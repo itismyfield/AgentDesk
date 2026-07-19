@@ -225,7 +225,7 @@
 | `POST` | `/api/queue/slots/{agent_id}/{slot_index}/reset-thread` | `auto_queue::reset_slot_thread` | `src/server/routes/auto_queue.rs:102` | `src/server/routes/domains/ops.rs:311` |
 | `GET` | `/api/queue/status` | `auto_queue::status` | `src/server/routes/auto_queue.rs:42` | `src/server/routes/domains/ops.rs:295` |
 | `GET` | `/api/rate-limits` | `analytics::rate_limits` | `src/server/routes/analytics.rs:504` | `src/server/routes/domains/admin.rs:78` |
-| `GET` | `/api/receipt` | `receipt::get_receipt` | `src/server/routes/receipt.rs:334` | `src/server/routes/domains/analytics.rs:18` |
+| `GET` | `/api/receipt` | `receipt::get_receipt` | `src/server/routes/receipt.rs:335` | `src/server/routes/domains/analytics.rs:18` |
 | `POST` | `/api/reviews/decision` | `review_verdict::submit_review_decision` | `src/server/routes/review_verdict/decision_route.rs:45` | `src/server/routes/domains/reviews.rs:23` |
 | `POST` | `/api/reviews/recovery` | `reviews::recover_review_target` | `src/server/routes/reviews.rs:609` | `src/server/routes/domains/reviews.rs:21` |
 | `POST` | `/api/reviews/tuning/aggregate` | `review_verdict::aggregate_review_tuning` | `src/server/routes/review_verdict/tuning_aggregate.rs:10` | `src/server/routes/domains/reviews.rs:27` |
@@ -283,7 +283,7 @@
 | `GET` | `/api/stats` | `stats::get_stats` | `src/server/routes/stats.rs:500` | `src/server/routes/domains/admin.rs:46` |
 | `GET` | `/api/stats/memento` | `stats::get_memento_stats` | `src/server/routes/stats.rs:520` | `src/server/routes/domains/admin.rs:47` |
 | `GET` | `/api/streaks` | `analytics::streaks` | `src/server/routes/analytics.rs:409` | `src/server/routes/domains/analytics.rs:15` |
-| `GET` | `/api/token-analytics` | `receipt::get_token_analytics` | `src/server/routes/receipt.rs:413` | `src/server/routes/domains/analytics.rs:19` |
+| `GET` | `/api/token-analytics` | `receipt::get_token_analytics` | `src/server/routes/receipt.rs:411` | `src/server/routes/domains/analytics.rs:19` |
 | `POST` | `/api/turns/{channel_id}/cancel` | `queue_api::cancel_turn` | `src/server/routes/queue_api.rs:192` | `src/server/routes/domains/ops.rs:347` |
 | `POST` | `/api/turns/{channel_id}/extend-timeout` | `queue_api::extend_turn_timeout` | `src/server/routes/queue_api.rs:290` | `src/server/routes/domains/ops.rs:348` |
 | `GET` | `/api/v1/achievements` | `achievements` | `src/server/routes/v1.rs:328` | `src/server/routes/v1.rs:124` |
@@ -296,6 +296,6 @@
 | `PATCH` | `/api/v1/settings/{key}` | `patch_setting` | `src/server/routes/v1.rs:374` | `src/server/routes/v1.rs:126` |
 | `GET` | `/api/v1/stream` | `stream` | `src/server/routes/v1.rs:228` | `src/server/routes/v1.rs:122` |
 | `GET` | `/api/v1/tokens` | `tokens` | `src/server/routes/v1.rs:202` | `src/server/routes/v1.rs:119` |
-| `GET` | `/api/voice/config` | `voice_config::get_voice_config` | `src/server/routes/voice_config.rs:109` | `src/server/routes/domains/admin.rs:68` |
-| `PUT` | `/api/voice/config` | `voice_config::put_voice_config` | `src/server/routes/voice_config.rs:117` | `src/server/routes/domains/admin.rs:68` |
+| `GET` | `/api/voice/config` | `voice_config::get_voice_config` | `src/server/routes/voice_config.rs:110` | `src/server/routes/domains/admin.rs:68` |
+| `PUT` | `/api/voice/config` | `voice_config::put_voice_config` | `src/server/routes/voice_config.rs:120` | `src/server/routes/domains/admin.rs:68` |
 | `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:24` | `src/server/mod.rs:439` |

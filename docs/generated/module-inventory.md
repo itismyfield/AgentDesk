@@ -299,7 +299,7 @@
 | `server::routes::prompt_manifest_retention` | `src/server/routes/prompt_manifest_retention.rs` | 57 | 57 | 0 |  |
 | `server::routes::provider_cli_api` | `src/server/routes/provider_cli_api.rs` | 386 | 386 | 0 |  |
 | `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 430 | 381 | 49 |  |
-| `server::routes::receipt` | `src/server/routes/receipt.rs` | 815 | 502 | 313 |  |
+| `server::routes::receipt` | `src/server/routes/receipt.rs` | 813 | 500 | 313 |  |
 | `server::routes::resume` | `src/server/routes/resume.rs` | 1260 | 1260 | 0 | giant-file |
 | `server::routes::review_verdict` | `src/server/routes/review_verdict/mod.rs` | 14 | 14 | 0 |  |
 | `server::routes::review_verdict::decision_route` | `src/server/routes/review_verdict/decision_route.rs` | 56 | 56 | 0 |  |
@@ -321,7 +321,7 @@
 | `server::routes::tests::preflight_harness::types` | `src/server/routes/tests/preflight_harness/types.rs` | 217 | 0 | 217 |  |
 | `server::routes::tests::preflight_harness::validation` | `src/server/routes/tests/preflight_harness/validation.rs` | 260 | 0 | 260 |  |
 | `server::routes::v1` | `src/server/routes/v1.rs` | 1857 | 1857 | 0 | giant-file |
-| `server::routes::voice_config` | `src/server/routes/voice_config.rs` | 463 | 393 | 70 |  |
+| `server::routes::voice_config` | `src/server/routes/voice_config.rs` | 466 | 396 | 70 |  |
 | `server::startup_preflight` | `src/server/startup_preflight.rs` | 72 | 36 | 36 |  |
 | `server::state` | `src/server/state.rs` | 11 | 11 | 0 |  |
 | `server::task_dispatch_claims` | `src/server/task_dispatch_claims.rs` | 1039 | 359 | 680 |  |
