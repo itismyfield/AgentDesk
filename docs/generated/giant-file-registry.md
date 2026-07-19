@@ -92,7 +92,7 @@
 | `src/services/discord/mod.rs` | 4169 |
 | `src/services/discord/router/message_handler/headless_turn.rs` | 1391 |
 | `src/services/discord_config_audit.rs` | 1288 |
-| `src/services/dispatched_sessions.rs` | 1815 |
+| `src/services/dispatched_sessions.rs` | 1821 |
 | `src/services/dispatches/discord_delivery/orchestration.rs` | 1500 |
 | `src/services/dispatches/outbox_route.rs` | 1177 |
 | `src/services/gemini.rs` | 1358 |

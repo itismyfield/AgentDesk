@@ -48,7 +48,7 @@
 | `DELETE` | `/api/channels/{channel_id}/monitoring/{key}` | `monitoring::remove_monitoring` | `src/server/routes/monitoring.rs:52` | `src/server/routes/domains/ops.rs:334` |
 | `GET` | `/api/channels/{id}/queue` | `queue_api::list_channel_queue` | `src/server/routes/queue_api.rs:20` | `src/server/routes/domains/ops.rs:321` |
 | `POST` | `/api/channels/{id}/relay-recovery` | `health_api::relay_recovery_handler` | `src/server/routes/health_api.rs:1473` | `src/server/routes/domains/ops.rs:326` |
-| `GET` | `/api/channels/{id}/watcher-state` | `queue_api::get_watcher_state` | `src/server/routes/queue_api.rs:240` | `src/server/routes/domains/ops.rs:322` |
+| `GET` | `/api/channels/{id}/watcher-state` | `queue_api::get_watcher_state` | `src/server/routes/queue_api.rs:248` | `src/server/routes/domains/ops.rs:322` |
 | `GET` | `/api/claude-accounts` | `claude_accounts_api::get_claude_accounts` | `src/server/routes/claude_accounts_api.rs:16` | `src/server/routes/domains/integrations.rs:16` |
 | `POST` | `/api/claude-accounts/switch` | `claude_accounts_api::switch_claude_account` | `src/server/routes/claude_accounts_api.rs:47` | `src/server/routes/domains/integrations.rs:20` |
 | `GET` | `/api/cluster/issue-specs` | `cluster::list_issue_specs` | `src/server/routes/cluster.rs:378` | `src/server/routes/domains/ops.rs:102` |
@@ -285,7 +285,7 @@
 | `GET` | `/api/streaks` | `analytics::streaks` | `src/server/routes/analytics.rs:409` | `src/server/routes/domains/analytics.rs:15` |
 | `GET` | `/api/token-analytics` | `receipt::get_token_analytics` | `src/server/routes/receipt.rs:413` | `src/server/routes/domains/analytics.rs:19` |
 | `POST` | `/api/turns/{channel_id}/cancel` | `queue_api::cancel_turn` | `src/server/routes/queue_api.rs:197` | `src/server/routes/domains/ops.rs:347` |
-| `POST` | `/api/turns/{channel_id}/extend-timeout` | `queue_api::extend_turn_timeout` | `src/server/routes/queue_api.rs:295` | `src/server/routes/domains/ops.rs:348` |
+| `POST` | `/api/turns/{channel_id}/extend-timeout` | `queue_api::extend_turn_timeout` | `src/server/routes/queue_api.rs:303` | `src/server/routes/domains/ops.rs:348` |
 | `GET` | `/api/v1/achievements` | `achievements` | `src/server/routes/v1.rs:328` | `src/server/routes/v1.rs:124` |
 | `GET` | `/api/v1/activity` | `activity` | `src/server/routes/v1.rs:288` | `src/server/routes/v1.rs:123` |
 | `GET` | `/api/v1/agents` | `list_agents` | `src/server/routes/v1.rs:183` | `src/server/routes/v1.rs:118` |
