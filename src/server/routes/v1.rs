@@ -351,7 +351,7 @@ async fn achievements(
 async fn get_settings(State(state): State<AppState>) -> Response {
     let (status, Json(body)) = match settings::get_config_entries(State(state)).await {
         Ok(response) => response,
-        Err(error) => (error.status(), Json(error.to_json_value())),
+        Err(error) => (error.status(), Json(json!({ "error": error.message() }))),
     };
     if status != StatusCode::OK {
         return map_legacy_error(status, &body, "settings_fetch");
@@ -384,7 +384,7 @@ async fn patch_setting(
     let (patch_status, Json(patch_body)) =
         match settings::patch_config_entries(State(state.clone()), Json(patch)).await {
             Ok(response) => response,
-            Err(error) => (error.status(), Json(error.to_json_value())),
+            Err(error) => (error.status(), Json(json!({ "error": error.message() }))),
         };
     if patch_status != StatusCode::OK {
         return map_legacy_error(patch_status, &patch_body, "settings_patch");
@@ -413,7 +413,7 @@ async fn patch_setting(
 
     let (status, Json(entries_body)) = match settings::get_config_entries(State(state)).await {
         Ok(response) => response,
-        Err(error) => (error.status(), Json(error.to_json_value())),
+        Err(error) => (error.status(), Json(json!({ "error": error.message() }))),
     };
     if status != StatusCode::OK {
         return map_legacy_error(status, &entries_body, "settings_refetch");
