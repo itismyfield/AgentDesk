@@ -30,6 +30,17 @@ pub(crate) enum ForwardResolution {
     Unavailable { status: StatusCode, body: Value },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CancelTurnSessionInfo {
+    pub(crate) session_key: String,
+    pub(crate) dispatch_id: Option<String>,
+    pub(crate) provider_name: Option<String>,
+    pub(crate) agent_id: Option<String>,
+    pub(crate) requested_provider: Option<String>,
+    pub(crate) owner_instance_id: Option<String>,
+    pub(crate) match_rank: i64,
+}
+
 /// Narrow state needed by session-control callers outside HTTP route handlers.
 #[derive(Clone)]
 pub(crate) struct ForwardCallerContext {
@@ -382,28 +393,105 @@ pub(crate) async fn forward_remote_cancel_if_needed(
     }
 }
 
-pub(crate) async fn load_cancel_owner(
+pub(crate) async fn load_cancel_turn_session(
     pool: &PgPool,
     channel_id: &str,
-) -> ServiceResult<Option<String>> {
-    sqlx::query_scalar::<_, Option<String>>(
-        "SELECT instance_id
-         FROM sessions
-         WHERE status IN ('turn_active', 'working')
-           AND (COALESCE(thread_channel_id, '') = $1 OR COALESCE(channel_id, '') = $1)
-         ORDER BY last_heartbeat DESC
+) -> ServiceResult<Option<CancelTurnSessionInfo>> {
+    sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            i64,
+        ),
+    >(
+        "WITH channel_agent AS (
+           SELECT id AS agent_id,
+                  CASE
+                    WHEN discord_channel_cc = $1 OR discord_channel_id = $1 THEN 'claude'
+                    WHEN discord_channel_cdx = $1 OR discord_channel_alt = $1 THEN 'codex'
+                    ELSE NULL
+                  END AS requested_provider
+           FROM agents
+           WHERE discord_channel_id = $1
+              OR discord_channel_alt = $1
+              OR discord_channel_cc = $1
+              OR discord_channel_cdx = $1
+           LIMIT 1
+         )
+         SELECT s.session_key,
+                s.active_dispatch_id,
+                s.provider,
+                s.agent_id,
+                ca.requested_provider,
+                s.instance_id,
+                CASE
+                  WHEN COALESCE(s.thread_channel_id, '') = $1 THEN 0
+                  WHEN s.session_key LIKE '%' || $1 || '%' THEN 1
+                  WHEN ca.requested_provider IS NOT NULL
+                       AND COALESCE(s.provider, '') = ca.requested_provider THEN 2
+                  ELSE 3
+                END::BIGINT AS match_rank
+         FROM sessions s
+         LEFT JOIN channel_agent ca ON s.agent_id = ca.agent_id
+         WHERE s.status = 'turn_active'
+           AND (
+             COALESCE(s.thread_channel_id, '') = $1
+             OR s.session_key LIKE '%' || $1 || '%'
+             OR (
+               ca.agent_id IS NOT NULL
+               AND (
+                 ca.requested_provider IS NULL
+                 OR COALESCE(s.provider, '') = ca.requested_provider
+               )
+             )
+           )
+         ORDER BY match_rank ASC, s.last_heartbeat DESC
          LIMIT 1",
     )
     .bind(channel_id)
     .fetch_optional(pool)
     .await
-    .map(|value| value.flatten())
+    .map(|row| {
+        row.map(
+            |(
+                session_key,
+                dispatch_id,
+                provider_name,
+                agent_id,
+                requested_provider,
+                owner_instance_id,
+                match_rank,
+            )| CancelTurnSessionInfo {
+                session_key,
+                dispatch_id,
+                provider_name,
+                agent_id,
+                requested_provider,
+                owner_instance_id,
+                match_rank,
+            },
+        )
+    })
     .map_err(|error| {
-        ServiceError::internal(format!("load cancel owner: {error}"))
+        ServiceError::internal(format!("load postgres active turn: {error}"))
             .with_code(ErrorCode::Database)
-            .with_operation("cancel_turn.query_owner_pg")
+            .with_operation("cancel_turn.query_active_session_pg")
             .with_context("channel_id", channel_id)
     })
+}
+
+pub(crate) async fn load_cancel_owner(
+    pool: &PgPool,
+    channel_id: &str,
+) -> ServiceResult<Option<String>> {
+    Ok(load_cancel_turn_session(pool, channel_id)
+        .await?
+        .and_then(|session| session.owner_instance_id))
 }
 
 fn cancel_success_body(status: StatusCode, body: Value, channel_id: &str) -> Value {
@@ -522,7 +610,7 @@ mod tests {
     use super::{
         CancelRetryDecision, ForwardResolution, ForwardTarget, classify_cancel_forward_status,
         client, encode_path_segment, forward_json_response, is_forwarded_request,
-        load_cancel_owner, resolve_forward_target_from_nodes,
+        load_cancel_owner, load_cancel_turn_session, resolve_forward_target_from_nodes,
     };
     use axum::Json;
     use axum::http::{HeaderMap, HeaderValue};
@@ -909,6 +997,78 @@ mod tests {
             load_cancel_owner(&pool, "108").await.expect("load owner"),
             None
         );
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_selection_session_key_fallback_preserves_remote_owner() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        insert_cancel_owner_fixture(
+            &pool,
+            "host:AgentDesk-claude-110",
+            None,
+            None,
+            Some("worker-key"),
+            "turn_active",
+        )
+        .await;
+
+        let selected = load_cancel_turn_session(&pool, "110")
+            .await
+            .expect("load selected session")
+            .expect("session-key fallback selection");
+        assert_eq!(selected.session_key, "host:AgentDesk-claude-110");
+        assert_eq!(selected.owner_instance_id.as_deref(), Some("worker-key"));
+        assert_eq!(selected.match_rank, 1);
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM sessions WHERE session_key = 'host:AgentDesk-claude-110'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load unchanged status");
+        assert_eq!(status, "turn_active");
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_selection_agent_provider_fallback_preserves_remote_owner() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_cc)
+             VALUES ('cancel-agent-111', 'Cancel Agent', 'claude', '111')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert cancel agent fixture");
+        sqlx::query(
+            "INSERT INTO sessions
+             (session_key, agent_id, provider, status, instance_id, last_heartbeat)
+             VALUES ('owner-provider-fallback', 'cancel-agent-111', 'claude', 'turn_active', 'worker-provider', NOW())",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert provider fallback session");
+
+        let selected = load_cancel_turn_session(&pool, "111")
+            .await
+            .expect("load selected session")
+            .expect("agent/provider fallback selection");
+        assert_eq!(selected.session_key, "owner-provider-fallback");
+        assert_eq!(
+            selected.owner_instance_id.as_deref(),
+            Some("worker-provider")
+        );
+        assert_eq!(selected.requested_provider.as_deref(), Some("claude"));
+        assert_eq!(selected.match_rank, 2);
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM sessions WHERE session_key = 'owner-provider-fallback'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load unchanged status");
+        assert_eq!(status, "turn_active");
         pg_db.drop().await;
     }
 

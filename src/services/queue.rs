@@ -138,16 +138,6 @@ pub struct QueueService {
 }
 
 #[derive(Debug)]
-struct CancelTurnSessionInfo {
-    session_key: String,
-    dispatch_id: Option<String>,
-    provider_name: Option<String>,
-    agent_id: Option<String>,
-    requested_provider: Option<String>,
-    match_rank: i64,
-}
-
-#[derive(Debug)]
 struct CancelTurnChannelTarget {
     agent_id: String,
     requested_provider: Option<String>,
@@ -482,14 +472,20 @@ impl QueueService {
             return Ok(response);
         }
 
+        let pool = self.pg_pool.as_ref().ok_or_else(|| {
+            ServiceError::internal("postgres pool unavailable for cancel_turn session lookup")
+                .with_code(ErrorCode::Database)
+                .with_operation("cancel_turn.query_active_session.no_pool")
+                .with_context("channel_id", channel_id)
+        })?;
+        let session_info =
+            crate::services::session_forwarding::load_cancel_turn_session(pool, channel_id).await?;
+
         if crate::services::session_forwarding::is_forwarded_request(headers) {
-            let pool = self.pg_pool.as_ref().ok_or_else(|| {
-                ServiceError::internal("postgres pool unavailable for forwarded cancel guard")
-                    .with_code(ErrorCode::Database)
-            })?;
-            let owner =
-                crate::services::session_forwarding::load_cancel_owner(pool, channel_id).await?;
-            if owner.as_deref() != forward_context.cluster_instance_id.as_deref() {
+            let owner = session_info
+                .as_ref()
+                .and_then(|session| session.owner_instance_id.as_deref());
+            if owner != forward_context.cluster_instance_id.as_deref() {
                 return Err(ServiceError::conflict(
                     "forwarded cancel owner changed before local mutation",
                 )
@@ -499,7 +495,6 @@ impl QueueService {
         }
 
         let channel_target = self.resolve_cancel_turn_channel_target(channel_id).await?;
-        let session_info = self.load_cancel_turn_session(channel_id).await?;
 
         let (session_key, dispatch_id, provider_name, agent_id, requested_provider, match_rank) =
             if let Some(session_info) = session_info {
@@ -758,102 +753,6 @@ impl QueueService {
             ServiceError::internal(format!("load postgres cancel channel target: {error}"))
                 .with_code(ErrorCode::Database)
                 .with_operation("cancel_turn.query_channel_target_pg")
-                .with_context("channel_id", channel_id)
-        })
-    }
-
-    async fn load_cancel_turn_session(
-        &self,
-        channel_id: &str,
-    ) -> ServiceResult<Option<CancelTurnSessionInfo>> {
-        let Some(pool) = self.pg_pool.as_ref() else {
-            return Err(ServiceError::internal(
-                "postgres pool unavailable for cancel_turn session lookup",
-            )
-            .with_code(ErrorCode::Database)
-            .with_operation("cancel_turn.query_active_session.no_pool")
-            .with_context("channel_id", channel_id));
-        };
-        sqlx::query_as::<
-            _,
-            (
-                String,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                i64,
-            ),
-        >(
-            "WITH channel_agent AS (
-               SELECT id AS agent_id,
-                      CASE
-                        WHEN discord_channel_cc = $1 OR discord_channel_id = $1 THEN 'claude'
-                        WHEN discord_channel_cdx = $1 OR discord_channel_alt = $1 THEN 'codex'
-                        ELSE NULL
-                      END AS requested_provider
-               FROM agents
-               WHERE discord_channel_id = $1
-                  OR discord_channel_alt = $1
-                  OR discord_channel_cc = $1
-                  OR discord_channel_cdx = $1
-               LIMIT 1
-             )
-             SELECT s.session_key,
-                    s.active_dispatch_id,
-                    s.provider,
-                    s.agent_id,
-                    ca.requested_provider,
-                    CASE
-                      WHEN COALESCE(s.thread_channel_id, '') = $1 THEN 0
-                      WHEN s.session_key LIKE '%' || $1 || '%' THEN 1
-                      WHEN ca.requested_provider IS NOT NULL
-                           AND COALESCE(s.provider, '') = ca.requested_provider THEN 2
-                      ELSE 3
-                    END::BIGINT AS match_rank
-             FROM sessions s
-             LEFT JOIN channel_agent ca ON s.agent_id = ca.agent_id
-             WHERE s.status IN ('turn_active', 'working')
-               AND (
-                 COALESCE(s.thread_channel_id, '') = $1
-                 OR s.session_key LIKE '%' || $1 || '%'
-                 OR (
-                   ca.agent_id IS NOT NULL
-                   AND (
-                     ca.requested_provider IS NULL
-                     OR COALESCE(s.provider, '') = ca.requested_provider
-                   )
-                 )
-               )
-             ORDER BY match_rank ASC, s.last_heartbeat DESC
-             LIMIT 1",
-        )
-        .bind(channel_id)
-        .fetch_optional(pool)
-        .await
-        .map(|row| {
-            row.map(
-                |(
-                    session_key,
-                    dispatch_id,
-                    provider_name,
-                    agent_id,
-                    requested_provider,
-                    match_rank,
-                )| CancelTurnSessionInfo {
-                    session_key,
-                    dispatch_id,
-                    provider_name,
-                    agent_id,
-                    requested_provider,
-                    match_rank,
-                },
-            )
-        })
-        .map_err(|error| {
-            ServiceError::internal(format!("load postgres active turn: {error}"))
-                .with_code(ErrorCode::Database)
-                .with_operation("cancel_turn.query_active_session_pg")
                 .with_context("channel_id", channel_id)
         })
     }
