@@ -1,5 +1,71 @@
 use super::*;
 
+pub(in crate::services::discord) fn stamp_claude_e_process_if_matches_identity_generation(
+    state: &InflightTurnState,
+    expected: &InflightTurnIdentity,
+    expected_save_generation: u64,
+) -> GuardedSaveOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedSaveOutcome::IoError;
+    };
+    stamp_claude_e_process_if_matches_identity_generation_in_root(
+        &root,
+        state,
+        expected,
+        expected_save_generation,
+    )
+}
+
+pub(in crate::services::discord::inflight) fn stamp_claude_e_process_if_matches_identity_generation_in_root(
+    root: &Path,
+    state: &InflightTurnState,
+    expected: &InflightTurnIdentity,
+    expected_save_generation: u64,
+) -> GuardedSaveOutcome {
+    let Some(provider) = state.provider_kind() else {
+        return GuardedSaveOutcome::IoError;
+    };
+    let path = inflight_state_path(root, &provider, state.channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return GuardedSaveOutcome::IoError;
+    };
+    let Some(mut on_disk) = load_inflight_state_unlocked(&path) else {
+        return GuardedSaveOutcome::Missing;
+    };
+    if on_disk.rebind_origin
+        || on_disk.save_generation != expected_save_generation
+        || !expected.matches_state(&on_disk)
+    {
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+
+    on_disk.runtime_kind = Some(RuntimeHandoffKind::ClaudeEAdapter);
+    on_disk.tmux_session_name = None;
+    on_disk.output_path = state.output_path.clone();
+    on_disk.input_fifo_path = None;
+    on_disk.last_offset = state.last_offset;
+    on_disk.claude_e_pid = state.claude_e_pid;
+    on_disk.claude_e_process_starttime = state.claude_e_process_starttime;
+    on_disk.claude_e_macos_lstart_hash = state.claude_e_macos_lstart_hash;
+    match persist_under_lock(
+        root,
+        &path,
+        &on_disk,
+        "src/services/discord/inflight.rs:stamp_claude_e_process_if_matches_identity_generation_in_root",
+    ) {
+        Ok(()) => GuardedSaveOutcome::Saved,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id = state.channel_id,
+                error = %error,
+                "ClaudeE process-evidence stamp failed; leaving durable row untouched"
+            );
+            GuardedSaveOutcome::IoError
+        }
+    }
+}
+
 pub(in crate::services::discord) fn save_inflight_state_if_identity_unchanged(
     state: &InflightTurnState,
     caller: &'static str,
@@ -1013,6 +1079,62 @@ mod tests {
             None,
             512,
         )
+    }
+
+    #[test]
+    fn claude_e_handoff_stamp_is_identity_and_generation_guarded() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let mut state = drain_restart_seed(45_960, "AgentDesk-claude-4596");
+        state.provider = ProviderKind::Claude.as_str().to_string();
+        save_inflight_state_in_root(temp.path(), &state).expect("seed owner row");
+        let path = inflight_state_path(temp.path(), &ProviderKind::Claude, state.channel_id);
+        let durable: InflightTurnState = serde_json::from_str(
+            &std::fs::read_to_string(&path).expect("read seeded row"),
+        )
+        .expect("parse seeded row");
+        let expected = InflightTurnIdentity::from_state(&durable);
+
+        let mut handoff = durable.clone();
+        handoff.tmux_session_name = None;
+        handoff.runtime_kind = Some(RuntimeHandoffKind::ClaudeEAdapter);
+        handoff.claude_e_pid = Some(42);
+        handoff.claude_e_process_starttime = Some(9001);
+        assert_eq!(
+            stamp_claude_e_process_if_matches_identity_generation_in_root(
+                temp.path(),
+                &handoff,
+                &expected,
+                durable.save_generation,
+            ),
+            GuardedSaveOutcome::Saved,
+        );
+        let persisted: InflightTurnState = serde_json::from_str(
+            &std::fs::read_to_string(&path).expect("read stamped row"),
+        )
+        .expect("parse stamped row");
+        assert_eq!(persisted.claude_e_pid, Some(42));
+        assert_eq!(persisted.claude_e_process_starttime, Some(9001));
+
+        let mut newer = persisted.clone();
+        newer.user_msg_id = 99_999;
+        save_inflight_state_in_root(temp.path(), &newer).expect("seed newer turn");
+        assert_eq!(
+            stamp_claude_e_process_if_matches_identity_generation_in_root(
+                temp.path(),
+                &handoff,
+                &expected,
+                durable.save_generation,
+            ),
+            GuardedSaveOutcome::IdentityMismatch,
+        );
+        let still_newer: InflightTurnState = serde_json::from_str(
+            &std::fs::read_to_string(&path).expect("read newer row"),
+        )
+        .expect("parse newer row");
+        assert_eq!(still_newer.user_msg_id, 99_999);
     }
 
     // #4370 F1: the `readopted_from_inflight` marker is a NARROW single-field

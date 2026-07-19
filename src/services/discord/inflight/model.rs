@@ -150,6 +150,12 @@ pub(in crate::services::discord) struct InflightTurnState {
     pub tmux_session_name: Option<String>,
     pub output_path: Option<String>,
     pub input_fifo_path: Option<String>,
+    #[serde(default)]
+    pub claude_e_pid: Option<u32>,
+    #[serde(default)]
+    pub claude_e_process_starttime: Option<u128>,
+    #[serde(default)]
+    pub claude_e_macos_lstart_hash: Option<u128>,
     /// #2235: deserializing through `deserialize_runtime_kind_tolerant` so a
     /// future variant written by a newer binary collapses to `None` instead
     /// of failing the whole row's parse (which would otherwise lose the
@@ -980,6 +986,9 @@ impl InflightTurnState {
             tmux_session_name,
             output_path,
             input_fifo_path,
+            claude_e_pid: None,
+            claude_e_process_starttime: None,
+            claude_e_macos_lstart_hash: None,
             runtime_kind,
             runtime_kind_unknown_on_disk: false,
             worktree_path: None,
