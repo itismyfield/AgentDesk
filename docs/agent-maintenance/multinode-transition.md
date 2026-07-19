@@ -757,6 +757,15 @@
   effective authority. Classification: PG-lease-backed worker-local execution;
   no new gateway owner, no extra leader election surface.
 
+- #4611 owner-targeted cancel forwarding: REST cancel and Discord `/stop` resolve
+  the canonical active `sessions.instance_id` owner and fail closed instead of
+  mutating leader-local state when ownership is remote or changes during cancel.
+  Rolling upgrade order is workers first, then leaders: a routable owner must
+  advertise `capabilities.agentdesk_api.cancel_forwarding_v1=true`; leaders do
+  not forward cancel to older workers that lack the capability. Keep old and new
+  nodes registered during rollout only after every potential owner advertises
+  the fence. No durable cancel outbox or new lease is introduced.
+
 - #4350 session-owner intake affinity: leader-only routing resolves the existing
   PG `sessions.instance_id` owner before `/node` or preferred labels, and every
   Discord/skill/queued producer shares one admission path. Stale or conflicting

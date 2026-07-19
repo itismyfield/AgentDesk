@@ -518,8 +518,15 @@ impl QueueService {
             } else {
                 return Err(
                     ServiceError::not_found("no active turn found for this channel")
-                        .with_code(ErrorCode::Queue)
-                        .with_context("channel_id", channel_id),
+                        .with_context("channel_id", channel_id)
+                        .with_context(
+                            "expected_owner_instance_id",
+                            crate::services::session_forwarding::forwarded_session_owner(headers),
+                        )
+                        .with_context(
+                            "receiver_instance_id",
+                            forward_context.cluster_instance_id.as_deref(),
+                        ),
                 );
             };
 
@@ -530,10 +537,20 @@ impl QueueService {
         {
             return Err(
                 ServiceError::not_found("no active turn found for this channel")
-                    .with_code(ErrorCode::Queue)
-                    .with_context("channel_id", channel_id),
+                    .with_context("channel_id", channel_id)
+                    .with_context(
+                        "owner_instance_id",
+                        forward_context.cluster_instance_id.as_deref(),
+                    ),
             );
         }
+
+        crate::services::session_forwarding::revalidate_local_cancel_owner(
+            forward_context,
+            channel_id,
+            session_key.as_deref(),
+        )
+        .await?;
 
         let tmux_name = session_key
             .as_deref()

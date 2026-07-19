@@ -537,6 +537,19 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
         }
     }
 
+    if let Err(error) = crate::services::session_forwarding::revalidate_local_cancel_owner(
+        &forward_context,
+        &channel_id.get().to_string(),
+        None,
+    )
+    .await
+    {
+        tracing::error!(channel_id = channel_id.get(), error = %error, "/stop owner moved before local mutation");
+        ctx.say("중지 요청 중 owner가 변경됐어요. 잠시 후 다시 시도해 주세요.")
+            .await?;
+        return Ok(());
+    }
+
     let result = mailbox_cancel_active_turn(&ctx.data().shared, channel_id).await;
 
     match result.token {

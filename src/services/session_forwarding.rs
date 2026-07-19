@@ -80,6 +80,12 @@ pub(crate) fn is_forwarded_request(headers: &HeaderMap) -> bool {
     headers.contains_key(FORWARDED_BY_HEADER)
 }
 
+pub(crate) fn forwarded_session_owner(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(SESSION_OWNER_HEADER)
+        .and_then(|value| value.to_str().ok())
+}
+
 fn client() -> &'static reqwest::Client {
     SESSION_FORWARD_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
@@ -175,6 +181,62 @@ fn valid_instance_id(value: &str) -> bool {
         && value.bytes().all(
             |byte| matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.'),
         )
+}
+
+fn owner_supports_cancel_forwarding(owner_instance_id: &str, worker_nodes: &[Value]) -> bool {
+    worker_nodes.iter().any(|node| {
+        node.get("instance_id").and_then(Value::as_str) == Some(owner_instance_id)
+            && node
+                .get("capabilities")
+                .and_then(|capabilities| capabilities.get("agentdesk_api"))
+                .and_then(|api| api.get("cancel_forwarding_v1"))
+                .and_then(Value::as_bool)
+                == Some(true)
+    })
+}
+
+pub(crate) async fn resolve_cancel_forward_target(
+    state: &ForwardCallerContext,
+    owner_instance_id: Option<&str>,
+    pool: &PgPool,
+) -> ForwardResolution {
+    let resolution = resolve_forward_target(state, owner_instance_id, pool).await;
+    let ForwardResolution::Forward(_) = &resolution else {
+        return resolution;
+    };
+    let Some(owner) = owner_instance_id else {
+        return resolution;
+    };
+    let worker_nodes = match crate::services::cluster::node_registry::list_worker_nodes(
+        pool,
+        state.config.cluster.lease_ttl_secs,
+    )
+    .await
+    {
+        Ok(nodes) => nodes,
+        Err(error) => {
+            return ForwardResolution::Unavailable {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                body: json!({
+                    "error": format!("failed to load worker nodes for cancel capability: {error}"),
+                    "code": "worker_nodes_unavailable",
+                    "owner_instance_id": owner,
+                }),
+            };
+        }
+    };
+    if owner_supports_cancel_forwarding(owner, &worker_nodes) {
+        resolution
+    } else {
+        ForwardResolution::Unavailable {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            body: json!({
+                "error": "session owner does not advertise cancel forwarding support",
+                "code": "cancel_forwarding_capability_missing",
+                "owner_instance_id": owner,
+            }),
+        }
+    }
 }
 
 pub(crate) async fn resolve_forward_target(
@@ -304,9 +366,31 @@ pub(crate) enum CancelRetryDecision {
     Fail,
 }
 
-pub(crate) fn classify_cancel_forward_status(status: StatusCode) -> CancelRetryDecision {
+pub(crate) fn classify_cancel_forward_response(
+    status: StatusCode,
+    body: &Value,
+    target: &ForwardTarget,
+    channel_id: &str,
+) -> CancelRetryDecision {
     match status {
-        StatusCode::OK | StatusCode::NOT_FOUND => CancelRetryDecision::Success,
+        StatusCode::OK => CancelRetryDecision::Success,
+        StatusCode::NOT_FOUND
+            if body.get("error").and_then(Value::as_str)
+                == Some("no active turn found for this channel")
+                && body.get("code").and_then(Value::as_str) == Some("not_found")
+                && body.pointer("/context/channel_id").and_then(Value::as_str)
+                    == Some(channel_id)
+                && body
+                    .pointer("/context/expected_owner_instance_id")
+                    .and_then(Value::as_str)
+                    == Some(target.owner_instance_id.as_str())
+                && body
+                    .pointer("/context/receiver_instance_id")
+                    .and_then(Value::as_str)
+                    == Some(target.owner_instance_id.as_str()) =>
+        {
+            CancelRetryDecision::Success
+        }
         StatusCode::CONFLICT => CancelRetryDecision::RetryOwner,
         _ => CancelRetryDecision::Fail,
     }
@@ -319,7 +403,7 @@ pub(crate) async fn forward_cancel_with_owner_retry(
     first_target: ForwardTarget,
 ) -> ServiceResult<Option<Value>> {
     let (status, Json(body)) = forward_cancel_turn(state, &first_target, channel_id, force).await;
-    match classify_cancel_forward_status(status) {
+    match classify_cancel_forward_response(status, &body, &first_target, channel_id) {
         CancelRetryDecision::Success => {
             return Ok(Some(cancel_success_body(status, body, channel_id)));
         }
@@ -332,7 +416,7 @@ pub(crate) async fn forward_cancel_with_owner_retry(
             .with_code(ErrorCode::Database)
     })?;
     let owner = load_cancel_owner(pool, channel_id).await?;
-    let resolution = resolve_forward_target(state, owner.as_deref(), pool).await;
+    let resolution = resolve_cancel_forward_target(state, owner.as_deref(), pool).await;
     let retry_target = match resolution {
         ForwardResolution::Forward(target) if target != first_target => target,
         ForwardResolution::Local => return Ok(None),
@@ -348,7 +432,7 @@ pub(crate) async fn forward_cancel_with_owner_retry(
     };
 
     let (status, Json(body)) = forward_cancel_turn(state, &retry_target, channel_id, force).await;
-    match classify_cancel_forward_status(status) {
+    match classify_cancel_forward_response(status, &body, &retry_target, channel_id) {
         CancelRetryDecision::Success => Ok(Some(cancel_success_body(status, body, channel_id))),
         CancelRetryDecision::RetryOwner | CancelRetryDecision::Fail => {
             Err(cancel_forward_error(status, body, channel_id))
@@ -367,7 +451,7 @@ pub(crate) async fn forward_remote_cancel_if_needed(
             .with_code(ErrorCode::Database)
     })?;
     let owner = load_cancel_owner(pool, channel_id).await?;
-    let resolution = resolve_forward_target(state, owner.as_deref(), pool).await;
+    let resolution = resolve_cancel_forward_target(state, owner.as_deref(), pool).await;
 
     if is_forwarded_request(headers) {
         return match resolution {
@@ -397,7 +481,12 @@ pub(crate) async fn load_cancel_turn_session(
     pool: &PgPool,
     channel_id: &str,
 ) -> ServiceResult<Option<CancelTurnSessionInfo>> {
-    sqlx::query_as::<
+    if channel_id.is_empty() || !channel_id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(ServiceError::bad_request("channel_id must contain only decimal digits")
+            .with_context("channel_id", channel_id));
+    }
+
+    let rows = sqlx::query_as::<
         _,
         (
             String,
@@ -406,7 +495,9 @@ pub(crate) async fn load_cancel_turn_session(
             Option<String>,
             Option<String>,
             Option<String>,
-            i64,
+            Option<String>,
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
         ),
     >(
         "WITH channel_agent AS (
@@ -429,68 +520,107 @@ pub(crate) async fn load_cancel_turn_session(
                 s.agent_id,
                 ca.requested_provider,
                 s.instance_id,
-                CASE
-                  WHEN COALESCE(s.thread_channel_id, '') = $1
-                    OR COALESCE(s.channel_id, '') = $1 THEN 0
-                  WHEN s.session_key LIKE '%' || $1 || '%'
-                    AND s.thread_channel_id IS NULL
-                    AND s.channel_id IS NULL THEN 1
-                  WHEN ca.requested_provider IS NOT NULL
-                       AND COALESCE(s.provider, '') = ca.requested_provider THEN 2
-                  ELSE 3
-                END::BIGINT AS match_rank
+                s.thread_channel_id,
+                s.channel_id,
+                s.last_heartbeat
          FROM sessions s
          LEFT JOIN channel_agent ca ON s.agent_id = ca.agent_id
          WHERE s.status = 'turn_active'
            AND (
              COALESCE(s.thread_channel_id, '') = $1
              OR COALESCE(s.channel_id, '') = $1
-             OR (
-               s.session_key LIKE '%' || $1 || '%'
-               AND s.thread_channel_id IS NULL
-               AND s.channel_id IS NULL
-             )
-             OR (
-               ca.agent_id IS NOT NULL
-               AND (
-                 ca.requested_provider IS NULL
-                 OR COALESCE(s.provider, '') = ca.requested_provider
-               )
-             )
+             OR (s.thread_channel_id IS NULL AND s.channel_id IS NULL)
+             OR ca.agent_id IS NOT NULL
            )
-         ORDER BY match_rank ASC, s.last_heartbeat DESC
-         LIMIT 1",
+         ORDER BY s.last_heartbeat DESC NULLS LAST, s.session_key ASC",
     )
     .bind(channel_id)
-    .fetch_optional(pool)
+    .fetch_all(pool)
     .await
-    .map(|row| {
-        row.map(
-            |(
-                session_key,
-                dispatch_id,
-                provider_name,
-                agent_id,
-                requested_provider,
-                owner_instance_id,
-                match_rank,
-            )| CancelTurnSessionInfo {
-                session_key,
-                dispatch_id,
-                provider_name,
-                agent_id,
-                requested_provider,
-                owner_instance_id,
-                match_rank,
-            },
-        )
-    })
     .map_err(|error| {
         ServiceError::internal(format!("load postgres active turn: {error}"))
             .with_code(ErrorCode::Database)
             .with_operation("cancel_turn.query_active_session_pg")
             .with_context("channel_id", channel_id)
-    })
+    })?;
+
+    let mut selected: Option<(
+        i64,
+        Option<chrono::DateTime<chrono::Utc>>,
+        CancelTurnSessionInfo,
+    )> = None;
+    for (
+        session_key,
+        dispatch_id,
+        provider_name,
+        agent_id,
+        requested_provider,
+        owner_instance_id,
+        thread_channel_id,
+        runtime_channel_id,
+        last_heartbeat,
+    ) in rows
+    {
+        let match_rank = if thread_channel_id.as_deref() == Some(channel_id)
+            || runtime_channel_id.as_deref() == Some(channel_id)
+        {
+            0
+        } else if legacy_session_key_matches_channel(&session_key, channel_id)
+            && thread_channel_id.is_none()
+            && runtime_channel_id.is_none()
+        {
+            1
+        } else if requested_provider.as_deref().is_some_and(|requested| {
+            provider_name.as_deref().is_some_and(|provider| provider == requested)
+        }) {
+            2
+        } else {
+            continue;
+        };
+        let info = CancelTurnSessionInfo {
+            session_key,
+            dispatch_id,
+            provider_name,
+            agent_id,
+            requested_provider,
+            owner_instance_id,
+            match_rank,
+        };
+        let replace = selected.as_ref().is_none_or(|(rank, heartbeat, current)| {
+            match match_rank.cmp(rank) {
+                std::cmp::Ordering::Less => true,
+                std::cmp::Ordering::Greater => false,
+                std::cmp::Ordering::Equal => match (last_heartbeat, *heartbeat) {
+                    (Some(candidate), Some(existing)) if candidate != existing => {
+                        candidate > existing
+                    }
+                    (Some(_), None) => true,
+                    (None, Some(_)) => false,
+                    _ => info.session_key < current.session_key,
+                },
+            }
+        });
+        if replace {
+            selected = Some((match_rank, last_heartbeat, info));
+        }
+    }
+    Ok(selected.map(|(_, _, info)| info))
+}
+
+fn legacy_session_key_matches_channel(session_key: &str, channel_id: &str) -> bool {
+    session_key
+        .as_bytes()
+        .windows(channel_id.len())
+        .enumerate()
+        .any(|(offset, window)| {
+            window == channel_id.as_bytes()
+                && offset > 0
+                && matches!(session_key.as_bytes()[offset - 1], b'-' | b'_' | b':' | b'/')
+                && session_key
+                    .as_bytes()
+                    .get(offset + channel_id.len())
+                    .is_none_or(|byte| !byte.is_ascii_digit())
+        })
 }
 
 pub(crate) async fn load_cancel_owner(
@@ -500,6 +630,33 @@ pub(crate) async fn load_cancel_owner(
     Ok(load_cancel_turn_session(pool, channel_id)
         .await?
         .and_then(|session| session.owner_instance_id))
+}
+
+pub(crate) async fn revalidate_local_cancel_owner(
+    state: &ForwardCallerContext,
+    channel_id: &str,
+    expected_session_key: Option<&str>,
+) -> ServiceResult<()> {
+    let pool = state.pg_pool_ref().ok_or_else(|| {
+        ServiceError::internal("postgres pool unavailable for cancel owner revalidation")
+            .with_code(ErrorCode::Database)
+    })?;
+    let selected = load_cancel_turn_session(pool, channel_id).await?;
+    let owner = selected
+        .as_ref()
+        .and_then(|session| session.owner_instance_id.as_deref());
+    let selected_key = selected.as_ref().map(|session| session.session_key.as_str());
+    if (owner.is_some() && owner != state.cluster_instance_id.as_deref())
+        || expected_session_key.is_some_and(|expected| selected_key != Some(expected))
+    {
+        return Err(ServiceError::conflict(
+            "cancel owner changed before local mutation",
+        )
+        .with_context("channel_id", channel_id)
+        .with_context("owner_instance_id", owner)
+        .with_context("selected_session_key", selected_key));
+    }
+    Ok(())
 }
 
 fn cancel_success_body(status: StatusCode, body: Value, channel_id: &str) -> Value {
@@ -616,9 +773,10 @@ fn encode_path_segment(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CancelRetryDecision, ForwardResolution, ForwardTarget, classify_cancel_forward_status,
+        CancelRetryDecision, ForwardResolution, ForwardTarget, classify_cancel_forward_response,
         client, encode_path_segment, forward_json_response, is_forwarded_request,
-        load_cancel_owner, load_cancel_turn_session, resolve_forward_target_from_nodes,
+        legacy_session_key_matches_channel, load_cancel_owner, load_cancel_turn_session,
+        resolve_forward_target_from_nodes,
     };
     use axum::Json;
     use axum::http::{HeaderMap, HeaderValue};
@@ -646,7 +804,8 @@ mod tests {
         let nodes = vec![json!({
             "instance_id": "worker-a",
             "status": "online",
-            "api_base_url": "http://worker-a.local:8791"
+            "api_base_url": "http://worker-a.local:8791",
+            "capabilities": {"agentdesk_api": {"cancel_forwarding_v1": true}}
         })];
 
         let resolution =
@@ -659,11 +818,30 @@ mod tests {
     }
 
     #[test]
+    fn cancel_capability_fence_rejects_legacy_owner_metadata() {
+        assert!(!super::owner_supports_cancel_forwarding(
+            "worker-a",
+            &[json!({
+                "instance_id": "worker-a",
+                "capabilities": {"agentdesk_api": {"session_forwarding": true}}
+            })]
+        ));
+        assert!(super::owner_supports_cancel_forwarding(
+            "worker-a",
+            &[json!({
+                "instance_id": "worker-a",
+                "capabilities": {"agentdesk_api": {"cancel_forwarding_v1": true}}
+            })]
+        ));
+    }
+
+    #[test]
     fn resolve_forward_target_reports_stale_owner_explicitly() {
         let nodes = vec![json!({
             "instance_id": "worker-a",
             "status": "offline",
-            "api_base_url": "http://worker-a.local:8791"
+            "api_base_url": "http://worker-a.local:8791",
+            "capabilities": {"agentdesk_api": {"cancel_forwarding_v1": true}}
         })];
 
         let resolution =
@@ -680,7 +858,8 @@ mod tests {
         let nodes = vec![json!({
             "instance_id": "worker-a",
             "status": "online",
-            "api_base_url": "file:///tmp/agentdesk.sock"
+            "api_base_url": "file:///tmp/agentdesk.sock",
+            "capabilities": {"agentdesk_api": {"cancel_forwarding_v1": true}}
         })];
 
         let resolution =
@@ -696,7 +875,8 @@ mod tests {
         let nodes = vec![json!({
             "instance_id": "worker-a\r\nx-injected: true",
             "status": "online",
-            "api_base_url": "http://worker-a.local:8791"
+            "api_base_url": "http://worker-a.local:8791",
+            "capabilities": {"agentdesk_api": {"cancel_forwarding_v1": true}}
         })];
 
         let resolution = resolve_forward_target_from_nodes(
@@ -718,7 +898,8 @@ mod tests {
         let nodes = vec![json!({
             "instance_id": "worker-a",
             "status": "online",
-            "api_base_url": "http://worker-a.local:8791"
+            "api_base_url": "http://worker-a.local:8791",
+            "capabilities": {"agentdesk_api": {"cancel_forwarding_v1": true}}
         })];
 
         let resolution = resolve_forward_target_from_nodes(
@@ -792,22 +973,111 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn forward_cancel_sends_auth_and_owner_headers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("test listener addr");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept test request");
+            let mut buffer = [0_u8; 2048];
+            let read = socket.read(&mut buffer).await.expect("read request");
+            let request = String::from_utf8_lossy(&buffer[..read]).to_ascii_lowercase();
+            assert!(request.contains("authorization: bearer secret-token"));
+            assert!(request.contains("x-agentdesk-forwarded-by: leader"));
+            assert!(request.contains("x-agentdesk-session-owner: worker-a"));
+            let body = r#"{"ok":true}"#;
+            let response = format!(
+                concat!(
+                    "HTTP/1.1 200 OK\r\n",
+                    "content-type: application/json\r\n",
+                    "content-length: {}\r\n",
+                    "connection: close\r\n\r\n{}"
+                ),
+                body.len(),
+                body
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+        let mut config = crate::config::Config::default();
+        config.server.auth_token = Some("secret-token".to_string());
+        let state = super::ForwardCallerContext {
+            pg_pool: None,
+            config: std::sync::Arc::new(config),
+            cluster_instance_id: Some("leader".to_string()),
+        };
+        let target = ForwardTarget {
+            owner_instance_id: "worker-a".to_string(),
+            base_url: format!("http://{addr}"),
+        };
+
+        let (status, Json(body)) =
+            super::forward_cancel_turn(&state, &target, "42", false).await;
+        server.await.expect("test server task");
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body["ok"].as_bool(), Some(true));
+    }
+
     #[test]
-    fn cancel_retry_status_accepts_ack_and_idempotent_not_found() {
+    fn cancel_retry_accepts_ack_and_authenticated_structured_not_found() {
+        let target = ForwardTarget {
+            owner_instance_id: "worker-a".to_string(),
+            base_url: "http://worker-a.local:8791".to_string(),
+        };
         assert_eq!(
-            classify_cancel_forward_status(axum::http::StatusCode::OK),
+            classify_cancel_forward_response(
+                axum::http::StatusCode::OK,
+                &json!({"ok": true}),
+                &target,
+                "42",
+            ),
             CancelRetryDecision::Success
         );
         assert_eq!(
-            classify_cancel_forward_status(axum::http::StatusCode::NOT_FOUND),
+            classify_cancel_forward_response(
+                axum::http::StatusCode::NOT_FOUND,
+                &json!({
+                    "error": "no active turn found for this channel",
+                    "code": "not_found",
+                    "context": {
+                        "channel_id": "42",
+                        "expected_owner_instance_id": "worker-a",
+                        "receiver_instance_id": "worker-a"
+                    },
+                }),
+                &target,
+                "42",
+            ),
             CancelRetryDecision::Success
+        );
+        assert_eq!(
+            classify_cancel_forward_response(
+                axum::http::StatusCode::NOT_FOUND,
+                &json!({"error": "proxy route missing"}),
+                &target,
+                "42",
+            ),
+            CancelRetryDecision::Fail
         );
     }
 
     #[test]
-    fn cancel_retry_status_reloads_owner_only_for_conflict() {
+    fn cancel_retry_reloads_owner_only_for_conflict() {
+        let target = ForwardTarget {
+            owner_instance_id: "worker-a".to_string(),
+            base_url: "http://worker-a.local:8791".to_string(),
+        };
         assert_eq!(
-            classify_cancel_forward_status(axum::http::StatusCode::CONFLICT),
+            classify_cancel_forward_response(
+                axum::http::StatusCode::CONFLICT,
+                &json!({}),
+                &target,
+                "42",
+            ),
             CancelRetryDecision::RetryOwner
         );
         for status in [
@@ -817,10 +1087,27 @@ mod tests {
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
         ] {
             assert_eq!(
-                classify_cancel_forward_status(status),
+                classify_cancel_forward_response(status, &json!({}), &target, "42"),
                 CancelRetryDecision::Fail
             );
         }
+    }
+
+    #[test]
+    fn legacy_session_key_match_is_numeric_delimiter_aware() {
+        assert!(legacy_session_key_matches_channel(
+            "host:AgentDesk-claude-110",
+            "110"
+        ));
+        assert!(!legacy_session_key_matches_channel(
+            "host:AgentDesk-claude-1100",
+            "110"
+        ));
+        assert!(!legacy_session_key_matches_channel("contains110", "110"));
+        assert!(!legacy_session_key_matches_channel(
+            "host:AgentDesk-claude-%_",
+            "%_"
+        ));
     }
 
     // PostgreSQL cases below pin sessions.instance_id as cancel authority.
@@ -848,7 +1135,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_owner_reads_sessions_instance_id_for_thread_channel() {
+    async fn cancel_owner_reads_sessions_instance_id_for_thread_channel_pg() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         insert_cancel_owner_fixture(
@@ -869,7 +1156,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_owner_reads_sessions_instance_id_for_runtime_channel() {
+    async fn cancel_owner_reads_sessions_instance_id_for_runtime_channel_pg() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         insert_cancel_owner_fixture(
@@ -890,7 +1177,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_owner_ignores_disconnected_sessions() {
+    async fn cancel_owner_ignores_disconnected_sessions_pg() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         insert_cancel_owner_fixture(
@@ -911,7 +1198,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_owner_preserves_null_instance_as_local_authority() {
+    async fn cancel_owner_preserves_null_instance_as_local_authority_pg() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         insert_cancel_owner_fixture(
@@ -932,7 +1219,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_owner_prefers_latest_active_heartbeat() {
+    async fn cancel_owner_prefers_latest_active_heartbeat_pg() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         insert_cancel_owner_fixture(
@@ -967,7 +1254,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_owner_matches_exact_channel_not_session_key_text() {
+    async fn cancel_owner_matches_exact_channel_not_session_key_text_pg() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         insert_cancel_owner_fixture(
@@ -988,7 +1275,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_owner_does_not_fall_back_to_agent_binding() {
+    async fn cancel_owner_does_not_fall_back_to_agent_binding_pg() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         insert_cancel_owner_fixture(
@@ -1009,7 +1296,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_selection_session_key_fallback_preserves_remote_owner() {
+    async fn cancel_selection_session_key_fallback_preserves_remote_owner_pg() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         insert_cancel_owner_fixture(
@@ -1040,7 +1327,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_selection_agent_provider_fallback_preserves_remote_owner() {
+    async fn cancel_selection_rejects_overlapping_and_pattern_channel_ids_pg() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        insert_cancel_owner_fixture(
+            &pool,
+            "host:AgentDesk-claude-1100",
+            None,
+            None,
+            Some("worker-overlap"),
+            "turn_active",
+        )
+        .await;
+
+        assert_eq!(
+            load_cancel_owner(&pool, "110").await.expect("load owner"),
+            None
+        );
+        for invalid in ["%", "_", "10%", "10_2"] {
+            let error = load_cancel_owner(&pool, invalid)
+                .await
+                .expect_err("pattern-like channel id must be rejected");
+            assert_eq!(error.status(), axum::http::StatusCode::BAD_REQUEST);
+        }
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_selection_agent_provider_fallback_preserves_remote_owner_pg() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         sqlx::query(
@@ -1081,7 +1395,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_owner_returns_none_when_no_session_exists() {
+    async fn cancel_owner_returns_none_when_no_session_exists_pg() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         assert_eq!(

@@ -31,6 +31,7 @@ pub(crate) fn cluster_capabilities_with_worker_api(config: &ClusterConfig) -> Va
             .unwrap_or_default();
         metadata.insert("base_url".to_string(), Value::String(api_base_url));
         metadata.insert("session_forwarding".to_string(), Value::Bool(true));
+        metadata.insert("cancel_forwarding_v1".to_string(), Value::Bool(true));
         capabilities.insert("agentdesk_api".to_string(), Value::Object(metadata));
     }
     Value::Object(capabilities)
@@ -269,6 +270,10 @@ mod tests {
         );
         assert_eq!(
             capabilities["agentdesk_api"]["session_forwarding"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            capabilities["agentdesk_api"]["cancel_forwarding_v1"].as_bool(),
             Some(true)
         );
 
