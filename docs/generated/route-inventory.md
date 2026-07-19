@@ -111,8 +111,8 @@
 | `PATCH` | `/api/github-issues/{owner}/{repo}/{number}/close` | `github_dashboard::close_issue` | `src/server/routes/github_dashboard.rs:103` | `src/server/routes/domains/integrations.rs:37` |
 | `GET` | `/api/github-repos` | `github_dashboard::list_repos` | `src/server/routes/github_dashboard.rs:26` | `src/server/routes/domains/integrations.rs:35` |
 | `POST` | `/api/github/issues/create` | `github::create_issue` | `src/server/routes/github.rs:299` | `src/server/routes/domains/integrations.rs:24` |
-| `GET` | `/api/github/pr-summary` | `pr_summary::get_pr_summary` | `src/server/routes/pr_summary.rs:71` | `src/server/routes/domains/integrations.rs:30` |
-| `POST` | `/api/github/pr-summary/invalidate` | `pr_summary::invalidate_pr_summary` | `src/server/routes/pr_summary.rs:127` | `src/server/routes/domains/integrations.rs:31` |
+| `GET` | `/api/github/pr-summary` | `pr_summary::get_pr_summary` | `src/server/routes/pr_summary.rs:88` | `src/server/routes/domains/integrations.rs:30` |
+| `POST` | `/api/github/pr-summary/invalidate` | `pr_summary::invalidate_pr_summary` | `src/server/routes/pr_summary.rs:131` | `src/server/routes/domains/integrations.rs:31` |
 | `GET` | `/api/github/repos` | `github::list_repos` | `src/server/routes/github.rs:771` | `src/server/routes/domains/integrations.rs:25` |
 | `POST` | `/api/github/repos` | `github::register_repo` | `src/server/routes/github.rs:809` | `src/server/routes/domains/integrations.rs:25` |
 | `POST` | `/api/github/repos/{owner}/{repo}/sync` | `github::sync_repo` | `src/server/routes/github.rs:861` | `src/server/routes/domains/integrations.rs:29` |

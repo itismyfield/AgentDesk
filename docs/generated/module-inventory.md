@@ -295,7 +295,7 @@
 | `server::routes::offices` | `src/server/routes/offices.rs` | 485 | 485 | 0 |  |
 | `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 58 | 58 | 0 |  |
 | `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 365 | 365 | 0 |  |
-| `server::routes::pr_summary` | `src/server/routes/pr_summary.rs` | 185 | 149 | 36 |  |
+| `server::routes::pr_summary` | `src/server/routes/pr_summary.rs` | 241 | 142 | 99 |  |
 | `server::routes::prompt_manifest_retention` | `src/server/routes/prompt_manifest_retention.rs` | 57 | 57 | 0 |  |
 | `server::routes::provider_cli_api` | `src/server/routes/provider_cli_api.rs` | 386 | 386 | 0 |  |
 | `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 447 | 398 | 49 |  |
