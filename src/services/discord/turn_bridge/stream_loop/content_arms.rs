@@ -20,8 +20,12 @@ fn active_usage_snapshot_is_eligible_for_compact(
     turn_source: crate::services::discord::inflight::TurnSource,
     tmux_session_name: Option<&str>,
 ) -> bool {
+    // #4667: #4652 gated this active-usage compact arm on `Managed`, killing
+    // auto-compact for interactive `ExternalInput`/`ExternalAdopted` sessions.
+    // Share `compact_eligible_turn_source` with `ManagedCompactTurnIdentity::
+    // capture` so the arm gate and identity capture stay in lockstep.
     *provider == ProviderKind::Claude
-        && turn_source == crate::services::discord::inflight::TurnSource::Managed
+        && crate::services::discord::compact_eligible_turn_source(turn_source)
         && tmux_session_name.is_some_and(|name| !name.trim().is_empty())
 }
 
@@ -583,30 +587,35 @@ mod tests {
     use crate::services::discord::inflight::TurnSource;
     use crate::services::provider::ProviderKind;
 
-    /// Mutation guard: live usage telemetry may arm compacting only for an
-    /// AgentDesk-managed Claude turn tied to a physical tmux pane. Removing the
-    /// `Managed` predicate makes the ExternalInput assertion fail.
+    /// #4667 mutation guard: live usage telemetry arms compacting for
+    /// `Managed` AND interactive `ExternalInput`/`ExternalAdopted` Claude
+    /// turns tied to a physical tmux pane. Restoring the #4652 `Managed`-only
+    /// predicate makes the `ExternalInput`/`ExternalAdopted` asserts FAIL.
+    /// `MonitorTriggered` (synthetic auto-turn) stays gated out.
     #[test]
-    fn active_usage_compact_gate_allows_managed_and_rejects_external_turns() {
-        assert!(active_usage_snapshot_is_eligible_for_compact(
-            &ProviderKind::Claude,
-            TurnSource::Managed,
-            Some("tmux-4631"),
-        ));
+    fn active_usage_compact_gate_allows_managed_and_external_interactive_turns() {
         for turn_source in [
+            TurnSource::Managed,
             TurnSource::ExternalInput,
-            TurnSource::MonitorTriggered,
             TurnSource::ExternalAdopted,
         ] {
             assert!(
-                !active_usage_snapshot_is_eligible_for_compact(
+                active_usage_snapshot_is_eligible_for_compact(
                     &ProviderKind::Claude,
                     turn_source,
                     Some("tmux-4631"),
                 ),
-                "{turn_source:?} must not create compact trigger state"
+                "{turn_source:?} must arm compact trigger state"
             );
         }
+        assert!(
+            !active_usage_snapshot_is_eligible_for_compact(
+                &ProviderKind::Claude,
+                TurnSource::MonitorTriggered,
+                Some("tmux-4631"),
+            ),
+            "MonitorTriggered must not create compact trigger state"
+        );
         assert!(!active_usage_snapshot_is_eligible_for_compact(
             &ProviderKind::Claude,
             TurnSource::Managed,

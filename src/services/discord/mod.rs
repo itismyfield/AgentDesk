@@ -201,7 +201,7 @@ use adk_session::{
     lookup_pending_dispatch_for_thread, parse_dispatch_id, post_adk_session_status,
 };
 pub(in crate::services) use compact_turn_authority::{
-    ManagedCompactTurnIdentity, live_managed_turn_matches,
+    ManagedCompactTurnIdentity, compact_eligible_turn_source, live_managed_turn_matches,
 };
 use formatting::{
     BUILTIN_SKILLS, extract_skill_description, format_for_discord, format_tool_input,
