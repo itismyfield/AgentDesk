@@ -10,15 +10,44 @@ use crate::services::tmux_diagnostics::{
 
 /// The final race gate for stale-busy recovery. The first mailbox identity is
 /// captured before the yielding liveness probe; immediately before finalize we
-/// require the same identity still to own the mailbox and a second exact tmux
-/// probe still to report no session. `mailbox_finish_turn_if_matches` repeats
-/// the identity guard inside the mailbox actor at the actual release point.
+/// require the same identity still to own the mailbox, the same runtime tmux
+/// session name still to be recorded on the in-flight row, and a second exact
+/// tmux probe still to report no session. `mailbox_finish_turn_if_matches`
+/// repeats the identity guard inside the mailbox actor at the actual release
+/// point.
+///
+/// #4634: the recorded-name equality is the third condition. A fresh routine
+/// turn that replaced the row between the two snapshots re-records a DIFFERENT
+/// runtime session name (its own `…-<routine>---pe` session), and a row that was
+/// removed reports `None`; either case must block finalize so the reaper never
+/// finalizes a turn whose runtime session it did not actually observe absent.
 fn stale_busy_turn_is_still_reapable(
     observed_user_msg_id: serenity::MessageId,
     current_user_msg_id: Option<serenity::MessageId>,
     has_session: bool,
+    observed_tmux_session_name: &str,
+    current_tmux_session_name: Option<&str>,
 ) -> bool {
-    !has_session && current_user_msg_id == Some(observed_user_msg_id)
+    !has_session
+        && current_user_msg_id == Some(observed_user_msg_id)
+        && current_tmux_session_name == Some(observed_tmux_session_name)
+}
+
+/// #4634: the runtime tmux session name the launch loop RECORDED on the
+/// in-flight row (`runtime_handoff_loop` writes `tmux_session_name`), read via
+/// the same `inflight::load_inflight_state` seam `cleanup.rs` uses. A `fresh`
+/// routine turn runs in a DISTINCT `…-<routine>---pe` session, so a name
+/// reconstructed from `channel_name` points at the long-lived channel session (a
+/// different, possibly dead process) and would false-finalize the live routine
+/// turn ("routine tmux 오염"). Returns `None` when the row is gone or never
+/// recorded a name — the reaper then SKIPS rather than falling back to the
+/// reconstructed name, and retries on the next cycle.
+fn recorded_inflight_tmux_session_name(
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+) -> Option<String> {
+    crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
+        .and_then(|state| state.tmux_session_name)
 }
 
 async fn finalize_stale_busy_turn(
@@ -82,7 +111,6 @@ async fn heal_stale_busy_mailbox_with_probe(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
-    tmux_session_name: &str,
     trigger: &'static str,
     respect_watcher_authority: bool,
     probe: &(dyn Fn(String) -> BoxFuture<'static, bool> + Send + Sync),
@@ -100,19 +128,36 @@ async fn heal_stale_busy_mailbox_with_probe(
         return false;
     };
 
-    if probe(tmux_session_name.to_string()).await {
+    // #4634: probe the runtime tmux session RECORDED on the in-flight row, never
+    // a name reconstructed from `channel_name`. When the row recorded no name (or
+    // was already removed) SKIP — falling back to the reconstructed name is what
+    // false-finalizes a live routine turn ("routine tmux 오염").
+    let Some(observed_tmux_session_name) =
+        recorded_inflight_tmux_session_name(provider, channel_id)
+    else {
+        return false;
+    };
+
+    if probe(observed_tmux_session_name.clone()).await {
         return false;
     }
 
-    // Close both yielding windows: a newer mailbox owner or a respawned tmux
-    // session must survive. The finalizer/mailer actor closes the remaining
-    // identity race at the token mutation itself.
+    // Close all yielding windows: a newer mailbox owner, a respawned tmux
+    // session, OR a fresh turn that re-recorded a DIFFERENT runtime session name
+    // between the two snapshots must all survive. The finalizer/mailer actor
+    // closes the remaining identity race at the token mutation itself.
     let current_user_msg_id = mailbox_snapshot(shared, channel_id)
         .await
         .active_user_message_id;
-    let has_session = probe(tmux_session_name.to_string()).await;
-    if !stale_busy_turn_is_still_reapable(observed_user_msg_id, current_user_msg_id, has_session)
-        || (respect_watcher_authority && shared.tmux_watchers.contains_key(&channel_id))
+    let current_tmux_session_name = recorded_inflight_tmux_session_name(provider, channel_id);
+    let has_session = probe(observed_tmux_session_name.clone()).await;
+    if !stale_busy_turn_is_still_reapable(
+        observed_user_msg_id,
+        current_user_msg_id,
+        has_session,
+        &observed_tmux_session_name,
+        current_tmux_session_name.as_deref(),
+    ) || (respect_watcher_authority && shared.tmux_watchers.contains_key(&channel_id))
     {
         return false;
     }
@@ -122,7 +167,7 @@ async fn heal_stale_busy_mailbox_with_probe(
         provider,
         channel_id,
         observed_user_msg_id,
-        tmux_session_name,
+        &observed_tmux_session_name,
         trigger,
     )
     .await
@@ -132,22 +177,16 @@ pub(in crate::services::discord) async fn heal_stale_busy_mailbox(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
-    tmux_session_name: &str,
+    // #4634: kept for a stable intake call site (router/message_handler.rs). The
+    // reaper now sources the runtime session name from the in-flight row itself
+    // (recorded name, not this reconstructed one), so the argument is unused.
+    _tmux_session_name: &str,
     trigger: &'static str,
 ) -> bool {
     let probe = |name: String| -> BoxFuture<'static, bool> {
         Box::pin(async move { probe_tmux_session_exists(&name).await })
     };
-    heal_stale_busy_mailbox_with_probe(
-        shared,
-        provider,
-        channel_id,
-        tmux_session_name,
-        trigger,
-        false,
-        &probe,
-    )
-    .await
+    heal_stale_busy_mailbox_with_probe(shared, provider, channel_id, trigger, false, &probe).await
 }
 
 /// Idle-channel half of #4485: unlike the legacy dead-session pass below,
@@ -191,12 +230,12 @@ async fn reap_stale_busy_mailboxes_with_probe(
         if !provider.uses_managed_tmux_backend() {
             continue;
         }
-        let tmux_session_name = provider.build_tmux_session_name(&channel_name);
+        // #4634: the runtime session name comes from the in-flight row inside the
+        // heal helper (recorded name), not from a `channel_name` reconstruction.
         heal_stale_busy_mailbox_with_probe(
             shared,
             &provider,
             channel_id,
-            &tmux_session_name,
             "periodic_reaper",
             true,
             probe,
@@ -878,18 +917,56 @@ mod tests {
     #[test]
     fn stale_busy_guard_preserves_respawned_or_reowned_turn() {
         let observed = MessageId::new(4_485_101);
+        let recorded = "AgentDesk-claude-adk-cc-routine---pe";
 
         assert!(
-            !stale_busy_turn_is_still_reapable(observed, Some(observed), true),
+            !stale_busy_turn_is_still_reapable(
+                observed,
+                Some(observed),
+                true,
+                recorded,
+                Some(recorded),
+            ),
             "a respawned tmux session must prevent stale-busy finalization"
         );
         assert!(
-            !stale_busy_turn_is_still_reapable(observed, Some(MessageId::new(4_485_102)), false,),
+            !stale_busy_turn_is_still_reapable(
+                observed,
+                Some(MessageId::new(4_485_102)),
+                false,
+                recorded,
+                Some(recorded),
+            ),
             "a newer mailbox identity must prevent stale-busy finalization"
         );
         assert!(
-            stale_busy_turn_is_still_reapable(observed, Some(observed), false),
+            stale_busy_turn_is_still_reapable(
+                observed,
+                Some(observed),
+                false,
+                recorded,
+                Some(recorded),
+            ),
             "the same busy identity with a positively absent session must be reapable"
+        );
+        // #4634 SAFETY: the recorded runtime session name must be IDENTICAL across
+        // both snapshots. A fresh routine turn re-records a DIFFERENT session name
+        // (its own `…---pe` session) — removing the name condition would let the
+        // reaper finalize a turn whose runtime session it never observed absent.
+        assert!(
+            !stale_busy_turn_is_still_reapable(
+                observed,
+                Some(observed),
+                false,
+                recorded,
+                Some("AgentDesk-claude-adk-cc-other-routine---pe"),
+            ),
+            "a runtime session name that changed between snapshots must block finalization"
+        );
+        // A removed in-flight row (recorded name gone) is likewise non-reapable.
+        assert!(
+            !stale_busy_turn_is_still_reapable(observed, Some(observed), false, recorded, None),
+            "a removed in-flight row (no recorded name) must block finalization"
         );
     }
 
@@ -1051,6 +1128,17 @@ agents:
             )
             .await
         );
+        // #4634: the reaper now reads the runtime session name from the in-flight
+        // row (recorded under the EFFECTIVE override provider = Codex). Seed it so
+        // the probe is driven by the recorded name — here identical to the
+        // reconstructed one, as no routine is involved.
+        seed_recorded_inflight_tmux_session(
+            &ProviderKind::Codex,
+            channel_id,
+            channel_name,
+            user_msg_id,
+            &live_tmux_name,
+        );
         shared.restart.global_active.store(1, Ordering::Relaxed);
 
         let probed_names = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1079,6 +1167,227 @@ agents:
                 .active_user_message_id,
             Some(user_msg_id),
             "the live override-provider turn must retain mailbox ownership"
+        );
+    }
+
+    /// Seed one in-flight row recording `tmux_session_name` for
+    /// (`provider`, `channel_id`) so `recorded_inflight_tmux_session_name` returns
+    /// it — the runtime handoff loop's on-disk RECORD, without touching it (#4634).
+    fn seed_recorded_inflight_tmux_session(
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+        channel_name: &str,
+        user_msg_id: MessageId,
+        tmux_session_name: &str,
+    ) {
+        let state = crate::services::discord::inflight::InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            Some(channel_name.to_string()),
+            9,
+            user_msg_id.get(),
+            user_msg_id.get(),
+            "prompt".to_string(),
+            Some("live-turn".to_string()),
+            Some(tmux_session_name.to_string()),
+            None,
+            None,
+            0,
+        );
+        crate::services::discord::inflight::save_inflight_state(&state)
+            .expect("seed recorded inflight tmux session");
+    }
+
+    /// #4634 CORE FIX: a `fresh` routine turn runs in a DISTINCT `…---pe` session
+    /// recorded on its in-flight row, while the name reconstructed from
+    /// `channel_name` points at a DEAD long-lived channel session. The reaper must
+    /// probe the RECORDED (alive) name and leave the live turn intact. Mutation:
+    /// probing the reconstructed name instead finds it dead → false-finalize.
+    #[tokio::test(flavor = "current_thread")]
+    async fn periodic_reaper_probes_recorded_routine_session_not_reconstructed_name() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _root = RuntimeRootGuard::set(root.path());
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_634_101);
+        let user_msg_id = MessageId::new(4_634_102);
+        let channel_name = "routine-chan-4634";
+        // The reconstructed name (what the OLD reaper probed) — DEAD here.
+        let reconstructed_dead_name = ProviderKind::Claude.build_tmux_session_name(channel_name);
+        // The recorded name the launch loop actually wrote — a fresh routine's
+        // DISTINCT session, still ALIVE.
+        let recorded_alive_name = format!("{reconstructed_dead_name}-nightly---pe");
+        assert_ne!(
+            recorded_alive_name, reconstructed_dead_name,
+            "the recorded routine session name must differ from the reconstructed one"
+        );
+
+        shared.settings.write().await.provider = ProviderKind::Claude;
+        shared.core.lock().await.sessions.insert(
+            channel_id,
+            crate::services::discord::DiscordSession {
+                session_id: Some("live-routine-turn".to_string()),
+                memento_context_loaded: false,
+                memento_reflected: false,
+                current_path: None,
+                history: Vec::new(),
+                pending_uploads: Vec::new(),
+                cleared: false,
+                remote_profile_name: None,
+                channel_id: Some(channel_id.get()),
+                channel_name: Some(channel_name.to_string()),
+                category_name: None,
+                last_active: tokio::time::Instant::now(),
+                worktree: None,
+                born_generation: shared.restart.current_generation,
+            },
+        );
+        let token = Arc::new(CancelToken::new());
+        assert!(
+            crate::services::discord::mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                token.clone(),
+                UserId::new(11),
+                user_msg_id,
+            )
+            .await
+        );
+        seed_recorded_inflight_tmux_session(
+            &ProviderKind::Claude,
+            channel_id,
+            channel_name,
+            user_msg_id,
+            &recorded_alive_name,
+        );
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+
+        let probed_names = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded_names = probed_names.clone();
+        let alive_name = recorded_alive_name.clone();
+        let probe = move |name: String| -> BoxFuture<'static, bool> {
+            recorded_names
+                .lock()
+                .expect("probe names lock")
+                .push(name.clone());
+            // Only the recorded routine session is alive; the reconstructed
+            // channel session is dead.
+            let is_live = name == alive_name;
+            Box::pin(async move { is_live })
+        };
+        reap_stale_busy_mailboxes_with_probe(&shared, &probe).await;
+
+        let probed = probed_names.lock().expect("probe names lock").clone();
+        assert!(
+            probed.iter().all(|name| name == &recorded_alive_name),
+            "the reaper must probe ONLY the recorded routine session, got {probed:?}"
+        );
+        assert!(
+            !probed.contains(&reconstructed_dead_name),
+            "the reaper must never probe the reconstructed (dead) channel session"
+        );
+        assert!(
+            !token.cancelled.load(Ordering::Relaxed),
+            "the live routine turn's cancel token must not be triggered"
+        );
+        assert_eq!(
+            shared.restart.global_active.load(Ordering::Relaxed),
+            1,
+            "the global concurrency slot must not be released for a live routine turn"
+        );
+        assert_eq!(
+            crate::services::discord::mailbox_snapshot(&shared, channel_id)
+                .await
+                .active_user_message_id,
+            Some(user_msg_id),
+            "the live routine turn must retain mailbox ownership"
+        );
+    }
+
+    /// #4634 SKIP FALLBACK: when the in-flight row is already GONE (no recorded
+    /// name), the reaper must SKIP rather than fall back to the reconstructed name
+    /// — the fallback is exactly what false-finalized the live turn. Mutation:
+    /// falling back to the reconstructed dead name here would finalize the turn.
+    #[tokio::test(flavor = "current_thread")]
+    async fn periodic_reaper_skips_when_recorded_session_name_is_absent() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .expect("shared env lock poisoned");
+        let root = tempfile::tempdir().expect("runtime root");
+        let _root = RuntimeRootGuard::set(root.path());
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_634_201);
+        let user_msg_id = MessageId::new(4_634_202);
+        let channel_name = "routine-chan-4634-skip";
+        shared.settings.write().await.provider = ProviderKind::Claude;
+        shared.core.lock().await.sessions.insert(
+            channel_id,
+            crate::services::discord::DiscordSession {
+                session_id: Some("live-routine-turn".to_string()),
+                memento_context_loaded: false,
+                memento_reflected: false,
+                current_path: None,
+                history: Vec::new(),
+                pending_uploads: Vec::new(),
+                cleared: false,
+                remote_profile_name: None,
+                channel_id: Some(channel_id.get()),
+                channel_name: Some(channel_name.to_string()),
+                category_name: None,
+                last_active: tokio::time::Instant::now(),
+                worktree: None,
+                born_generation: shared.restart.current_generation,
+            },
+        );
+        let token = Arc::new(CancelToken::new());
+        assert!(
+            crate::services::discord::mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                token.clone(),
+                UserId::new(12),
+                user_msg_id,
+            )
+            .await
+        );
+        // Deliberately DO NOT seed an in-flight row: recorded name is None.
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+
+        let probed_names = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded_names = probed_names.clone();
+        // Any probe would report dead — asserting the reaper never even probes.
+        let probe = move |name: String| -> BoxFuture<'static, bool> {
+            recorded_names
+                .lock()
+                .expect("probe names lock")
+                .push(name.clone());
+            Box::pin(async move { false })
+        };
+        reap_stale_busy_mailboxes_with_probe(&shared, &probe).await;
+
+        assert!(
+            probed_names.lock().expect("probe names lock").is_empty(),
+            "with no recorded session name the reaper must SKIP without probing"
+        );
+        assert!(
+            !token.cancelled.load(Ordering::Relaxed),
+            "a turn with no recorded session name must not be finalized"
+        );
+        assert_eq!(
+            shared.restart.global_active.load(Ordering::Relaxed),
+            1,
+            "the global concurrency slot must not be released on skip"
+        );
+        assert_eq!(
+            crate::services::discord::mailbox_snapshot(&shared, channel_id)
+                .await
+                .active_user_message_id,
+            Some(user_msg_id),
+            "the turn must retain mailbox ownership on skip"
         );
     }
 
