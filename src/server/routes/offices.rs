@@ -8,6 +8,7 @@ use serde_json::json;
 use sqlx::{PgPool, QueryBuilder, Row};
 
 use super::AppState;
+use crate::error::{AppError, AppResult, ErrorCode};
 
 // ── Body types ────────────────────────────────────────────────
 
@@ -45,118 +46,99 @@ pub struct ReorderOfficeItem {
     pub sort_order: i32,
 }
 
-fn pg_unavailable() -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error": "postgres pool not configured"})),
-    )
+fn ensure_pg(state: &AppState) -> AppResult<&PgPool> {
+    state.pg_pool_ref().ok_or_else(|| {
+        AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::Config,
+            "postgres pool not configured",
+        )
+    })
+}
+
+fn db_error(error: sqlx::Error) -> AppError {
+    AppError::internal(format!("{error}")).with_code(ErrorCode::Database)
 }
 
 // ── Handlers ──────────────────────────────────────────────────
 
 /// GET /api/offices
-pub async fn list_offices(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool_ref() {
-        return match list_offices_pg(pool).await {
-            Ok(offices) => (StatusCode::OK, Json(json!({"offices": offices}))),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            ),
-        };
-    }
-
-    pg_unavailable()
+pub async fn list_offices(
+    State(state): State<AppState>,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = ensure_pg(&state)?;
+    let offices = list_offices_pg(pool).await.map_err(db_error)?;
+    Ok((StatusCode::OK, Json(json!({"offices": offices}))))
 }
 
 /// PATCH /api/offices/reorder
 pub async fn reorder_offices(
     State(state): State<AppState>,
     Json(body): Json<Vec<ReorderOfficeItem>>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool_ref() {
-        let mut tx = match pool.begin().await {
-            Ok(tx) => tx,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = ensure_pg(&state)?;
+    let mut tx = pool.begin().await.map_err(|error| {
+        AppError::internal(format!("begin tx: {error}")).with_code(ErrorCode::Database)
+    })?;
+
+    let mut updated = 0usize;
+    for item in &body {
+        match sqlx::query("UPDATE offices SET sort_order = $1 WHERE id = $2")
+            .bind(item.sort_order)
+            .bind(&item.id)
+            .execute(&mut *tx)
+            .await
+        {
+            Ok(result) => updated += result.rows_affected() as usize,
             Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("begin tx: {error}")})),
+                let _ = tx.rollback().await;
+                return Err(
+                    AppError::internal(format!("update id={}: {error}", item.id))
+                        .with_code(ErrorCode::Database),
                 );
             }
-        };
-
-        let mut updated = 0usize;
-        for item in &body {
-            match sqlx::query("UPDATE offices SET sort_order = $1 WHERE id = $2")
-                .bind(item.sort_order)
-                .bind(&item.id)
-                .execute(&mut *tx)
-                .await
-            {
-                Ok(result) => updated += result.rows_affected() as usize,
-                Err(error) => {
-                    let _ = tx.rollback().await;
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("update id={}: {error}", item.id)})),
-                    );
-                }
-            }
         }
-
-        if let Err(error) = tx.commit().await {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("commit: {error}")})),
-            );
-        }
-
-        return (
-            StatusCode::OK,
-            Json(json!({"ok": true, "updated": updated})),
-        );
     }
 
-    pg_unavailable()
+    tx.commit().await.map_err(|error| {
+        AppError::internal(format!("commit: {error}")).with_code(ErrorCode::Database)
+    })?;
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({"ok": true, "updated": updated})),
+    ))
 }
 
 /// POST /api/offices
 pub async fn create_office(
     State(state): State<AppState>,
     Json(body): Json<CreateOfficeBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let id = uuid::Uuid::new_v4().to_string();
+    let pool = ensure_pg(&state)?;
 
-    if let Some(pool) = state.pg_pool_ref() {
-        if let Err(error) = sqlx::query(
-            "INSERT INTO offices (id, name, layout, sort_order, created_at)
-             VALUES ($1, $2, $3, 0, NOW())",
-        )
-        .bind(&id)
-        .bind(body.name.as_str())
-        .bind(body.layout.as_deref())
-        .execute(pool)
-        .await
-        {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            );
-        }
+    sqlx::query(
+        "INSERT INTO offices (id, name, layout, sort_order, created_at)
+         VALUES ($1, $2, $3, 0, NOW())",
+    )
+    .bind(&id)
+    .bind(body.name.as_str())
+    .bind(body.layout.as_deref())
+    .execute(pool)
+    .await
+    .map_err(db_error)?;
 
-        return (
-            StatusCode::CREATED,
-            Json(json!({
-                "office": {
-                    "id": id,
-                    "name": body.name,
-                    "layout": body.layout,
-                }
-            })),
-        );
-    }
-
-    pg_unavailable()
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "office": {
+                "id": id,
+                "name": body.name,
+                "layout": body.layout,
+            }
+        })),
+    ))
 }
 
 /// PATCH /api/offices/:id
@@ -164,102 +146,72 @@ pub async fn update_office(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<UpdateOfficeBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool_ref() {
-        let mut updated_any = false;
-        let mut builder = QueryBuilder::<sqlx::Postgres>::new("UPDATE offices SET ");
-        let mut separated = builder.separated(", ");
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = ensure_pg(&state)?;
+    let mut updated_any = false;
+    let mut builder = QueryBuilder::<sqlx::Postgres>::new("UPDATE offices SET ");
+    let mut separated = builder.separated(", ");
 
-        if let Some(ref name) = body.name {
-            updated_any = true;
-            separated.push("name = ").push_bind_unseparated(name);
-        }
-        if let Some(ref layout) = body.layout {
-            updated_any = true;
-            separated.push("layout = ").push_bind_unseparated(layout);
-        }
-
-        if !updated_any {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "no fields to update"})),
-            );
-        }
-
-        builder.push(" WHERE id = ");
-        builder.push_bind(&id);
-
-        match builder.build().execute(pool).await {
-            Ok(result) if result.rows_affected() == 0 => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "office not found"})),
-                );
-            }
-            Ok(_) => {}
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
-            }
-        }
-
-        return match sqlx::query("SELECT id, name, layout FROM offices WHERE id = $1")
-            .bind(&id)
-            .fetch_one(pool)
-            .await
-        {
-            Ok(row) => (
-                StatusCode::OK,
-                Json(json!({
-                    "office": {
-                        "id": row.get::<String, _>("id"),
-                        "name": row.get::<Option<String>, _>("name"),
-                        "layout": row.get::<Option<String>, _>("layout"),
-                    }
-                })),
-            ),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            ),
-        };
+    if let Some(ref name) = body.name {
+        updated_any = true;
+        separated.push("name = ").push_bind_unseparated(name);
+    }
+    if let Some(ref layout) = body.layout {
+        updated_any = true;
+        separated.push("layout = ").push_bind_unseparated(layout);
     }
 
-    pg_unavailable()
+    if !updated_any {
+        return Err(AppError::bad_request("no fields to update"));
+    }
+
+    builder.push(" WHERE id = ");
+    builder.push_bind(&id);
+
+    let result = builder.build().execute(pool).await.map_err(db_error)?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::not_found("office not found"));
+    }
+
+    let row = sqlx::query("SELECT id, name, layout FROM offices WHERE id = $1")
+        .bind(&id)
+        .fetch_one(pool)
+        .await
+        .map_err(db_error)?;
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "office": {
+                "id": row.get::<String, _>("id"),
+                "name": row.get::<Option<String>, _>("name"),
+                "layout": row.get::<Option<String>, _>("layout"),
+            }
+        })),
+    ))
 }
 
 /// DELETE /api/offices/:id
 pub async fn delete_office(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool_ref() {
-        return match sqlx::query("DELETE FROM offices WHERE id = $1")
-            .bind(&id)
-            .execute(pool)
-            .await
-        {
-            Ok(result) if result.rows_affected() == 0 => (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "office not found"})),
-            ),
-            Ok(_) => {
-                let _ = sqlx::query("DELETE FROM office_agents WHERE office_id = $1")
-                    .bind(&id)
-                    .execute(pool)
-                    .await;
-                (StatusCode::OK, Json(json!({"ok": true})))
-            }
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            ),
-        };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = ensure_pg(&state)?;
+    let result = sqlx::query("DELETE FROM offices WHERE id = $1")
+        .bind(&id)
+        .execute(pool)
+        .await
+        .map_err(db_error)?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::not_found("office not found"));
     }
 
-    pg_unavailable()
+    let _ = sqlx::query("DELETE FROM office_agents WHERE office_id = $1")
+        .bind(&id)
+        .execute(pool)
+        .await;
+    Ok((StatusCode::OK, Json(json!({"ok": true}))))
 }
 
 /// POST /api/offices/:id/agents
@@ -267,67 +219,50 @@ pub async fn add_agent(
     State(state): State<AppState>,
     Path(office_id): Path<String>,
     Json(body): Json<AddAgentBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool_ref() {
-        return match office_exists_or_response(
-            office_exists_pg(pool, &office_id).await,
-            &office_id,
-            "add office agent",
-        ) {
-            Ok(true) => match sqlx::query(
-                "INSERT INTO office_agents (office_id, agent_id, department_id)
-                 VALUES ($1, $2, $3)
-                 ON CONFLICT (office_id, agent_id)
-                 DO UPDATE SET department_id = EXCLUDED.department_id",
-            )
-            .bind(&office_id)
-            .bind(body.agent_id.as_str())
-            .bind(body.department_id.as_deref())
-            .execute(pool)
-            .await
-            {
-                Ok(_) => (StatusCode::OK, Json(json!({"ok": true}))),
-                Err(error) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                ),
-            },
-            Ok(false) => (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "office not found"})),
-            ),
-            Err(response) => response,
-        };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = ensure_pg(&state)?;
+    if !office_exists_or_error(
+        office_exists_pg(pool, &office_id).await,
+        &office_id,
+        "add office agent",
+    )? {
+        return Err(AppError::not_found("office not found"));
     }
 
-    pg_unavailable()
+    sqlx::query(
+        "INSERT INTO office_agents (office_id, agent_id, department_id)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (office_id, agent_id)
+         DO UPDATE SET department_id = EXCLUDED.department_id",
+    )
+    .bind(&office_id)
+    .bind(body.agent_id.as_str())
+    .bind(body.department_id.as_deref())
+    .execute(pool)
+    .await
+    .map_err(db_error)?;
+
+    Ok((StatusCode::OK, Json(json!({"ok": true}))))
 }
 
 /// DELETE /api/offices/:office_id/agents/:agent_id
 pub async fn remove_agent(
     State(state): State<AppState>,
     Path((office_id, agent_id)): Path<(String, String)>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool_ref() {
-        return match sqlx::query("DELETE FROM office_agents WHERE office_id = $1 AND agent_id = $2")
-            .bind(&office_id)
-            .bind(&agent_id)
-            .execute(pool)
-            .await
-        {
-            Ok(result) if result.rows_affected() == 0 => (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "office-agent link not found"})),
-            ),
-            Ok(_) => (StatusCode::OK, Json(json!({"ok": true}))),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            ),
-        };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = ensure_pg(&state)?;
+    let result = sqlx::query("DELETE FROM office_agents WHERE office_id = $1 AND agent_id = $2")
+        .bind(&office_id)
+        .bind(&agent_id)
+        .execute(pool)
+        .await
+        .map_err(db_error)?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::not_found("office-agent link not found"));
     }
 
-    pg_unavailable()
+    Ok((StatusCode::OK, Json(json!({"ok": true}))))
 }
 
 /// PATCH /api/offices/:office_id/agents/:agent_id
@@ -335,30 +270,23 @@ pub async fn update_office_agent(
     State(state): State<AppState>,
     Path((office_id, agent_id)): Path<(String, String)>,
     Json(body): Json<UpdateOfficeAgentBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool_ref() {
-        return match sqlx::query(
-            "UPDATE office_agents SET department_id = $1 WHERE office_id = $2 AND agent_id = $3",
-        )
-        .bind(body.department_id.as_deref())
-        .bind(&office_id)
-        .bind(&agent_id)
-        .execute(pool)
-        .await
-        {
-            Ok(result) if result.rows_affected() == 0 => (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "office-agent link not found"})),
-            ),
-            Ok(_) => (StatusCode::OK, Json(json!({"ok": true}))),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            ),
-        };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = ensure_pg(&state)?;
+    let result = sqlx::query(
+        "UPDATE office_agents SET department_id = $1 WHERE office_id = $2 AND agent_id = $3",
+    )
+    .bind(body.department_id.as_deref())
+    .bind(&office_id)
+    .bind(&agent_id)
+    .execute(pool)
+    .await
+    .map_err(db_error)?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::not_found("office-agent link not found"));
     }
 
-    pg_unavailable()
+    Ok((StatusCode::OK, Json(json!({"ok": true}))))
 }
 
 /// POST /api/offices/:id/agents/batch
@@ -366,62 +294,36 @@ pub async fn batch_add_agents(
     State(state): State<AppState>,
     Path(office_id): Path<String>,
     Json(body): Json<BatchAddAgentsBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    if let Some(pool) = state.pg_pool_ref() {
-        return match office_exists_or_response(
-            office_exists_pg(pool, &office_id).await,
-            &office_id,
-            "batch add office agents",
-        ) {
-            Ok(true) => {
-                let mut tx = match pool.begin().await {
-                    Ok(tx) => tx,
-                    Err(error) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": format!("{error}")})),
-                        );
-                    }
-                };
-
-                for agent_id in &body.agent_ids {
-                    if let Err(error) = sqlx::query(
-                        "INSERT INTO office_agents (office_id, agent_id, department_id)
-                         VALUES ($1, $2, NULL)
-                         ON CONFLICT (office_id, agent_id)
-                         DO UPDATE SET department_id = NULL",
-                    )
-                    .bind(&office_id)
-                    .bind(agent_id)
-                    .execute(&mut *tx)
-                    .await
-                    {
-                        let _ = tx.rollback().await;
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": format!("{error}")})),
-                        );
-                    }
-                }
-
-                if let Err(error) = tx.commit().await {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("{error}")})),
-                    );
-                }
-
-                (StatusCode::OK, Json(json!({"ok": true})))
-            }
-            Ok(false) => (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "office not found"})),
-            ),
-            Err(response) => response,
-        };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = ensure_pg(&state)?;
+    if !office_exists_or_error(
+        office_exists_pg(pool, &office_id).await,
+        &office_id,
+        "batch add office agents",
+    )? {
+        return Err(AppError::not_found("office not found"));
     }
 
-    pg_unavailable()
+    let mut tx = pool.begin().await.map_err(db_error)?;
+    for agent_id in &body.agent_ids {
+        if let Err(error) = sqlx::query(
+            "INSERT INTO office_agents (office_id, agent_id, department_id)
+             VALUES ($1, $2, NULL)
+             ON CONFLICT (office_id, agent_id)
+             DO UPDATE SET department_id = NULL",
+        )
+        .bind(&office_id)
+        .bind(agent_id)
+        .execute(&mut *tx)
+        .await
+        {
+            let _ = tx.rollback().await;
+            return Err(db_error(error));
+        }
+    }
+
+    tx.commit().await.map_err(db_error)?;
+    Ok((StatusCode::OK, Json(json!({"ok": true}))))
 }
 
 async fn list_offices_pg(pool: &PgPool) -> Result<Vec<serde_json::Value>, sqlx::Error> {
@@ -463,23 +365,17 @@ async fn office_exists_pg(pool: &PgPool, office_id: &str) -> Result<bool, sqlx::
         .map(|count| count > 0)
 }
 
-fn office_exists_or_response(
+fn office_exists_or_error(
     result: Result<bool, sqlx::Error>,
     office_id: &str,
     action: &'static str,
-) -> Result<bool, (StatusCode, Json<serde_json::Value>)> {
-    match result {
-        Ok(exists) => Ok(exists),
-        Err(error) => {
-            tracing::warn!(
-                office_id = %office_id,
-                action,
-                "failed to look up office via postgres: {error}"
-            );
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            ))
-        }
-    }
+) -> AppResult<bool> {
+    result.map_err(|error| {
+        tracing::warn!(
+            office_id = %office_id,
+            action,
+            "failed to look up office via postgres: {error}"
+        );
+        db_error(error)
+    })
 }
