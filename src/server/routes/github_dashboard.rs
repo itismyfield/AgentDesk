@@ -8,6 +8,7 @@ use serde_json::json;
 use sqlx::Row;
 
 use super::AppState;
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::github;
 
 // ── Query types ─────────────────────────────────────────────────
@@ -103,26 +104,27 @@ pub async fn list_issues(
 pub async fn close_issue(
     State(_state): State<AppState>,
     Path((owner, repo, number)): Path<(String, String, u64)>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let full_repo = format!("{owner}/{repo}");
 
     if !github::gh_available() {
-        return (
+        return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "gh CLI is not available"})),
-        );
+            ErrorCode::Config,
+            "gh CLI is not available",
+        ));
     }
 
     match github::close_issue(&full_repo, number as i64) {
-        Ok(_) => (
+        Ok(_) => Ok((
             StatusCode::OK,
             Json(json!({
                 "ok": true,
                 "repo": full_repo,
                 "number": number,
             })),
-        ),
-        Err(e) => (
+        )),
+        Err(e) => Ok((
             StatusCode::BAD_GATEWAY,
             Json(json!({
                 "ok": false,
@@ -130,7 +132,7 @@ pub async fn close_issue(
                 "repo": full_repo,
                 "number": number,
             })),
-        ),
+        )),
     }
 }
 
