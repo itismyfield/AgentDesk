@@ -628,11 +628,15 @@ pub(crate) async fn cmd_github_sync(repo: Option<&str>) -> Result<(), String> {
     let mut any_failed = false;
     for repo_id in &repos {
         let (owner, repo_name) = split_repo(repo_id)?;
-        let (status, Json(value)) = crate::server::routes::github::sync_repo(
+        let (status, Json(value)) = match crate::server::routes::github::sync_repo(
             State(state.clone()),
             Path((owner, repo_name)),
         )
-        .await;
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => error.into_json_response(),
+        };
         if status.is_success() {
             results.push(value);
         } else {
