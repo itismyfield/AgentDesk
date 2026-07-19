@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 
 use super::AppState;
 use crate::config::{AgentDef, Config};
+use crate::error::AppResult;
 use crate::voice::barge_in::BargeInSensitivity;
 use crate::voice::config::DEFAULT_ACTIVE_AGENT_TTL_SECS;
 
@@ -90,25 +91,27 @@ enum VoiceConfigError {
 }
 
 impl VoiceConfigError {
-    fn into_response(self) -> (StatusCode, Json<Value>) {
+    fn into_response(self) -> AppResult<(StatusCode, Json<Value>)> {
         match self {
-            Self::BadRequest(message) => (
+            Self::BadRequest(message) => Ok((
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "bad_request", "message": message})),
-            ),
-            Self::Conflict(body) => (StatusCode::CONFLICT, Json(body)),
-            Self::Internal(message) => (
+            )),
+            Self::Conflict(body) => Ok((StatusCode::CONFLICT, Json(body))),
+            Self::Internal(message) => Ok((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "internal_error", "message": message})),
-            ),
+            )),
         }
     }
 }
 
 /// GET /api/voice/config
-pub async fn get_voice_config(State(_state): State<AppState>) -> (StatusCode, Json<Value>) {
+pub async fn get_voice_config(
+    State(_state): State<AppState>,
+) -> AppResult<(StatusCode, Json<Value>)> {
     match load_voice_config_response() {
-        Ok(response) => (StatusCode::OK, Json(json!(response))),
+        Ok(response) => Ok((StatusCode::OK, Json(json!(response)))),
         Err(error) => error.into_response(),
     }
 }
@@ -117,9 +120,9 @@ pub async fn get_voice_config(State(_state): State<AppState>) -> (StatusCode, Js
 pub async fn put_voice_config(
     State(state): State<AppState>,
     Json(body): Json<PutVoiceConfigBody>,
-) -> (StatusCode, Json<Value>) {
+) -> AppResult<(StatusCode, Json<Value>)> {
     match put_voice_config_inner(&state, body).await {
-        Ok(response) => (StatusCode::OK, Json(json!(response))),
+        Ok(response) => Ok((StatusCode::OK, Json(json!(response)))),
         Err(error) => error.into_response(),
     }
 }

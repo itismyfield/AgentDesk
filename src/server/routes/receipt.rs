@@ -16,6 +16,7 @@ use std::time::{Duration as StdDuration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
 
 use super::AppState;
+use crate::error::{AppError, AppResult};
 use crate::receipt;
 
 #[derive(Debug, Deserialize)]
@@ -334,7 +335,7 @@ pub async fn prewarm_token_analytics_cache() {
 pub async fn get_receipt(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<ReceiptQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let period = params.period.as_deref().unwrap_or("month");
     let now = chrono::Utc::now();
     let local_now = now.with_timezone(&Local);
@@ -399,14 +400,11 @@ pub async fn get_receipt(
     {
         Ok(d) => d,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("collection failed: {e}")})),
-            );
+            return Err(AppError::internal(format!("collection failed: {e}")));
         }
     };
 
-    (StatusCode::OK, Json(json!(data)))
+    Ok((StatusCode::OK, Json(json!(data))))
 }
 
 /// GET /api/token-analytics?period=30d&fresh=1
