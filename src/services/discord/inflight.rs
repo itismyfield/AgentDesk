@@ -600,6 +600,10 @@ pub(in crate::services::discord) enum InflightSignal {
     Completed { channel_id: u64, turn_id: u64 },
 }
 
+#[cfg(test)]
+#[path = "inflight/save_store/post_loop_identity_guard_tests.rs"]
+mod post_loop_identity_guard_tests;
+
 /// #1446 Layer 1 — `inflight_state_is_stale` is a pure helper with no
 /// filesystem or runtime dependencies, so we keep its test always-on
 /// (`#[cfg(test)]`) rather than tying it to the removed SQLite-only harness.
