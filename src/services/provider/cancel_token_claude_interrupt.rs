@@ -1,16 +1,12 @@
 //! Session-level Claude turn-interrupt ownership.
 
-use super::CancelToken;
-use std::collections::HashMap;
+use super::cancel_token_cleanup::authority::{self, KillAuthorization, SessionKillGuard};
+use super::{CancelToken, ProviderKind};
 use std::sync::atomic::Ordering;
-use std::sync::{LazyLock, Mutex};
-
-static ACTIVE_GENERATION_BY_TMUX: LazyLock<Mutex<HashMap<String, u64>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub(crate) struct ClaudeInterruptDeliveryGuard<'a> {
     token: &'a CancelToken,
-    _generations: std::sync::MutexGuard<'static, HashMap<String, u64>>,
+    _session: SessionKillGuard,
 }
 
 impl ClaudeInterruptDeliveryGuard<'_> {
@@ -70,18 +66,17 @@ impl CancelToken {
         if tmux_session_name.is_empty() {
             return;
         }
-        ACTIVE_GENERATION_BY_TMUX
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .entry(tmux_session_name.to_string())
-            .and_modify(|generation| {
-                *generation = (*generation).max(self.claude_interrupt_generation);
-            })
-            .or_insert(self.claude_interrupt_generation);
+        let Some(binding) = authority::publish(
+            ProviderKind::Claude,
+            tmux_session_name,
+            self.claude_interrupt_generation,
+        ) else {
+            return;
+        };
         *self
-            .tmux_session
+            .tmux_binding
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(tmux_session_name.to_string());
+            .unwrap_or_else(|error| error.into_inner()) = Some(binding);
     }
 
     /// Acquire the session-level generation fence for provider delivery.
@@ -93,16 +88,48 @@ impl CancelToken {
         &self,
         tmux_session_name: &str,
     ) -> Option<ClaudeInterruptDeliveryGuard<'_>> {
-        let generations = ACTIVE_GENERATION_BY_TMUX
+        let binding = self
+            .tmux_binding
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let is_current = generations
-            .get(tmux_session_name.trim())
-            .is_some_and(|generation| *generation == self.claude_interrupt_generation);
-        is_current.then_some(ClaudeInterruptDeliveryGuard {
-            token: self,
-            _generations: generations,
-        })
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let matches_requested_name = binding
+            .as_ref()
+            .is_some_and(|binding| binding.name() == tmux_session_name.trim());
+        if !matches_requested_name {
+            return None;
+        }
+        match authority::authorize(binding.as_ref()) {
+            KillAuthorization::Current(session) => Some(ClaudeInterruptDeliveryGuard {
+                token: self,
+                _session: session,
+            }),
+            KillAuthorization::Unregistered | KillAuthorization::Stale { .. } => None,
+        }
+    }
+
+    /// Store a tmux name without publishing a managed generation slot.
+    pub(crate) fn bind_unmanaged_session_name(&self, tmux_session_name: &str) {
+        let tmux_session_name = tmux_session_name.trim();
+        if tmux_session_name.is_empty() {
+            return;
+        }
+        *self
+            .tmux_binding
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(
+            super::cancel_token_cleanup::authority::TmuxBinding::NameOnly {
+                name: tmux_session_name.to_string(),
+            },
+        );
+    }
+
+    pub(crate) fn tmux_session_name(&self) -> Option<String> {
+        self.tmux_binding
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|binding| binding.name().to_string())
     }
 
     /// Record that a wrapper accepted this turn before JSONL confirms it.
@@ -147,7 +174,7 @@ mod tests {
 
     #[test]
     fn wrapper_followup_publishes_then_writes_then_marks_pending() {
-        let session = "claude-wrapper-followup-submit-order";
+        let session = "AgentDesk-claude-wrapper-followup-submit-order";
         let stale = CancelToken::new();
         let current = CancelToken::new();
         stale.bind_claude_tmux_session(session);
@@ -177,9 +204,11 @@ mod tests {
     fn wrapper_followup_write_failure_does_not_mark_submit_pending() {
         let token = CancelToken::new();
         assert!(
-            submit_claude_wrapper_followup(Some(&token), "claude-wrapper-write-failure", || {
-                Err("write failed".to_string())
-            })
+            submit_claude_wrapper_followup(
+                Some(&token),
+                "AgentDesk-claude-wrapper-write-failure",
+                || { Err("write failed".to_string()) }
+            )
             .is_err()
         );
         assert!(!token.claude_interrupt_submit_pending());
@@ -209,7 +238,7 @@ mod tests {
 
     #[test]
     fn session_generation_advance_blocks_stale_stop_operation() {
-        let session = "claude-session-generation-advance";
+        let session = "AgentDesk-claude-session-generation-advance";
         let stale = CancelToken::new();
         let current = CancelToken::new();
         stale.bind_claude_tmux_session(session);
@@ -237,7 +266,7 @@ mod tests {
 
     #[test]
     fn stale_rebind_cannot_replace_a_newer_session_generation() {
-        let session = "claude-session-stale-rebind";
+        let session = "AgentDesk-claude-session-stale-rebind";
         let stale = CancelToken::new();
         let current = CancelToken::new();
         stale.bind_claude_tmux_session(session);
@@ -259,7 +288,7 @@ mod tests {
 
     #[test]
     fn stale_pending_stop_is_rejected_after_next_generation_publishes() {
-        let session = "claude-session-pending-generation-advance";
+        let session = "AgentDesk-claude-session-pending-generation-advance";
         let stale = CancelToken::new();
         let current = CancelToken::new();
         stale.bind_claude_tmux_session(session);
@@ -282,8 +311,28 @@ mod tests {
     }
 
     #[test]
+    fn unmanaged_binding_stores_name_without_registry_authority() {
+        let token = CancelToken::new();
+        token.bind_unmanaged_session_name("AgentDesk-codex-name-only-binding");
+
+        assert_eq!(
+            token.tmux_session_name().as_deref(),
+            Some("AgentDesk-codex-name-only-binding")
+        );
+        let binding = token
+            .tmux_binding
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        assert!(matches!(
+            authority::authorize(binding.as_ref()),
+            KillAuthorization::Unregistered
+        ));
+    }
+
+    #[test]
     fn submitted_window_clears_when_delivery_commits() {
-        let session = "claude-session-pending-commit";
+        let session = "AgentDesk-claude-session-pending-commit";
         let token = CancelToken::new();
         token.bind_claude_tmux_session(session);
         token.mark_claude_interrupt_submit_pending();
@@ -300,7 +349,7 @@ mod tests {
 
     #[test]
     fn successful_operation_commits_before_returning() {
-        let session = "claude-session-atomic-commit";
+        let session = "AgentDesk-claude-session-atomic-commit";
         let token = CancelToken::new();
         token.bind_claude_tmux_session(session);
         assert!(token.claim_claude_interrupt());

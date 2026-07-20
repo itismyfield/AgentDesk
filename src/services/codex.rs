@@ -1710,8 +1710,7 @@ pub(crate) fn wire_cancel_token_to_tmux_session(
     tmux_session_name: &str,
 ) {
     if let Some(token) = cancel_token {
-        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(tmux_session_name.to_string());
+        token.bind_unmanaged_session_name(tmux_session_name);
         if let Some(pid) = crate::services::platform::tmux::pane_pid(tmux_session_name) {
             *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(pid);
         }
@@ -2442,8 +2441,7 @@ fn execute_streaming_local_tmux(
     }
 
     if let Some(ref token) = cancel_token {
-        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(tmux_session_name.to_string());
+        token.bind_unmanaged_session_name(tmux_session_name);
     }
 
     let read_result = read_output_file_until_result(
@@ -2608,8 +2606,7 @@ fn send_followup_to_tmux(
     }
 
     if let Some(ref token) = cancel_token {
-        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(tmux_session_name.to_string());
+        token.bind_unmanaged_session_name(tmux_session_name);
     }
 
     let read_result = match read_output_file_until_result_tracked(

@@ -436,12 +436,7 @@ pub(in crate::services::discord) async fn interrupt_provider_cli_turn(
 }
 
 pub(in crate::services::discord) fn cancel_token_has_tmux_session(token: &CancelToken) -> bool {
-    token
-        .tmux_session
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone())
-        .is_some()
+    token.tmux_session_name().is_some()
 }
 
 pub(in crate::services::discord) fn bind_cancel_token_tmux_runtime(
@@ -452,17 +447,8 @@ pub(in crate::services::discord) fn bind_cancel_token_tmux_runtime(
 ) -> Option<u32> {
     if matches!(provider, ProviderKind::Claude) {
         token.bind_claude_tmux_session(tmux_session_name);
-    } else if let Ok(mut guard) = token.tmux_session.lock() {
-        if guard.as_deref() != Some(tmux_session_name) {
-            *guard = Some(tmux_session_name.to_string());
-        }
     } else {
-        tracing::error!(
-            "cancel token tmux rebind failed: provider={} session={} reason={} error=tmux_session_lock_poisoned",
-            provider.as_str(),
-            tmux_session_name,
-            reason
-        );
+        token.bind_unmanaged_session_name(tmux_session_name);
     }
 
     let tracked_child_pid = token.child_pid.lock().ok().and_then(|guard| *guard);
