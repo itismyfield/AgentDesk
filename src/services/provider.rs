@@ -1014,6 +1014,9 @@ pub struct CancelToken {
     claude_interrupt_submit_pending: AtomicBool,
     /// Lifecycle-aware restart/handoff mode for inflight preservation.
     pub restart_mode: AtomicU8,
+    /// Independent destructive claims prevent a PID-only cleanup from suppressing tmux cleanup.
+    pub(crate) pid_kill_claim: AtomicU8,
+    pub(crate) name_kill_claim: AtomicU8,
 }
 
 impl CancelToken {
@@ -1036,6 +1039,8 @@ impl CancelToken {
                 .fetch_add(1, Ordering::Relaxed),
             claude_interrupt_submit_pending: AtomicBool::new(false),
             restart_mode: AtomicU8::new(0),
+            pid_kill_claim: AtomicU8::new(0),
+            name_kill_claim: AtomicU8::new(0),
         }
     }
 
@@ -1080,13 +1085,6 @@ impl CancelToken {
             .and_then(|guard| guard.as_ref().map(|process| process.pid))
     }
 
-    pub(crate) fn take_child_pid_value(&self) -> Option<u32> {
-        let mut guard = self.child_pid.lock().unwrap_or_else(|e| e.into_inner());
-        guard.take().map(|process| process.pid)
-    }
-
-    // Consumed in #4593 S3 (identity-gated kill).
-    #[allow(dead_code)]
     pub(crate) fn captured_child_process(&self) -> Option<CapturedProcess> {
         self.child_pid.lock().ok().and_then(|guard| guard.clone())
     }
@@ -1103,32 +1101,14 @@ impl CancelToken {
         }
     }
 
-    /// Cancel and clean up any associated tmux session.
+    /// Compatibility adapter for legacy callers; cleanup authority lives in request_cleanup.
     pub fn cancel_with_tmux_cleanup(&self) {
-        self.cancelled.store(true, Ordering::Relaxed);
-        if let Some(name) = self
-            .tmux_binding
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-            .map(|binding| binding.name().to_string())
-        {
-            #[cfg(unix)]
-            {
-                crate::services::tmux_diagnostics::record_tmux_exit_reason(
-                    &name,
-                    "턴 취소에 의한 tmux 세션 정리",
-                );
-                crate::services::platform::tmux::kill_session(
-                    &name,
-                    "턴 취소에 의한 tmux 세션 정리",
-                );
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = &name;
-            }
-        }
+        let _ = self.request_cleanup(cancel_token_cleanup::executor::CleanupRequest {
+            cancel_source: "tmux_cleanup".to_string(),
+            intent: cancel_token_cleanup::executor::TmuxCleanupIntent::CleanupSession,
+            termination_reason: None,
+            hard_stop_target: None,
+        });
     }
 
     pub fn set_restart_mode(&self, mode: Option<crate::services::discord::InflightRestartMode>) {
@@ -1145,38 +1125,78 @@ impl CancelToken {
         )
     }
 
-    pub fn set_cancel_source(&self, source: impl Into<String>) {
+    pub(crate) fn set_cancel_source_if_absent(&self, source: impl Into<String>) {
         let label = source.into();
-        // Issue #2335 (a): keep the enum classification in sync with the
-        // free-form label so downstream consumers can branch on the variant
-        // without re-parsing the string. We only auto-classify when no
-        // explicit kind has been set yet so that callers using
-        // `set_cancel_source_kind` keep precedence.
         let classified = CancelSource::classify(&label);
-        {
-            let mut kind = self
-                .cancel_source_kind
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+        // All source writers take kind before label. Cleanup is provisional and
+        // may never replace an already recorded cancellation cause.
+        let mut kind = self
+            .cancel_source_kind
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut current_label = self.cancel_source.lock().unwrap_or_else(|e| e.into_inner());
+        if current_label.is_none() {
+            *current_label = Some(label);
             if kind.is_none() {
                 *kind = Some(classified);
             }
         }
-        *self.cancel_source.lock().unwrap_or_else(|e| e.into_inner()) = Some(label);
+    }
+
+    pub fn set_cancel_source(&self, source: impl Into<String>) {
+        let label = source.into();
+        let classified = CancelSource::classify(&label);
+        // Keep kind and label transactional. Specific kinds retain #3908's
+        // first-wins behavior, except that cleanup's Other classification is
+        // deliberately provisional and upgrades to a later specific source.
+        let mut kind = self
+            .cancel_source_kind
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut current_label = self.cancel_source.lock().unwrap_or_else(|e| e.into_inner());
+        if kind.is_none()
+            || (*kind == Some(CancelSource::Other) && classified != CancelSource::Other)
+        {
+            *kind = Some(classified);
+        }
+        *current_label = Some(label);
     }
 
     /// Explicitly set the structured cancel source. Also updates the
     /// free-form label (used for tracing / dispatch reason) to the canonical
     /// string for the variant when no label was previously recorded.
     pub fn set_cancel_source_kind(&self, kind: CancelSource) {
-        *self
+        self.set_cancel_source_kind_transactional(kind, |_| {});
+    }
+
+    fn set_cancel_source_kind_transactional(
+        &self,
+        kind: CancelSource,
+        after_kind_write: impl FnOnce(&Self),
+    ) {
+        // Hold both locks across the pair update so cleanup cannot leave a
+        // canonical kind paired with a cleanup-only label.
+        let mut current_kind = self
             .cancel_source_kind
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(kind);
+            .unwrap_or_else(|e| e.into_inner());
         let mut label = self.cancel_source.lock().unwrap_or_else(|e| e.into_inner());
-        if label.is_none() {
+        let replace_provisional_cleanup_label =
+            *current_kind == Some(CancelSource::Other) && label.as_deref() == Some("tmux_cleanup");
+        *current_kind = Some(kind);
+        after_kind_write(self);
+        if label.is_none() || replace_provisional_cleanup_label {
             *label = Some(kind.as_label().to_string());
         }
+    }
+
+    #[cfg(test)]
+    fn set_cancel_source_kind_with_interleaving(
+        &self,
+        kind: CancelSource,
+        after_kind_write: impl FnOnce(&Self),
+    ) {
+        self.set_cancel_source_kind_transactional(kind, after_kind_write);
     }
 
     pub fn cancel_source(&self) -> Option<String> {
@@ -2175,6 +2195,8 @@ mod cancel_token_tests {
         current_unix_millis, enforce_watchdog_deadline, register_child_pid,
     };
     use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     #[test]
     fn cancel_token_helpers_register_source_and_state() {
@@ -2265,6 +2287,125 @@ mod cancel_token_tests {
             token.cancel_source().as_deref(),
             Some("voice_barge_in_live_cut")
         );
+    }
+
+    #[test]
+    fn cleanup_adapter_preserves_existing_voice_cancel_source_and_kind() {
+        let token = CancelToken::new();
+        token.set_cancel_source("voice_barge_in_explicit_stop");
+        token.set_cancel_source_kind(CancelSource::UserBargeIn);
+
+        token.cancel_with_tmux_cleanup();
+
+        assert_eq!(
+            token.cancel_source().as_deref(),
+            Some("voice_barge_in_explicit_stop")
+        );
+        assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
+    }
+
+    #[test]
+    fn cleanup_adapter_populates_source_for_fresh_token() {
+        let token = CancelToken::new();
+
+        token.cancel_with_tmux_cleanup();
+
+        assert_eq!(token.cancel_source().as_deref(), Some("tmux_cleanup"));
+        assert_eq!(token.cancel_source_kind(), Some(CancelSource::Other));
+    }
+
+    #[test]
+    fn concurrent_cleanup_cannot_downgrade_primary_cancel_source() {
+        let token = Arc::new(CancelToken::new());
+        token.set_cancel_source("voice_barge_in_live_cut");
+        let barrier = Arc::new(Barrier::new(3));
+        let mut cleaners = Vec::new();
+        for _ in 0..2 {
+            let token = Arc::clone(&token);
+            let barrier = Arc::clone(&barrier);
+            cleaners.push(thread::spawn(move || {
+                barrier.wait();
+                token.cancel_with_tmux_cleanup();
+            }));
+        }
+        barrier.wait();
+        for cleaner in cleaners {
+            cleaner.join().unwrap();
+        }
+
+        assert_eq!(
+            token.cancel_source().as_deref(),
+            Some("voice_barge_in_live_cut")
+        );
+        assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
+    }
+
+    #[test]
+    fn cleanup_first_upgrades_to_specific_voice_source() {
+        let token = CancelToken::new();
+        token.cancel_with_tmux_cleanup();
+        token.set_cancel_source("voice_barge_in_live_cut");
+
+        assert_eq!(
+            token.cancel_source().as_deref(),
+            Some("voice_barge_in_live_cut")
+        );
+        assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
+    }
+
+    #[test]
+    fn concurrent_cleanup_and_voice_source_never_leave_provisional_kind() {
+        for cleanup_first in [true, false] {
+            let token = Arc::new(CancelToken::new());
+            let cleanup_ready = Arc::new(Barrier::new(2));
+            let voice_ready = Arc::new(Barrier::new(2));
+            let cleanup_token = Arc::clone(&token);
+            let cleanup_ready_for_thread = Arc::clone(&cleanup_ready);
+            let voice_ready_for_thread = Arc::clone(&voice_ready);
+            let cleanup = thread::spawn(move || {
+                if cleanup_first {
+                    cleanup_token.cancel_with_tmux_cleanup();
+                    cleanup_ready_for_thread.wait();
+                    voice_ready_for_thread.wait();
+                } else {
+                    cleanup_ready_for_thread.wait();
+                    voice_ready_for_thread.wait();
+                    cleanup_token.cancel_with_tmux_cleanup();
+                }
+            });
+            let voice_token = Arc::clone(&token);
+            if cleanup_first {
+                cleanup_ready.wait();
+                voice_token.set_cancel_source("voice_barge_in_explicit_stop");
+                voice_ready.wait();
+            } else {
+                voice_token.set_cancel_source("voice_barge_in_explicit_stop");
+                cleanup_ready.wait();
+                voice_ready.wait();
+            }
+            cleanup.join().unwrap();
+
+            assert_eq!(
+                token.cancel_source().as_deref(),
+                Some("voice_barge_in_explicit_stop")
+            );
+            assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
+        }
+    }
+
+    #[test]
+    fn explicit_kind_pair_update_excludes_cleanup_interleaving() {
+        let token = CancelToken::new();
+
+        token.set_cancel_source_kind_with_interleaving(CancelSource::UserBargeIn, |token| {
+            assert!(
+                token.cancel_source.try_lock().is_err(),
+                "the label lock must remain held after the kind write"
+            );
+        });
+
+        assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
+        assert_eq!(token.cancel_source().as_deref(), Some("user_barge_in"));
     }
 
     #[test]

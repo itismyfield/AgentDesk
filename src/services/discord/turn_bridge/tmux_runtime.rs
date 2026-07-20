@@ -1,8 +1,9 @@
 use super::super::*;
 use crate::services::discord::InflightRestartMode;
+use crate::services::provider::cancel_token_cleanup::executor::{
+    CleanupRequest, TmuxCleanupIntent,
+};
 use crate::services::provider::{CancelToken, ProviderKind};
-#[cfg(unix)]
-use crate::services::tmux_diagnostics::record_tmux_exit_reason;
 use std::time::Duration;
 
 // #3479: behavior-preserving decomposition of this giant module. The pure
@@ -688,10 +689,7 @@ pub(in crate::services::discord) fn cancel_active_token(
     cleanup_policy: TmuxCleanupPolicy,
     reason: &str,
 ) -> bool {
-    token.cancelled.store(true, Ordering::Relaxed);
     token.set_restart_mode(cleanup_policy.preserves_inflight());
-    let mut termination_recorded = false;
-
     let child_pid = token.child_pid_value();
     let has_tmux_session = token.tmux_session_name().is_some();
     if !has_tmux_session
@@ -700,71 +698,24 @@ pub(in crate::services::discord) fn cancel_active_token(
     {
         crate::services::session_backend::mark_process_sessions_stopped_by_pid(pid);
     }
-    // `child_pid` is the wrapper PID — i.e. the foreground process of the
-    // tmux pane. SIGKILL'ing it tears down the tmux session itself. For
-    // `PreserveSession` / `PreserveSessionAndInflight` the caller has
-    // already sent the provider abort key
-    // (`interrupt_provider_cli_turn` C-c + SIGINT fallback in
-    // `stop_active_turn`), so the provider is being asked to exit
-    // cooperatively and we MUST NOT take down the tmux pane underneath it
-    // — otherwise the next turn re-spawns the session, the capture file
-    // rotates, and the watcher floods Discord with stale scrollback. Only
-    // the tear-down policy kills the wrapper here.
-    if cleanup_policy.should_cleanup_tmux()
-        && let Some(pid) = child_pid
-    {
-        crate::services::process::kill_pid_tree(pid);
-    }
 
-    if let TmuxCleanupPolicy::CleanupSession {
-        termination_reason_code,
-    } = cleanup_policy
-    {
-        if child_pid.is_some() {
-            if let Some(name) = token.tmux_session_name() {
-                #[cfg(unix)]
-                {
-                    // #145: skip kill for unified-thread sessions with active runs
-                    let is_unified =
-                        crate::services::provider::parse_provider_and_channel_from_tmux_name(&name)
-                            .map(|(_, ch)| {
-                                crate::dispatch::is_unified_thread_channel_name_active(&ch)
-                            })
-                            .unwrap_or(false);
-                    if !is_unified {
-                        if let Some(reason_code) = termination_reason_code {
-                            crate::services::termination_audit::record_termination_for_tmux(
-                                &name,
-                                None,
-                                "turn_bridge",
-                                reason_code,
-                                Some(&format!("explicit cleanup via {reason}")),
-                                None,
-                            );
-                            termination_recorded = true;
-                        }
-                        record_tmux_exit_reason(&name, &format!("explicit cleanup via {reason}"));
-                        crate::services::platform::tmux::kill_session(
-                            &name,
-                            &format!("explicit cleanup via {reason}"),
-                        );
-                    }
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = &name;
-                }
-            }
-        } else {
-            #[cfg(unix)]
-            if let Some(name) = token.tmux_session_name() {
-                record_tmux_exit_reason(&name, &format!("explicit cleanup via {reason}"));
-            }
-            token.cancel_with_tmux_cleanup();
+    let (intent, termination_reason) = match cleanup_policy {
+        TmuxCleanupPolicy::CleanupSession {
+            termination_reason_code,
+        } => (TmuxCleanupIntent::CleanupSession, termination_reason_code),
+        TmuxCleanupPolicy::PreserveSession
+        | TmuxCleanupPolicy::PreserveSessionAndInflight { .. } => {
+            (TmuxCleanupIntent::PreserveSession, None)
         }
-    }
-
-    termination_recorded
+    };
+    token
+        .request_cleanup(CleanupRequest {
+            cancel_source: reason.to_string(),
+            intent,
+            termination_reason,
+            hard_stop_target: None,
+        })
+        .termination_confirmed()
 }
 
 #[cfg(unix)]

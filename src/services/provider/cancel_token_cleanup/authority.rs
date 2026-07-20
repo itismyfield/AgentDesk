@@ -72,7 +72,6 @@ pub(crate) enum KillAuthorizationState {
     Unregistered,
     Current,
     Stale,
-    Duplicate,
 }
 
 fn session_slot(key: &SessionKey, initial_generation: u64) -> Arc<Mutex<SessionSlot>> {
@@ -114,20 +113,6 @@ pub(crate) fn publish(provider: ProviderKind, name: &str, generation: u64) -> Op
     drop(slot_guard);
 
     Some(TmuxBinding::Published { key, generation })
-}
-
-pub(crate) fn authorize_state(
-    binding: Option<&TmuxBinding>,
-    duplicate: bool,
-) -> KillAuthorizationState {
-    if duplicate {
-        return KillAuthorizationState::Duplicate;
-    }
-    match authorize(binding) {
-        KillAuthorization::Unregistered => KillAuthorizationState::Unregistered,
-        KillAuthorization::Current(_) => KillAuthorizationState::Current,
-        KillAuthorization::Stale { .. } => KillAuthorizationState::Stale,
-    }
 }
 
 pub(crate) fn authorize(binding: Option<&TmuxBinding>) -> KillAuthorization {
@@ -220,29 +205,5 @@ mod tests {
             KillAuthorization::Unregistered
         ));
         assert!(matches!(authorize(None), KillAuthorization::Unregistered));
-    }
-
-    #[test]
-    fn authorization_state_exposes_all_four_kill_outcomes() {
-        let name = "AgentDesk-claude-authority-four-states";
-        let current = publish(ProviderKind::Claude, name, 40).unwrap();
-        let stale = publish(ProviderKind::Claude, name, 39).unwrap();
-
-        assert_eq!(
-            authorize_state(None, false),
-            KillAuthorizationState::Unregistered
-        );
-        assert_eq!(
-            authorize_state(Some(&current), false),
-            KillAuthorizationState::Current
-        );
-        assert_eq!(
-            authorize_state(Some(&stale), false),
-            KillAuthorizationState::Stale
-        );
-        assert_eq!(
-            authorize_state(Some(&current), true),
-            KillAuthorizationState::Duplicate
-        );
     }
 }
