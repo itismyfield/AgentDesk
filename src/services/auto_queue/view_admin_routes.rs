@@ -442,7 +442,7 @@ pub(super) async fn add_run_entry_with_pg(
             } else {
                 StatusCode::BAD_REQUEST
             };
-            return (status, Json(json!({"error": err})));
+            return Err(auto_queue_json_error(status, Json(json!({"error": err}))));
         }
     };
     let Some(inserted_entry) = inserted.into_iter().next() else {

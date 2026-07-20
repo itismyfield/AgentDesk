@@ -533,7 +533,10 @@ pub(crate) async fn cmd_auto_queue_activate(
             active_only: active_only.then_some(true),
         };
         let (status, body) =
-            crate::server::routes::auto_queue::activate(State(state), Json(body)).await;
+            match crate::server::routes::auto_queue::activate(State(state), Json(body)).await {
+                Ok(response) => response,
+                Err(error) => error.into_json_response(),
+            };
         route_json(status, body)
     })
     .await
@@ -1343,7 +1346,7 @@ pub(crate) async fn cmd_auto_queue_add(
                 let issue_number = issue_number.ok_or_else(|| {
                     format!("card '{card_id}' has no linked GitHub issue number")
                 })?;
-                let (status, Json(mut value)) = crate::server::routes::auto_queue::add_run_entry(
+                let (status, Json(mut value)) = match crate::server::routes::auto_queue::add_run_entry(
                     State(state.clone()),
                     Path(existing_run_id.clone()),
                     Json(crate::server::routes::auto_queue::AddRunEntryBody {
@@ -1352,7 +1355,11 @@ pub(crate) async fn cmd_auto_queue_add(
                         thread_group,
                     }),
                 )
-                .await;
+                .await
+                {
+                    Ok(response) => response,
+                    Err(error) => error.into_json_response(),
+                };
                 if !status.is_success() {
                     return Err(extract_error_message(&value)
                         .unwrap_or_else(|| format!("auto-queue add failed ({})", status.as_u16())));
@@ -1364,7 +1371,7 @@ pub(crate) async fn cmd_auto_queue_add(
                         .and_then(Value::as_str)
                     {
                         let (update_status, Json(update_value)) =
-                            crate::server::routes::auto_queue::update_entry(
+                            match crate::server::routes::auto_queue::update_entry(
                                 State(state),
                                 Path(entry_id.to_string()),
                                 Json(crate::server::routes::auto_queue::UpdateEntryBody {
@@ -1374,7 +1381,11 @@ pub(crate) async fn cmd_auto_queue_add(
                                     status: None,
                                 }),
                             )
-                            .await;
+                            .await
+                            {
+                                Ok(response) => response,
+                                Err(error) => error.into_json_response(),
+                            };
                         if update_status.is_success() {
                             value = update_value;
                         } else {
@@ -1505,7 +1516,7 @@ pub(crate) async fn cmd_auto_queue_config(
             .ok_or_else(|| "postgres pool unavailable for auto-queue config".to_string())?;
         let pool = pool.clone();
         let run_id = resolve_auto_queue_run_pg(&pool, run_id, repo, agent_id).await?;
-        let (status, Json(value)) = crate::server::routes::auto_queue::update_run(
+        let (status, Json(value)) = match crate::server::routes::auto_queue::update_run(
             State(state.clone()),
             Path(run_id.clone()),
             Json(crate::server::routes::auto_queue::UpdateRunBody {
@@ -1515,7 +1526,11 @@ pub(crate) async fn cmd_auto_queue_config(
                 max_concurrent_threads: Some(max_concurrent_threads),
             }),
         )
-        .await;
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => error.into_json_response(),
+        };
         if !status.is_success() {
             return Err(extract_error_message(&value)
                 .unwrap_or_else(|| format!("auto-queue config failed ({})", status.as_u16())));

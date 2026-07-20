@@ -786,7 +786,7 @@ pub async fn cancel(
     };
     match result {
         Ok(payload) => Ok((StatusCode::OK, Json(payload))),
-        Err(error) => cancel_route_error_response(error),
+        Err(error) => Ok(cancel_route_error_response(error)),
     }
 }
 
