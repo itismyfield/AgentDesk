@@ -1,4 +1,5 @@
 use crate::services::platform::BinaryResolution;
+use crate::services::provider::cancel_token_cleanup::target::CapturedProcess;
 use crate::services::provider_auth::ProviderAuthSpec;
 use crate::utils::format::safe_prefix;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering};
@@ -975,7 +976,7 @@ impl CancelSource {
 /// Cooperative cancellation token shared by provider runtimes and Discord orchestration.
 pub struct CancelToken {
     pub cancelled: AtomicBool,
-    pub child_pid: Mutex<Option<u32>>,
+    child_pid: Mutex<Option<CapturedProcess>>,
     cancel_source: Mutex<Option<String>>,
     cancel_source_kind: Mutex<Option<CancelSource>>,
     /// SSH cancel flag — set to true to signal remote execution to close the channel
@@ -1065,6 +1066,45 @@ impl CancelToken {
 
     pub fn is_completion_cleanup(&self) -> bool {
         self.completion_cleanup.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn store_child_pid(&self, pid: u32) {
+        *self.child_pid.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(CapturedProcess::capture(pid));
+    }
+
+    pub(crate) fn child_pid_value(&self) -> Option<u32> {
+        self.child_pid
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|process| process.pid)
+    }
+
+    pub(crate) fn take_child_pid_value(&self) -> Option<u32> {
+        self.child_pid
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .map(|process| process.pid)
+    }
+
+    pub(crate) fn captured_child_process(&self) -> Option<CapturedProcess> {
+        self.child_pid
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub(crate) fn clear_child_pid(&self) {
+        *self.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    pub(crate) fn store_child_pid_if_empty(&self, pid: u32) {
+        let mut child_pid = self.child_pid.lock().unwrap_or_else(|e| e.into_inner());
+        if child_pid.is_none() {
+            *child_pid = Some(CapturedProcess::capture(pid));
+        }
     }
 
     /// Cancel and clean up any associated tmux session.
@@ -1196,7 +1236,7 @@ fn enforce_watchdog_deadline(token: &CancelToken, now_ms: i64) -> bool {
 
 pub fn register_child_pid(token: Option<&CancelToken>, child_pid: u32) {
     if let Some(token) = token {
-        *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(child_pid);
+        token.store_child_pid(child_pid);
     }
 }
 
@@ -2148,8 +2188,9 @@ mod cancel_token_tests {
         assert_eq!(token.cancel_source(), None);
 
         register_child_pid(Some(&token), 4242);
+        assert_eq!(token.child_pid_value(), Some(4242));
         assert_eq!(
-            *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()),
+            token.captured_child_process().map(|process| process.pid),
             Some(4242)
         );
 

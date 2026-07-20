@@ -57,12 +57,7 @@ pub async fn execute_simple_with_timeout_and_context(
         joined = &mut handle => joined.map_err(|e| format!("Task join error: {}", e))?,
         _ = tokio::time::sleep(timeout) => {
             cancel_for_timeout.cancel_with_tmux_cleanup();
-            if let Some(pid) = cancel_for_timeout
-                .child_pid
-                .lock()
-                .ok()
-                .and_then(|guard| *guard)
-            {
+            if let Some(pid) = cancel_for_timeout.child_pid_value() {
                 kill_pid_tree(pid);
             }
             let _ = tokio::time::timeout(Duration::from_secs(3), &mut handle).await;
@@ -256,12 +251,7 @@ pub async fn execute_structured_with_context(
         joined = &mut handle => joined.map_err(|err| format!("Task join error: {err}"))?,
         _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => {
             cancel_for_timeout.cancel_with_tmux_cleanup();
-            if let Some(pid) = cancel_for_timeout
-                .child_pid
-                .lock()
-                .ok()
-                .and_then(|guard| *guard)
-            {
+            if let Some(pid) = cancel_for_timeout.child_pid_value() {
                 kill_pid_tree(pid);
             }
             if tokio::time::timeout(Duration::from_secs(3), &mut handle).await.is_err() {

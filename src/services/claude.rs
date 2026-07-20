@@ -473,10 +473,7 @@ where
     let (tx, rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
         let result = run_worker(std::sync::Arc::clone(&cancel_for_worker));
-        *cancel_for_worker
-            .child_pid
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = None;
+        cancel_for_worker.clear_child_pid();
         let _ = tx.send(result);
     });
 
@@ -503,11 +500,7 @@ where
                 "execute_command_simple_with_timeout timed out; cancelling and killing child"
             );
             cancel_token.cancel_with_tmux_cleanup();
-            let child_pid = cancel_token
-                .child_pid
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .take();
+            let child_pid = cancel_token.take_child_pid_value();
             let child_pid_was_none = child_pid.is_none();
             if let Some(pid) = child_pid {
                 tracing::warn!(
@@ -3134,9 +3127,7 @@ pub(crate) fn execute_streaming_local_process(
     })?;
 
     // Store child PID in cancel token
-    if let Some(ref token) = cancel_token {
-        *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle.pid());
-    }
+    register_child_pid(cancel_token.as_deref(), handle.pid());
 
     // Store handle for follow-up messages and protect it from tmux-takeover cleanup.
     let active_turn = insert_process_session_and_mark_active_turn(session_name.to_string(), handle);
@@ -3215,7 +3206,7 @@ fn send_followup_to_process(
     // Store session in cancel token
     if let Some(ref token) = cancel_token {
         if let Some(pid) = process_session_pid(session_name) {
-            *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(pid);
+            token.store_child_pid(pid);
         }
     }
 

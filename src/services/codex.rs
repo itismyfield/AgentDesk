@@ -909,10 +909,7 @@ where
         // this PID at any moment. Clearing here prevents a late timeout
         // path (timer raced ahead of recv on a different timeline) from
         // signalling a reused, unrelated PID.
-        *cancel_for_worker
-            .child_pid
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
+        cancel_for_worker.clear_child_pid();
         let _ = tx.send(result);
     });
 
@@ -948,11 +945,7 @@ where
             cancel_token.cancel_with_tmux_cleanup();
             // Snapshot under lock and clear, so any concurrent observer
             // sees the same "no PID" state we are about to act on.
-            let child_pid = cancel_token
-                .child_pid
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .take();
+            let child_pid = cancel_token.take_child_pid_value();
             let child_pid_was_none = child_pid.is_none();
             if let Some(pid) = child_pid {
                 tracing::warn!(
@@ -1712,7 +1705,7 @@ pub(crate) fn wire_cancel_token_to_tmux_session(
     if let Some(token) = cancel_token {
         token.bind_unmanaged_session_name(tmux_session_name);
         if let Some(pid) = crate::services::platform::tmux::pane_pid(tmux_session_name) {
-            *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(pid);
+            token.store_child_pid(pid);
         }
     }
 }
@@ -2830,9 +2823,7 @@ fn execute_streaming_local_process_codex(
     let backend = ProcessBackend::new();
     let handle = backend.create_session(&config)?;
 
-    if let Some(ref token) = cancel_token {
-        *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle.pid());
-    }
+    register_child_pid(cancel_token.as_deref(), handle.pid());
 
     insert_process_session(session_name.to_string(), handle);
 
