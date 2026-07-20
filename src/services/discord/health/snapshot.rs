@@ -547,13 +547,10 @@ async fn watcher_state_snapshot_for_shared(
     let has_pending_queue = !mailbox_snapshot.intervention_queue.is_empty();
     let mailbox_engaged =
         mailbox_has_cancel_token || mailbox_active_user_msg_id.is_some() || has_pending_queue;
-    let mailbox_cancel_tmux_session = mailbox_snapshot.cancel_token.as_ref().and_then(|token| {
-        token
-            .tmux_session
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .clone()
-    });
+    let mailbox_cancel_tmux_session = mailbox_snapshot
+        .cancel_token
+        .as_ref()
+        .and_then(|token| token.tmux_session_name());
     // Use one authority for both the probe target and the published identity.
     // The cancel token is the earliest turn-owned tmux proof and can exist
     // before inflight/watcher enrichment. Keeping only the probe fallback would

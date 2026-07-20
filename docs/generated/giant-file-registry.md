@@ -16,7 +16,7 @@
 | `src/server/worker_registry.rs` | 1313 | server-runtime | 2026-08-31 | #3739 |
 | `src/services/codex_tui/rollout_tail.rs` | 1329 | discord-relay | 2026-10-31 | #3843 |
 | `src/services/discord/catch_up.rs` | 1809 | discord-relay | 2026-10-31 | #3405 |
-| `src/services/discord/health/recovery.rs` | 2570 | discord-relay | 2026-10-31 | #3839 |
+| `src/services/discord/health/recovery.rs` | 2567 | discord-relay | 2026-10-31 | #3839 |
 | `src/services/discord/idle_recap.rs` | 1375 | discord-relay | 2026-08-31 | #3405 |
 | `src/services/discord/outbound/delivery_record.rs` | 1369 | discord-relay | 2026-10-31 | #3405 |
 | `src/services/discord/outbound/turn_output_controller.rs` | 1228 | discord-relay | 2026-08-31 | #3405 |
@@ -83,7 +83,7 @@
 | `src/services/auto_queue/cancel_run.rs` | 1031 |
 | `src/services/claude.rs` | 2951 |
 | `src/services/claude_tui/input.rs` | 2187 |
-| `src/services/codex.rs` | 3131 |
+| `src/services/codex.rs` | 3128 |
 | `src/services/codex_tmux_wrapper.rs` | 1403 |
 | `src/services/codex_tui/input.rs` | 1670 |
 | `src/services/discord/commands/text_commands.rs` | 1482 |
@@ -100,8 +100,8 @@
 | `src/services/onboarding/mod.rs` | 2881 |
 | `src/services/opencode.rs` | 2760 |
 | `src/services/platform/binary_resolver.rs` | 1495 |
-| `src/services/provider.rs` | 1822 |
-| `src/services/qwen.rs` | 2198 |
+| `src/services/provider.rs` | 1824 |
+| `src/services/qwen.rs` | 2196 |
 | `src/services/routines/agent_executor.rs` | 2131 |
 | `src/services/routines/discord_log.rs` | 1594 |
 | `src/services/routines/store.rs` | 3559 |

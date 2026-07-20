@@ -1397,8 +1397,7 @@ fn execute_streaming_local_tmux(
     }
 
     if let Some(ref token) = cancel_token {
-        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(tmux_session_name.to_string());
+        token.bind_unmanaged_session_name(tmux_session_name);
     }
 
     let read_result = match qwen_read_output_file_until_result(
@@ -1494,8 +1493,7 @@ fn send_followup_to_tmux(
     );
 
     if let Some(ref token) = cancel_token {
-        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(tmux_session_name.to_string());
+        token.bind_unmanaged_session_name(tmux_session_name);
     }
 
     let read_result = match qwen_read_output_file_until_result_tracked(

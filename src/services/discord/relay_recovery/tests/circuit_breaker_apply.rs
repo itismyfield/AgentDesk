@@ -15,11 +15,7 @@ async fn durable_reattach_circuit_open_preserves_every_live_turn_authority() {
     std::fs::write(&output_path, "{\"type\":\"assistant\"}\n").expect("seed output");
 
     let token = start_test_turn(&shared, channel, user_message).await;
-    token
-        .tmux_session
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .replace(tmux_session.to_string());
+    token.bind_unmanaged_session_name(tmux_session);
     shared.restart.global_active.store(1, Ordering::Relaxed);
     let mut state = super::super::super::inflight::InflightTurnState::new(
         provider.clone(),
@@ -160,11 +156,7 @@ async fn first_reserved_dead_frontier_apply_preserves_episode_and_reattaches_wat
     std::fs::write(&output_path, vec![b'x'; 128]).expect("seed output");
 
     let token = start_test_turn(&shared, channel, user_message).await;
-    token
-        .tmux_session
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .replace(tmux_session.clone());
+    token.bind_claude_tmux_session(&tmux_session);
     shared.restart.global_active.store(1, Ordering::Relaxed);
     let mut state = super::super::super::inflight::InflightTurnState::new(
         provider.clone(),

@@ -220,10 +220,7 @@ fn preserve_cancel_should_skip_provider_interrupt_for_idle_tui(
 
 fn cancel_token_tmux_session(token: &Arc<CancelToken>) -> Option<String> {
     token
-        .tmux_session
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone())
+        .tmux_session_name()
         .filter(|session| !session.trim().is_empty())
 }
 
