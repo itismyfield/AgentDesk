@@ -581,7 +581,7 @@
 | `services::discord::outbound::turn_output_controller` | `src/services/discord/outbound/turn_output_controller.rs` | 3519 | 1228 | 2291 | giant-file |
 | `services::discord::outbound::turn_output_controller::fresh_send` | `src/services/discord/outbound/turn_output_controller/fresh_send.rs` | 227 | 227 | 0 |  |
 | `services::discord::placeholder_cleanup` | `src/services/discord/placeholder_cleanup.rs` | 763 | 453 | 310 |  |
-| `services::discord::placeholder_controller` | `src/services/discord/placeholder_controller.rs` | 978 | 587 | 391 |  |
+| `services::discord::placeholder_controller` | `src/services/discord/placeholder_controller.rs` | 1230 | 663 | 567 |  |
 | `services::discord::placeholder_live_events` | `src/services/discord/placeholder_live_events/mod.rs` | 681 | 681 | 0 |  |
 | `services::discord::placeholder_live_events::background_task_events` | `src/services/discord/placeholder_live_events/background_task_events.rs` | 109 | 109 | 0 |  |
 | `services::discord::placeholder_live_events::common` | `src/services/discord/placeholder_live_events/common.rs` | 226 | 226 | 0 |  |
