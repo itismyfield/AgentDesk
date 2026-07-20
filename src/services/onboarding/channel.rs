@@ -108,10 +108,10 @@ async fn load_channels(
     {
         Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
         _ => {
-            return (
+            return Ok((
                 StatusCode::OK,
                 Json(json!({"guilds": [], "error": "Failed to fetch guilds"})),
-            );
+            ));
         }
     };
 

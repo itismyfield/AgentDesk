@@ -252,10 +252,10 @@ pub async fn resume_card(
         Err(error) => return Err(AppError::internal(error)),
     };
     if effective.is_terminal(&status) {
-        return (
+        return Ok((
             StatusCode::CONFLICT,
             Json(json!({"error": "cannot resume terminal card", "status": status})),
-        );
+        ));
     }
 
     // 3. Check if there's already an active dispatch (card-wide, matching kanban.rs guard)
