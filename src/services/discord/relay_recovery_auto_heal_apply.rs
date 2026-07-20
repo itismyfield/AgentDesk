@@ -131,6 +131,44 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
                 );
                 reserved_episode = Some(episode);
             }
+            circuit_breaker::CircuitReservation::ReservedLiveVouched {
+                episode,
+                reasons_csv,
+            } => {
+                for staged_alert_id in circuit_breaker::load_orphaned_staged_alert_ids(
+                    provider,
+                    decision.channel_id,
+                ) {
+                    match alert_enqueue
+                        .cancel(shared.pg_pool.as_ref(), staged_alert_id)
+                        .await
+                    {
+                        Ok(()) => circuit_breaker::acknowledge_orphaned_staged_alert_cleanup(
+                            provider,
+                            decision.channel_id,
+                            staged_alert_id,
+                        ),
+                        Err(error) => tracing::warn!(
+                            target: "agentdesk::discord::relay_recovery",
+                            provider = provider.as_str(),
+                            channel_id = decision.channel_id,
+                            staged_alert_id,
+                            error = %error,
+                            "relay reattach circuit orphaned held alert cleanup will retry"
+                        ),
+                    }
+                }
+                tracing::info!(
+                    target: "agentdesk::discord::relay_recovery",
+                    provider = provider.as_str(),
+                    channel_id = decision.channel_id,
+                    episode = episode.short_key(),
+                    reasons_csv = %reasons_csv,
+                    event = "relay_reattach_attempt_not_spent_live_turn",
+                    "relay reattach circuit admitted a live turn without spending an attempt"
+                );
+                reserved_episode = Some(episode);
+            }
             circuit_breaker::CircuitReservation::Open {
                 episode,
                 open,

@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 use poise::serenity_prelude::ChannelId;
 use serde::{Deserialize, Serialize};
 
+use super::health::liveness_authority::{
+    LivenessAuthorityRead, LivenessVouch, ProcessLocalLivenessAuthority, monotonic_now_secs,
+};
 use super::{RelayRecoveryActionKind, RelayRecoveryApplySource, RelayRecoveryDecision, SharedData};
 use crate::services::provider::ProviderKind;
 
@@ -77,6 +80,10 @@ pub(super) enum CircuitReservation {
         episode: RelayReattachEpisode,
         attempt: u32,
         orphaned_staged_alert_ids: Vec<i64>,
+    },
+    ReservedLiveVouched {
+        episode: RelayReattachEpisode,
+        reasons_csv: String,
     },
     Open {
         episode: RelayReattachEpisode,
@@ -187,6 +194,26 @@ fn persist_record(path: &Path, record: &CircuitRecord) -> Result<(), String> {
     super::super::runtime_store::atomic_write(path, &json)
 }
 
+pub(super) fn load_orphaned_staged_alert_ids(
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Vec<i64> {
+    let Some(root) = super::super::runtime_store::runtime_root()
+        .map(|root| root.join("discord_relay_recovery_circuit"))
+    else {
+        return Vec::new();
+    };
+    let path = circuit_path(&root, provider, channel_id);
+    let Ok(_lock) = lock_path(&path) else {
+        return Vec::new();
+    };
+    load_record(&path)
+        .ok()
+        .flatten()
+        .map(|record| record.orphaned_staged_alert_ids)
+        .unwrap_or_default()
+}
+
 fn effective_frontier(
     state: &super::super::inflight::InflightTurnState,
     observed_relay_offset: u64,
@@ -194,12 +221,14 @@ fn effective_frontier(
     observed_relay_offset.max(state.last_watcher_relayed_offset.unwrap_or(0))
 }
 
-fn reserve_in_root(
+fn reserve_in_root_with_authority(
     root: &Path,
     snapshot: &super::super::inflight::InflightTurnState,
     expected: &RelayReattachEpisode,
     observed_relay_offset: u64,
     max_attempts: u32,
+    authority: &dyn LivenessAuthorityRead,
+    now_mono_secs: i64,
 ) -> CircuitReservation {
     let current = RelayReattachEpisode::from_state(snapshot);
     if &current != expected {
@@ -230,6 +259,12 @@ fn reserve_in_root(
         return CircuitReservation::StaleIdentity;
     }
 
+    let vouch = authority.vouch_for_inflight(
+        &provider,
+        ChannelId::new(snapshot.channel_id),
+        &authoritative,
+        now_mono_secs,
+    );
     let frontier = effective_frontier(&authoritative, observed_relay_offset);
     let mut record = match load_record(&path) {
         Ok(Some(record)) => record,
@@ -248,6 +283,7 @@ fn reserve_in_root(
     if record.version != CIRCUIT_VERSION {
         return CircuitReservation::IoError;
     }
+    let mut record_changed = false;
     if record.episode_key != expected.key {
         if let Some(id) = record.staged_alert_id.take()
             && !record.orphaned_staged_alert_ids.contains(&id)
@@ -259,6 +295,7 @@ fn reserve_in_root(
         record.attempts = 0;
         record.alert_queued = false;
         record.open_generation = 1;
+        record_changed = true;
     } else if frontier > record.baseline_relay_offset {
         if let Some(id) = record.staged_alert_id.take()
             && !record.orphaned_staged_alert_ids.contains(&id)
@@ -269,8 +306,24 @@ fn reserve_in_root(
         record.attempts = 0;
         record.alert_queued = false;
         record.open_generation = record.open_generation.saturating_add(1).max(1);
+        record_changed = true;
     } else if record.open_generation == 0 {
         record.open_generation = 1;
+        record_changed = true;
+    }
+    let reasons_csv = match vouch {
+        LivenessVouch::Vouched { reasons_csv, .. } => Some(reasons_csv),
+        LivenessVouch::DeferTransient { .. } => Some("transient_unknown".to_string()),
+        LivenessVouch::NotVouched { .. } => None,
+    };
+    if let Some(reasons_csv) = reasons_csv {
+        if record_changed && persist_record(&path, &record).is_err() {
+            return CircuitReservation::IoError;
+        }
+        return CircuitReservation::ReservedLiveVouched {
+            episode: expected.clone(),
+            reasons_csv,
+        };
     }
     if record.attempts >= max_attempts {
         if persist_record(&path, &record).is_err() {
@@ -292,6 +345,24 @@ fn reserve_in_root(
         attempt: record.attempts,
         orphaned_staged_alert_ids: record.orphaned_staged_alert_ids.clone(),
     }
+}
+
+fn reserve_in_root(
+    root: &Path,
+    snapshot: &super::super::inflight::InflightTurnState,
+    expected: &RelayReattachEpisode,
+    observed_relay_offset: u64,
+    max_attempts: u32,
+) -> CircuitReservation {
+    reserve_in_root_with_authority(
+        root,
+        snapshot,
+        expected,
+        observed_relay_offset,
+        max_attempts,
+        &ProcessLocalLivenessAuthority,
+        monotonic_now_secs(),
+    )
 }
 
 pub(super) fn should_use_durable_circuit(
@@ -335,7 +406,7 @@ pub(super) fn reserve_current_episode(
     )
 }
 
-fn open_alert_cas_in_root(
+fn open_alert_cas_in_root_with_authority(
     root: &Path,
     provider: &ProviderKind,
     channel_id: u64,
@@ -343,6 +414,8 @@ fn open_alert_cas_in_root(
     open: &CircuitOpenPin,
     max_attempts: u32,
     staged_alert_id: i64,
+    authority: &dyn LivenessAuthorityRead,
+    now_mono_secs: i64,
 ) -> bool {
     let path = circuit_path(root, provider, channel_id);
     let Ok(_lock) = lock_path(&path) else {
@@ -356,8 +429,21 @@ fn open_alert_cas_in_root(
     else {
         return false;
     };
-    if RelayReattachEpisode::from_state(&authoritative) != *expected
-        || record.version != CIRCUIT_VERSION
+    if RelayReattachEpisode::from_state(&authoritative) != *expected {
+        return false;
+    }
+    if matches!(
+        authority.vouch_for_inflight(
+            provider,
+            ChannelId::new(channel_id),
+            &authoritative,
+            now_mono_secs,
+        ),
+        LivenessVouch::Vouched { .. } | LivenessVouch::DeferTransient { .. }
+    ) {
+        return false;
+    }
+    if record.version != CIRCUIT_VERSION
         || record.episode_key != open.episode_key
         || record.baseline_relay_offset != open.baseline_relay_offset
         || record.open_generation != open.generation
@@ -385,6 +471,28 @@ fn open_alert_cas_in_root(
         return persist_record(&path, &record).is_ok();
     }
     record.staged_alert_id == Some(staged_alert_id)
+}
+
+fn open_alert_cas_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &RelayReattachEpisode,
+    open: &CircuitOpenPin,
+    max_attempts: u32,
+    staged_alert_id: i64,
+) -> bool {
+    open_alert_cas_in_root_with_authority(
+        root,
+        provider,
+        channel_id,
+        expected,
+        open,
+        max_attempts,
+        staged_alert_id,
+        &ProcessLocalLivenessAuthority,
+        monotonic_now_secs(),
+    )
 }
 
 fn complete_staged_alert_if_matches(
@@ -742,6 +850,47 @@ mod tests {
         reasons: Mutex<Vec<String>>,
     }
 
+    struct FixedLivenessAuthority {
+        vouch: LivenessVouch,
+    }
+
+    impl LivenessAuthorityRead for FixedLivenessAuthority {
+        fn vouch_for_inflight(
+            &self,
+            _provider: &ProviderKind,
+            _channel_id: ChannelId,
+            _authoritative: &super::super::super::inflight::InflightTurnState,
+            _now_mono_secs: i64,
+        ) -> LivenessVouch {
+            self.vouch.clone()
+        }
+    }
+
+    fn vouched_authority() -> FixedLivenessAuthority {
+        FixedLivenessAuthority {
+            vouch: LivenessVouch::Vouched {
+                reasons_csv: "capture_advancing".to_string(),
+                published_age_secs: 0,
+            },
+        }
+    }
+
+    fn transient_authority() -> FixedLivenessAuthority {
+        FixedLivenessAuthority {
+            vouch: LivenessVouch::DeferTransient {
+                unknown_age_secs: 1,
+            },
+        }
+    }
+
+    fn not_vouched_authority() -> FixedLivenessAuthority {
+        FixedLivenessAuthority {
+            vouch: LivenessVouch::NotVouched {
+                reason: super::super::health::liveness_authority::VouchDenial::NoEvidence,
+            },
+        }
+    }
+
     #[async_trait::async_trait]
     impl CircuitAlertEnqueue for BlockingPgEnqueue {
         async fn enqueue(
@@ -905,6 +1054,241 @@ mod tests {
         );
         decision.affected.finalizer_turn_id = Some(state.effective_finalizer_turn_id());
         decision
+    }
+
+    #[test]
+    fn reserve_live_vouched_spends_no_attempt_and_leaves_record_untouched() {
+        let temp = tempfile::tempdir().expect("circuit root");
+        let _env = crate::config::set_agentdesk_root_for_test(temp.path());
+        let state = state(46_150);
+        let episode = RelayReattachEpisode::from_state(&state);
+        super::super::super::inflight::save_inflight_state(&state)
+            .expect("seed authoritative inflight");
+        let record_path = circuit_path(temp.path(), &ProviderKind::Codex, state.channel_id);
+
+        for _ in 0..2 {
+            assert!(matches!(
+                reserve_in_root_with_authority(
+                    temp.path(),
+                    &state,
+                    &episode,
+                    0,
+                    2,
+                    &vouched_authority(),
+                    10,
+                ),
+                CircuitReservation::ReservedLiveVouched {
+                    ref reasons_csv,
+                    ..
+                } if reasons_csv == "capture_advancing"
+            ));
+        }
+        assert!(
+            !record_path.exists(),
+            "a live vouch must not create or mutate circuit accounting"
+        );
+    }
+
+    #[test]
+    fn zombie_foreground_not_vouched_still_opens() {
+        let temp = tempfile::tempdir().expect("circuit root");
+        let _env = crate::config::set_agentdesk_root_for_test(temp.path());
+        let state = state(46_151);
+        let episode = RelayReattachEpisode::from_state(&state);
+        super::super::super::inflight::save_inflight_state(&state)
+            .expect("seed authoritative inflight");
+        let authority = not_vouched_authority();
+
+        assert!(matches!(
+            reserve_in_root_with_authority(
+                temp.path(), &state, &episode, 0, 2, &authority, 10,
+            ),
+            CircuitReservation::Reserved { attempt: 1, .. }
+        ));
+        assert!(matches!(
+            reserve_in_root_with_authority(
+                temp.path(), &state, &episode, 0, 2, &authority, 11,
+            ),
+            CircuitReservation::Reserved { attempt: 2, .. }
+        ));
+        assert!(matches!(
+            reserve_in_root_with_authority(
+                temp.path(), &state, &episode, 0, 2, &authority, 12,
+            ),
+            CircuitReservation::Open {
+                alert_needed: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn frontier_progress_preserves_existing_reset() {
+        let temp = tempfile::tempdir().expect("circuit root");
+        let _env = crate::config::set_agentdesk_root_for_test(temp.path());
+        let state = state(46_152);
+        let episode = RelayReattachEpisode::from_state(&state);
+        super::super::super::inflight::save_inflight_state(&state)
+            .expect("seed authoritative inflight");
+        let authority = not_vouched_authority();
+
+        assert!(matches!(
+            reserve_in_root_with_authority(
+                temp.path(), &state, &episode, 0, 1, &authority, 10,
+            ),
+            CircuitReservation::Reserved { attempt: 1, .. }
+        ));
+        assert!(matches!(
+            reserve_in_root_with_authority(
+                temp.path(), &state, &episode, 64, 1, &authority, 11,
+            ),
+            CircuitReservation::Reserved { attempt: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn transient_defers_spend_until_not_vouched() {
+        let temp = tempfile::tempdir().expect("circuit root");
+        let _env = crate::config::set_agentdesk_root_for_test(temp.path());
+        let state = state(46_153);
+        let episode = RelayReattachEpisode::from_state(&state);
+        super::super::super::inflight::save_inflight_state(&state)
+            .expect("seed authoritative inflight");
+
+        assert!(matches!(
+            reserve_in_root_with_authority(
+                temp.path(),
+                &state,
+                &episode,
+                0,
+                1,
+                &transient_authority(),
+                10,
+            ),
+            CircuitReservation::ReservedLiveVouched {
+                ref reasons_csv,
+                ..
+            } if reasons_csv == "transient_unknown"
+        ));
+        assert!(matches!(
+            reserve_in_root_with_authority(
+                temp.path(),
+                &state,
+                &episode,
+                0,
+                1,
+                &not_vouched_authority(),
+                71,
+            ),
+            CircuitReservation::Reserved { attempt: 1, .. }
+        ));
+        assert!(matches!(
+            reserve_in_root_with_authority(
+                temp.path(),
+                &state,
+                &episode,
+                0,
+                1,
+                &not_vouched_authority(),
+                72,
+            ),
+            CircuitReservation::Open { .. }
+        ));
+    }
+
+    #[test]
+    fn reserve_open_is_bypassed_while_vouched() {
+        let temp = tempfile::tempdir().expect("circuit root");
+        let _env = crate::config::set_agentdesk_root_for_test(temp.path());
+        let state = state(46_154);
+        let episode = RelayReattachEpisode::from_state(&state);
+        super::super::super::inflight::save_inflight_state(&state)
+            .expect("seed authoritative inflight");
+
+        assert!(matches!(
+            reserve_in_root_with_authority(
+                temp.path(),
+                &state,
+                &episode,
+                0,
+                1,
+                &not_vouched_authority(),
+                10,
+            ),
+            CircuitReservation::Reserved { .. }
+        ));
+        let record_path = circuit_path(temp.path(), &ProviderKind::Codex, state.channel_id);
+        let before = std::fs::read(&record_path).expect("open-ready circuit record");
+        assert!(matches!(
+            reserve_in_root_with_authority(
+                temp.path(),
+                &state,
+                &episode,
+                0,
+                1,
+                &vouched_authority(),
+                11,
+            ),
+            CircuitReservation::ReservedLiveVouched { .. }
+        ));
+        assert_eq!(
+            std::fs::read(&record_path).expect("circuit record after live bypass"),
+            before
+        );
+    }
+
+    #[test]
+    fn open_alert_cas_refuses_while_vouched_without_setting_alert_queued() {
+        let temp = tempfile::tempdir().expect("circuit root");
+        let _env = crate::config::set_agentdesk_root_for_test(temp.path());
+        let state = state(46_155);
+        let episode = RelayReattachEpisode::from_state(&state);
+        super::super::super::inflight::save_inflight_state(&state)
+            .expect("seed authoritative inflight");
+        assert!(matches!(
+            reserve_in_root_with_authority(
+                temp.path(),
+                &state,
+                &episode,
+                0,
+                1,
+                &not_vouched_authority(),
+                10,
+            ),
+            CircuitReservation::Reserved { .. }
+        ));
+        let CircuitReservation::Open { open, .. } = reserve_in_root_with_authority(
+            temp.path(),
+            &state,
+            &episode,
+            0,
+            1,
+            &not_vouched_authority(),
+            11,
+        ) else {
+            panic!("episode must be open");
+        };
+
+        assert!(!open_alert_cas_in_root_with_authority(
+            temp.path(),
+            &ProviderKind::Codex,
+            state.channel_id,
+            &episode,
+            &open,
+            1,
+            77,
+            &vouched_authority(),
+            12,
+        ));
+        let record = load_record(&circuit_path(
+            temp.path(),
+            &ProviderKind::Codex,
+            state.channel_id,
+        ))
+        .expect("read circuit record")
+        .expect("circuit record");
+        assert!(!record.alert_queued);
+        assert!(record.staged_alert_id.is_none());
     }
 
     #[test]
