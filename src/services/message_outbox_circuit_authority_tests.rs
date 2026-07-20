@@ -234,23 +234,14 @@ async fn vouch_then_new_epoch_reopens_and_old_activation_is_stale_pg() {
         activate_fenced(&pool, first_id, &first).await.unwrap(),
         CircuitActivation::Stale
     );
-    let second = match reserve_next_authority(
-        &pool,
-        "discord",
-        "502",
-        "node-a",
-        7,
-        "e1",
-        11,
-        2,
-        Some(1),
-    )
-    .await
-    .unwrap()
-    {
-        AuthorityReservation::Reserved(value) => value,
-        other => panic!("{other:?}"),
-    };
+    let second =
+        match reserve_next_authority(&pool, "discord", "502", "node-a", 7, "e1", 11, 2, Some(1))
+            .await
+            .unwrap()
+        {
+            AuthorityReservation::Reserved(value) => value,
+            other => panic!("{other:?}"),
+        };
     assert_eq!(second.authority_epoch, 2);
     let second_id = match stage_held(&pool, message(target, "same"), &second, 300)
         .await
