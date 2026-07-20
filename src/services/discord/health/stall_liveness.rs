@@ -2323,7 +2323,7 @@ mod tests {
     /// prior `OFFSET_OBSERVATIONS` pane entry (it is only fed once
     /// `should_clean` fires), so the legacy pane-advance signal was
     /// structurally blind for exactly the tick that decides the cleanup. The
-    /// authority's every-tick hardened coordinate history must cover that first
+    /// authority's every-tick coordinate history must cover that first
     /// tick. This complements the stateless first-tick open-tool vouch in
     /// `liveness_authority`; it does not replace capture evidence when capture
     /// advancement was observed before the threshold.

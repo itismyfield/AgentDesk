@@ -94,7 +94,7 @@ struct CaptureCoordinateState {
     advanced_at_unix_secs: Option<i64>,
     last_observed_at_unix_secs: i64,
     unknown_since_mono_secs: Option<i64>,
-    rebase_pending: bool,
+    _rebase_pending: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -255,26 +255,33 @@ pub(in crate::services::discord) fn observe_capture_coordinate(
         state.observation.path_hash == current.path_hash
             && state.observation.file_id == current.file_id
     });
-    let observed_advance = same_coordinate
-        && !previous.as_ref().is_some_and(|state| state.rebase_pending)
-        && matches!(
-            (previous.as_ref().and_then(|state| state.observation.offset), current.offset),
-            (Some(before), Some(after)) if after > before
-        );
+    // S1 deliberately preserves the main watchdog's size-only tick semantics:
+    // path/inode changes and observed decreases are recorded as discontinuities
+    // but do not alter advancement or grace accounting. Consequently an in-tick
+    // same-inode truncate followed by append past the old size is not detectable;
+    // capture-generation hardening belongs to a follow-up slice. Verdict entries
+    // are likewise process-local and bounded by provider/channel cardinality; GC
+    // is deferred until that follow-up rather than expanding S1's behavior.
+    let observed_advance = matches!(
+        (
+            previous
+                .as_ref()
+                .and_then(|state| state.observation.offset),
+            current.offset
+        ),
+        (Some(before), Some(after)) if after > before
+    );
     let discontinuity = previous.as_ref().is_some_and(|state| {
         !same_coordinate
             || matches!((state.observation.offset, current.offset), (Some(before), Some(after)) if after < before)
             || (state.observation.offset.is_some() && current.offset.is_none())
     });
-    let observed_advancing_before = !discontinuity
-        && (observed_advance
-            || previous
-                .as_ref()
-                .is_some_and(|state| state.observed_advancing_before));
+    let observed_advancing_before = observed_advance
+        || previous
+            .as_ref()
+            .is_some_and(|state| state.observed_advancing_before);
     let consecutive_non_advancing_ticks = if observed_advance {
         0
-    } else if discontinuity {
-        CAPTURE_GRACE_TICKS
     } else {
         previous
             .as_ref()
@@ -310,8 +317,6 @@ pub(in crate::services::discord) fn observe_capture_coordinate(
     };
     let advanced_at_unix_secs = if observed_advance {
         Some(now_unix_secs)
-    } else if discontinuity {
-        None
     } else {
         previous
             .as_ref()
@@ -320,10 +325,6 @@ pub(in crate::services::discord) fn observe_capture_coordinate(
     let advancing = observed_advance
         || (observed_advancing_before && consecutive_non_advancing_ticks < CAPTURE_GRACE_TICKS);
 
-    let rebase_pending = discontinuity
-        || previous
-            .as_ref()
-            .is_some_and(|state| state.rebase_pending && current.offset.is_none());
     CAPTURE_COORDINATES.insert(
         binding,
         CaptureCoordinateState {
@@ -334,10 +335,7 @@ pub(in crate::services::discord) fn observe_capture_coordinate(
             advanced_at_unix_secs,
             last_observed_at_unix_secs: now_unix_secs,
             unknown_since_mono_secs,
-            rebase_pending: rebase_pending
-                && previous
-                    .as_ref()
-                    .is_none_or(|state| !state.rebase_pending || current.offset.is_none()),
+            _rebase_pending: discontinuity,
         },
     );
     CaptureAssessment {
@@ -535,7 +533,7 @@ pub(in crate::services::discord) fn capture_advanced_age_secs(
     CAPTURE_COORDINATES
         .get(&binding)
         .and_then(|state| state.advanced_at_unix_secs)
-        .map(|advanced| now_unix_secs.saturating_sub(advanced) as u64)
+        .map(|advanced| now_unix_secs.saturating_sub(advanced).max(0) as u64)
 }
 
 fn recent(age: Option<u64>, budget: u64) -> bool {
@@ -662,24 +660,22 @@ mod tests {
     }
 
     #[test]
-    fn capture_truncate_offset_decrease_rebases_no_advance() {
+    fn capture_decrease_preserves_main_two_tick_grace() {
         let key = binding(461_514);
         CAPTURE_COORDINATES.remove(&key);
-        assert!(
-            !observe_for_test(&key, coordinate(Some(1_000), "a", Some((1, 2))), 1, 1).advancing
-        );
-        assert!(!observe_for_test(&key, coordinate(Some(0), "a", Some((1, 2))), 2, 2).advancing);
-        assert!(!observe_for_test(&key, coordinate(Some(100), "a", Some((1, 2))), 3, 3).advancing);
+        assert!(!observe_for_test(&key, coordinate(Some(100), "a", Some((1, 2))), 1, 1).advancing);
+        assert!(observe_for_test(&key, coordinate(Some(200), "a", Some((1, 2))), 2, 2).advancing);
+        assert!(observe_for_test(&key, coordinate(Some(0), "a", Some((1, 2))), 3, 3).advancing);
     }
 
     #[test]
-    fn capture_some_to_none_cancels_alive() {
+    fn capture_some_to_none_records_disappearance_and_preserves_main_grace() {
         let key = binding(461_515);
         CAPTURE_COORDINATES.remove(&key);
         observe_for_test(&key, coordinate(Some(10), "a", Some((1, 2))), 1, 1);
         assert!(observe_for_test(&key, coordinate(Some(20), "a", Some((1, 2))), 2, 2).advancing);
         let missing = observe_for_test(&key, coordinate(None, "a", None), 3, 3);
-        assert!(!missing.advancing);
+        assert!(missing.advancing);
         assert_eq!(
             missing.observation.status,
             CoordinateStatus::MissingAfterObserved

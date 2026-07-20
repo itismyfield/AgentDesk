@@ -4603,13 +4603,12 @@ mod stall_watchdog_auto_heal_tests {
         );
     }
 
-    /// #4460: fresh producer activity must be authoritative even while the
-    /// control plane is desynced. This is the production shape that the W0
-    /// shadow verdict mislabeled `control_plane_desync`: the transcript is
-    /// fresh, but the turn itself is old enough to enter branch 4. It must not
-    /// page and must never clean the turn.
+    /// #4615: in the pre-backstop window, capture advancement alone must keep
+    /// the force-clean/page guard closed when every stateless signal is stale.
+    /// Replacing `capture_assessment.advancing` with `false` makes the alert-row
+    /// assertion fail because the pass pages this otherwise live producer.
     #[tokio::test(flavor = "current_thread")]
-    async fn branch4_producer_liveness_suppresses_page_and_preserves_turn_pg() {
+    async fn pre_backstop_capture_advance_suppresses_page_pg() {
         let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
             "agentdesk_stall_watchdog_producer_live",
             "stall watchdog producer-live suppression tests",
@@ -4640,6 +4639,12 @@ mod stall_watchdog_auto_heal_tests {
         let stale_output = tempdir.path().join("force-clean-stale.jsonl");
         std::fs::write(&stale_output, "partial stale output\n")
             .expect("write stale output fixture");
+        let stale_mtime = chrono::Utc::now().timestamp() - 5 * 60 * 60;
+        filetime::set_file_mtime(
+            &stale_output,
+            filetime::FileTime::from_unix_time(stale_mtime, 0),
+        )
+        .expect("age transcript beyond stateless liveness windows");
         let stale_token = seed_active_mailbox_and_session(&shared, channel, user_msg).await;
         let mut stale_state = seed_idle_inflight(
             &provider,
@@ -4665,6 +4670,28 @@ mod stall_watchdog_auto_heal_tests {
             watcher_handle(stale_tmux, &stale_output, watcher_cancel.clone()),
         );
         let turn_view_ops_before = shared.turn_view_reconciler.ops().len();
+        let baseline = registry
+            .snapshot_watcher_state_for_shared(&provider, shared.clone(), channel.get())
+            .await
+            .expect("capture baseline snapshot");
+        let observed_at = chrono::Utc::now().timestamp();
+        assert!(
+            !super::super::liveness_authority::observe_capture_coordinate(
+                &provider,
+                channel,
+                &baseline,
+                observed_at,
+                1,
+            )
+            .advancing
+        );
+        std::fs::write(&stale_output, "partial stale output\nproducer advanced\n")
+            .expect("advance capture without refreshing transcript evidence");
+        filetime::set_file_mtime(
+            &stale_output,
+            filetime::FileTime::from_unix_time(stale_mtime, 0),
+        )
+        .expect("keep transcript mtime stale after capture growth");
 
         let cleaned = super::run_stall_watchdog_pass(&registry, &provider).await;
 
@@ -4845,11 +4872,12 @@ mod stall_watchdog_auto_heal_tests {
         );
     }
 
-    /// A genuinely stalled/desynced turn has no fresh producer evidence. It
-    /// must page once through the provider-owned DM bot, while the branch-4
-    /// no-cleanup invariant preserves every turn authority on repeated passes.
+    /// #4615: a pre-backstop genuine stall with flat, never-advanced capture
+    /// and no stateless evidence must page once. Replacing
+    /// `capture_assessment.advancing` with `true` makes the row-count assertion
+    /// fail because the page is incorrectly suppressed.
     #[tokio::test(flavor = "current_thread")]
-    async fn branch4_genuine_stall_pages_once_and_preserves_turn_pg() {
+    async fn pre_backstop_flat_capture_pages_genuine_stall_pg() {
         let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
             "agentdesk_stall_watchdog_genuine_stall",
             "stall watchdog genuine-stall paging tests",
@@ -4892,7 +4920,7 @@ mod stall_watchdog_auto_heal_tests {
             0,
             "genuinely-stalled-session",
         );
-        let stale_at = (chrono::Local::now() - chrono::Duration::hours(5))
+        let stale_at = (chrono::Local::now() - chrono::Duration::minutes(30))
             .format("%Y-%m-%d %H:%M:%S")
             .to_string();
         state.started_at = stale_at.clone();
