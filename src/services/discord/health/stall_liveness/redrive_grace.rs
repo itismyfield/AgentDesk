@@ -313,6 +313,12 @@ mod tests {
             inflight_state_present: true,
             last_relay_ts_ms: 1_700_000_000_000,
             last_capture_offset: Some(capture_offset),
+            capture_coordinate: super::super::liveness_authority::CaptureCoordinateObservation {
+                offset: Some(capture_offset),
+                path_hash: 0,
+                file_id: None,
+                status: super::super::liveness_authority::CoordinateStatus::Observed,
+            },
             unread_bytes: Some(unread),
             desynced: true,
             reconnect_count: 0,

@@ -1,6 +1,7 @@
 use poise::serenity_prelude::ChannelId;
 use serde::Serialize;
 
+use super::liveness_authority::CaptureCoordinateObservation;
 use super::mailbox::MailboxHealthSnapshot;
 use super::provider_probe::{self, ProviderHealthSnapshot};
 use super::redaction;
@@ -46,6 +47,8 @@ pub struct WatcherStateSnapshot {
     /// Current tmux output JSONL length when an inflight `output_path` is known.
     /// `null` means the endpoint could not identify a capture file.
     pub last_capture_offset: Option<u64>,
+    #[serde(skip)]
+    pub(in crate::services::discord) capture_coordinate: CaptureCoordinateObservation,
     /// Bytes present in the capture file but not yet confirmed as relayed.
     /// `null` when `last_capture_offset` is unknown.
     pub unread_bytes: Option<u64>,
@@ -645,6 +648,7 @@ async fn watcher_state_snapshot_for_shared(
         inflight_state_present: session.inflight_state_present,
         last_relay_ts_ms: session.last_relay_ts_ms,
         last_capture_offset: session.last_capture_offset,
+        capture_coordinate: session.capture_coordinate.clone(),
         unread_bytes: session.unread_bytes,
         desynced,
         reconnect_count: session.reconnect_count,

@@ -1645,6 +1645,16 @@ pub(crate) async fn run_stall_watchdog_pass(
             Some(snapshot) => snapshot,
             None => continue,
         };
+        let now_mono_secs = super::liveness_authority::monotonic_now_secs();
+        let tick_inflight = discord::inflight::load_inflight_state(provider, channel_id.get());
+        let capture_assessment = super::liveness_authority::observe_and_publish_from_tick(
+            provider,
+            channel_id,
+            &snapshot,
+            tick_inflight.as_ref(),
+            now_unix_secs,
+            now_mono_secs,
+        );
         if relay_dead_reattach::try_apply(
             registry,
             shared.clone(),
@@ -1824,16 +1834,10 @@ pub(crate) async fn run_stall_watchdog_pass(
             continue;
         }
 
-        let capture_advancing = stall_liveness::stall_watchdog_capture_offset_advancing(
-            provider,
-            channel_id,
-            &snapshot,
-            now_unix_secs,
-        );
         let should_clean = stall_watchdog_should_force_clean(
             snapshot.attached,
             snapshot.desynced,
-            capture_advancing,
+            capture_assessment.advancing,
             snapshot.inflight_terminal_delivery_committed,
             snapshot.inflight_started_at.as_deref(),
             now_unix_secs,
@@ -4782,7 +4786,9 @@ mod stall_watchdog_auto_heal_tests {
                 channel,
                 &initial_snapshot,
                 observation_time,
-            ),
+                1,
+            )
+            .advancing,
             "first capture observation only establishes the baseline"
         );
         std::fs::write(&output, "fresh producer output\nstill advancing\n")
@@ -4797,7 +4803,9 @@ mod stall_watchdog_auto_heal_tests {
                 channel,
                 &advanced_snapshot,
                 observation_time + 1,
-            ),
+                2,
+            )
+            .advancing,
             "fixture must prove cross-tick capture advancement"
         );
 

@@ -398,6 +398,13 @@ mod thread_guard_stale_pure_tests {
             inflight_state_present: true,
             last_relay_ts_ms: 0,
             last_capture_offset: None,
+            capture_coordinate:
+                crate::services::discord::health::liveness_authority::CaptureCoordinateObservation {
+                    offset: None,
+                    path_hash: 0,
+                    file_id: None,
+                    status: crate::services::discord::health::liveness_authority::CoordinateStatus::Missing,
+                },
             unread_bytes: None,
             desynced,
             reconnect_count: 0,

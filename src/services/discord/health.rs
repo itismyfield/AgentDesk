@@ -21,6 +21,7 @@ use crate::services::provider::ProviderKind;
 //   * `outbound::{send_target,send_gate,manual_delivery,send_api}` — manual
 //     send-to-agent/outbound dispatch, re-exported here for compatibility
 mod headless_turn;
+pub(in crate::services::discord) mod liveness_authority;
 mod mailbox;
 mod provider_probe;
 #[path = "health/rebind_request.rs"]

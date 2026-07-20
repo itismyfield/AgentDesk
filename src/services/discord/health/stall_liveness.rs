@@ -120,6 +120,7 @@ static OFFSET_OBSERVATIONS: LazyLock<dashmap::DashMap<StallLivenessKey, OffsetOb
 /// turn is still alive and producing bytes (capture offset advancing). This map
 /// lets the watchdog distinguish "relay stalled but turn alive" (do NOT
 /// force-clean) from a genuinely dead turn (capture also frozen).
+#[cfg(test)]
 #[derive(Clone, Debug)]
 struct CaptureOffsetWatchdogState {
     last_seen_capture_offset: Option<u64>,
@@ -142,6 +143,7 @@ struct CaptureOffsetWatchdogState {
     last_updated_unix_secs: i64,
 }
 
+#[cfg(test)]
 static CAPTURE_OFFSET_WATCHDOG_STATE: LazyLock<
     dashmap::DashMap<StallLivenessKey, CaptureOffsetWatchdogState>,
 > = LazyLock::new(dashmap::DashMap::new);
@@ -367,16 +369,24 @@ pub(super) fn evaluate_stall_watchdog_liveness(
 /// turn whose relay lane wedged (capture still growing) is never wrongly cleaned
 /// (#4178 incident 2026-07-06), while a turn we have never seen advance (dead on
 /// arrival, or no capture data) keeps the pre-#4178 prompt force-clean timing.
+#[cfg(test)]
 pub(super) fn stall_watchdog_capture_offset_advancing(
     provider: &ProviderKind,
     channel_id: ChannelId,
     snapshot: &WatcherStateSnapshot,
     now_unix_secs: i64,
-) -> bool {
-    let key = StallLivenessKey::from_snapshot(provider, channel_id, snapshot);
-    capture_offset_advancing(&key, snapshot.last_capture_offset, now_unix_secs)
+    now_mono_secs: i64,
+) -> super::liveness_authority::CaptureAssessment {
+    super::liveness_authority::observe_capture_coordinate(
+        provider,
+        channel_id,
+        snapshot,
+        now_unix_secs,
+        now_mono_secs,
+    )
 }
 
+#[cfg(test)]
 fn capture_offset_advancing(
     key: &StallLivenessKey,
     current_capture_offset: Option<u64>,
@@ -700,7 +710,7 @@ impl StallWatchdogLivenessEvidence {
             // the every-tick capture watchdog recorded.
             pane_offset_advanced_age_secs: pane_observation
                 .advanced_age_secs
-                .or_else(|| capture_watchdog_advanced_age_secs(key, now_unix_secs)),
+                .or_else(|| capture_watchdog_advanced_age_secs(key, snapshot, now_unix_secs)),
             relay_offset_current: Some(snapshot.last_relay_offset),
             relay_offset_previous: relay_observation.previous_offset,
             relay_offset_advanced_age_secs: relay_observation.advanced_age_secs,
@@ -729,11 +739,17 @@ impl StallWatchdogLivenessEvidence {
 /// which is updated EVERY tick (recovery.rs) rather than only after
 /// `should_clean` fires. `None` when the channel has never been observed to
 /// advance (dead-on-arrival keeps pre-#4400 timing).
-fn capture_watchdog_advanced_age_secs(key: &StallLivenessKey, now_unix_secs: i64) -> Option<u64> {
-    CAPTURE_OFFSET_WATCHDOG_STATE
-        .get(key)
-        .and_then(|state| state.advanced_at_unix_secs)
-        .map(|advanced_at| saturating_age_secs(advanced_at, now_unix_secs))
+fn capture_watchdog_advanced_age_secs(
+    key: &StallLivenessKey,
+    snapshot: &WatcherStateSnapshot,
+    now_unix_secs: i64,
+) -> Option<u64> {
+    super::liveness_authority::capture_advanced_age_secs(
+        &key.provider,
+        ChannelId::new(key.channel_id),
+        snapshot,
+        now_unix_secs,
+    )
 }
 
 /// #4400 (a): age of `inflight.updated_at` while the row witnesses an
@@ -750,7 +766,7 @@ fn capture_watchdog_advanced_age_secs(key: &StallLivenessKey, now_unix_secs: i64
 ///
 /// The `tmux_session_alive == Some(true)` gate is invariant I6: a dead pane
 /// never earns this evidence, so dead-turn cleanup timing is unchanged.
-fn open_tool_execution_age_secs(
+pub(in crate::services::discord) fn open_tool_execution_age_secs(
     snapshot: &WatcherStateSnapshot,
     inflight: Option<&InflightTurnState>,
     now_unix_secs: i64,
@@ -865,7 +881,7 @@ fn relay_offset_unchanged_past_backlog_grace(relay_observation: &OffsetObservati
         .is_some_and(|age| age >= STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS)
 }
 
-fn transcript_mtime_age_secs(
+pub(in crate::services::discord) fn transcript_mtime_age_secs(
     inflight: Option<&InflightTurnState>,
     now_unix_secs: i64,
 ) -> Option<u64> {
@@ -950,7 +966,10 @@ fn positive_millis(value: i64) -> Option<i64> {
     (value > 0).then_some(value)
 }
 
-fn unix_millis_age_secs(unix_millis: Option<i64>, now_unix_secs: i64) -> Option<u64> {
+pub(in crate::services::discord) fn unix_millis_age_secs(
+    unix_millis: Option<i64>,
+    now_unix_secs: i64,
+) -> Option<u64> {
     let millis = unix_millis?;
     let now_millis = now_unix_secs.saturating_mul(1000);
     if millis >= now_millis {
@@ -1077,6 +1096,16 @@ mod tests {
             inflight_state_present: true,
             last_relay_ts_ms: 1_700_000_000_000,
             last_capture_offset: capture_offset,
+            capture_coordinate: super::liveness_authority::CaptureCoordinateObservation {
+                offset: capture_offset,
+                path_hash: 0,
+                file_id: None,
+                status: if capture_offset.is_some() {
+                    super::liveness_authority::CoordinateStatus::Observed
+                } else {
+                    super::liveness_authority::CoordinateStatus::Missing
+                },
+            },
             unread_bytes: capture_offset.map(|offset| offset.saturating_sub(10)),
             desynced: true,
             reconnect_count: 0,
