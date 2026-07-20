@@ -866,7 +866,7 @@ pub async fn health_detail_handler(
             ErrorCode::Policy,
             "auth_token required for non-loopback host",
         ))
-            .into_response();
+        .into_response();
     }
     health_response(&state, true).await
 }
@@ -975,7 +975,7 @@ pub async fn startup_doctor_latest_handler(
             ErrorCode::Policy,
             "auth_token required for non-loopback host",
         ))
-            .into_response();
+        .into_response();
     }
 
     Json(crate::cli::doctor::startup::latest_startup_doctor_response_json()).into_response()
@@ -993,7 +993,7 @@ pub async fn stale_mailbox_repair_handler(
             ErrorCode::Policy,
             "auth_token required for non-loopback host",
         ))
-            .into_response();
+        .into_response();
     }
 
     let body_str = String::from_utf8_lossy(&body);
@@ -1017,7 +1017,7 @@ pub async fn stale_mailbox_repair_handler(
                 return legacy_health_error(
                     AppError::bad_request("invalid provider").with_context("provider", provider),
                 )
-                    .into_response();
+                .into_response();
             }
         },
         None => None,
@@ -1474,7 +1474,7 @@ pub async fn relay_recovery_handler(
             ErrorCode::Policy,
             "auth_token required for non-loopback host",
         ))
-            .into_response();
+        .into_response();
     }
 
     let channel_id = match channel_id.parse::<u64>() {
@@ -1483,7 +1483,7 @@ pub async fn relay_recovery_handler(
             return legacy_health_error(AppError::bad_request(
                 "channel_id must be a numeric Discord channel ID",
             ))
-                .into_response();
+            .into_response();
         }
     };
 
@@ -1493,7 +1493,7 @@ pub async fn relay_recovery_handler(
             ErrorCode::Config,
             "Discord not available (standalone mode)",
         ))
-            .into_response();
+        .into_response();
     };
 
     let request = if body.is_empty() {
@@ -1503,8 +1503,10 @@ pub async fn relay_recovery_handler(
         match serde_json::from_str::<RelayRecoveryRequest>(&body_str) {
             Ok(request) => request,
             Err(error) => {
-                return legacy_health_error(AppError::bad_request(format!("invalid request: {error}")))
-                    .into_response();
+                return legacy_health_error(AppError::bad_request(format!(
+                    "invalid request: {error}"
+                )))
+                .into_response();
             }
         }
     };
@@ -1538,7 +1540,7 @@ pub async fn send_handler(
             ErrorCode::Policy,
             "auth_token required for non-loopback host",
         ))
-            .into_response();
+        .into_response();
     }
 
     let Some(ref registry) = state.health_registry else {
@@ -1547,7 +1549,7 @@ pub async fn send_handler(
             ErrorCode::Config,
             "Discord not available (standalone mode)",
         ))
-            .into_response();
+        .into_response();
     };
 
     let body_str = String::from_utf8_lossy(&body);
@@ -1589,7 +1591,7 @@ pub async fn reload_discord_bot_tokens_handler(
             ErrorCode::Policy,
             "auth_token required for non-loopback host",
         ))
-            .into_response();
+        .into_response();
     }
 
     let Some(ref registry) = state.health_registry else {
@@ -1598,7 +1600,7 @@ pub async fn reload_discord_bot_tokens_handler(
             ErrorCode::Config,
             "Discord not available (standalone mode)",
         ))
-            .into_response();
+        .into_response();
     };
 
     let report = registry.reload_bot_tokens().await;
@@ -1657,7 +1659,7 @@ pub async fn rebind_inflight_handler(
             ErrorCode::Policy,
             "auth_token required for non-loopback host",
         ))
-            .into_response();
+        .into_response();
     }
 
     let Some(ref registry) = state.health_registry else {
@@ -1666,7 +1668,7 @@ pub async fn rebind_inflight_handler(
             ErrorCode::Config,
             "Discord not available (standalone mode)",
         ))
-            .into_response();
+        .into_response();
     };
 
     let body_str = String::from_utf8_lossy(&body);
@@ -1693,7 +1695,7 @@ pub async fn send_to_agent_handler(
             ErrorCode::Policy,
             "auth_token required for non-loopback host",
         ))
-            .into_response();
+        .into_response();
     }
 
     let Some(ref registry) = state.health_registry else {
@@ -1702,7 +1704,7 @@ pub async fn send_to_agent_handler(
             ErrorCode::Config,
             "Discord not available (standalone mode)",
         ))
-            .into_response();
+        .into_response();
     };
 
     let body_str = String::from_utf8_lossy(&body);
@@ -1735,7 +1737,7 @@ pub async fn senddm_handler(
             ErrorCode::Policy,
             "auth_token required for non-loopback host",
         ))
-            .into_response();
+        .into_response();
     }
 
     let Some(ref registry) = state.health_registry else {
@@ -1744,7 +1746,7 @@ pub async fn senddm_handler(
             ErrorCode::Config,
             "Discord not available (standalone mode)",
         ))
-            .into_response();
+        .into_response();
     };
 
     let body_str = String::from_utf8_lossy(&body);
