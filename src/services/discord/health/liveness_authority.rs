@@ -92,6 +92,7 @@ struct CaptureCoordinateState {
     consecutive_non_advancing_ticks: u8,
     consecutive_missing_ticks: u8,
     advanced_at_unix_secs: Option<i64>,
+    last_observed_at_unix_secs: i64,
     unknown_since_mono_secs: Option<i64>,
     rebase_pending: bool,
 }
@@ -331,6 +332,7 @@ pub(in crate::services::discord) fn observe_capture_coordinate(
             consecutive_non_advancing_ticks,
             consecutive_missing_ticks,
             advanced_at_unix_secs,
+            last_observed_at_unix_secs: now_unix_secs,
             unknown_since_mono_secs,
             rebase_pending: rebase_pending
                 && previous
@@ -494,6 +496,27 @@ pub(in crate::services::discord) fn vouch_for_inflight(
             reason: VouchDenial::PastAbsoluteCeiling,
         },
     }
+}
+
+pub(in crate::services::discord) fn clear_capture_state_for_session(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session: Option<&str>,
+) {
+    CAPTURE_COORDINATES.retain(|binding, _| {
+        binding.provider != provider.as_str()
+            || binding.channel_id != channel_id.get()
+            || binding.tmux_session_name.as_deref() != tmux_session
+    });
+}
+
+pub(in crate::services::discord) fn gc_capture_state(now_unix_secs: i64, ttl_secs: u64) {
+    CAPTURE_COORDINATES.retain(|_, state| {
+        now_unix_secs
+            .saturating_sub(state.last_observed_at_unix_secs)
+            .max(0) as u64
+            <= ttl_secs
+    });
 }
 
 pub(in crate::services::discord) fn capture_advanced_age_secs(

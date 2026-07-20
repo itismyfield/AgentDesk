@@ -451,6 +451,8 @@ pub(super) fn clear_stall_watchdog_liveness_state(
 ) {
     let probe = StallLivenessKey::new(provider, channel_id, tmux_session, None, None);
     OFFSET_OBSERVATIONS.retain(|key, _| !key.matches_session(&probe));
+    super::liveness_authority::clear_capture_state_for_session(provider, channel_id, tmux_session);
+    #[cfg(test)]
     CAPTURE_OFFSET_WATCHDOG_STATE.retain(|key, _| !key.matches_session(&probe));
     redrive_grace::clear_for_session(&probe);
 }
@@ -471,6 +473,8 @@ pub(super) fn gc_stall_watchdog_liveness_state(now_unix_secs: i64) {
     OFFSET_OBSERVATIONS.retain(|_, observation| {
         !liveness_state_expired(observation.last_updated_unix_secs, now_unix_secs)
     });
+    super::liveness_authority::gc_capture_state(now_unix_secs, STALL_LIVENESS_STATE_TTL_SECS);
+    #[cfg(test)]
     CAPTURE_OFFSET_WATCHDOG_STATE
         .retain(|_, state| !liveness_state_expired(state.last_updated_unix_secs, now_unix_secs));
     redrive_grace::gc();
