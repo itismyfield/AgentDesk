@@ -475,11 +475,15 @@ pub(crate) async fn cmd_review_decision(
                     decision: applied.clone(),
                     comment: comment.map(str::to_string),
                 };
-                let (status, Json(mut value)) =
-                    match crate::server::routes::kanban::pm_decision(State(state), Json(body)).await {
-                        Ok(response) => response,
-                        Err(error) => error.into_json_response(),
-                    };
+                let (status, Json(mut value)) = match crate::server::routes::kanban::pm_decision(
+                    State(state),
+                    Json(body),
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(error) => error.into_json_response(),
+                };
                 if status.is_success() && requested != applied {
                     value["requested_decision"] = json!(requested);
                     value["applied_decision"] = json!(applied);

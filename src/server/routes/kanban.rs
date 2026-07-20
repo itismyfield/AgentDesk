@@ -400,8 +400,7 @@ pub async fn update_card(
             if !is_allowed_manual_transition(&old_status, new_s) {
                 return Err(AppError::bad_request(format!(
                     "PATCH /api/kanban-cards/{{id}} only allows manual status transitions backlog -> ready and any -> backlog (requested: {} -> {}). Use POST /api/kanban-cards/{{id}}/transition for administrative force transitions, or POST /api/kanban-cards/{{id}}/rereview for review reruns.",
-                    old_status,
-                    new_s,
+                    old_status, new_s,
                 )));
             }
 
@@ -955,13 +954,15 @@ pub async fn list_card_reviews(
     };
 
     match kanban_db::list_card_reviews_json_pg(pool, &id).await {
-        Ok(reviews) => Ok((StatusCode::OK, Json(json!({"reviews": reviews})))) ,
+        Ok(reviews) => Ok((StatusCode::OK, Json(json!({"reviews": reviews})))),
         Err(error) => Err(database_error(error)),
     }
 }
 
 /// GET /api/kanban-cards/stalled
-pub async fn stalled_cards(State(state): State<AppState>) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+pub async fn stalled_cards(
+    State(state): State<AppState>,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
         return Err(pg_pool_required_error());
     };
@@ -1407,7 +1408,9 @@ pub async fn pm_decision(
         }
         "rework" => {
             if agent_id.is_empty() {
-                return Err(AppError::bad_request("card has no assigned agent for rework"));
+                return Err(AppError::bad_request(
+                    "card has no assigned agent for rework",
+                ));
             }
             // Try dispatch creation FIRST — only transition on success
             match crate::dispatch::create_dispatch_pg_only(
@@ -1450,9 +1453,7 @@ pub async fn pm_decision(
                         match kanban_db::card_status_pg(transition_pool, &body.card_id).await {
                             Ok(status) => status.unwrap_or_default(),
                             Err(error) => {
-                                return Err(database_error(format!(
-                                    "load rework status: {error}"
-                                )));
+                                return Err(database_error(format!("load rework status: {error}")));
                             }
                         };
                     let pipeline = crate::pipeline::get();

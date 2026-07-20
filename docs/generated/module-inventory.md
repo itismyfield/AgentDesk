@@ -61,7 +61,7 @@
 | `cli::client::runtime_config` | `src/cli/client/runtime_config.rs` | 55 | 23 | 32 |  |
 | `cli::dcserver` | `src/cli/dcserver.rs` | 1650 | 1650 | 0 | giant-file |
 | `cli::dcserver_pg_bootstrap` | `src/cli/dcserver_pg_bootstrap.rs` | 1068 | 544 | 524 |  |
-| `cli::direct` | `src/cli/direct.rs` | 1771 | 1771 | 0 | giant-file |
+| `cli::direct` | `src/cli/direct.rs` | 1803 | 1803 | 0 | giant-file |
 | `cli::discord` | `src/cli/discord.rs` | 472 | 249 | 223 |  |
 | `cli::discord_thread_create` | `src/cli/discord_thread_create.rs` | 1468 | 415 | 1053 |  |
 | `cli::discord_thread_create_lock` | `src/cli/discord_thread_create_lock.rs` | 669 | 611 | 58 |  |
@@ -284,7 +284,7 @@
 | `server::routes::home_metrics` | `src/server/routes/home_metrics.rs` | 352 | 352 | 0 |  |
 | `server::routes::hooks` | `src/server/routes/hooks.rs` | 136 | 136 | 0 |  |
 | `server::routes::idle_recap` | `src/server/routes/idle_recap.rs` | 406 | 406 | 0 |  |
-| `server::routes::kanban` | `src/server/routes/kanban.rs` | 2788 | 2725 | 63 | giant-file |
+| `server::routes::kanban` | `src/server/routes/kanban.rs` | 2489 | 2426 | 63 | giant-file |
 | `server::routes::kanban_repos` | `src/server/routes/kanban_repos.rs` | 234 | 234 | 0 |  |
 | `server::routes::maintenance` | `src/server/routes/maintenance.rs` | 17 | 17 | 0 |  |
 | `server::routes::meetings` | `src/server/routes/meetings.rs` | 1245 | 1245 | 0 | giant-file |

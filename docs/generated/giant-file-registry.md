@@ -45,7 +45,7 @@
 | --- | ---: |
 | `src/cli/client.rs` | 2464 |
 | `src/cli/dcserver.rs` | 1650 |
-| `src/cli/direct.rs` | 1771 |
+| `src/cli/direct.rs` | 1803 |
 | `src/cli/doctor/orchestrator.rs` | 4381 |
 | `src/cli/init.rs` | 1444 |
 | `src/cli/migrate/apply.rs` | 3237 |
@@ -74,7 +74,7 @@
 | `src/server/routes/agents_setup.rs` | 1365 |
 | `src/server/routes/escalation.rs` | 1379 |
 | `src/server/routes/health_api.rs` | 1775 |
-| `src/server/routes/kanban.rs` | 2725 |
+| `src/server/routes/kanban.rs` | 2426 |
 | `src/server/routes/meetings.rs` | 1245 |
 | `src/server/routes/resume.rs` | 1260 |
 | `src/server/routes/v1.rs` | 1866 |
