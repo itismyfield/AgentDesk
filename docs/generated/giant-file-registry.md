@@ -45,7 +45,7 @@
 | --- | ---: |
 | `src/cli/client.rs` | 2464 |
 | `src/cli/dcserver.rs` | 1650 |
-| `src/cli/direct.rs` | 1786 |
+| `src/cli/direct.rs` | 1818 |
 | `src/cli/doctor/orchestrator.rs` | 4381 |
 | `src/cli/init.rs` | 1444 |
 | `src/cli/migrate/apply.rs` | 3237 |
@@ -69,12 +69,12 @@
 | `src/receipt.rs` | 1842 |
 | `src/reconcile.rs` | 1902 |
 | `src/server/mod.rs` | 2756 |
-| `src/server/routes/agents.rs` | 1278 |
-| `src/server/routes/agents_crud.rs` | 1271 |
+| `src/server/routes/agents.rs` | 1240 |
+| `src/server/routes/agents_crud.rs` | 1295 |
 | `src/server/routes/agents_setup.rs` | 1365 |
 | `src/server/routes/escalation.rs` | 1379 |
 | `src/server/routes/health_api.rs` | 1775 |
-| `src/server/routes/kanban.rs` | 2725 |
+| `src/server/routes/kanban.rs` | 2426 |
 | `src/server/routes/meetings.rs` | 1245 |
 | `src/server/routes/resume.rs` | 1260 |
 | `src/server/routes/v1.rs` | 1866 |
@@ -92,7 +92,7 @@
 | `src/services/discord/mod.rs` | 4165 |
 | `src/services/discord/router/message_handler/headless_turn.rs` | 1391 |
 | `src/services/discord_config_audit.rs` | 1288 |
-| `src/services/dispatched_sessions.rs` | 1821 |
+| `src/services/dispatched_sessions.rs` | 1767 |
 | `src/services/dispatches/discord_delivery/orchestration.rs` | 1500 |
 | `src/services/dispatches/outbox_route.rs` | 1177 |
 | `src/services/gemini.rs` | 1358 |
