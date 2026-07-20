@@ -100,7 +100,7 @@
 | `src/services/onboarding/mod.rs` | 2881 |
 | `src/services/opencode.rs` | 2760 |
 | `src/services/platform/binary_resolver.rs` | 1495 |
-| `src/services/provider.rs` | 1862 |
+| `src/services/provider.rs` | 1880 |
 | `src/services/qwen.rs` | 2192 |
 | `src/services/routines/agent_executor.rs` | 2131 |
 | `src/services/routines/discord_log.rs` | 1594 |
