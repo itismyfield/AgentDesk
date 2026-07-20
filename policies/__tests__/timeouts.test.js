@@ -935,6 +935,87 @@ test("timeouts long turn monitor module alerts every 30-minute threshold", () =>
   assert.deepEqual(toPlain(state.executions[0].params), ["long_turn_tier:codex:channel-1", "90"]);
 });
 
+test("timeouts long turn monitor module skips persistent routine keep-alive sessions", () => {
+  const tmuxSession = "AgentDesk-claude-routine-warmup-obiseo-session---personal-obi";
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    inflights: [
+      {
+        provider: "claude",
+        channel_id: "routine-thread-1",
+        channel_name: "routine warmup-obiseo-session - personal-obi",
+        session_key: "provider:" + tmuxSession,
+        tmux_session_name: tmuxSession,
+        started_at: timestampMinutesAgo(91),
+        dispatch_id: null
+      }
+    ],
+    dbQuery: createSqlRouter([
+      {
+        match: "SELECT execution_strategy FROM routines WHERE discord_thread_id = ? LIMIT 1",
+        result(sql, params) {
+          assert.deepEqual(toPlain(params), ["routine-thread-1"]);
+          return [{ execution_strategy: "persistent" }];
+        }
+      },
+      { match: "SELECT value FROM kv_meta WHERE key = ?", result: [] },
+      {
+        match: "SELECT id FROM agents WHERE discord_channel_id = ? OR discord_channel_alt = ? OR discord_channel_cc = ? OR discord_channel_cdx = ? LIMIT 1",
+        result: []
+      },
+      { match: "SELECT key FROM kv_meta WHERE key LIKE 'long_turn_tier:%'", result: [] },
+      { match: "SELECT key FROM kv_meta WHERE key LIKE 'long_turn_watchdog_extension:%'", result: [] }
+    ])
+  });
+
+  policy._section_L();
+
+  assert.equal(state.deadlockAlerts.length, 0);
+  assert.equal(
+    state.executions.filter((execution) => /INSERT OR REPLACE INTO kv_meta/.test(execution.sql)).length,
+    0
+  );
+  assert.equal(
+    state.logs.warn.filter((line) => line.includes("inflight scan error")).length,
+    0,
+    state.logs.warn.join("\n")
+  );
+});
+
+test("timeouts long turn monitor module still alerts fresh routine sessions", () => {
+  const tmuxSession = "AgentDesk-claude-routine-once-only---personal-obi";
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    inflights: [
+      {
+        provider: "claude",
+        channel_id: "routine-thread-2",
+        channel_name: "routine once-only - personal-obi",
+        session_key: "provider:" + tmuxSession,
+        tmux_session_name: tmuxSession,
+        started_at: timestampMinutesAgo(91),
+        dispatch_id: null
+      }
+    ],
+    dbQuery: createSqlRouter([
+      {
+        match: "SELECT execution_strategy FROM routines WHERE discord_thread_id = ? LIMIT 1",
+        result: [{ execution_strategy: "fresh" }]
+      },
+      { match: "SELECT value FROM kv_meta WHERE key = ?", result: [] },
+      {
+        match: "SELECT id FROM agents WHERE discord_channel_id = ? OR discord_channel_alt = ? OR discord_channel_cc = ? OR discord_channel_cdx = ? LIMIT 1",
+        result: []
+      },
+      { match: "SELECT key FROM kv_meta WHERE key LIKE 'long_turn_tier:%'", result: [] }
+    ])
+  });
+
+  policy._section_L();
+
+  assert.equal(state.deadlockAlerts.length, 1);
+  assert.match(state.deadlockAlerts[0].message, /장시간 턴/);
+  assert.match(state.deadlockAlerts[0].message, /90분 단계/);
+});
+
 test("timeouts long turn monitor module skips synthetic reattach placeholders", () => {
   const { policy, state } = loadPolicy("policies/timeouts.js", {
     inflights: [

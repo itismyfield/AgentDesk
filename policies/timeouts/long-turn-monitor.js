@@ -48,6 +48,16 @@ module.exports = function attachLongTurnMonitor(timeouts, helpers) {
         for (var li = 0; li < inflights.length; li++) {
           var inf = inflights[li];
           if (!inf.started_at) continue;
+          // Persistent routine sessions are intentionally reusable and may stay idle
+          // without accumulating progress, so elapsed time is not a hang signal.
+          var routineTmux = /^AgentDesk-[^-]+-routine-/.test(inf.tmux_session_name || "");
+          if (routineTmux) {
+            var routineRows = agentdesk.db.query(
+              "SELECT execution_strategy FROM routines WHERE discord_thread_id = ? LIMIT 1",
+              [inf.channel_id]
+            );
+            if (routineRows.length > 0 && routineRows[0].execution_strategy === "persistent") continue;
+          }
           // Stale inflight check: skip cleanup here — let InflightCleanupGuard handle it.
           // Previous approach (checking working sessions) caused false positives because
           // DB session status can lag behind actual tmux state.
