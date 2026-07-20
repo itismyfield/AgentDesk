@@ -1102,7 +1102,10 @@ src/
 │   │   ├── shell.rs
 │   │   └── tmux.rs
 │   ├── provider/
+│   │   ├── cancel_token_cleanup/
+│   │   │   └── authority.rs
 │   │   ├── cancel_token_claude_interrupt.rs
+│   │   ├── cancel_token_cleanup.rs
 │   │   └── provider_conformance_invariant_tests.rs
 │   ├── provider_cli/
 │   │   ├── canary.rs
