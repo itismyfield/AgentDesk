@@ -1104,7 +1104,8 @@ src/
 │   │   └── tmux.rs
 │   ├── provider/
 │   │   ├── cancel_token_cleanup/
-│   │   │   └── authority.rs
+│   │   │   ├── authority.rs
+│   │   │   └── target.rs
 │   │   ├── cancel_token_claude_interrupt.rs
 │   │   ├── cancel_token_cleanup.rs
 │   │   └── provider_conformance_invariant_tests.rs
