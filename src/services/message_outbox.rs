@@ -75,7 +75,7 @@ impl From<sqlx::Error> for OutboxEnqueueError {
     }
 }
 
-fn validate_outbox_source(source: &str) -> Result<(), OutboxEnqueueError> {
+pub(crate) fn validate_outbox_source(source: &str) -> Result<(), OutboxEnqueueError> {
     crate::services::discord::outbound::source_registry::validate_send_source_for(
         source,
         crate::services::discord::outbound::source_registry::SendCallerClass::LoopbackInternal,
@@ -85,7 +85,7 @@ fn validate_outbox_source(source: &str) -> Result<(), OutboxEnqueueError> {
     })
 }
 
-fn normalized_session_key(target: &str, session_key: Option<&str>) -> Option<String> {
+pub(crate) fn normalized_session_key(target: &str, session_key: Option<&str>) -> Option<String> {
     session_key
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -96,7 +96,7 @@ fn normalized_session_key(target: &str, session_key: Option<&str>) -> Option<Str
         })
 }
 
-fn normalized_reason_code(reason_code: Option<&str>) -> Option<&str> {
+pub(crate) fn normalized_reason_code(reason_code: Option<&str>) -> Option<&str> {
     reason_code.map(str::trim).filter(|value| !value.is_empty())
 }
 
@@ -143,7 +143,7 @@ pub(crate) fn delivery_bot_for_target_session<'a>(
     Cow::Borrowed(configured_bot)
 }
 
-fn dedupe_key_for_message(
+pub(crate) fn dedupe_key_for_message(
     target: &str,
     content: &str,
     reason_code: Option<&str>,

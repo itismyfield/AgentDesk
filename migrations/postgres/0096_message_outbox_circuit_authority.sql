@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS message_outbox_circuit_authority (
     episode_key         TEXT NOT NULL,
     baseline_relay_offset BIGINT NOT NULL,
     open_generation     BIGINT NOT NULL,
+    authority_epoch     BIGINT NOT NULL,
     revoked_at          TIMESTAMPTZ,
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (provider, channel_id),
@@ -21,7 +22,8 @@ CREATE TABLE IF NOT EXISTS message_outbox_circuit_authority (
     CONSTRAINT moca_episode_nonempty CHECK (btrim(episode_key) <> ''),
     CONSTRAINT moca_owner_generation_nonneg CHECK (owner_generation >= 0),
     CONSTRAINT moca_baseline_nonneg CHECK (baseline_relay_offset >= 0),
-    CONSTRAINT moca_open_generation_nonneg CHECK (open_generation >= 0)
+    CONSTRAINT moca_open_generation_nonneg CHECK (open_generation >= 0),
+    CONSTRAINT moca_authority_epoch_positive CHECK (authority_epoch > 0)
 );
 
 ALTER TABLE message_outbox ADD COLUMN IF NOT EXISTS circuit_provider TEXT;
@@ -29,6 +31,7 @@ ALTER TABLE message_outbox ADD COLUMN IF NOT EXISTS circuit_channel_id TEXT;
 ALTER TABLE message_outbox ADD COLUMN IF NOT EXISTS circuit_episode_key TEXT;
 ALTER TABLE message_outbox ADD COLUMN IF NOT EXISTS circuit_baseline_relay_offset BIGINT;
 ALTER TABLE message_outbox ADD COLUMN IF NOT EXISTS circuit_open_generation BIGINT;
+ALTER TABLE message_outbox ADD COLUMN IF NOT EXISTS circuit_authority_epoch BIGINT;
 ALTER TABLE message_outbox ADD COLUMN IF NOT EXISTS circuit_owner_instance_id TEXT;
 ALTER TABLE message_outbox ADD COLUMN IF NOT EXISTS circuit_owner_generation BIGINT;
 ALTER TABLE message_outbox ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;
@@ -36,8 +39,12 @@ ALTER TABLE message_outbox ADD COLUMN IF NOT EXISTS cancel_reason TEXT;
 ALTER TABLE message_outbox ADD COLUMN IF NOT EXISTS delivery_fence_checked_at TIMESTAMPTZ;
 
 -- A cancelled row is terminal and must release its dedupe identity exactly as a
--- failed row does. Rebuild the partial index so every enqueue conflict target
--- uses the same active-lifecycle predicate.
+-- failed row does. PostgreSQL cannot replace a partial-index predicate in place,
+-- and sqlx runs this migration transactionally, so this DROP/CREATE takes a
+-- write-blocking SHARE lock while the index is rebuilt. Keeping both statements
+-- in one transaction avoids exposing a no-uniqueness window; an online
+-- CONCURRENTLY replacement would require a separately non-transactional
+-- migration and cannot atomically preserve the conflict-target contract.
 DROP INDEX IF EXISTS uq_message_outbox_active_dedupe_key;
 CREATE UNIQUE INDEX uq_message_outbox_active_dedupe_key
     ON message_outbox(dedupe_key)
@@ -51,6 +58,7 @@ ALTER TABLE message_outbox ADD CONSTRAINT message_outbox_circuit_stamp_complete
          AND circuit_episode_key IS NULL
          AND circuit_baseline_relay_offset IS NULL
          AND circuit_open_generation IS NULL
+         AND circuit_authority_epoch IS NULL
          AND circuit_owner_instance_id IS NULL
          AND circuit_owner_generation IS NULL)
         OR
@@ -59,8 +67,25 @@ ALTER TABLE message_outbox ADD CONSTRAINT message_outbox_circuit_stamp_complete
          AND circuit_episode_key IS NOT NULL
          AND circuit_baseline_relay_offset IS NOT NULL
          AND circuit_open_generation IS NOT NULL
+         AND circuit_authority_epoch IS NOT NULL
          AND circuit_owner_instance_id IS NOT NULL
          AND circuit_owner_generation IS NOT NULL)
+    ) NOT VALID;
+
+ALTER TABLE message_outbox ADD CONSTRAINT message_outbox_circuit_stamp_values
+    CHECK (
+        circuit_provider IS NULL OR (
+            circuit_provider = lower(btrim(circuit_provider))
+            AND circuit_provider <> ''
+            AND circuit_channel_id = btrim(circuit_channel_id)
+            AND circuit_channel_id <> ''
+            AND btrim(circuit_episode_key) <> ''
+            AND circuit_baseline_relay_offset >= 0
+            AND circuit_open_generation >= 0
+            AND circuit_authority_epoch > 0
+            AND btrim(circuit_owner_instance_id) <> ''
+            AND circuit_owner_generation >= 0
+        )
     ) NOT VALID;
 
 ALTER TABLE message_outbox ADD CONSTRAINT message_outbox_cancelled_metadata

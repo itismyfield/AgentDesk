@@ -493,7 +493,7 @@
     },
     {
       "path": "migrations/postgres/0096_message_outbox_circuit_authority.sql",
-      "sha256": "b07f7c639f3c0074f236beb2bbf9028b63181f0c7f27685c3aa0316aac0897a9",
+      "sha256": "ba443b3dd24ab4cea8efd6bceabe1522b8656de0c9fbd61c0be2bc779e69d883",
       "version": 96
     }
   ],

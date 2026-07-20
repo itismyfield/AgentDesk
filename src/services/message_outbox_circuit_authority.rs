@@ -1,8 +1,9 @@
 //! PostgreSQL authority for channel-scoped circuit alert activation (#4615 S3a).
 //!
-//! This module is deliberately isolated from relay circuit integration. It
-//! provides transaction-linearized primitives that a later slice can call once
-//! the circuit producer is wired to PostgreSQL.
+//! This module is deliberately isolated from relay circuit integration. S3a is
+//! dormant: live producer wiring is forbidden until S3b adds the worker delivery
+//! fence. These transaction-linearized primitives only establish the schema and
+//! lifecycle contract that the later slice will consume.
 
 use sqlx::{PgPool, Postgres, Transaction};
 
@@ -15,6 +16,9 @@ pub(crate) struct CircuitCoordinate<'a> {
     pub episode_key: &'a str,
     pub baseline_relay_offset: i64,
     pub open_generation: i64,
+    /// Channel-global monotonic CAS coordinate. Unlike `open_generation`, this
+    /// never resets when `episode_key` changes.
+    pub authority_epoch: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +57,80 @@ async fn lock_channel(
         .execute(&mut **tx)
         .await?;
     Ok(())
+}
+
+/// Stage a worker-invisible circuit row with the complete fenced coordinate.
+/// This is dormant scaffolding for S3b; callers must not wire it into live relay
+/// production before the worker-side final delivery fence exists.
+#[allow(dead_code)]
+pub(crate) async fn stage_held(
+    pool: &PgPool,
+    message: crate::services::message_outbox::OutboxMessage<'_>,
+    coordinate: &CircuitCoordinate<'_>,
+    dedupe_ttl_secs: i64,
+) -> Result<i64, crate::services::message_outbox::OutboxEnqueueError> {
+    crate::services::message_outbox::validate_outbox_source(message.source)?;
+    if coordinate.owner_generation < 0
+        || coordinate.baseline_relay_offset < 0
+        || coordinate.open_generation < 0
+        || coordinate.authority_epoch <= 0
+    {
+        return Err(crate::services::message_outbox::OutboxEnqueueError::Database(
+            sqlx::Error::Protocol("invalid circuit coordinate".to_string()),
+        ));
+    }
+    let provider = normalized_provider(coordinate.provider);
+    let channel_id = normalized_channel(coordinate.channel_id);
+    let reason_code = crate::services::message_outbox::normalized_reason_code(message.reason_code);
+    let session_key = crate::services::message_outbox::normalized_session_key(
+        message.target,
+        message.session_key,
+    );
+    let dedupe_key = crate::services::message_outbox::dedupe_key_for_message(
+        message.target,
+        message.content,
+        reason_code,
+        session_key.as_deref(),
+    )
+    .ok_or_else(|| {
+        crate::services::message_outbox::OutboxEnqueueError::Database(sqlx::Error::Protocol(
+            "circuit staging requires a dedupe identity".to_string(),
+        ))
+    })?;
+    let mut tx = pool.begin().await?;
+    let id = sqlx::query_scalar(
+        "INSERT INTO message_outbox
+             (target,content,bot,source,status,reason_code,session_key,dedupe_key,
+              dedupe_expires_at,circuit_provider,circuit_channel_id,circuit_episode_key,
+              circuit_baseline_relay_offset,circuit_open_generation,circuit_authority_epoch,
+              circuit_owner_instance_id,circuit_owner_generation)
+         VALUES ($1,$2,$3,$4,'held',$5,$6,$7,
+                 NOW()+($8::BIGINT*INTERVAL '1 second'),$9,$10,$11,$12,$13,$14,$15,$16)
+         ON CONFLICT (dedupe_key)
+             WHERE dedupe_key IS NOT NULL AND status NOT IN ('failed','cancelled')
+         DO UPDATE SET dedupe_expires_at=message_outbox.dedupe_expires_at
+         RETURNING id",
+    )
+    .bind(message.target)
+    .bind(message.content)
+    .bind(message.bot)
+    .bind(message.source)
+    .bind(reason_code)
+    .bind(session_key.as_deref())
+    .bind(&dedupe_key)
+    .bind(dedupe_ttl_secs.max(1))
+    .bind(&provider)
+    .bind(&channel_id)
+    .bind(coordinate.episode_key)
+    .bind(coordinate.baseline_relay_offset)
+    .bind(coordinate.open_generation)
+    .bind(coordinate.authority_epoch)
+    .bind(coordinate.owner_instance_id)
+    .bind(coordinate.owner_generation)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(id)
 }
 
 async fn owner_is_current(
@@ -104,23 +182,25 @@ pub(crate) async fn activate_fenced(
     let authority_changed = sqlx::query(
         "INSERT INTO message_outbox_circuit_authority
              (provider,channel_id,owner_instance_id,owner_generation,episode_key,
-              baseline_relay_offset,open_generation)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)
+              baseline_relay_offset,open_generation,authority_epoch)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
          ON CONFLICT (provider,channel_id) DO UPDATE SET
              owner_instance_id=EXCLUDED.owner_instance_id,
              owner_generation=EXCLUDED.owner_generation,
              episode_key=EXCLUDED.episode_key,
              baseline_relay_offset=EXCLUDED.baseline_relay_offset,
              open_generation=EXCLUDED.open_generation,
+             authority_epoch=EXCLUDED.authority_epoch,
              revoked_at=NULL,
              updated_at=NOW()
-         WHERE (message_outbox_circuit_authority.open_generation < EXCLUDED.open_generation
-            OR (message_outbox_circuit_authority.open_generation = EXCLUDED.open_generation
+         WHERE message_outbox_circuit_authority.authority_epoch < EXCLUDED.authority_epoch
+            OR (message_outbox_circuit_authority.authority_epoch = EXCLUDED.authority_epoch
+                AND message_outbox_circuit_authority.revoked_at IS NULL
                 AND message_outbox_circuit_authority.episode_key = EXCLUDED.episode_key
                 AND message_outbox_circuit_authority.baseline_relay_offset = EXCLUDED.baseline_relay_offset
+                AND message_outbox_circuit_authority.open_generation = EXCLUDED.open_generation
                 AND message_outbox_circuit_authority.owner_instance_id = EXCLUDED.owner_instance_id
-                AND message_outbox_circuit_authority.owner_generation = EXCLUDED.owner_generation))
-           AND message_outbox_circuit_authority.revoked_at IS NULL",
+                AND message_outbox_circuit_authority.owner_generation = EXCLUDED.owner_generation)",
     )
     .bind(&provider)
     .bind(&channel_id)
@@ -129,6 +209,7 @@ pub(crate) async fn activate_fenced(
     .bind(coordinate.episode_key)
     .bind(coordinate.baseline_relay_offset)
     .bind(coordinate.open_generation)
+    .bind(coordinate.authority_epoch)
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -142,8 +223,8 @@ pub(crate) async fn activate_fenced(
           WHERE id=$1 AND status='held'
             AND circuit_provider=$2 AND circuit_channel_id=$3
             AND circuit_episode_key=$4 AND circuit_baseline_relay_offset=$5
-            AND circuit_open_generation=$6 AND circuit_owner_instance_id=$7
-            AND circuit_owner_generation=$8",
+            AND circuit_open_generation=$6 AND circuit_authority_epoch=$7
+            AND circuit_owner_instance_id=$8 AND circuit_owner_generation=$9",
     )
     .bind(outbox_id)
     .bind(&provider)
@@ -151,6 +232,7 @@ pub(crate) async fn activate_fenced(
     .bind(coordinate.episode_key)
     .bind(coordinate.baseline_relay_offset)
     .bind(coordinate.open_generation)
+    .bind(coordinate.authority_epoch)
     .bind(coordinate.owner_instance_id)
     .bind(coordinate.owner_generation)
     .execute(&mut *tx)
@@ -193,14 +275,15 @@ pub(crate) async fn revoke_on_fresh_vouch(
     let revoked = sqlx::query(
         "INSERT INTO message_outbox_circuit_authority
              (provider,channel_id,owner_instance_id,owner_generation,episode_key,
-              baseline_relay_offset,open_generation,revoked_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+              baseline_relay_offset,open_generation,authority_epoch,revoked_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
          ON CONFLICT (provider,channel_id) DO UPDATE SET revoked_at=NOW(),updated_at=NOW()
          WHERE message_outbox_circuit_authority.owner_instance_id=$3
            AND message_outbox_circuit_authority.owner_generation=$4
            AND message_outbox_circuit_authority.episode_key=$5
            AND message_outbox_circuit_authority.baseline_relay_offset=$6
            AND message_outbox_circuit_authority.open_generation=$7
+           AND message_outbox_circuit_authority.authority_epoch=$8
            AND message_outbox_circuit_authority.revoked_at IS NULL",
     )
     .bind(&provider)
@@ -210,20 +293,21 @@ pub(crate) async fn revoke_on_fresh_vouch(
     .bind(coordinate.episode_key)
     .bind(coordinate.baseline_relay_offset)
     .bind(coordinate.open_generation)
+    .bind(coordinate.authority_epoch)
     .execute(&mut *tx)
     .await?
     .rows_affected();
 
     let cancelled = sqlx::query(
         "UPDATE message_outbox
-            SET status='cancelled', cancelled_at=NOW(), cancel_reason=$8,
+            SET status='cancelled', cancelled_at=NOW(), cancel_reason=$9,
                 dedupe_key=NULL, dedupe_expires_at=NULL,
                 claimed_at=NULL, claim_owner=NULL, next_attempt_at=NULL
           WHERE status IN ('held','pending')
             AND circuit_provider=$1 AND circuit_channel_id=$2
             AND circuit_owner_instance_id=$3 AND circuit_owner_generation=$4
             AND circuit_episode_key=$5 AND circuit_baseline_relay_offset=$6
-            AND circuit_open_generation=$7",
+            AND circuit_open_generation=$7 AND circuit_authority_epoch=$8",
     )
     .bind(&provider)
     .bind(&channel_id)
@@ -232,6 +316,7 @@ pub(crate) async fn revoke_on_fresh_vouch(
     .bind(coordinate.episode_key)
     .bind(coordinate.baseline_relay_offset)
     .bind(coordinate.open_generation)
+    .bind(coordinate.authority_epoch)
     .bind(reason)
     .execute(&mut *tx)
     .await?
