@@ -668,18 +668,10 @@ mod manual_v3_delivery_tests {
 
     #[test]
     fn synthetic_routine_pair_is_complete_and_message_id_deterministic() {
-        let first = synthetic_routine_pair(
-            42,
-            "message-7",
-            "posted briefing",
-            Some("morning-briefing"),
-        );
-        let retry = synthetic_routine_pair(
-            42,
-            "message-7",
-            "posted briefing",
-            Some("morning-briefing"),
-        );
+        let first =
+            synthetic_routine_pair(42, "message-7", "posted briefing", Some("morning-briefing"));
+        let retry =
+            synthetic_routine_pair(42, "message-7", "posted briefing", Some("morning-briefing"));
 
         assert_eq!(first.0, "manual-discord:42:message-7");
         assert_eq!(first.0, retry.0);
