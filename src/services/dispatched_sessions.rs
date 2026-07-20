@@ -322,7 +322,9 @@ pub async fn cleanup_sessions(
     if let Some(pool) = state.pg_pool_ref() {
         return match dispatched_sessions_db::cleanup_disconnected_sessions_pg(pool).await {
             Ok(result) => Ok((StatusCode::OK, Json(json!({"ok": true, "deleted": result})))),
-            Err(error) => Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database)),
+            Err(error) => {
+                Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database))
+            }
         };
     }
 
@@ -366,7 +368,9 @@ pub async fn delete_session(
                     Json(json!({"ok": true, "deleted": result.deleted})),
                 ))
             }
-            Err(error) => Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database)),
+            Err(error) => {
+                Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database))
+            }
         };
     }
 
@@ -443,7 +447,9 @@ pub async fn clear_stale_session_id(
     if let Some(pool) = state.pg_pool_ref() {
         return match dispatched_sessions_db::clear_stale_session_id_pg(pool, sid).await {
             Ok(result) => Ok((StatusCode::OK, Json(json!({"cleared": result})))),
-            Err(error) => Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database)),
+            Err(error) => {
+                Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database))
+            }
         };
     }
 
@@ -463,7 +469,9 @@ pub async fn clear_session_id_by_key(
     if let Some(pool) = state.pg_pool_ref() {
         return match dispatched_sessions_db::clear_session_id_by_key_pg(pool, key).await {
             Ok(result) => Ok((StatusCode::OK, Json(json!({"cleared": result})))),
-            Err(error) => Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database)),
+            Err(error) => {
+                Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database))
+            }
         };
     }
 

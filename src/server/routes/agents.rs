@@ -227,7 +227,8 @@ pub async fn agent_diag(
             return Err(AppError::not_found("agent/channel session not found"));
         }
         Err(error) => {
-            return Err(AppError::internal(format!("query diag session: {error}")).with_code(ErrorCode::Database));
+            return Err(AppError::internal(format!("query diag session: {error}"))
+                .with_code(ErrorCode::Database));
         }
     };
 
@@ -639,12 +640,19 @@ pub async fn agent_offices(
     match agent_exists_pg(pool, &id).await {
         Ok(true) => {}
         Ok(false) => return Err(AppError::not_found("agent not found")),
-        Err(e) => return Err(AppError::internal(format!("query: {e}")).with_code(ErrorCode::Database)),
+        Err(e) => {
+            return Err(AppError::internal(format!("query: {e}")).with_code(ErrorCode::Database));
+        }
     }
 
     list_agent_offices_pg_json(pool, &id)
         .await
-        .map(|offices| (StatusCode::OK, Json(json!(AgentOfficesResponse { offices }))))
+        .map(|offices| {
+            (
+                StatusCode::OK,
+                Json(json!(AgentOfficesResponse { offices })),
+            )
+        })
         .map_err(|e| AppError::internal(format!("query: {e}")).with_code(ErrorCode::Database))
 }
 
@@ -657,18 +665,23 @@ pub async fn agent_skills(
     match agent_exists_pg(pool, &id).await {
         Ok(true) => {}
         Ok(false) => return Err(AppError::not_found("agent not found")),
-        Err(e) => return Err(AppError::internal(format!("query: {e}")).with_code(ErrorCode::Database)),
+        Err(e) => {
+            return Err(AppError::internal(format!("query: {e}")).with_code(ErrorCode::Database));
+        }
     }
 
     list_agent_skills_pg_json(pool, &id)
         .await
         .map(|skills| {
             let total_count = skills.len();
-            (StatusCode::OK, Json(json!(AgentSkillsResponse {
-                skills,
-                shared_skills: Vec::new(),
-                total_count,
-            })))
+            (
+                StatusCode::OK,
+                Json(json!(AgentSkillsResponse {
+                    skills,
+                    shared_skills: Vec::new(),
+                    total_count,
+                })),
+            )
         })
         .map_err(|e| AppError::internal(format!("query: {e}")).with_code(ErrorCode::Database))
 }
@@ -681,9 +694,14 @@ pub async fn agent_dispatched_sessions(
     let pool = state.pg_pool_ref().ok_or_else(pg_required_error)?;
     let guild_id = state.config.discord.guild_id.as_deref();
     match load_agent_dispatched_sessions_pg_json(pool, &id, guild_id).await {
-        Ok(sessions) => Ok((StatusCode::OK, Json(json!(AgentDispatchedSessionsResponse { sessions })))),
+        Ok(sessions) => Ok((
+            StatusCode::OK,
+            Json(json!(AgentDispatchedSessionsResponse { sessions })),
+        )),
         Err(AgentQueryLookupError::AgentNotFound) => Err(AppError::not_found("agent not found")),
-        Err(AgentQueryLookupError::Query(e)) => Err(AppError::internal(format!("query: {e}")).with_code(ErrorCode::Database)),
+        Err(AgentQueryLookupError::Query(e)) => {
+            Err(AppError::internal(format!("query: {e}")).with_code(ErrorCode::Database))
+        }
     }
 }
 
@@ -696,7 +714,9 @@ pub async fn agent_turn(
     match load_agent_turn_status_pg(pool, &id).await {
         Ok(body) => Ok((StatusCode::OK, Json(body))),
         Err(AgentTurnLookupError::AgentNotFound) => Err(AppError::not_found("agent not found")),
-        Err(AgentTurnLookupError::Query(error)) => Err(AppError::internal(format!("query: {error}")).with_code(ErrorCode::Database)),
+        Err(AgentTurnLookupError::Query(error)) => {
+            Err(AppError::internal(format!("query: {error}")).with_code(ErrorCode::Database))
+        }
     }
 }
 
@@ -1100,7 +1120,9 @@ pub async fn agent_timeline(
             Json(json!(AgentTimelineResponse { events })),
         )),
         Err(AgentQueryLookupError::AgentNotFound) => Err(AppError::not_found("agent not found")),
-        Err(AgentQueryLookupError::Query(e)) => Err(AppError::internal(format!("query: {e}")).with_code(ErrorCode::Database)),
+        Err(AgentQueryLookupError::Query(e)) => {
+            Err(AppError::internal(format!("query: {e}")).with_code(ErrorCode::Database))
+        }
     }
 }
 
@@ -1129,7 +1151,9 @@ pub async fn agent_transcripts(
                 transcripts,
             })),
         )),
-        Err(e) => Err(AppError::internal(format!("transcripts: {e}")).with_code(ErrorCode::Database)),
+        Err(e) => {
+            Err(AppError::internal(format!("transcripts: {e}")).with_code(ErrorCode::Database))
+        }
     }
 }
 
