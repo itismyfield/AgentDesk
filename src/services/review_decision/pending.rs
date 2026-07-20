@@ -38,10 +38,11 @@ pub(super) async fn decision_route_validate_input(
 ) -> Result<DecisionInput, DecisionResponse> {
     let valid = ["accept", "dispute", "dismiss"];
     if !valid.contains(&body.decision.as_str()) {
-        return Err(
-            AppError::bad_request(format!("decision must be one of: {}", valid.join(", ")))
-                .into_json_response(),
-        );
+        return Err(AppError::bad_request(format!(
+            "decision must be one of: {}",
+            valid.join(", ")
+        ))
+        .into_json_response());
     }
 
     let submitted_commit = match normalize_optional_commit_sha(body.commit_sha.as_deref()) {

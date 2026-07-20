@@ -469,8 +469,7 @@ pub async fn draft_get(state: &AppState) -> AppResult<(StatusCode, Json<serde_js
     let draft = load_onboarding_draft(&root)
         .map_err(AppError::internal)?
         .map(OnboardingDraft::redact_secrets);
-    let completion_state =
-        load_onboarding_completion_state(&root).map_err(AppError::internal)?;
+    let completion_state = load_onboarding_completion_state(&root).map_err(AppError::internal)?;
     let available = draft.is_some();
 
     Ok((
@@ -489,9 +488,7 @@ pub async fn draft_get(state: &AppState) -> AppResult<(StatusCode, Json<serde_js
 
 /// PUT /api/onboarding/draft
 /// Persists the in-progress onboarding draft required to resume across browsers.
-pub async fn draft_put(
-    body: OnboardingDraft,
-) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+pub async fn draft_put(body: OnboardingDraft) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let root = crate::cli::agentdesk_runtime_root()
         .ok_or_else(|| AppError::internal("cannot determine runtime root"))?;
 

@@ -26,9 +26,7 @@ pub async fn list_bindings(
     Ok((StatusCode::OK, Json(json!({"bindings": []}))))
 }
 
-async fn list_bindings_pg(
-    pool: &sqlx::PgPool,
-) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+async fn list_bindings_pg(pool: &sqlx::PgPool) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let map = match load_all_agent_channel_bindings_pg(pool).await {
         Ok(m) => m,
         Err(error) => {
@@ -193,8 +191,9 @@ pub async fn channel_messages(
     ) {
         Some(t) => t,
         None => {
-            return Err(AppError::internal("announce bot token not found")
-                .with_code(ErrorCode::Discord));
+            return Err(
+                AppError::internal("announce bot token not found").with_code(ErrorCode::Discord)
+            );
         }
     };
 
@@ -316,8 +315,9 @@ pub async fn channel_info(
     ) {
         Some(t) => t,
         None => {
-            return Err(AppError::internal("announce bot token not found")
-                .with_code(ErrorCode::Discord));
+            return Err(
+                AppError::internal("announce bot token not found").with_code(ErrorCode::Discord)
+            );
         }
     };
 

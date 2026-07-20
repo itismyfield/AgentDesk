@@ -61,7 +61,7 @@
 | `cli::client::runtime_config` | `src/cli/client/runtime_config.rs` | 55 | 23 | 32 |  |
 | `cli::dcserver` | `src/cli/dcserver.rs` | 1650 | 1650 | 0 | giant-file |
 | `cli::dcserver_pg_bootstrap` | `src/cli/dcserver_pg_bootstrap.rs` | 1068 | 544 | 524 |  |
-| `cli::direct` | `src/cli/direct.rs` | 1818 | 1818 | 0 | giant-file |
+| `cli::direct` | `src/cli/direct.rs` | 1819 | 1819 | 0 | giant-file |
 | `cli::discord` | `src/cli/discord.rs` | 472 | 249 | 223 |  |
 | `cli::discord_thread_create` | `src/cli/discord_thread_create.rs` | 1468 | 415 | 1053 |  |
 | `cli::discord_thread_create_lock` | `src/cli/discord_thread_create_lock.rs` | 669 | 611 | 58 |  |
@@ -244,13 +244,13 @@
 | `server::routes::cluster` | `src/server/routes/cluster.rs` | 379 | 379 | 0 |  |
 | `server::routes::cron_api` | `src/server/routes/cron_api.rs` | 180 | 180 | 0 |  |
 | `server::routes::departments` | `src/server/routes/departments.rs` | 342 | 266 | 76 |  |
-| `server::routes::discord` | `src/server/routes/discord.rs` | 416 | 359 | 57 |  |
+| `server::routes::discord` | `src/server/routes/discord.rs` | 403 | 346 | 57 |  |
 | `server::routes::dispatched_sessions` | `src/server/routes/dispatched_sessions.rs` | 139 | 139 | 0 |  |
 | `server::routes::dispatches` | `src/server/routes/dispatches/mod.rs` | 29 | 29 | 0 |  |
 | `server::routes::dispatches::crud` | `src/server/routes/dispatches/crud.rs` | 1071 | 773 | 298 |  |
 | `server::routes::dispatches::discord_delivery` | `src/server/routes/dispatches/discord_delivery.rs` | 15 | 15 | 0 |  |
 | `server::routes::dispatches::outbox` | `src/server/routes/dispatches/outbox.rs` | 10 | 10 | 0 |  |
-| `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 141 | 141 | 0 |  |
+| `server::routes::dispatches::thread_reuse` | `src/server/routes/dispatches/thread_reuse.rs` | 115 | 115 | 0 |  |
 | `server::routes::dm_reply` | `src/server/routes/dm_reply.rs` | 60 | 60 | 0 |  |
 | `server::routes::docs` | `src/server/routes/docs.rs` | 913 | 363 | 550 |  |
 | `server::routes::docs::guides` | `src/server/routes/docs/guides.rs` | 247 | 247 | 0 |  |
@@ -277,7 +277,7 @@
 | `server::routes::domains::onboarding` | `src/server/routes/domains/onboarding.rs` | 39 | 39 | 0 |  |
 | `server::routes::domains::ops` | `src/server/routes/domains/ops.rs` | 369 | 369 | 0 |  |
 | `server::routes::domains::reviews` | `src/server/routes/domains/reviews.rs` | 33 | 33 | 0 |  |
-| `server::routes::escalation` | `src/server/routes/escalation.rs` | 1644 | 1379 | 265 | giant-file |
+| `server::routes::escalation` | `src/server/routes/escalation.rs` | 1625 | 1359 | 266 | giant-file |
 | `server::routes::github` | `src/server/routes/github.rs` | 940 | 663 | 277 |  |
 | `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 190 | 190 | 0 |  |
 | `server::routes::health_api` | `src/server/routes/health_api.rs` | 2701 | 1775 | 926 | giant-file |
@@ -293,14 +293,14 @@
 | `server::routes::messages` | `src/server/routes/messages.rs` | 195 | 195 | 0 |  |
 | `server::routes::monitoring` | `src/server/routes/monitoring.rs` | 96 | 96 | 0 |  |
 | `server::routes::offices` | `src/server/routes/offices.rs` | 381 | 381 | 0 |  |
-| `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 58 | 58 | 0 |  |
+| `server::routes::onboarding` | `src/server/routes/onboarding.rs` | 61 | 61 | 0 |  |
 | `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 353 | 353 | 0 |  |
 | `server::routes::pr_summary` | `src/server/routes/pr_summary.rs` | 241 | 142 | 99 |  |
 | `server::routes::prompt_manifest_retention` | `src/server/routes/prompt_manifest_retention.rs` | 57 | 57 | 0 |  |
 | `server::routes::provider_cli_api` | `src/server/routes/provider_cli_api.rs` | 369 | 369 | 0 |  |
 | `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 430 | 381 | 49 |  |
 | `server::routes::receipt` | `src/server/routes/receipt.rs` | 813 | 500 | 313 |  |
-| `server::routes::resume` | `src/server/routes/resume.rs` | 1260 | 1260 | 0 | giant-file |
+| `server::routes::resume` | `src/server/routes/resume.rs` | 1226 | 1226 | 0 | giant-file |
 | `server::routes::review_verdict` | `src/server/routes/review_verdict/mod.rs` | 14 | 14 | 0 |  |
 | `server::routes::review_verdict::decision_route` | `src/server/routes/review_verdict/decision_route.rs` | 56 | 56 | 0 |  |
 | `server::routes::review_verdict::tuning_aggregate` | `src/server/routes/review_verdict/tuning_aggregate.rs` | 14 | 14 | 0 |  |
@@ -1009,8 +1009,8 @@
 | `services::observability::turn_lifecycle` | `src/services/observability/turn_lifecycle.rs` | 949 | 484 | 465 |  |
 | `services::observability::watcher_latency` | `src/services/observability/watcher_latency.rs` | 284 | 284 | 0 |  |
 | `services::observability::worker` | `src/services/observability/worker.rs` | 321 | 321 | 0 |  |
-| `services::onboarding` | `src/services/onboarding/mod.rs` | 2987 | 2937 | 50 | giant-file |
-| `services::onboarding::channel` | `src/services/onboarding/channel.rs` | 199 | 199 | 0 |  |
+| `services::onboarding` | `src/services/onboarding/mod.rs` | 2931 | 2881 | 50 | giant-file |
+| `services::onboarding::channel` | `src/services/onboarding/channel.rs` | 192 | 192 | 0 |  |
 | `services::onboarding::provider` | `src/services/onboarding/provider.rs` | 181 | 181 | 0 |  |
 | `services::opencode` | `src/services/opencode.rs` | 3125 | 2760 | 365 | giant-file |
 | `services::operator_connectors` | `src/services/operator_connectors.rs` | 475 | 293 | 182 |  |
@@ -1055,8 +1055,8 @@
 | `services::review_decision::accept` | `src/services/review_decision/accept.rs` | 697 | 697 | 0 |  |
 | `services::review_decision::adapters` | `src/services/review_decision/adapters.rs` | 226 | 226 | 0 |  |
 | `services::review_decision::dismiss_finalize` | `src/services/review_decision/dismiss_finalize.rs` | 181 | 181 | 0 |  |
-| `services::review_decision::dispute` | `src/services/review_decision/dispute.rs` | 738 | 738 | 0 |  |
-| `services::review_decision::pending` | `src/services/review_decision/pending.rs` | 635 | 635 | 0 |  |
+| `services::review_decision::dispute` | `src/services/review_decision/dispute.rs` | 733 | 733 | 0 |  |
+| `services::review_decision::pending` | `src/services/review_decision/pending.rs` | 634 | 634 | 0 |  |
 | `services::review_decision::repo_card` | `src/services/review_decision/repo_card.rs` | 851 | 742 | 109 |  |
 | `services::review_decision::repo_dispatch` | `src/services/review_decision/repo_dispatch.rs` | 650 | 650 | 0 |  |
 | `services::review_decision::review_state_repo` | `src/services/review_decision/review_state_repo.rs` | 33 | 33 | 0 |  |

@@ -45,7 +45,7 @@
 | --- | ---: |
 | `src/cli/client.rs` | 2464 |
 | `src/cli/dcserver.rs` | 1650 |
-| `src/cli/direct.rs` | 1818 |
+| `src/cli/direct.rs` | 1819 |
 | `src/cli/doctor/orchestrator.rs` | 4381 |
 | `src/cli/init.rs` | 1444 |
 | `src/cli/migrate/apply.rs` | 3237 |
@@ -72,11 +72,11 @@
 | `src/server/routes/agents.rs` | 1240 |
 | `src/server/routes/agents_crud.rs` | 1295 |
 | `src/server/routes/agents_setup.rs` | 1365 |
-| `src/server/routes/escalation.rs` | 1379 |
+| `src/server/routes/escalation.rs` | 1359 |
 | `src/server/routes/health_api.rs` | 1775 |
 | `src/server/routes/kanban.rs` | 2426 |
 | `src/server/routes/meetings.rs` | 1245 |
-| `src/server/routes/resume.rs` | 1260 |
+| `src/server/routes/resume.rs` | 1226 |
 | `src/server/routes/v1.rs` | 1866 |
 | `src/services/auto_queue.rs` | 1545 |
 | `src/services/auto_queue/activate_command.rs` | 1510 |
@@ -97,7 +97,7 @@
 | `src/services/dispatches/outbox_route.rs` | 1177 |
 | `src/services/gemini.rs` | 1358 |
 | `src/services/memory/memento.rs` | 1893 |
-| `src/services/onboarding/mod.rs` | 2937 |
+| `src/services/onboarding/mod.rs` | 2881 |
 | `src/services/opencode.rs` | 2760 |
 | `src/services/platform/binary_resolver.rs` | 1495 |
 | `src/services/provider.rs` | 1822 |
