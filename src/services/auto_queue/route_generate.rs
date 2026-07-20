@@ -56,7 +56,9 @@ pub async fn generate(
         let mut cards =
             match resolve_dispatch_cards_with_pg(pool, body.repo.as_deref(), issue_numbers).await {
                 Ok(cards) => cards,
-                Err(error) => return Err(AppError::bad_request(error).with_code(ErrorCode::AutoQueue)),
+                Err(error) => {
+                    return Err(AppError::bad_request(error).with_code(ErrorCode::AutoQueue));
+                }
             };
         if let Err(error) =
             apply_dispatch_agent_assignments_with_pg(pool, &mut cards, Some(agent_id), true).await
@@ -195,9 +197,10 @@ pub async fn generate(
                 Ok(None) => retained.push(card),
                 Err(error) => {
                     return Err(AppError::internal(format!(
-                                "active-dispatch lookup failed for card {}: {error}",
-                                card.card_id
-                            ),).with_code(ErrorCode::AutoQueue));
+                        "active-dispatch lookup failed for card {}: {error}",
+                        card.card_id
+                    ))
+                    .with_code(ErrorCode::AutoQueue));
                 }
             }
         }
@@ -490,7 +493,10 @@ pub async fn generate(
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(error) => {
-            return Err(AppError::internal(format!("begin auto-queue generate transaction: {error}")).with_code(ErrorCode::AutoQueue));
+            return Err(AppError::internal(format!(
+                "begin auto-queue generate transaction: {error}"
+            ))
+            .with_code(ErrorCode::AutoQueue));
         }
     };
     if let Err(error) = sqlx::query(
@@ -551,7 +557,10 @@ pub async fn generate(
         entry_ids.push(entry_id);
     }
     if let Err(error) = tx.commit().await {
-        return Err(AppError::internal(format!("commit auto-queue generate transaction: {error}")).with_code(ErrorCode::AutoQueue));
+        return Err(
+            AppError::internal(format!("commit auto-queue generate transaction: {error}"))
+                .with_code(ErrorCode::AutoQueue),
+        );
     };
 
     let mut entries = Vec::with_capacity(entry_ids.len());

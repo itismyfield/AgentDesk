@@ -114,25 +114,40 @@ pub(super) async fn submit_order_with_pg(
     {
         Ok(row) => row,
         Err(error) => {
-            return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("load auto-queue run '{run_id}': {error}")})),));
+            return Err(auto_queue_json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("load auto-queue run '{run_id}': {error}")})),
+            ));
         }
     };
     let Some(run_row) = run_row else {
-        return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": "run not found or not pending"})),));
+        return Err(auto_queue_json_error(
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "run not found or not pending"})),
+        ));
     };
     let run_status: String = match run_row.try_get("status") {
         Ok(value) => value,
         Err(error) => {
-            return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("decode auto-queue run status: {error}")})),));
+            return Err(auto_queue_json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("decode auto-queue run status: {error}")})),
+            ));
         }
     };
     if run_status != "pending" {
-        return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": "run not found or not pending"})),));
+        return Err(auto_queue_json_error(
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "run not found or not pending"})),
+        ));
     }
     let run_repo: Option<String> = match run_row.try_get("repo") {
         Ok(value) => value,
         Err(error) => {
-            return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("decode auto-queue run repo: {error}")})),));
+            return Err(auto_queue_json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("decode auto-queue run repo: {error}")})),
+            ));
         }
     };
     let run_log_ctx = AutoQueueLogContext::new().run(run_id);
@@ -143,7 +158,10 @@ pub(super) async fn submit_order_with_pg(
             Ok(Some(card)) => card,
             Ok(None) => continue,
             Err(error) => {
-                return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": error})),));
+                return Err(auto_queue_json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                ));
             }
         };
 
@@ -207,7 +225,10 @@ pub(super) async fn submit_order_with_pg(
         .execute(pool)
         .await
         {
-            return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("activate auto-queue run '{run_id}': {error}")})),));
+            return Err(auto_queue_json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("activate auto-queue run '{run_id}': {error}")})),
+            ));
         }
     } else {
         crate::auto_queue_log!(
@@ -227,7 +248,10 @@ pub(super) async fn submit_order_with_pg(
         .execute(pool)
         .await
         {
-            return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("complete auto-queue run '{run_id}': {error}")})),));
+            return Err(auto_queue_json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("complete auto-queue run '{run_id}': {error}")})),
+            ));
         }
     }
 

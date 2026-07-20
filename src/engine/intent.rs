@@ -361,7 +361,8 @@ fn execute_activate_auto_queue(
             let engine = engine.clone();
             let body = body;
             move |_bridge_pool| async move {
-                match crate::server::routes::auto_queue::activate_with_bridge_pg(engine, body).await {
+                match crate::server::routes::auto_queue::activate_with_bridge_pg(engine, body).await
+                {
                     Ok(response) => Ok(response),
                     Err(error) => Ok(error.into_json_response()),
                 }

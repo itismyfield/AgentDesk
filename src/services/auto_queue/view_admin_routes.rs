@@ -42,7 +42,10 @@ pub async fn history(
     let records = match crate::db::auto_queue::list_run_history_pg(pool, &filter, limit).await {
         Ok(records) => records,
         Err(error) => {
-            return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("list run history: {error}")})),));
+            return Err(auto_queue_json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("list run history: {error}")})),
+            ));
         }
     };
 
@@ -144,23 +147,35 @@ pub(super) async fn update_entry_with_pg(
     {
         Ok(row) => row,
         Err(error) => {
-            return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("load auto-queue entry {id}: {error}")})),));
+            return Err(auto_queue_json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("load auto-queue entry {id}: {error}")})),
+            ));
         }
     };
     let Some(entry_row) = entry_row else {
-        return Err(auto_queue_json_error(StatusCode::NOT_FOUND, Json(json!({"error": "entry not found"})),));
+        return Err(auto_queue_json_error(
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "entry not found"})),
+        ));
     };
 
     let run_id: String = match entry_row.try_get("run_id") {
         Ok(value) => value,
         Err(error) => {
-            return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("decode auto-queue entry run_id: {error}")})),));
+            return Err(auto_queue_json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("decode auto-queue entry run_id: {error}")})),
+            ));
         }
     };
     let status: String = match entry_row.try_get("status") {
         Ok(value) => value,
         Err(error) => {
-            return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("decode auto-queue entry status: {error}")})),));
+            return Err(auto_queue_json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("decode auto-queue entry status: {error}")})),
+            ));
         }
     };
 
@@ -186,31 +201,46 @@ pub(super) async fn update_entry_with_pg(
         match update_result {
             Ok(result) => effective_status = result.to_status,
             Err(error) if error.contains("not found") => {
-                return Err(auto_queue_json_error(StatusCode::NOT_FOUND, Json(json!({"error": "entry not found"})),));
+                return Err(auto_queue_json_error(
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "entry not found"})),
+                ));
             }
             Err(error) if error.contains("invalid auto-queue entry transition") => {
-                return Err(auto_queue_json_error(StatusCode::CONFLICT, Json(json!({
+                return Err(auto_queue_json_error(
+                    StatusCode::CONFLICT,
+                    Json(json!({
                         "error": format!(
                             "entry status transition not allowed: {} -> {}",
                             status, new_status
                         ),
-                    })),));
+                    })),
+                ));
             }
             Err(error) => {
-                return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": error})),));
+                return Err(auto_queue_json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                ));
             }
         }
     }
 
     if body.thread_group.is_some() || body.priority_rank.is_some() || body.batch_phase.is_some() {
         if effective_status != crate::db::auto_queue::ENTRY_STATUS_PENDING {
-            return Err(auto_queue_json_error(StatusCode::CONFLICT, Json(json!({"error": "only pending entries can be reprioritized"})),));
+            return Err(auto_queue_json_error(
+                StatusCode::CONFLICT,
+                Json(json!({"error": "only pending entries can be reprioritized"})),
+            ));
         }
 
         let mut tx = match pool.begin().await {
             Ok(tx) => tx,
             Err(error) => {
-                return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("open update_entry transaction: {error}")})),));
+                return Err(auto_queue_json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("open update_entry transaction: {error}")})),
+                ));
             }
         };
         let changed = match sqlx::query(
@@ -230,21 +260,33 @@ pub(super) async fn update_entry_with_pg(
         {
             Ok(result) => result.rows_affected(),
             Err(error) => {
-                return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("update auto-queue entry {id}: {error}")})),));
+                return Err(auto_queue_json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("update auto-queue entry {id}: {error}")})),
+                ));
             }
         };
         if changed == 0 {
-            return Err(auto_queue_json_error(StatusCode::NOT_FOUND, Json(json!({"error": "entry not found or not pending"})),));
+            return Err(auto_queue_json_error(
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "entry not found or not pending"})),
+            ));
         }
 
         if body.thread_group.is_some() {
             if let Err(error) = sync_run_group_metadata_with_pg_tx(&mut tx, &run_id).await {
-                return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": error})),));
+                return Err(auto_queue_json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                ));
             }
         }
 
         if let Err(error) = tx.commit().await {
-            return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("commit update_entry transaction: {error}")})),));
+            return Err(auto_queue_json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("commit update_entry transaction: {error}")})),
+            ));
         }
     }
 
@@ -267,21 +309,33 @@ pub async fn update_entry(
         && body.batch_phase.is_none()
         && body.status.is_none()
     {
-        return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": "no fields to update"})),));
+        return Err(auto_queue_json_error(
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "no fields to update"})),
+        ));
     }
     if let Some(thread_group) = body.thread_group {
         if thread_group < 0 {
-            return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": "thread_group must be >= 0"})),));
+            return Err(auto_queue_json_error(
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "thread_group must be >= 0"})),
+            ));
         }
     }
     if let Some(priority_rank) = body.priority_rank {
         if priority_rank < 0 {
-            return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": "priority_rank must be >= 0"})),));
+            return Err(auto_queue_json_error(
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "priority_rank must be >= 0"})),
+            ));
         }
     }
     if let Some(batch_phase) = body.batch_phase {
         if batch_phase < 0 {
-            return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": "batch_phase must be >= 0"})),));
+            return Err(auto_queue_json_error(
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "batch_phase must be >= 0"})),
+            ));
         }
     }
     let requested_status = match body.status.as_deref().map(str::trim) {
@@ -296,12 +350,18 @@ pub async fn update_entry(
             Some(crate::db::auto_queue::ENTRY_STATUS_DONE)
         }
         Some(crate::db::auto_queue::ENTRY_STATUS_DISPATCHED) => {
-            return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({
+            return Err(auto_queue_json_error(
+                StatusCode::BAD_REQUEST,
+                Json(json!({
                     "error": "manual entry status updates only support pending, skipped, or terminal done reconciliation"
-                })),));
+                })),
+            ));
         }
         Some(other) => {
-            return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": format!("unsupported entry status '{other}'")})),));
+            return Err(auto_queue_json_error(
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("unsupported entry status '{other}'")})),
+            ));
         }
     };
 
@@ -330,29 +390,44 @@ pub(super) async fn add_run_entry_with_pg(
     {
         Ok(row) => row,
         Err(error) => {
-            return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("load auto-queue run '{run_id}': {error}")})),));
+            return Err(auto_queue_json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("load auto-queue run '{run_id}': {error}")})),
+            ));
         }
     };
     let Some(run_row) = run_row else {
-        return Err(auto_queue_json_error(StatusCode::NOT_FOUND, Json(json!({"error": format!("auto-queue run '{run_id}' not found")})),));
+        return Err(auto_queue_json_error(
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("auto-queue run '{run_id}' not found")})),
+        ));
     };
 
     let run_status: String = match run_row.try_get("status") {
         Ok(value) => value,
         Err(error) => {
-            return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("decode auto-queue run status: {error}")})),));
+            return Err(auto_queue_json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("decode auto-queue run status: {error}")})),
+            ));
         }
     };
     let run_repo: Option<String> = match run_row.try_get("repo") {
         Ok(value) => value,
         Err(error) => {
-            return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("decode auto-queue run repo: {error}")})),));
+            return Err(auto_queue_json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("decode auto-queue run repo: {error}")})),
+            ));
         }
     };
     let run_agent_id: Option<String> = match run_row.try_get("agent_id") {
         Ok(value) => value,
         Err(error) => {
-            return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("decode auto-queue run agent: {error}")})),));
+            return Err(auto_queue_json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("decode auto-queue run agent: {error}")})),
+            ));
         }
     };
     if run_status != "active" {
@@ -380,18 +455,24 @@ pub(super) async fn add_run_entry_with_pg(
             }
         };
     let Some(card) = cards_by_issue.get(&body.issue_number) else {
-        return Err(auto_queue_json_error(StatusCode::NOT_FOUND, Json(
+        return Err(auto_queue_json_error(
+            StatusCode::NOT_FOUND,
+            Json(
                 json!({"error": format!("kanban card not found for issue #{}", body.issue_number)}),
-            ),));
+            ),
+        ));
     };
     if card.status != "ready" {
-        return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({
+        return Err(auto_queue_json_error(
+            StatusCode::BAD_REQUEST,
+            Json(json!({
                 "error": format!(
                     "issue #{} must be in ready status to be added to an active run (current={})",
                     body.issue_number,
                     card.status
                 )
-            })),));
+            })),
+        ));
     }
 
     let run_agent = run_agent_id
@@ -405,19 +486,25 @@ pub(super) async fn add_run_entry_with_pg(
         .filter(|value| !value.is_empty());
     match (run_agent, card_agent) {
         (_, None) => {
-            return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({
+            return Err(auto_queue_json_error(
+                StatusCode::BAD_REQUEST,
+                Json(json!({
                     "error": format!("issue #{} has no assigned agent", body.issue_number)
-                })),));
+                })),
+            ));
         }
         (Some(run_agent), Some(card_agent)) if run_agent != card_agent => {
-            return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({
+            return Err(auto_queue_json_error(
+                StatusCode::BAD_REQUEST,
+                Json(json!({
                     "error": format!(
                         "issue #{} is assigned to {}, not the active run agent {}",
                         body.issue_number,
                         card_agent,
                         run_agent
                     )
-                })),));
+                })),
+            ));
         }
         _ => {}
     }
@@ -446,7 +533,10 @@ pub(super) async fn add_run_entry_with_pg(
         }
     };
     let Some(inserted_entry) = inserted.into_iter().next() else {
-        return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "failed to create auto-queue entry"})),));
+        return Err(auto_queue_json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "failed to create auto-queue entry"})),
+        ));
     };
     let entry = state
         .auto_queue_service()
@@ -472,16 +562,25 @@ pub async fn add_run_entry(
     Json(body): Json<AddRunEntryBody>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if body.issue_number <= 0 {
-        return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": "issue_number must be > 0"})),));
+        return Err(auto_queue_json_error(
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "issue_number must be > 0"})),
+        ));
     }
     if let Some(thread_group) = body.thread_group {
         if thread_group < 0 {
-            return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": "thread_group must be >= 0"})),));
+            return Err(auto_queue_json_error(
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "thread_group must be >= 0"})),
+            ));
         }
     }
     let batch_phase = body.batch_phase.unwrap_or(0);
     if batch_phase < 0 {
-        return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": "batch_phase must be >= 0"})),));
+        return Err(auto_queue_json_error(
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "batch_phase must be >= 0"})),
+        ));
     }
     let Some(pg_pool) = state.pg_pool.clone() else {
         return Err(auto_queue_tuple_error(pg_unavailable_response()));
@@ -506,16 +605,25 @@ pub(super) async fn restore_run_with_pg(
     {
         Ok(status) => status,
         Err(error) => {
-            return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("load auto-queue run '{run_id}': {error}")})),));
+            return Err(auto_queue_json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("load auto-queue run '{run_id}': {error}")})),
+            ));
         }
     };
     match run_status.as_deref() {
         None => {
-            return Err(auto_queue_json_error(StatusCode::NOT_FOUND, Json(json!({"error": format!("auto-queue run '{run_id}' not found")})),));
+            return Err(auto_queue_json_error(
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("auto-queue run '{run_id}' not found")})),
+            ));
         }
         Some("cancelled") | Some(RUN_STATUS_RESTORING) => {}
         Some("active") => {
-            return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": format!("auto-queue run '{run_id}' is already active")})),));
+            return Err(auto_queue_json_error(
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("auto-queue run '{run_id}' is already active")})),
+            ));
         }
         Some(status) => {
             return Ok((

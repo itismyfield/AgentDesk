@@ -649,7 +649,7 @@ pub(crate) async fn activate_with_bridge_pg(
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pg_pool) = engine.pg_pool().cloned() else {
         return Err(
-            AppError::internal("postgres pool is not configured").with_code(ErrorCode::AutoQueue),
+            AppError::internal("postgres pool is not configured").with_code(ErrorCode::AutoQueue)
         );
     };
     let deps = AutoQueueActivateDeps {

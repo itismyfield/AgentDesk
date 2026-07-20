@@ -202,10 +202,8 @@ pub async fn violations_route(
     match scan_violations_pg(pool).await {
         Ok(snapshot) => match serde_json::to_value(&snapshot) {
             Ok(value) => Ok((StatusCode::OK, Json(value))),
-            Err(e) => Err(
-                AppError::internal(format!("serialize snapshot: {e}"))
-                    .with_code(ErrorCode::AutoQueue),
-            ),
+            Err(e) => Err(AppError::internal(format!("serialize snapshot: {e}"))
+                .with_code(ErrorCode::AutoQueue)),
         },
         Err(e) => Err(AppError::internal(e).with_code(ErrorCode::AutoQueue)),
     }

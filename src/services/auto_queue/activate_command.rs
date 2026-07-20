@@ -25,7 +25,7 @@ pub(crate) async fn activate_with_deps_pg(
     let _ignored_unified_thread = body.unified_thread.is_some();
     let Some(pool) = deps.pg_pool.as_ref() else {
         return Err(
-            AppError::internal("postgres pool is not configured").with_code(ErrorCode::AutoQueue),
+            AppError::internal("postgres pool is not configured").with_code(ErrorCode::AutoQueue)
         );
     };
     let active_only = body.active_only.unwrap_or(false);
@@ -1916,7 +1916,9 @@ mod tests {
             set_scope_status(&pool, Some("pending")).await;
 
             let deps = make_deps(&pool);
-            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await.expect("activate response");
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body())
+                .await
+                .expect("activate response");
             assert_eq!(status, axum::http::StatusCode::OK);
 
             // The gate fired: the entry was NOT bound to the existing impl dispatch.
@@ -1947,7 +1949,9 @@ mod tests {
             set_scope_status(&pool, Some("completed")).await;
 
             let deps = make_deps(&pool);
-            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await.expect("activate response");
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body())
+                .await
+                .expect("activate response");
             assert_eq!(status, axum::http::StatusCode::OK);
 
             assert_eq!(
@@ -1972,7 +1976,9 @@ mod tests {
             set_scope_status(&pool, None).await;
 
             let deps = make_deps(&pool);
-            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await.expect("activate response");
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body())
+                .await
+                .expect("activate response");
             assert_eq!(status, axum::http::StatusCode::OK);
 
             assert_eq!(
@@ -2037,7 +2043,9 @@ mod tests {
             set_scope_completed_with_depth(&pool, "full").await;
 
             let deps = make_deps(&pool);
-            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await.expect("activate response");
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body())
+                .await
+                .expect("activate response");
             assert_eq!(status, axum::http::StatusCode::OK);
 
             // Depth-aware: a `plan` dispatch was created, NOT a plain impl.
@@ -2074,7 +2082,9 @@ mod tests {
             set_scope_completed_with_depth(&pool, "plan_only").await;
 
             let deps = make_deps(&pool);
-            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await.expect("activate response");
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body())
+                .await
+                .expect("activate response");
             assert_eq!(status, axum::http::StatusCode::OK);
 
             assert_eq!(
@@ -2113,7 +2123,9 @@ mod tests {
             set_scope_completed_with_depth(&pool, "direct").await;
 
             let deps = make_deps(&pool);
-            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await.expect("activate response");
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body())
+                .await
+                .expect("activate response");
             assert_eq!(status, axum::http::StatusCode::OK);
 
             // No plan stage for direct.
@@ -2151,7 +2163,9 @@ mod tests {
             set_scope_completed_with_depth(&pool, "full").await;
 
             let deps = make_deps(&pool);
-            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await.expect("activate response");
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body())
+                .await
+                .expect("activate response");
             assert_eq!(status, axum::http::StatusCode::OK);
 
             // No NEW plan was created — only the pre-existing completed plan remains.
@@ -2190,7 +2204,9 @@ mod tests {
             set_scope_status(&pool, None).await;
 
             let deps = make_deps(&pool);
-            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await.expect("activate response");
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body())
+                .await
+                .expect("activate response");
             assert_eq!(status, axum::http::StatusCode::OK);
 
             assert_eq!(

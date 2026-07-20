@@ -18,10 +18,7 @@ fn auto_queue_tuple_error((status, body): (StatusCode, Json<serde_json::Value>))
     auto_queue_json_error(status, body)
 }
 
-fn auto_queue_json_error(
-    status: StatusCode,
-    Json(body): Json<serde_json::Value>,
-) -> AppError {
+fn auto_queue_json_error(status: StatusCode, Json(body): Json<serde_json::Value>) -> AppError {
     let message = body
         .get("error")
         .and_then(serde_json::Value::as_str)

@@ -17,9 +17,12 @@ pub async fn update_run(
         .is_some_and(|phases| !phases.is_empty())
         && !deploy_phase_api_enabled(&state)
     {
-        return Err(auto_queue_json_error(StatusCode::FORBIDDEN, Json(json!({
+        return Err(auto_queue_json_error(
+            StatusCode::FORBIDDEN,
+            Json(json!({
                 "error": "deploy_phases requires server.auth_token to be configured"
-            })),));
+            })),
+        ));
     }
 
     let Some(pool) = state.pg_pool_ref() else {
@@ -27,7 +30,10 @@ pub async fn update_run(
     };
     if let Some(max_concurrent_threads) = body.max_concurrent_threads {
         if max_concurrent_threads <= 0 {
-            return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": "max_concurrent_threads must be > 0"})),));
+            return Err(auto_queue_json_error(
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "max_concurrent_threads must be > 0"})),
+            ));
         }
     }
 
@@ -37,7 +43,10 @@ pub async fn update_run(
         && body.max_concurrent_threads.is_none()
         && !ignored_unified_thread
     {
-        return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": "no fields to update"})),));
+        return Err(auto_queue_json_error(
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "no fields to update"})),
+        ));
     }
 
     match update_run_with_pg(&id, &body, pool).await {
@@ -48,7 +57,10 @@ pub async fn update_run(
                 "ignored": ignored_unified_thread.then_some(vec!["unified_thread"]),
             })),
         )),
-        Err(error) => Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": error})),)),
+        Err(error) => Err(auto_queue_json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        )),
     }
 }
 
@@ -76,10 +88,14 @@ pub async fn reset_slot_thread(
                 "cleared_bindings": cleared_bindings,
             })),
         )),
-        Err(err) if err.contains("has active dispatch") => {
-            Err(auto_queue_json_error(StatusCode::CONFLICT, Json(json!({"error": err}))))
-        }
-        Err(err) => Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err})),)),
+        Err(err) if err.contains("has active dispatch") => Err(auto_queue_json_error(
+            StatusCode::CONFLICT,
+            Json(json!({"error": err})),
+        )),
+        Err(err) => Err(auto_queue_json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": err})),
+        )),
     }
 }
 
@@ -92,7 +108,10 @@ pub async fn reset(
     let body: ResetBody = match parse_json_body(body, "reset") {
         Ok(parsed) => parsed,
         Err(error) => {
-            return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": error}))));
+            return Err(auto_queue_json_error(
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": error})),
+            ));
         }
     };
 
@@ -104,7 +123,10 @@ pub async fn reset(
     {
         Some(agent_id) => agent_id,
         None => {
-            return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": "agent_id is required for reset"})),));
+            return Err(auto_queue_json_error(
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "agent_id is required for reset"})),
+            ));
         }
     };
 
@@ -113,7 +135,10 @@ pub async fn reset(
     };
     match reset_scoped_with_pg(agent_id, pool).await {
         Ok(response) => Ok((StatusCode::OK, Json(response))),
-        Err(error) => Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": error})),)),
+        Err(error) => Err(auto_queue_json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        )),
     }
 }
 
@@ -126,7 +151,10 @@ pub async fn reset_global(
     let body: ResetGlobalBody = match parse_json_body(body, "reset-global") {
         Ok(parsed) => parsed,
         Err(error) => {
-            return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": error}))));
+            return Err(auto_queue_json_error(
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": error})),
+            ));
         }
     };
 
@@ -136,7 +164,10 @@ pub async fn reset_global(
         .map(str::trim)
         .filter(|value| !value.is_empty());
     if confirmation_token != Some(RESET_GLOBAL_CONFIRMATION_TOKEN) {
-        return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": "confirmation_token is required for reset-global"})),));
+        return Err(auto_queue_json_error(
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "confirmation_token is required for reset-global"})),
+        ));
     }
 
     let Some(pool) = state.pg_pool_ref() else {
@@ -144,7 +175,10 @@ pub async fn reset_global(
     };
     match reset_global_with_pg(pool).await {
         Ok(response) => Ok((StatusCode::OK, Json(response))),
-        Err(error) => Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": error})),)),
+        Err(error) => Err(auto_queue_json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        )),
     }
 }
 
@@ -156,7 +190,10 @@ pub async fn pause(
     let body: PauseBody = match parse_json_body(body, "pause") {
         Ok(parsed) => parsed,
         Err(error) => {
-            return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": error}))));
+            return Err(auto_queue_json_error(
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": error})),
+            ));
         }
     };
     let force = body.force.unwrap_or(false);
@@ -170,7 +207,10 @@ pub async fn pause(
         soft_pause_with_pg(pool).await
     } {
         Ok(response) => Ok((StatusCode::OK, Json(response))),
-        Err(error) => Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": error})),)),
+        Err(error) => Err(auto_queue_json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        )),
     }
 }
 
@@ -188,7 +228,9 @@ pub(super) fn cancel_route_error_response(
 }
 
 /// POST /api/queue/resume — resume paused runs and dispatch next entry
-pub async fn resume_run(State(state): State<AppState>) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+pub async fn resume_run(
+    State(state): State<AppState>,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
         return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
@@ -208,7 +250,10 @@ pub async fn resume_run(State(state): State<AppState>) -> AppResult<(StatusCode,
     {
         Ok(value) => value,
         Err(error) => {
-            return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("count postgres blocked auto-queue runs: {error}")})),));
+            return Err(auto_queue_json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("count postgres blocked auto-queue runs: {error}")})),
+            ));
         }
     };
     let resumed = match sqlx::query(
@@ -228,7 +273,10 @@ pub async fn resume_run(State(state): State<AppState>) -> AppResult<(StatusCode,
     {
         Ok(result) => result.rows_affected() as i64,
         Err(error) => {
-            return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("resume postgres auto-queue runs: {error}")})),));
+            return Err(auto_queue_json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("resume postgres auto-queue runs: {error}")})),
+            ));
         }
     };
 
@@ -800,7 +848,10 @@ pub async fn reorder(
     };
     match reorder_with_pg(&body, pool).await {
         Ok(()) => Ok((StatusCode::OK, Json(json!({ "ok": true })))),
-        Err(error) if error.starts_with("not_found:") => Err(auto_queue_json_error(StatusCode::NOT_FOUND, Json(json!({"error": error.trim_start_matches("not_found:")})),)),
+        Err(error) if error.starts_with("not_found:") => Err(auto_queue_json_error(
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": error.trim_start_matches("not_found:")})),
+        )),
         Err(error)
             if error == "ordered_ids cannot be empty"
                 || error == "no pending entries found for reorder scope"
@@ -808,9 +859,15 @@ pub async fn reorder(
                 || error == "replacement sequence exhausted"
                 || error == "replacement sequence was not fully consumed" =>
         {
-            Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({ "error": error }))))
+            Err(auto_queue_json_error(
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": error })),
+            ))
         }
-        Err(error) => Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": error})),)),
+        Err(error) => Err(auto_queue_json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error})),
+        )),
     }
 }
 

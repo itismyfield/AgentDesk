@@ -6,8 +6,8 @@ use axum::{
 };
 
 use super::AppState;
-use crate::{api_caller_observability::RequestPrincipal, error::AppResult};
 use crate::services::auto_queue::route;
+use crate::{api_caller_observability::RequestPrincipal, error::AppResult};
 
 #[allow(unused_imports)]
 pub use route::{
@@ -107,7 +107,10 @@ pub async fn reset_slot_thread(
     route::reset_slot_thread(state, slot).await
 }
 
-pub async fn reset(state: State<AppState>, body: Bytes) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+pub async fn reset(
+    state: State<AppState>,
+    body: Bytes,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     route::reset(state, body).await
 }
 
@@ -118,11 +121,16 @@ pub async fn reset_global(
     route::reset_global(state, body).await
 }
 
-pub async fn pause(state: State<AppState>, body: Bytes) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+pub async fn pause(
+    state: State<AppState>,
+    body: Bytes,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     route::pause(state, body).await
 }
 
-pub async fn resume_run(state: State<AppState>) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+pub async fn resume_run(
+    state: State<AppState>,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     route::resume_run(state).await
 }
 
