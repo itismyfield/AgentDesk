@@ -11,6 +11,7 @@ use axum::{
 };
 use serde_json::{Value, json};
 
+use crate::error::{AppError, AppResult};
 use crate::server::routes::AppState;
 use crate::services::dispatches::LinkDispatchThreadBody;
 use crate::services::dispatches::thread_reuse::{
@@ -18,22 +19,14 @@ use crate::services::dispatches::thread_reuse::{
     get_pending_dispatch_for_thread_pg, link_dispatch_thread_pg,
 };
 
-fn postgres_pool_unavailable() -> (StatusCode, Json<Value>) {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": "postgres pool unavailable"})),
-    )
+fn postgres_pool_unavailable() -> AppError {
+    AppError::internal("postgres pool unavailable")
 }
 
-fn thread_reuse_error_response(error: DispatchThreadReuseError) -> (StatusCode, Json<Value>) {
+fn thread_reuse_error_response(error: DispatchThreadReuseError) -> AppError {
     match error {
-        DispatchThreadReuseError::NotFound(message) => {
-            (StatusCode::NOT_FOUND, Json(json!({"error": message})))
-        }
-        DispatchThreadReuseError::Internal(message) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": message})),
-        ),
+        DispatchThreadReuseError::NotFound(message) => AppError::not_found(message),
+        DispatchThreadReuseError::Internal(message) => AppError::internal(message),
     }
 }
 
@@ -44,10 +37,8 @@ fn thread_reuse_error_response(error: DispatchThreadReuseError) -> (StatusCode, 
 pub async fn link_dispatch_thread(
     State(state): State<AppState>,
     Json(body): Json<LinkDispatchThreadBody>,
-) -> (StatusCode, Json<Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return postgres_pool_unavailable();
-    };
+) -> AppResult<(StatusCode, Json<Value>)> {
+    let pool = state.pg_pool_ref().ok_or_else(postgres_pool_unavailable)?;
 
     let input = LinkDispatchThreadInput {
         dispatch_id: body.dispatch_id,
@@ -55,11 +46,11 @@ pub async fn link_dispatch_thread(
         channel_id: body.channel_id,
     };
     match link_dispatch_thread_pg(pool, input).await {
-        Ok(outcome) => (
+        Ok(outcome) => Ok((
             StatusCode::OK,
             Json(json!({"ok": true, "card_id": outcome.card_id})),
-        ),
-        Err(error) => thread_reuse_error_response(error),
+        )),
+        Err(error) => Err(thread_reuse_error_response(error)),
     }
 }
 
@@ -68,23 +59,16 @@ pub async fn link_dispatch_thread(
 pub async fn get_card_thread(
     State(state): State<AppState>,
     Query(params): Query<std::collections::HashMap<String, String>>,
-) -> (StatusCode, Json<Value>) {
+) -> AppResult<(StatusCode, Json<Value>)> {
     let dispatch_id = match params.get("dispatch_id") {
         Some(id) => id,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "dispatch_id required"})),
-            );
-        }
+        None => return Err(AppError::bad_request("dispatch_id required")),
     };
 
-    let Some(pool) = state.pg_pool_ref() else {
-        return postgres_pool_unavailable();
-    };
+    let pool = state.pg_pool_ref().ok_or_else(postgres_pool_unavailable)?;
 
     match get_card_thread_pg(pool, dispatch_id).await {
-        Ok(outcome) => (
+        Ok(outcome) => Ok((
             StatusCode::OK,
             Json(json!({
                 "card_id": outcome.card_id,
@@ -101,8 +85,8 @@ pub async fn get_card_thread(
                 "discord_channel_target": outcome.discord_channel_target,
                 "dispatch_context": outcome.dispatch_context,
             })),
-        ),
-        Err(error) => thread_reuse_error_response(error),
+        )),
+        Err(error) => Err(thread_reuse_error_response(error)),
     }
 }
 
@@ -115,27 +99,17 @@ pub async fn get_card_thread(
 pub async fn get_pending_dispatch_for_thread(
     State(state): State<AppState>,
     Query(params): Query<std::collections::HashMap<String, String>>,
-) -> (StatusCode, Json<Value>) {
+) -> AppResult<(StatusCode, Json<Value>)> {
     let thread_id = match params.get("thread_id") {
         Some(id) => id,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "thread_id required"})),
-            );
-        }
+        None => return Err(AppError::bad_request("thread_id required")),
     };
 
-    let Some(pool) = state.pg_pool_ref() else {
-        return postgres_pool_unavailable();
-    };
+    let pool = state.pg_pool_ref().ok_or_else(postgres_pool_unavailable)?;
 
     match get_pending_dispatch_for_thread_pg(pool, thread_id).await {
-        Ok(Some(id)) => (StatusCode::OK, Json(json!({"dispatch_id": id}))),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "no pending dispatch for thread"})),
-        ),
-        Err(error) => thread_reuse_error_response(error),
+        Ok(Some(id)) => Ok((StatusCode::OK, Json(json!({"dispatch_id": id})))),
+        Ok(None) => Err(AppError::not_found("no pending dispatch for thread")),
+        Err(error) => Err(thread_reuse_error_response(error)),
     }
 }

@@ -845,7 +845,8 @@ pub(crate) async fn cmd_discord_read(
         Path(channel_id.to_string()),
         Query(query),
     )
-    .await;
+    .await
+    .map_err(|error| error.message().to_string())?;
     let value = route_json(status, body)?;
     print_json(&value);
     Ok(())

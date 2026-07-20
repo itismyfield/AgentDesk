@@ -30,6 +30,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::app_state::AppState;
+use crate::error::{AppError, AppResult};
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const ONBOARDING_DRAFT_VERSION: u8 = 1;
@@ -262,26 +263,17 @@ fn onboarding_draft_secret_policy_value() -> serde_json::Value {
 
 /// GET /api/onboarding/status
 /// Returns whether onboarding is complete + existing config values.
-pub async fn status(state: &AppState) -> (StatusCode, Json<serde_json::Value>) {
+pub async fn status(state: &AppState) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Some(pool) = state.pg_pool_ref() {
-        return match status_pg(pool).await {
-            Ok(value) => (StatusCode::OK, Json(value)),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            ),
-        };
+        return status_pg(pool)
+            .await
+            .map(|value| (StatusCode::OK, Json(value)))
+            .map_err(AppError::internal);
     }
 
-    {
-        return match status_config() {
-            Ok(value) => (StatusCode::OK, Json(value)),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            ),
-        };
-    }
+    status_config()
+        .map(|value| (StatusCode::OK, Json(value)))
+        .map_err(AppError::internal)
 }
 
 pub(super) async fn pg_kv_value(pool: &sqlx::PgPool, key: &str) -> Result<Option<String>, String> {
@@ -453,15 +445,12 @@ fn status_config() -> Result<serde_json::Value, String> {
 
 /// GET /api/onboarding/draft
 /// Returns the in-progress onboarding draft, distinct from completed setup summary.
-pub async fn draft_get(state: &AppState) -> (StatusCode, Json<serde_json::Value>) {
+pub async fn draft_get(state: &AppState) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let completed = if let Some(pool) = state.pg_pool_ref() {
         match onboarding_has_agents_pg(pool).await {
             Ok(completed) => completed,
             Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
+                return Err(AppError::internal(error));
             }
         }
     } else {
@@ -474,35 +463,17 @@ pub async fn draft_get(state: &AppState) -> (StatusCode, Json<serde_json::Value>
         }
     };
 
-    let Some(root) = crate::cli::agentdesk_runtime_root() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "cannot determine runtime root"})),
-        );
-    };
+    let root = crate::cli::agentdesk_runtime_root()
+        .ok_or_else(|| AppError::internal("cannot determine runtime root"))?;
 
-    let draft = match load_onboarding_draft(&root) {
-        Ok(draft) => draft,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
-        }
-    }
-    .map(OnboardingDraft::redact_secrets);
-    let completion_state = match load_onboarding_completion_state(&root) {
-        Ok(state) => state,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
-        }
-    };
+    let draft = load_onboarding_draft(&root)
+        .map_err(AppError::internal)?
+        .map(OnboardingDraft::redact_secrets);
+    let completion_state =
+        load_onboarding_completion_state(&root).map_err(AppError::internal)?;
     let available = draft.is_some();
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "available": available,
@@ -513,42 +484,27 @@ pub async fn draft_get(state: &AppState) -> (StatusCode, Json<serde_json::Value>
             "completion_state": onboarding_completion_state_value(completion_state.as_ref()),
             "secret_policy": onboarding_draft_secret_policy_value(),
         })),
-    )
+    ))
 }
 
 /// PUT /api/onboarding/draft
 /// Persists the in-progress onboarding draft required to resume across browsers.
-pub async fn draft_put(body: OnboardingDraft) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(root) = crate::cli::agentdesk_runtime_root() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "cannot determine runtime root"})),
-        );
-    };
+pub async fn draft_put(
+    body: OnboardingDraft,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let root = crate::cli::agentdesk_runtime_root()
+        .ok_or_else(|| AppError::internal("cannot determine runtime root"))?;
 
-    if let Err(error) = crate::runtime_layout::ensure_runtime_layout(&root) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("failed to prepare runtime layout: {error}")})),
-        );
-    }
+    crate::runtime_layout::ensure_runtime_layout(&root).map_err(|error| {
+        AppError::internal(format!("failed to prepare runtime layout: {error}"))
+    })?;
 
-    let draft = match body.normalize() {
-        Ok(draft) => draft,
-        Err(error) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
-        }
-    };
+    let draft = body.normalize().map_err(AppError::bad_request)?;
     let draft = draft.redact_secrets();
 
-    if let Err(error) = save_onboarding_draft(&root, &draft) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        );
-    }
+    save_onboarding_draft(&root, &draft).map_err(AppError::internal)?;
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "ok": true,
@@ -556,34 +512,25 @@ pub async fn draft_put(body: OnboardingDraft) -> (StatusCode, Json<serde_json::V
             "draft": draft,
             "secret_policy": onboarding_draft_secret_policy_value(),
         })),
-    )
+    ))
 }
 
 /// DELETE /api/onboarding/draft
 /// Explicitly removes the in-progress onboarding draft.
-pub async fn draft_delete() -> (StatusCode, Json<serde_json::Value>) {
-    let Some(root) = crate::cli::agentdesk_runtime_root() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "cannot determine runtime root"})),
-        );
-    };
+pub async fn draft_delete() -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let root = crate::cli::agentdesk_runtime_root()
+        .ok_or_else(|| AppError::internal("cannot determine runtime root"))?;
 
-    if let Err(error) = clear_onboarding_draft(&root) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        );
-    }
+    clear_onboarding_draft(&root).map_err(AppError::internal)?;
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "ok": true,
             "available": false,
             "secret_policy": onboarding_draft_secret_policy_value(),
         })),
-    )
+    ))
 }
 
 // Discord token / channel discovery handlers moved to `channel` submodule.

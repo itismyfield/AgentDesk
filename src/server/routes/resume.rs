@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::AppState;
+use crate::error::{AppError, AppResult, ErrorCode};
 
 #[derive(Debug)]
 struct ResumeCardSnapshot {
@@ -210,7 +211,7 @@ pub async fn resume_card(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<ResumeCardBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let force = body.force.unwrap_or(false);
     let reason = body.reason.unwrap_or_else(|| "manual resume".to_string());
 
@@ -219,34 +220,20 @@ pub async fn resume_card(
     let id = match resolve_resume_card_id_pg_first(&state, &id) {
         Ok(Some(card_id)) => card_id,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": format!("no card found for issue #{requested_id}")})),
-            );
+            return Err(AppError::not_found(format!(
+                "no card found for issue #{requested_id}"
+            )));
         }
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
-        }
+        Err(error) => return Err(AppError::internal(error)),
     };
 
     // 1. Load card state
     let card = match load_resume_card_snapshot_pg_first(&state, &id) {
         Ok(Some(card)) => card,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "card not found"})),
-            );
+            return Err(AppError::not_found("card not found"));
         }
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
-        }
+        Err(error) => return Err(AppError::internal(error)),
     };
     let status = card.status.clone();
     let review_status = card.review_status.clone();
@@ -262,12 +249,7 @@ pub async fn resume_card(
         card.assigned_agent_id.as_deref(),
     ) {
         Ok(pipeline) => pipeline,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
-        }
+        Err(error) => return Err(AppError::internal(error)),
     };
     if effective.is_terminal(&status) {
         return (
@@ -280,15 +262,10 @@ pub async fn resume_card(
     if !force {
         let active_dispatch = match load_active_dispatch_pg_first(&state, &id) {
             Ok(dispatch) => dispatch,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
-            }
+            Err(error) => return Err(AppError::internal(error)),
         };
         if let Some((active_id, active_status)) = active_dispatch {
-            return (
+            return Ok((
                 StatusCode::OK,
                 Json(json!({
                     "action": "noop",
@@ -296,16 +273,17 @@ pub async fn resume_card(
                     "dispatch_id": active_id,
                     "dispatch_status": active_status,
                 })),
-            );
+            ));
         }
     }
 
     // 4. No assigned agent → cannot create dispatch
     if agent_id.is_empty() {
-        return (
+        return Err(AppError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"error": "card has no assigned agent — cannot create dispatch"})),
-        );
+            ErrorCode::Validation,
+            "card has no assigned agent — cannot create dispatch",
+        ));
     }
 
     // 5. Determine resume action based on current state
@@ -326,12 +304,9 @@ pub async fn resume_card(
     match resume_result {
         Ok(action) => {
             // Return updated card + action taken
-            let Some(pool) = state.pg_pool_ref() else {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": "postgres pool unavailable"})),
-                );
-            };
+            let pool = state
+                .pg_pool_ref()
+                .ok_or_else(|| AppError::internal("postgres pool unavailable"))?;
             match super::kanban::load_card_json_pg(pool, &id).await {
                 Ok(Some(card)) => {
                     crate::server::ws::emit_event(
@@ -339,25 +314,16 @@ pub async fn resume_card(
                         "kanban_card_updated",
                         card.clone(),
                     );
-                    (
+                    Ok((
                         StatusCode::OK,
                         Json(json!({"card": card, "action": action})),
-                    )
+                    ))
                 }
-                Ok(None) => (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "card not found after resume"})),
-                ),
-                Err(error) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                ),
+                Ok(None) => Err(AppError::not_found("card not found after resume")),
+                Err(error) => Err(AppError::internal(error)),
             }
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
-        ),
+        Err(error) => Err(AppError::internal(error)),
     }
 }
 
