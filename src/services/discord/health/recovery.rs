@@ -4603,12 +4603,17 @@ mod stall_watchdog_auto_heal_tests {
         );
     }
 
-    /// #4615: in the pre-backstop window, capture advancement alone must keep
-    /// the force-clean/page guard closed when every stateless signal is stale.
-    /// Replacing `capture_assessment.advancing` with `false` makes the alert-row
-    /// assertion fail because the pass pages this otherwise live producer.
+    /// #4615: in the pre-backstop window, capture advancement is intentionally
+    /// defense-in-depth: it closes the early `should_clean` gate, while the
+    /// secondary liveness evaluation can independently defer from the recorded
+    /// advance history. This integration test proves the combined suppression,
+    /// not isolation of the early wire. The opposite stuck-true mutation is
+    /// guarded by `pre_backstop_flat_capture_pages_genuine_stall_pg`; direct
+    /// early-gate semantics remain covered by
+    /// `stall_watchdog_capture_advancing_blocks_force_clean`, and secondary
+    /// history by the stall-liveness first-threshold regression.
     #[tokio::test(flavor = "current_thread")]
-    async fn pre_backstop_capture_advance_suppresses_page_pg() {
+    async fn pre_backstop_capture_advance_has_defense_in_depth_suppression_pg() {
         let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
             "agentdesk_stall_watchdog_producer_live",
             "stall watchdog producer-live suppression tests",
