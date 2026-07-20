@@ -376,7 +376,7 @@ pub(super) async fn add_run_entry_with_pg(
                 } else {
                     StatusCode::BAD_REQUEST
                 };
-                return (status, Json(json!({"error": err})));
+                return Err(auto_queue_json_error(status, Json(json!({"error": err}))));
             }
         };
     let Some(card) = cards_by_issue.get(&body.issue_number) else {
