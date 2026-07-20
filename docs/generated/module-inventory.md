@@ -1025,11 +1025,11 @@
 | `services::platform::tmux::availability` | `src/services/platform/tmux/availability.rs` | 269 | 136 | 133 |  |
 | `services::pr_summary` | `src/services/pr_summary.rs` | 542 | 321 | 221 |  |
 | `services::process` | `src/services/process.rs` | 1252 | 782 | 470 |  |
-| `services::provider` | `src/services/provider.rs` | 2479 | 1864 | 615 | giant-file |
+| `services::provider` | `src/services/provider.rs` | 2475 | 1860 | 615 | giant-file |
 | `services::provider::cancel_token_claude_interrupt` | `src/services/provider/cancel_token_claude_interrupt.rs` | 366 | 169 | 197 |  |
 | `services::provider::cancel_token_cleanup` | `src/services/provider/cancel_token_cleanup.rs` | 4 | 4 | 0 |  |
 | `services::provider::cancel_token_cleanup::authority` | `src/services/provider/cancel_token_cleanup/authority.rs` | 248 | 156 | 92 |  |
-| `services::provider::cancel_token_cleanup::target` | `src/services/provider/cancel_token_cleanup/target.rs` | 17 | 17 | 0 |  |
+| `services::provider::cancel_token_cleanup::target` | `src/services/provider/cancel_token_cleanup/target.rs` | 19 | 19 | 0 |  |
 | `services::provider_auth` | `src/services/provider_auth.rs` | 628 | 400 | 228 |  |
 | `services::provider_cli` | `src/services/provider_cli/mod.rs` | 21 | 21 | 0 |  |
 | `services::provider_cli::canary` | `src/services/provider_cli/canary.rs` | 86 | 86 | 0 |  |
