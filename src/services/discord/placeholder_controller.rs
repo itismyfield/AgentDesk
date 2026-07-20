@@ -304,8 +304,9 @@ impl PlaceholderController {
         let mut guarded = incarnation.slot.state.lock().await;
         guarded.revoked = true;
         drop(guarded);
-        self.entries
-            .remove_if(&incarnation.key, |_, current| Arc::ptr_eq(current, &incarnation.slot));
+        self.entries.remove_if(&incarnation.key, |_, current| {
+            Arc::ptr_eq(current, &incarnation.slot)
+        });
     }
 
     /// Sweep entries whose state is terminal (Completed/TimedOut/Aborted) or
@@ -874,7 +875,10 @@ mod edit_retry_tests {
             async move { controller.revoke_incarnation(&old).await }
         });
         tokio::task::yield_now().await;
-        assert!(!revoke.is_finished(), "revoke must wait for the admitted PATCH");
+        assert!(
+            !revoke.is_finished(),
+            "revoke must wait for the admitted PATCH"
+        );
 
         gateway.release_edit();
         assert_eq!(edit.await.unwrap(), PlaceholderControllerOutcome::Edited);
@@ -899,7 +903,11 @@ mod edit_retry_tests {
             &replacement.slot
         ));
         assert!(!controller.entries.contains_key(&other_key));
-        assert_eq!(controller.entries.len(), 1, "stale capability must not recreate");
+        assert_eq!(
+            controller.entries.len(),
+            1,
+            "stale capability must not recreate"
+        );
     }
 
     #[tokio::test]
