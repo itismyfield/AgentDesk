@@ -1026,7 +1026,7 @@
 | `services::platform::tmux::availability` | `src/services/platform/tmux/availability.rs` | 269 | 136 | 133 |  |
 | `services::pr_summary` | `src/services/pr_summary.rs` | 542 | 321 | 221 |  |
 | `services::process` | `src/services/process.rs` | 1252 | 782 | 470 |  |
-| `services::provider` | `src/services/provider.rs` | 2455 | 1840 | 615 | giant-file |
+| `services::provider` | `src/services/provider.rs` | 2527 | 1859 | 668 | giant-file |
 | `services::provider::cancel_token_claude_interrupt` | `src/services/provider/cancel_token_claude_interrupt.rs` | 366 | 169 | 197 |  |
 | `services::provider::cancel_token_cleanup` | `src/services/provider/cancel_token_cleanup.rs` | 5 | 5 | 0 |  |
 | `services::provider::cancel_token_cleanup::authority` | `src/services/provider/cancel_token_cleanup/authority.rs` | 209 | 141 | 68 |  |
