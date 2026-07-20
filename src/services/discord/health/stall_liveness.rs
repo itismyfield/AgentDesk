@@ -376,8 +376,8 @@ pub(super) fn stall_watchdog_capture_offset_advancing(
     snapshot: &WatcherStateSnapshot,
     now_unix_secs: i64,
     now_mono_secs: i64,
-) -> super::liveness_authority::CaptureAssessment {
-    super::liveness_authority::observe_capture_coordinate(
+) -> crate::services::discord::health::liveness_authority::CaptureAssessment {
+    crate::services::discord::health::liveness_authority::observe_capture_coordinate(
         provider,
         channel_id,
         snapshot,
@@ -451,7 +451,11 @@ pub(super) fn clear_stall_watchdog_liveness_state(
 ) {
     let probe = StallLivenessKey::new(provider, channel_id, tmux_session, None, None);
     OFFSET_OBSERVATIONS.retain(|key, _| !key.matches_session(&probe));
-    super::liveness_authority::clear_capture_state_for_session(provider, channel_id, tmux_session);
+    crate::services::discord::health::liveness_authority::clear_capture_state_for_session(
+        provider,
+        channel_id,
+        tmux_session,
+    );
     #[cfg(test)]
     CAPTURE_OFFSET_WATCHDOG_STATE.retain(|key, _| !key.matches_session(&probe));
     redrive_grace::clear_for_session(&probe);
@@ -473,7 +477,10 @@ pub(super) fn gc_stall_watchdog_liveness_state(now_unix_secs: i64) {
     OFFSET_OBSERVATIONS.retain(|_, observation| {
         !liveness_state_expired(observation.last_updated_unix_secs, now_unix_secs)
     });
-    super::liveness_authority::gc_capture_state(now_unix_secs, STALL_LIVENESS_STATE_TTL_SECS);
+    crate::services::discord::health::liveness_authority::gc_capture_state(
+        now_unix_secs,
+        STALL_LIVENESS_STATE_TTL_SECS,
+    );
     #[cfg(test)]
     CAPTURE_OFFSET_WATCHDOG_STATE
         .retain(|_, state| !liveness_state_expired(state.last_updated_unix_secs, now_unix_secs));
@@ -748,7 +755,7 @@ fn capture_watchdog_advanced_age_secs(
     snapshot: &WatcherStateSnapshot,
     now_unix_secs: i64,
 ) -> Option<u64> {
-    super::liveness_authority::capture_advanced_age_secs(
+    crate::services::discord::health::liveness_authority::capture_advanced_age_secs(
         &key.provider,
         ChannelId::new(key.channel_id),
         snapshot,
@@ -1100,16 +1107,17 @@ mod tests {
             inflight_state_present: true,
             last_relay_ts_ms: 1_700_000_000_000,
             last_capture_offset: capture_offset,
-            capture_coordinate: super::liveness_authority::CaptureCoordinateObservation {
-                offset: capture_offset,
-                path_hash: 0,
-                file_id: None,
-                status: if capture_offset.is_some() {
-                    super::liveness_authority::CoordinateStatus::Observed
-                } else {
-                    super::liveness_authority::CoordinateStatus::Missing
+            capture_coordinate:
+                crate::services::discord::health::liveness_authority::CaptureCoordinateObservation {
+                    offset: capture_offset,
+                    path_hash: 0,
+                    file_id: None,
+                    status: if capture_offset.is_some() {
+                        crate::services::discord::health::liveness_authority::CoordinateStatus::Observed
+                    } else {
+                        crate::services::discord::health::liveness_authority::CoordinateStatus::Missing
+                    },
                 },
-            },
             unread_bytes: capture_offset.map(|offset| offset.saturating_sub(10)),
             desynced: true,
             reconnect_count: 0,
