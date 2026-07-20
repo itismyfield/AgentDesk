@@ -1203,6 +1203,8 @@ src/
 │   ├── long_turn_watchdog.rs
 │   ├── mcp_config.rs
 │   ├── message_outbox.rs
+│   ├── message_outbox_circuit_authority.rs
+│   ├── message_outbox_circuit_authority_tests.rs
 │   ├── message_outbox_recovery.rs
 │   ├── message_outbox_recovery_support.rs
 │   ├── message_outbox_recovery_tests.rs
