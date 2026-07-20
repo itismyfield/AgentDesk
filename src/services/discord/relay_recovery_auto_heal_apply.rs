@@ -90,36 +90,37 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
 
     let mut reserved_episode = None;
     if circuit_breaker::should_use_durable_circuit(decision.action, source) {
-        match circuit_breaker::reserve_current_episode(
+        let reservation = circuit_breaker::reserve_current_episode(
             provider,
             &decision,
             decision.auto_heal.max_attempts_per_window,
-        ) {
+        );
+        for staged_alert_id in
+            circuit_breaker::load_orphaned_staged_alert_ids(provider, decision.channel_id)
+        {
+            match alert_enqueue
+                .cancel(shared.pg_pool.as_ref(), staged_alert_id)
+                .await
+            {
+                Ok(()) => circuit_breaker::acknowledge_orphaned_staged_alert_cleanup(
+                    provider,
+                    decision.channel_id,
+                    staged_alert_id,
+                ),
+                Err(error) => tracing::warn!(
+                    target: "agentdesk::discord::relay_recovery",
+                    provider = provider.as_str(),
+                    channel_id = decision.channel_id,
+                    staged_alert_id,
+                    error = %error,
+                    "relay reattach circuit orphaned held alert cleanup will retry"
+                ),
+            }
+        }
+        match reservation {
             circuit_breaker::CircuitReservation::Reserved {
-                attempt,
-                episode,
-                orphaned_staged_alert_ids,
+                attempt, episode, ..
             } => {
-                for staged_alert_id in orphaned_staged_alert_ids {
-                    match alert_enqueue
-                        .cancel(shared.pg_pool.as_ref(), staged_alert_id)
-                        .await
-                    {
-                        Ok(()) => circuit_breaker::acknowledge_orphaned_staged_alert_cleanup(
-                            provider,
-                            decision.channel_id,
-                            staged_alert_id,
-                        ),
-                        Err(error) => tracing::warn!(
-                            target: "agentdesk::discord::relay_recovery",
-                            provider = provider.as_str(),
-                            channel_id = decision.channel_id,
-                            staged_alert_id,
-                            error = %error,
-                            "relay reattach circuit orphaned held alert cleanup will retry"
-                        ),
-                    }
-                }
                 tracing::info!(
                     target: "agentdesk::discord::relay_recovery",
                     provider = provider.as_str(),
@@ -135,28 +136,6 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
                 episode,
                 reasons_csv,
             } => {
-                for staged_alert_id in
-                    circuit_breaker::load_orphaned_staged_alert_ids(provider, decision.channel_id)
-                {
-                    match alert_enqueue
-                        .cancel(shared.pg_pool.as_ref(), staged_alert_id)
-                        .await
-                    {
-                        Ok(()) => circuit_breaker::acknowledge_orphaned_staged_alert_cleanup(
-                            provider,
-                            decision.channel_id,
-                            staged_alert_id,
-                        ),
-                        Err(error) => tracing::warn!(
-                            target: "agentdesk::discord::relay_recovery",
-                            provider = provider.as_str(),
-                            channel_id = decision.channel_id,
-                            staged_alert_id,
-                            error = %error,
-                            "relay reattach circuit orphaned held alert cleanup will retry"
-                        ),
-                    }
-                }
                 tracing::info!(
                     target: "agentdesk::discord::relay_recovery",
                     provider = provider.as_str(),

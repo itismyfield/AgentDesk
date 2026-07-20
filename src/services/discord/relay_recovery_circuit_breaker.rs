@@ -189,7 +189,20 @@ fn load_record(path: &Path) -> Result<Option<CircuitRecord>, String> {
     }
 }
 
+#[cfg(test)]
+static FAIL_NEXT_PERSIST_PATH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
 fn persist_record(path: &Path, record: &CircuitRecord) -> Result<(), String> {
+    #[cfg(test)]
+    {
+        let mut fail_path = FAIL_NEXT_PERSIST_PATH
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if fail_path.as_deref() == Some(path) {
+            *fail_path = None;
+            return Err("injected circuit persist failure".to_string());
+        }
+    }
     let json = serde_json::to_string_pretty(record).map_err(|error| error.to_string())?;
     super::super::runtime_store::atomic_write(path, &json)
 }
@@ -421,6 +434,12 @@ pub(super) fn reserve_current_episode(
     )
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpenAlertCasOutcome {
+    Activate,
+    Cancel,
+}
+
 fn open_alert_cas_in_root_with_authority(
     root: &Path,
     provider: &ProviderKind,
@@ -431,21 +450,21 @@ fn open_alert_cas_in_root_with_authority(
     staged_alert_id: i64,
     authority: &dyn LivenessAuthorityRead,
     now_mono_secs: i64,
-) -> bool {
+) -> OpenAlertCasOutcome {
     let path = circuit_path(root, provider, channel_id);
     let Ok(_lock) = lock_path(&path) else {
-        return false;
+        return OpenAlertCasOutcome::Cancel;
     };
     let Ok(Some(mut record)) = load_record(&path) else {
-        return false;
+        return OpenAlertCasOutcome::Cancel;
     };
     let Some(authoritative) =
         super::super::inflight::load_inflight_state_read_only(provider, channel_id)
     else {
-        return false;
+        return OpenAlertCasOutcome::Cancel;
     };
     if RelayReattachEpisode::from_state(&authoritative) != *expected {
-        return false;
+        return OpenAlertCasOutcome::Cancel;
     }
     if matches!(
         authority.vouch_for_inflight(
@@ -456,17 +475,15 @@ fn open_alert_cas_in_root_with_authority(
         ),
         LivenessVouch::Vouched { .. } | LivenessVouch::DeferTransient { .. }
     ) {
-        // The caller will cancel this held row. Revoke the matching local
-        // obligation before returning so a later NotVouched pass stages a
-        // fresh alert instead of resuming the canceled id for one pass.
+        // The caller always cancels this held row. Best-effort local clearing
+        // avoids a stale resume latch; cancellation completion retries the same
+        // transition and retains a durable orphan on any remaining ambiguity.
         if record.alert_queued && record.staged_alert_id == Some(staged_alert_id) {
             record.alert_queued = false;
             record.staged_alert_id = None;
-            if persist_record(&path, &record).is_err() {
-                return true;
-            }
+            let _ = persist_record(&path, &record);
         }
-        return false;
+        return OpenAlertCasOutcome::Cancel;
     }
     if record.version != CIRCUIT_VERSION
         || record.episode_key != open.episode_key
@@ -474,7 +491,7 @@ fn open_alert_cas_in_root_with_authority(
         || record.open_generation != open.generation
         || record.attempts < max_attempts
     {
-        return false;
+        return OpenAlertCasOutcome::Cancel;
     }
     let frontier = effective_frontier(&authoritative, 0);
     if frontier > open.baseline_relay_offset {
@@ -488,14 +505,22 @@ fn open_alert_cas_in_root_with_authority(
         }
         record.open_generation = record.open_generation.saturating_add(1).max(1);
         let _ = persist_record(&path, &record);
-        return false;
+        return OpenAlertCasOutcome::Cancel;
     }
     if !record.alert_queued {
         record.alert_queued = true;
         record.staged_alert_id = Some(staged_alert_id);
-        return persist_record(&path, &record).is_ok();
+        return if persist_record(&path, &record).is_ok() {
+            OpenAlertCasOutcome::Activate
+        } else {
+            OpenAlertCasOutcome::Cancel
+        };
     }
-    record.staged_alert_id == Some(staged_alert_id)
+    if record.staged_alert_id == Some(staged_alert_id) {
+        OpenAlertCasOutcome::Activate
+    } else {
+        OpenAlertCasOutcome::Cancel
+    }
 }
 
 #[cfg(test)]
@@ -518,7 +543,7 @@ fn open_alert_cas_in_root(
         staged_alert_id,
         &ProcessLocalLivenessAuthority,
         monotonic_now_secs(),
-    )
+    ) == OpenAlertCasOutcome::Activate
 }
 
 fn complete_staged_alert_if_matches(
@@ -543,6 +568,36 @@ fn complete_staged_alert_if_matches(
     {
         record.staged_alert_id = None;
         let _ = persist_record(&path, &record);
+    }
+}
+
+fn clear_canceled_staged_alert_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    staged_alert_id: i64,
+) {
+    let path = circuit_path(root, provider, channel_id);
+    let Ok(_lock) = lock_path(&path) else {
+        return;
+    };
+    let Ok(Some(mut record)) = load_record(&path) else {
+        return;
+    };
+    let mut changed = false;
+    if record.staged_alert_id == Some(staged_alert_id) {
+        record.alert_queued = false;
+        record.staged_alert_id = None;
+        changed = true;
+    }
+    let before = record.orphaned_staged_alert_ids.len();
+    record
+        .orphaned_staged_alert_ids
+        .retain(|id| *id != staged_alert_id);
+    changed |= record.orphaned_staged_alert_ids.len() != before;
+    if changed && persist_record(&path, &record).is_err() {
+        drop(_lock);
+        retain_orphaned_staged_alert_for_cleanup(root, provider, channel_id, staged_alert_id);
     }
 }
 
@@ -825,7 +880,7 @@ async fn queue_or_resume_open_alert_with_enqueue_in_root(
     let validate_open = open.clone();
     let validate_channel_id = channel_id.get();
     let validate_authority = authority.clone();
-    let valid = tokio::task::spawn_blocking(move || {
+    let outcome = tokio::task::spawn_blocking(move || {
         super::super::inflight::lock_inflight_episode(
             &validate_provider,
             validate_channel_id,
@@ -850,8 +905,8 @@ async fn queue_or_resume_open_alert_with_enqueue_in_root(
         })
     })
     .await
-    .unwrap_or(false);
-    if valid {
+    .unwrap_or(OpenAlertCasOutcome::Cancel);
+    if outcome == OpenAlertCasOutcome::Activate {
         match enqueue.activate(shared.pg_pool.as_ref(), staged_id).await {
             Ok(true) => {
                 complete_staged_alert_if_matches(&root, provider, channel_id.get(), open, staged_id)
@@ -877,16 +932,31 @@ async fn queue_or_resume_open_alert_with_enqueue_in_root(
                 );
             }
         }
-    } else if let Err(error) = enqueue.cancel(shared.pg_pool.as_ref(), staged_id).await {
-        retain_orphaned_staged_alert_for_cleanup(&root, provider, channel_id.get(), staged_id);
-        tracing::warn!(
-            target: "agentdesk::discord::relay_recovery",
-            provider = provider.as_str(),
-            channel_id = channel_id.get(),
-            staged_id,
-            error = %error,
-            "stale relay reattach circuit held alert cancellation failed; durable cleanup retained"
-        );
+    } else {
+        match enqueue.cancel(shared.pg_pool.as_ref(), staged_id).await {
+            Ok(()) => clear_canceled_staged_alert_in_root(
+                root,
+                provider,
+                channel_id.get(),
+                staged_id,
+            ),
+            Err(error) => {
+                retain_orphaned_staged_alert_for_cleanup(
+                    root,
+                    provider,
+                    channel_id.get(),
+                    staged_id,
+                );
+                tracing::warn!(
+                    target: "agentdesk::discord::relay_recovery",
+                    provider = provider.as_str(),
+                    channel_id = channel_id.get(),
+                    staged_id,
+                    error = %error,
+                    "stale relay reattach circuit held alert cancellation failed; durable cleanup retained"
+                );
+            }
+        }
     }
 }
 
@@ -904,6 +974,13 @@ mod tests {
     struct CrashAfterLocalCommitEnqueue {
         enqueue_calls: AtomicUsize,
         activate_calls: AtomicUsize,
+    }
+
+    struct CountingCancelEnqueue {
+        enqueue_calls: AtomicUsize,
+        activate_calls: AtomicUsize,
+        cancel_calls: AtomicUsize,
+        fail_cancel_calls: AtomicUsize,
     }
 
     struct ProgressThenCancelFailureEnqueue {
@@ -1038,6 +1115,34 @@ mod tests {
 
         async fn cancel(&self, _pool: Option<&sqlx::PgPool>, _id: i64) -> Result<(), String> {
             Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CircuitAlertEnqueue for CountingCancelEnqueue {
+        async fn enqueue(
+            &self,
+            _pool: Option<&sqlx::PgPool>,
+            _request: &CircuitAlertRequest,
+        ) -> Result<i64, String> {
+            self.enqueue_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(93)
+        }
+
+        async fn activate(&self, _pool: Option<&sqlx::PgPool>, id: i64) -> Result<bool, String> {
+            assert_eq!(id, 93);
+            self.activate_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
+        }
+
+        async fn cancel(&self, _pool: Option<&sqlx::PgPool>, _id: i64) -> Result<(), String> {
+            self.cancel_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_cancel_calls.load(Ordering::SeqCst) > 0 {
+                self.fail_cancel_calls.fetch_sub(1, Ordering::SeqCst);
+                Err("injected cancellation failure".to_string())
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -1327,17 +1432,20 @@ mod tests {
             panic!("episode must be open");
         };
 
-        assert!(!open_alert_cas_in_root_with_authority(
-            temp.path(),
-            &ProviderKind::Codex,
-            state.channel_id,
-            &episode,
-            &open,
-            1,
-            77,
-            &vouched_authority(),
-            12,
-        ));
+        assert_eq!(
+            open_alert_cas_in_root_with_authority(
+                temp.path(),
+                &ProviderKind::Codex,
+                state.channel_id,
+                &episode,
+                &open,
+                1,
+                77,
+                &vouched_authority(),
+                12,
+            ),
+            OpenAlertCasOutcome::Cancel,
+        );
         let record = load_record(&circuit_path(
             temp.path(),
             &ProviderKind::Codex,
@@ -1347,6 +1455,75 @@ mod tests {
         .expect("circuit record");
         assert!(!record.alert_queued);
         assert!(record.staged_alert_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn fresh_vouch_persist_failure_cancels_without_activation_or_latch() {
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(temp.path());
+        let shared = super::super::super::make_shared_data_for_tests();
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(46_157);
+        let state = state(channel.get());
+        let episode = RelayReattachEpisode::from_state(&state);
+        super::super::super::inflight::save_inflight_state(&state)
+            .expect("seed authoritative inflight");
+        let authority = not_vouched_authority();
+        assert!(matches!(
+            reserve_in_root_with_authority(temp.path(), &state, &episode, 0, 1, &authority, 10),
+            CircuitReservation::Reserved { .. }
+        ));
+        let CircuitReservation::Open { open, .. } =
+            reserve_in_root_with_authority(temp.path(), &state, &episode, 0, 1, &authority, 11)
+        else {
+            panic!("episode must open");
+        };
+        let path = circuit_path(temp.path(), &provider, channel.get());
+        *FAIL_NEXT_PERSIST_PATH
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(path.clone());
+        let enqueue = CountingCancelEnqueue {
+            enqueue_calls: AtomicUsize::new(0),
+            activate_calls: AtomicUsize::new(0),
+            cancel_calls: AtomicUsize::new(0),
+            fail_cancel_calls: AtomicUsize::new(0),
+        };
+        queue_or_resume_open_alert_with_enqueue_in_root(
+            temp.path(),
+            &shared,
+            &provider,
+            channel,
+            &episode,
+            &open,
+            1,
+            None,
+            &enqueue,
+            Arc::new(vouched_authority()),
+            12,
+        )
+        .await;
+
+        assert_eq!(enqueue.activate_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(enqueue.cancel_calls.load(Ordering::SeqCst), 1);
+        let record = load_record(&path).expect("load record").expect("record");
+        assert!(!record.alert_queued);
+        assert!(record.staged_alert_id.is_none());
+        assert!(matches!(
+            reserve_in_root_with_authority(
+                temp.path(),
+                &state,
+                &episode,
+                0,
+                1,
+                &not_vouched_authority(),
+                13,
+            ),
+            CircuitReservation::Open {
+                alert_needed: true,
+                staged_alert_id: None,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -1371,17 +1548,20 @@ mod tests {
             panic!("episode must be open");
         };
 
-        assert!(open_alert_cas_in_root_with_authority(
-            temp.path(),
-            &provider,
-            channel.get(),
-            &episode,
-            &open,
-            1,
-            91,
-            &authority,
-            12,
-        ));
+        assert_eq!(
+            open_alert_cas_in_root_with_authority(
+                temp.path(),
+                &provider,
+                channel.get(),
+                &episode,
+                &open,
+                1,
+                91,
+                &authority,
+                12,
+            ),
+            OpenAlertCasOutcome::Activate,
+        );
         assert!(matches!(
             reserve_in_root_with_authority(
                 temp.path(),
