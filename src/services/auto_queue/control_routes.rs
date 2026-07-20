@@ -281,7 +281,7 @@ pub async fn resume_run(
     };
 
     if resumed > 0 {
-        let body = match activate(
+        let dispatched = match activate(
             State(state),
             Json(ActivateBody {
                 run_id: None,
@@ -294,10 +294,9 @@ pub async fn resume_run(
         )
         .await
         {
-            Ok((_status, body)) => body,
-            Err(error) => return Err(error),
+            Ok((_status, body)) => body.0.get("count").and_then(|v| v.as_u64()).unwrap_or(0),
+            Err(_) => 0,
         };
-        let dispatched = body.0.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
         return Ok((
             StatusCode::OK,
             Json(
