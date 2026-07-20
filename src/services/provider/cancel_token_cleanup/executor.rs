@@ -172,6 +172,14 @@ impl CancelToken {
                             &request.cancel_source,
                             authorization,
                         );
+                        if !tmux_killed {
+                            // The slot guard serializes same-session cleanup, so this
+                            // rollback cannot erase another request's successful claim.
+                            // A transient tmux failure or a suppression transition must
+                            // remain retryable rather than orphaning the live session.
+                            self.name_kill_claim.store(0, Ordering::Release);
+                            name_claimed = false;
+                        }
                         termination_recorded = tmux_killed && request.termination_reason.is_some();
                     }
                 }
@@ -211,7 +219,7 @@ impl CancelToken {
         {
             let _ = target;
             PID_KILL_DISPATCHES.fetch_add(1, Ordering::Relaxed);
-            return true;
+            return PID_KILL_SUCCEEDS.load(Ordering::Relaxed);
         }
         #[cfg(not(test))]
         match target.identity {
@@ -256,7 +264,8 @@ impl CancelToken {
         {
             let _ = (name, termination_reason, cancel_source, authorization);
             TMUX_KILL_DISPATCHES.fetch_add(1, Ordering::Relaxed);
-            return true;
+            return TMUX_KILL_SUCCEEDS.load(Ordering::Relaxed)
+                && !SUPPRESS_TMUX_AFTER_CLAIM.load(Ordering::Relaxed);
         }
         #[cfg(all(unix, not(test)))]
         {
@@ -299,11 +308,17 @@ impl CancelToken {
 }
 
 #[cfg(test)]
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 #[cfg(test)]
 static PID_KILL_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static TMUX_KILL_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static PID_KILL_SUCCEEDS: AtomicBool = AtomicBool::new(true);
+#[cfg(test)]
+static TMUX_KILL_SUCCEEDS: AtomicBool = AtomicBool::new(true);
+#[cfg(test)]
+static SUPPRESS_TMUX_AFTER_CLAIM: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
 mod tests {
@@ -326,6 +341,9 @@ mod tests {
         let _lock = TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         PID_KILL_DISPATCHES.store(0, Ordering::Relaxed);
         TMUX_KILL_DISPATCHES.store(0, Ordering::Relaxed);
+        PID_KILL_SUCCEEDS.store(true, Ordering::Relaxed);
+        TMUX_KILL_SUCCEEDS.store(true, Ordering::Relaxed);
+        SUPPRESS_TMUX_AFTER_CLAIM.store(false, Ordering::Relaxed);
         test();
     }
 
@@ -376,6 +394,73 @@ mod tests {
             assert_eq!(PID_KILL_DISPATCHES.load(Ordering::Relaxed), 1);
             assert_eq!(TMUX_KILL_DISPATCHES.load(Ordering::Relaxed), 1);
             assert!(outcome.tmux_killed);
+        });
+    }
+
+    #[test]
+    fn failed_pid_dispatch_rolls_back_claim_for_retry() {
+        with_seam(|| {
+            let token = CancelToken::new();
+            token.store_child_pid(45);
+            PID_KILL_SUCCEEDS.store(false, Ordering::Relaxed);
+
+            token.request_cleanup(request(TmuxCleanupIntent::PidOnly));
+            assert_eq!(PID_KILL_DISPATCHES.load(Ordering::Relaxed), 1);
+            assert_eq!(token.pid_kill_claim.load(Ordering::Acquire), 0);
+
+            PID_KILL_SUCCEEDS.store(true, Ordering::Relaxed);
+            token.request_cleanup(request(TmuxCleanupIntent::PidOnly));
+            assert_eq!(PID_KILL_DISPATCHES.load(Ordering::Relaxed), 2);
+            assert_eq!(token.pid_kill_claim.load(Ordering::Acquire), 1);
+        });
+    }
+
+    #[test]
+    fn failed_tmux_dispatch_rolls_back_name_claim_for_retry() {
+        with_seam(|| {
+            let token = CancelToken::new();
+            bind(&token, "AgentDesk-claude-executor-tmux-failure");
+            TMUX_KILL_SUCCEEDS.store(false, Ordering::Relaxed);
+
+            token.request_cleanup(request(TmuxCleanupIntent::CleanupSession));
+            assert_eq!(TMUX_KILL_DISPATCHES.load(Ordering::Relaxed), 1);
+            assert_eq!(token.name_kill_claim.load(Ordering::Acquire), 0);
+
+            TMUX_KILL_SUCCEEDS.store(true, Ordering::Relaxed);
+            let outcome = token.request_cleanup(request(TmuxCleanupIntent::CleanupSession));
+            assert_eq!(TMUX_KILL_DISPATCHES.load(Ordering::Relaxed), 2);
+            assert_eq!(token.name_kill_claim.load(Ordering::Acquire), 1);
+            assert!(outcome.tmux_killed);
+        });
+    }
+
+    #[test]
+    fn suppression_after_name_claim_rolls_back_claim() {
+        with_seam(|| {
+            let token = CancelToken::new();
+            bind(&token, "AgentDesk-claude-executor-suppression-transition");
+            SUPPRESS_TMUX_AFTER_CLAIM.store(true, Ordering::Relaxed);
+
+            token.request_cleanup(request(TmuxCleanupIntent::CleanupSession));
+            assert_eq!(TMUX_KILL_DISPATCHES.load(Ordering::Relaxed), 1);
+            assert_eq!(token.name_kill_claim.load(Ordering::Acquire), 0);
+        });
+    }
+
+    #[test]
+    fn unregistered_binding_dispatches_pid_and_tmux_cleanup() {
+        with_seam(|| {
+            let token = CancelToken::new();
+            *token.tmux_binding.lock().unwrap() = Some(TmuxBinding::NameOnly {
+                name: "AgentDesk-codex-executor-unregistered".to_string(),
+            });
+            token.store_child_pid(46);
+
+            let outcome = token.request_cleanup(request(TmuxCleanupIntent::CleanupSession));
+
+            assert_eq!(outcome.authorization, KillAuthorizationState::Unregistered);
+            assert_eq!(PID_KILL_DISPATCHES.load(Ordering::Relaxed), 1);
+            assert_eq!(TMUX_KILL_DISPATCHES.load(Ordering::Relaxed), 1);
         });
     }
 
