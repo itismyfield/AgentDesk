@@ -490,6 +490,11 @@
       "path": "migrations/postgres/0095_intake_outbox_idempotency_key_index.sql",
       "sha256": "3464e5a5657f99e808ac7125a8a68ed3e18cf3580e063f2649cf3fa7cc593d28",
       "version": 95
+    },
+    {
+      "path": "migrations/postgres/0096_message_outbox_circuit_authority.sql",
+      "sha256": "b07f7c639f3c0074f236beb2bbf9028b63181f0c7f27685c3aa0316aac0897a9",
+      "version": 96
     }
   ],
   "version": 1

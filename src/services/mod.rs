@@ -57,6 +57,9 @@ pub mod memory;
 // live on clean sibling modules. Remove during message_outbox dead-code cleanup.
 #[allow(dead_code)]
 pub mod message_outbox;
+pub(crate) mod message_outbox_circuit_authority;
+#[cfg(test)]
+mod message_outbox_circuit_authority_tests;
 pub mod message_outbox_recovery;
 pub(crate) mod message_outbox_recovery_support;
 #[cfg(test)]
