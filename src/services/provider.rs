@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 pub(crate) mod cancel_token_claude_interrupt;
+pub(crate) mod cancel_token_cleanup;
 
 /// Tmux session name prefix — always "AgentDesk".
 pub const TMUX_SESSION_PREFIX: &str = "AgentDesk";
@@ -980,8 +981,8 @@ pub struct CancelToken {
     /// SSH cancel flag — set to true to signal remote execution to close the channel
     #[allow(dead_code)]
     pub ssh_cancel: Mutex<Option<std::sync::Arc<AtomicBool>>>,
-    /// tmux session name for cleanup on cancel
-    pub tmux_session: Mutex<Option<String>>,
+    /// Tmux binding for cleanup on cancel.
+    pub(crate) tmux_binding: Mutex<Option<cancel_token_cleanup::authority::TmuxBinding>>,
     /// Watchdog deadline as Unix timestamp in milliseconds.
     /// The watchdog fires when `now_ms >= deadline_ms`. Extend by setting a future value.
     /// Operator extensions may move this and the max cap together within configured limits.
@@ -1024,7 +1025,7 @@ impl CancelToken {
             cancel_source: Mutex::new(None),
             cancel_source_kind: Mutex::new(None),
             ssh_cancel: Mutex::new(None),
-            tmux_session: Mutex::new(None),
+            tmux_binding: Mutex::new(None),
             watchdog_deadline_ms: AtomicI64::new(0),
             watchdog_max_deadline_ms: AtomicI64::new(0),
             async_managed: AtomicBool::new(false),
@@ -1070,10 +1071,11 @@ impl CancelToken {
     pub fn cancel_with_tmux_cleanup(&self) {
         self.cancelled.store(true, Ordering::Relaxed);
         if let Some(name) = self
-            .tmux_session
+            .tmux_binding
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()
+            .map(|binding| binding.name().to_string())
         {
             #[cfg(unix)]
             {

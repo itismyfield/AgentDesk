@@ -392,12 +392,7 @@ pub(super) async fn reset_session_for_auto_retry(
     }
 
     #[cfg(unix)]
-    if let Some(name) = cancel_token
-        .tmux_session
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone())
-    {
+    if let Some(name) = cancel_token.tmux_session_name() {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
             "  [{ts}] ♻ auto-retry: killing tmux session {name} before retry ({reason})"
