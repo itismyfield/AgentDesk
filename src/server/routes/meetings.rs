@@ -18,6 +18,7 @@ use crate::db::meetings::{
     persist_meeting_query_hashes_pg, replace_transcripts_pg, store_issue_url_pg,
     update_summary_transcript_pg, upsert_issue_repo_pg, upsert_meeting_record_pg,
 };
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::discord::meeting_artifact_store::UpsertMeetingBody;
 use crate::services::discord::{health, meeting, settings};
 use crate::services::github_issue_creation::{
@@ -516,27 +517,29 @@ fn apply_selection_reason_fallback(
 // ── Handlers ───────────────────────────────────────────────────
 
 /// GET /api/round-table-meetings
-pub async fn list_meetings(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+pub async fn list_meetings(
+    State(state): State<AppState>,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return (
+        return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres pool unavailable"})),
-        );
+            ErrorCode::Database,
+            "postgres pool unavailable",
+        ));
     };
 
-    match list_meetings_pg(pool, apply_selection_reason_fallback).await {
-        Ok(meetings) => (StatusCode::OK, Json(json!({"meetings": meetings}))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("query: {e}")})),
-        ),
-    }
+    let meetings = list_meetings_pg(pool, apply_selection_reason_fallback)
+        .await
+        .map_err(|error| {
+            AppError::internal(format!("query: {error}")).with_code(ErrorCode::Database)
+        })?;
+    Ok((StatusCode::OK, Json(json!({"meetings": meetings}))))
 }
 
 /// GET /api/round-table-meetings/channels
 pub async fn list_meeting_channels(
     State(state): State<AppState>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let bindings = settings::list_registered_channel_bindings();
     let registry = state.health_registry.as_ref();
     let available_experts = meeting::list_available_agent_options();
@@ -587,31 +590,26 @@ pub async fn list_meeting_channels(
         })
     });
 
-    (StatusCode::OK, Json(json!({"channels": channels})))
+    Ok((StatusCode::OK, Json(json!({"channels": channels}))))
 }
 
 /// GET /api/round-table-meetings/:id
 pub async fn get_meeting(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return (
+        return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres pool unavailable"})),
-        );
+            ErrorCode::Database,
+            "postgres pool unavailable",
+        ));
     };
 
     match load_meeting_pg(pool, &id, apply_selection_reason_fallback).await {
-        Ok(Some(meeting)) => (StatusCode::OK, Json(json!({"meeting": meeting}))),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "meeting not found"})),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
-        ),
+        Ok(Some(meeting)) => Ok((StatusCode::OK, Json(json!({"meeting": meeting})))),
+        Ok(None) => return Err(AppError::not_found("meeting not found")),
+        Err(e) => return Err(AppError::internal(format!("{e}")).with_code(ErrorCode::Database)),
     }
 }
 
@@ -619,24 +617,19 @@ pub async fn get_meeting(
 pub async fn delete_meeting(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return (
+        return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres pool unavailable"})),
-        );
+            ErrorCode::Database,
+            "postgres pool unavailable",
+        ));
     };
 
     match delete_meeting_pg(pool, &id).await {
-        Ok(true) => (StatusCode::OK, Json(json!({"ok": true}))),
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "meeting not found"})),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
-        ),
+        Ok(true) => Ok((StatusCode::OK, Json(json!({"ok": true})))),
+        Ok(false) => Err(AppError::not_found("meeting not found")),
+        Err(e) => return Err(AppError::internal(format!("{e}")).with_code(ErrorCode::Database)),
     }
 }
 
@@ -645,28 +638,23 @@ pub async fn update_issue_repo(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<IssueRepoBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return (
+        return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres pool unavailable"})),
-        );
+            ErrorCode::Database,
+            "postgres pool unavailable",
+        ));
     };
 
     if !meeting_exists_pg(pool, &id).await {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "meeting not found"})),
-        );
+        return Err(AppError::not_found("meeting not found"));
     }
 
     // Store issue_repo in kv_meta (meetings table doesn't have issue_repo column)
     let repo_str = body.repo.as_deref().unwrap_or("");
     if let Err(e) = upsert_issue_repo_pg(pool, &id, repo_str).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
-        );
+        return Err(AppError::internal(format!("{e}")).with_code(ErrorCode::Database));
     }
 
     match load_meeting_pg(pool, &id, apply_selection_reason_fallback).await {
@@ -675,19 +663,13 @@ pub async fn update_issue_repo(
                 .as_object_mut()
                 .unwrap()
                 .insert("issue_repo".to_string(), json!(body.repo));
-            (
+            Ok((
                 StatusCode::OK,
                 Json(json!({"ok": true, "meeting": meeting})),
-            )
+            ))
         }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "meeting not found"})),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
-        ),
+        Ok(None) => return Err(AppError::not_found("meeting not found")),
+        Err(e) => return Err(AppError::internal(format!("{e}")).with_code(ErrorCode::Database)),
     }
 }
 
@@ -703,19 +685,17 @@ pub async fn create_issues(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<CreateIssuesBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return (
+        return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres pool unavailable"})),
-        );
+            ErrorCode::Database,
+            "postgres pool unavailable",
+        ));
     };
     let (repo, summaries) = {
         if !meeting_exists_pg(pool, &id).await {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "meeting not found"})),
-            );
+            return Err(AppError::not_found("meeting not found"));
         }
 
         // Get issue repo from kv_meta or request body
@@ -726,12 +706,9 @@ pub async fn create_issues(
         };
 
         let Some(repo) = repo else {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    json!({"error": "no repo configured for this meeting — set issue_repo first"}),
-                ),
-            );
+            return Err(AppError::bad_request(
+                "no repo configured for this meeting — set issue_repo first",
+            ));
         };
 
         let summaries = get_meeting_summaries_pg(pool, &id).await;
@@ -739,7 +716,7 @@ pub async fn create_issues(
     };
 
     if summaries.is_empty() {
-        return (
+        return Ok((
             StatusCode::OK,
             Json(json!({
                 "ok": true,
@@ -747,7 +724,7 @@ pub async fn create_issues(
                 "results": [],
                 "summary": {"total": 0, "created": 0, "failed": 0, "discarded": 0, "pending": 0, "all_created": true, "all_resolved": true}
             })),
-        );
+        ));
     }
     // Create issues from summaries using gh CLI
     let mut results = Vec::new();
@@ -828,7 +805,7 @@ pub async fn create_issues(
         .count() as i64;
     let pending = total - created - failed - discarded;
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "ok": true,
@@ -843,7 +820,7 @@ pub async fn create_issues(
                 "all_resolved": pending == 0 && failed == 0,
             }
         })),
-    )
+    ))
 }
 
 /// POST /api/round-table-meetings/:id/issues/discard
@@ -856,20 +833,18 @@ pub async fn discard_issue(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<DiscardIssueBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let key = body.key.as_deref().unwrap_or("");
     if key.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "key is required"})),
-        );
+        return Err(AppError::bad_request("key is required"));
     }
 
     let Some(pool) = state.pg_pool_ref() else {
-        return (
+        return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres pool unavailable"})),
-        );
+            ErrorCode::Database,
+            "postgres pool unavailable",
+        ));
     };
 
     let _ = discard_issue_pg(pool, &id, key).await;
@@ -881,24 +856,25 @@ pub async fn discard_issue(
         .flatten()
         .unwrap_or(json!(null));
 
-    (
+    Ok((
         StatusCode::OK,
         Json(
             json!({"ok": true, "meeting": meeting, "summary": {"total": 0, "created": 0, "failed": 0, "discarded": 1, "pending": 0, "all_created": false, "all_resolved": false}}),
         ),
-    )
+    ))
 }
 
 /// POST /api/round-table-meetings/:id/issues/discard-all
 pub async fn discard_all_issues(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return (
+        return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres pool unavailable"})),
-        );
+            ErrorCode::Database,
+            "postgres pool unavailable",
+        ));
     };
 
     let count = discard_all_issues_pg(pool, &id).await;
@@ -909,7 +885,7 @@ pub async fn discard_all_issues(
         .flatten()
         .unwrap_or(json!(null));
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "ok": true,
@@ -917,7 +893,7 @@ pub async fn discard_all_issues(
             "results": [],
             "summary": {"total": count, "created": 0, "failed": 0, "discarded": count, "pending": 0, "all_created": false, "all_resolved": true}
         })),
-    )
+    ))
 }
 
 /// POST /api/round-table-meetings/start
@@ -925,30 +901,24 @@ pub async fn discard_all_issues(
 pub async fn start_meeting(
     State(state): State<AppState>,
     Json(body): Json<StartMeetingBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let channel_id_raw = match &body.channel_id {
         Some(id) if !id.is_empty() => id.clone(),
         _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "channel_id is required"})),
-            );
+            return Err(AppError::bad_request("channel_id is required"));
         }
     };
     let channel_id_value = match channel_id_raw.parse::<u64>() {
         Ok(value) => value,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "channel_id must be a numeric string"})),
-            );
+            return Err(AppError::bad_request("channel_id must be a numeric string"));
         }
     };
     let requested_primary_provider = match parse_meeting_provider(body.primary_provider.as_deref())
     {
         Ok(provider) => provider,
         Err(error) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+            return Err(AppError::bad_request(error));
         }
     };
     let (owner_provider, primary_provider) = match resolve_start_meeting_providers(
@@ -957,14 +927,15 @@ pub async fn start_meeting(
     ) {
         Ok(providers) => providers,
         Err(error) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+            return Err(AppError::bad_request(error));
         }
     };
     let Some(registry) = state.health_registry.as_ref() else {
-        return (
+        return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "health registry unavailable"})),
-        );
+            ErrorCode::Discord,
+            "health registry unavailable",
+        ));
     };
 
     let agenda = body.agenda.as_deref().unwrap_or("General discussion");
@@ -973,13 +944,13 @@ pub async fn start_meeting(
     {
         Ok(provider) => provider,
         Err(error) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+            return Err(AppError::bad_request(error));
         }
     };
     if let Err(error) =
         validate_reviewer_provider(&primary_provider, &reviewer_provider, &owner_provider)
     {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+        return Err(AppError::bad_request(error));
     }
 
     match health::start_direct_meeting(
@@ -993,16 +964,16 @@ pub async fn start_meeting(
     )
     .await
     {
-        Ok(()) => (
+        Ok(()) => Ok((
             StatusCode::OK,
             Json(json!({"ok": true, "message": "Meeting start scheduled"})),
-        ),
+        )),
         Err(error) => {
             let error_message = normalize_direct_start_error(&error);
-            (
+            Ok((
                 direct_start_error_status(&error_message),
                 Json(json!({"ok": false, "error": error_message})),
-            )
+            ))
         }
     }
 }
@@ -1012,24 +983,21 @@ pub async fn start_meeting(
 pub async fn upsert_meeting(
     State(state): State<AppState>,
     Json(body): Json<UpsertMeetingBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if body.id.trim().is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "meeting id is required"})),
-        );
+        return Err(AppError::bad_request("meeting id is required"));
     }
 
     let primary_provider = match parse_meeting_provider(body.primary_provider.as_deref()) {
         Ok(provider) => provider,
         Err(error) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+            return Err(AppError::bad_request(error));
         }
     };
     let reviewer_provider = match parse_meeting_provider(body.reviewer_provider.as_deref()) {
         Ok(provider) => provider.or_else(|| primary_provider.clone().map(|p| p.counterpart())),
         Err(error) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+            return Err(AppError::bad_request(error));
         }
     };
 
@@ -1067,10 +1035,11 @@ pub async fn upsert_meeting(
         .and_then(normalize_selection_reason);
 
     let Some(pool) = state.pg_pool_ref() else {
-        return (
+        return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres pool unavailable"})),
-        );
+            ErrorCode::Database,
+            "postgres pool unavailable",
+        ));
     };
 
     // #2050 P1 finding 1 — detect whether this upsert creates or updates a meeting
@@ -1108,20 +1077,14 @@ pub async fn upsert_meeting(
     )
     .await
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
-        );
+        return Err(AppError::internal(format!("{e}")).with_code(ErrorCode::Database));
     }
 
     let saved_thread_id = get_meeting_thread_id_pg(pool, &body.id).await;
     if let Err(e) =
         persist_meeting_query_hashes_pg(pool, &body.id, saved_thread_id.as_deref()).await
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
-        );
+        return Err(AppError::internal(format!("{e}")).with_code(ErrorCode::Database));
     }
 
     let mut next_seq = get_next_transcript_seq_pg(pool, &body.id).await;
@@ -1150,10 +1113,7 @@ pub async fn upsert_meeting(
                 next_seq = new_next_seq;
             }
             Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
+                return Err(AppError::internal(format!("{e}")).with_code(ErrorCode::Database));
             }
         }
     }
@@ -1176,10 +1136,7 @@ pub async fn upsert_meeting(
         };
 
         if let Err(e) = summary_result {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
+            return Err(AppError::internal(format!("{e}")).with_code(ErrorCode::Database));
         }
     }
 
@@ -1193,19 +1150,17 @@ pub async fn upsert_meeting(
                 "round_table_new"
             };
             crate::server::ws::emit_event(&state.broadcast_tx, event_name, meeting.clone());
-            (
+            Ok((
                 StatusCode::OK,
                 Json(json!({"ok": true, "meeting": meeting})),
-            )
+            ))
         }
-        Ok(None) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "meeting was not persisted"})),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{e}")})),
-        ),
+        Ok(None) => {
+            return Err(
+                AppError::internal("meeting was not persisted").with_code(ErrorCode::Database)
+            );
+        }
+        Err(e) => return Err(AppError::internal(format!("{e}")).with_code(ErrorCode::Database)),
     }
 }
 

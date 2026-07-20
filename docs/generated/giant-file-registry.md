@@ -75,7 +75,7 @@
 | `src/server/routes/escalation.rs` | 1379 |
 | `src/server/routes/health_api.rs` | 1775 |
 | `src/server/routes/kanban.rs` | 2725 |
-| `src/server/routes/meetings.rs` | 1290 |
+| `src/server/routes/meetings.rs` | 1245 |
 | `src/server/routes/resume.rs` | 1260 |
 | `src/server/routes/v1.rs` | 1866 |
 | `src/services/auto_queue.rs` | 1545 |
