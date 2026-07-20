@@ -1076,24 +1076,21 @@ impl CancelToken {
     pub(crate) fn child_pid_value(&self) -> Option<u32> {
         self.child_pid
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(|process| process.pid)
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|process| process.pid))
     }
 
     pub(crate) fn take_child_pid_value(&self) -> Option<u32> {
         self.child_pid
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-            .map(|process| process.pid)
+            .ok()
+            .and_then(|mut guard| guard.take().map(|process| process.pid))
     }
 
+    // Consumed in #4593 S3 (identity-gated kill).
+    #[allow(dead_code)]
     pub(crate) fn captured_child_process(&self) -> Option<CapturedProcess> {
-        self.child_pid
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.child_pid.lock().ok().and_then(|guard| guard.clone())
     }
 
     pub(crate) fn clear_child_pid(&self) {
@@ -1101,9 +1098,10 @@ impl CancelToken {
     }
 
     pub(crate) fn store_child_pid_if_empty(&self, pid: u32) {
+        let captured = CapturedProcess::capture(pid);
         let mut child_pid = self.child_pid.lock().unwrap_or_else(|e| e.into_inner());
         if child_pid.is_none() {
-            *child_pid = Some(CapturedProcess::capture(pid));
+            *child_pid = Some(captured);
         }
     }
 
