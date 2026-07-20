@@ -194,13 +194,12 @@ fn persist_record(path: &Path, record: &CircuitRecord) -> Result<(), String> {
     super::super::runtime_store::atomic_write(path, &json)
 }
 
-pub(super) fn load_orphaned_staged_alert_ids(provider: &ProviderKind, channel_id: u64) -> Vec<i64> {
-    let Some(root) = super::super::runtime_store::runtime_root()
-        .map(|root| root.join("discord_relay_recovery_circuit"))
-    else {
-        return Vec::new();
-    };
-    let path = circuit_path(&root, provider, channel_id);
+fn load_orphaned_staged_alert_ids_from_root(
+    root: &Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Vec<i64> {
+    let path = circuit_path(root, provider, channel_id);
     let Ok(_lock) = lock_path(&path) else {
         return Vec::new();
     };
@@ -209,6 +208,15 @@ pub(super) fn load_orphaned_staged_alert_ids(provider: &ProviderKind, channel_id
         .flatten()
         .map(|record| record.orphaned_staged_alert_ids)
         .unwrap_or_default()
+}
+
+pub(super) fn load_orphaned_staged_alert_ids(provider: &ProviderKind, channel_id: u64) -> Vec<i64> {
+    let Some(root) = super::super::runtime_store::runtime_root()
+        .map(|root| root.join("discord_relay_recovery_circuit"))
+    else {
+        return Vec::new();
+    };
+    load_orphaned_staged_alert_ids_from_root(&root, provider, channel_id)
 }
 
 fn effective_frontier(
@@ -314,6 +322,16 @@ fn reserve_in_root_with_authority(
         LivenessVouch::NotVouched { .. } => None,
     };
     if let Some(reasons_csv) = reasons_csv {
+        // A held alert is valid only while the latest enqueue-time vouch allows
+        // it. Revoke the local obligation now so expiry cannot resume a row
+        // canceled by this vouched pass and defer the first fail-closed alert.
+        if let Some(id) = record.staged_alert_id.take() {
+            record.alert_queued = false;
+            if !record.orphaned_staged_alert_ids.contains(&id) {
+                record.orphaned_staged_alert_ids.push(id);
+            }
+            record_changed = true;
+        }
         if record_changed && persist_record(&path, &record).is_err() {
             return CircuitReservation::IoError;
         }
@@ -438,6 +456,16 @@ fn open_alert_cas_in_root_with_authority(
         ),
         LivenessVouch::Vouched { .. } | LivenessVouch::DeferTransient { .. }
     ) {
+        // The caller will cancel this held row. Revoke the matching local
+        // obligation before returning so a later NotVouched pass stages a
+        // fresh alert instead of resuming the canceled id for one pass.
+        if record.alert_queued && record.staged_alert_id == Some(staged_alert_id) {
+            record.alert_queued = false;
+            record.staged_alert_id = None;
+            if persist_record(&path, &record).is_err() {
+                return true;
+            }
+        }
         return false;
     }
     if record.version != CIRCUIT_VERSION
@@ -470,6 +498,7 @@ fn open_alert_cas_in_root_with_authority(
     record.staged_alert_id == Some(staged_alert_id)
 }
 
+#[cfg(test)]
 fn open_alert_cas_in_root(
     root: &Path,
     provider: &ProviderKind,
@@ -517,17 +546,13 @@ fn complete_staged_alert_if_matches(
     }
 }
 
-pub(super) fn acknowledge_orphaned_staged_alert_cleanup(
+fn acknowledge_orphaned_staged_alert_cleanup_in_root(
+    root: &Path,
     provider: &ProviderKind,
     channel_id: u64,
     staged_alert_id: i64,
 ) {
-    let Some(root) = super::super::runtime_store::runtime_root()
-        .map(|root| root.join("discord_relay_recovery_circuit"))
-    else {
-        return;
-    };
-    let path = circuit_path(&root, provider, channel_id);
+    let path = circuit_path(root, provider, channel_id);
     let Ok(_lock) = lock_path(&path) else {
         return;
     };
@@ -541,6 +566,24 @@ pub(super) fn acknowledge_orphaned_staged_alert_cleanup(
     if record.orphaned_staged_alert_ids.len() != before {
         let _ = persist_record(&path, &record);
     }
+}
+
+pub(super) fn acknowledge_orphaned_staged_alert_cleanup(
+    provider: &ProviderKind,
+    channel_id: u64,
+    staged_alert_id: i64,
+) {
+    let Some(root) = super::super::runtime_store::runtime_root()
+        .map(|root| root.join("discord_relay_recovery_circuit"))
+    else {
+        return;
+    };
+    acknowledge_orphaned_staged_alert_cleanup_in_root(
+        &root,
+        provider,
+        channel_id,
+        staged_alert_id,
+    );
 }
 
 fn retain_orphaned_staged_alert_for_cleanup(
@@ -717,6 +760,36 @@ pub(super) async fn queue_or_resume_open_alert_with_enqueue(
     else {
         return;
     };
+    queue_or_resume_open_alert_with_enqueue_in_root(
+        &root,
+        shared,
+        provider,
+        channel_id,
+        episode,
+        open,
+        max_attempts,
+        resume_staged_alert_id,
+        enqueue,
+        std::sync::Arc::new(ProcessLocalLivenessAuthority),
+        monotonic_now_secs(),
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn queue_or_resume_open_alert_with_enqueue_in_root(
+    root: &Path,
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    episode: &RelayReattachEpisode,
+    open: &CircuitOpenPin,
+    max_attempts: u32,
+    resume_staged_alert_id: Option<i64>,
+    enqueue: &dyn CircuitAlertEnqueue,
+    authority: std::sync::Arc<dyn LivenessAuthorityRead>,
+    now_mono_secs: i64,
+) {
     let target = format!("channel:{}", channel_id.get());
     let reason_code = format!("relay_reattach_circuit_open:{}", open.dedupe_suffix());
     let mention = owner_mention(episode.owner_user_id);
@@ -756,6 +829,7 @@ pub(super) async fn queue_or_resume_open_alert_with_enqueue(
     let validate_episode = episode.clone();
     let validate_open = open.clone();
     let validate_channel_id = channel_id.get();
+    let validate_authority = authority.clone();
     let valid = tokio::task::spawn_blocking(move || {
         super::super::inflight::lock_inflight_episode(
             &validate_provider,
@@ -767,7 +841,7 @@ pub(super) async fn queue_or_resume_open_alert_with_enqueue(
                 RelayReattachEpisode::from_state(locked_episode.state()),
                 validate_episode
             );
-            open_alert_cas_in_root(
+            open_alert_cas_in_root_with_authority(
                 &validate_root,
                 &validate_provider,
                 validate_channel_id,
@@ -775,6 +849,8 @@ pub(super) async fn queue_or_resume_open_alert_with_enqueue(
                 &validate_open,
                 max_attempts,
                 staged_id,
+                validate_authority.as_ref(),
+                now_mono_secs,
             )
         })
     })
@@ -1276,6 +1352,128 @@ mod tests {
         .expect("circuit record");
         assert!(!record.alert_queued);
         assert!(record.staged_alert_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn vouched_pass_then_expiry_fires_open_alert_in_first_not_vouched_pass() {
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(temp.path());
+        let shared = super::super::super::make_shared_data_for_tests();
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(46_156);
+        let state = state(channel.get());
+        let episode = RelayReattachEpisode::from_state(&state);
+        super::super::super::inflight::save_inflight_state(&state)
+            .expect("seed authoritative inflight");
+        let authority = not_vouched_authority();
+        assert!(matches!(
+            reserve_in_root_with_authority(
+                temp.path(),
+                &state,
+                &episode,
+                0,
+                1,
+                &authority,
+                10,
+            ),
+            CircuitReservation::Reserved { attempt: 1, .. }
+        ));
+        let CircuitReservation::Open { open, .. } = reserve_in_root_with_authority(
+            temp.path(),
+            &state,
+            &episode,
+            0,
+            1,
+            &authority,
+            11,
+        ) else {
+            panic!("episode must be open");
+        };
+
+        assert!(open_alert_cas_in_root_with_authority(
+            temp.path(),
+            &provider,
+            channel.get(),
+            &episode,
+            &open,
+            1,
+            91,
+            &authority,
+            12,
+        ));
+        assert!(matches!(
+            reserve_in_root_with_authority(
+                temp.path(),
+                &state,
+                &episode,
+                0,
+                1,
+                &vouched_authority(),
+                13,
+            ),
+            CircuitReservation::ReservedLiveVouched { .. }
+        ));
+        assert_eq!(
+            load_orphaned_staged_alert_ids_from_root(temp.path(), &provider, channel.get()),
+            vec![91],
+            "the vouched pass must expose the canceled held row for cleanup",
+        );
+        acknowledge_orphaned_staged_alert_cleanup_in_root(
+            temp.path(),
+            &provider,
+            channel.get(),
+            91,
+        );
+
+        let CircuitReservation::Open {
+            open: expired_open,
+            alert_needed,
+            staged_alert_id,
+            ..
+        } = reserve_in_root_with_authority(
+            temp.path(),
+            &state,
+            &episode,
+            0,
+            1,
+            &not_vouched_authority(),
+            14,
+        ) else {
+            panic!("the first expired-vouch pass must reopen the alert obligation");
+        };
+        let enqueue = CrashAfterLocalCommitEnqueue {
+            enqueue_calls: AtomicUsize::new(0),
+            activate_calls: AtomicUsize::new(1),
+        };
+        if alert_needed || staged_alert_id.is_some() {
+            queue_or_resume_open_alert_with_enqueue_in_root(
+                temp.path(),
+                &shared,
+                &provider,
+                channel,
+                &episode,
+                &expired_open,
+                1,
+                staged_alert_id,
+                &enqueue,
+                Arc::new(not_vouched_authority()),
+                14,
+            )
+            .await;
+        }
+
+        assert_eq!(
+            enqueue.enqueue_calls.load(Ordering::SeqCst),
+            1,
+            "a stale held-resume latch would leave the first-pass alert counter at zero",
+        );
+        assert_eq!(enqueue.activate_calls.load(Ordering::SeqCst), 2);
+        let record = load_record(&circuit_path(temp.path(), &provider, channel.get()))
+            .expect("read circuit record")
+            .expect("circuit record");
+        assert!(record.alert_queued);
+        assert!(record.staged_alert_id.is_none());
+        assert!(record.orphaned_staged_alert_ids.is_empty());
     }
 
     #[test]
