@@ -7,7 +7,7 @@ use crate::services::discord::inflight::InflightTurnState;
 use crate::services::discord::relay_health::RelayActiveTurn;
 use crate::services::provider::ProviderKind;
 
-use super::{snapshot::WatcherStateSnapshot, stall_verdict};
+use super::{liveness_authority, snapshot::WatcherStateSnapshot, stall_verdict};
 
 mod redrive_grace;
 #[cfg(test)]
@@ -361,31 +361,6 @@ pub(super) fn evaluate_stall_watchdog_liveness(
     }
 }
 
-/// #4178: returns `true` while the tmux capture offset for this channel shows
-/// the underlying turn is still alive, so the stall-watchdog must NOT force-clean
-/// inflight. A turn is protected only once its capture offset has been observed
-/// to ADVANCE at least once (proven-alive), and then only for a short grace of
-/// up to TWO consecutive non-advancing ticks after it last advanced — so a live
-/// turn whose relay lane wedged (capture still growing) is never wrongly cleaned
-/// (#4178 incident 2026-07-06), while a turn we have never seen advance (dead on
-/// arrival, or no capture data) keeps the pre-#4178 prompt force-clean timing.
-#[cfg(test)]
-pub(super) fn stall_watchdog_capture_offset_advancing(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    snapshot: &WatcherStateSnapshot,
-    now_unix_secs: i64,
-    now_mono_secs: i64,
-) -> crate::services::discord::health::liveness_authority::CaptureAssessment {
-    crate::services::discord::health::liveness_authority::observe_capture_coordinate(
-        provider,
-        channel_id,
-        snapshot,
-        now_unix_secs,
-        now_mono_secs,
-    )
-}
-
 #[cfg(test)]
 fn capture_offset_advancing(
     key: &StallLivenessKey,
@@ -451,11 +426,7 @@ pub(super) fn clear_stall_watchdog_liveness_state(
 ) {
     let probe = StallLivenessKey::new(provider, channel_id, tmux_session, None, None);
     OFFSET_OBSERVATIONS.retain(|key, _| !key.matches_session(&probe));
-    crate::services::discord::health::liveness_authority::clear_capture_state_for_session(
-        provider,
-        channel_id,
-        tmux_session,
-    );
+    liveness_authority::clear_capture_state_for_session(provider, channel_id, tmux_session);
     #[cfg(test)]
     CAPTURE_OFFSET_WATCHDOG_STATE.retain(|key, _| !key.matches_session(&probe));
     redrive_grace::clear_for_session(&probe);
@@ -477,10 +448,7 @@ pub(super) fn gc_stall_watchdog_liveness_state(now_unix_secs: i64) {
     OFFSET_OBSERVATIONS.retain(|_, observation| {
         !liveness_state_expired(observation.last_updated_unix_secs, now_unix_secs)
     });
-    crate::services::discord::health::liveness_authority::gc_capture_state(
-        now_unix_secs,
-        STALL_LIVENESS_STATE_TTL_SECS,
-    );
+    liveness_authority::gc_capture_state(now_unix_secs, STALL_LIVENESS_STATE_TTL_SECS);
     #[cfg(test)]
     CAPTURE_OFFSET_WATCHDOG_STATE
         .retain(|_, state| !liveness_state_expired(state.last_updated_unix_secs, now_unix_secs));
@@ -755,7 +723,7 @@ fn capture_watchdog_advanced_age_secs(
     snapshot: &WatcherStateSnapshot,
     now_unix_secs: i64,
 ) -> Option<u64> {
-    crate::services::discord::health::liveness_authority::capture_advanced_age_secs(
+    liveness_authority::capture_advanced_age_secs(
         &key.provider,
         ChannelId::new(key.channel_id),
         snapshot,
@@ -1107,17 +1075,16 @@ mod tests {
             inflight_state_present: true,
             last_relay_ts_ms: 1_700_000_000_000,
             last_capture_offset: capture_offset,
-            capture_coordinate:
-                crate::services::discord::health::liveness_authority::CaptureCoordinateObservation {
-                    offset: capture_offset,
-                    path_hash: 0,
-                    file_id: None,
-                    status: if capture_offset.is_some() {
-                        crate::services::discord::health::liveness_authority::CoordinateStatus::Observed
-                    } else {
-                        crate::services::discord::health::liveness_authority::CoordinateStatus::Missing
-                    },
+            capture_coordinate: liveness_authority::CaptureCoordinateObservation {
+                offset: capture_offset,
+                path_hash: 0,
+                file_id: None,
+                status: if capture_offset.is_some() {
+                    liveness_authority::CoordinateStatus::Observed
+                } else {
+                    liveness_authority::CoordinateStatus::Missing
                 },
+            },
             unread_bytes: capture_offset.map(|offset| offset.saturating_sub(10)),
             desynced: true,
             reconnect_count: 0,
@@ -2378,19 +2345,37 @@ mod tests {
         // `should_clean` gate is no longer blocked by capture advancement.
         let baseline = snapshot(channel.get(), tmux_session, Some(100));
         assert!(
-            !stall_watchdog_capture_offset_advancing(&provider, channel, &baseline, now - 90, 1,)
-                .advancing
+            !liveness_authority::observe_capture_coordinate(
+                &provider,
+                channel,
+                &baseline,
+                now - 90,
+                1,
+            )
+            .advancing
         );
         let advanced = snapshot(channel.get(), tmux_session, Some(200));
         assert!(
-            stall_watchdog_capture_offset_advancing(&provider, channel, &advanced, now - 60, 2,)
-                .advancing
+            liveness_authority::observe_capture_coordinate(
+                &provider,
+                channel,
+                &advanced,
+                now - 60,
+                2,
+            )
+            .advancing
         );
-        stall_watchdog_capture_offset_advancing(&provider, channel, &advanced, now - 45, 3);
-        stall_watchdog_capture_offset_advancing(&provider, channel, &advanced, now - 30, 4);
+        liveness_authority::observe_capture_coordinate(&provider, channel, &advanced, now - 45, 3);
+        liveness_authority::observe_capture_coordinate(&provider, channel, &advanced, now - 30, 4);
         assert!(
-            !stall_watchdog_capture_offset_advancing(&provider, channel, &advanced, now - 15, 5,)
-                .advancing
+            !liveness_authority::observe_capture_coordinate(
+                &provider,
+                channel,
+                &advanced,
+                now - 15,
+                5,
+            )
+            .advancing
         );
 
         let inflight = inflight_with_output(channel.get(), tmux_session, None);
