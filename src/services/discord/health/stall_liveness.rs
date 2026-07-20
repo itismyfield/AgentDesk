@@ -2356,8 +2356,10 @@ mod tests {
     /// prior `OFFSET_OBSERVATIONS` pane entry (it is only fed once
     /// `should_clean` fires), so the legacy pane-advance signal was
     /// structurally blind for exactly the tick that decides the cleanup. The
-    /// every-tick capture watchdog's `advanced_at_unix_secs` history must cover
-    /// that first tick.
+    /// authority's every-tick hardened coordinate history must cover that first
+    /// tick. This complements the stateless first-tick open-tool vouch in
+    /// `liveness_authority`; it does not replace capture evidence when capture
+    /// advancement was observed before the threshold.
     ///
     /// Mutation proof: removing the `capture_watchdog_advanced_age_secs`
     /// fallback in `StallWatchdogLivenessEvidence::collect` leaves
@@ -2368,21 +2370,31 @@ mod tests {
         let channel = ChannelId::new(4_400_005);
         let tmux_session = "AgentDesk-codex-4400-first-tick-fallback";
         let _root = isolated_runtime_root();
-        let key = liveness_key(&provider, channel, tmux_session);
         clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
         let now = chrono::Utc::now().timestamp();
 
-        // Pre-threshold ticks: the every-tick capture watchdog records an
-        // advance 60s ago, then the two-tick grace is exhausted so the
-        // `should_clean` gate stops being blocked by `capture_offset_advancing`.
-        assert!(!capture_offset_advancing(&key, Some(100), now - 90));
-        assert!(capture_offset_advancing(&key, Some(200), now - 60));
-        capture_offset_advancing(&key, Some(200), now - 45);
-        capture_offset_advancing(&key, Some(200), now - 30);
-        assert!(!capture_offset_advancing(&key, Some(200), now - 15));
+        // Pre-threshold ticks feed the production authority path: it records an
+        // advance 60s ago, then exhausts the two-tick grace so the local
+        // `should_clean` gate is no longer blocked by capture advancement.
+        let baseline = snapshot(channel.get(), tmux_session, Some(100));
+        assert!(
+            !stall_watchdog_capture_offset_advancing(&provider, channel, &baseline, now - 90, 1,)
+                .advancing
+        );
+        let advanced = snapshot(channel.get(), tmux_session, Some(200));
+        assert!(
+            stall_watchdog_capture_offset_advancing(&provider, channel, &advanced, now - 60, 2,)
+                .advancing
+        );
+        stall_watchdog_capture_offset_advancing(&provider, channel, &advanced, now - 45, 3);
+        stall_watchdog_capture_offset_advancing(&provider, channel, &advanced, now - 30, 4);
+        assert!(
+            !stall_watchdog_capture_offset_advancing(&provider, channel, &advanced, now - 15, 5,)
+                .advancing
+        );
 
         let inflight = inflight_with_output(channel.get(), tmux_session, None);
-        let mut snap = snapshot(channel.get(), tmux_session, Some(200));
+        let mut snap = advanced;
         snap.unread_bytes = Some(0);
         snap.relay_health.unread_bytes = Some(0);
 
