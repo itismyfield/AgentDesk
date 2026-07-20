@@ -35,6 +35,32 @@ async fn episode_transition_allocates_next_epoch_and_stale_cas_fails_pg() {
 }
 
 #[tokio::test]
+async fn same_episode_rollbacks_fail_but_monotonic_and_episode_reset_advance_pg() {
+    let Some((db,pool))=setup("circuit_coordinate_order").await else{return}; owner(&pool,"507","node-a").await;
+    let mut current=match reserve_next_authority(&pool,"discord","507","node-a",7,"e0",1,1,None).await.unwrap(){AuthorityReservation::Reserved(value)=>value,other=>panic!("{other:?}")};
+    for episode in ["e0-2","e0-3","e0-4","e0-5","e0-6"] {
+        current=match reserve_next_authority(&pool,"discord","507","node-a",7,episode,1,1,Some(current.authority_epoch)).await.unwrap(){AuthorityReservation::Reserved(value)=>value,other=>panic!("{other:?}")};
+    }
+    current=match reserve_next_authority(&pool,"discord","507","node-a",7,"e1",100,4,Some(6)).await.unwrap(){AuthorityReservation::Reserved(value)=>value,other=>panic!("{other:?}")};
+    assert_eq!(current.authority_epoch,7);
+    assert_eq!(reserve_next_authority(&pool,"discord","507","node-a",7,"e1",100,4,Some(7)).await.unwrap(),AuthorityReservation::Reserved(current.clone()));
+    assert!(matches!(reserve_next_authority(&pool,"discord","507","node-a",7,"e1",90,3,Some(7)).await.unwrap(),AuthorityReservation::Stale));
+    let increment=match reserve_next_authority(&pool,"discord","507","node-a",7,"e1",101,5,Some(7)).await.unwrap(){AuthorityReservation::Reserved(value)=>value,other=>panic!("{other:?}")};
+    assert_eq!(increment.authority_epoch,8);
+    let reset=match reserve_next_authority(&pool,"discord","507","node-a",7,"e2",1,1,Some(8)).await.unwrap(){AuthorityReservation::Reserved(value)=>value,other=>panic!("{other:?}")};
+    assert_eq!(reset.authority_epoch,9);
+    pool.close().await; db.drop().await;
+}
+
+#[tokio::test]
+async fn maximum_authority_epoch_fails_closed_pg() {
+    let Some((db,pool))=setup("circuit_epoch_overflow").await else{return}; owner(&pool,"508","node-a").await;
+    sqlx::query("INSERT INTO message_outbox_circuit_authority(provider,channel_id,owner_instance_id,owner_generation,episode_key,baseline_relay_offset,open_generation,authority_epoch) VALUES('discord','508','node-a',7,'e1',100,4,$1)").bind(i64::MAX).execute(&pool).await.unwrap();
+    assert!(matches!(reserve_next_authority(&pool,"discord","508","node-a",7,"e1",101,5,Some(i64::MAX)).await.unwrap(),AuthorityReservation::Stale));
+    pool.close().await; db.drop().await;
+}
+
+#[tokio::test]
 async fn vouch_then_new_epoch_reopens_and_old_activation_is_stale_pg() {
     let Some((db,pool))=setup("circuit_vouch_reopen").await else{return}; owner(&pool,"502","node-a").await;
     let first=reserve(&pool,"502","e1",1,None).await; let target="channel:502";
@@ -53,6 +79,7 @@ async fn exact_stage_is_idempotent_and_mismatched_coordinate_conflicts_pg() {
     let c=reserve(&pool,"503","e1",1,None).await; let target="channel:503";
     let id=match stage_held(&pool,message(target,"identity"),&c,300).await.unwrap(){StageHeldOutcome::Staged{id}=>id,other=>panic!("{other:?}")};
     assert_eq!(stage_held(&pool,message(target,"identity"),&c,300).await.unwrap(),StageHeldOutcome::Idempotent{id});
+    assert_eq!(stage_held(&pool,message(target,"identity"),&c,301).await.unwrap(),StageHeldOutcome::Conflict);
     let c2=reserve(&pool,"503","e2",1,Some(1)).await;
     assert_eq!(stage_held(&pool,message(target,"identity"),&c2,300).await.unwrap(),StageHeldOutcome::Conflict);
     assert!(!super::message_outbox::activate_staged_outbox_pg(&pool,id).await.unwrap());

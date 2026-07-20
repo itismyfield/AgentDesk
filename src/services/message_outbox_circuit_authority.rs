@@ -157,7 +157,27 @@ pub(crate) async fn reserve_next_authority(
             return Ok(AuthorityReservation::Reserved(coordinate));
         }
         Some(row) if expected_authority_epoch == Some(row.get("authority_epoch")) => {
-            row.get::<i64, _>("authority_epoch") + 1
+            let same_episode = row.get::<String, _>("episode_key") == requested.episode_key;
+            let same_owner_generation =
+                row.get::<i64, _>("owner_generation") == requested.owner_generation;
+            if same_episode
+                && same_owner_generation
+                && (requested.baseline_relay_offset
+                    < row.get::<i64, _>("baseline_relay_offset")
+                    || requested.open_generation < row.get::<i64, _>("open_generation"))
+            {
+                tx.rollback().await?;
+                return Ok(AuthorityReservation::Stale);
+            }
+            if requested.owner_generation < row.get::<i64, _>("owner_generation") {
+                tx.rollback().await?;
+                return Ok(AuthorityReservation::Stale);
+            }
+            let Some(next_epoch) = row.get::<i64, _>("authority_epoch").checked_add(1) else {
+                tx.rollback().await?;
+                return Ok(AuthorityReservation::Stale);
+            };
+            next_epoch
         }
         _ => {
             tx.rollback().await?;
@@ -233,6 +253,7 @@ pub(crate) async fn stage_held(
     ).ok_or_else(|| crate::services::message_outbox::OutboxEnqueueError::Database(
         sqlx::Error::Protocol("circuit staging requires a dedupe identity".to_string()),
     ))?;
+    let dedupe_ttl_secs = dedupe_ttl_secs.max(1);
     let mut tx = pool.begin().await?;
     lock_channel(&mut tx, &coordinate.provider, &coordinate.channel_id).await?;
     if !owner_is_current(&mut tx, coordinate).await? {
@@ -251,14 +272,15 @@ pub(crate) async fn stage_held(
         "INSERT INTO message_outbox
              (target,content,bot,source,status,reason_code,session_key,dedupe_key,dedupe_expires_at,
               circuit_provider,circuit_channel_id,circuit_episode_key,circuit_baseline_relay_offset,
-              circuit_open_generation,circuit_authority_epoch,circuit_owner_instance_id,circuit_owner_generation)
+              circuit_open_generation,circuit_authority_epoch,circuit_dedupe_ttl_secs,
+              circuit_owner_instance_id,circuit_owner_generation)
          VALUES ($1,$2,$3,$4,'held',$5,$6,$7,NOW()+($8::BIGINT*INTERVAL '1 second'),
-                 $9,$10,$11,$12,$13,$14,$15,$16)
+                 $9,$10,$11,$12,$13,$14,$8,$15,$16)
          ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL
              AND status NOT IN ('failed','cancelled') DO NOTHING RETURNING id",
     )
     .bind(message.target).bind(message.content).bind(message.bot).bind(message.source)
-    .bind(reason_code).bind(session_key.as_deref()).bind(&dedupe_key).bind(dedupe_ttl_secs.max(1))
+    .bind(reason_code).bind(session_key.as_deref()).bind(&dedupe_key).bind(dedupe_ttl_secs)
     .bind(&coordinate.provider).bind(&coordinate.channel_id).bind(&coordinate.episode_key)
     .bind(coordinate.baseline_relay_offset).bind(coordinate.open_generation)
     .bind(coordinate.authority_epoch).bind(&coordinate.owner_instance_id)
@@ -270,7 +292,8 @@ pub(crate) async fn stage_held(
     let existing = sqlx::query(
         "SELECT id,target,content,bot,source,reason_code,session_key,status,
                 circuit_provider,circuit_channel_id,circuit_episode_key,circuit_baseline_relay_offset,
-                circuit_open_generation,circuit_authority_epoch,circuit_owner_instance_id,circuit_owner_generation
+                circuit_open_generation,circuit_authority_epoch,circuit_dedupe_ttl_secs,
+                circuit_owner_instance_id,circuit_owner_generation
            FROM message_outbox WHERE dedupe_key=$1 AND status NOT IN ('failed','cancelled')",
     ).bind(&dedupe_key).fetch_optional(&mut *tx).await?;
     let exact = existing.as_ref().is_some_and(|row|
@@ -287,6 +310,7 @@ pub(crate) async fn stage_held(
         && row.get::<Option<i64>,_>("circuit_baseline_relay_offset") == Some(coordinate.baseline_relay_offset)
         && row.get::<Option<i64>,_>("circuit_open_generation") == Some(coordinate.open_generation)
         && row.get::<Option<i64>,_>("circuit_authority_epoch") == Some(coordinate.authority_epoch)
+        && row.get::<Option<i64>,_>("circuit_dedupe_ttl_secs") == Some(dedupe_ttl_secs)
         && row.get::<Option<String>,_>("circuit_owner_instance_id").as_deref() == Some(coordinate.owner_instance_id.as_str())
         && row.get::<Option<i64>,_>("circuit_owner_generation") == Some(coordinate.owner_generation));
     let outcome = if exact {

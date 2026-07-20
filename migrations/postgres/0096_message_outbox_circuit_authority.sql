@@ -32,6 +32,7 @@ ALTER TABLE message_outbox ADD COLUMN IF NOT EXISTS circuit_episode_key TEXT;
 ALTER TABLE message_outbox ADD COLUMN IF NOT EXISTS circuit_baseline_relay_offset BIGINT;
 ALTER TABLE message_outbox ADD COLUMN IF NOT EXISTS circuit_open_generation BIGINT;
 ALTER TABLE message_outbox ADD COLUMN IF NOT EXISTS circuit_authority_epoch BIGINT;
+ALTER TABLE message_outbox ADD COLUMN IF NOT EXISTS circuit_dedupe_ttl_secs BIGINT;
 ALTER TABLE message_outbox ADD COLUMN IF NOT EXISTS circuit_owner_instance_id TEXT;
 ALTER TABLE message_outbox ADD COLUMN IF NOT EXISTS circuit_owner_generation BIGINT;
 ALTER TABLE message_outbox ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;
@@ -59,6 +60,7 @@ ALTER TABLE message_outbox ADD CONSTRAINT message_outbox_circuit_stamp_complete
          AND circuit_baseline_relay_offset IS NULL
          AND circuit_open_generation IS NULL
          AND circuit_authority_epoch IS NULL
+         AND circuit_dedupe_ttl_secs IS NULL
          AND circuit_owner_instance_id IS NULL
          AND circuit_owner_generation IS NULL)
         OR
@@ -68,6 +70,7 @@ ALTER TABLE message_outbox ADD CONSTRAINT message_outbox_circuit_stamp_complete
          AND circuit_baseline_relay_offset IS NOT NULL
          AND circuit_open_generation IS NOT NULL
          AND circuit_authority_epoch IS NOT NULL
+         AND circuit_dedupe_ttl_secs IS NOT NULL
          AND circuit_owner_instance_id IS NOT NULL
          AND circuit_owner_generation IS NOT NULL)
     ) NOT VALID;
@@ -83,6 +86,7 @@ ALTER TABLE message_outbox ADD CONSTRAINT message_outbox_circuit_stamp_values
             AND circuit_baseline_relay_offset >= 0
             AND circuit_open_generation >= 0
             AND circuit_authority_epoch > 0
+            AND circuit_dedupe_ttl_secs > 0
             AND btrim(circuit_owner_instance_id) <> ''
             AND circuit_owner_generation >= 0
         )
