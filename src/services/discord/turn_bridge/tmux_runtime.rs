@@ -703,7 +703,8 @@ pub(in crate::services::discord) fn cancel_active_token(
         TmuxCleanupPolicy::CleanupSession {
             termination_reason_code,
         } => (TmuxCleanupIntent::CleanupSession, termination_reason_code),
-        TmuxCleanupPolicy::PreserveSession | TmuxCleanupPolicy::PreserveSessionAndInflight { .. } => {
+        TmuxCleanupPolicy::PreserveSession
+        | TmuxCleanupPolicy::PreserveSessionAndInflight { .. } => {
             (TmuxCleanupIntent::PreserveSession, None)
         }
     };

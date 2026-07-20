@@ -5,7 +5,9 @@
 //! same slot before it can become reachable, so it cannot appear between the
 //! generation check and a kill.
 
-use super::authority::{self, KillAuthorization, KillAuthorizationState, SessionKillGuard, TmuxBinding};
+use super::authority::{
+    self, KillAuthorization, KillAuthorizationState, SessionKillGuard, TmuxBinding,
+};
 use super::target::CapturedProcess;
 use crate::services::provider::CancelToken;
 use std::sync::atomic::Ordering;
@@ -82,9 +84,13 @@ impl CancelToken {
                     termination_recorded: false,
                 }
             }
-            KillAuthorization::Current(guard) => {
-                self.request_cleanup_authorized(request, binding, child, KillAuthorizationState::Current, Some(guard))
-            }
+            KillAuthorization::Current(guard) => self.request_cleanup_authorized(
+                request,
+                binding,
+                child,
+                KillAuthorizationState::Current,
+                Some(guard),
+            ),
             KillAuthorization::Unregistered => {
                 tracing::debug!(
                     cancel_source = request.cancel_source,
@@ -118,7 +124,10 @@ impl CancelToken {
         let mut pid_claimed = false;
         let mut name_claimed = false;
 
-        if matches!(request.intent, TmuxCleanupIntent::PidOnly | TmuxCleanupIntent::CleanupSession) {
+        if matches!(
+            request.intent,
+            TmuxCleanupIntent::PidOnly | TmuxCleanupIntent::CleanupSession
+        ) {
             pid_claimed = self
                 .pid_kill_claim
                 .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
@@ -130,7 +139,10 @@ impl CancelToken {
                             target.pid, identity,
                         );
                     } else {
-                        tracing::debug!(pid = target.pid, "skip cancellation PID kill without captured identity");
+                        tracing::debug!(
+                            pid = target.pid,
+                            "skip cancellation PID kill without captured identity"
+                        );
                     }
                 }
             }
@@ -177,11 +189,17 @@ impl CancelToken {
     ) -> bool {
         #[cfg(unix)]
         {
-            let unified = crate::services::provider::parse_provider_and_channel_from_tmux_name(name)
-                .map(|(_, channel)| crate::dispatch::is_unified_thread_channel_name_active(&channel))
-                .unwrap_or(false);
+            let unified =
+                crate::services::provider::parse_provider_and_channel_from_tmux_name(name)
+                    .map(|(_, channel)| {
+                        crate::dispatch::is_unified_thread_channel_name_active(&channel)
+                    })
+                    .unwrap_or(false);
             if unified {
-                tracing::debug!(tmux_session = name, "skip cleanup for active unified thread");
+                tracing::debug!(
+                    tmux_session = name,
+                    "skip cleanup for active unified thread"
+                );
                 return false;
             }
             tracing::debug!(
@@ -220,14 +238,23 @@ impl CancelToken {
         child: Option<&CapturedProcess>,
     ) {
         if let Some(binding) = binding {
-            let mut current = self.tmux_binding.lock().unwrap_or_else(|error| error.into_inner());
+            let mut current = self
+                .tmux_binding
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             if current.as_ref() == Some(binding) {
                 *current = None;
             }
         }
         if let Some(child) = child {
-            let mut current = self.child_pid.lock().unwrap_or_else(|error| error.into_inner());
-            if current.as_ref().is_some_and(|current| current.pid == child.pid) {
+            let mut current = self
+                .child_pid
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if current
+                .as_ref()
+                .is_some_and(|current| current.pid == child.pid)
+            {
                 *current = None;
             }
         }
