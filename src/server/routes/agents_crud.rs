@@ -13,6 +13,7 @@ use sqlx::{Postgres, QueryBuilder, Row};
 use std::path::{Path as FsPath, PathBuf};
 
 use super::{AppState, agents_setup};
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::git::{GitCommand, GitCommandError};
 use crate::services::observability::session_inventory::derive_visual_status;
 use crate::services::pipeline_override::{PipelineOverrideError, PipelineOverrideService};
@@ -141,21 +142,15 @@ fn parse_pipeline_config_json(raw: Option<String>) -> Option<serde_json::Value> 
     raw.and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
 }
 
-fn pipeline_override_error_response(
-    error: PipelineOverrideError,
-) -> (StatusCode, Json<serde_json::Value>) {
+fn pipeline_override_error(error: PipelineOverrideError) -> AppError {
     match error {
-        PipelineOverrideError::BadRequest(error) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("invalid pipeline_config: {error}")})),
-        ),
-        PipelineOverrideError::NotFound(error) => {
-            (StatusCode::NOT_FOUND, Json(json!({"error": error})))
+        PipelineOverrideError::BadRequest(error) => {
+            AppError::bad_request(format!("invalid pipeline_config: {error}"))
         }
-        PipelineOverrideError::Database(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
+        PipelineOverrideError::NotFound(error) => AppError::not_found(error),
+        PipelineOverrideError::Database(error) => {
+            AppError::internal(error).with_code(ErrorCode::Database)
+        }
     }
 }
 
@@ -680,7 +675,7 @@ pub(super) async fn get_agent(
 pub(super) async fn create_agent(
     State(state): State<AppState>,
     Json(body): Json<CreateAgentBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Some(pool) = state.pg_pool_ref() {
         let (discord_channel_id, discord_channel_alt, discord_channel_cc, discord_channel_cdx) =
             merged_channel_values(
@@ -709,10 +704,7 @@ pub(super) async fn create_agent(
         .execute(pool)
         .await
         {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            );
+            return Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database));
         }
 
         if let Some(ref office_id) = body.office_id {
@@ -726,10 +718,7 @@ pub(super) async fn create_agent(
             .execute(pool)
             .await
             {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
+                return Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database));
             }
         }
 
@@ -742,30 +731,28 @@ pub(super) async fn create_agent(
                     "agent_created",
                     json!({ "id": body.id, "agent": agent }),
                 );
-                (StatusCode::CREATED, Json(json!({"agent": agent})))
+                Ok((StatusCode::CREATED, Json(json!({"agent": agent}))))
             }
-            Ok(None) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "agent insert succeeded but readback failed"})),
+            Ok(None) => Err(
+                AppError::internal("agent insert succeeded but readback failed")
+                    .with_code(ErrorCode::Database),
             ),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            ),
+            Err(error) => Err(AppError::internal(error).with_code(ErrorCode::Database)),
         };
     }
 
-    (
+    Err(AppError::new(
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error": "postgres pool unavailable"})),
-    )
+        ErrorCode::Database,
+        "postgres pool unavailable",
+    ))
 }
 
 pub(super) async fn update_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<UpdateAgentBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Some(pool) = state.pg_pool_ref() {
         let mut updated_any = false;
         let channel_patch_requested = body.discord_channel_id.is_some()
@@ -794,17 +781,9 @@ pub(super) async fn update_agent(
                     row.try_get("discord_channel_cc").ok().flatten(),
                     row.try_get("discord_channel_cdx").ok().flatten(),
                 )),
-                Ok(None) => {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(json!({"error": "agent not found"})),
-                    );
-                }
+                Ok(None) => return Err(AppError::not_found("agent not found")),
                 Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("{error}")})),
-                    );
+                    return Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database));
                 }
             }
         } else {
@@ -900,7 +879,7 @@ pub(super) async fn update_agent(
             if pipeline_config.is_null() {
                 let service = PipelineOverrideService::new(pool);
                 if let Err(error) = service.validate_agent_pipeline_config(&id, None).await {
-                    return pipeline_override_error_response(error);
+                    return Err(pipeline_override_error(error));
                 }
                 separated.push("pipeline_config = NULL");
             } else {
@@ -910,7 +889,7 @@ pub(super) async fn update_agent(
                     .validate_agent_pipeline_config(&id, Some(pipeline_config))
                     .await
                 {
-                    return pipeline_override_error_response(error);
+                    return Err(pipeline_override_error(error));
                 }
                 separated
                     .push("pipeline_config = ")
@@ -926,12 +905,7 @@ pub(super) async fn update_agent(
                 .await
                 .map_err(|error| format!("{error}"));
             match exists {
-                Ok(0) => {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(json!({"error": "agent not found"})),
-                    );
-                }
+                Ok(0) => return Err(AppError::not_found("agent not found")),
                 Ok(_) => match write_prompt_if_changed(
                     &id,
                     body.provider.as_deref().or(body.cli_provider.as_deref()),
@@ -943,17 +917,11 @@ pub(super) async fn update_agent(
                 {
                     Ok(result) => Some(result),
                     Err(error) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": error})),
-                        );
+                        return Err(AppError::internal(error).with_code(ErrorCode::Config));
                     }
                 },
                 Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": error})),
-                    );
+                    return Err(AppError::internal(error).with_code(ErrorCode::Database));
                 }
             }
         } else {
@@ -961,10 +929,7 @@ pub(super) async fn update_agent(
         };
 
         if !updated_any && prompt_result.is_none() {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "no fields to update"})),
-            );
+            return Err(AppError::bad_request("no fields to update"));
         }
 
         if updated_any {
@@ -973,41 +938,35 @@ pub(super) async fn update_agent(
 
             match builder.build().execute(pool).await {
                 Ok(result) if result.rows_affected() == 0 => {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(json!({"error": "agent not found"})),
-                    );
+                    return Err(AppError::not_found("agent not found"));
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("{error}")})),
+                    return Err(
+                        AppError::internal(format!("{error}")).with_code(ErrorCode::Database)
                     );
                 }
             }
         }
 
         return match load_agent_pg(pool, &id).await {
-            Ok(Some(agent)) => (
+            Ok(Some(agent)) => Ok((
                 StatusCode::OK,
                 Json(json!({"agent": agent, "prompt": prompt_result})),
+            )),
+            Ok(None) => Err(
+                AppError::internal("agent update succeeded but readback failed")
+                    .with_code(ErrorCode::Database),
             ),
-            Ok(None) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "agent update succeeded but readback failed"})),
-            ),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            ),
+            Err(error) => Err(AppError::internal(error).with_code(ErrorCode::Database)),
         };
     }
 
-    (
+    Err(AppError::new(
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error": "postgres pool unavailable"})),
-    )
+        ErrorCode::Database,
+        "postgres pool unavailable",
+    ))
 }
 
 async fn load_duplicate_source_pg(
@@ -1050,36 +1009,24 @@ pub(super) async fn duplicate_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<DuplicateAgentBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let new_agent_id = body.new_agent_id.trim().to_string();
     let Some(channel_id) = clean_optional_text(body.channel_id.clone()) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "channel_id is required"})),
-        );
+        return Err(AppError::bad_request("channel_id is required"));
     };
 
     let source = if let Some(pool) = state.pg_pool_ref() {
         match load_duplicate_source_pg(pool, &id).await {
             Ok(Some(agent)) => agent,
-            Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "agent not found"})),
-                );
-            }
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
-            }
+            Ok(None) => return Err(AppError::not_found("agent not found")),
+            Err(error) => return Err(AppError::internal(error).with_code(ErrorCode::Database)),
         }
     } else {
-        return (
+        return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres pool unavailable"})),
-        );
+            ErrorCode::Database,
+            "postgres pool unavailable",
+        ));
     };
 
     let provider = clean_optional_text(body.provider.clone())
@@ -1098,9 +1045,9 @@ pub(super) async fn duplicate_agent(
             resolve_agent_prompt_path(&id, Some(&provider)).map(|path| path.display().to_string())
         });
     let Some(prompt_template_path) = prompt_path else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "source prompt path could not be resolved"})),
+        return Err(
+            AppError::internal("source prompt path could not be resolved")
+                .with_code(ErrorCode::Config),
         );
     };
 
@@ -1115,7 +1062,7 @@ pub(super) async fn duplicate_agent(
     let (setup_status, Json(setup_json)) =
         agents_setup::setup_agent(State(state.clone()), Json(setup_body)).await;
     if body.dry_run || !setup_status.is_success() {
-        return (
+        return Ok((
             setup_status,
             Json(json!({
                 "ok": setup_status.is_success(),
@@ -1124,7 +1071,7 @@ pub(super) async fn duplicate_agent(
                 "new_agent_id": new_agent_id,
                 "setup": setup_json,
             })),
-        );
+        ));
     }
 
     let name = clean_optional_text(body.name.clone())
@@ -1157,10 +1104,11 @@ pub(super) async fn duplicate_agent(
     });
 
     let Some(pool) = state.pg_pool_ref() else {
-        return (
+        return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres pool unavailable"})),
-        );
+            ErrorCode::Database,
+            "postgres pool unavailable",
+        ));
     };
     if let Err(error) = sqlx::query(
         "UPDATE agents
@@ -1175,9 +1123,9 @@ pub(super) async fn duplicate_agent(
     .execute(pool)
     .await
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("update duplicate metadata: {error}")})),
+        return Err(
+            AppError::internal(format!("update duplicate metadata: {error}"))
+                .with_code(ErrorCode::Database),
         );
     }
 
@@ -1188,10 +1136,7 @@ pub(super) async fn duplicate_agent(
         department.as_deref(),
         avatar_emoji.as_deref(),
     ) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        );
+        return Err(AppError::internal(error).with_code(ErrorCode::Config));
     }
 
     let agent = load_agent_pg(pool, &new_agent_id)
@@ -1200,7 +1145,7 @@ pub(super) async fn duplicate_agent(
         .flatten()
         .unwrap_or_else(|| json!({"id": new_agent_id}));
 
-    (
+    Ok((
         StatusCode::CREATED,
         Json(json!({
             "ok": true,
@@ -1210,13 +1155,13 @@ pub(super) async fn duplicate_agent(
             "setup": setup_json,
             "agent": agent,
         })),
-    )
+    ))
 }
 
 pub(super) async fn delete_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Some(pool) = state.pg_pool_ref() {
         match sqlx::query("DELETE FROM agents WHERE id = $1")
             .bind(&id)
@@ -1224,10 +1169,7 @@ pub(super) async fn delete_agent(
             .await
         {
             Ok(result) if result.rows_affected() == 0 => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "agent not found"})),
-                );
+                return Err(AppError::not_found("agent not found"));
             }
             Ok(_) => {
                 let _ = sqlx::query("DELETE FROM office_agents WHERE agent_id = $1")
@@ -1240,21 +1182,19 @@ pub(super) async fn delete_agent(
                     "agent_deleted",
                     json!({ "id": id }),
                 );
-                return (StatusCode::OK, Json(json!({"ok": true})));
+                return Ok((StatusCode::OK, Json(json!({"ok": true}))));
             }
             Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
+                return Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database));
             }
         }
     }
 
-    (
+    Err(AppError::new(
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error": "postgres pool unavailable"})),
-    )
+        ErrorCode::Database,
+        "postgres pool unavailable",
+    ))
 }
 
 pub(super) async fn list_sessions(State(state): State<AppState>) -> Json<serde_json::Value> {
