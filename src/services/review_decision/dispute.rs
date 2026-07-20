@@ -9,6 +9,7 @@ use axum::{Json, http::StatusCode};
 use serde_json::json;
 
 use crate::app_state::AppState;
+use crate::error::AppError;
 use crate::services::review_decision::ReviewDecisionBody;
 
 use super::DecisionResponse;
@@ -402,10 +403,7 @@ async fn decision_route_dispute_scope_mismatch_close(
         // 8. Reuse dismiss cleanup to clear any leftover pending
         //    review dispatches and review_status.
         if let Err(error) = dismiss_review_cleanup_pg_first(state, &body.card_id).await {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
+            return AppError::internal(error).into_json_response();
         }
 
         if let Err(error) = record_decision_tuning(
@@ -486,10 +484,7 @@ async fn decision_route_dispute_re_review(
     };
 
     if let Err(error) = prepare_dispute_review_entry_pg_first(state, &body.card_id).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        );
+        return AppError::internal(error).into_json_response();
     }
 
     // #119: Record tuning outcome BEFORE OnReviewEnter (which increments review_round)

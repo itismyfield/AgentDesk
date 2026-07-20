@@ -7,6 +7,7 @@ use sqlx::Row as SqlxRow;
 
 use crate::config::{Config, EscalationMode, EscalationSettings, EscalationSettingsResponse};
 use crate::db::agents::load_agent_channel_bindings_pg;
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::server::routes::AppState;
 use crate::services::discord::health::active_request_owner_for_channel;
 // Escalation-settings read path now lives in the service layer (#3037); the
@@ -24,10 +25,11 @@ const ESCALATION_SECTION_CHAR_LIMIT: usize = 320;
 const ESCALATION_REASON_CHAR_LIMIT: usize = 240;
 const ESCALATION_RECENT_RESULT_LIMIT: usize = 2;
 
-fn pg_unavailable() -> (StatusCode, Json<serde_json::Value>) {
-    (
+fn pg_unavailable() -> AppError {
+    AppError::new(
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error": "postgres pool not configured"})),
+        ErrorCode::Config,
+        "postgres pool not configured",
     )
 }
 
@@ -966,7 +968,7 @@ async fn emit_escalation_with_base_url(
     state: &AppState,
     body: EmitEscalationBody,
     base_url: &str,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let card_id = body.card_id.trim().to_string();
     let reasons = body
         .reasons
@@ -975,16 +977,10 @@ async fn emit_escalation_with_base_url(
         .filter(|reason| !reason.is_empty())
         .collect::<Vec<_>>();
     if card_id.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "card_id is required"})),
-        );
+        return Err(AppError::bad_request("card_id is required"));
     }
     if reasons.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "reasons must not be empty"})),
-        );
+        return Err(AppError::bad_request("reasons must not be empty"));
     }
 
     let (settings, summary, context, parent_channels, cached_thread_id) =
@@ -998,17 +994,17 @@ async fn emit_escalation_with_base_url(
                     } else {
                         StatusCode::INTERNAL_SERVER_ERROR
                     };
-                    return (status, Json(json!({"error": error})));
+                    return Err(AppError::new(status, ErrorCode::Internal, error));
                 }
             }
         } else {
-            return pg_unavailable();
+            return Err(pg_unavailable());
         };
 
     if summary_manual_decision_is_superseded(&summary) {
         let card_status = summary.status.clone();
         let review_status = summary.review_status.clone();
-        return (
+        return Ok((
             StatusCode::CONFLICT,
             Json(json!({
                 "ok": false,
@@ -1018,7 +1014,7 @@ async fn emit_escalation_with_base_url(
                 "review_status": review_status,
                 "error": "manual decision no longer required for this card",
             })),
-        );
+        ));
     }
 
     let client = reqwest::Client::new();
@@ -1040,10 +1036,7 @@ async fn emit_escalation_with_base_url(
     }) {
         Some(token) => token,
         None => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "bot token not found"})),
-            );
+            return Err(AppError::internal("bot token not found").with_code(ErrorCode::Discord));
         }
     };
 
@@ -1066,7 +1059,7 @@ async fn emit_escalation_with_base_url(
                 .await
                 {
                     Ok(true) => {
-                        return (
+                        return Ok((
                             StatusCode::OK,
                             Json(json!({
                                 "ok": true,
@@ -1077,7 +1070,7 @@ async fn emit_escalation_with_base_url(
                                 "owner_user_id": owner_user_id,
                                 "owner_source": owner_target.source,
                             })),
-                        );
+                        ));
                     }
                     Ok(false) => {
                         if let Some(pool) = state.pg_pool_ref() {
@@ -1168,7 +1161,7 @@ async fn emit_escalation_with_base_url(
                         } else {
                             thread_id
                         };
-                        return (
+                        return Ok((
                             StatusCode::OK,
                             Json(json!({
                                 "ok": true,
@@ -1180,7 +1173,7 @@ async fn emit_escalation_with_base_url(
                                 "owner_user_id": owner_user_id,
                                 "owner_source": owner_target.source,
                             })),
-                        );
+                        ));
                     }
                     Err(err) => {
                         tracing::warn!("[escalation] thread create failed for {card_id}: {err}");
@@ -1230,23 +1223,20 @@ async fn deliver_pm_fallback(
     fallback_note: impl Into<Option<&'static str>>,
     requested_mode: EscalationMode,
     resolved_mode: EscalationMode,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let fallback_note = fallback_note.into();
     let pm_channel = settings
         .pm_channel_id
         .as_deref()
         .and_then(parse_channel_reference);
     let Some(pm_channel_id) = pm_channel else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "pm_channel_id is not configured"})),
-        );
+        return Err(AppError::internal("pm_channel_id is not configured"));
     };
     let pm_channel_id = pm_channel_id.to_string();
 
     let message = build_pm_message(card_id, summary, reasons, fallback_note);
     match send_channel_message(client, base_url, announce_token, &pm_channel_id, &message).await {
-        Ok(()) => (
+        Ok(()) => Ok((
             StatusCode::OK,
             Json(json!({
                 "ok": true,
@@ -1256,11 +1246,12 @@ async fn deliver_pm_fallback(
                 "pm_channel_id": pm_channel_id,
                 "fallback_note": fallback_note,
             })),
-        ),
-        Err(err) => (
+        )),
+        Err(error) => Err(AppError::new(
             StatusCode::BAD_GATEWAY,
-            Json(json!({"error": format!("pm delivery failed: {err}")})),
-        ),
+            ErrorCode::Discord,
+            format!("pm delivery failed: {error}"),
+        )),
     }
 }
 
@@ -1287,48 +1278,43 @@ pub async fn seed_escalation_defaults_pg(
 /// GET /api/settings/escalation
 pub async fn get_escalation_settings(
     State(state): State<AppState>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let defaults = escalation_defaults(&state.config);
     let current = if let Some(pool) = state.pg_pool_ref() {
         match merged_settings_pg(pool, &state.config) {
             Ok(current) => current,
             Err(error) => {
                 tracing::warn!(%error, "[escalation] postgres settings load failed");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
+                return Err(AppError::internal(error));
             }
         }
     } else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
-    (
+    Ok((
         StatusCode::OK,
         Json(
             serde_json::to_value(EscalationSettingsResponse { current, defaults })
                 .unwrap_or_else(|_| json!({"error": "serialization failed"})),
         ),
-    )
+    ))
 }
 
 /// PUT /api/settings/escalation
 pub async fn put_escalation_settings(
     State(state): State<AppState>,
     Json(mut body): Json<EscalationSettings>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     body.pm_channel_id = normalize_optional_string(body.pm_channel_id.take());
     if body.schedule.timezone.parse::<Tz>().is_err() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "schedule.timezone must be a valid IANA timezone"})),
-        );
+        return Err(AppError::bad_request(
+            "schedule.timezone must be a valid IANA timezone",
+        ));
     }
     if parse_time_window(&body.schedule.pm_hours).is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "schedule.pm_hours must be HH:MM-HH:MM"})),
-        );
+        return Err(AppError::bad_request(
+            "schedule.pm_hours must be HH:MM-HH:MM",
+        ));
     }
 
     let defaults = escalation_defaults(&state.config);
@@ -1339,41 +1325,35 @@ pub async fn put_escalation_settings(
             store_override_pg(pool, &body)
         };
         if let Err(error) = store_result {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
+            return Err(AppError::internal(error));
         }
 
         match merged_settings_pg(pool, &state.config) {
             Ok(current) => current,
             Err(error) => {
                 tracing::warn!(%error, "[escalation] postgres settings reload failed");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
+                return Err(AppError::internal(error));
             }
         }
     } else {
-        return pg_unavailable();
+        return Err(pg_unavailable());
     };
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "ok": true,
             "current": current,
             "defaults": defaults,
         })),
-    )
+    ))
 }
 
 /// POST /api/internal/escalation/emit
 pub async fn emit_escalation(
     State(state): State<AppState>,
     Json(body): Json<EmitEscalationBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     emit_escalation_with_base_url(&state, body, DISCORD_API_BASE).await
 }
 
@@ -1627,7 +1607,8 @@ mod manual_decision_gate_tests {
                 },
                 &format!("http://{addr}"),
             )
-            .await;
+            .await
+            .expect("superseded escalation remains a flat response");
             assert_eq!(status, StatusCode::CONFLICT, "{card_id}");
             assert_eq!(body["state"], json!("superseded"), "{card_id}");
         }
