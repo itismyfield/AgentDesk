@@ -94,8 +94,11 @@ pub(crate) fn publish(provider: ProviderKind, name: &str, generation: u64) -> Op
         return None;
     }
 
+    // #4593 S1: a name/provider mismatch is tolerated in production (warn + proceed
+    // below), so a debug_assert here would diverge debug/test behavior from the
+    // production contract and panic legitimate callers (e.g. wrapper-interrupt fencing
+    // tests whose session name does not parse to the published provider).
     let parsed_provider = parse_provider_and_channel_from_tmux_name(name).map(|(kind, _)| kind);
-    debug_assert_eq!(parsed_provider.as_ref(), Some(&provider));
     if parsed_provider.as_ref() != Some(&provider) {
         tracing::warn!(
             provider = provider.as_str(),
