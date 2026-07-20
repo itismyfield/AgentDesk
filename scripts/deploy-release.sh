@@ -326,6 +326,11 @@ _resolve_release_server_port() {
         return 0
     fi
 
+    if ! python3 -c 'import yaml' >/dev/null 2>&1; then
+        echo "✗ Cannot resolve server.port from $config_path: python3 PyYAML is required; aborting deploy" >&2
+        return 1
+    fi
+
     if configured_port=$(python3 - "$config_path" "$fallback_port" <<'PY'
 import sys
 
@@ -348,8 +353,8 @@ PY
         return 0
     fi
 
-    echo "⚠ Could not resolve server.port from $config_path — using :$fallback_port" >&2
-    printf '%s\n' "$fallback_port"
+    echo "✗ Cannot resolve server.port from $config_path: invalid or unreadable configuration; aborting deploy" >&2
+    return 1
 }
 
 _notify_channel() {
