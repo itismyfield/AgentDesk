@@ -578,12 +578,7 @@ pub(super) fn acknowledge_orphaned_staged_alert_cleanup(
     else {
         return;
     };
-    acknowledge_orphaned_staged_alert_cleanup_in_root(
-        &root,
-        provider,
-        channel_id,
-        staged_alert_id,
-    );
+    acknowledge_orphaned_staged_alert_cleanup_in_root(&root, provider, channel_id, staged_alert_id);
 }
 
 fn retain_orphaned_staged_alert_for_cleanup(
@@ -824,7 +819,7 @@ async fn queue_or_resume_open_alert_with_enqueue_in_root(
 
     // Revalidate under a short, synchronous flock and commit the local alert
     // obligation. No `.await` occurs while this guard is live.
-    let validate_root = root.clone();
+    let validate_root = root.to_path_buf();
     let validate_provider = provider.clone();
     let validate_episode = episode.clone();
     let validate_open = open.clone();
@@ -1367,26 +1362,12 @@ mod tests {
             .expect("seed authoritative inflight");
         let authority = not_vouched_authority();
         assert!(matches!(
-            reserve_in_root_with_authority(
-                temp.path(),
-                &state,
-                &episode,
-                0,
-                1,
-                &authority,
-                10,
-            ),
+            reserve_in_root_with_authority(temp.path(), &state, &episode, 0, 1, &authority, 10,),
             CircuitReservation::Reserved { attempt: 1, .. }
         ));
-        let CircuitReservation::Open { open, .. } = reserve_in_root_with_authority(
-            temp.path(),
-            &state,
-            &episode,
-            0,
-            1,
-            &authority,
-            11,
-        ) else {
+        let CircuitReservation::Open { open, .. } =
+            reserve_in_root_with_authority(temp.path(), &state, &episode, 0, 1, &authority, 11)
+        else {
             panic!("episode must be open");
         };
 
@@ -1438,7 +1419,8 @@ mod tests {
             1,
             &not_vouched_authority(),
             14,
-        ) else {
+        )
+        else {
             panic!("the first expired-vouch pass must reopen the alert obligation");
         };
         let enqueue = CrashAfterLocalCommitEnqueue {
