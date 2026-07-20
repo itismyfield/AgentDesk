@@ -209,7 +209,8 @@ mod tests {
     /// The batch identity `session_key = "catch_up_too_old:{channel}:{batch_id}"`
     /// is stable, so `spawn_outbox` now stages via
     /// `enqueue_outbox_pg_returning_id_with_persistent_dedupe` (NULL expiry,
-    /// `ON CONFLICT(dedupe_key) WHERE status != 'failed'`). The dedupe key has no
+    /// `ON CONFLICT(dedupe_key) WHERE status NOT IN ('failed', 'cancelled')`). The
+    /// dedupe key has no
     /// time component, so the restart converges on the original row.
     ///
     /// We simulate the >5-minute gap by shifting the first row back in time by

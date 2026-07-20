@@ -36,6 +36,7 @@ pub(crate) enum StageHeldOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CircuitActivation {
     Activated,
+    AlreadyActivated,
     Stale,
     NotOwner,
 }
@@ -100,18 +101,13 @@ fn valid_same_episode_frontier_transition(
     requested_baseline: i64,
     requested_open_generation: i64,
 ) -> bool {
-    // `reserve_in_root` and `open_alert_cas_in_root` in
-    // relay_recovery_circuit_breaker.rs update the baseline only for a strictly
-    // newer frontier and increment open_generation exactly once in that update.
-    // `reserve_in_root` also normalizes a legacy generation 0 record to 1
-    // without moving its baseline.
-    (requested_baseline > current_baseline
-        && current_open_generation
-            .checked_add(1)
-            .is_some_and(|next| requested_open_generation == next))
-        || (current_open_generation == 0
-            && requested_open_generation == 1
-            && requested_baseline == current_baseline)
+    // Every frontier advance in `reserve_in_root` and `open_alert_cas_in_root`
+    // updates both values. PostgreSQL authority observes only the subsequence
+    // that reaches alert reservation, so multiple producer advances may occur
+    // between observations; both axes must therefore advance strictly, without
+    // requiring adjacent open generations.
+    requested_baseline > current_baseline
+        && requested_open_generation > current_open_generation
 }
 
 /// Reserve the first or next channel-global authority epoch under owner lock.
@@ -421,12 +417,34 @@ pub(crate) async fn activate_fenced(
     .execute(&mut *tx)
     .await?
     .rows_affected();
-    if changed != 1 {
-        tx.rollback().await?;
-        return Ok(CircuitActivation::Stale);
+    if changed == 1 {
+        tx.commit().await?;
+        return Ok(CircuitActivation::Activated);
     }
-    tx.commit().await?;
-    Ok(CircuitActivation::Activated)
+    let already_pending: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM message_outbox WHERE id=$1 AND status='pending'
+           AND circuit_provider=$2 AND circuit_channel_id=$3 AND circuit_episode_key=$4
+           AND circuit_baseline_relay_offset=$5 AND circuit_open_generation=$6
+           AND circuit_authority_epoch=$7 AND circuit_owner_instance_id=$8
+           AND circuit_owner_generation=$9)",
+    )
+    .bind(outbox_id)
+    .bind(&coordinate.provider)
+    .bind(&coordinate.channel_id)
+    .bind(&coordinate.episode_key)
+    .bind(coordinate.baseline_relay_offset)
+    .bind(coordinate.open_generation)
+    .bind(coordinate.authority_epoch)
+    .bind(&coordinate.owner_instance_id)
+    .bind(coordinate.owner_generation)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.rollback().await?;
+    Ok(if already_pending {
+        CircuitActivation::AlreadyActivated
+    } else {
+        CircuitActivation::Stale
+    })
 }
 
 #[allow(dead_code)]

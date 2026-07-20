@@ -152,8 +152,44 @@ async fn same_episode_rollbacks_fail_but_monotonic_and_episode_reset_advance_pg(
         ),
         "open-only rollback"
     );
+    assert!(
+        matches!(
+            reserve_next_authority(&pool, "discord", "507", "node-a", 7, "e1", 140, 4, Some(7))
+                .await
+                .unwrap(),
+            AuthorityReservation::Stale
+        ),
+        "baseline advance with equal generation"
+    );
+    assert!(
+        matches!(
+            reserve_next_authority(&pool, "discord", "507", "node-a", 7, "e1", 140, 3, Some(7))
+                .await
+                .unwrap(),
+            AuthorityReservation::Stale
+        ),
+        "baseline advance with lower generation"
+    );
+    assert!(
+        matches!(
+            reserve_next_authority(&pool, "discord", "507", "node-a", 7, "e1", 100, 7, Some(7))
+                .await
+                .unwrap(),
+            AuthorityReservation::Stale
+        ),
+        "generation advance with equal baseline"
+    );
+    assert!(
+        matches!(
+            reserve_next_authority(&pool, "discord", "507", "node-a", 7, "e1", 99, 7, Some(7))
+                .await
+                .unwrap(),
+            AuthorityReservation::Stale
+        ),
+        "generation advance with lower baseline"
+    );
     let increment =
-        match reserve_next_authority(&pool, "discord", "507", "node-a", 7, "e1", 101, 5, Some(7))
+        match reserve_next_authority(&pool, "discord", "507", "node-a", 7, "e1", 140, 7, Some(7))
             .await
             .unwrap()
         {
@@ -254,6 +290,19 @@ async fn vouch_then_new_epoch_reopens_and_old_activation_is_stale_pg() {
     assert_eq!(
         activate_fenced(&pool, second_id, &second).await.unwrap(),
         CircuitActivation::Activated
+    );
+    assert_eq!(
+        activate_fenced(&pool, second_id, &second).await.unwrap(),
+        CircuitActivation::AlreadyActivated
+    );
+    sqlx::query("UPDATE message_outbox SET status='processing' WHERE id=$1")
+        .bind(second_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        activate_fenced(&pool, second_id, &second).await.unwrap(),
+        CircuitActivation::Stale
     );
     pool.close().await;
     db.drop().await;
