@@ -886,7 +886,7 @@ async fn queue_or_resume_open_alert_with_enqueue_in_root(
             validate_channel_id,
             validate_episode.pin(),
         )
-        .is_ok_and(|locked_episode| {
+        .map(|locked_episode| {
             debug_assert_eq!(
                 RelayReattachEpisode::from_state(locked_episode.state()),
                 validate_episode
@@ -903,6 +903,7 @@ async fn queue_or_resume_open_alert_with_enqueue_in_root(
                 now_mono_secs,
             )
         })
+        .unwrap_or(OpenAlertCasOutcome::Cancel)
     })
     .await
     .unwrap_or(OpenAlertCasOutcome::Cancel);
@@ -934,12 +935,9 @@ async fn queue_or_resume_open_alert_with_enqueue_in_root(
         }
     } else {
         match enqueue.cancel(shared.pg_pool.as_ref(), staged_id).await {
-            Ok(()) => clear_canceled_staged_alert_in_root(
-                root,
-                provider,
-                channel_id.get(),
-                staged_id,
-            ),
+            Ok(()) => {
+                clear_canceled_staged_alert_in_root(root, provider, channel_id.get(), staged_id)
+            }
             Err(error) => {
                 retain_orphaned_staged_alert_for_cleanup(
                     root,
