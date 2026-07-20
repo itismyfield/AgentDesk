@@ -646,30 +646,42 @@ async fn load_agent_pg(pool: &sqlx::PgPool, id: &str) -> Result<Option<serde_jso
 pub(super) async fn list_agents(
     State(state): State<AppState>,
     Query(params): Query<ListAgentsQuery>,
-) -> Json<serde_json::Value> {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Some(pool) = state.pg_pool_ref() {
         let agents = list_agents_pg(pool, params.office_id.as_deref())
             .await
             .unwrap_or_default();
-        return Json(json!({ "agents": agents }));
+        return Ok((StatusCode::OK, Json(json!({ "agents": agents }))));
     }
 
-    Json(json!({ "error": "postgres pool unavailable" }))
+    Err(AppError::new(
+        StatusCode::OK,
+        ErrorCode::Database,
+        "postgres pool unavailable",
+    ))
 }
 
 pub(super) async fn get_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Json<serde_json::Value> {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Some(pool) = state.pg_pool_ref() {
         return match load_agent_pg(pool, &id).await {
-            Ok(Some(agent)) => Json(json!({ "agent": agent })),
-            Ok(None) => Json(json!({ "error": "agent not found" })),
-            Err(error) => Json(json!({ "error": error })),
+            Ok(Some(agent)) => Ok((StatusCode::OK, Json(json!({ "agent": agent })))),
+            Ok(None) => Err(AppError::new(
+                StatusCode::OK,
+                ErrorCode::NotFound,
+                "agent not found",
+            )),
+            Err(error) => Err(AppError::new(StatusCode::OK, ErrorCode::Database, error)),
         };
     }
 
-    Json(json!({ "error": "postgres pool unavailable" }))
+    Err(AppError::new(
+        StatusCode::OK,
+        ErrorCode::Database,
+        "postgres pool unavailable",
+    ))
 }
 
 pub(super) async fn create_agent(
@@ -1197,9 +1209,15 @@ pub(super) async fn delete_agent(
     ))
 }
 
-pub(super) async fn list_sessions(State(state): State<AppState>) -> Json<serde_json::Value> {
+pub(super) async fn list_sessions(
+    State(state): State<AppState>,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return Json(json!({ "error": "postgres pool unavailable" }));
+        return Err(AppError::new(
+            StatusCode::OK,
+            ErrorCode::Database,
+            "postgres pool unavailable",
+        ));
     };
     let rows = match sqlx::query(
         "SELECT id, session_key, instance_id, agent_id, provider, status, active_dispatch_id,
@@ -1212,7 +1230,13 @@ pub(super) async fn list_sessions(State(state): State<AppState>) -> Json<serde_j
     .await
     {
         Ok(rows) => rows,
-        Err(error) => return Json(json!({ "error": format!("query failed: {error}") })),
+        Err(error) => {
+            return Err(AppError::new(
+                StatusCode::OK,
+                ErrorCode::Database,
+                format!("query failed: {error}"),
+            ));
+        }
     };
     let worker_nodes = match crate::server::cluster::list_worker_nodes(
         pool,
@@ -1251,7 +1275,7 @@ pub(super) async fn list_sessions(State(state): State<AppState>) -> Json<serde_j
         &worker_nodes,
     );
 
-    Json(json!({ "sessions": sessions }))
+    Ok((StatusCode::OK, Json(json!({ "sessions": sessions }))))
 }
 
 pub(super) async fn list_policies(State(state): State<AppState>) -> Json<serde_json::Value> {
