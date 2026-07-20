@@ -215,9 +215,9 @@ impl CancelToken {
         }
         #[cfg(not(test))]
         match target.identity {
-            Some(identity) => crate::services::process::kill_pid_tree_if_identity_matches(
-                target.pid, identity,
-            ),
+            Some(identity) => {
+                crate::services::process::kill_pid_tree_if_identity_matches(target.pid, identity)
+            }
             // A current-generation cleanup must retain legacy PID delivery when
             // registration could not capture a platform identity baseline. The
             // generation slot still fences another managed incarnation; this is
@@ -233,7 +233,9 @@ impl CancelToken {
         #[cfg(unix)]
         {
             crate::services::provider::parse_provider_and_channel_from_tmux_name(name)
-                .map(|(_, channel)| crate::dispatch::is_unified_thread_channel_name_active(&channel))
+                .map(|(_, channel)| {
+                    crate::dispatch::is_unified_thread_channel_name_active(&channel)
+                })
                 .unwrap_or(false)
         }
         #[cfg(not(unix))]
@@ -328,8 +330,11 @@ mod tests {
     }
 
     fn bind(token: &CancelToken, name: &str) {
-        *token.tmux_binding.lock().unwrap() =
-            authority::publish(ProviderKind::Claude, name, token.claude_interrupt_generation);
+        *token.tmux_binding.lock().unwrap() = authority::publish(
+            ProviderKind::Claude,
+            name,
+            token.claude_interrupt_generation,
+        );
     }
 
     #[test]

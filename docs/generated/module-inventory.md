@@ -377,7 +377,7 @@
 | `services::auto_queue::view_admin_routes` | `src/services/auto_queue/view_admin_routes.rs` | 730 | 730 | 0 |  |
 | `services::automation_candidate_contract` | `src/services/automation_candidate_contract.rs` | 127 | 87 | 40 |  |
 | `services::automation_candidate_materializer` | `src/services/automation_candidate_materializer.rs` | 844 | 844 | 0 |  |
-| `services::claude` | `src/services/claude.rs` | 4297 | 2942 | 1355 | giant-file |
+| `services::claude` | `src/services/claude.rs` | 4298 | 2943 | 1355 | giant-file |
 | `services::claude::active_usage` | `src/services/claude/active_usage.rs` | 55 | 55 | 0 |  |
 | `services::claude::backend_routing` | `src/services/claude/backend_routing.rs` | 122 | 122 | 0 |  |
 | `services::claude_command` | `src/services/claude_command.rs` | 1055 | 473 | 582 |  |
@@ -425,7 +425,7 @@
 | `services::cluster::stream_relay` | `src/services/cluster/stream_relay.rs` | 1638 | 985 | 653 |  |
 | `services::cluster::stream_relay::identity` | `src/services/cluster/stream_relay/identity.rs` | 37 | 37 | 0 |  |
 | `services::cluster::watcher_supervisor` | `src/services/cluster/watcher_supervisor.rs` | 845 | 373 | 472 |  |
-| `services::codex` | `src/services/codex.rs` | 3839 | 3119 | 720 | giant-file |
+| `services::codex` | `src/services/codex.rs` | 3833 | 3113 | 720 | giant-file |
 | `services::codex_remote_policy` | `src/services/codex_remote_policy.rs` | 49 | 32 | 17 |  |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 2554 | 1403 | 1151 | giant-file |
 | `services::codex_tui` | `src/services/codex_tui/mod.rs` | 5 | 5 | 0 |  |
@@ -1026,12 +1026,12 @@
 | `services::platform::tmux::availability` | `src/services/platform/tmux/availability.rs` | 269 | 136 | 133 |  |
 | `services::pr_summary` | `src/services/pr_summary.rs` | 542 | 321 | 221 |  |
 | `services::process` | `src/services/process.rs` | 1252 | 782 | 470 |  |
-| `services::provider` | `src/services/provider.rs` | 2462 | 1847 | 615 | giant-file |
+| `services::provider` | `src/services/provider.rs` | 2455 | 1840 | 615 | giant-file |
 | `services::provider::cancel_token_claude_interrupt` | `src/services/provider/cancel_token_claude_interrupt.rs` | 366 | 169 | 197 |  |
 | `services::provider::cancel_token_cleanup` | `src/services/provider/cancel_token_cleanup.rs` | 5 | 5 | 0 |  |
-| `services::provider::cancel_token_cleanup::authority` | `src/services/provider/cancel_token_cleanup/authority.rs` | 248 | 156 | 92 |  |
-| `services::provider::cancel_token_cleanup::executor` | `src/services/provider/cancel_token_cleanup/executor.rs` | 296 | 263 | 33 |  |
-| `services::provider::cancel_token_cleanup::target` | `src/services/provider/cancel_token_cleanup/target.rs` | 19 | 19 | 0 |  |
+| `services::provider::cancel_token_cleanup::authority` | `src/services/provider/cancel_token_cleanup/authority.rs` | 209 | 141 | 68 |  |
+| `services::provider::cancel_token_cleanup::executor` | `src/services/provider/cancel_token_cleanup/executor.rs` | 404 | 307 | 97 |  |
+| `services::provider::cancel_token_cleanup::target` | `src/services/provider/cancel_token_cleanup/target.rs` | 17 | 17 | 0 |  |
 | `services::provider_auth` | `src/services/provider_auth.rs` | 628 | 400 | 228 |  |
 | `services::provider_cli` | `src/services/provider_cli/mod.rs` | 21 | 21 | 0 |  |
 | `services::provider_cli::canary` | `src/services/provider_cli/canary.rs` | 86 | 86 | 0 |  |
@@ -1047,7 +1047,7 @@
 | `services::provider_cli::snapshot` | `src/services/provider_cli/snapshot.rs` | 74 | 74 | 0 |  |
 | `services::provider_cli::upgrade` | `src/services/provider_cli/upgrade.rs` | 637 | 637 | 0 |  |
 | `services::provider_error_transcript` | `src/services/provider_error_transcript.rs` | 87 | 48 | 39 |  |
-| `services::provider_exec` | `src/services/provider_exec.rs` | 307 | 307 | 0 |  |
+| `services::provider_exec` | `src/services/provider_exec.rs` | 300 | 300 | 0 |  |
 | `services::provider_hosting` | `src/services/provider_hosting.rs` | 1073 | 493 | 580 |  |
 | `services::provider_output_guard` | `src/services/provider_output_guard.rs` | 195 | 195 | 0 |  |
 | `services::provider_runtime` | `src/services/provider_runtime.rs` | 73 | 73 | 0 |  |

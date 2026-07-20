@@ -206,5 +206,4 @@ mod tests {
         ));
         assert!(matches!(authorize(None), KillAuthorization::Unregistered));
     }
-
 }
