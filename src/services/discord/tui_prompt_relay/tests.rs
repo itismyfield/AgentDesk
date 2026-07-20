@@ -1789,17 +1789,52 @@ fn slash_command_control_turn_dedupes_double_post_but_not_distinct_commands() {
 }
 
 #[test]
-fn local_compact_bypasses_the_two_second_external_slash_control_gate() {
-    let sess = format!("local-compact-gate-{:p}", &0u8 as *const u8);
+fn local_slash_control_note_dedupes_same_kind_but_not_distinct_kinds() {
+    let sess = format!("local-control-note-gate-{:p}", &0u8 as *const u8);
+
+    assert!(local_only_slash_control_note_is_first_sighting(
+        &sess, "/compact"
+    ));
+    assert!(
+        !local_only_slash_control_note_is_first_sighting(&sess, "/compact"),
+        "the local note emission gate must drop the near-simultaneous transcript half"
+    );
+    assert!(
+        local_only_slash_control_note_is_first_sighting(&sess, "/loop"),
+        "different command kinds must remain independent"
+    );
+}
+
+#[test]
+fn local_slash_control_note_allows_same_kind_after_window() {
+    let sess = format!("local-control-note-window-{:p}", &0u8 as *const u8);
+    assert!(local_only_slash_control_note_is_first_sighting(
+        &sess, "/compact"
+    ));
+
+    let key = format!("{sess}\u{0}/compact");
+    SLASH_COMMAND_CONTROL_LAST_POSTED
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(
+            key,
+            std::time::Instant::now() - SLASH_COMMAND_CONTROL_DEDUPE_WINDOW,
+        );
+
+    assert!(
+        local_only_slash_control_note_is_first_sighting(&sess, "/compact"),
+        "the local note gate must allow a genuine command after the dedupe window"
+    );
+}
+
+#[test]
+fn local_compact_still_bypasses_the_external_replay_classifier() {
+    let sess = format!("local-compact-external-gate-{:p}", &0u8 as *const u8);
     let compact = relay_observed_prompt_injected_prompt_decision("/compact");
     assert!(compact.local_only_slash);
     assert!(
         !slash_command_control_turn_is_duplicate_external_replay(&compact, &sess),
-        "the first human local /compact must not enter the external /loop time gate"
-    );
-    assert!(
-        !slash_command_control_turn_is_duplicate_external_replay(&compact, &sess),
-        "a second human local /compact inside two seconds is still distinct"
+        "local controls must remain outside the external replay classifier"
     );
 
     let loop_control = relay_observed_prompt_injected_prompt_decision("/loop 5m inspect status");

@@ -817,7 +817,7 @@
 | `services::discord::tui_direct_abort_marker::sweep` | `src/services/discord/tui_direct_abort_marker/sweep.rs` | 177 | 177 | 0 |  |
 | `services::discord::tui_direct_abort_marker::tombstone` | `src/services/discord/tui_direct_abort_marker/tombstone.rs` | 70 | 70 | 0 |  |
 | `services::discord::tui_direct_pending_start` | `src/services/discord/tui_direct_pending_start.rs` | 3815 | 1495 | 2320 | giant-file |
-| `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 854 | 854 | 0 |  |
+| `services::discord::tui_prompt_relay` | `src/services/discord/tui_prompt_relay.rs` | 866 | 866 | 0 |  |
 | `services::discord::tui_prompt_relay::anchor_completion` | `src/services/discord/tui_prompt_relay/anchor_completion.rs` | 454 | 218 | 236 |  |
 | `services::discord::tui_prompt_relay::bridge_completion` | `src/services/discord/tui_prompt_relay/bridge_completion.rs` | 167 | 81 | 86 |  |
 | `services::discord::tui_prompt_relay::bridge_gateway` | `src/services/discord/tui_prompt_relay/bridge_gateway.rs` | 199 | 199 | 0 |  |
