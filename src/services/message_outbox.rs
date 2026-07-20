@@ -772,17 +772,15 @@ pub(crate) async fn stage_outbox_pg_with_ttl(
 }
 
 pub(crate) async fn activate_staged_outbox_pg(pool: &PgPool, id: i64) -> Result<bool, sqlx::Error> {
-    Ok(
-        sqlx::query(
-            "UPDATE message_outbox SET status='pending'
+    Ok(sqlx::query(
+        "UPDATE message_outbox SET status='pending'
               WHERE id=$1 AND status='held' AND circuit_open_generation IS NULL",
-        )
-        .bind(id)
-        .execute(pool)
-        .await?
-        .rows_affected()
-            == 1,
     )
+    .bind(id)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1)
 }
 
 /// Activate a held row, or confirm that a prior activation already made the

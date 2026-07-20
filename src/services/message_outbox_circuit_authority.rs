@@ -48,7 +48,10 @@ pub(crate) enum FreshVouchRevoke {
 }
 
 fn normalize(provider: &str, channel_id: &str) -> (String, String) {
-    (provider.trim().to_lowercase(), channel_id.trim().to_string())
+    (
+        provider.trim().to_lowercase(),
+        channel_id.trim().to_string(),
+    )
 }
 
 async fn lock_channel(
@@ -267,12 +270,21 @@ pub(crate) async fn stage_held(
 ) -> Result<StageHeldOutcome, crate::services::message_outbox::OutboxEnqueueError> {
     crate::services::message_outbox::validate_outbox_source(message.source)?;
     let reason_code = crate::services::message_outbox::normalized_reason_code(message.reason_code);
-    let session_key = crate::services::message_outbox::normalized_session_key(message.target, message.session_key);
+    let session_key = crate::services::message_outbox::normalized_session_key(
+        message.target,
+        message.session_key,
+    );
     let dedupe_key = crate::services::message_outbox::dedupe_key_for_message(
-        message.target, message.content, reason_code, session_key.as_deref(),
-    ).ok_or_else(|| crate::services::message_outbox::OutboxEnqueueError::Database(
-        sqlx::Error::Protocol("circuit staging requires a dedupe identity".to_string()),
-    ))?;
+        message.target,
+        message.content,
+        reason_code,
+        session_key.as_deref(),
+    )
+    .ok_or_else(|| {
+        crate::services::message_outbox::OutboxEnqueueError::Database(sqlx::Error::Protocol(
+            "circuit staging requires a dedupe identity".to_string(),
+        ))
+    })?;
     let dedupe_ttl_secs = dedupe_ttl_secs.max(1);
     let mut tx = pool.begin().await?;
     lock_channel(&mut tx, &coordinate.provider, &coordinate.channel_id).await?;
@@ -287,7 +299,10 @@ pub(crate) async fn stage_held(
     sqlx::query(
         "DELETE FROM message_outbox WHERE dedupe_key=$1 AND status='held'
            AND dedupe_expires_at IS NOT NULL AND dedupe_expires_at<=NOW()",
-    ).bind(&dedupe_key).execute(&mut *tx).await?;
+    )
+    .bind(&dedupe_key)
+    .execute(&mut *tx)
+    .await?;
     let inserted = sqlx::query_scalar::<_, i64>(
         "INSERT INTO message_outbox
              (target,content,bot,source,status,reason_code,session_key,dedupe_key,dedupe_expires_at,
@@ -299,12 +314,24 @@ pub(crate) async fn stage_held(
          ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL
              AND status NOT IN ('failed','cancelled') DO NOTHING RETURNING id",
     )
-    .bind(message.target).bind(message.content).bind(message.bot).bind(message.source)
-    .bind(reason_code).bind(session_key.as_deref()).bind(&dedupe_key).bind(dedupe_ttl_secs)
-    .bind(&coordinate.provider).bind(&coordinate.channel_id).bind(&coordinate.episode_key)
-    .bind(coordinate.baseline_relay_offset).bind(coordinate.open_generation)
-    .bind(coordinate.authority_epoch).bind(&coordinate.owner_instance_id)
-    .bind(coordinate.owner_generation).fetch_optional(&mut *tx).await?;
+    .bind(message.target)
+    .bind(message.content)
+    .bind(message.bot)
+    .bind(message.source)
+    .bind(reason_code)
+    .bind(session_key.as_deref())
+    .bind(&dedupe_key)
+    .bind(dedupe_ttl_secs)
+    .bind(&coordinate.provider)
+    .bind(&coordinate.channel_id)
+    .bind(&coordinate.episode_key)
+    .bind(coordinate.baseline_relay_offset)
+    .bind(coordinate.open_generation)
+    .bind(coordinate.authority_epoch)
+    .bind(&coordinate.owner_instance_id)
+    .bind(coordinate.owner_generation)
+    .fetch_optional(&mut *tx)
+    .await?;
     if let Some(id) = inserted {
         tx.commit().await?;
         return Ok(StageHeldOutcome::Staged { id });
@@ -316,33 +343,54 @@ pub(crate) async fn stage_held(
                 circuit_owner_instance_id,circuit_owner_generation
            FROM message_outbox WHERE dedupe_key=$1 AND status NOT IN ('failed','cancelled')",
     ).bind(&dedupe_key).fetch_optional(&mut *tx).await?;
-    let exact = existing.as_ref().is_some_and(|row|
-        row.get::<String,_>("target") == message.target
-        && row.get::<String,_>("content") == message.content
-        && row.get::<String,_>("bot") == message.bot
-        && row.get::<String,_>("source") == message.source
-        && row.get::<Option<String>,_>("reason_code").as_deref() == reason_code
-        && row.get::<Option<String>,_>("session_key") == session_key
-        && row.get::<String,_>("status") == "held"
-        && row.get::<Option<String>,_>("circuit_provider").as_deref() == Some(coordinate.provider.as_str())
-        && row.get::<Option<String>,_>("circuit_channel_id").as_deref() == Some(coordinate.channel_id.as_str())
-        && row.get::<Option<String>,_>("circuit_episode_key").as_deref() == Some(coordinate.episode_key.as_str())
-        && row.get::<Option<i64>,_>("circuit_baseline_relay_offset") == Some(coordinate.baseline_relay_offset)
-        && row.get::<Option<i64>,_>("circuit_open_generation") == Some(coordinate.open_generation)
-        && row.get::<Option<i64>,_>("circuit_authority_epoch") == Some(coordinate.authority_epoch)
-        && row.get::<Option<i64>,_>("circuit_dedupe_ttl_secs") == Some(dedupe_ttl_secs)
-        && row.get::<Option<String>,_>("circuit_owner_instance_id").as_deref() == Some(coordinate.owner_instance_id.as_str())
-        && row.get::<Option<i64>,_>("circuit_owner_generation") == Some(coordinate.owner_generation));
+    let exact = existing.as_ref().is_some_and(|row| {
+        row.get::<String, _>("target") == message.target
+            && row.get::<String, _>("content") == message.content
+            && row.get::<String, _>("bot") == message.bot
+            && row.get::<String, _>("source") == message.source
+            && row.get::<Option<String>, _>("reason_code").as_deref() == reason_code
+            && row.get::<Option<String>, _>("session_key") == session_key
+            && row.get::<String, _>("status") == "held"
+            && row.get::<Option<String>, _>("circuit_provider").as_deref()
+                == Some(coordinate.provider.as_str())
+            && row
+                .get::<Option<String>, _>("circuit_channel_id")
+                .as_deref()
+                == Some(coordinate.channel_id.as_str())
+            && row
+                .get::<Option<String>, _>("circuit_episode_key")
+                .as_deref()
+                == Some(coordinate.episode_key.as_str())
+            && row.get::<Option<i64>, _>("circuit_baseline_relay_offset")
+                == Some(coordinate.baseline_relay_offset)
+            && row.get::<Option<i64>, _>("circuit_open_generation")
+                == Some(coordinate.open_generation)
+            && row.get::<Option<i64>, _>("circuit_authority_epoch")
+                == Some(coordinate.authority_epoch)
+            && row.get::<Option<i64>, _>("circuit_dedupe_ttl_secs") == Some(dedupe_ttl_secs)
+            && row
+                .get::<Option<String>, _>("circuit_owner_instance_id")
+                .as_deref()
+                == Some(coordinate.owner_instance_id.as_str())
+            && row.get::<Option<i64>, _>("circuit_owner_generation")
+                == Some(coordinate.owner_generation)
+    });
     let outcome = if exact {
-        StageHeldOutcome::Idempotent { id: existing.unwrap().get("id") }
-    } else { StageHeldOutcome::Conflict };
+        StageHeldOutcome::Idempotent {
+            id: existing.unwrap().get("id"),
+        }
+    } else {
+        StageHeldOutcome::Conflict
+    };
     tx.rollback().await?;
     Ok(outcome)
 }
 
 #[allow(dead_code)]
 pub(crate) async fn activate_fenced(
-    pool: &PgPool, outbox_id: i64, coordinate: &CircuitCoordinate,
+    pool: &PgPool,
+    outbox_id: i64,
+    coordinate: &CircuitCoordinate,
 ) -> Result<CircuitActivation, sqlx::Error> {
     let mut tx = pool.begin().await?;
     lock_channel(&mut tx, &coordinate.provider, &coordinate.channel_id).await?;
@@ -360,19 +408,32 @@ pub(crate) async fn activate_fenced(
            AND circuit_baseline_relay_offset=$5 AND circuit_open_generation=$6
            AND circuit_authority_epoch=$7 AND circuit_owner_instance_id=$8
            AND circuit_owner_generation=$9",
-    ).bind(outbox_id).bind(&coordinate.provider).bind(&coordinate.channel_id)
-    .bind(&coordinate.episode_key).bind(coordinate.baseline_relay_offset)
-    .bind(coordinate.open_generation).bind(coordinate.authority_epoch)
-    .bind(&coordinate.owner_instance_id).bind(coordinate.owner_generation)
-    .execute(&mut *tx).await?.rows_affected();
-    if changed != 1 { tx.rollback().await?; return Ok(CircuitActivation::Stale); }
+    )
+    .bind(outbox_id)
+    .bind(&coordinate.provider)
+    .bind(&coordinate.channel_id)
+    .bind(&coordinate.episode_key)
+    .bind(coordinate.baseline_relay_offset)
+    .bind(coordinate.open_generation)
+    .bind(coordinate.authority_epoch)
+    .bind(&coordinate.owner_instance_id)
+    .bind(coordinate.owner_generation)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if changed != 1 {
+        tx.rollback().await?;
+        return Ok(CircuitActivation::Stale);
+    }
     tx.commit().await?;
     Ok(CircuitActivation::Activated)
 }
 
 #[allow(dead_code)]
 pub(crate) async fn revoke_on_fresh_vouch(
-    pool: &PgPool, coordinate: &CircuitCoordinate, reason: &str,
+    pool: &PgPool,
+    coordinate: &CircuitCoordinate,
+    reason: &str,
 ) -> Result<FreshVouchRevoke, sqlx::Error> {
     let mut tx = pool.begin().await?;
     lock_channel(&mut tx, &coordinate.provider, &coordinate.channel_id).await?;
@@ -385,11 +446,22 @@ pub(crate) async fn revoke_on_fresh_vouch(
           WHERE provider=$1 AND channel_id=$2 AND owner_instance_id=$3 AND owner_generation=$4
             AND episode_key=$5 AND baseline_relay_offset=$6 AND open_generation=$7
             AND authority_epoch=$8 AND revoked_at IS NULL",
-    ).bind(&coordinate.provider).bind(&coordinate.channel_id).bind(&coordinate.owner_instance_id)
-    .bind(coordinate.owner_generation).bind(&coordinate.episode_key)
-    .bind(coordinate.baseline_relay_offset).bind(coordinate.open_generation)
-    .bind(coordinate.authority_epoch).execute(&mut *tx).await?.rows_affected();
-    if revoked != 1 { tx.rollback().await?; return Ok(FreshVouchRevoke::Stale); }
+    )
+    .bind(&coordinate.provider)
+    .bind(&coordinate.channel_id)
+    .bind(&coordinate.owner_instance_id)
+    .bind(coordinate.owner_generation)
+    .bind(&coordinate.episode_key)
+    .bind(coordinate.baseline_relay_offset)
+    .bind(coordinate.open_generation)
+    .bind(coordinate.authority_epoch)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if revoked != 1 {
+        tx.rollback().await?;
+        return Ok(FreshVouchRevoke::Stale);
+    }
     sqlx::query(
         "UPDATE message_outbox SET status='cancelled',cancelled_at=NOW(),cancel_reason=$9,
                 dedupe_key=NULL,dedupe_expires_at=NULL,claimed_at=NULL,claim_owner=NULL,next_attempt_at=NULL
