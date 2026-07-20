@@ -135,7 +135,7 @@ struct CaptureOffsetWatchdogState {
     /// offset was observed to ADVANCE. Unlike `OFFSET_OBSERVATIONS` (which is
     /// only fed inside `evaluate_stall_watchdog_liveness`, i.e. only once
     /// `should_clean` already fired), this map is fed EVERY watchdog tick via
-    /// `stall_watchdog_capture_offset_advancing` (recovery.rs), so it carries
+    /// `liveness_authority::observe_capture_coordinate`, so it carries
     /// pre-threshold advance history. Used as the fallback source for
     /// `pane_offset_advanced_age_secs`, removing the structural one-tick
     /// blindness on the first post-threshold evaluation (previous == None).

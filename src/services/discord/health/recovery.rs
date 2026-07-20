@@ -4781,7 +4781,7 @@ mod stall_watchdog_auto_heal_tests {
             .expect("initial absolute-backstop watcher snapshot");
         let observation_time = chrono::Utc::now().timestamp();
         assert!(
-            !super::stall_liveness::stall_watchdog_capture_offset_advancing(
+            !super::super::liveness_authority::observe_capture_coordinate(
                 &provider,
                 channel,
                 &initial_snapshot,
@@ -4798,7 +4798,7 @@ mod stall_watchdog_auto_heal_tests {
             .await
             .expect("advanced absolute-backstop watcher snapshot");
         assert!(
-            super::stall_liveness::stall_watchdog_capture_offset_advancing(
+            super::super::liveness_authority::observe_capture_coordinate(
                 &provider,
                 channel,
                 &advanced_snapshot,
