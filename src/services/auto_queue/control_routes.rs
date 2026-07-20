@@ -10,30 +10,24 @@ pub async fn update_run(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<UpdateRunBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if body
         .deploy_phases
         .as_ref()
         .is_some_and(|phases| !phases.is_empty())
         && !deploy_phase_api_enabled(&state)
     {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({
+        return Err(auto_queue_json_error(StatusCode::FORBIDDEN, Json(json!({
                 "error": "deploy_phases requires server.auth_token to be configured"
-            })),
-        );
+            })),));
     }
 
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable_response();
+        return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     if let Some(max_concurrent_threads) = body.max_concurrent_threads {
         if max_concurrent_threads <= 0 {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "max_concurrent_threads must be > 0"})),
-            );
+            return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": "max_concurrent_threads must be > 0"})),));
         }
     }
 
@@ -43,24 +37,18 @@ pub async fn update_run(
         && body.max_concurrent_threads.is_none()
         && !ignored_unified_thread
     {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "no fields to update"})),
-        );
+        return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": "no fields to update"})),));
     }
 
     match update_run_with_pg(&id, &body, pool).await {
-        Ok(_) => (
+        Ok(_) => Ok((
             StatusCode::OK,
             Json(json!({
                 "ok": true,
                 "ignored": ignored_unified_thread.then_some(vec!["unified_thread"]),
             })),
-        ),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
+        )),
+        Err(error) => Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": error})),)),
     }
 }
 
@@ -68,16 +56,16 @@ pub async fn update_run(
 pub async fn reset_slot_thread(
     State(state): State<AppState>,
     Path((agent_id, slot_index)): Path<(String, i64)>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable_response();
+        return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     match crate::services::auto_queue::runtime::reset_slot_thread_bindings_pg(
         pool, &agent_id, slot_index,
     )
     .await
     {
-        Ok((archived_threads, cleared_sessions, cleared_bindings)) => (
+        Ok((archived_threads, cleared_sessions, cleared_bindings)) => Ok((
             StatusCode::OK,
             Json(json!({
                 "ok": true,
@@ -87,14 +75,11 @@ pub async fn reset_slot_thread(
                 "cleared_sessions": cleared_sessions,
                 "cleared_bindings": cleared_bindings,
             })),
-        ),
+        )),
         Err(err) if err.contains("has active dispatch") => {
-            (StatusCode::CONFLICT, Json(json!({"error": err})))
+            Err(auto_queue_json_error(StatusCode::CONFLICT, Json(json!({"error": err}))))
         }
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": err})),
-        ),
+        Err(err) => Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": err})),)),
     }
 }
 
@@ -103,11 +88,11 @@ pub async fn reset_slot_thread(
 pub async fn reset(
     State(state): State<AppState>,
     body: Bytes,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let body: ResetBody = match parse_json_body(body, "reset") {
         Ok(parsed) => parsed,
         Err(error) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+            return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": error}))));
         }
     };
 
@@ -119,22 +104,16 @@ pub async fn reset(
     {
         Some(agent_id) => agent_id,
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "agent_id is required for reset"})),
-            );
+            return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": "agent_id is required for reset"})),));
         }
     };
 
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable_response();
+        return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     match reset_scoped_with_pg(agent_id, pool).await {
-        Ok(response) => (StatusCode::OK, Json(response)),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
+        Ok(response) => Ok((StatusCode::OK, Json(response))),
+        Err(error) => Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": error})),)),
     }
 }
 
@@ -143,11 +122,11 @@ pub async fn reset(
 pub async fn reset_global(
     State(state): State<AppState>,
     body: Bytes,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let body: ResetGlobalBody = match parse_json_body(body, "reset-global") {
         Ok(parsed) => parsed,
         Err(error) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+            return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": error}))));
         }
     };
 
@@ -157,21 +136,15 @@ pub async fn reset_global(
         .map(str::trim)
         .filter(|value| !value.is_empty());
     if confirmation_token != Some(RESET_GLOBAL_CONFIRMATION_TOKEN) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "confirmation_token is required for reset-global"})),
-        );
+        return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": "confirmation_token is required for reset-global"})),));
     }
 
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable_response();
+        return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     match reset_global_with_pg(pool).await {
-        Ok(response) => (StatusCode::OK, Json(response)),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
+        Ok(response) => Ok((StatusCode::OK, Json(response))),
+        Err(error) => Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": error})),)),
     }
 }
 
@@ -179,28 +152,25 @@ pub async fn reset_global(
 pub async fn pause(
     State(state): State<AppState>,
     body: Bytes,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let body: PauseBody = match parse_json_body(body, "pause") {
         Ok(parsed) => parsed,
         Err(error) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+            return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({"error": error}))));
         }
     };
     let force = body.force.unwrap_or(false);
 
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable_response();
+        return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     match if force {
         force_pause_with_pg(state.health_registry.clone(), pool).await
     } else {
         soft_pause_with_pg(pool).await
     } {
-        Ok(response) => (StatusCode::OK, Json(response)),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
+        Ok(response) => Ok((StatusCode::OK, Json(response))),
+        Err(error) => Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": error})),)),
     }
 }
 
@@ -218,9 +188,9 @@ pub(super) fn cancel_route_error_response(
 }
 
 /// POST /api/queue/resume — resume paused runs and dispatch next entry
-pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+pub async fn resume_run(State(state): State<AppState>) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable_response();
+        return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     let blocked_runs = match sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)
@@ -238,10 +208,7 @@ pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serd
     {
         Ok(value) => value,
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("count postgres blocked auto-queue runs: {error}")})),
-            );
+            return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("count postgres blocked auto-queue runs: {error}")})),));
         }
     };
     let resumed = match sqlx::query(
@@ -261,15 +228,12 @@ pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serd
     {
         Ok(result) => result.rows_affected() as i64,
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("resume postgres auto-queue runs: {error}")})),
-            );
+            return Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("resume postgres auto-queue runs: {error}")})),));
         }
     };
 
     if resumed > 0 {
-        let (_status, body) = activate(
+        let body = match activate(
             State(state),
             Json(ActivateBody {
                 run_id: None,
@@ -280,22 +244,26 @@ pub async fn resume_run(State(state): State<AppState>) -> (StatusCode, Json<serd
                 active_only: Some(true),
             }),
         )
-        .await;
+        .await
+        {
+            Ok((_status, body)) => body,
+            Err(error) => return Err(error),
+        };
         let dispatched = body.0.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-        return (
+        return Ok((
             StatusCode::OK,
             Json(
                 json!({"ok": true, "resumed_runs": resumed, "blocked_runs": blocked_runs, "dispatched": dispatched}),
             ),
-        );
+        ));
     }
 
-    (
+    Ok((
         StatusCode::OK,
         Json(
             json!({"ok": true, "resumed_runs": 0, "blocked_runs": blocked_runs, "message": "No resumable runs"}),
         ),
-    )
+    ))
 }
 
 /// Max length of `failed_reason` carried into structured audit logs / JSON
@@ -797,9 +765,9 @@ fn audit_phase_gate_repair_idempotency_claimed(
 pub async fn cancel(
     State(state): State<AppState>,
     Query(query): Query<CancelQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable_response();
+        return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     let service = state.auto_queue_service();
     let result = if let Some(run_id) = query
@@ -817,7 +785,7 @@ pub async fn cancel(
             .await
     };
     match result {
-        Ok(payload) => (StatusCode::OK, Json(payload)),
+        Ok(payload) => Ok((StatusCode::OK, Json(payload))),
         Err(error) => cancel_route_error_response(error),
     }
 }
@@ -826,16 +794,13 @@ pub async fn cancel(
 pub async fn reorder(
     State(state): State<AppState>,
     Json(body): Json<ReorderBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable_response();
+        return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     match reorder_with_pg(&body, pool).await {
-        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))),
-        Err(error) if error.starts_with("not_found:") => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": error.trim_start_matches("not_found:")})),
-        ),
+        Ok(()) => Ok((StatusCode::OK, Json(json!({ "ok": true })))),
+        Err(error) if error.starts_with("not_found:") => Err(auto_queue_json_error(StatusCode::NOT_FOUND, Json(json!({"error": error.trim_start_matches("not_found:")})),)),
         Err(error)
             if error == "ordered_ids cannot be empty"
                 || error == "no pending entries found for reorder scope"
@@ -843,12 +808,9 @@ pub async fn reorder(
                 || error == "replacement sequence exhausted"
                 || error == "replacement sequence was not fully consumed" =>
         {
-            (StatusCode::BAD_REQUEST, Json(json!({ "error": error })))
+            Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({ "error": error }))))
         }
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
+        Err(error) => Err(auto_queue_json_error(StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": error})),)),
     }
 }
 

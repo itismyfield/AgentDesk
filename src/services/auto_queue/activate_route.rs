@@ -5,13 +5,13 @@ use super::*;
 pub async fn activate(
     State(state): State<AppState>,
     Json(body): Json<ActivateBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable_response();
+        return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     let deps = AutoQueueActivateDeps::from_state(&state);
     let body = match activate_preflight_with_pg(pool, body).await {
-        ActivatePgPreflight::Return(response) => return response,
+        ActivatePgPreflight::Return(response) => return Ok(response),
         ActivatePgPreflight::Continue(body) => body,
     };
 

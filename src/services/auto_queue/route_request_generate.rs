@@ -31,42 +31,30 @@ pub struct RequestGenerateBody {
 pub async fn request_generate(
     State(state): State<AppState>,
     body: Json<serde_json::Value>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let body: RequestGenerateBody = match serde_json::from_value(body.0) {
         Ok(value) => value,
         Err(error) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": format!("invalid request body: {error}") })),
-            );
+            return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({ "error": format!("invalid request body: {error}") })),));
         }
     };
 
     let repo = body.repo.trim();
     if repo.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "repo is required" })),
-        );
+        return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({ "error": "repo is required" })),));
     }
     let agent_id = body.agent_id.trim();
     if agent_id.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "agent_id is required" })),
-        );
+        return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({ "error": "agent_id is required" })),));
     }
     if body.issue_numbers.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "issue_numbers must be non-empty" })),
-        );
+        return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({ "error": "issue_numbers must be non-empty" })),));
     }
 
     let allowed_gate_kinds = match validate_allowed_gate_kinds(body.allowed_gate_kinds.as_deref()) {
         Ok(kinds) => kinds,
         Err(error) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({ "error": error })));
+            return Err(auto_queue_json_error(StatusCode::BAD_REQUEST, Json(json!({ "error": error }))));
         }
     };
 
@@ -80,12 +68,9 @@ pub async fn request_generate(
     });
 
     let Some(ref registry) = state.health_registry else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
+        return Err(auto_queue_json_error(StatusCode::SERVICE_UNAVAILABLE, Json(json!({
                 "error": "Discord not available (standalone mode); cannot dispatch request-generate",
-            })),
-        );
+            })),));
     };
 
     let send_body = json!({
@@ -112,7 +97,7 @@ pub async fn request_generate(
         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
     if !code.is_success() {
-        return (code, Json(send_json));
+        return Ok((code, Json(send_json)));
     }
 
     let channel_id = send_json
@@ -136,7 +121,7 @@ pub async fn request_generate(
         allowed_gate_kinds
     );
 
-    (
+    Ok((
         StatusCode::ACCEPTED,
         Json(json!({
             "request_id": request_id,
@@ -145,7 +130,7 @@ pub async fn request_generate(
             "dispatched_at": dispatched_at,
             "instruction_preview": preview_instruction(&instruction),
         })),
-    )
+    ))
 }
 
 fn validate_allowed_gate_kinds(kinds: Option<&[String]>) -> Result<Option<Vec<String>>, String> {
