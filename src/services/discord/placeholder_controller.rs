@@ -253,7 +253,10 @@ struct PlaceholderEntrySlot {
 /// The inner `Arc` is intentionally opaque: capability operations use it
 /// directly and never recover authority by looking up (or creating) a key.
 #[derive(Debug, Clone)]
-pub(super) struct PlaceholderIncarnation(Arc<PlaceholderEntrySlot>);
+pub(super) struct PlaceholderIncarnation {
+    key: PlaceholderKey,
+    slot: Arc<PlaceholderEntrySlot>,
+}
 
 #[derive(Debug, Default)]
 pub(super) struct PlaceholderController {
@@ -291,19 +294,18 @@ impl PlaceholderController {
     }
 
     pub(super) fn incarnation(&self, key: &PlaceholderKey) -> PlaceholderIncarnation {
-        PlaceholderIncarnation(self.entry(key))
+        PlaceholderIncarnation {
+            key: key.clone(),
+            slot: self.entry(key),
+        }
     }
 
-    pub(super) async fn revoke_incarnation(
-        &self,
-        key: &PlaceholderKey,
-        incarnation: &PlaceholderIncarnation,
-    ) {
-        let mut guarded = incarnation.0.state.lock().await;
+    pub(super) async fn revoke_incarnation(&self, incarnation: &PlaceholderIncarnation) {
+        let mut guarded = incarnation.slot.state.lock().await;
         guarded.revoked = true;
-        self.entries.remove_if(key, |_, current| {
-            Arc::ptr_eq(current, &incarnation.0)
-        });
+        drop(guarded);
+        self.entries
+            .remove_if(&incarnation.key, |_, current| Arc::ptr_eq(current, &incarnation.slot));
     }
 
     /// Sweep entries whose state is terminal (Completed/TimedOut/Aborted) or
@@ -363,30 +365,29 @@ impl PlaceholderController {
         live_events_block: Option<String>,
     ) -> PlaceholderControllerOutcome {
         let incarnation = self.incarnation(&key);
-        self.ensure_active_incarnation_inner(gateway, &key, &incarnation, input, live_events_block)
+        self.ensure_active_incarnation_inner(gateway, &incarnation, input, live_events_block)
             .await
     }
 
     pub(super) async fn ensure_active_incarnation<G: TurnGateway + ?Sized>(
         &self,
         gateway: &G,
-        key: &PlaceholderKey,
         incarnation: &PlaceholderIncarnation,
         input: PlaceholderActiveInput,
     ) -> PlaceholderControllerOutcome {
-        self.ensure_active_incarnation_inner(gateway, key, incarnation, input, None)
+        self.ensure_active_incarnation_inner(gateway, incarnation, input, None)
             .await
     }
 
     async fn ensure_active_incarnation_inner<G: TurnGateway + ?Sized>(
         &self,
         gateway: &G,
-        key: &PlaceholderKey,
         incarnation: &PlaceholderIncarnation,
         input: PlaceholderActiveInput,
         live_events_block: Option<String>,
     ) -> PlaceholderControllerOutcome {
-        let mut guarded = incarnation.0.state.lock().await;
+        let key = &incarnation.key;
+        let mut guarded = incarnation.slot.state.lock().await;
         if guarded.revoked {
             return PlaceholderControllerOutcome::Rejected;
         }
@@ -859,20 +860,18 @@ mod edit_retry_tests {
         let edit = tokio::spawn({
             let controller = controller.clone();
             let gateway = gateway.clone();
-            let key = key.clone();
             let old = old.clone();
             async move {
                 controller
-                    .ensure_active_incarnation(gateway.as_ref(), &key, &old, input())
+                    .ensure_active_incarnation(gateway.as_ref(), &old, input())
                     .await
             }
         });
         gateway.edit_started.notified().await;
         let revoke = tokio::spawn({
             let controller = controller.clone();
-            let key = key.clone();
             let old = old.clone();
-            async move { controller.revoke_incarnation(&key, &old).await }
+            async move { controller.revoke_incarnation(&old).await }
         });
         tokio::task::yield_now().await;
         assert!(!revoke.is_finished(), "revoke must wait for the admitted PATCH");
@@ -883,18 +882,23 @@ mod edit_retry_tests {
         assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             controller
-                .ensure_active_incarnation(gateway.as_ref(), &key, &old, input())
+                .ensure_active_incarnation(gateway.as_ref(), &old, input())
                 .await,
             PlaceholderControllerOutcome::Rejected
         );
         assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
 
         let replacement = controller.incarnation(&key);
-        controller.revoke_incarnation(&key, &old).await;
+        let other_key = PlaceholderKey {
+            message_id: MessageId::new(99),
+            ..key.clone()
+        };
+        controller.revoke_incarnation(&old).await;
         assert!(Arc::ptr_eq(
             &controller.entries.get(&key).unwrap().clone(),
-            &replacement.0
+            &replacement.slot
         ));
+        assert!(!controller.entries.contains_key(&other_key));
         assert_eq!(controller.entries.len(), 1, "stale capability must not recreate");
     }
 
@@ -907,19 +911,18 @@ mod edit_retry_tests {
         let edit = tokio::spawn({
             let controller = controller.clone();
             let gateway = gateway.clone();
-            let key = key.clone();
             let incarnation = incarnation.clone();
             async move {
                 controller
-                    .ensure_active_incarnation(gateway.as_ref(), &key, &incarnation, input())
+                    .ensure_active_incarnation(gateway.as_ref(), &incarnation, input())
                     .await
             }
         });
         gateway.edit_started.notified().await;
         edit.abort();
         assert!(edit.await.unwrap_err().is_cancelled());
-        controller.revoke_incarnation(&key, &incarnation).await;
-        let guarded = incarnation.0.state.lock().await;
+        controller.revoke_incarnation(&incarnation).await;
+        let guarded = incarnation.slot.state.lock().await;
         assert!(guarded.revoked);
         assert_eq!(guarded.state, PlaceholderLifecycle::NotCreated);
         assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
