@@ -1028,7 +1028,7 @@
 | `services::provider` | `src/services/provider.rs` | 2438 | 1824 | 614 | giant-file |
 | `services::provider::cancel_token_claude_interrupt` | `src/services/provider/cancel_token_claude_interrupt.rs` | 366 | 169 | 197 |  |
 | `services::provider::cancel_token_cleanup` | `src/services/provider/cancel_token_cleanup.rs` | 3 | 3 | 0 |  |
-| `services::provider::cancel_token_cleanup::authority` | `src/services/provider/cancel_token_cleanup/authority.rs` | 245 | 153 | 92 |  |
+| `services::provider::cancel_token_cleanup::authority` | `src/services/provider/cancel_token_cleanup/authority.rs` | 248 | 156 | 92 |  |
 | `services::provider_auth` | `src/services/provider_auth.rs` | 628 | 400 | 228 |  |
 | `services::provider_cli` | `src/services/provider_cli/mod.rs` | 21 | 21 | 0 |  |
 | `services::provider_cli::canary` | `src/services/provider_cli/canary.rs` | 86 | 86 | 0 |  |
