@@ -1920,10 +1920,7 @@ fn record_relayed_entry_id(provider: &str, tmux_session_name: &str, entry_id: &s
     }
 }
 
-/// Mark a local-only entry as replayed only after its Discord session note was
-/// accepted. No subscriber, lagged receiver, missing route/http, or failed send
-/// calls this helper, so those paths cannot lose a later exact replay.
-pub(crate) fn record_local_only_entry_id_after_note_delivery(prompt: &ObservedTuiPrompt) {
+fn record_local_only_entry_id(prompt: &ObservedTuiPrompt) {
     if classify_local_only_slash_control(&prompt.prompt).is_none() {
         return;
     }
@@ -1936,6 +1933,16 @@ pub(crate) fn record_local_only_entry_id_after_note_delivery(prompt: &ObservedTu
         return;
     };
     record_relayed_entry_id(&prompt.provider, &prompt.tmux_session_name, entry_id);
+}
+
+/// Mark a local-only entry as replayed after its Discord session note was accepted.
+pub(crate) fn record_local_only_entry_id_after_note_delivery(prompt: &ObservedTuiPrompt) {
+    record_local_only_entry_id(prompt);
+}
+
+/// Seal a local-only transcript half collapsed into an already-rendered note.
+pub(crate) fn seal_deduped_local_only_entry_id(prompt: &ObservedTuiPrompt) {
+    record_local_only_entry_id(prompt);
 }
 
 pub(crate) fn prompts_match(expected: &str, observed: &str) -> bool {

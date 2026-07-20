@@ -1138,10 +1138,9 @@
     normal long SILENT tool run (e.g. a big build) is never mistaken for an idle
     hang, with the 4h hard ceiling as the real backstop, and noted the limitation
     in the idle-kill error message + a delayed-event test).
-  - `src/services/tui_prompt_dedupe.rs` (2134 lines; +29 from #4567: classify start-anchored structured task notifications as status-only observations before generic external-input ownership, preserving task-card/status delivery while leaving the next human prompt immediately admissible; -41 from #4591 R4: remove
-    raw/envelope time-pair state so local slash-control representations may
-    duplicate rather than swallowing a later human command; local stable entry
-    IDs are now recorded only after the relay confirms its Discord session note,
+  - `src/services/tui_prompt_dedupe.rs` (2141 lines; +7 from #4693: seal a local-only raw/envelope half collapsed by the Discord marker gate so its stable entry ID remains replay-immune after a watermark reset; +29 from #4567: classify start-anchored structured task notifications as status-only observations before generic external-input ownership, preserving task-card/status delivery while leaving the next human prompt immediately admissible; -41 from #4591 R4: remove
+    observation-layer raw/envelope pairing while leaving local execution independent of Discord rendering; local stable entry
+    IDs are recorded after note delivery or when a duplicate marker half is sealed,
     while generic direct-input identity replay behavior remains eager; +4 from #4295: retain the
     stable provider source-event id on observed TUI prompts so terminal-card
     delivery can reject an exact post-compaction replay durably; +117 from #4423: adopt Claude's
