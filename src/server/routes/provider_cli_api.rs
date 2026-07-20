@@ -21,27 +21,25 @@ use crate::services::provider_cli::{
 };
 
 use super::AppState;
+use crate::error::{AppError, AppResult, ErrorCode};
 
 const ALL_PROVIDERS: &[&str] = &["codex", "claude", "gemini", "qwen"];
 
 /// GET /api/provider-cli — current registry channels + migration states.
-pub async fn get_provider_cli_status(State(_state): State<AppState>) -> (StatusCode, Json<Value>) {
-    let Some(root) = crate::config::runtime_root() else {
-        return (
+pub async fn get_provider_cli_status(
+    State(_state): State<AppState>,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    let root = crate::config::runtime_root().ok_or_else(|| {
+        AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "runtime root not configured"})),
-        );
-    };
+            ErrorCode::Config,
+            "runtime root not configured",
+        )
+    })?;
 
-    let registry = match load_registry(&root) {
-        Ok(r) => r.unwrap_or_default(),
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("load registry: {e}")})),
-            );
-        }
-    };
+    let registry = load_registry(&root)
+        .map_err(|e| AppError::internal(format!("load registry: {e}")))?
+        .unwrap_or_default();
 
     let providers: Vec<ProviderDiagnostics> = ALL_PROVIDERS
         .iter()
@@ -81,13 +79,9 @@ pub async fn get_provider_cli_status(State(_state): State<AppState>) -> (StatusC
         generated_at: Utc::now(),
     };
 
-    match serde_json::to_value(&response) {
-        Ok(v) => (StatusCode::OK, Json(v)),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("serialize: {e}")})),
-        ),
-    }
+    let value = serde_json::to_value(&response)
+        .map_err(|e| AppError::internal(format!("serialize: {e}")))?;
+    Ok((StatusCode::OK, Json(value)))
 }
 
 /// PATCH /api/provider-cli/{provider} — apply action to migration state.
@@ -97,53 +91,38 @@ pub async fn patch_provider_cli(
     State(_state): State<AppState>,
     Path(provider): Path<String>,
     Json(body): Json<ProviderCliActionRequest>,
-) -> (StatusCode, Json<Value>) {
+) -> AppResult<(StatusCode, Json<Value>)> {
     let action = match body.action.as_str() {
         "confirm_promote" => ProviderCliApiAction::ConfirmPromote,
         "rollback" => ProviderCliApiAction::Rollback,
         "rollback_to_previous" => ProviderCliApiAction::RollbackToPrevious,
-        action => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": format!("unknown action: {action}")})),
-            );
-        }
+        action => return Err(AppError::bad_request(format!("unknown action: {action}"))),
     };
 
     if !is_supported_provider(&provider) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("unsupported provider: {provider}")})),
-        );
+        return Err(AppError::bad_request(format!(
+            "unsupported provider: {provider}"
+        )));
     }
 
-    let Some(root) = crate::config::runtime_root() else {
-        return (
+    let root = crate::config::runtime_root().ok_or_else(|| {
+        AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "runtime root not configured"})),
-        );
-    };
+            ErrorCode::Config,
+            "runtime root not configured",
+        )
+    })?;
 
-    let mut migration = match load_migration_state(&root, &provider) {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": format!("no migration state for provider: {provider}")})),
-            );
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("load migration state: {e}")})),
-            );
-        }
-    };
+    let mut migration = load_migration_state(&root, &provider)
+        .map_err(|e| AppError::internal(format!("load migration state: {e}")))?
+        .ok_or_else(|| {
+            AppError::not_found(format!("no migration state for provider: {provider}"))
+        })?;
 
     if matches!(action, ProviderCliApiAction::ConfirmPromote)
         && migration.state == MigrationState::ProviderAgentsMigrated
     {
-        return (
+        return Ok((
             StatusCode::OK,
             Json(json!({
                 "provider": provider,
@@ -151,7 +130,7 @@ pub async fn patch_provider_cli(
                 "state": migration_state_wire_value(&migration.state),
                 "updated_at": migration.updated_at,
             })),
-        );
+        ));
     }
 
     let transition_result = if matches!(action, ProviderCliApiAction::ConfirmPromote) {
@@ -334,18 +313,22 @@ pub async fn patch_provider_cli(
         })
     };
 
-    if let Err((status, message)) = transition_result {
-        return (status, Json(json!({"error": message})));
-    }
+    transition_result.map_err(|(status, message)| {
+        AppError::new(
+            status,
+            if status == StatusCode::UNPROCESSABLE_ENTITY {
+                ErrorCode::Validation
+            } else {
+                ErrorCode::Internal
+            },
+            message,
+        )
+    })?;
 
-    if let Err(e) = save_migration_state(&root, &migration) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("save migration state: {e}")})),
-        );
-    }
+    save_migration_state(&root, &migration)
+        .map_err(|e| AppError::internal(format!("save migration state: {e}")))?;
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "provider": provider,
@@ -353,7 +336,7 @@ pub async fn patch_provider_cli(
             "state": migration_state_wire_value(&migration.state),
             "updated_at": migration.updated_at,
         })),
-    )
+    ))
 }
 
 fn is_supported_provider(provider: &str) -> bool {

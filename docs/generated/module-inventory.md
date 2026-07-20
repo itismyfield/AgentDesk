@@ -61,7 +61,7 @@
 | `cli::client::runtime_config` | `src/cli/client/runtime_config.rs` | 55 | 23 | 32 |  |
 | `cli::dcserver` | `src/cli/dcserver.rs` | 1650 | 1650 | 0 | giant-file |
 | `cli::dcserver_pg_bootstrap` | `src/cli/dcserver_pg_bootstrap.rs` | 1068 | 544 | 524 |  |
-| `cli::direct` | `src/cli/direct.rs` | 1767 | 1767 | 0 | giant-file |
+| `cli::direct` | `src/cli/direct.rs` | 1771 | 1771 | 0 | giant-file |
 | `cli::discord` | `src/cli/discord.rs` | 472 | 249 | 223 |  |
 | `cli::discord_thread_create` | `src/cli/discord_thread_create.rs` | 1468 | 415 | 1053 |  |
 | `cli::discord_thread_create_lock` | `src/cli/discord_thread_create_lock.rs` | 669 | 611 | 58 |  |
@@ -278,7 +278,7 @@
 | `server::routes::domains::ops` | `src/server/routes/domains/ops.rs` | 369 | 369 | 0 |  |
 | `server::routes::domains::reviews` | `src/server/routes/domains/reviews.rs` | 33 | 33 | 0 |  |
 | `server::routes::escalation` | `src/server/routes/escalation.rs` | 1644 | 1379 | 265 | giant-file |
-| `server::routes::github` | `src/server/routes/github.rs` | 949 | 680 | 269 |  |
+| `server::routes::github` | `src/server/routes/github.rs` | 940 | 663 | 277 |  |
 | `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 190 | 190 | 0 |  |
 | `server::routes::health_api` | `src/server/routes/health_api.rs` | 2701 | 1775 | 926 | giant-file |
 | `server::routes::home_metrics` | `src/server/routes/home_metrics.rs` | 352 | 352 | 0 |  |
@@ -297,7 +297,7 @@
 | `server::routes::pipeline` | `src/server/routes/pipeline.rs` | 353 | 353 | 0 |  |
 | `server::routes::pr_summary` | `src/server/routes/pr_summary.rs` | 241 | 142 | 99 |  |
 | `server::routes::prompt_manifest_retention` | `src/server/routes/prompt_manifest_retention.rs` | 57 | 57 | 0 |  |
-| `server::routes::provider_cli_api` | `src/server/routes/provider_cli_api.rs` | 386 | 386 | 0 |  |
+| `server::routes::provider_cli_api` | `src/server/routes/provider_cli_api.rs` | 369 | 369 | 0 |  |
 | `server::routes::queue_api` | `src/server/routes/queue_api.rs` | 430 | 381 | 49 |  |
 | `server::routes::receipt` | `src/server/routes/receipt.rs` | 813 | 500 | 313 |  |
 | `server::routes::resume` | `src/server/routes/resume.rs` | 1260 | 1260 | 0 | giant-file |

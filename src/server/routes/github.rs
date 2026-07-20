@@ -9,6 +9,7 @@ use sqlx::Row;
 use std::collections::BTreeSet;
 
 use super::AppState;
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::github;
 use crate::services::github_issue_creation::{
     GitHubIssueCreateRequest, IssueAnnouncementSync, IssueAnnouncementSyncOptions,
@@ -299,18 +300,18 @@ fn issue_validation_error(error: String, dry_run: bool) -> (StatusCode, Json<ser
 pub async fn create_issue(
     State(state): State<AppState>,
     Json(body): Json<CreateIssueBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let dry_run = body.dry_run.unwrap_or(false);
     let unsupported_features = requested_unsupported_issue_create_features(&body);
     if !dry_run && !unsupported_features.is_empty() {
-        return (
+        return Ok((
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({
                 "error": unsupported_issue_create_error(&unsupported_features),
                 "capabilities": issue_create_capabilities(),
                 "unsupported_features": unsupported_features,
             })),
-        );
+        ));
     }
 
     if dry_run {
@@ -335,7 +336,7 @@ pub async fn create_issue(
                 .cloned()
                 .unwrap_or_else(|| "validation failed".to_string());
             validation_warnings.extend(unsupported_feature_warnings);
-            return (
+            return Ok((
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({
                     "dry_run": true,
@@ -345,7 +346,7 @@ pub async fn create_issue(
                     "unsupported_features": unsupported_features,
                     "block_on": block_on_issue_numbers,
                 })),
-            );
+            ));
         }
 
         let repo = repo.expect("validated repo must exist");
@@ -376,7 +377,7 @@ pub async fn create_issue(
             .as_deref()
             .and_then(trim_non_empty);
 
-        return (
+        return Ok((
             StatusCode::OK,
             Json(json!({
                 "dry_run": true,
@@ -400,24 +401,29 @@ pub async fn create_issue(
                 // deprecated alias kept for transition; remove after clients migrate
                 "pmd_format_version": ISSUE_FORMAT_VERSION,
             })),
-        );
+        ));
     }
 
     let repo = match resolve_issue_repo(&body.repo) {
         Ok(repo) => repo,
-        Err(error) => return issue_validation_error(error, dry_run),
+        Err(error) => return Ok(issue_validation_error(error, dry_run)),
     };
     let title = match trim_non_empty(&body.title) {
         Some(title) => title,
-        None => return issue_validation_error("title is required".to_string(), dry_run),
+        None => {
+            return Ok(issue_validation_error(
+                "title is required".to_string(),
+                dry_run,
+            ));
+        }
     };
     let issue_body = match build_pmd_issue_body(&body) {
         Ok(issue_body) => issue_body,
-        Err(error) => return issue_validation_error(error, dry_run),
+        Err(error) => return Ok(issue_validation_error(error, dry_run)),
     };
     let block_on_issue_numbers = match normalize_block_on_issue_numbers(&body) {
         Ok(block_on_issue_numbers) => block_on_issue_numbers,
-        Err(error) => return issue_validation_error(error, dry_run),
+        Err(error) => return Ok(issue_validation_error(error, dry_run)),
     };
 
     let applied_labels = body
@@ -461,7 +467,7 @@ pub async fn create_issue(
             let announcement_message_id = announcement.message_id.clone();
             let announcement_sync_error = announcement.error.clone();
 
-            (
+            Ok((
                 StatusCode::CREATED,
                 Json(json!({
                     "issue": {
@@ -484,16 +490,18 @@ pub async fn create_issue(
                     // deprecated alias kept for transition; remove after clients migrate
                     "pmd_format_version": ISSUE_FORMAT_VERSION,
                 })),
-            )
+            ))
         }
-        Err(IssueCreationError::GhUnavailable) => (
+        Err(IssueCreationError::GhUnavailable) => Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "gh CLI is not available on this system"})),
-        ),
-        Err(IssueCreationError::GitHub(error)) => (
+            ErrorCode::Config,
+            "gh CLI is not available on this system",
+        )),
+        Err(IssueCreationError::GitHub(error)) => Err(AppError::new(
             StatusCode::BAD_GATEWAY,
-            Json(json!({"error": format!("gh issue create failed: {error}")})),
-        ),
+            ErrorCode::Internal,
+            format!("gh issue create failed: {error}"),
+        )),
     }
 }
 
@@ -613,7 +621,9 @@ Write-Error "unexpected gh args: $Rest"; exit 2
         body.block_on = Some(vec![3718]);
         body.dry_run = Some(true);
 
-        let (status, Json(response)) = create_issue(State(test_state()), Json(body)).await;
+        let (status, Json(response)) = create_issue(State(test_state()), Json(body))
+            .await
+            .expect("create issue response");
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(response["dry_run"], true);
@@ -680,7 +690,9 @@ Write-Error "unexpected gh args: $Rest"; exit 2
         let mut body = base_issue_body();
         body.auto_dispatch = Some(true);
 
-        let (status, Json(response)) = create_issue(State(test_state()), Json(body)).await;
+        let (status, Json(response)) = create_issue(State(test_state()), Json(body))
+            .await
+            .expect("create issue response");
 
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(response["unsupported_features"], json!(["auto_dispatch"]));
@@ -705,7 +717,9 @@ Write-Error "unexpected gh args: $Rest"; exit 2
         body.agent_id = Some("project-agentdesk".to_string());
         body.block_on = Some(vec![7, 42]);
 
-        let (status, Json(response)) = create_issue(State(test_state()), Json(body)).await;
+        let (status, Json(response)) = create_issue(State(test_state()), Json(body))
+            .await
+            .expect("create issue response");
 
         assert_eq!(status, StatusCode::CREATED, "{response}");
         assert_eq!(response["issue"]["number"], json!(4242));
@@ -748,8 +762,10 @@ Write-Error "unexpected gh args: $Rest"; exit 2
         let fake_gh = install_fake_gh(temp.path(), true);
         let _gh_guard = EnvVarGuard::set("AGENTDESK_GH_PATH", &fake_gh);
 
-        let (status, Json(response)) =
-            create_issue(State(test_state()), Json(base_issue_body())).await;
+        let (status, Json(response)) = create_issue(State(test_state()), Json(base_issue_body()))
+            .await
+            .expect_err("GitHub failure must return AppError")
+            .into_json_response();
 
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert!(
@@ -768,29 +784,24 @@ Write-Error "unexpected gh args: $Rest"; exit 2
 }
 
 /// GET /api/github/repos
-pub async fn list_repos(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return (
+pub async fn list_repos(
+    State(state): State<AppState>,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = state.pg_pool_ref().ok_or_else(|| {
+        AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres pool unavailable"})),
-        );
-    };
-    let rows = match sqlx::query(
+            ErrorCode::Config,
+            "postgres pool unavailable",
+        )
+    })?;
+    let rows = sqlx::query(
         "SELECT id, display_name, sync_enabled, last_synced_at::text AS last_synced_at
          FROM github_repos
          ORDER BY id",
     )
     .fetch_all(pool)
     .await
-    {
-        Ok(rows) => rows,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            );
-        }
-    };
+    .map_err(|error| AppError::internal(format!("{error}")).with_code(ErrorCode::Database))?;
     let items: Vec<serde_json::Value> = rows
         .into_iter()
         .map(|row| {
@@ -802,33 +813,28 @@ pub async fn list_repos(State(state): State<AppState>) -> (StatusCode, Json<serd
             })
         })
         .collect();
-    (StatusCode::OK, Json(json!({"repos": items})))
+    Ok((StatusCode::OK, Json(json!({"repos": items}))))
 }
 
 /// POST /api/github/repos
 pub async fn register_repo(
     State(state): State<AppState>,
     Json(body): Json<RegisterRepoBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if body.id.is_empty() || !body.id.contains('/') {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "id must be in 'owner/repo' format"})),
-        );
+        return Err(AppError::bad_request("id must be in 'owner/repo' format"));
     }
 
-    let Some(pool) = state.pg_pool_ref() else {
-        return (
+    let pool = state.pg_pool_ref().ok_or_else(|| {
+        AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres pool unavailable"})),
-        );
-    };
-    if let Err(error) = crate::db::postgres::register_repo(pool, &body.id).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        );
-    }
+            ErrorCode::Config,
+            "postgres pool unavailable",
+        )
+    })?;
+    crate::db::postgres::register_repo(pool, &body.id)
+        .await
+        .map_err(|error| AppError::internal(error).with_code(ErrorCode::Database))?;
 
     match sqlx::query(
         "SELECT id, display_name, sync_enabled, last_synced_at::text AS last_synced_at
@@ -839,7 +845,7 @@ pub async fn register_repo(
     .fetch_one(pool)
     .await
     {
-        Ok(row) => (
+        Ok(row) => Ok((
             StatusCode::CREATED,
             Json(json!({
                 "repo": {
@@ -849,11 +855,8 @@ pub async fn register_repo(
                     "last_synced_at": row.try_get::<Option<String>, _>("last_synced_at").ok().flatten(),
                 }
             })),
-        ),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{error}")})),
-        ),
+        )),
+        Err(error) => Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database)),
     }
 }
 
@@ -861,16 +864,17 @@ pub async fn register_repo(
 pub async fn sync_repo(
     State(state): State<AppState>,
     Path((owner, repo)): Path<(String, String)>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let repo_id = format!("{owner}/{repo}");
 
     // Check repo exists
-    let Some(pool) = state.pg_pool_ref() else {
-        return (
+    let pool = state.pg_pool_ref().ok_or_else(|| {
+        AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres pool unavailable"})),
-        );
-    };
+            ErrorCode::Config,
+            "postgres pool unavailable",
+        )
+    })?;
     let exists =
         match sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM github_repos WHERE id = $1")
             .bind(&repo_id)
@@ -879,60 +883,47 @@ pub async fn sync_repo(
         {
             Ok(count) => count > 0,
             Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
+                return Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database));
             }
         };
 
     if !exists {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": format!("repo '{}' not registered", repo_id)})),
-        );
+        return Err(AppError::not_found(format!(
+            "repo '{}' not registered",
+            repo_id
+        )));
     }
 
     // Check if gh is available
     if !github::gh_available() {
-        return (
+        return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "gh CLI is not available on this system"})),
-        );
+            ErrorCode::Config,
+            "gh CLI is not available on this system",
+        ));
     }
 
     // Fetch issues
-    let issues = match github::sync::fetch_issues(&repo_id) {
-        Ok(i) => i,
-        Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({"error": format!("gh fetch failed: {e}")})),
-            );
-        }
-    };
+    let issues = github::sync::fetch_issues(&repo_id).map_err(|e| {
+        AppError::new(
+            StatusCode::BAD_GATEWAY,
+            ErrorCode::Internal,
+            format!("gh fetch failed: {e}"),
+        )
+    })?;
 
-    let triaged = match github::triage::triage_new_issues_pg(pool, &repo_id, &issues).await {
-        Ok(count) => count,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("triage failed: {error}")})),
-            );
-        }
-    };
-    let sync_result =
-        match github::sync::sync_github_issues_for_repo_pg(pool, &repo_id, &issues).await {
-            Ok(result) => result,
-            Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("sync failed: {error}")})),
-                );
-            }
-        };
+    let triaged = github::triage::triage_new_issues_pg(pool, &repo_id, &issues)
+        .await
+        .map_err(|error| {
+            AppError::internal(format!("triage failed: {error}")).with_code(ErrorCode::Database)
+        })?;
+    let sync_result = github::sync::sync_github_issues_for_repo_pg(pool, &repo_id, &issues)
+        .await
+        .map_err(|error| {
+            AppError::internal(format!("sync failed: {error}")).with_code(ErrorCode::Database)
+        })?;
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "synced": true,
@@ -945,5 +936,5 @@ pub async fn sync_repo(
             "stale_card_issue_batches": sync_result.stale_card_issue_batch_count,
             "stale_card_issue_errors": sync_result.stale_card_issue_error_count,
         })),
-    )
+    ))
 }
