@@ -1,65 +1,6 @@
-use super::message_outbox_circuit_authority::{
-    CircuitActivation, CircuitCoordinate, FreshVouchRevoke, activate_fenced,
-    revoke_on_fresh_vouch, stage_held,
-};
+use super::message_outbox::OutboxMessage;
+use super::message_outbox_circuit_authority::*;
 use sqlx::{PgPool, Row};
-
-async fn seed_owner(pool: &PgPool, channel_id: &str, owner: &str, generation: i64) {
-    sqlx::query(
-        "INSERT INTO intake_session_owners
-             (provider,raw_channel_id,owner_instance_id,generation,status)
-         VALUES ('discord',$1,$2,$3,'active')",
-    )
-    .bind(channel_id)
-    .bind(owner)
-    .bind(generation)
-    .execute(pool)
-    .await
-    .expect("seed current channel owner");
-}
-
-async fn stage(
-    pool: &PgPool,
-    channel_id: &str,
-    open_generation: i64,
-    authority_epoch: i64,
-    dedupe_identity: &str,
-) -> i64 {
-    let target = format!("channel:{channel_id}");
-    stage_held(
-        pool,
-        crate::services::message_outbox::OutboxMessage {
-            target: &target,
-            content: "circuit alert",
-            bot: "notify",
-            source: "system",
-            reason_code: Some(dedupe_identity),
-            session_key: Some(channel_id),
-        },
-        &coordinate(channel_id, "episode-a", open_generation, authority_epoch),
-        300,
-    )
-    .await
-    .expect("stage circuit outbox row")
-}
-
-fn coordinate(
-    channel_id: &str,
-    episode_key: &str,
-    open_generation: i64,
-    authority_epoch: i64,
-) -> CircuitCoordinate<'_> {
-    CircuitCoordinate {
-        provider: "discord",
-        channel_id,
-        owner_instance_id: "node-a",
-        owner_generation: 7,
-        episode_key,
-        baseline_relay_offset: 10,
-        open_generation,
-        authority_epoch,
-    }
-}
 
 async fn setup(name: &str) -> Option<(crate::dispatch::test_support::DispatchPostgresTestDb, PgPool)> {
     let db = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(name, name).await?;
@@ -67,152 +8,88 @@ async fn setup(name: &str) -> Option<(crate::dispatch::test_support::DispatchPos
     Some((db, pool))
 }
 
-#[tokio::test]
-async fn vouch_before_activation_blocks_activation_pg() {
-    let Some((db, pool)) = setup("outbox_circuit_vouch_before_activation").await else { return };
-    seed_owner(&pool, "461501", "node-a", 7).await;
-    let id = stage(&pool, "461501", 1, 1, "circuit-vouch-before").await;
+async fn owner(pool: &PgPool, channel: &str, node: &str) {
+    sqlx::query("INSERT INTO intake_session_owners(provider,raw_channel_id,owner_instance_id,generation,status) VALUES('discord',$1,$2,7,'active')")
+        .bind(channel).bind(node).execute(pool).await.unwrap();
+}
 
-    assert_eq!(
-        revoke_on_fresh_vouch(&pool, &coordinate("461501", "episode-a", 1, 1), "fresh-vouch").await.unwrap(),
-        FreshVouchRevoke::Revoked
-    );
-    assert_eq!(
-        activate_fenced(&pool, id, &coordinate("461501", "episode-a", 1, 1)).await.unwrap(),
-        CircuitActivation::Stale
-    );
-    let status: String = sqlx::query_scalar("SELECT status FROM message_outbox WHERE id=$1")
-        .bind(id).fetch_one(&pool).await.unwrap();
-    assert_eq!(status, "cancelled");
-    pool.close().await;
-    db.drop().await;
+async fn reserve(pool: &PgPool, channel: &str, episode: &str, generation: i64, expected: Option<i64>) -> CircuitCoordinate {
+    match reserve_next_authority(pool,"discord",channel,"node-a",7,episode,10,generation,expected).await.unwrap() {
+        AuthorityReservation::Reserved(value) => value,
+        other => panic!("unexpected reservation: {other:?}"),
+    }
+}
+
+fn message<'a>(target: &'a str, reason: &'a str) -> OutboxMessage<'a> {
+    OutboxMessage { target, content:"body", bot:"notify", source:"system", reason_code:Some(reason), session_key:Some(target) }
 }
 
 #[tokio::test]
-async fn activation_then_vouch_before_claim_cancels_pending_pg() {
-    let Some((db, pool)) = setup("outbox_circuit_activate_then_vouch").await else { return };
-    seed_owner(&pool, "461502", "node-a", 7).await;
-    let id = stage(&pool, "461502", 2, 1, "circuit-activate-vouch").await;
-
-    assert_eq!(
-        activate_fenced(&pool, id, &coordinate("461502", "episode-a", 2, 1)).await.unwrap(),
-        CircuitActivation::Activated
-    );
-    assert_eq!(
-        revoke_on_fresh_vouch(&pool, &coordinate("461502", "episode-a", 2, 1), "fresh-vouch").await.unwrap(),
-        FreshVouchRevoke::Revoked
-    );
-    let row = sqlx::query("SELECT status,cancelled_at,dedupe_key FROM message_outbox WHERE id=$1")
-        .bind(id).fetch_one(&pool).await.unwrap();
-    assert_eq!(row.try_get::<String, _>("status").unwrap(), "cancelled");
-    assert!(row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("cancelled_at").unwrap().is_some());
-    assert!(row.try_get::<Option<String>, _>("dedupe_key").unwrap().is_none());
-    pool.close().await;
-    db.drop().await;
+async fn episode_transition_allocates_next_epoch_and_stale_cas_fails_pg() {
+    let Some((db,pool))=setup("circuit_allocate_episode").await else{return}; owner(&pool,"501","node-a").await;
+    let first=reserve(&pool,"501","e1",1,None).await; assert_eq!(first.authority_epoch,1);
+    assert_eq!(reserve(&pool,"501","e1",1,Some(1)).await,first);
+    let second=reserve(&pool,"501","e2",1,Some(1)).await; assert_eq!(second.authority_epoch,2);
+    assert!(matches!(reserve_next_authority(&pool,"discord","501","node-a",7,"e3",10,1,Some(1)).await.unwrap(),AuthorityReservation::Stale));
+    pool.close().await; db.drop().await;
 }
 
 #[tokio::test]
-async fn cancelled_row_releases_dedupe_for_new_row_pg() {
-    let Some((db, pool)) = setup("outbox_circuit_cancelled_dedupe").await else { return };
-    seed_owner(&pool, "461503", "node-a", 7).await;
-    let first = stage(&pool, "461503", 3, 1, "circuit-cancel-dedupe").await;
-    revoke_on_fresh_vouch(&pool, &coordinate("461503", "episode-a", 3, 1), "fresh-vouch").await.unwrap();
-    let second = stage(&pool, "461503", 4, 2, "circuit-cancel-dedupe").await;
-    assert_ne!(first, second);
-    pool.close().await;
-    db.drop().await;
+async fn vouch_then_new_epoch_reopens_and_old_activation_is_stale_pg() {
+    let Some((db,pool))=setup("circuit_vouch_reopen").await else{return}; owner(&pool,"502","node-a").await;
+    let first=reserve(&pool,"502","e1",1,None).await; let target="channel:502";
+    let first_id=match stage_held(&pool,message(target,"same"),&first,300).await.unwrap(){StageHeldOutcome::Staged{id}=>id,other=>panic!("{other:?}")};
+    assert_eq!(revoke_on_fresh_vouch(&pool,&first,"live").await.unwrap(),FreshVouchRevoke::Revoked);
+    assert_eq!(activate_fenced(&pool,first_id,&first).await.unwrap(),CircuitActivation::Stale);
+    let second=reserve(&pool,"502","e1",2,Some(1)).await; assert_eq!(second.authority_epoch,2);
+    let second_id=match stage_held(&pool,message(target,"same"),&second,300).await.unwrap(){StageHeldOutcome::Staged{id}=>id,other=>panic!("{other:?}")};
+    assert_ne!(first_id,second_id); assert_eq!(activate_fenced(&pool,second_id,&second).await.unwrap(),CircuitActivation::Activated);
+    pool.close().await; db.drop().await;
 }
 
 #[tokio::test]
-async fn authority_epoch_orders_episode_transitions_pg() {
-    let Some((db, pool)) = setup("outbox_circuit_episode_epoch").await else { return };
-    seed_owner(&pool, "461505", "node-a", 7).await;
-    let first = stage(&pool, "461505", 1, 1, "episode-one").await;
-    assert_eq!(
-        activate_fenced(&pool, first, &coordinate("461505", "episode-a", 1, 1)).await.unwrap(),
-        CircuitActivation::Activated
-    );
-
-    let second = stage(&pool, "461505", 1, 2, "episode-two").await;
-    assert_eq!(
-        activate_fenced(&pool, second, &coordinate("461505", "episode-b", 1, 2)).await.unwrap(),
-        CircuitActivation::Stale
-    );
-    sqlx::query("UPDATE message_outbox SET circuit_episode_key='episode-b' WHERE id=$1")
-        .bind(second).execute(&pool).await.unwrap();
-    assert_eq!(
-        activate_fenced(&pool, second, &coordinate("461505", "episode-b", 1, 2)).await.unwrap(),
-        CircuitActivation::Activated
-    );
-    assert_eq!(
-        activate_fenced(&pool, first, &coordinate("461505", "episode-a", 1, 1)).await.unwrap(),
-        CircuitActivation::Stale
-    );
-    pool.close().await;
-    db.drop().await;
+async fn exact_stage_is_idempotent_and_mismatched_coordinate_conflicts_pg() {
+    let Some((db,pool))=setup("circuit_stage_exact").await else{return}; owner(&pool,"503","node-a").await;
+    let c=reserve(&pool,"503","e1",1,None).await; let target="channel:503";
+    let id=match stage_held(&pool,message(target,"identity"),&c,300).await.unwrap(){StageHeldOutcome::Staged{id}=>id,other=>panic!("{other:?}")};
+    assert_eq!(stage_held(&pool,message(target,"identity"),&c,300).await.unwrap(),StageHeldOutcome::Idempotent{id});
+    let c2=reserve(&pool,"503","e2",1,Some(1)).await;
+    assert_eq!(stage_held(&pool,message(target,"identity"),&c2,300).await.unwrap(),StageHeldOutcome::Conflict);
+    assert!(!super::message_outbox::activate_staged_outbox_pg(&pool,id).await.unwrap());
+    pool.close().await; db.drop().await;
 }
 
 #[tokio::test]
-async fn newer_epoch_reopens_after_vouch_and_old_activation_stays_stale_pg() {
-    let Some((db, pool)) = setup("outbox_circuit_reopen_epoch").await else { return };
-    seed_owner(&pool, "461506", "node-a", 7).await;
-    let old = stage(&pool, "461506", 1, 1, "reopen-old").await;
-    assert_eq!(
-        revoke_on_fresh_vouch(&pool, &coordinate("461506", "episode-a", 1, 1), "fresh-vouch").await.unwrap(),
-        FreshVouchRevoke::Revoked
-    );
-    let next = stage(&pool, "461506", 2, 2, "reopen-next").await;
-    assert_eq!(
-        activate_fenced(&pool, next, &coordinate("461506", "episode-a", 2, 2)).await.unwrap(),
-        CircuitActivation::Activated
-    );
-    assert_eq!(
-        activate_fenced(&pool, old, &coordinate("461506", "episode-a", 1, 1)).await.unwrap(),
-        CircuitActivation::Stale
-    );
-    let epoch: i64 = sqlx::query_scalar(
-        "SELECT authority_epoch FROM message_outbox_circuit_authority WHERE provider='discord' AND channel_id='461506'",
-    ).fetch_one(&pool).await.unwrap();
-    assert_eq!(epoch, 2);
-    pool.close().await;
-    db.drop().await;
+async fn non_circuit_collision_conflicts_and_expired_held_is_replaced_pg() {
+    let Some((db,pool))=setup("circuit_collision_expired").await else{return}; owner(&pool,"504","node-a").await;
+    let c=reserve(&pool,"504","e1",1,None).await; let target="channel:504";
+    let key=super::message_outbox::dedupe_key_for_message(target,"body",Some("collision"),Some(target)).unwrap();
+    sqlx::query("INSERT INTO message_outbox(target,content,bot,source,status,reason_code,session_key,dedupe_key) VALUES($1,'body','notify','system','held','collision',$1,$2)").bind(target).bind(&key).execute(&pool).await.unwrap();
+    assert_eq!(stage_held(&pool,message(target,"collision"),&c,300).await.unwrap(),StageHeldOutcome::Conflict);
+    sqlx::query("DELETE FROM message_outbox WHERE dedupe_key=$1").bind(&key).execute(&pool).await.unwrap();
+    let old=match stage_held(&pool,message(target,"expired"),&c,1).await.unwrap(){StageHeldOutcome::Staged{id}=>id,other=>panic!("{other:?}")};
+    sqlx::query("UPDATE message_outbox SET dedupe_expires_at=NOW()-INTERVAL '1 second' WHERE id=$1").bind(old).execute(&pool).await.unwrap();
+    let new=match stage_held(&pool,message(target,"expired"),&c,300).await.unwrap(){StageHeldOutcome::Staged{id}=>id,other=>panic!("{other:?}")}; assert_ne!(old,new);
+    pool.close().await; db.drop().await;
 }
 
 #[tokio::test]
-async fn staging_stamps_exact_coordinate_pg() {
-    let Some((db, pool)) = setup("outbox_circuit_stage_stamp").await else { return };
-    let id = stage(&pool, "461507", 9, 12, "stamp-exact").await;
-    let row = sqlx::query(
-        "SELECT status,circuit_provider,circuit_channel_id,circuit_episode_key,
-                circuit_baseline_relay_offset,circuit_open_generation,circuit_authority_epoch,
-                circuit_owner_instance_id,circuit_owner_generation
-           FROM message_outbox WHERE id=$1",
-    ).bind(id).fetch_one(&pool).await.unwrap();
-    assert_eq!(row.try_get::<String, _>("status").unwrap(), "held");
-    assert_eq!(row.try_get::<String, _>("circuit_provider").unwrap(), "discord");
-    assert_eq!(row.try_get::<String, _>("circuit_channel_id").unwrap(), "461507");
-    assert_eq!(row.try_get::<String, _>("circuit_episode_key").unwrap(), "episode-a");
-    assert_eq!(row.try_get::<i64, _>("circuit_baseline_relay_offset").unwrap(), 10);
-    assert_eq!(row.try_get::<i64, _>("circuit_open_generation").unwrap(), 9);
-    assert_eq!(row.try_get::<i64, _>("circuit_authority_epoch").unwrap(), 12);
-    assert_eq!(row.try_get::<String, _>("circuit_owner_instance_id").unwrap(), "node-a");
-    assert_eq!(row.try_get::<i64, _>("circuit_owner_generation").unwrap(), 7);
-    assert!(!super::message_outbox::activate_staged_outbox_pg(&pool, id).await.unwrap());
-    pool.close().await;
-    db.drop().await;
+async fn non_owner_reserve_and_stage_leave_zero_rows_pg() {
+    let Some((db,pool))=setup("circuit_nonowner_zero").await else{return}; owner(&pool,"505","node-b").await;
+    assert!(matches!(reserve_next_authority(&pool,"discord","505","node-a",7,"e1",10,1,None).await.unwrap(),AuthorityReservation::NotOwner));
+    let fake=CircuitCoordinate{provider:"discord".into(),channel_id:"505".into(),owner_instance_id:"node-a".into(),owner_generation:7,episode_key:"e1".into(),baseline_relay_offset:10,open_generation:1,authority_epoch:1};
+    assert_eq!(stage_held(&pool,message("channel:505","nonowner"),&fake,300).await.unwrap(),StageHeldOutcome::NotOwner);
+    let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox WHERE target='channel:505'").fetch_one(&pool).await.unwrap(); assert_eq!(count,0);
+    pool.close().await; db.drop().await;
 }
 
 #[tokio::test]
-async fn non_owner_activation_and_revoke_fail_closed_pg() {
-    let Some((db, pool)) = setup("outbox_circuit_non_owner").await else { return };
-    seed_owner(&pool, "461504", "node-b", 8).await;
-    let id = stage(&pool, "461504", 4, 1, "circuit-non-owner").await;
-
-    assert_eq!(activate_fenced(&pool, id, &coordinate("461504", "episode-a", 4, 1)).await.unwrap(), CircuitActivation::NotOwner);
-    assert_eq!(revoke_on_fresh_vouch(&pool, &coordinate("461504", "episode-a", 4, 1), "fresh-vouch").await.unwrap(), FreshVouchRevoke::NotOwner);
-    let status: String = sqlx::query_scalar("SELECT status FROM message_outbox WHERE id=$1")
-        .bind(id).fetch_one(&pool).await.unwrap();
-    assert_eq!(status, "held");
-    pool.close().await;
-    db.drop().await;
+async fn activation_then_vouch_cancels_pending_and_releases_dedupe_pg() {
+    let Some((db,pool))=setup("circuit_pending_vouch").await else{return}; owner(&pool,"506","node-a").await;
+    let c=reserve(&pool,"506","e1",1,None).await; let target="channel:506";
+    let id=match stage_held(&pool,message(target,"release"),&c,300).await.unwrap(){StageHeldOutcome::Staged{id}=>id,other=>panic!("{other:?}")};
+    assert_eq!(activate_fenced(&pool,id,&c).await.unwrap(),CircuitActivation::Activated);
+    assert_eq!(revoke_on_fresh_vouch(&pool,&c,"live").await.unwrap(),FreshVouchRevoke::Revoked);
+    let row=sqlx::query("SELECT status,dedupe_key FROM message_outbox WHERE id=$1").bind(id).fetch_one(&pool).await.unwrap(); assert_eq!(row.get::<String,_>("status"),"cancelled"); assert!(row.get::<Option<String>,_>("dedupe_key").is_none());
+    pool.close().await; db.drop().await;
 }
