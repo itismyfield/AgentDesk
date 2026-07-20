@@ -1154,7 +1154,8 @@ impl CancelToken {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut current_label = self.cancel_source.lock().unwrap_or_else(|e| e.into_inner());
-        if kind.is_none() || (*kind == Some(CancelSource::Other) && classified != CancelSource::Other)
+        if kind.is_none()
+            || (*kind == Some(CancelSource::Other) && classified != CancelSource::Other)
         {
             *kind = Some(classified);
         }
@@ -1172,8 +1173,8 @@ impl CancelToken {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut label = self.cancel_source.lock().unwrap_or_else(|e| e.into_inner());
-        let replace_provisional_cleanup_label = *current_kind == Some(CancelSource::Other)
-            && label.as_deref() == Some("tmux_cleanup");
+        let replace_provisional_cleanup_label =
+            *current_kind == Some(CancelSource::Other) && label.as_deref() == Some("tmux_cleanup");
         *current_kind = Some(kind);
         if label.is_none() || replace_provisional_cleanup_label {
             *label = Some(kind.as_label().to_string());
