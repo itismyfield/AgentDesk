@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use poise::serenity_prelude::ChannelId;
 use serde::{Deserialize, Serialize};
 
-use super::health::liveness_authority::{
+use super::super::health::liveness_authority::{
     LivenessAuthorityRead, LivenessVouch, ProcessLocalLivenessAuthority, monotonic_now_secs,
 };
 use super::{RelayRecoveryActionKind, RelayRecoveryApplySource, RelayRecoveryDecision, SharedData};
@@ -194,10 +194,7 @@ fn persist_record(path: &Path, record: &CircuitRecord) -> Result<(), String> {
     super::super::runtime_store::atomic_write(path, &json)
 }
 
-pub(super) fn load_orphaned_staged_alert_ids(
-    provider: &ProviderKind,
-    channel_id: u64,
-) -> Vec<i64> {
+pub(super) fn load_orphaned_staged_alert_ids(provider: &ProviderKind, channel_id: u64) -> Vec<i64> {
     let Some(root) = super::super::runtime_store::runtime_root()
         .map(|root| root.join("discord_relay_recovery_circuit"))
     else {
@@ -886,7 +883,7 @@ mod tests {
     fn not_vouched_authority() -> FixedLivenessAuthority {
         FixedLivenessAuthority {
             vouch: LivenessVouch::NotVouched {
-                reason: super::super::health::liveness_authority::VouchDenial::NoEvidence,
+                reason: super::super::super::health::liveness_authority::VouchDenial::NoEvidence,
             },
         }
     }
@@ -1100,21 +1097,15 @@ mod tests {
         let authority = not_vouched_authority();
 
         assert!(matches!(
-            reserve_in_root_with_authority(
-                temp.path(), &state, &episode, 0, 2, &authority, 10,
-            ),
+            reserve_in_root_with_authority(temp.path(), &state, &episode, 0, 2, &authority, 10,),
             CircuitReservation::Reserved { attempt: 1, .. }
         ));
         assert!(matches!(
-            reserve_in_root_with_authority(
-                temp.path(), &state, &episode, 0, 2, &authority, 11,
-            ),
+            reserve_in_root_with_authority(temp.path(), &state, &episode, 0, 2, &authority, 11,),
             CircuitReservation::Reserved { attempt: 2, .. }
         ));
         assert!(matches!(
-            reserve_in_root_with_authority(
-                temp.path(), &state, &episode, 0, 2, &authority, 12,
-            ),
+            reserve_in_root_with_authority(temp.path(), &state, &episode, 0, 2, &authority, 12,),
             CircuitReservation::Open {
                 alert_needed: true,
                 ..
@@ -1133,15 +1124,11 @@ mod tests {
         let authority = not_vouched_authority();
 
         assert!(matches!(
-            reserve_in_root_with_authority(
-                temp.path(), &state, &episode, 0, 1, &authority, 10,
-            ),
+            reserve_in_root_with_authority(temp.path(), &state, &episode, 0, 1, &authority, 10,),
             CircuitReservation::Reserved { attempt: 1, .. }
         ));
         assert!(matches!(
-            reserve_in_root_with_authority(
-                temp.path(), &state, &episode, 64, 1, &authority, 11,
-            ),
+            reserve_in_root_with_authority(temp.path(), &state, &episode, 64, 1, &authority, 11,),
             CircuitReservation::Reserved { attempt: 1, .. }
         ));
     }

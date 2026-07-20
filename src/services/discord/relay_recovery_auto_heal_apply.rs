@@ -135,10 +135,9 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
                 episode,
                 reasons_csv,
             } => {
-                for staged_alert_id in circuit_breaker::load_orphaned_staged_alert_ids(
-                    provider,
-                    decision.channel_id,
-                ) {
+                for staged_alert_id in
+                    circuit_breaker::load_orphaned_staged_alert_ids(provider, decision.channel_id)
+                {
                     match alert_enqueue
                         .cancel(shared.pg_pool.as_ref(), staged_alert_id)
                         .await
