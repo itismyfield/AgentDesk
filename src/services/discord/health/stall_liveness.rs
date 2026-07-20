@@ -7,7 +7,7 @@ use crate::services::discord::inflight::InflightTurnState;
 use crate::services::discord::relay_health::RelayActiveTurn;
 use crate::services::provider::ProviderKind;
 
-use super::{snapshot::WatcherStateSnapshot, stall_verdict};
+use super::{liveness_authority, snapshot::WatcherStateSnapshot, stall_verdict};
 
 mod redrive_grace;
 #[cfg(test)]
@@ -120,6 +120,7 @@ static OFFSET_OBSERVATIONS: LazyLock<dashmap::DashMap<StallLivenessKey, OffsetOb
 /// turn is still alive and producing bytes (capture offset advancing). This map
 /// lets the watchdog distinguish "relay stalled but turn alive" (do NOT
 /// force-clean) from a genuinely dead turn (capture also frozen).
+#[cfg(test)]
 #[derive(Clone, Debug)]
 struct CaptureOffsetWatchdogState {
     last_seen_capture_offset: Option<u64>,
@@ -134,7 +135,7 @@ struct CaptureOffsetWatchdogState {
     /// offset was observed to ADVANCE. Unlike `OFFSET_OBSERVATIONS` (which is
     /// only fed inside `evaluate_stall_watchdog_liveness`, i.e. only once
     /// `should_clean` already fired), this map is fed EVERY watchdog tick via
-    /// `stall_watchdog_capture_offset_advancing` (recovery.rs), so it carries
+    /// `liveness_authority::observe_capture_coordinate`, so it carries
     /// pre-threshold advance history. Used as the fallback source for
     /// `pane_offset_advanced_age_secs`, removing the structural one-tick
     /// blindness on the first post-threshold evaluation (previous == None).
@@ -142,6 +143,7 @@ struct CaptureOffsetWatchdogState {
     last_updated_unix_secs: i64,
 }
 
+#[cfg(test)]
 static CAPTURE_OFFSET_WATCHDOG_STATE: LazyLock<
     dashmap::DashMap<StallLivenessKey, CaptureOffsetWatchdogState>,
 > = LazyLock::new(dashmap::DashMap::new);
@@ -359,24 +361,7 @@ pub(super) fn evaluate_stall_watchdog_liveness(
     }
 }
 
-/// #4178: returns `true` while the tmux capture offset for this channel shows
-/// the underlying turn is still alive, so the stall-watchdog must NOT force-clean
-/// inflight. A turn is protected only once its capture offset has been observed
-/// to ADVANCE at least once (proven-alive), and then only for a short grace of
-/// up to TWO consecutive non-advancing ticks after it last advanced — so a live
-/// turn whose relay lane wedged (capture still growing) is never wrongly cleaned
-/// (#4178 incident 2026-07-06), while a turn we have never seen advance (dead on
-/// arrival, or no capture data) keeps the pre-#4178 prompt force-clean timing.
-pub(super) fn stall_watchdog_capture_offset_advancing(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    snapshot: &WatcherStateSnapshot,
-    now_unix_secs: i64,
-) -> bool {
-    let key = StallLivenessKey::from_snapshot(provider, channel_id, snapshot);
-    capture_offset_advancing(&key, snapshot.last_capture_offset, now_unix_secs)
-}
-
+#[cfg(test)]
 fn capture_offset_advancing(
     key: &StallLivenessKey,
     current_capture_offset: Option<u64>,
@@ -441,6 +426,8 @@ pub(super) fn clear_stall_watchdog_liveness_state(
 ) {
     let probe = StallLivenessKey::new(provider, channel_id, tmux_session, None, None);
     OFFSET_OBSERVATIONS.retain(|key, _| !key.matches_session(&probe));
+    liveness_authority::clear_capture_state_for_session(provider, channel_id, tmux_session);
+    #[cfg(test)]
     CAPTURE_OFFSET_WATCHDOG_STATE.retain(|key, _| !key.matches_session(&probe));
     redrive_grace::clear_for_session(&probe);
 }
@@ -461,6 +448,8 @@ pub(super) fn gc_stall_watchdog_liveness_state(now_unix_secs: i64) {
     OFFSET_OBSERVATIONS.retain(|_, observation| {
         !liveness_state_expired(observation.last_updated_unix_secs, now_unix_secs)
     });
+    liveness_authority::gc_capture_state(now_unix_secs, STALL_LIVENESS_STATE_TTL_SECS);
+    #[cfg(test)]
     CAPTURE_OFFSET_WATCHDOG_STATE
         .retain(|_, state| !liveness_state_expired(state.last_updated_unix_secs, now_unix_secs));
     redrive_grace::gc();
@@ -700,7 +689,7 @@ impl StallWatchdogLivenessEvidence {
             // the every-tick capture watchdog recorded.
             pane_offset_advanced_age_secs: pane_observation
                 .advanced_age_secs
-                .or_else(|| capture_watchdog_advanced_age_secs(key, now_unix_secs)),
+                .or_else(|| capture_watchdog_advanced_age_secs(key, snapshot, now_unix_secs)),
             relay_offset_current: Some(snapshot.last_relay_offset),
             relay_offset_previous: relay_observation.previous_offset,
             relay_offset_advanced_age_secs: relay_observation.advanced_age_secs,
@@ -729,11 +718,17 @@ impl StallWatchdogLivenessEvidence {
 /// which is updated EVERY tick (recovery.rs) rather than only after
 /// `should_clean` fires. `None` when the channel has never been observed to
 /// advance (dead-on-arrival keeps pre-#4400 timing).
-fn capture_watchdog_advanced_age_secs(key: &StallLivenessKey, now_unix_secs: i64) -> Option<u64> {
-    CAPTURE_OFFSET_WATCHDOG_STATE
-        .get(key)
-        .and_then(|state| state.advanced_at_unix_secs)
-        .map(|advanced_at| saturating_age_secs(advanced_at, now_unix_secs))
+fn capture_watchdog_advanced_age_secs(
+    key: &StallLivenessKey,
+    snapshot: &WatcherStateSnapshot,
+    now_unix_secs: i64,
+) -> Option<u64> {
+    liveness_authority::capture_advanced_age_secs(
+        &key.provider,
+        ChannelId::new(key.channel_id),
+        snapshot,
+        now_unix_secs,
+    )
 }
 
 /// #4400 (a): age of `inflight.updated_at` while the row witnesses an
@@ -750,7 +745,7 @@ fn capture_watchdog_advanced_age_secs(key: &StallLivenessKey, now_unix_secs: i64
 ///
 /// The `tmux_session_alive == Some(true)` gate is invariant I6: a dead pane
 /// never earns this evidence, so dead-turn cleanup timing is unchanged.
-fn open_tool_execution_age_secs(
+pub(in crate::services::discord) fn open_tool_execution_age_secs(
     snapshot: &WatcherStateSnapshot,
     inflight: Option<&InflightTurnState>,
     now_unix_secs: i64,
@@ -865,7 +860,7 @@ fn relay_offset_unchanged_past_backlog_grace(relay_observation: &OffsetObservati
         .is_some_and(|age| age >= STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS)
 }
 
-fn transcript_mtime_age_secs(
+pub(in crate::services::discord) fn transcript_mtime_age_secs(
     inflight: Option<&InflightTurnState>,
     now_unix_secs: i64,
 ) -> Option<u64> {
@@ -950,7 +945,10 @@ fn positive_millis(value: i64) -> Option<i64> {
     (value > 0).then_some(value)
 }
 
-fn unix_millis_age_secs(unix_millis: Option<i64>, now_unix_secs: i64) -> Option<u64> {
+pub(in crate::services::discord) fn unix_millis_age_secs(
+    unix_millis: Option<i64>,
+    now_unix_secs: i64,
+) -> Option<u64> {
     let millis = unix_millis?;
     let now_millis = now_unix_secs.saturating_mul(1000);
     if millis >= now_millis {
@@ -1077,6 +1075,16 @@ mod tests {
             inflight_state_present: true,
             last_relay_ts_ms: 1_700_000_000_000,
             last_capture_offset: capture_offset,
+            capture_coordinate: liveness_authority::CaptureCoordinateObservation {
+                offset: capture_offset,
+                path_hash: 0,
+                file_id: None,
+                status: if capture_offset.is_some() {
+                    liveness_authority::CoordinateStatus::Observed
+                } else {
+                    liveness_authority::CoordinateStatus::Missing
+                },
+            },
             unread_bytes: capture_offset.map(|offset| offset.saturating_sub(10)),
             desynced: true,
             reconnect_count: 0,
@@ -2315,8 +2323,10 @@ mod tests {
     /// prior `OFFSET_OBSERVATIONS` pane entry (it is only fed once
     /// `should_clean` fires), so the legacy pane-advance signal was
     /// structurally blind for exactly the tick that decides the cleanup. The
-    /// every-tick capture watchdog's `advanced_at_unix_secs` history must cover
-    /// that first tick.
+    /// authority's every-tick coordinate history must cover that first
+    /// tick. This complements the stateless first-tick open-tool vouch in
+    /// `liveness_authority`; it does not replace capture evidence when capture
+    /// advancement was observed before the threshold.
     ///
     /// Mutation proof: removing the `capture_watchdog_advanced_age_secs`
     /// fallback in `StallWatchdogLivenessEvidence::collect` leaves
@@ -2327,21 +2337,49 @@ mod tests {
         let channel = ChannelId::new(4_400_005);
         let tmux_session = "AgentDesk-codex-4400-first-tick-fallback";
         let _root = isolated_runtime_root();
-        let key = liveness_key(&provider, channel, tmux_session);
         clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
         let now = chrono::Utc::now().timestamp();
 
-        // Pre-threshold ticks: the every-tick capture watchdog records an
-        // advance 60s ago, then the two-tick grace is exhausted so the
-        // `should_clean` gate stops being blocked by `capture_offset_advancing`.
-        assert!(!capture_offset_advancing(&key, Some(100), now - 90));
-        assert!(capture_offset_advancing(&key, Some(200), now - 60));
-        capture_offset_advancing(&key, Some(200), now - 45);
-        capture_offset_advancing(&key, Some(200), now - 30);
-        assert!(!capture_offset_advancing(&key, Some(200), now - 15));
+        // Pre-threshold ticks feed the production authority path: it records an
+        // advance 60s ago, then exhausts the two-tick grace so the local
+        // `should_clean` gate is no longer blocked by capture advancement.
+        let baseline = snapshot(channel.get(), tmux_session, Some(100));
+        assert!(
+            !liveness_authority::observe_capture_coordinate(
+                &provider,
+                channel,
+                &baseline,
+                now - 90,
+                1,
+            )
+            .advancing
+        );
+        let advanced = snapshot(channel.get(), tmux_session, Some(200));
+        assert!(
+            liveness_authority::observe_capture_coordinate(
+                &provider,
+                channel,
+                &advanced,
+                now - 60,
+                2,
+            )
+            .advancing
+        );
+        liveness_authority::observe_capture_coordinate(&provider, channel, &advanced, now - 45, 3);
+        liveness_authority::observe_capture_coordinate(&provider, channel, &advanced, now - 30, 4);
+        assert!(
+            !liveness_authority::observe_capture_coordinate(
+                &provider,
+                channel,
+                &advanced,
+                now - 15,
+                5,
+            )
+            .advancing
+        );
 
         let inflight = inflight_with_output(channel.get(), tmux_session, None);
-        let mut snap = snapshot(channel.get(), tmux_session, Some(200));
+        let mut snap = advanced;
         snap.unread_bytes = Some(0);
         snap.relay_health.unread_bytes = Some(0);
 

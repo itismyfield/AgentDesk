@@ -656,6 +656,12 @@ mod tests {
             inflight_state_present: inflight_present,
             last_relay_ts_ms: 1_700_000_000_000,
             last_capture_offset: Some(20),
+            capture_coordinate: crate::services::discord::health::liveness_authority::CaptureCoordinateObservation {
+                offset: Some(20),
+                path_hash: 0,
+                file_id: None,
+                status: crate::services::discord::health::liveness_authority::CoordinateStatus::Observed,
+            },
             unread_bytes: Some(10),
             desynced: true,
             reconnect_count: 0,

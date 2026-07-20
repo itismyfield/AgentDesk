@@ -4,6 +4,8 @@ use crate::services::discord::{self as discord, SharedData};
 use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::ProviderKind;
 
+use super::liveness_authority::{CaptureCoordinateObservation, CoordinateStatus};
+
 pub(super) const WATCHER_STATE_DESYNC_STALE_MS: i64 = 30_000;
 
 #[derive(Debug)]
@@ -26,6 +28,7 @@ pub(super) struct SessionEnrichment {
     pub last_relay_ts_ms: i64,
     pub reconnect_count: u64,
     pub last_capture_offset: Option<u64>,
+    pub capture_coordinate: CaptureCoordinateObservation,
     pub unread_bytes: Option<u64>,
     pub relay_stale: bool,
     pub capture_lagged: bool,
@@ -101,14 +104,13 @@ impl SessionEnrichment {
             .as_ref()
             .and_then(|state| state.output_path.as_deref())
             .map(str::to_string);
-        let last_capture_offset = match output_path_for_metadata {
-            Some(path) => tokio::task::spawn_blocking(move || {
-                std::fs::metadata(path).ok().map(|meta| meta.len())
-            })
-            .await
-            .unwrap_or(None),
-            None => None,
+        let capture_coordinate = match output_path_for_metadata {
+            Some(path) => tokio::task::spawn_blocking(move || capture_coordinate_for_path(&path))
+                .await
+                .unwrap_or_else(|_| CaptureCoordinateObservation::missing(None)),
+            None => CaptureCoordinateObservation::missing(None),
         };
+        let last_capture_offset = capture_coordinate.offset;
         let unread_bytes = relay_state_matches_inflight
             .then(|| last_capture_offset.map(|capture| capture.saturating_sub(last_relay_offset)))
             .flatten();
@@ -147,6 +149,7 @@ impl SessionEnrichment {
             last_relay_ts_ms,
             reconnect_count,
             last_capture_offset,
+            capture_coordinate,
             unread_bytes,
             relay_stale,
             capture_lagged,
@@ -225,6 +228,35 @@ impl SessionEnrichment {
             .as_ref()
             .and_then(|state| state.dispatch_id.as_deref())
             .is_some()
+    }
+}
+
+fn capture_coordinate_for_path(path: &str) -> CaptureCoordinateObservation {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    let path_hash = hasher.finish();
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return CaptureCoordinateObservation {
+            offset: None,
+            path_hash,
+            file_id: None,
+            status: CoordinateStatus::Missing,
+        };
+    };
+    #[cfg(unix)]
+    let file_id = {
+        use std::os::unix::fs::MetadataExt;
+        Some((metadata.dev(), metadata.ino()))
+    };
+    #[cfg(not(unix))]
+    let file_id = None;
+    CaptureCoordinateObservation {
+        offset: Some(metadata.len()),
+        path_hash,
+        file_id,
+        status: CoordinateStatus::Observed,
     }
 }
 

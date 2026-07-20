@@ -1642,6 +1642,16 @@ pub(crate) async fn run_stall_watchdog_pass(
             Some(snapshot) => snapshot,
             None => continue,
         };
+        let now_mono_secs = super::liveness_authority::monotonic_now_secs();
+        let tick_inflight = discord::inflight::load_inflight_state(provider, channel_id.get());
+        let capture_assessment = super::liveness_authority::observe_and_publish_from_tick(
+            provider,
+            channel_id,
+            &snapshot,
+            tick_inflight.as_ref(),
+            now_unix_secs,
+            now_mono_secs,
+        );
         if relay_dead_reattach::try_apply(
             registry,
             shared.clone(),
@@ -1821,16 +1831,10 @@ pub(crate) async fn run_stall_watchdog_pass(
             continue;
         }
 
-        let capture_advancing = stall_liveness::stall_watchdog_capture_offset_advancing(
-            provider,
-            channel_id,
-            &snapshot,
-            now_unix_secs,
-        );
         let should_clean = stall_watchdog_should_force_clean(
             snapshot.attached,
             snapshot.desynced,
-            capture_advancing,
+            capture_assessment.advancing,
             snapshot.inflight_terminal_delivery_committed,
             snapshot.inflight_started_at.as_deref(),
             now_unix_secs,
@@ -4596,13 +4600,17 @@ mod stall_watchdog_auto_heal_tests {
         );
     }
 
-    /// #4460: fresh producer activity must be authoritative even while the
-    /// control plane is desynced. This is the production shape that the W0
-    /// shadow verdict mislabeled `control_plane_desync`: the transcript is
-    /// fresh, but the turn itself is old enough to enter branch 4. It must not
-    /// page and must never clean the turn.
+    /// #4615: in the pre-backstop window, capture advancement is intentionally
+    /// defense-in-depth: it closes the early `should_clean` gate, while the
+    /// secondary liveness evaluation can independently defer from the recorded
+    /// advance history. This integration test proves the combined suppression,
+    /// not isolation of the early wire. The opposite stuck-true mutation is
+    /// guarded by `pre_backstop_flat_capture_pages_genuine_stall_pg`; direct
+    /// early-gate semantics remain covered by
+    /// `stall_watchdog_capture_advancing_blocks_force_clean`, and secondary
+    /// history by the stall-liveness first-threshold regression.
     #[tokio::test(flavor = "current_thread")]
-    async fn branch4_producer_liveness_suppresses_page_and_preserves_turn_pg() {
+    async fn pre_backstop_capture_advance_has_defense_in_depth_suppression_pg() {
         let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
             "agentdesk_stall_watchdog_producer_live",
             "stall watchdog producer-live suppression tests",
@@ -4633,6 +4641,12 @@ mod stall_watchdog_auto_heal_tests {
         let stale_output = tempdir.path().join("force-clean-stale.jsonl");
         std::fs::write(&stale_output, "partial stale output\n")
             .expect("write stale output fixture");
+        let stale_mtime = chrono::Utc::now().timestamp() - 5 * 60 * 60;
+        filetime::set_file_mtime(
+            &stale_output,
+            filetime::FileTime::from_unix_time(stale_mtime, 0),
+        )
+        .expect("age transcript beyond stateless liveness windows");
         let stale_token = seed_active_mailbox_and_session(&shared, channel, user_msg).await;
         let mut stale_state = seed_idle_inflight(
             &provider,
@@ -4658,6 +4672,28 @@ mod stall_watchdog_auto_heal_tests {
             watcher_handle(stale_tmux, &stale_output, watcher_cancel.clone()),
         );
         let turn_view_ops_before = shared.turn_view_reconciler.ops().len();
+        let baseline = registry
+            .snapshot_watcher_state_for_shared(&provider, shared.clone(), channel.get())
+            .await
+            .expect("capture baseline snapshot");
+        let observed_at = chrono::Utc::now().timestamp();
+        assert!(
+            !super::super::liveness_authority::observe_capture_coordinate(
+                &provider,
+                channel,
+                &baseline,
+                observed_at,
+                1,
+            )
+            .advancing
+        );
+        std::fs::write(&stale_output, "partial stale output\nproducer advanced\n")
+            .expect("advance capture without refreshing transcript evidence");
+        filetime::set_file_mtime(
+            &stale_output,
+            filetime::FileTime::from_unix_time(stale_mtime, 0),
+        )
+        .expect("keep transcript mtime stale after capture growth");
 
         let cleaned = super::run_stall_watchdog_pass(&registry, &provider).await;
 
@@ -4774,12 +4810,14 @@ mod stall_watchdog_auto_heal_tests {
             .expect("initial absolute-backstop watcher snapshot");
         let observation_time = chrono::Utc::now().timestamp();
         assert!(
-            !super::stall_liveness::stall_watchdog_capture_offset_advancing(
+            !super::super::liveness_authority::observe_capture_coordinate(
                 &provider,
                 channel,
                 &initial_snapshot,
                 observation_time,
-            ),
+                1,
+            )
+            .advancing,
             "first capture observation only establishes the baseline"
         );
         std::fs::write(&output, "fresh producer output\nstill advancing\n")
@@ -4789,12 +4827,14 @@ mod stall_watchdog_auto_heal_tests {
             .await
             .expect("advanced absolute-backstop watcher snapshot");
         assert!(
-            super::stall_liveness::stall_watchdog_capture_offset_advancing(
+            super::super::liveness_authority::observe_capture_coordinate(
                 &provider,
                 channel,
                 &advanced_snapshot,
                 observation_time + 1,
-            ),
+                2,
+            )
+            .advancing,
             "fixture must prove cross-tick capture advancement"
         );
 
@@ -4834,11 +4874,12 @@ mod stall_watchdog_auto_heal_tests {
         );
     }
 
-    /// A genuinely stalled/desynced turn has no fresh producer evidence. It
-    /// must page once through the provider-owned DM bot, while the branch-4
-    /// no-cleanup invariant preserves every turn authority on repeated passes.
+    /// #4615: a pre-backstop genuine stall with flat, never-advanced capture
+    /// and no stateless evidence must page once. Replacing
+    /// `capture_assessment.advancing` with `true` makes the row-count assertion
+    /// fail because the page is incorrectly suppressed.
     #[tokio::test(flavor = "current_thread")]
-    async fn branch4_genuine_stall_pages_once_and_preserves_turn_pg() {
+    async fn pre_backstop_flat_capture_pages_genuine_stall_pg() {
         let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
             "agentdesk_stall_watchdog_genuine_stall",
             "stall watchdog genuine-stall paging tests",
@@ -4881,7 +4922,7 @@ mod stall_watchdog_auto_heal_tests {
             0,
             "genuinely-stalled-session",
         );
-        let stale_at = (chrono::Local::now() - chrono::Duration::hours(5))
+        let stale_at = (chrono::Local::now() - chrono::Duration::minutes(30))
             .format("%Y-%m-%d %H:%M:%S")
             .to_string();
         state.started_at = stale_at.clone();
