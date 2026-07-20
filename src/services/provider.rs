@@ -1166,6 +1166,14 @@ impl CancelToken {
     /// free-form label (used for tracing / dispatch reason) to the canonical
     /// string for the variant when no label was previously recorded.
     pub fn set_cancel_source_kind(&self, kind: CancelSource) {
+        self.set_cancel_source_kind_transactional(kind, |_| {});
+    }
+
+    fn set_cancel_source_kind_transactional(
+        &self,
+        kind: CancelSource,
+        after_kind_write: impl FnOnce(&Self),
+    ) {
         // Hold both locks across the pair update so cleanup cannot leave a
         // canonical kind paired with a cleanup-only label.
         let mut current_kind = self
@@ -1176,9 +1184,19 @@ impl CancelToken {
         let replace_provisional_cleanup_label =
             *current_kind == Some(CancelSource::Other) && label.as_deref() == Some("tmux_cleanup");
         *current_kind = Some(kind);
+        after_kind_write(self);
         if label.is_none() || replace_provisional_cleanup_label {
             *label = Some(kind.as_label().to_string());
         }
+    }
+
+    #[cfg(test)]
+    fn set_cancel_source_kind_with_interleaving(
+        &self,
+        kind: CancelSource,
+        after_kind_write: impl FnOnce(&Self),
+    ) {
+        self.set_cancel_source_kind_transactional(kind, after_kind_write);
     }
 
     pub fn cancel_source(&self) -> Option<String> {
@@ -2376,33 +2394,18 @@ mod cancel_token_tests {
     }
 
     #[test]
-    fn explicit_kind_and_cleanup_cannot_leave_tmux_label_mismatch() {
-        for cleanup_first in [true, false] {
-            let token = Arc::new(CancelToken::new());
-            let barrier = Arc::new(Barrier::new(2));
-            let cleanup_token = Arc::clone(&token);
-            let cleanup_barrier = Arc::clone(&barrier);
-            let cleanup = thread::spawn(move || {
-                if cleanup_first {
-                    cleanup_token.cancel_with_tmux_cleanup();
-                }
-                cleanup_barrier.wait();
-                if !cleanup_first {
-                    cleanup_token.cancel_with_tmux_cleanup();
-                }
-            });
-            if !cleanup_first {
-                barrier.wait();
-            }
-            token.set_cancel_source_kind(CancelSource::UserBargeIn);
-            if cleanup_first {
-                barrier.wait();
-            }
-            cleanup.join().unwrap();
+    fn explicit_kind_pair_update_excludes_cleanup_interleaving() {
+        let token = CancelToken::new();
 
-            assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
-            assert_ne!(token.cancel_source().as_deref(), Some("tmux_cleanup"));
-        }
+        token.set_cancel_source_kind_with_interleaving(CancelSource::UserBargeIn, |token| {
+            assert!(
+                token.cancel_source.try_lock().is_err(),
+                "the label lock must remain held after the kind write"
+            );
+        });
+
+        assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
+        assert_eq!(token.cancel_source().as_deref(), Some("user_barge_in"));
     }
 
     #[test]
