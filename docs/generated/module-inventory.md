@@ -229,7 +229,7 @@
 | `server::issue_specs` | `src/server/issue_specs.rs` | 396 | 284 | 112 |  |
 | `server::maintenance` | `src/server/maintenance.rs` | 1293 | 1153 | 140 | giant-file |
 | `server::multinode_regression` | `src/server/multinode_regression.rs` | 419 | 0 | 419 |  |
-| `server::outbox_actionable_delivery` | `src/server/outbox_actionable_delivery.rs` | 121 | 89 | 32 |  |
+| `server::outbox_actionable_delivery` | `src/server/outbox_actionable_delivery.rs` | 122 | 90 | 32 |  |
 | `server::outbox_delivery_alert` | `src/server/outbox_delivery_alert.rs` | 149 | 149 | 0 |  |
 | `server::resource_locks` | `src/server/resource_locks.rs` | 416 | 239 | 177 |  |
 | `server::routes` | `src/server/routes/mod.rs` | 570 | 335 | 235 |  |
@@ -565,13 +565,13 @@
 | `services::discord::outbound::delivery` | `src/services/discord/outbound/delivery.rs` | 1433 | 737 | 696 |  |
 | `services::discord::outbound::delivery_frontier_probe` | `src/services/discord/outbound/delivery_frontier_probe.rs` | 75 | 75 | 0 |  |
 | `services::discord::outbound::delivery_record` | `src/services/discord/outbound/delivery_record.rs` | 3077 | 1369 | 1708 | giant-file |
-| `services::discord::outbound::manual_delivery` | `src/services/discord/outbound/manual_delivery.rs` | 1203 | 594 | 609 |  |
+| `services::discord::outbound::manual_delivery` | `src/services/discord/outbound/manual_delivery.rs` | 1291 | 661 | 630 |  |
 | `services::discord::outbound::message` | `src/services/discord/outbound/message.rs` | 471 | 447 | 24 |  |
 | `services::discord::outbound::policy` | `src/services/discord/outbound/policy.rs` | 124 | 124 | 0 |  |
 | `services::discord::outbound::reaction_control` | `src/services/discord/outbound/reaction_control.rs` | 190 | 125 | 65 |  |
 | `services::discord::outbound::result` | `src/services/discord/outbound/result.rs` | 161 | 161 | 0 |  |
-| `services::discord::outbound::send_api` | `src/services/discord/outbound/send_api.rs` | 595 | 299 | 296 |  |
-| `services::discord::outbound::send_gate` | `src/services/discord/outbound/send_gate.rs` | 555 | 349 | 206 |  |
+| `services::discord::outbound::send_api` | `src/services/discord/outbound/send_api.rs` | 646 | 323 | 323 |  |
+| `services::discord::outbound::send_gate` | `src/services/discord/outbound/send_gate.rs` | 561 | 355 | 206 |  |
 | `services::discord::outbound::send_target` | `src/services/discord/outbound/send_target.rs` | 263 | 153 | 110 |  |
 | `services::discord::outbound::send_to_agent` | `src/services/discord/outbound/send_to_agent.rs` | 164 | 100 | 64 |  |
 | `services::discord::outbound::serenity_reference` | `src/services/discord/outbound/serenity_reference.rs` | 239 | 200 | 39 |  |
@@ -602,7 +602,7 @@
 | `services::discord::placeholder_sweeper` | `src/services/discord/placeholder_sweeper.rs` | 1293 | 998 | 295 |  |
 | `services::discord::placeholder_sweeper::abandon_guard` | `src/services/discord/placeholder_sweeper/abandon_guard.rs` | 914 | 492 | 422 |  |
 | `services::discord::prompt_builder` | `src/services/discord/prompt_builder/mod.rs` | 687 | 687 | 0 |  |
-| `services::discord::prompt_builder::channel_recent_context` | `src/services/discord/prompt_builder/channel_recent_context.rs` | 419 | 200 | 219 |  |
+| `services::discord::prompt_builder::channel_recent_context` | `src/services/discord/prompt_builder/channel_recent_context.rs` | 436 | 200 | 236 |  |
 | `services::discord::prompt_builder::dispatch_contract` | `src/services/discord/prompt_builder/dispatch_contract.rs` | 576 | 576 | 0 |  |
 | `services::discord::prompt_builder::layer_rendering` | `src/services/discord/prompt_builder/layer_rendering.rs` | 498 | 299 | 199 |  |
 | `services::discord::prompt_builder::manifest` | `src/services/discord/prompt_builder/manifest.rs` | 382 | 382 | 0 |  |

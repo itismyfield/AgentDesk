@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, CreateMessage};
+use sqlx::PgPool;
 
+use crate::db::session_transcripts::{PersistSessionTranscript, persist_turn_db};
 use crate::services::discord::bot_role::UtilityBotRole;
 use crate::services::discord::formatting::{build_long_message_attachment, split_message};
 use crate::services::discord::outbound::delivery::{
@@ -42,6 +44,9 @@ pub(super) async fn send_resolved_manual_message_with_client<C: ManualOutboundCl
     bot: &str,
     summary: Option<&str>,
     delivery_id: Option<ManualOutboundDeliveryId<'_>>,
+    pg_pool: Option<&PgPool>,
+    record_transcript: bool,
+    transcript_source_label: Option<&str>,
 ) -> (&'static str, String) {
     let channel_id = ChannelId::new(channel_id_raw);
     let send_result = deliver_manual_notification(
@@ -67,6 +72,16 @@ pub(super) async fn send_resolved_manual_message_with_client<C: ManualOutboundCl
             tracing::info!(
                 "  [{ts}] {emoji} ROUTE: [{source}] → channel {channel_id} (bot={bot}{delivery_tag})"
             );
+            if record_transcript && !message_id.is_empty() && !content.trim().is_empty() {
+                record_manual_message_transcript(
+                    pg_pool,
+                    channel_id_raw,
+                    &message_id,
+                    content,
+                    transcript_source_label,
+                )
+                .await;
+            }
             let mut response = serde_json::json!({
                 "ok": true,
                 "target": format!("channel:{channel_id}"),
@@ -95,6 +110,58 @@ pub(super) async fn send_resolved_manual_message_with_client<C: ManualOutboundCl
                 ),
             )
         }
+    }
+}
+
+fn synthetic_routine_pair<'a>(
+    channel_id_raw: u64,
+    message_id: &'a str,
+    content: &'a str,
+    source_label: Option<&str>,
+) -> (String, String, &'a str) {
+    let label = source_label
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("routine");
+    (
+        format!("manual-discord:{channel_id_raw}:{message_id}"),
+        format!("(routine {label} posted)"),
+        content,
+    )
+}
+
+async fn record_manual_message_transcript(
+    pg_pool: Option<&PgPool>,
+    channel_id_raw: u64,
+    message_id: &str,
+    content: &str,
+    source_label: Option<&str>,
+) {
+    let (turn_id, user_message, assistant_message) =
+        synthetic_routine_pair(channel_id_raw, message_id, content, source_label);
+    let channel_id = channel_id_raw.to_string();
+    let source_label = source_label
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let entry = PersistSessionTranscript {
+        turn_id: &turn_id,
+        session_key: None,
+        channel_id: Some(&channel_id),
+        agent_id: source_label,
+        provider: Some("routine"),
+        dispatch_id: None,
+        user_message: &user_message,
+        assistant_message,
+        events: &[],
+        duration_ms: None,
+    };
+    if let Err(error) = persist_turn_db(pg_pool, entry).await {
+        tracing::warn!(
+            channel_id = channel_id_raw,
+            message_id,
+            error = %error,
+            "manual Discord message delivered but transcript persistence failed"
+        );
     }
 }
 
@@ -598,6 +665,27 @@ mod manual_v3_delivery_tests {
     use std::sync::{Arc, Mutex};
 
     use crate::services::discord::health::{HealthRegistry, handle_send};
+
+    #[test]
+    fn synthetic_routine_pair_is_complete_and_message_id_deterministic() {
+        let first =
+            synthetic_routine_pair(42, "message-7", "posted briefing", Some("morning-briefing"));
+        let retry =
+            synthetic_routine_pair(42, "message-7", "posted briefing", Some("morning-briefing"));
+
+        assert_eq!(first.0, "manual-discord:42:message-7");
+        assert_eq!(first.0, retry.0);
+        assert_eq!(first.1, "(routine morning-briefing posted)");
+        assert!(!first.1.trim().is_empty());
+        assert_eq!(first.2, "posted briefing");
+        assert!(!first.2.trim().is_empty());
+    }
+
+    #[test]
+    fn synthetic_routine_pair_uses_non_empty_default_label() {
+        let pair = synthetic_routine_pair(42, "message-8", "body", Some("  "));
+        assert_eq!(pair.1, "(routine routine posted)");
+    }
 
     #[test]
     fn manual_delivery_log_emoji_preserves_legacy_mapping() {

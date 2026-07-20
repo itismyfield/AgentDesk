@@ -9,7 +9,9 @@ use super::manual_delivery::{
     ManualDeliveryOutcome, ManualOutboundDeliveryId, SerenityManualOutboundClient,
     deliver_manual_dm_notification, is_reserved_voice_correlation_namespace,
 };
-use super::send_gate::{SendCallerClass, send_message_with_backends_and_delivery_id_for_caller};
+use super::send_gate::{
+    ManualOutboundOptions, SendCallerClass, send_message_with_backends_and_delivery_id_for_caller,
+};
 use crate::services::discord::bot_role::UtilityBotRole;
 use crate::services::discord::health::{HealthRegistry, resolve_bot_http};
 use crate::services::discord::outbound::shared_outbound_deduper;
@@ -86,6 +88,7 @@ pub async fn handle_send_with_caller<'a>(
             .to_string(),
         );
     }
+    let transcript_options = parse_transcript_options(&json);
 
     send_message_with_backends_and_delivery_id_for_caller(
         registry,
@@ -96,9 +99,30 @@ pub async fn handle_send_with_caller<'a>(
         bot,
         summary,
         delivery_id,
+        transcript_options,
         caller_class,
     )
     .await
+}
+
+fn parse_transcript_options(json: &serde_json::Value) -> ManualOutboundOptions {
+    let record_transcript = json
+        .get("record_transcript")
+        .or_else(|| json.get("recordTranscript"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let transcript_source_label = json
+        .get("transcript_source_label")
+        .or_else(|| json.get("transcriptSourceLabel"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    ManualOutboundOptions {
+        record_transcript,
+        transcript_source_label,
+        ..ManualOutboundOptions::default()
+    }
 }
 
 /// Handle POST /api/discord/send-dm — send a DM to a Discord user.
@@ -419,7 +443,7 @@ mod handle_send_contract_tests {
 
     use crate::services::discord::health::{HealthRegistry, SendCallerClass};
 
-    use super::{handle_send, handle_send_with_caller};
+    use super::{handle_send, handle_send_with_caller, parse_transcript_options};
 
     struct TestRuntimeRoot {
         previous_root: Option<std::ffi::OsString>,
@@ -472,6 +496,33 @@ mod handle_send_contract_tests {
         let body: serde_json::Value = serde_json::from_str(&body).unwrap(); // agentdesk-audit: allow-unwrap — test response JSON should parse
         assert_eq!(body["ok"], false);
         assert_eq!(body["error"], expected_error);
+    }
+
+    #[test]
+    fn transcript_recording_is_opt_in_and_accepts_both_json_spellings() {
+        let default_options = parse_transcript_options(&serde_json::json!({}));
+        assert!(!default_options.record_transcript);
+        assert!(default_options.transcript_source_label.is_none());
+
+        let snake = parse_transcript_options(&serde_json::json!({
+            "record_transcript": true,
+            "transcript_source_label": " morning-briefing "
+        }));
+        assert!(snake.record_transcript);
+        assert_eq!(
+            snake.transcript_source_label.as_deref(),
+            Some("morning-briefing")
+        );
+
+        let camel = parse_transcript_options(&serde_json::json!({
+            "recordTranscript": true,
+            "transcriptSourceLabel": "daily-briefing"
+        }));
+        assert!(camel.record_transcript);
+        assert_eq!(
+            camel.transcript_source_label.as_deref(),
+            Some("daily-briefing")
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -247,6 +247,23 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_routine_pair_is_rendered_as_recent_channel_context() {
+        let context = render_recent_pairs(&[pair(
+            "(routine morning-briefing posted)",
+            "today's briefing",
+        )])
+        .expect("synthetic routine pair must be eligible");
+
+        assert_eq!(context.pair_count, 1);
+        assert!(
+            context
+                .rendered_context
+                .contains("(routine morning-briefing posted)")
+        );
+        assert!(context.rendered_context.contains("today's briefing"));
+    }
+
+    #[test]
     fn resumed_session_is_disabled() {
         assert!(!should_inject(
             Some("session-id"),
