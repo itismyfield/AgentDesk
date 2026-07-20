@@ -50,7 +50,7 @@ impl CancelToken {
     /// Execute all token-owned destructive cleanup behind one generation fence.
     pub(crate) fn request_cleanup(&self, request: CleanupRequest) -> CleanupOutcome {
         self.cancelled.store(true, Ordering::Relaxed);
-        self.set_cancel_source(request.cancel_source.clone());
+        self.set_cancel_source_if_absent(request.cancel_source.clone());
 
         let binding = self
             .tmux_binding
