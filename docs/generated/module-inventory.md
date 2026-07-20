@@ -447,7 +447,7 @@
 | `services::discord::catch_up::classification` | `src/services/discord/catch_up/classification.rs` | 321 | 321 | 0 |  |
 | `services::discord::catch_up::phase2` | `src/services/discord/catch_up/phase2.rs` | 97 | 97 | 0 |  |
 | `services::discord::catch_up::settled_ledger_consult` | `src/services/discord/catch_up/settled_ledger_consult.rs` | 25 | 25 | 0 |  |
-| `services::discord::catch_up::too_old_notice` | `src/services/discord/catch_up/too_old_notice.rs` | 294 | 115 | 179 |  |
+| `services::discord::catch_up::too_old_notice` | `src/services/discord/catch_up/too_old_notice.rs` | 295 | 115 | 180 |  |
 | `services::discord::commands` | `src/services/discord/commands/mod.rs` | 248 | 189 | 59 |  |
 | `services::discord::commands::command_policy` | `src/services/discord/commands/command_policy.rs` | 227 | 209 | 18 |  |
 | `services::discord::commands::config` | `src/services/discord/commands/config.rs` | 1224 | 956 | 268 |  |
@@ -993,7 +993,7 @@
 | `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 884 | 769 | 115 |  |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 315 | 315 | 0 |  |
 | `services::message_outbox` | `src/services/message_outbox.rs` | 1426 | 869 | 557 |  |
-| `services::message_outbox_circuit_authority` | `src/services/message_outbox_circuit_authority.rs` | 478 | 478 | 0 |  |
+| `services::message_outbox_circuit_authority` | `src/services/message_outbox_circuit_authority.rs` | 495 | 495 | 0 |  |
 | `services::message_outbox_recovery` | `src/services/message_outbox_recovery.rs` | 166 | 166 | 0 |  |
 | `services::message_outbox_recovery_support` | `src/services/message_outbox_recovery_support.rs` | 138 | 138 | 0 |  |
 | `services::monitoring_store` | `src/services/monitoring_store.rs` | 141 | 141 | 0 |  |

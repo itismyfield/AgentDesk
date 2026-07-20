@@ -106,8 +106,7 @@ fn valid_same_episode_frontier_transition(
     // that reaches alert reservation, so multiple producer advances may occur
     // between observations; both axes must therefore advance strictly, without
     // requiring adjacent open generations.
-    requested_baseline > current_baseline
-        && requested_open_generation > current_open_generation
+    requested_baseline > current_baseline && requested_open_generation > current_open_generation
 }
 
 /// Reserve the first or next channel-global authority epoch under owner lock.
