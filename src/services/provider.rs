@@ -1085,13 +1085,6 @@ impl CancelToken {
             .and_then(|guard| guard.as_ref().map(|process| process.pid))
     }
 
-    pub(crate) fn take_child_pid_value(&self) -> Option<u32> {
-        let mut guard = self.child_pid.lock().unwrap_or_else(|e| e.into_inner());
-        guard.take().map(|process| process.pid)
-    }
-
-    // Consumed in #4593 S3 (identity-gated kill).
-    #[allow(dead_code)]
     pub(crate) fn captured_child_process(&self) -> Option<CapturedProcess> {
         self.child_pid.lock().ok().and_then(|guard| guard.clone())
     }

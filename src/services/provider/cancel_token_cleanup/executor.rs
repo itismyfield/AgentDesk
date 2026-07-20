@@ -75,7 +75,6 @@ impl CancelToken {
                     cancel_source = request.cancel_source,
                     "skip cancellation cleanup for stale Claude generation"
                 );
-                self.clear_cleanup_targets(binding.as_ref(), child.as_ref());
                 CleanupOutcome {
                     authorization: KillAuthorizationState::Stale,
                     pid_killed: false,
@@ -128,46 +127,61 @@ impl CancelToken {
             request.intent,
             TmuxCleanupIntent::PidOnly | TmuxCleanupIntent::CleanupSession
         ) {
-            pid_claimed = self
-                .pid_kill_claim
-                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok();
-            if pid_claimed {
-                if let Some(target) = child.as_ref().or(request.hard_stop_target.as_ref()) {
-                    if let Some(identity) = target.identity {
-                        pid_killed = crate::services::process::kill_pid_tree_if_identity_matches(
-                            target.pid, identity,
+            if let Some(target) = child.as_ref().or(request.hard_stop_target.as_ref()) {
+                // A claim is consumed only when this request actually dispatches its
+                // PID primitive. In particular, an early watchdog with no target must
+                // not prevent a later CleanupSession from claiming a newly bound PID.
+                let identity_allows_dispatch = target
+                    .identity
+                    .map_or(true, |identity| identity.matches(target.pid));
+                if identity_allows_dispatch {
+                    pid_claimed = self
+                        .pid_kill_claim
+                        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok();
+                    if pid_claimed {
+                        pid_killed = self.kill_pid_tree_guarded(target);
+                        if !pid_killed {
+                            self.pid_kill_claim.store(0, Ordering::Release);
+                            pid_claimed = false;
+                        }
+                    }
+                } else {
+                    tracing::debug!(
+                        pid = target.pid,
+                        "skip cancellation PID kill because captured identity no longer matches"
+                    );
+                }
+            }
+        }
+
+        if matches!(request.intent, TmuxCleanupIntent::CleanupSession) {
+            if let Some(name) = binding.as_ref().map(TmuxBinding::name) {
+                if !self.tmux_cleanup_is_suppressed(name) {
+                    // As with the PID claim, only consume this claim immediately before
+                    // the name primitive is dispatched. Preserve and suppressed/no-name
+                    // requests leave a later CleanupSession eligible to clean up.
+                    name_claimed = self
+                        .name_kill_claim
+                        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok();
+                    if name_claimed {
+                        tmux_killed = self.kill_tmux_session_guarded(
+                            name,
+                            request.termination_reason,
+                            &request.cancel_source,
+                            authorization,
                         );
-                    } else {
-                        tracing::debug!(
-                            pid = target.pid,
-                            "skip cancellation PID kill without captured identity"
-                        );
+                        termination_recorded = tmux_killed && request.termination_reason.is_some();
                     }
                 }
             }
         }
-
-        if matches!(request.intent, TmuxCleanupIntent::CleanupSession) {
-            name_claimed = self
-                .name_kill_claim
-                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok();
-            if name_claimed {
-                if let Some(name) = binding.as_ref().map(TmuxBinding::name) {
-                    tmux_killed = self.kill_tmux_session_guarded(
-                        name,
-                        request.termination_reason,
-                        &request.cancel_source,
-                        authorization,
-                    );
-                    termination_recorded = tmux_killed && request.termination_reason.is_some();
-                }
-            }
-        }
-
-        if matches!(request.intent, TmuxCleanupIntent::CleanupSession) {
-            self.clear_cleanup_targets(binding.as_ref(), child.as_ref());
+        // The legacy timeout drain reads child_pid after this call to distinguish a
+        // killed worker from a naturally completed one. Leave the PID published until
+        // its worker clears it, after this chokepoint has delivered the signal.
+        if tmux_killed {
+            self.clear_binding_if_matches(binding.as_ref());
         }
         CleanupOutcome {
             authorization,
@@ -180,6 +194,55 @@ impl CancelToken {
         }
     }
 
+    fn clear_binding_if_matches(&self, binding: Option<&TmuxBinding>) {
+        if let Some(binding) = binding {
+            let mut current = self
+                .tmux_binding
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if current.as_ref() == Some(binding) {
+                *current = None;
+            }
+        }
+    }
+
+    fn kill_pid_tree_guarded(&self, target: &CapturedProcess) -> bool {
+        #[cfg(test)]
+        {
+            let _ = target;
+            PID_KILL_DISPATCHES.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+        #[cfg(not(test))]
+        match target.identity {
+            Some(identity) => crate::services::process::kill_pid_tree_if_identity_matches(
+                target.pid, identity,
+            ),
+            // A current-generation cleanup must retain legacy PID delivery when
+            // registration could not capture a platform identity baseline. The
+            // generation slot still fences another managed incarnation; this is
+            // deliberately distinct from an identity mismatch, which is skipped.
+            None => {
+                crate::services::process::kill_pid_tree(target.pid);
+                true
+            }
+        }
+    }
+
+    fn tmux_cleanup_is_suppressed(&self, name: &str) -> bool {
+        #[cfg(unix)]
+        {
+            crate::services::provider::parse_provider_and_channel_from_tmux_name(name)
+                .map(|(_, channel)| crate::dispatch::is_unified_thread_channel_name_active(&channel))
+                .unwrap_or(false)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = name;
+            false
+        }
+    }
+
     fn kill_tmux_session_guarded(
         &self,
         name: &str,
@@ -187,15 +250,15 @@ impl CancelToken {
         cancel_source: &str,
         authorization: KillAuthorizationState,
     ) -> bool {
-        #[cfg(unix)]
+        #[cfg(test)]
         {
-            let unified =
-                crate::services::provider::parse_provider_and_channel_from_tmux_name(name)
-                    .map(|(_, channel)| {
-                        crate::dispatch::is_unified_thread_channel_name_active(&channel)
-                    })
-                    .unwrap_or(false);
-            if unified {
+            let _ = (name, termination_reason, cancel_source, authorization);
+            TMUX_KILL_DISPATCHES.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+        #[cfg(all(unix, not(test)))]
+        {
+            if self.tmux_cleanup_is_suppressed(name) {
                 tracing::debug!(
                     tmux_session = name,
                     "skip cleanup for active unified thread"
@@ -225,46 +288,28 @@ impl CancelToken {
             }
             killed
         }
-        #[cfg(not(unix))]
+        #[cfg(all(not(unix), not(test)))]
         {
             let _ = (name, termination_reason, cancel_source, authorization);
             false
         }
     }
-
-    fn clear_cleanup_targets(
-        &self,
-        binding: Option<&TmuxBinding>,
-        child: Option<&CapturedProcess>,
-    ) {
-        if let Some(binding) = binding {
-            let mut current = self
-                .tmux_binding
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if current.as_ref() == Some(binding) {
-                *current = None;
-            }
-        }
-        if let Some(child) = child {
-            let mut current = self
-                .child_pid
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if current
-                .as_ref()
-                .is_some_and(|current| current.pid == child.pid)
-            {
-                *current = None;
-            }
-        }
-    }
 }
+
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+#[cfg(test)]
+static PID_KILL_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static TMUX_KILL_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::Ordering;
+    use crate::services::provider::ProviderKind;
+    use std::sync::{Mutex, OnceLock};
+
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn request(intent: TmuxCleanupIntent) -> CleanupRequest {
         CleanupRequest {
@@ -275,22 +320,80 @@ mod tests {
         }
     }
 
-    #[test]
-    fn pid_only_claim_does_not_suppress_later_session_cleanup_name_claim() {
-        let token = CancelToken::new();
-        token.request_cleanup(request(TmuxCleanupIntent::PidOnly));
-        assert_eq!(token.pid_kill_claim.load(Ordering::Acquire), 1);
-        assert_eq!(token.name_kill_claim.load(Ordering::Acquire), 0);
+    fn with_seam(test: impl FnOnce()) {
+        let _lock = TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        PID_KILL_DISPATCHES.store(0, Ordering::Relaxed);
+        TMUX_KILL_DISPATCHES.store(0, Ordering::Relaxed);
+        test();
+    }
 
-        token.request_cleanup(request(TmuxCleanupIntent::CleanupSession));
-        assert_eq!(token.name_kill_claim.load(Ordering::Acquire), 1);
+    fn bind(token: &CancelToken, name: &str) {
+        *token.tmux_binding.lock().unwrap() =
+            authority::publish(ProviderKind::Claude, name, token.claude_interrupt_generation);
     }
 
     #[test]
-    fn preserve_claims_no_destructive_primitive() {
-        let token = CancelToken::new();
-        token.request_cleanup(request(TmuxCleanupIntent::PreserveSession));
-        assert_eq!(token.pid_kill_claim.load(Ordering::Acquire), 0);
-        assert_eq!(token.name_kill_claim.load(Ordering::Acquire), 0);
+    fn pid_only_without_target_does_not_consume_claim() {
+        with_seam(|| {
+            let token = CancelToken::new();
+            token.request_cleanup(request(TmuxCleanupIntent::PidOnly));
+            assert_eq!(token.pid_kill_claim.load(Ordering::Acquire), 0);
+            assert_eq!(PID_KILL_DISPATCHES.load(Ordering::Relaxed), 0);
+        });
+    }
+
+    #[test]
+    fn pid_only_claim_does_not_suppress_later_session_cleanup_name_kill() {
+        with_seam(|| {
+            let token = CancelToken::new();
+            bind(&token, "AgentDesk-claude-executor-f1");
+            token.store_child_pid(42);
+
+            token.request_cleanup(request(TmuxCleanupIntent::PidOnly));
+            let outcome = token.request_cleanup(request(TmuxCleanupIntent::CleanupSession));
+
+            assert_eq!(PID_KILL_DISPATCHES.load(Ordering::Relaxed), 1);
+            assert_eq!(TMUX_KILL_DISPATCHES.load(Ordering::Relaxed), 1);
+            assert!(outcome.tmux_killed);
+        });
+    }
+
+    #[test]
+    fn preserve_does_not_clear_or_consume_cleanup_targets() {
+        with_seam(|| {
+            let token = CancelToken::new();
+            bind(&token, "AgentDesk-claude-executor-preserve");
+            token.store_child_pid(43);
+
+            token.request_cleanup(request(TmuxCleanupIntent::PreserveSession));
+            let outcome = token.request_cleanup(request(TmuxCleanupIntent::CleanupSession));
+
+            assert_eq!(PID_KILL_DISPATCHES.load(Ordering::Relaxed), 1);
+            assert_eq!(TMUX_KILL_DISPATCHES.load(Ordering::Relaxed), 1);
+            assert!(outcome.tmux_killed);
+        });
+    }
+
+    #[test]
+    fn stale_binding_is_retained_and_dispatches_no_primitive() {
+        with_seam(|| {
+            let token = CancelToken::new();
+            let name = "AgentDesk-claude-executor-stale";
+            bind(&token, name);
+            token.store_child_pid(44);
+            authority::publish(
+                ProviderKind::Claude,
+                name,
+                token.claude_interrupt_generation + 1,
+            );
+
+            let outcome = token.request_cleanup(request(TmuxCleanupIntent::CleanupSession));
+
+            assert_eq!(outcome.authorization, KillAuthorizationState::Stale);
+            assert_eq!(PID_KILL_DISPATCHES.load(Ordering::Relaxed), 0);
+            assert_eq!(TMUX_KILL_DISPATCHES.load(Ordering::Relaxed), 0);
+            assert!(token.tmux_binding.lock().unwrap().is_some());
+            assert!(token.child_pid.lock().unwrap().is_some());
+        });
     }
 }

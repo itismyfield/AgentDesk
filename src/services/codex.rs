@@ -17,7 +17,7 @@ use crate::services::claude_tui::hook_server::current_hook_endpoint;
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
-use crate::services::process::{kill_child_tree, kill_pid_tree, shell_escape};
+use crate::services::process::{kill_child_tree, shell_escape};
 use crate::services::provider::{
     CancelToken, FollowupResult, ProviderKind, SessionProbe, cancel_requested,
     fold_read_output_result, is_readonly_tool_policy, register_child_pid, spawn_cancel_watchdog,
@@ -943,23 +943,17 @@ where
                 "execute_command_simple_with_timeout timed out; cancelling and killing child"
             );
             cancel_token.cancel_with_tmux_cleanup();
-            // Snapshot under lock and clear, so any concurrent observer
-            // sees the same "no PID" state we are about to act on.
-            let child_pid = cancel_token.take_child_pid_value();
+            // request_cleanup owns signal delivery and leaves the PID visible
+            // until the worker clears it, preserving the timeout drain meaning.
+            let child_pid = cancel_token.child_pid_value();
             let child_pid_was_none = child_pid.is_none();
             if let Some(pid) = child_pid {
                 tracing::warn!(
                     provider = provider_name,
                     stage = %label_owned,
                     child_pid = pid,
-                    "execute_command_simple_with_timeout sending SIGTERM/SIGKILL to child process group"
+                    "execute_command_simple_with_timeout cleanup signal dispatched for child process group"
                 );
-                // kill_pid_tree sends SIGTERM to the process group (or
-                // PID fallback), waits ~200ms, then escalates to SIGKILL
-                // on the still-alive target. The Codex spawn is in its
-                // own group (configure_child_process_group above), so
-                // the negative-PID path reaches grand-descendants.
-                kill_pid_tree(pid);
             } else {
                 tracing::warn!(
                     provider = provider_name,

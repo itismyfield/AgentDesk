@@ -3,8 +3,6 @@ use crate::services::process::ProcessIdentity;
 #[derive(Clone, Debug)]
 pub(crate) struct CapturedProcess {
     pub pid: u32,
-    // Consumed in #4593 S3 (identity-gated kill).
-    #[allow(dead_code)]
     pub identity: Option<ProcessIdentity>,
 }
 

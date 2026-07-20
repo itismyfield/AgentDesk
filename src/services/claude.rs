@@ -19,7 +19,7 @@ use crate::services::claude_tui::hosting::{
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
-use crate::services::process::{kill_child_tree, kill_pid_tree, shell_escape};
+use crate::services::process::{kill_child_tree, shell_escape};
 use crate::services::provider::{
     CancelToken, ProviderKind, ReadOutputResult, SessionProbe, cancel_requested,
     cancel_token_claude_interrupt::{
@@ -500,16 +500,17 @@ where
                 "execute_command_simple_with_timeout timed out; cancelling and killing child"
             );
             cancel_token.cancel_with_tmux_cleanup();
-            let child_pid = cancel_token.take_child_pid_value();
+            // request_cleanup owns signal delivery and deliberately leaves the PID
+            // published until the worker clears it, preserving the drain distinction.
+            let child_pid = cancel_token.child_pid_value();
             let child_pid_was_none = child_pid.is_none();
             if let Some(pid) = child_pid {
                 tracing::warn!(
                     provider = provider_name,
                     stage = %label_owned,
                     child_pid = pid,
-                    "execute_command_simple_with_timeout sending SIGTERM/SIGKILL to child process group"
+                    "execute_command_simple_with_timeout cleanup signal dispatched for child process group"
                 );
-                kill_pid_tree(pid);
             } else {
                 tracing::warn!(
                     provider = provider_name,
