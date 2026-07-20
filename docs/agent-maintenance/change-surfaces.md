@@ -1694,7 +1694,7 @@
 - legacy_modules: none; retired route fallback history is documented in
   `known-legacy.md`.
 - do_not_edit_without_migration_plan (giant-file routes):
-  - `src/server/routes/kanban.rs` (2725 lines after #3037 backflow batch
+  - `src/server/routes/kanban.rs` (2426 lines after #3037 backflow batch
     relocated the `require_explicit_bearer_token` /
     `resolve_requesting_agent_id_with_pg` auth/identity helpers to
     `crate::services::kanban`; +50 from #4038 slice-1 log-only caller
