@@ -44,10 +44,15 @@ async fn same_episode_rollbacks_fail_but_monotonic_and_episode_reset_advance_pg(
     current=match reserve_next_authority(&pool,"discord","507","node-a",7,"e1",100,4,Some(6)).await.unwrap(){AuthorityReservation::Reserved(value)=>value,other=>panic!("{other:?}")};
     assert_eq!(current.authority_epoch,7);
     assert_eq!(reserve_next_authority(&pool,"discord","507","node-a",7,"e1",100,4,Some(7)).await.unwrap(),AuthorityReservation::Reserved(current.clone()));
-    assert!(matches!(reserve_next_authority(&pool,"discord","507","node-a",7,"e1",90,3,Some(7)).await.unwrap(),AuthorityReservation::Stale));
+    assert!(matches!(reserve_next_authority(&pool,"discord","507","node-a",7,"e1",101,4,Some(7)).await.unwrap(),AuthorityReservation::Stale),"baseline-only advance");
+    assert!(matches!(reserve_next_authority(&pool,"discord","507","node-a",7,"e1",100,5,Some(7)).await.unwrap(),AuthorityReservation::Stale),"open-only advance");
+    assert!(matches!(reserve_next_authority(&pool,"discord","507","node-a",7,"e1",99,5,Some(7)).await.unwrap(),AuthorityReservation::Stale),"baseline-only rollback");
+    assert!(matches!(reserve_next_authority(&pool,"discord","507","node-a",7,"e1",101,3,Some(7)).await.unwrap(),AuthorityReservation::Stale),"open-only rollback");
     let increment=match reserve_next_authority(&pool,"discord","507","node-a",7,"e1",101,5,Some(7)).await.unwrap(){AuthorityReservation::Reserved(value)=>value,other=>panic!("{other:?}")};
     assert_eq!(increment.authority_epoch,8);
-    let reset=match reserve_next_authority(&pool,"discord","507","node-a",7,"e2",1,1,Some(8)).await.unwrap(){AuthorityReservation::Reserved(value)=>value,other=>panic!("{other:?}")};
+    sqlx::query("UPDATE intake_session_owners SET generation=8 WHERE provider='discord' AND raw_channel_id='507'").execute(&pool).await.unwrap();
+    assert!(matches!(reserve_next_authority(&pool,"discord","507","node-a",8,"e1",100,4,Some(8)).await.unwrap(),AuthorityReservation::Stale),"owner transfer cannot bypass coordinate ordering");
+    let reset=match reserve_next_authority(&pool,"discord","507","node-a",8,"e2",1,1,Some(8)).await.unwrap(){AuthorityReservation::Reserved(value)=>value,other=>panic!("{other:?}")};
     assert_eq!(reset.authority_epoch,9);
     pool.close().await; db.drop().await;
 }

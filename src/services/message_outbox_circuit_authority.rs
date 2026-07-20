@@ -91,6 +91,26 @@ fn same_logical_coordinate(row: &sqlx::postgres::PgRow, coordinate: &CircuitCoor
         && row.get::<i64, _>("open_generation") == coordinate.open_generation
 }
 
+fn valid_same_episode_frontier_transition(
+    current_baseline: i64,
+    current_open_generation: i64,
+    requested_baseline: i64,
+    requested_open_generation: i64,
+) -> bool {
+    // `reserve_in_root` and `open_alert_cas_in_root` in
+    // relay_recovery_circuit_breaker.rs update the baseline only for a strictly
+    // newer frontier and increment open_generation exactly once in that update.
+    // `reserve_in_root` also normalizes a legacy generation 0 record to 1
+    // without moving its baseline.
+    (requested_baseline > current_baseline
+        && current_open_generation
+            .checked_add(1)
+            .is_some_and(|next| requested_open_generation == next))
+        || (current_open_generation == 0
+            && requested_open_generation == 1
+            && requested_baseline == current_baseline)
+}
+
 /// Reserve the first or next channel-global authority epoch under owner lock.
 /// `expected_authority_epoch` is the caller's current-file pin: `None` creates
 /// epoch 1; `Some(n)` may idempotently return the current coordinate at `n`, or
@@ -158,13 +178,13 @@ pub(crate) async fn reserve_next_authority(
         }
         Some(row) if expected_authority_epoch == Some(row.get("authority_epoch")) => {
             let same_episode = row.get::<String, _>("episode_key") == requested.episode_key;
-            let same_owner_generation =
-                row.get::<i64, _>("owner_generation") == requested.owner_generation;
             if same_episode
-                && same_owner_generation
-                && (requested.baseline_relay_offset
-                    < row.get::<i64, _>("baseline_relay_offset")
-                    || requested.open_generation < row.get::<i64, _>("open_generation"))
+                && !valid_same_episode_frontier_transition(
+                    row.get("baseline_relay_offset"),
+                    row.get("open_generation"),
+                    requested.baseline_relay_offset,
+                    requested.open_generation,
+                )
             {
                 tx.rollback().await?;
                 return Ok(AuthorityReservation::Stale);
