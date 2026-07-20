@@ -880,9 +880,18 @@ mod edit_retry_tests {
             "revoke must wait for the admitted PATCH"
         );
 
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
+        assert!(Arc::ptr_eq(
+            &controller.entries.get(&key).unwrap().clone(),
+            &old.slot
+        ));
         gateway.release_edit();
         assert_eq!(edit.await.unwrap(), PlaceholderControllerOutcome::Edited);
         revoke.await.unwrap();
+        let committed_then_revoked = old.slot.state.lock().await;
+        assert!(committed_then_revoked.revoked);
+        assert_eq!(committed_then_revoked.state, PlaceholderLifecycle::Active);
+        drop(committed_then_revoked);
         assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             controller
@@ -908,6 +917,46 @@ mod edit_retry_tests {
             1,
             "stale capability must not recreate"
         );
+    }
+
+    #[tokio::test]
+    async fn mismatched_key_and_slot_capability_cannot_remove_or_mutate_maps() {
+        let controller = PlaceholderController::default();
+        let gateway = ScriptedGateway::new(vec![Ok(())]);
+        let key_a = key();
+        let key_b = PlaceholderKey {
+            message_id: MessageId::new(99),
+            ..key_a.clone()
+        };
+        let incarnation_a = controller.incarnation(&key_a);
+        let incarnation_b = controller.incarnation(&key_b);
+        let mismatched = PlaceholderIncarnation {
+            key: key_a.clone(),
+            slot: incarnation_b.slot.clone(),
+        };
+
+        controller.revoke_incarnation(&mismatched).await;
+        assert!(controller.entries.contains_key(&key_a));
+        assert!(controller.entries.contains_key(&key_b));
+        assert!(Arc::ptr_eq(
+            &controller.entries.get(&key_a).unwrap().clone(),
+            &incarnation_a.slot
+        ));
+        assert!(Arc::ptr_eq(
+            &controller.entries.get(&key_b).unwrap().clone(),
+            &incarnation_b.slot
+        ));
+        assert!(!incarnation_a.slot.state.lock().await.revoked);
+        assert!(incarnation_b.slot.state.lock().await.revoked);
+
+        assert_eq!(
+            controller
+                .ensure_active_incarnation(&gateway, &mismatched, input())
+                .await,
+            PlaceholderControllerOutcome::Rejected
+        );
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(controller.entries.len(), 2);
     }
 
     #[tokio::test]
