@@ -1014,6 +1014,9 @@ pub struct CancelToken {
     claude_interrupt_submit_pending: AtomicBool,
     /// Lifecycle-aware restart/handoff mode for inflight preservation.
     pub restart_mode: AtomicU8,
+    /// Independent destructive claims prevent a PID-only cleanup from suppressing tmux cleanup.
+    pub(crate) pid_kill_claim: AtomicU8,
+    pub(crate) name_kill_claim: AtomicU8,
 }
 
 impl CancelToken {
@@ -1036,6 +1039,8 @@ impl CancelToken {
                 .fetch_add(1, Ordering::Relaxed),
             claude_interrupt_submit_pending: AtomicBool::new(false),
             restart_mode: AtomicU8::new(0),
+            pid_kill_claim: AtomicU8::new(0),
+            name_kill_claim: AtomicU8::new(0),
         }
     }
 
@@ -1103,32 +1108,14 @@ impl CancelToken {
         }
     }
 
-    /// Cancel and clean up any associated tmux session.
+    /// Compatibility adapter for legacy callers; cleanup authority lives in request_cleanup.
     pub fn cancel_with_tmux_cleanup(&self) {
-        self.cancelled.store(true, Ordering::Relaxed);
-        if let Some(name) = self
-            .tmux_binding
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-            .map(|binding| binding.name().to_string())
-        {
-            #[cfg(unix)]
-            {
-                crate::services::tmux_diagnostics::record_tmux_exit_reason(
-                    &name,
-                    "턴 취소에 의한 tmux 세션 정리",
-                );
-                crate::services::platform::tmux::kill_session(
-                    &name,
-                    "턴 취소에 의한 tmux 세션 정리",
-                );
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = &name;
-            }
-        }
+        let _ = self.request_cleanup(cancel_token_cleanup::executor::CleanupRequest {
+            cancel_source: "tmux_cleanup".to_string(),
+            intent: cancel_token_cleanup::executor::TmuxCleanupIntent::CleanupSession,
+            termination_reason: None,
+            hard_stop_target: None,
+        });
     }
 
     pub fn set_restart_mode(&self, mode: Option<crate::services::discord::InflightRestartMode>) {
