@@ -305,14 +305,21 @@ pub(super) fn degenerate_duplicate_refuses_delivery(
 /// the live channel with `route="duplicate_guard_refused"` and zero user-visible
 /// response (both placeholder and streaming suppressed).
 ///
-/// The discriminator that separates the two: a PENDING user boundary. A prompt
-/// anchor / external-input lease is recorded when a user turn arrives and CLEARED
-/// once that turn's response is delivered. So at a #4081 phantom re-relay (the
-/// prior turn already delivered) no boundary is present, while at a #4714
-/// follow-up a boundary IS present (a user is still awaiting a response). When a
-/// pending boundary exists the matching content is a new turn whose identity was
-/// lost — NOT a re-post — so the guard must NOT refuse it. A genuine re-post of an
-/// already-delivered turn (no pending boundary) is still caught, preserving #4081.
+/// The discriminator is a PENDING user boundary. A prompt anchor / external-input
+/// lease is recorded when a user turn arrives and CLEARED once that turn's
+/// response is delivered. Normally a #4081 phantom re-relay has no boundary,
+/// while a #4714 follow-up does, so the latter must not be refused.
+///
+/// Accepted cross-turn edge: the boundary is a single latest-turn slot, not an
+/// identity carried by this degenerate response. If turn A is delivered, turn B
+/// overwrites the slot, and A's phantom body is reconsidered while B is pending,
+/// A inherits B's boundary and can be sent once more. Neither the content
+/// fingerprint (which intentionally matches both a phantom and a legitimate
+/// byte-identical follow-up) nor the slot's message id / lease generation can
+/// identify the response after this path has lost its turn identity. Refusing
+/// that ambiguous overlap would recreate #4714 and strand B, so delivery wins.
+/// The exposure is bounded to a #4081 phantom overlapping a concurrently pending
+/// second message; ordinary re-posts with no pending boundary remain refused.
 ///
 /// The boundary is read here (not threaded from the caller) to keep the hot
 /// `tmux_watcher.rs` relay-loop call site byte-identical (#3016 hot-file rule);
