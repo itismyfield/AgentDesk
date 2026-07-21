@@ -36,6 +36,9 @@ static WORKER_RESTART_BUDGET_EXHAUSTED_COUNT: AtomicUsize = AtomicUsize::new(0);
 static WORKER_RECOVERY_STATES: LazyLock<Mutex<HashMap<&'static str, WorkerRecoveryState>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static FATAL_LEDGER_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(test)]
+static WORKER_RESTART_BUDGET_TEST_MUTEX: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum WorkerLocalTerminalReason {
@@ -467,12 +470,9 @@ enum CrossProcessDecision {
 }
 
 fn commit_fatal_exit(record: &FatalExhaustionRecord, shutdown: &Arc<AtomicBool>) {
-    let decision = match fatal_exit_ledger_path() {
-        Some(path) => record_and_check_cross_process_fatal_at(&path, record.worker, now_unix_ms()),
-        // No runtime root to persist the ledger — fall back to exiting; launchd
-        // ThrottleInterval still bounds any resulting boot loop.
-        None => CrossProcessDecision::Exit,
-    };
+    let ledger_path = fatal_exit_ledger_path();
+    let decision =
+        cross_process_fatal_decision_at(ledger_path.as_deref(), record.worker, now_unix_ms());
 
     if let CrossProcessDecision::HoldWithoutExit { recent_fatal_exits } = decision {
         tracing::error!(
@@ -515,6 +515,21 @@ fn fatal_exit_ledger_path() -> Option<PathBuf> {
 
 fn now_unix_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+fn cross_process_fatal_decision_at(
+    path: Option<&Path>,
+    worker: &str,
+    now_ms: i64,
+) -> CrossProcessDecision {
+    match path {
+        Some(path) => record_and_check_cross_process_fatal_at(path, worker, now_ms),
+        // Without a runtime root there is no durable cross-process evidence, so
+        // hold for operator intervention rather than entering an exit loop.
+        None => CrossProcessDecision::HoldWithoutExit {
+            recent_fatal_exits: 0,
+        },
+    }
 }
 
 /// #4515 PR3 (§9.2): node-local (no PG / leader coordination) crash-loop guard.
@@ -771,6 +786,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn budget_exhaustion_fires_fatal_hook_once() {
+        let _counter_guard = WORKER_RESTART_BUDGET_TEST_MUTEX.lock().await;
         WORKER_RESTART_BUDGET_EXHAUSTED_COUNT.store(0, Ordering::Release);
         let spawns = Arc::new(AtomicUsize::new(0));
         let factory_spawns = spawns.clone();
@@ -856,6 +872,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn simultaneous_return_and_shutdown_is_expected_without_budget_use() {
+        let _counter_guard = WORKER_RESTART_BUDGET_TEST_MUTEX.lock().await;
         WORKER_RESTART_BUDGET_EXHAUSTED_COUNT.store(0, Ordering::Release);
         let shutdown = Arc::new(AtomicBool::new(false));
         let factory_shutdown = shutdown.clone();
@@ -1070,6 +1087,16 @@ mod tests {
         );
         supervisor.abort();
         clear_recovery_state(spec.name);
+    }
+
+    #[test]
+    fn cross_process_guard_holds_without_ledger_path() {
+        assert_eq!(
+            cross_process_fatal_decision_at(None, "dispatch_outbox", 1_000),
+            CrossProcessDecision::HoldWithoutExit {
+                recent_fatal_exits: 0
+            }
+        );
     }
 
     #[test]
