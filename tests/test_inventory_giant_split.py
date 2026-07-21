@@ -663,19 +663,18 @@ class RegistryValidationTest(unittest.TestCase):
         self.assertIn("frozen", str(ctx.exception))
         self.assertIn("src/b.rs", str(ctx.exception))
 
-    def test_grandfather_shrink_within_baseline_passes(self) -> None:
-        # Removing a path from grandfathered (decomposed) while it remains in the
-        # frozen baseline is allowed.
+    def test_grandfather_shrink_within_baseline_still_requires_backfill(self) -> None:
         modules = [self._module("src/a.rs", 1500, giant=True)]
         orig = GEN.load_giant_file_registry
         GEN.load_giant_file_registry = self._patch_registry(
             ["src/a.rs"], [], baseline_paths=["src/a.rs", "src/retired.rs"]
         )
         try:
-            regs = GEN.build_giant_registrations(modules)
+            with self.assertRaises(GEN.ParseError) as ctx:
+                GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig
-        self.assertEqual([r.file_path for r in regs], ["src/a.rs"])
+        self.assertIn("metadata backfill is closed", str(ctx.exception))
 
     def test_missing_baseline_paths_fails(self) -> None:
         modules = [self._module("src/a.rs", 1500, giant=True)]
@@ -906,23 +905,31 @@ class RegistryValidationTest(unittest.TestCase):
 
     def test_valid_registry_builds_rows(self) -> None:
         modules = [
-            self._module("src/grand.rs", 1200, giant=True),
+            self._module("src/first.rs", 1200, giant=True),
             self._module("src/tracked.rs", 1500, giant=True),
         ]
-        entry = {
-            "file": "src/tracked.rs",
-            "owner": "team",
-            "deadline": "2026-08-31",
-            "decompose_issue": "#3036",
-        }
+        entries = [
+            {
+                "file": "src/first.rs",
+                "decision": "keep",
+                "owner": "team",
+                "keep_reason": "cohesive generated parser table",
+            },
+            {
+                "file": "src/tracked.rs",
+                "owner": "team",
+                "deadline": "2026-08-31",
+                "decompose_issue": "#3036",
+            },
+        ]
         orig = GEN.load_giant_file_registry
-        GEN.load_giant_file_registry = self._patch_registry(["src/grand.rs"], [entry])
+        GEN.load_giant_file_registry = self._patch_registry([], entries)
         try:
             regs = GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig
         by_path = {r.file_path: r for r in regs}
-        self.assertEqual(by_path["src/grand.rs"].deadline, "")
+        self.assertEqual(by_path["src/first.rs"].decision, "keep")
         self.assertEqual(by_path["src/tracked.rs"].deadline, "2026-08-31")
         self.assertEqual(by_path["src/tracked.rs"].owner, "team")
 
