@@ -440,7 +440,7 @@ impl HealthRegistry {
         if !should_redrive_undelivered_backlog(provider, channel_id, &snapshot, token) {
             return Ok(false);
         }
-        if redrive_should_yield_to_live_relay(&shared, provider, channel_id, &snapshot) {
+        if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot) {
             return Ok(false);
         }
         let Some(_frontier_mutation) = shared.acquire_relay_frontier_mutation(channel_id, token)
@@ -464,7 +464,7 @@ impl HealthRegistry {
         ) {
             (true, false, None)
         } else {
-            if redrive_should_yield_to_live_relay(&shared, provider, channel_id, &snapshot)
+            if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot)
                 || !shared.relay_frontier_token_is_current(channel_id, token)
             {
                 return Ok(false);
@@ -612,25 +612,18 @@ fn live_relay_frontier_advanced_since_snapshot(
     shared.committed_relay_offset(channel_id) > snapshot.last_relay_offset
 }
 
-/// Redrive yields when the committed frontier advanced, a relay emission is
-/// still in flight, or the shared producer-liveness authority vouches for the
-/// foreground turn. The first two checks close the relay POST TOCTOU described
-/// by #4181. The authority check closes #4615's producer-live false positive,
-/// but only within its bounded verdict TTL/transient budget and four-hour turn
-/// ceiling; missing, stale, identity-mismatched, or evidence-free verdicts fail
-/// closed so they cannot disable bounded recovery.
+/// Redrive yields only when the committed frontier advanced or a relay
+/// emission is still in flight, closing the relay POST TOCTOU described by
+/// #4181. Producer liveness does not enter action admission: a live producer can
+/// coexist with a wedged relay, so #4615 gates only capped operator escalation
+/// while preserving every bounded recovery attempt.
 fn redrive_should_yield_to_live_relay(
     shared: &SharedData,
-    provider: &ProviderKind,
     channel_id: ChannelId,
     snapshot: &WatcherStateSnapshot,
 ) -> bool {
     live_relay_frontier_advanced_since_snapshot(shared, channel_id, snapshot)
         || shared.relay_emission_in_flight(channel_id)
-        || matches!(
-            redrive_liveness_vouch(provider, channel_id),
-            LivenessVouch::Vouched { .. } | LivenessVouch::DeferTransient { .. }
-        )
 }
 
 fn nudge_existing_watcher_for_backlog(
@@ -663,14 +656,7 @@ fn nudge_existing_watcher_for_backlog(
     if snapshot.inflight_output_path.as_deref() != Some(watcher.output_path.as_str()) {
         return false;
     }
-    if !nudge_watcher_handle_for_backlog(
-        shared,
-        provider,
-        snapshot,
-        watcher.value(),
-        channel_id,
-        token,
-    ) {
+    if !nudge_watcher_handle_for_backlog(shared, snapshot, watcher.value(), channel_id, token) {
         return false;
     }
 
@@ -689,7 +675,6 @@ fn nudge_existing_watcher_for_backlog(
 
 fn nudge_watcher_handle_for_backlog(
     shared: &SharedData,
-    provider: &ProviderKind,
     snapshot: &WatcherStateSnapshot,
     watcher: &crate::services::discord::TmuxWatcherHandle,
     channel_id: ChannelId,
@@ -704,7 +689,7 @@ fn nudge_watcher_handle_for_backlog(
     let Ok(mut resume_offset) = watcher.resume_offset.lock() else {
         return false;
     };
-    if redrive_should_yield_to_live_relay(shared, provider, channel_id, snapshot)
+    if redrive_should_yield_to_live_relay(shared, channel_id, snapshot)
         || !shared.relay_frontier_token_is_current(channel_id, token)
     {
         return false;
@@ -1345,73 +1330,7 @@ mod tests {
     }
 
     #[test]
-    fn redrive_live_yield_consumes_authority_vouch_4615() {
-        let _env_lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let tmp = tempfile::tempdir().expect("temp runtime root");
-        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-            "AGENTDESK_ROOT_DIR",
-            tmp.path(),
-        );
-        let provider = ProviderKind::Codex;
-        let channel_id = ChannelId::new(4_615_301);
-        let tmux_session = "AgentDesk-codex-4615-live-yield";
-        let output_path = "/tmp/agentdesk-4615-live-yield.jsonl";
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let mut snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, 301_613);
-        let started_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        snapshot.inflight_started_at = Some(started_at.clone());
-        snapshot.inflight_updated_at = Some(started_at.clone());
-        snapshot
-            .inflight_identity
-            .as_mut()
-            .expect("snapshot identity")
-            .started_at = started_at.clone();
-        let mut inflight = InflightTurnState::new(
-            provider.clone(),
-            channel_id.get(),
-            None,
-            0,
-            snapshot
-                .inflight_user_msg_id
-                .expect("snapshot user message"),
-            0,
-            "test".to_string(),
-            None,
-            Some(tmux_session.to_string()),
-            Some(output_path.to_string()),
-            None,
-            snapshot.last_relay_offset,
-        );
-        inflight.started_at = snapshot.inflight_started_at.clone().expect("started at");
-        inflight.updated_at = inflight.started_at.clone();
-        crate::services::discord::inflight::save_inflight_state(&inflight)
-            .expect("seed authoritative inflight");
-        clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
-
-        assert!(
-            !redrive_should_yield_to_live_relay(&shared, &provider, channel_id, &snapshot),
-            "missing authority evidence must fail closed"
-        );
-        seed_liveness_verdict(
-            &provider,
-            channel_id,
-            &snapshot,
-            &inflight,
-            chrono::Utc::now().timestamp(),
-        );
-        assert!(
-            redrive_should_yield_to_live_relay(&shared, &provider, channel_id, &snapshot),
-            "a proven-live foreground turn must make the live-yield guard fire"
-        );
-
-        crate::services::discord::inflight::clear_inflight_state(&provider, channel_id.get());
-        clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
-    }
-
-    #[test]
-    fn redrive_capped_alarm_suppressed_while_vouched_then_fires_after_death_4615() {
+    fn redrive_actions_continue_while_vouched_then_alarm_fires_after_death_4615() {
         let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1456,6 +1375,11 @@ mod tests {
             .expect("seed authoritative inflight");
         clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
         let base = chrono::Utc::now().timestamp();
+        seed_liveness_verdict(&provider, channel_id, &snapshot, &inflight, base);
+        assert!(
+            !redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot),
+            "producer liveness must not veto relay recovery action admission"
+        );
 
         for (expected, elapsed) in [0, 30, 90, 210, 450].into_iter().enumerate() {
             let reserved =
@@ -1478,7 +1402,6 @@ mod tests {
         }
         let sixth = shared.redrive_attempt_decision(&provider, channel_id, &snapshot, base + 930);
         assert_eq!(sixth.attempt, Some(6));
-        seed_liveness_verdict(&provider, channel_id, &snapshot, &inflight, base);
         let suppressed =
             shared.commit_redrive_success(&provider, channel_id, channel_id, base + 930, false);
         assert!(!suppressed.emit_capped_alarm);
