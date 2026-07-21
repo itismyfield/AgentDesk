@@ -108,7 +108,7 @@ mod tests {
     fn deadline_poll_dispatches_token_current_pid_without_raw_pid_argument() {
         with_executor_dispatch_seam(|| {
             let token = CancelToken::new();
-            token.store_child_pid(4711);
+            token.store_child_pid(std::process::id());
             token.watchdog_deadline_ms.store(100, Ordering::Relaxed);
 
             assert!(poll_cancel_watchdog(&token, "test-watchdog", 100));
@@ -155,7 +155,7 @@ mod tests {
     fn external_cancel_before_deadline_does_not_become_watchdog_timeout() {
         with_executor_dispatch_seam(|| {
             let token = CancelToken::new();
-            token.store_child_pid(4713);
+            token.store_child_pid(std::process::id());
             token.watchdog_deadline_ms.store(200, Ordering::Relaxed);
             token.cancelled.store(true, Ordering::Relaxed);
 
@@ -213,7 +213,7 @@ mod tests {
     fn cleanup_does_not_replace_existing_specific_cancel_source() {
         with_executor_dispatch_seam(|| {
             let token = CancelToken::new();
-            token.store_child_pid(4714);
+            token.store_child_pid(std::process::id());
             token.set_cancel_source("voice_barge_in_explicit_stop");
             token.cancelled.store(true, Ordering::Relaxed);
 
