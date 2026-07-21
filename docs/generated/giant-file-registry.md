@@ -69,7 +69,7 @@
 | `src/services/discord/outbound/turn_output_controller.rs` | 1228 | shrink | discord-relay | 2026-08-31 | #4712 |  |
 | `src/services/discord/recovery_engine/manual_rebind/mod.rs` | 1001 | shrink | discord-relay | 2026-10-31 | #4712 |  |
 | `src/services/discord/recovery_engine/restore_inflight.rs` | 2328 | shrink | discord-relay | 2026-10-31 | #4712 |  |
-| `src/services/discord/relay_recovery.rs` | 1536 | shrink | discord-relay | 2026-08-31 | #4712 |  |
+| `src/services/discord/relay_recovery.rs` | 1538 | shrink | discord-relay | 2026-08-31 | #4712 |  |
 | `src/services/discord/router/intake_gate.rs` | 1591 | shrink | discord-relay | 2026-10-31 | #4712 |  |
 | `src/services/discord/router/message_handler/headless_turn.rs` | 1443 | shrink | discord-relay | 2027-01-31 | #4712 |  |
 | `src/services/discord/router/message_handler/intake_turn.rs` | 2690 | shrink | discord-relay | 2026-10-31 | #4712 |  |

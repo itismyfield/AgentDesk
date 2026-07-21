@@ -981,6 +981,7 @@ src/
 │   │   ├── relay_recovery_auto_heal_apply.rs
 │   │   ├── relay_recovery_auto_heal_attempts.rs
 │   │   ├── relay_recovery_auto_heal_confirm.rs
+│   │   ├── relay_recovery_circuit_alert_producer.rs
 │   │   ├── relay_recovery_circuit_breaker.rs
 │   │   ├── relay_recovery_completion_footer.rs
 │   │   ├── relay_recovery_reattach_apply.rs

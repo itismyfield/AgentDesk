@@ -353,6 +353,10 @@ pub fn record_relay_owner_unknown(channel_id: u64, provider: &str) {
     super::emit::emit_relay_root_cause_counter(provider, channel_id, "relay_owner_unknown");
 }
 
+pub fn record_relay_circuit_activate_unknown() {
+    super::emit::emit_relay_root_cause_counter("unknown", 0, "relay_circuit_activate_unknown");
+}
+
 pub fn snapshot() -> Vec<CounterSnapshotRow> {
     global().snapshot()
 }
