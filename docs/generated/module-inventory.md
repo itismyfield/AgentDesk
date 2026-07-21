@@ -377,7 +377,7 @@
 | `services::auto_queue::view_admin_routes` | `src/services/auto_queue/view_admin_routes.rs` | 730 | 730 | 0 |  |
 | `services::automation_candidate_contract` | `src/services/automation_candidate_contract.rs` | 127 | 87 | 40 |  |
 | `services::automation_candidate_materializer` | `src/services/automation_candidate_materializer.rs` | 844 | 844 | 0 |  |
-| `services::claude` | `src/services/claude.rs` | 4306 | 2951 | 1355 | giant-file |
+| `services::claude` | `src/services/claude.rs` | 4309 | 2954 | 1355 | giant-file |
 | `services::claude::active_usage` | `src/services/claude/active_usage.rs` | 55 | 55 | 0 |  |
 | `services::claude::backend_routing` | `src/services/claude/backend_routing.rs` | 122 | 122 | 0 |  |
 | `services::claude_command` | `src/services/claude_command.rs` | 1055 | 473 | 582 |  |
@@ -425,7 +425,7 @@
 | `services::cluster::stream_relay` | `src/services/cluster/stream_relay.rs` | 1638 | 985 | 653 |  |
 | `services::cluster::stream_relay::identity` | `src/services/cluster/stream_relay/identity.rs` | 37 | 37 | 0 |  |
 | `services::cluster::watcher_supervisor` | `src/services/cluster/watcher_supervisor.rs` | 845 | 373 | 472 |  |
-| `services::codex` | `src/services/codex.rs` | 3851 | 3131 | 720 | giant-file |
+| `services::codex` | `src/services/codex.rs` | 3850 | 3130 | 720 | giant-file |
 | `services::codex_remote_policy` | `src/services/codex_remote_policy.rs` | 49 | 32 | 17 |  |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 2554 | 1403 | 1151 | giant-file |
 | `services::codex_tui` | `src/services/codex_tui/mod.rs` | 5 | 5 | 0 |  |
@@ -1047,7 +1047,7 @@
 | `services::provider_output_guard` | `src/services/provider_output_guard.rs` | 195 | 195 | 0 |  |
 | `services::provider_runtime` | `src/services/provider_runtime.rs` | 73 | 73 | 0 |  |
 | `services::queue` | `src/services/queue.rs` | 966 | 822 | 144 |  |
-| `services::qwen` | `src/services/qwen.rs` | 2219 | 2198 | 21 | giant-file |
+| `services::qwen` | `src/services/qwen.rs` | 2218 | 2197 | 21 | giant-file |
 | `services::qwen_tmux_wrapper` | `src/services/qwen_tmux_wrapper.rs` | 944 | 944 | 0 |  |
 | `services::remote_stub` | `src/services/remote_stub.rs` | 126 | 58 | 68 |  |
 | `services::retrospectives` | `src/services/retrospectives.rs` | 565 | 565 | 0 |  |
@@ -1089,12 +1089,12 @@
 | `services::shell_guard` | `src/services/shell_guard.rs` | 419 | 419 | 0 |  |
 | `services::slo` | `src/services/slo/mod.rs` | 535 | 508 | 27 |  |
 | `services::termination_audit` | `src/services/termination_audit.rs` | 192 | 192 | 0 |  |
-| `services::tmux_common` | `src/services/tmux_common.rs` | 2443 | 1382 | 1061 | giant-file |
+| `services::tmux_common` | `src/services/tmux_common.rs` | 2445 | 1384 | 1061 | giant-file |
 | `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 276 | 265 | 11 |  |
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 898 | 787 | 111 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 286 | 220 | 66 |  |
 | `services::tui_prompt_control` | `src/services/tui_prompt_control.rs` | 246 | 208 | 38 |  |
-| `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 4760 | 2135 | 2625 | giant-file |
+| `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 4771 | 2146 | 2625 | giant-file |
 | `services::tui_prompt_dedupe::synthetic_prompt` | `src/services/tui_prompt_dedupe/synthetic_prompt.rs` | 34 | 34 | 0 |  |
 | `services::tui_turn_state` | `src/services/tui_turn_state.rs` | 2033 | 648 | 1385 |  |
 | `services::tui_turn_state::completion_scan` | `src/services/tui_turn_state/completion_scan.rs` | 360 | 360 | 0 |  |

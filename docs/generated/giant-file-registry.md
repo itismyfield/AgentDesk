@@ -34,7 +34,7 @@
 | `src/services/discord/turn_view_reconciler.rs` | 2358 | discord-relay | 2026-08-31 | #4049 |
 | `src/services/discord/voice_barge_in.rs` | 2887 | voice-runtime | 2026-08-31 | #3405 |
 | `src/services/discord/watchers/lifecycle.rs` | 2097 | discord-relay | 2026-10-31 | #3840 |
-| `src/services/tmux_common.rs` | 1382 | discord-relay | 2026-10-31 | #3924 |
+| `src/services/tmux_common.rs` | 1384 | discord-relay | 2026-10-31 | #3924 |
 | `src/voice/announce_meta.rs` | 1001 | voice-runtime | 2026-08-31 | #3405 |
 
 ## Grandfathered
@@ -81,9 +81,9 @@
 | `src/services/auto_queue.rs` | 1545 |
 | `src/services/auto_queue/activate_command.rs` | 1506 |
 | `src/services/auto_queue/cancel_run.rs` | 1031 |
-| `src/services/claude.rs` | 2951 |
+| `src/services/claude.rs` | 2954 |
 | `src/services/claude_tui/input.rs` | 2187 |
-| `src/services/codex.rs` | 3131 |
+| `src/services/codex.rs` | 3130 |
 | `src/services/codex_tmux_wrapper.rs` | 1403 |
 | `src/services/codex_tui/input.rs` | 1670 |
 | `src/services/discord/commands/text_commands.rs` | 1482 |
@@ -101,11 +101,11 @@
 | `src/services/opencode.rs` | 2760 |
 | `src/services/platform/binary_resolver.rs` | 1495 |
 | `src/services/provider.rs` | 1822 |
-| `src/services/qwen.rs` | 2198 |
+| `src/services/qwen.rs` | 2197 |
 | `src/services/routines/agent_executor.rs` | 2131 |
 | `src/services/routines/discord_log.rs` | 1594 |
 | `src/services/routines/store.rs` | 3559 |
 | `src/services/settings.rs` | 1112 |
-| `src/services/tui_prompt_dedupe.rs` | 2135 |
+| `src/services/tui_prompt_dedupe.rs` | 2146 |
 | `src/services/turn_orchestrator.rs` | 3283 |
 | `src/voice/receiver.rs` | 1108 |

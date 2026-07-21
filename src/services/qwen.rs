@@ -1197,10 +1197,6 @@ fn execute_streaming_local_tmux(
         crate::services::tmux_common::session_temp_path(tmux_session_name, "input");
     let prompt_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "prompt");
     let owner_path = tmux_owner_path(tmux_session_name);
-    if let Some(channel_id) = report_channel_id {
-        crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
-    }
-
     // Accept either the new persistent location or the legacy /tmp location
     // so that dcserver restarts that lost /tmp files still re-attach to a
     // live tmux pane owned by an older wrapper. See issue #892.
@@ -1262,6 +1258,9 @@ fn execute_streaming_local_tmux(
     }
 
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
+    if let Some(channel_id) = report_channel_id {
+        crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
+    }
 
     std::fs::write(&output_path, "").map_err(|e| format!("Failed to create output file: {}", e))?;
 

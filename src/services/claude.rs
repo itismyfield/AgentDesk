@@ -1844,6 +1844,9 @@ fn execute_streaming_local_tui_tmux(
         resume,
         &launch_env,
     )?;
+    if let Some(channel_id) = report_channel_id {
+        crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
+    }
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
     // #3087: stamp a per-spawn nonce on the Claude-TUI DIRECT spawn path too.

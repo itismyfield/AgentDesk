@@ -1691,10 +1691,6 @@ fn prepare_codex_tui_launch_script(
         tmux_session_name,
         prompt,
     );
-    if let Some(channel_id) = report_channel_id {
-        crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
-    }
-
     Ok(CodexTuiLaunchScript {
         script_path,
         owner_path,
@@ -1893,6 +1889,9 @@ fn execute_streaming_local_tui_tmux(
         report_provider,
         warm_followup_enabled,
     )?;
+    if let Some(channel_id) = report_channel_id {
+        crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
+    }
 
     let tmux_result = crate::services::platform::tmux::create_session(
         tmux_session_name,

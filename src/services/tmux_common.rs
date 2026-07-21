@@ -1107,7 +1107,6 @@ pub fn cleanup_session_temp_files(session_name: &str) {
         "spawn_nonce",
         "exit_reason",
         TMUX_RUNTIME_KIND_TEMP_EXT,
-        TMUX_CHANNEL_TEMP_EXT,
         TMUX_DEAD_MARKER_TEMP_EXT,
         CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT,
         CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
@@ -1146,7 +1145,10 @@ pub fn write_tmux_channel_binding(tmux_session_name: &str, channel_id: u64) -> R
     if channel_id == 0 {
         return Err("tmux channel binding requires a non-zero channel id".to_string());
     }
-    std::fs::write(tmux_channel_path(tmux_session_name), channel_id.to_string())
+    let path = std::path::PathBuf::from(tmux_channel_path(tmux_session_name));
+    let temp_path = path.with_extension("channel.tmp");
+    std::fs::write(&temp_path, channel_id.to_string())
+        .and_then(|_| std::fs::rename(&temp_path, &path))
         .map_err(|e| format!("Failed to write tmux channel binding: {e}"))
 }
 

@@ -1138,7 +1138,7 @@
     normal long SILENT tool run (e.g. a big build) is never mistaken for an idle
     hang, with the 4h hard ceiling as the real backstop, and noted the limitation
     in the idle-kill error message + a delayed-event test).
-  - `src/services/tui_prompt_dedupe.rs` (2135 lines; +29 from #4567: classify start-anchored structured task notifications as status-only observations before generic external-input ownership, preserving task-card/status delivery while leaving the next human prompt immediately admissible; -41 from #4591 R4: remove
+  - `src/services/tui_prompt_dedupe.rs` (2146 lines; +29 from #4567: classify start-anchored structured task notifications as status-only observations before generic external-input ownership, preserving task-card/status delivery while leaving the next human prompt immediately admissible; -41 from #4591 R4: remove
     raw/envelope time-pair state so local slash-control representations may
     duplicate rather than swallowing a later human command; local stable entry
     IDs are now recorded only after the relay confirms its Discord session note,
@@ -1873,7 +1873,7 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
   support extracted from the route layer; split before adding non-bugfix
   behavior.
 - `src/services/claude.rs` (2969; +9 net from #4553 replacing dead native cache-TTL launch wiring with guarded gateway-proxy launch decisions and covering the simple-command spawn; -21 from #4113 backend_routing/availability extraction), `src/services/gemini.rs` (1358),
-  `src/services/qwen.rs` (2198), `src/services/codex.rs` (3131),
+  `src/services/qwen.rs` (2197), `src/services/codex.rs` (3130),
   `src/services/opencode.rs` (2760), `src/services/provider.rs` (1818; +4 from #4566 publishing the session-generation registry binding as a monotonic max() guard with the token-local tmux-session name kept for SIGINT/pid tracking) —
   provider adapters. (#3034 removed dead non-cancel `execute_command_simple*`
   twins from the claude/codex/gemini adapters and a superseded
