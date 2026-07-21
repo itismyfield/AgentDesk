@@ -92,6 +92,172 @@ class ClippyAllowRatchetTest(unittest.TestCase):
         self.assertEqual(len(problems), 1)
         self.assertIn("too_many_arguments", problems[0])
 
+    # ------------------------------------------------------------------
+    # Lexical pre-pass: comments
+    # ------------------------------------------------------------------
+    def test_block_comment_bracket_does_not_split_attribute(self) -> None:
+        # The `]` inside the block comment must not close the attribute early.
+        actual = self._collect_source(
+            "#[allow(clippy::too_many_arguments /* ] */)]\n"
+            "fn sample() {}\n"
+        )
+        self.assertEqual(actual[("sample.rs", "too_many_arguments")], 1)
+
+    def test_block_comment_quote_and_bracket_are_neutralized(self) -> None:
+        # A quote AND a bracket together inside a block comment.
+        cleaned, ambiguous = RATCHET.neutralize_source('#[allow(/* " ] */ x)]\n')
+        self.assertFalse(ambiguous)
+        self.assertNotIn('"', cleaned)
+        self.assertNotIn("]", cleaned[: cleaned.index("x")])  # bracket gone from comment
+        actual = self._collect_source(
+            '#[allow(/* " ] */ clippy::too_many_arguments)]\n'
+            "fn sample() {}\n"
+        )
+        self.assertEqual(actual[("sample.rs", "too_many_arguments")], 1)
+
+    def test_nested_block_comment_is_fully_neutralized(self) -> None:
+        # `]` sits between the inner and outer close; only nesting-aware parsing
+        # keeps it inside the comment.
+        actual = self._collect_source(
+            "#[allow(clippy::too_many_arguments /* a /* b */ ] */)]\n"
+            "fn sample() {}\n"
+        )
+        self.assertEqual(actual[("sample.rs", "too_many_arguments")], 1)
+
+    def test_line_comment_bracket_and_quote_are_neutralized(self) -> None:
+        cleaned, ambiguous = RATCHET.neutralize_source('let _ = 0; // ] " ) note\n')
+        self.assertFalse(ambiguous)
+        self.assertNotIn("]", cleaned)
+        self.assertNotIn('"', cleaned)
+        actual = self._collect_source(
+            "#[allow(clippy::too_many_arguments)] // trailing ] \" ) note\n"
+            "fn sample() {}\n"
+        )
+        self.assertEqual(actual[("sample.rs", "too_many_arguments")], 1)
+
+    # ------------------------------------------------------------------
+    # Lexical pre-pass: string / raw string / byte string literals
+    # ------------------------------------------------------------------
+    def test_raw_string_with_brackets_parens_and_quote(self) -> None:
+        # r#"a ) ] " b"# must be consumed whole (no escapes, hash-counted end).
+        actual = self._collect_source(
+            '#[allow(a, r#"a ) ] " b"#, clippy::too_many_arguments)]\n'
+            "fn sample() {}\n"
+        )
+        self.assertEqual(actual[("sample.rs", "too_many_arguments")], 1)
+
+    def test_raw_byte_string_with_brackets(self) -> None:
+        # Internal `"` ensures a plain-string misread would desync (proving the
+        # raw rule is doing the work), plus brackets/parens inside.
+        actual = self._collect_source(
+            '#[allow(a, br#"] ) " ["#, clippy::too_many_arguments)]\n'
+            "fn sample() {}\n"
+        )
+        self.assertEqual(actual[("sample.rs", "too_many_arguments")], 1)
+
+    def test_byte_string_with_brackets(self) -> None:
+        actual = self._collect_source(
+            '#[allow(a, b") ] \\" (", clippy::too_many_arguments)]\n'
+            "fn sample() {}\n"
+        )
+        self.assertEqual(actual[("sample.rs", "too_many_arguments")], 1)
+
+    # ------------------------------------------------------------------
+    # Lexical pre-pass: char / byte-char literals and the lifetime split
+    # ------------------------------------------------------------------
+    def test_char_literal_close_paren_does_not_end_body(self) -> None:
+        # The ')' inside the char literal must not close the allow(...) body and
+        # drop the trailing lint.
+        actual = self._collect_source(
+            "#[allow(a, ')', clippy::too_many_arguments)]\n"
+            "fn sample() {}\n"
+        )
+        self.assertEqual(actual[("sample.rs", "too_many_arguments")], 1)
+
+    def test_char_literal_close_bracket_does_not_split_attribute(self) -> None:
+        actual = self._collect_source(
+            "#[allow(a, ']', clippy::too_many_arguments)]\n"
+            "fn sample() {}\n"
+        )
+        self.assertEqual(actual[("sample.rs", "too_many_arguments")], 1)
+
+    def test_char_literal_quote_is_neutralized(self) -> None:
+        cleaned, ambiguous = RATCHET.neutralize_source("let _ = '\"'; let x = 0;\n")
+        self.assertFalse(ambiguous)
+        self.assertNotIn('"', cleaned)
+        actual = self._collect_source(
+            "#[allow(a, '\"', clippy::too_many_arguments)]\n"
+            "fn sample() {}\n"
+        )
+        self.assertEqual(actual[("sample.rs", "too_many_arguments")], 1)
+
+    def test_byte_char_literal_bracket_is_neutralized(self) -> None:
+        actual = self._collect_source(
+            "#[allow(a, b']', clippy::too_many_arguments)]\n"
+            "fn sample() {}\n"
+        )
+        self.assertEqual(actual[("sample.rs", "too_many_arguments")], 1)
+
+    def test_lifetime_is_not_a_char_literal(self) -> None:
+        # 'a is a lifetime (no closing quote); the quote must be left in place and
+        # the following bracket structure must parse normally.
+        cleaned, ambiguous = RATCHET.neutralize_source("struct S<'a>(&'a [u8]);\n")
+        self.assertFalse(ambiguous)
+        self.assertIn("[u8]", cleaned)  # brackets survive intact
+        actual = self._collect_source(
+            "struct S<'a>(&'a u8);\n"
+            "#[allow(clippy::too_many_arguments)]\n"
+            "fn sample<'a>() {}\n"
+        )
+        self.assertEqual(actual[("sample.rs", "too_many_arguments")], 1)
+
+    def test_escaped_char_literals_are_neutralized(self) -> None:
+        for lit in ("'\\''", "'\\n'", "'\\\\'", "'\\x5d'", "'\\u{5d}'"):
+            actual = self._collect_source(
+                f"#[allow(a, {lit}, clippy::too_many_arguments)]\n"
+                "fn sample() {}\n"
+            )
+            self.assertEqual(
+                actual[("sample.rs", "too_many_arguments")], 1, msg=lit
+            )
+
+    # ------------------------------------------------------------------
+    # Fail-closed: ambiguity must inflate the count, never silently zero it.
+    # ------------------------------------------------------------------
+    def test_unterminated_string_fails_closed(self) -> None:
+        actual = self._collect_source(
+            "#[allow(clippy::too_many_arguments)]\n"
+            'fn sample() { let s = "oops; }\n'
+        )
+        for lint in RATCHET.LINTS:
+            self.assertEqual(actual[("sample.rs", lint)], RATCHET.AMBIGUOUS_SENTINEL)
+        self.assertEqual(len(RATCHET.validate_occurrences(actual, Counter())), 4)
+
+    def test_unterminated_block_comment_fails_closed(self) -> None:
+        actual = self._collect_source(
+            "#[allow(clippy::too_many_arguments)]\n"
+            "fn sample() {} /* never closed\n"
+        )
+        for lint in RATCHET.LINTS:
+            self.assertEqual(actual[("sample.rs", lint)], RATCHET.AMBIGUOUS_SENTINEL)
+
+    def test_unbalanced_allow_paren_fails_closed(self) -> None:
+        # allow( with no closing paren: must NOT silently drop the body to zero.
+        actual = self._collect_source(
+            "#[allow(clippy::too_many_arguments]\n"
+            "fn sample() {}\n"
+        )
+        for lint in RATCHET.LINTS:
+            self.assertEqual(actual[("sample.rs", lint)], RATCHET.AMBIGUOUS_SENTINEL)
+
+    def test_unbalanced_attribute_bracket_fails_closed(self) -> None:
+        actual = self._collect_source(
+            "#[allow(clippy::too_many_arguments)\n"
+            "fn sample() {}\n"
+        )
+        for lint in RATCHET.LINTS:
+            self.assertEqual(actual[("sample.rs", lint)], RATCHET.AMBIGUOUS_SENTINEL)
+
 
 if __name__ == "__main__":
     unittest.main()
