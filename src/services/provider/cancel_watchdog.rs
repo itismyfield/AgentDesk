@@ -21,7 +21,6 @@ pub(super) fn enforce_watchdog_deadline(token: &CancelToken, now_ms: i64) -> boo
 
 /// Poll one cancellation boundary. The token remains the sole owner of its target.
 pub(crate) fn poll_cancel_watchdog(token: &CancelToken, label: &'static str, now_ms: i64) -> bool {
-    let deadline_enforced = enforce_watchdog_deadline(token, now_ms);
     if token.is_completion_cleanup() {
         tracing::debug!(
             provider_cancel_watchdog = label,
@@ -31,7 +30,11 @@ pub(crate) fn poll_cancel_watchdog(token: &CancelToken, label: &'static str, now
         );
         return true;
     }
-    if !token.cancelled.load(Ordering::Relaxed) {
+    let deadline_enforced = enforce_watchdog_deadline(token, now_ms);
+    if token.is_completion_cleanup() {
+        return true;
+    }
+    if !token.cancelled.load(Ordering::Acquire) {
         return false;
     }
 
@@ -123,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_cleanup_after_deadline_skips_cleanup_dispatch() {
+    fn completion_cleanup_after_deadline_skips_timeout_attribution_and_dispatch() {
         with_executor_dispatch_seam(|| {
             let token = CancelToken::new();
             token.store_child_pid(4712);
@@ -133,11 +136,27 @@ mod tests {
             assert!(poll_cancel_watchdog(&token, "test-watchdog", 100));
             assert_eq!(pid_kill_dispatches_for_test(), 0);
             assert_eq!(token.pid_kill_claim.load(Ordering::Acquire), 0);
-            assert_eq!(
-                token.cancel_source_kind(),
-                Some(CancelSource::WatchdogTimeout)
-            );
+            assert_eq!(token.cancel_source_kind(), None);
+            assert!(!token.cancelled.load(Ordering::Acquire));
         });
+    }
+
+    #[test]
+    fn completion_publication_wins_interleaving_before_timeout_commit() {
+        let token = Arc::new(CancelToken::new());
+        token.watchdog_deadline_ms.store(100, Ordering::Relaxed);
+        let publication = token
+            .cancellation_publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let timeout_token = Arc::clone(&token);
+        let timeout = std::thread::spawn(move || timeout_token.try_mark_watchdog_timeout());
+        token.completion_cleanup.store(true, Ordering::Release);
+        drop(publication);
+
+        assert!(!timeout.join().expect("timeout thread should finish"));
+        assert_eq!(token.cancel_source_kind(), None);
+        assert!(!token.cancelled.load(Ordering::Acquire));
     }
 
     #[test]
@@ -175,8 +194,7 @@ mod tests {
             let token = CancelToken::new();
             token.store_child_pid(std::process::id());
             token.watchdog_deadline_ms.store(100, Ordering::Relaxed);
-            token.set_cancel_source("voice_barge_in_explicit_stop");
-            token.cancelled.store(true, Ordering::Release);
+            token.publish_cancel("voice_barge_in_explicit_stop");
 
             assert!(poll_cancel_watchdog(&token, "test-watchdog", 200));
             assert_eq!(pid_kill_dispatches_for_test(), 1);
@@ -186,6 +204,28 @@ mod tests {
             );
             assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
         });
+    }
+
+    #[test]
+    fn external_cancel_publication_wins_interleaving_before_timeout_commit() {
+        let token = Arc::new(CancelToken::new());
+        token.watchdog_deadline_ms.store(100, Ordering::Relaxed);
+        let publication = token
+            .cancellation_publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let timeout_token = Arc::clone(&token);
+        let timeout = std::thread::spawn(move || timeout_token.try_mark_watchdog_timeout());
+        token.set_cancel_source_locked("voice_barge_in_explicit_stop");
+        token.cancelled.store(true, Ordering::Release);
+        drop(publication);
+
+        assert!(!timeout.join().expect("timeout thread should finish"));
+        assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
+        assert_eq!(
+            token.cancel_source().as_deref(),
+            Some("voice_barge_in_explicit_stop")
+        );
     }
 
     #[test]

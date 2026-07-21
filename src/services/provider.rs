@@ -981,6 +981,8 @@ pub struct CancelToken {
     child_pid: Mutex<Option<CapturedProcess>>,
     cancel_source: Mutex<Option<String>>,
     cancel_source_kind: Mutex<Option<CancelSource>>,
+    /// Serializes cancellation attribution, timeout, and completion publication.
+    cancellation_publication: Mutex<()>,
     /// SSH cancel flag — set to true to signal remote execution to close the channel
     #[allow(dead_code)]
     pub ssh_cancel: Mutex<Option<std::sync::Arc<AtomicBool>>>,
@@ -1030,6 +1032,7 @@ impl CancelToken {
             child_pid: Mutex::new(None),
             cancel_source: Mutex::new(None),
             cancel_source_kind: Mutex::new(None),
+            cancellation_publication: Mutex::new(()),
             ssh_cancel: Mutex::new(None),
             tmux_binding: Mutex::new(None),
             watchdog_deadline_ms: AtomicI64::new(0),
@@ -1068,11 +1071,15 @@ impl CancelToken {
     }
 
     pub fn mark_completion_cleanup(&self) {
-        self.completion_cleanup.store(true, Ordering::Relaxed);
+        let _publication = self
+            .cancellation_publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.completion_cleanup.store(true, Ordering::Release);
     }
 
     pub fn is_completion_cleanup(&self) -> bool {
-        self.completion_cleanup.load(Ordering::Relaxed)
+        self.completion_cleanup.load(Ordering::Acquire)
     }
 
     pub(crate) fn store_child_pid(&self, pid: u32) {
@@ -1135,7 +1142,7 @@ impl CancelToken {
         )
     }
 
-    pub(crate) fn set_cancel_source_if_absent(&self, source: impl Into<String>) {
+    fn set_cancel_source_if_absent_locked(&self, source: impl Into<String>) {
         let label = source.into();
         let classified = CancelSource::classify(&label);
         // All source writers take kind before label. Cleanup is provisional and
@@ -1153,7 +1160,15 @@ impl CancelToken {
         }
     }
 
-    pub fn set_cancel_source(&self, source: impl Into<String>) {
+    pub(crate) fn set_cancel_source_if_absent(&self, source: impl Into<String>) {
+        let _publication = self
+            .cancellation_publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.set_cancel_source_if_absent_locked(source);
+    }
+
+    fn set_cancel_source_locked(&self, source: impl Into<String>) {
         let label = source.into();
         let classified = CancelSource::classify(&label);
         // Keep kind and label transactional. Specific kinds retain #3908's
@@ -1172,14 +1187,34 @@ impl CancelToken {
         *current_label = Some(label);
     }
 
+    pub fn set_cancel_source(&self, source: impl Into<String>) {
+        let _publication = self
+            .cancellation_publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.set_cancel_source_locked(source);
+    }
+
     /// Explicitly set the structured cancel source. Also updates the
     /// free-form label (used for tracing / dispatch reason) to the canonical
     /// string for the variant when no label was previously recorded.
     pub fn set_cancel_source_kind(&self, kind: CancelSource) {
+        let _publication = self
+            .cancellation_publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         self.set_cancel_source_kind_transactional(kind, |_| {});
     }
 
     pub(crate) fn try_mark_watchdog_timeout(&self) -> bool {
+        let _publication = self
+            .cancellation_publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.completion_cleanup.load(Ordering::Acquire) {
+            return false;
+        }
+
         let mut kind = self
             .cancel_source_kind
             .lock()
@@ -1200,6 +1235,24 @@ impl CancelToken {
             *label = Some(CancelSource::WatchdogTimeout.as_label().to_string());
         }
         true
+    }
+
+    pub(crate) fn publish_cancel(&self, source: impl Into<String>) {
+        let _publication = self
+            .cancellation_publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.set_cancel_source_locked(source);
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn publish_cancel_if_source_absent(&self, source: impl Into<String>) {
+        let _publication = self
+            .cancellation_publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.set_cancel_source_if_absent_locked(source);
+        self.cancelled.store(true, Ordering::Release);
     }
 
     fn set_cancel_source_kind_transactional(
