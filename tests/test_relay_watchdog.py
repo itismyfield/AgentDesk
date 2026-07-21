@@ -4511,7 +4511,11 @@ class TickChannelTests(unittest.TestCase):
         os.utime(successor, (successor_at, successor_at))
         rt.haystack = norm("current session delivery proof")
         rt.watcher_probe = WatcherStateProbe(
-            200, attached=True, desynced=False, bound_output_path=str(successor)
+            200,
+            attached=True,
+            desynced=False,
+            bound_output_path="/runtime/sessions/channel-mirror.jsonl",
+            bound_session_id=successor.stem,
         )
         tick_channel(rt, TICK_CHANNEL, state, successor_at + 1)
 

@@ -1444,6 +1444,9 @@ class WatcherStateProbe:
     # `relay_stall_state` plus nested `relay_health`. `None` is a legacy server
     # with neither field and preserves the pre-#4458 desync behavior.
     relay_activity: CoverageActivityProbe | None = None
+    # Provider session identity is authoritative across runtime-mirror/provider-
+    # project path representations. It is optional for legacy watcher-state.
+    bound_session_id: str | None = None
 
 
 def parse_watcher_state_probe(
@@ -1458,15 +1461,23 @@ def parse_watcher_state_probe(
     attached_raw = payload.get("attached")
     desynced_raw = payload.get("desynced")
     bound_output_path = payload.get("bound_output_path")
+    bound_session_id_raw = payload.get("bound_session_id")
     attached = attached_raw if isinstance(attached_raw, bool) else None
     desynced = desynced_raw if isinstance(desynced_raw, bool) else None
     bound = bound_output_path if isinstance(bound_output_path, str) else None
+    bound_session_id = (
+        bound_session_id_raw
+        if isinstance(bound_session_id_raw, str) and bound_session_id_raw
+        else None
+    )
 
     has_activity_schema = (
         "relay_stall_state" in payload or "relay_health" in payload
     )
     if not has_activity_schema:
-        return WatcherStateProbe(200, attached, desynced, bound)
+        return WatcherStateProbe(
+            200, attached, desynced, bound, bound_session_id=bound_session_id
+        )
 
     malformed = False
     stall_raw = payload.get("relay_stall_state")
@@ -1489,6 +1500,7 @@ def parse_watcher_state_probe(
                 relay_stall_state=relay_stall_state,
                 malformed=True,
             ),
+            bound_session_id,
         )
 
     def string_field(key: str) -> tuple[str | None, bool]:
@@ -1571,6 +1583,7 @@ def parse_watcher_state_probe(
             desynced=relay_desynced,
             malformed=malformed,
         ),
+        bound_session_id,
     )
 
 
@@ -3634,9 +3647,9 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         None,
     )
     selected_probe = rt.watcher_state(cid) if selected_path else WatcherStateProbe(None)
-    successor_binding_proven = (
-        selected_probe.status == 200
-        and selected_probe.bound_output_path == selected_path
+    successor_binding_proven = selected_probe.status == 200 and (
+        selected_probe.bound_output_path == selected_path
+        or selected_probe.bound_session_id == selected.path.stem
     )
     superseded_gap_owners: list[str] = []
     if (
