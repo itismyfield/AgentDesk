@@ -641,7 +641,7 @@ decompose_issue = "#4713"
 file = "src/services/discord/tmux_watcher.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3832"
+decompose_issue = "#4712"
 
 [[entry]]
 # #4229 S4 follow-up: turn stream collection was moved out of the watcher root
@@ -650,7 +650,7 @@ decompose_issue = "#3832"
 file = "src/services/discord/tmux_watcher/turn_stream_collector.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#4229"
+decompose_issue = "#4712"
 
 [[entry]]
 # #3834 r2: restart-path scan moved out of the recovery_engine root, but the
@@ -659,7 +659,7 @@ decompose_issue = "#4229"
 file = "src/services/discord/recovery_engine/restore_inflight.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3834"
+decompose_issue = "#4712"
 
 [[entry]]
 # #3721 first-batch promotion: Discord message intake execution mixes request
@@ -668,7 +668,7 @@ decompose_issue = "#3834"
 file = "src/services/discord/router/message_handler/intake_turn.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#4552"
+decompose_issue = "#4712"
 
 [[entry]]
 # #3721 first-batch promotion: Discord admission gate owns mention/self/queue,
@@ -676,7 +676,7 @@ decompose_issue = "#4552"
 file = "src/services/discord/router/intake_gate.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3838"
+decompose_issue = "#4712"
 
 [[entry]]
 # #3721 first-batch promotion: health recovery surface combines stop/cancel,
@@ -684,7 +684,7 @@ decompose_issue = "#3838"
 file = "src/services/discord/health/recovery.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3839"
+decompose_issue = "#4712"
 
 [[entry]]
 # #3721 first-batch promotion: watcher lifecycle root still mixes restore scan,
@@ -692,7 +692,7 @@ decompose_issue = "#3839"
 file = "src/services/discord/watchers/lifecycle.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3840"
+decompose_issue = "#4712"
 
 [[entry]]
 # #3721 first-batch promotion: residual tmux relay helper root remains giant
@@ -700,7 +700,7 @@ decompose_issue = "#3840"
 file = "src/services/discord/tmux.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3841"
+decompose_issue = "#4712"
 
 [[entry]]
 # #3721 first-batch promotion: Codex TUI rollout tailer mixes discovery,
@@ -708,14 +708,14 @@ decompose_issue = "#3841"
 file = "src/services/codex_tui/rollout_tail.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3843"
+decompose_issue = "#4712"
 
 [[entry]]
 # Highest prod-LoC voice surface; flagship decomposition target from #3036.
 file = "src/services/discord/voice_barge_in.rs"
 owner = "voice-runtime"
 deadline = "2026-08-31"
-decompose_issue = "#3405"
+decompose_issue = "#4713"
 
 [[entry]]
 # Crossed the 1000-prod-LoC threshold when #3034 restored per-item dead_code
@@ -724,7 +724,7 @@ decompose_issue = "#3405"
 file = "src/db/automation_candidates.rs"
 owner = "automation-pipeline"
 deadline = "2026-08-31"
-decompose_issue = "#3405"
+decompose_issue = "#4711"
 
 [[entry]]
 # Crossed the 1000-prod-LoC threshold when #3034 restored per-item dead_code
@@ -732,7 +732,7 @@ decompose_issue = "#3405"
 file = "src/voice/announce_meta.rs"
 owner = "voice-runtime"
 deadline = "2026-08-31"
-decompose_issue = "#3405"
+decompose_issue = "#4713"
 
 [[entry]]
 # Crossed the 1000-prod-LoC threshold when #3017 re-landed the single
@@ -743,7 +743,7 @@ decompose_issue = "#3405"
 file = "src/services/discord/session_relay_sink.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"
-decompose_issue = "#3405"
+decompose_issue = "#4712"
 
 [[entry]]
 # Crossed the 1000-prod-LoC threshold in #3998 E13 when the turn-output
@@ -754,7 +754,7 @@ decompose_issue = "#3405"
 file = "src/services/discord/outbound/turn_output_controller.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"
-decompose_issue = "#3405"
+decompose_issue = "#4712"
 
 # NOTE: src/services/discord/relay_recovery.rs previously had an [[entry]] here;
 # #3779 extracted auto-heal attempt accounting into a sibling module, dropping
@@ -770,7 +770,7 @@ decompose_issue = "#3405"
 file = "src/services/discord/relay_recovery.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"
-decompose_issue = "#3405"
+decompose_issue = "#4712"
 
 [[entry]]
 # Crossed the 1000-prod-LoC threshold in #3739: worker-local LoopOwned Tokio
@@ -781,7 +781,7 @@ decompose_issue = "#3405"
 file = "src/server/worker_registry.rs"
 owner = "server-runtime"
 deadline = "2026-08-31"
-decompose_issue = "#3739"
+decompose_issue = "#4710"
 
 [[entry]]
 # Crossed the 1000-prod-LoC threshold when #3041 P1-0 landed the dormant
@@ -793,7 +793,7 @@ decompose_issue = "#3739"
 file = "src/services/discord/turn_finalizer.rs"
 owner = "discord-finalizer"
 deadline = "2026-08-31"
-decompose_issue = "#3016"
+decompose_issue = "#4712"
 
 [[entry]]
 # Crossed the 1000-prod-LoC threshold in #4049 S4-a1: the notification-only
@@ -803,7 +803,7 @@ decompose_issue = "#3016"
 file = "src/services/discord/turn_view_reconciler.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"
-decompose_issue = "#4049"
+decompose_issue = "#4712"
 
 # NOTE: src/services/discord/idle_recap.rs previously had an [[entry]] here; #3479
 # extracted the scrollback-capture/Haiku-summarizer and token-context-display
@@ -820,7 +820,7 @@ decompose_issue = "#4049"
 file = "src/services/discord/idle_recap.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"
-decompose_issue = "#3405"
+decompose_issue = "#4712"
 
 # NOTE: src/services/discord/turn_bridge/terminal_delivery.rs previously had an
 # [[entry]] here; the #3028 splitter fix dropped its production LoC below the
@@ -852,7 +852,7 @@ decompose_issue = "#3405"
 file = "src/services/discord/tui_direct_pending_start.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"
-decompose_issue = "#3540"
+decompose_issue = "#4712"
 
 [[entry]]
 # Crossed the 1000-prod-LoC giant threshold in #4081 when the durable delivery
@@ -863,7 +863,7 @@ decompose_issue = "#3540"
 file = "src/services/discord/outbound/delivery_record.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3405"
+decompose_issue = "#4712"
 
 [[entry]]
 # Crossed the 1000-prod-LoC giant threshold in #4019 R2: synthetic TUI-direct
@@ -874,7 +874,7 @@ decompose_issue = "#3405"
 file = "src/services/discord/tui_prompt_relay/synthetic_start.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#4019"
+decompose_issue = "#4712"
 
 [[entry]]
 # Crossed the 1000-prod-LoC giant threshold in #3909: the leader-only voice
@@ -888,7 +888,7 @@ decompose_issue = "#4019"
 file = "src/server/maintenance.rs"
 owner = "server-runtime"
 deadline = "2026-10-31"
-decompose_issue = "#3909"
+decompose_issue = "#4710"
 
 [[entry]]
 # Crossed the 1000-prod-LoC giant threshold in #3924: the recovery-net
@@ -904,7 +904,7 @@ decompose_issue = "#3909"
 file = "src/services/tmux_common.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3924"
+decompose_issue = "#4712"
 
 [[entry]]
 # Crossed the giant threshold while #4706 backfilled explicit decision metadata.
@@ -913,7 +913,7 @@ decompose_issue = "#3924"
 file = "src/services/discord/recovery_engine/manual_rebind/mod.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3405"
+decompose_issue = "#4712"
 
 [[entry]]
 # Crossed the 1000-prod-LoC giant threshold while catch-up phase1/phase2
@@ -922,4 +922,4 @@ decompose_issue = "#3405"
 file = "src/services/discord/catch_up.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3405"
+decompose_issue = "#4712"

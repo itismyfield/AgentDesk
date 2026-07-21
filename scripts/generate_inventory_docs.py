@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import json
 import re
 import sys
 from collections import Counter
@@ -895,6 +896,7 @@ _PLACEHOLDER_VALUES = frozenset({"tbd", "unknown", "none", "umbrella"})
 _DECOMPOSE_ISSUE_SELF_REFERENCE = "#4519"
 _DECISION_SHRINK = "shrink"
 _DECISION_KEEP = "keep"
+GIANT_FILE_ISSUE_METADATA = REPO_ROOT / "scripts" / "giant_file_issue_metadata.json"
 
 
 def _is_real_value(value: str) -> bool:
@@ -913,6 +915,61 @@ def _parse_deadline(value: str) -> date | None:
 def _is_real_decompose_issue(value: str) -> bool:
     match = _ISSUE_RE.fullmatch(value.strip())
     return match is not None and value.strip() != _DECOMPOSE_ISSUE_SELF_REFERENCE
+
+
+def load_giant_file_issue_metadata() -> dict[int, dict[str, object]]:
+    """Load the checked-in, reviewable issue snapshot used by the CI registry gate."""
+    try:
+        payload = json.loads(read_text(GIANT_FILE_ISSUE_METADATA))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ParseError(f"invalid giant-file issue metadata: {error}") from error
+    if payload.get("schema_version") != 1 or not isinstance(payload.get("issues"), list):
+        raise ParseError("giant-file issue metadata must use schema_version 1 and an issues list")
+    issues: dict[int, dict[str, object]] = {}
+    for issue in payload["issues"]:
+        if not isinstance(issue, dict):
+            raise ParseError(f"invalid giant-file issue metadata record: {issue!r}")
+        number = issue.get("number")
+        state = issue.get("state")
+        title = issue.get("title")
+        owners = issue.get("owners")
+        if (
+            not isinstance(number, int)
+            or isinstance(number, bool)
+            or number <= 0
+            or state != "open"
+            or not isinstance(title, str)
+            or not _is_real_value(title)
+            or not isinstance(owners, list)
+            or not owners
+            or any(not isinstance(owner, str) or not _is_real_value(owner) for owner in owners)
+            or number in issues
+        ):
+            raise ParseError(f"invalid or duplicate giant-file issue metadata record: {issue!r}")
+        issues[number] = issue
+    return issues
+
+
+def validate_decompose_issue_metadata(
+    path: str,
+    owner: str,
+    decompose_issue: str,
+    issues: dict[int, dict[str, object]],
+) -> str | None:
+    match = _ISSUE_RE.fullmatch(decompose_issue.strip())
+    if match is None:
+        return None
+    number = int(match.group("number"))
+    issue = issues.get(number)
+    if issue is None:
+        return f"[[entry]] {path!r} decompose_issue #{number} is absent from checked-in open issue metadata"
+    owners = issue["owners"]
+    if owner not in owners:
+        return (
+            f"[[entry]] {path!r} owner {owner!r} is outside decompose_issue #{number} "
+            f"scope {owners!r}"
+        )
+    return None
 
 
 def _markdown_table_value(value: str) -> str:
@@ -1032,6 +1089,7 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
     """
 
     grandfathered, entries, baseline_paths = load_giant_file_registry()
+    issue_metadata = load_giant_file_issue_metadata()
     prod_giants = {
         entry.file_path: entry.prod_line_count
         for entry in modules
@@ -1097,6 +1155,12 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
                 problems.append(
                     f"[[entry]] {path!r} shrink decompose_issue {decompose_issue!r} must be a real numeric issue and cannot be #4519"
                 )
+            else:
+                issue_problem = validate_decompose_issue_metadata(
+                    path, owner, decompose_issue, issue_metadata
+                )
+                if issue_problem:
+                    problems.append(issue_problem)
             if keep_reason:
                 problems.append(f"[[entry]] {path!r} shrink forbids keep_reason")
         elif decision == _DECISION_KEEP:

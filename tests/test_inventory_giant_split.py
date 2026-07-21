@@ -588,6 +588,21 @@ class RegistryParseTest(unittest.TestCase):
 
 
 class RegistryValidationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._original_issue_metadata = GEN.load_giant_file_issue_metadata
+        GEN.load_giant_file_issue_metadata = lambda: {
+            number: {
+                "number": number,
+                "state": "open",
+                "title": f"test tracker {number}",
+                "owners": ["team"],
+            }
+            for number in (1, 3036)
+        }
+
+    def tearDown(self) -> None:
+        GEN.load_giant_file_issue_metadata = self._original_issue_metadata
+
     def _module(self, path: str, prod: int, *, giant: bool) -> "GEN.ModuleEntry":
         flags = ("giant-file",) if giant else ()
         return GEN.ModuleEntry(
@@ -902,6 +917,55 @@ class RegistryValidationTest(unittest.TestCase):
                 self.assertIn("decompose_issue", str(ctx.exception), issue)
         finally:
             GEN.load_giant_file_registry = orig
+
+    def test_shrink_rejects_issue_absent_from_checked_in_metadata(self) -> None:
+        modules = [self._module("src/a.rs", 1500, giant=True)]
+        entry = {
+            "file": "src/a.rs",
+            "decision": "shrink",
+            "owner": "team",
+            "deadline": "2026-08-31",
+            "decompose_issue": "#999",
+        }
+        orig = GEN.load_giant_file_registry
+        GEN.load_giant_file_registry = self._patch_registry([], [entry])
+        try:
+            with self.assertRaises(GEN.ParseError) as ctx:
+                GEN.build_giant_registrations(modules)
+        finally:
+            GEN.load_giant_file_registry = orig
+        self.assertIn("absent from checked-in open issue metadata", str(ctx.exception))
+
+    def test_shrink_rejects_issue_outside_owner_scope(self) -> None:
+        modules = [self._module("src/a.rs", 1500, giant=True)]
+        entry = {
+            "file": "src/a.rs",
+            "decision": "shrink",
+            "owner": "voice-runtime",
+            "deadline": "2026-08-31",
+            "decompose_issue": "#1",
+        }
+        orig = GEN.load_giant_file_registry
+        GEN.load_giant_file_registry = self._patch_registry([], [entry])
+        try:
+            with self.assertRaises(GEN.ParseError) as ctx:
+                GEN.build_giant_registrations(modules)
+        finally:
+            GEN.load_giant_file_registry = orig
+        self.assertIn("outside decompose_issue #1 scope", str(ctx.exception))
+
+    def test_checked_in_issue_metadata_covers_every_shrink_entry(self) -> None:
+        GEN.load_giant_file_issue_metadata = self._original_issue_metadata
+        _grandfathered, entries, _baseline = GEN.load_giant_file_registry()
+        issues = GEN.load_giant_file_issue_metadata()
+        problems = [
+            GEN.validate_decompose_issue_metadata(
+                entry["file"], entry["owner"], entry["decompose_issue"], issues
+            )
+            for entry in entries
+            if entry.get("decision", "shrink") == "shrink"
+        ]
+        self.assertEqual([problem for problem in problems if problem], [])
 
     def test_valid_registry_builds_rows(self) -> None:
         modules = [
