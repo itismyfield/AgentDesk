@@ -493,3 +493,94 @@ pub(crate) async fn revoke_on_fresh_vouch(
     tx.commit().await?;
     Ok(FreshVouchRevoke::Revoked)
 }
+
+/// Cancellation reason stamped on a row fenced off by the worker delivery fence.
+pub(crate) const DELIVERY_FENCE_CANCEL_REASON: &str = "circuit_authority_superseded_at_delivery";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeliveryFenceOutcome {
+    /// Non-circuit row, or the row's circuit authority is still current: the
+    /// lease is retained, `delivery_fence_checked_at` is stamped, and the caller
+    /// must proceed with the Discord send.
+    Cleared,
+    /// The row's circuit episode/authority was superseded (a newer epoch was
+    /// reserved) or revoked (`revoked_at`): the row is cancelled, its dedupe
+    /// identity released, `delivery_fence_checked_at` stamped, and the caller
+    /// must NOT deliver.
+    Fenced,
+    /// The lease (`claim_owner`/`claimed_at`) no longer matches or the row left
+    /// `processing`: a stale worker performed no mutation and must NOT deliver.
+    LeaseLost,
+}
+
+/// Re-validate a claimed `processing` outbox row's circuit authority in the
+/// instant before the worker performs the Discord HTTP send (#4615 S3b — the
+/// worker delivery fence that activates S3a's dormant authority columns).
+///
+/// The fence is lease-guarded exactly like `mark_message_outbox_sent_pg` /
+/// `mark_message_outbox_failed_pg`: every mutation requires the row to still be
+/// `processing` under the caller's `claim_owner` + `claimed_at`, so a worker
+/// whose lease was stolen (stale-claim reclaimed by another owner) neither
+/// fences nor stamps the row.
+///
+/// Non-circuit rows (`circuit_provider IS NULL`) are always cleared and keep
+/// their existing lifecycle. A circuit row is fenced when no non-revoked
+/// authority row matches its stamped coordinate — this catches the exact gap
+/// `revoke_on_fresh_vouch` cannot close, because that revoke only cancels
+/// `held`/`pending` rows and a row already escaped to `processing` would
+/// otherwise deliver a superseded alert. Both the fence-cancel and the
+/// clear-stamp run in one transaction and target disjoint rows.
+pub(crate) async fn fence_claimed_delivery(
+    pool: &PgPool,
+    outbox_id: i64,
+    claim_owner: &str,
+    claimed_at: chrono::DateTime<chrono::Utc>,
+) -> Result<DeliveryFenceOutcome, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let fenced = sqlx::query(
+        "UPDATE message_outbox
+            SET status='cancelled', cancelled_at=NOW(), cancel_reason=$4,
+                delivery_fence_checked_at=NOW(), dedupe_key=NULL, dedupe_expires_at=NULL,
+                claimed_at=NULL, claim_owner=NULL, next_attempt_at=NULL
+          WHERE id=$1 AND claim_owner=$2 AND claimed_at=$3 AND status='processing'
+            AND circuit_provider IS NOT NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM message_outbox_circuit_authority a
+                 WHERE a.provider = message_outbox.circuit_provider
+                   AND a.channel_id = message_outbox.circuit_channel_id
+                   AND a.owner_instance_id = message_outbox.circuit_owner_instance_id
+                   AND a.owner_generation = message_outbox.circuit_owner_generation
+                   AND a.episode_key = message_outbox.circuit_episode_key
+                   AND a.baseline_relay_offset = message_outbox.circuit_baseline_relay_offset
+                   AND a.open_generation = message_outbox.circuit_open_generation
+                   AND a.authority_epoch = message_outbox.circuit_authority_epoch
+                   AND a.revoked_at IS NULL)",
+    )
+    .bind(outbox_id)
+    .bind(claim_owner)
+    .bind(claimed_at)
+    .bind(DELIVERY_FENCE_CANCEL_REASON)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if fenced == 1 {
+        tx.commit().await?;
+        return Ok(DeliveryFenceOutcome::Fenced);
+    }
+    let cleared = sqlx::query(
+        "UPDATE message_outbox SET delivery_fence_checked_at=NOW()
+          WHERE id=$1 AND claim_owner=$2 AND claimed_at=$3 AND status='processing'",
+    )
+    .bind(outbox_id)
+    .bind(claim_owner)
+    .bind(claimed_at)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    tx.commit().await?;
+    Ok(if cleared == 1 {
+        DeliveryFenceOutcome::Cleared
+    } else {
+        DeliveryFenceOutcome::LeaseLost
+    })
+}

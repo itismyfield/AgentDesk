@@ -2487,6 +2487,78 @@ mod message_outbox_retry_tests {
         pool.close().await;
         pg_db.drop().await;
     }
+
+    /// #4615 S3b mutation sentinel: a claimed circuit row whose authority is
+    /// superseded (here: no matching authority row) must be fenced by the drain
+    /// loop — never handed to `deliver()` — and left `cancelled` with
+    /// `delivery_fence_checked_at` stamped. Removing the fence call regresses
+    /// this into a delivery + `sent`.
+    #[tokio::test]
+    async fn drain_fences_superseded_circuit_row_before_delivery_pg() {
+        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_drain_delivery_fence",
+            "worker delivery fence drain integration",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = pg_db.connect_and_migrate().await;
+        // A fully circuit-stamped pending row with NO backing authority row:
+        // its stamped coordinate is superseded by absence, so the fence must
+        // cancel it instead of delivering.
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO message_outbox(target,content,bot,source,status,
+                circuit_provider,circuit_channel_id,circuit_episode_key,
+                circuit_baseline_relay_offset,circuit_open_generation,circuit_authority_epoch,
+                circuit_dedupe_ttl_secs,circuit_owner_instance_id,circuit_owner_generation)
+             VALUES('channel:777','fenced body','notify','system','pending',
+                'discord','777','ep1',0,0,1,300,'node-a',7) RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert superseded circuit row");
+
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<i64>::new()));
+        let observed_delivery = observed.clone();
+        let drained = drain_message_outbox_batch_once(&pool, Some("fence-drain-test"), {
+            move |row| {
+                let observed_delivery = observed_delivery.clone();
+                async move {
+                    observed_delivery
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .push(row.id);
+                    ("200 OK".to_string(), String::new())
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(drained, 1, "the row is claimed and accounted for");
+        assert!(
+            observed
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .is_empty(),
+            "a superseded circuit row must never reach deliver()"
+        );
+        let row =
+            sqlx::query("SELECT status,delivery_fence_checked_at FROM message_outbox WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("load fenced row");
+        assert_eq!(row.get::<String, _>("status"), "cancelled");
+        assert!(
+            row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("delivery_fence_checked_at")
+                .is_some(),
+            "the fenced row must stamp delivery_fence_checked_at"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
 }
 
 impl PendingMessageOutboxRow {
@@ -2755,6 +2827,48 @@ where
     }
 
     for row in &pending {
+        // #4615 S3b: re-validate circuit authority under the claim lease before
+        // the Discord send. A row whose circuit episode/authority was superseded
+        // or revoked after it was claimed (and therefore escaped
+        // `revoke_on_fresh_vouch`, which only cancels held/pending rows) is
+        // fenced off instead of delivered. Non-circuit rows clear trivially. The
+        // fence fails closed: a lease-loss or DB error skips this row this cycle
+        // rather than risk delivering an un-validated alert.
+        use crate::services::message_outbox_circuit_authority::DeliveryFenceOutcome;
+        match crate::services::message_outbox_circuit_authority::fence_claimed_delivery(
+            pg_pool,
+            row.id,
+            &row.claim_owner,
+            row.claimed_at,
+        )
+        .await
+        {
+            Ok(DeliveryFenceOutcome::Cleared) => {}
+            Ok(DeliveryFenceOutcome::Fenced) => {
+                tracing::info!(
+                    outbox_id = row.id,
+                    target = %row.target,
+                    "[outbox] delivery fenced: circuit authority superseded before send"
+                );
+                continue;
+            }
+            Ok(DeliveryFenceOutcome::LeaseLost) => {
+                tracing::warn!(
+                    outbox_id = row.id,
+                    claim_owner = %row.claim_owner,
+                    "[outbox] delivery fence: stale lease, skipping send"
+                );
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    outbox_id = row.id,
+                    %error,
+                    "[outbox] delivery fence db error, deferring send this cycle"
+                );
+                continue;
+            }
+        }
         let (status, err_text) = deliver(row.clone()).await;
         if status == "200 OK" {
             if mark_message_outbox_sent_pg(pg_pool, row.id, &row.claim_owner, row.claimed_at)

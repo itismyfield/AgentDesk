@@ -38,7 +38,7 @@
 | `src/receipt.rs` | 1842 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |
 | `src/reconcile.rs` | 1902 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |
 | `src/server/maintenance.rs` | 1153 | shrink | server-runtime | 2026-10-31 | #4710 |  |
-| `src/server/mod.rs` | 2757 | shrink | server-runtime | 2027-01-31 | #4710 |  |
+| `src/server/mod.rs` | 2799 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/server/routes/agents.rs` | 1240 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/server/routes/agents_crud.rs` | 1297 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/server/routes/agents_setup.rs` | 1366 | shrink | server-runtime | 2027-01-31 | #4710 |  |

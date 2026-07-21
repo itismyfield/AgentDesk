@@ -475,3 +475,235 @@ async fn activation_then_vouch_cancels_pending_and_releases_dedupe_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+// #4615 S3b: worker delivery fence — re-validates a claimed `processing` row's
+// circuit authority immediately before the Discord send.
+
+/// Drive a staged+activated circuit row to `processing` under `owner`'s lease,
+/// mirroring `claim_pending_message_outbox_batch_pg` (status/claim_owner/claimed_at).
+async fn claim_as(pool: &PgPool, id: i64, owner: &str) -> chrono::DateTime<chrono::Utc> {
+    sqlx::query_scalar(
+        "UPDATE message_outbox SET status='processing', claim_owner=$2, claimed_at=NOW()
+          WHERE id=$1 RETURNING claimed_at",
+    )
+    .bind(id)
+    .bind(owner)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// reserve → stage_held → activate_fenced → claim, returning the processing row
+/// id, its live coordinate, and the claim's `claimed_at`.
+async fn processing_circuit_row(
+    pool: &PgPool,
+    channel: &str,
+    owner: &str,
+) -> (i64, CircuitCoordinate, chrono::DateTime<chrono::Utc>) {
+    let c = reserve(pool, channel, "e1", 1, None).await;
+    let target = format!("channel:{channel}");
+    let id = match stage_held(pool, message(&target, "fence"), &c, 300)
+        .await
+        .unwrap()
+    {
+        StageHeldOutcome::Staged { id } => id,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        activate_fenced(pool, id, &c).await.unwrap(),
+        CircuitActivation::Activated
+    );
+    let claimed_at = claim_as(pool, id, owner).await;
+    (id, c, claimed_at)
+}
+
+#[tokio::test]
+async fn fence_revoked_authority_cancels_processing_row_pg() {
+    let Some((db, pool)) = setup("fence_revoked_authority").await else {
+        return;
+    };
+    owner(&pool, "601", "node-a").await;
+    let (id, c, claimed_at) = processing_circuit_row(&pool, "601", "w1").await;
+    // A fresh vouch revokes authority but only cancels held/pending rows — this
+    // already-processing row escapes it. The fence must catch it.
+    assert_eq!(
+        revoke_on_fresh_vouch(&pool, &c, "live").await.unwrap(),
+        FreshVouchRevoke::Revoked
+    );
+    assert_eq!(
+        fence_claimed_delivery(&pool, id, "w1", claimed_at)
+            .await
+            .unwrap(),
+        DeliveryFenceOutcome::Fenced
+    );
+    let row = sqlx::query(
+        "SELECT status,cancel_reason,dedupe_key,cancelled_at,delivery_fence_checked_at
+           FROM message_outbox WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<String, _>("status"), "cancelled");
+    assert_eq!(
+        row.get::<Option<String>, _>("cancel_reason").as_deref(),
+        Some(DELIVERY_FENCE_CANCEL_REASON)
+    );
+    assert!(row.get::<Option<String>, _>("dedupe_key").is_none());
+    assert!(
+        row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("cancelled_at")
+            .is_some()
+    );
+    assert!(
+        row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("delivery_fence_checked_at")
+            .is_some(),
+        "fenced row must stamp delivery_fence_checked_at"
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn fence_superseded_epoch_cancels_processing_row_pg() {
+    let Some((db, pool)) = setup("fence_superseded_epoch").await else {
+        return;
+    };
+    owner(&pool, "602", "node-a").await;
+    let (id, _c, claimed_at) = processing_circuit_row(&pool, "602", "w1").await;
+    // A newer episode reserves epoch 2, superseding the row's stamped epoch 1.
+    let second = reserve(&pool, "602", "e2", 1, Some(1)).await;
+    assert_eq!(second.authority_epoch, 2);
+    assert_eq!(
+        fence_claimed_delivery(&pool, id, "w1", claimed_at)
+            .await
+            .unwrap(),
+        DeliveryFenceOutcome::Fenced
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM message_outbox WHERE id=$1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "cancelled");
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn fence_live_authority_clears_and_stamps_pg() {
+    let Some((db, pool)) = setup("fence_live_authority").await else {
+        return;
+    };
+    owner(&pool, "603", "node-a").await;
+    let (id, _c, claimed_at) = processing_circuit_row(&pool, "603", "w1").await;
+    assert_eq!(
+        fence_claimed_delivery(&pool, id, "w1", claimed_at)
+            .await
+            .unwrap(),
+        DeliveryFenceOutcome::Cleared
+    );
+    let row = sqlx::query(
+        "SELECT status,claim_owner,delivery_fence_checked_at FROM message_outbox WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        row.get::<String, _>("status"),
+        "processing",
+        "a live row keeps its lease and proceeds to delivery"
+    );
+    assert_eq!(
+        row.get::<Option<String>, _>("claim_owner").as_deref(),
+        Some("w1")
+    );
+    assert!(
+        row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("delivery_fence_checked_at")
+            .is_some(),
+        "a cleared row still stamps delivery_fence_checked_at"
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn fence_stale_lease_is_noop_pg() {
+    let Some((db, pool)) = setup("fence_stale_lease").await else {
+        return;
+    };
+    owner(&pool, "604", "node-a").await;
+    let (id, c, stale_claimed_at) = processing_circuit_row(&pool, "604", "w1").await;
+    // Another worker steals the lease (stale-claim reclaim).
+    let fresh_claimed_at = claim_as(&pool, id, "w2").await;
+    // Supersede the authority so, were the stale worker allowed to act, it would
+    // fence the row — proving the lease guard (not authority state) is what stops it.
+    assert_eq!(
+        revoke_on_fresh_vouch(&pool, &c, "live").await.unwrap(),
+        FreshVouchRevoke::Revoked
+    );
+    assert_eq!(
+        fence_claimed_delivery(&pool, id, "w1", stale_claimed_at)
+            .await
+            .unwrap(),
+        DeliveryFenceOutcome::LeaseLost
+    );
+    let row = sqlx::query(
+        "SELECT status,claim_owner,claimed_at,delivery_fence_checked_at
+           FROM message_outbox WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<String, _>("status"), "processing");
+    assert_eq!(
+        row.get::<Option<String>, _>("claim_owner").as_deref(),
+        Some("w2")
+    );
+    assert_eq!(
+        row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("claimed_at"),
+        Some(fresh_claimed_at)
+    );
+    assert!(
+        row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("delivery_fence_checked_at")
+            .is_none(),
+        "a stale worker must not stamp or mutate the row"
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn fence_non_circuit_row_clears_pg() {
+    let Some((db, pool)) = setup("fence_non_circuit").await else {
+        return;
+    };
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO message_outbox(target,content,bot,source,status)
+         VALUES('channel:900','body','notify','system','pending') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let claimed_at = claim_as(&pool, id, "w1").await;
+    assert_eq!(
+        fence_claimed_delivery(&pool, id, "w1", claimed_at)
+            .await
+            .unwrap(),
+        DeliveryFenceOutcome::Cleared
+    );
+    let row =
+        sqlx::query("SELECT status,delivery_fence_checked_at FROM message_outbox WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row.get::<String, _>("status"), "processing");
+    assert!(
+        row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("delivery_fence_checked_at")
+            .is_some()
+    );
+    pool.close().await;
+    db.drop().await;
+}

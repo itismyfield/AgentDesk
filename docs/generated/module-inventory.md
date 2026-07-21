@@ -216,7 +216,7 @@
 | `runtime_layout::paths` | `src/runtime_layout/paths.rs` | 144 | 110 | 34 |  |
 | `runtime_layout::skill_refresh` | `src/runtime_layout/skill_refresh.rs` | 376 | 276 | 100 |  |
 | `runtime_layout::skill_sync` | `src/runtime_layout/skill_sync.rs` | 1253 | 962 | 291 |  |
-| `server` | `src/server/mod.rs` | 3363 | 2757 | 606 | giant-file |
+| `server` | `src/server/mod.rs` | 3477 | 2799 | 678 | giant-file |
 | `server::cluster` | `src/server/cluster.rs` | 9 | 9 | 0 |  |
 | `server::cluster_session_routing` | `src/server/cluster_session_routing.rs` | 9 | 9 | 0 |  |
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 67 | 67 | 0 |  |
@@ -994,7 +994,7 @@
 | `services::memory::memento_throttle` | `src/services/memory/memento_throttle.rs` | 884 | 769 | 115 |  |
 | `services::memory::runtime_state` | `src/services/memory/runtime_state.rs` | 315 | 315 | 0 |  |
 | `services::message_outbox` | `src/services/message_outbox.rs` | 1426 | 869 | 557 |  |
-| `services::message_outbox_circuit_authority` | `src/services/message_outbox_circuit_authority.rs` | 495 | 495 | 0 |  |
+| `services::message_outbox_circuit_authority` | `src/services/message_outbox_circuit_authority.rs` | 586 | 586 | 0 |  |
 | `services::message_outbox_recovery` | `src/services/message_outbox_recovery.rs` | 166 | 166 | 0 |  |
 | `services::message_outbox_recovery_support` | `src/services/message_outbox_recovery_support.rs` | 138 | 138 | 0 |  |
 | `services::monitoring_store` | `src/services/monitoring_store.rs` | 141 | 141 | 0 |  |
