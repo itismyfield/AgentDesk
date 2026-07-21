@@ -324,6 +324,95 @@ fn degenerate_key_content_guard_requires_no_fresh_output_4081() {
 }
 
 #[test]
+fn degenerate_duplicate_refusal_core_gates_on_pending_boundary_4714() {
+    // Pure decision core (#4081/#4714). A byte-identical re-post with no fresh
+    // in-range text and NO pending user boundary is the only refusal case.
+    assert!(
+        degenerate_duplicate_refuses_delivery(true, false, false),
+        "#4081: a true re-post (no fresh text, no pending boundary) must be refused"
+    );
+    // #4714: a pending user boundary marks a live follow-up turn — never suppress.
+    assert!(
+        !degenerate_duplicate_refuses_delivery(true, false, true),
+        "#4714: a pending user boundary must relay even on a fingerprint collision"
+    );
+    // Fresh in-range assistant text is a real new answer regardless of boundary.
+    assert!(!degenerate_duplicate_refuses_delivery(true, true, false));
+    // A non-duplicate body always relays.
+    assert!(!degenerate_duplicate_refuses_delivery(false, false, false));
+}
+
+#[test]
+fn pending_user_boundary_relays_fingerprint_collision_followup_4714() {
+    // #4714 regression (end-to-end through the real prompt-anchor gate): a
+    // no-inflight follow-up turn whose body byte-collides with a prior delivered
+    // fingerprint MUST still be relayed while a user boundary is pending (prompt
+    // anchor present), while a genuine re-post of the same delivered turn (anchor
+    // cleared, no boundary) MUST still be refused (#4081).
+    let temp = tempfile::TempDir::new().expect("temp runtime root");
+    let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
+
+    let provider = ProviderKind::Codex;
+    let session = "AgentDesk-codex-adk-cdx-4714";
+    let channel_id = poise::serenity_prelude::ChannelId::new(7_4714);
+    let body = "identical answer body";
+    let gen_path = crate::services::tmux_common::session_temp_path(session, "generation");
+    std::fs::create_dir_all(std::path::Path::new(&gen_path).parent().unwrap()).unwrap();
+    std::fs::write(&gen_path, b"1").unwrap();
+    // The prior turn was already delivered — its content fingerprint is on record.
+    crate::services::discord::outbound::delivery_record::record_delivered_content_fingerprint(
+        &provider, channel_id, session, body,
+    );
+
+    // A new follow-up user turn arrives -> a prompt anchor is recorded and is still
+    // pending (no response delivered for it yet).
+    crate::services::tui_prompt_dedupe::record_prompt_anchor(
+        provider.as_str(),
+        session,
+        channel_id.get(),
+        1_528_976_408_649_531_434,
+    );
+
+    // #4714 core: identical fingerprint + no fresh in-range text + degenerate id-0
+    // key, BUT a user boundary is pending -> a genuinely new follow-up turn whose
+    // identity was lost. It must NOT be suppressed.
+    let followup_decision = watcher_direct_terminal_response_decision(
+        &provider, channel_id, 33, session, None, 50, false, body,
+    );
+    assert_eq!(
+        followup_decision,
+        WatcherDirectTerminalResponseDecision::Send,
+        "a no-inflight follow-up turn with a pending prompt anchor must relay even when its \
+         body collides with a prior delivered fingerprint (#4714)"
+    );
+    assert!(followup_decision.has_sendable_body());
+    assert!(!followup_decision.refused_duplicate());
+
+    // The follow-up's response is delivered -> its prompt anchor clears. The exact
+    // same collision with NO pending boundary is now a genuine re-post and must
+    // still be refused, preserving #4081.
+    let cleared = crate::services::tui_prompt_dedupe::take_prompt_anchor_for_response(
+        provider.as_str(),
+        session,
+        channel_id.get(),
+    );
+    assert!(
+        cleared.is_some(),
+        "the pending prompt anchor must clear on delivery"
+    );
+    let repost_decision = watcher_direct_terminal_response_decision(
+        &provider, channel_id, 33, session, None, 50, false, body,
+    );
+    assert_eq!(
+        repost_decision,
+        WatcherDirectTerminalResponseDecision::RefusedDegenerateDuplicate,
+        "a genuine re-post of an already-delivered turn (no pending boundary) must still be \
+         deduped so #4081 does not regress"
+    );
+    assert!(repost_decision.refused_duplicate());
+}
+
+#[test]
 fn long_chunk_delivery_fingerprint_refuses_phantom_rerelay_4081() {
     let temp = tempfile::TempDir::new().expect("temp runtime root");
     let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
