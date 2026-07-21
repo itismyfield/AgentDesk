@@ -19,6 +19,15 @@ pub(super) const fn queue_pending_reactions_to_clear() -> [char; 3] {
     super::super::super::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS
 }
 
+fn steering_injection_succeeded(
+    outcome: &crate::services::tui_steering::SteeringOutcome,
+) -> bool {
+    matches!(
+        outcome,
+        crate::services::tui_steering::SteeringOutcome::Injected
+    )
+}
+
 /// Bundle of Discord-runtime dependencies that `handle_text_message`
 /// reads from outside its per-message parameters. Phase 2-pre.2 of
 /// intake-node-routing (docs/design/intake-node-routing.md): the body
@@ -2004,10 +2013,7 @@ pub(super) async fn handle_text_message(
             .unwrap_or_else(|error| {
                 crate::services::tui_steering::SteeringOutcome::Failed(error.to_string())
             });
-            let injected = matches!(
-                outcome,
-                crate::services::tui_steering::SteeringOutcome::Injected
-            );
+            let injected = steering_injection_succeeded(&outcome);
             let reaction = if injected { '🎯' } else { '⚠' };
             #[cfg(not(test))]
             let _ =
@@ -2021,23 +2027,26 @@ pub(super) async fn handle_text_message(
                 .await;
             #[cfg(test)]
             let _ = reaction;
-            let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
-            let _ = release_mailbox_after_hosted_tui_busy_pre_submit(
-                shared,
-                &bot_owner_provider,
-                channel_id,
-            )
-            .await;
-            let _ = channel_id.delete_message(http, placeholder_msg_id).await;
-            tv_clear_current(shared, http, channel_id, user_msg_id, "intake_tui_steering").await;
-            super::super::super::saturating_decrement_global_active(shared);
-            shared.turn_start_times.remove(&channel_id);
-            cancel_token
-                .cancelled
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            super::super::super::clear_watchdog_deadline_override(channel_id.get()).await;
-            intake_latency.log(channel_id.get(), provider_label, "tui_steered");
-            return Ok(());
+            if injected {
+                let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
+                let _ = release_mailbox_after_hosted_tui_busy_pre_submit(
+                    shared,
+                    &bot_owner_provider,
+                    channel_id,
+                )
+                .await;
+                let _ = channel_id.delete_message(http, placeholder_msg_id).await;
+                tv_clear_current(shared, http, channel_id, user_msg_id, "intake_tui_steering")
+                    .await;
+                super::super::super::saturating_decrement_global_active(shared);
+                shared.turn_start_times.remove(&channel_id);
+                cancel_token
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                super::super::super::clear_watchdog_deadline_override(channel_id.get()).await;
+                intake_latency.log(channel_id.get(), provider_label, "tui_steered");
+                return Ok(());
+            }
         }
     }
     #[cfg(unix)]
@@ -2774,6 +2783,36 @@ pub(super) async fn handle_text_message(
 
 #[cfg(test)]
 mod tui_busy_pre_submit_queue_reaction_tests {
+    use crate::services::tui_steering::SteeringOutcome;
+
+    #[test]
+    fn failed_or_unsafe_steering_falls_through_to_busy_followup_enqueue() {
+        assert!(!super::steering_injection_succeeded(
+            &SteeringOutcome::Failed("submit failed".to_string())
+        ));
+        assert!(!super::steering_injection_succeeded(
+            &SteeringOutcome::Unsafe("composer changed".to_string())
+        ));
+        assert!(super::steering_injection_succeeded(
+            &SteeringOutcome::Injected
+        ));
+
+        let module_src = include_str!("intake_turn.rs");
+        let steering_guard = module_src
+            .find("if injected {")
+            .expect("steering success owns its teardown guard");
+        let steering_return = module_src[steering_guard..]
+            .find("return Ok(());")
+            .map(|offset| steering_guard + offset)
+            .expect("successful steering returns after teardown");
+        let busy_enqueue = module_src[steering_return..]
+            .find("enqueue_busy_tui_followup_for_retry(")
+            .map(|offset| steering_return + offset)
+            .expect("failed steering falls through to the existing busy enqueue");
+
+        assert!(steering_guard < steering_return && steering_return < busy_enqueue);
+    }
+
     #[test]
     fn busy_pre_submit_enqueue_keeps_the_authoritative_queue_view() {
         let module_src = include_str!("intake_turn.rs");

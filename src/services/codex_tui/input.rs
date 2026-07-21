@@ -1169,24 +1169,46 @@ pub(crate) fn steering_snapshot_decision(
     Ok(())
 }
 
-fn inject_steering_prompt_using<C, R, S>(
+fn steering_submit_outcome_to_result(
+    outcome: CodexFollowupPromptSubmitOutcome,
+) -> Result<(), String> {
+    match outcome {
+        CodexFollowupPromptSubmitOutcome::Submitted => Ok(()),
+        CodexFollowupPromptSubmitOutcome::NotSubmitted { error }
+        | CodexFollowupPromptSubmitOutcome::Unconfirmed { error, .. } => Err(error),
+        CodexFollowupPromptSubmitOutcome::RetrySafeDraft { .. } => {
+            Err("codex tui steering prompt remained in the composer after submit".to_string())
+        }
+        CodexFollowupPromptSubmitOutcome::Cancelled => {
+            Err("codex tui steering prompt submission was cancelled".to_string())
+        }
+    }
+}
+
+fn inject_steering_prompt_using<C, R, U, S>(
     session_name: &str,
     prompt: &str,
     mut capture: C,
     mut record_prompt: R,
+    mut remove_prompt: U,
     mut submit: S,
 ) -> Result<(), String>
 where
     C: FnMut(&str) -> PromptReadinessSnapshot,
     R: FnMut(&str, &str, &str),
-    S: FnMut(&str, &[TuiInputAction]) -> Result<(), String>,
+    U: FnMut(&str, &str, &str),
+    S: FnMut(&str, &str) -> CodexFollowupPromptSubmitOutcome,
 {
-    let actions = plan_prompt_submit(prompt)?;
+    plan_prompt_submit(prompt)?;
     with_composer_mutation_lock(session_name, || {
         let final_snapshot = capture(session_name);
         steering_snapshot_decision(&final_snapshot).map_err(str::to_string)?;
         record_prompt("codex", session_name, prompt);
-        submit(session_name, &actions)
+        let result = steering_submit_outcome_to_result(submit(session_name, prompt));
+        if result.is_err() {
+            remove_prompt("codex", session_name, prompt);
+        }
+        result
     })
 }
 
@@ -1196,10 +1218,8 @@ pub(crate) fn inject_steering_prompt(session_name: &str, prompt: &str) -> Result
         prompt,
         prompt_readiness_snapshot,
         crate::services::tui_prompt_dedupe::record_discord_originated_prompt,
-        |session_name, actions| {
-            let mut executor = TmuxTuiActionExecutor::default();
-            run_actions_with_executor(session_name, actions, None, &mut executor)
-        },
+        crate::services::tui_prompt_dedupe::remove_discord_originated_prompt,
+        |session_name, prompt| submit_codex_followup_prompt_under_lock(session_name, prompt, None),
     )
 }
 
@@ -2149,9 +2169,10 @@ mod tests {
     }
 
     #[test]
-    fn codex_injection_records_discord_originated_prompt() {
+    fn codex_injection_records_before_confirmed_submit() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let record_events = events.clone();
+        let remove_events = events.clone();
         let submit_events = events.clone();
 
         inject_steering_prompt_using(
@@ -2164,9 +2185,15 @@ mod tests {
                     .unwrap()
                     .push(format!("record:{provider}:{session_name}:{prompt}"));
             },
+            move |provider, session_name, prompt| {
+                remove_events
+                    .lock()
+                    .unwrap()
+                    .push(format!("remove:{provider}:{session_name}:{prompt}"));
+            },
             move |_, _| {
                 submit_events.lock().unwrap().push("submit".to_string());
-                Ok(())
+                CodexFollowupPromptSubmitOutcome::Submitted
             },
         )
         .unwrap();
@@ -2176,6 +2203,102 @@ mod tests {
             vec![
                 "record:codex:agentdesk-codex-steering-dedupe-test:steer now",
                 "submit"
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_steering_production_path_uses_confirmed_submit() {
+        let module_src = include_str!("input.rs");
+        let steering_entry = module_src
+            .find("pub(crate) fn inject_steering_prompt(")
+            .expect("Codex steering entry point exists");
+        let warm_followup_entry = module_src[steering_entry..]
+            .find("pub(crate) fn submit_codex_followup_prompt(")
+            .map(|offset| steering_entry + offset)
+            .expect("warm-followup entry follows steering entry");
+        let steering_body = &module_src[steering_entry..warm_followup_entry];
+
+        assert!(steering_body.contains("submit_codex_followup_prompt_under_lock("));
+        assert!(!steering_body.contains("run_actions_with_executor("));
+    }
+
+    #[test]
+    fn codex_injection_rejects_stranded_draft_and_rolls_back_dedupe() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let record_events = events.clone();
+        let remove_events = events.clone();
+        let first = active_box_draft_snapshot("steer now");
+        let second = first.clone();
+
+        let error = inject_steering_prompt_using(
+            "agentdesk-codex-steering-confirmation-test",
+            "steer now",
+            |_| submit_snapshot(true, true, true, false),
+            move |provider, session_name, prompt| {
+                record_events
+                    .lock()
+                    .unwrap()
+                    .push(format!("record:{provider}:{session_name}:{prompt}"));
+            },
+            move |provider, session_name, prompt| {
+                remove_events
+                    .lock()
+                    .unwrap()
+                    .push(format!("remove:{provider}:{session_name}:{prompt}"));
+            },
+            move |_, _| CodexFollowupPromptSubmitOutcome::RetrySafeDraft {
+                first: first.clone(),
+                second: second.clone(),
+            },
+        )
+        .expect_err("a stranded draft must not report steering success");
+
+        assert!(error.contains("remained in the composer"));
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "record:codex:agentdesk-codex-steering-confirmation-test:steer now",
+                "remove:codex:agentdesk-codex-steering-confirmation-test:steer now"
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_injection_rejects_unconfirmed_submit_and_rolls_back_dedupe() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let record_events = events.clone();
+        let remove_events = events.clone();
+
+        let error = inject_steering_prompt_using(
+            "agentdesk-codex-steering-unconfirmed-test",
+            "steer now",
+            |_| submit_snapshot(true, true, true, false),
+            move |provider, session_name, prompt| {
+                record_events
+                    .lock()
+                    .unwrap()
+                    .push(format!("record:{provider}:{session_name}:{prompt}"));
+            },
+            move |provider, session_name, prompt| {
+                remove_events
+                    .lock()
+                    .unwrap()
+                    .push(format!("remove:{provider}:{session_name}:{prompt}"));
+            },
+            move |_, _| CodexFollowupPromptSubmitOutcome::Unconfirmed {
+                error: "submit could not be confirmed".to_string(),
+                snapshot: submit_snapshot(true, false, false, false),
+            },
+        )
+        .expect_err("an unconfirmed submit must not report steering success");
+
+        assert_eq!(error, "submit could not be confirmed");
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "record:codex:agentdesk-codex-steering-unconfirmed-test:steer now",
+                "remove:codex:agentdesk-codex-steering-unconfirmed-test:steer now"
             ]
         );
     }
