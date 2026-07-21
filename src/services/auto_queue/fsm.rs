@@ -593,6 +593,7 @@ pub(super) fn slot_requires_thread_reset_before_reuse_prefer_pg(
     Err("postgres backend required for auto-queue slot reset".to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn create_activate_dispatch_for_entry_prefer_pg(
     deps: &AutoQueueActivateDeps,
     card_id: &str,

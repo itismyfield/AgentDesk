@@ -141,6 +141,7 @@ pub(in crate::services::discord) fn orphan_tui_anchor_should_clear(
 /// so a deferred claim / recovery that saved an inflight row, a marker, or a
 /// durable pending-start AFTER the verdict aborts the removal instead of
 /// stripping a legitimate `⏳`.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) async fn sweep_orphan_tui_anchors_with_probes(
     reconciler: &TurnViewReconciler,
     shared: &SharedData,

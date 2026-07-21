@@ -73,6 +73,7 @@ pub(crate) fn force_clean_should_preserve_resume_selector(
 /// (which clears `desynced` and the kill never happens). A genuinely hung turn
 /// stays desynced past that window and is still cleaned.
 /// #3656: age from the current turn's `started_at` (not `updated_at`) so consecutive short turns under one session key don't accumulate into a fake stall.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn stall_watchdog_should_force_clean(
     attached: bool,
     desynced: bool,
@@ -124,6 +125,7 @@ pub(crate) fn stall_watchdog_should_force_clean(
 /// Callers must NOT clean on this signal alone - the user may be reading the
 /// delivered response and about to send the next message. The helper exists
 /// so the watchdog can emit telemetry without altering recovery behaviour.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn inflight_completed_stale_leak_detected(
     attached: bool,
     desynced: bool,
@@ -208,6 +210,7 @@ fn outbound_activity_is_recent(
     age_ms < threshold_secs.saturating_mul(1000)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn stale_idle_foreground_queue_detected(
     active_turn: RelayActiveTurn,
     mailbox_has_cancel_token: bool,
@@ -239,6 +242,7 @@ pub(crate) fn stale_idle_foreground_queue_detected(
     age_secs >= 0 && (age_secs as u64) >= threshold_secs
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn stall_watchdog_should_force_clean_orphan_explicit_background_work(
     relay_stall_state: RelayStallState,
     attached: bool,

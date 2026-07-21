@@ -273,6 +273,7 @@ pub(crate) fn parse_voice_background_handoff_correlation_id(text: &str) -> Optio
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_voice_transcript_announcement(
     transcript: &str,
     _user_id: u64,
@@ -311,6 +312,7 @@ pub(crate) fn parse_voice_transcript_announcement_ref(text: &str) -> Option<Stri
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn voice_transcript_announcement_meta(
     transcript: &str,
     user_id: u64,

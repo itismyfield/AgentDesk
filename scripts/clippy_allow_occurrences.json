@@ -1,0 +1,866 @@
+{
+  "schema_version": 1,
+  "lints": [
+    "large_enum_variant",
+    "result_large_err",
+    "too_many_arguments",
+    "type_complexity"
+  ],
+  "occurrences": [
+    {
+      "path": "src/cli/args.rs",
+      "lint": "large_enum_variant",
+      "count": 1
+    },
+    {
+      "path": "src/cli/direct.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/cli/init.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/cli/migrate/apply.rs",
+      "lint": "too_many_arguments",
+      "count": 3
+    },
+    {
+      "path": "src/config.rs",
+      "lint": "large_enum_variant",
+      "count": 1
+    },
+    {
+      "path": "src/db/dispatches/mod.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/db/dispatches/outbox/delivery.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/db/scheduled_messages.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/dispatch/dispatch_create.rs",
+      "lint": "too_many_arguments",
+      "count": 6
+    },
+    {
+      "path": "src/dispatch/dispatch_status.rs",
+      "lint": "too_many_arguments",
+      "count": 3
+    },
+    {
+      "path": "src/engine/ops/http_ops.rs",
+      "lint": "result_large_err",
+      "count": 1
+    },
+    {
+      "path": "src/server/routes/agents_crud.rs",
+      "lint": "result_large_err",
+      "count": 1
+    },
+    {
+      "path": "src/server/routes/agents_crud.rs",
+      "lint": "type_complexity",
+      "count": 1
+    },
+    {
+      "path": "src/server/routes/agents_setup.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/server/routes/escalation.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/server/routes/escalation.rs",
+      "lint": "type_complexity",
+      "count": 1
+    },
+    {
+      "path": "src/server/routes/message_outbox.rs",
+      "lint": "result_large_err",
+      "count": 1
+    },
+    {
+      "path": "src/server/routes/resume.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/server/routes/review_verdict/verdict_route.rs",
+      "lint": "type_complexity",
+      "count": 1
+    },
+    {
+      "path": "src/services/agents/serialization.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/auto_queue/fsm.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/auto_queue/planning.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/claude.rs",
+      "lint": "too_many_arguments",
+      "count": 7
+    },
+    {
+      "path": "src/services/claude_e/process.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/claude_tui/hook_relay.rs",
+      "lint": "too_many_arguments",
+      "count": 6
+    },
+    {
+      "path": "src/services/claude_tui/hook_relay/ordered_queue.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/claude_tui/hosting/warm_followup.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/claude_tui/transcript_tail.rs",
+      "lint": "type_complexity",
+      "count": 1
+    },
+    {
+      "path": "src/services/cluster/intake_router_hook/owner_record.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/cluster/intake_worker.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/cluster/node_registry.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/cluster/stream_relay.rs",
+      "lint": "large_enum_variant",
+      "count": 1
+    },
+    {
+      "path": "src/services/cluster/stream_relay.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/codex.rs",
+      "lint": "too_many_arguments",
+      "count": 8
+    },
+    {
+      "path": "src/services/codex_tmux_wrapper.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/codex_tui/rollout_tail.rs",
+      "lint": "too_many_arguments",
+      "count": 6
+    },
+    {
+      "path": "src/services/codex_tui/warm_followup.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/adk_session.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/agent_handoff.rs",
+      "lint": "too_many_arguments",
+      "count": 3
+    },
+    {
+      "path": "src/services/discord/catch_up/classification.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/discord/commands/control.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/commands/voice.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/footer_view_reconciler/mod.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/discord/footer_view_reconciler/registry.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/formatting.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/discord/formatting/long_send_rollback.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/health/headless_turn.rs",
+      "lint": "too_many_arguments",
+      "count": 4
+    },
+    {
+      "path": "src/services/discord/health/recovery/watchdog_decisions.rs",
+      "lint": "too_many_arguments",
+      "count": 4
+    },
+    {
+      "path": "src/services/discord/health/stall_liveness.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/health/stall_verdict.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/inflight/clear_store/mod.rs",
+      "lint": "too_many_arguments",
+      "count": 3
+    },
+    {
+      "path": "src/services/discord/inflight/model.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/discord/meeting_orchestrator.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/mod.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/outbound/delivery.rs",
+      "lint": "too_many_arguments",
+      "count": 3
+    },
+    {
+      "path": "src/services/discord/outbound/delivery_record.rs",
+      "lint": "too_many_arguments",
+      "count": 3
+    },
+    {
+      "path": "src/services/discord/outbound/manual_delivery.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/discord/outbound/send_gate.rs",
+      "lint": "too_many_arguments",
+      "count": 4
+    },
+    {
+      "path": "src/services/discord/placeholder_live_events/mod.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/prompt_builder/channel_recent_context.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/prompt_builder/memory_guidance.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/prompt_builder/mod.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/discord/recovery_engine/manual_rebind/episode_handoff.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/recovery_engine/manual_rebind/mod.rs",
+      "lint": "large_enum_variant",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/recovery_engine/manual_rebind/mod.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/recovery_engine/rebind_runtime.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/recovery_engine/status_panel_completion_producer.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/recovery_paths/controller_cutover.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/discord/recovery_paths/restart.rs",
+      "lint": "too_many_arguments",
+      "count": 3
+    },
+    {
+      "path": "src/services/discord/relay_owner_observability.rs",
+      "lint": "too_many_arguments",
+      "count": 4
+    },
+    {
+      "path": "src/services/discord/relay_recovery_auto_heal_apply.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/relay_recovery_circuit_breaker.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/router/intake_dispatch/queued.rs",
+      "lint": "large_enum_variant",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/router/intake_dispatch/queued.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/router/intake_dispatch/skill.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/router/message_handler/headless_turn.rs",
+      "lint": "too_many_arguments",
+      "count": 4
+    },
+    {
+      "path": "src/services/discord/router/message_handler/intake_turn.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/router/message_handler/intake_turn/race_loss.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/router/message_handler/intake_turn/voice_intake.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/router/message_handler/tui_followup.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/discord/router/message_handler/voice_announcement_scope.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/router/message_handler/watchdog.rs",
+      "lint": "too_many_arguments",
+      "count": 3
+    },
+    {
+      "path": "src/services/discord/router/response_format.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/router/turn_start.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/discord/runtime_bootstrap/framework_setup.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/runtime_bootstrap/gateway_lease.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/runtime_bootstrap/gateway_runtime.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/runtime_bootstrap/recovery_flush.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/runtime_bootstrap/shutdown.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/session_banner.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/session_relay_sink.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/discord/session_relay_sink/task_notification_context.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/discord/standby_relay.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/discord/task_notification_delivery/mod.rs",
+      "lint": "large_enum_variant",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/task_notification_delivery/mod.rs",
+      "lint": "too_many_arguments",
+      "count": 4
+    },
+    {
+      "path": "src/services/discord/task_notification_delivery/store/response_chunks.rs",
+      "lint": "too_many_arguments",
+      "count": 3
+    },
+    {
+      "path": "src/services/discord/task_notification_delivery/store/response_fence.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/tmux.rs",
+      "lint": "too_many_arguments",
+      "count": 5
+    },
+    {
+      "path": "src/services/discord/tmux_overload_retry.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/tmux_placeholder_suppression/ops.rs",
+      "lint": "too_many_arguments",
+      "count": 9
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/commit_decisions.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/completion_producer.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/entry.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/jsonl_rotation.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/liveness.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/orphan_status_panel_cleanup.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/panel_decisions.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/placeholder_reclaim.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/single_message_footer.rs",
+      "lint": "too_many_arguments",
+      "count": 3
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/streaming_session_banner.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/supervisor_relay.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/task_response_authority.rs",
+      "lint": "too_many_arguments",
+      "count": 3
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/terminal_direct_fallback.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/terminal_long_chunks.rs",
+      "lint": "too_many_arguments",
+      "count": 4
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/terminal_readiness.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/terminal_send.rs",
+      "lint": "too_many_arguments",
+      "count": 5
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/turn_identity.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/turn_stream_collector.rs",
+      "lint": "large_enum_variant",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/tmux_watcher/two_message_panel.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/discord/tui_direct_abort_marker/drain.rs",
+      "lint": "too_many_arguments",
+      "count": 3
+    },
+    {
+      "path": "src/services/discord/tui_direct_abort_marker/store.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/tui_direct_pending_start.rs",
+      "lint": "type_complexity",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/tui_prompt_relay/bridge_completion.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/tui_prompt_relay/claude_idle_bridge.rs",
+      "lint": "too_many_arguments",
+      "count": 3
+    },
+    {
+      "path": "src/services/discord/tui_prompt_relay/synthetic_start.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/tui_prompt_relay/synthetic_start/stale_reclaim.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/turn_bridge/cancel_finalize_policy.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/turn_bridge/finalize_epilogue.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/turn_bridge/retry_state.rs",
+      "lint": "too_many_arguments",
+      "count": 3
+    },
+    {
+      "path": "src/services/discord/turn_bridge/single_message_footer.rs",
+      "lint": "too_many_arguments",
+      "count": 5
+    },
+    {
+      "path": "src/services/discord/turn_bridge/status_panel.rs",
+      "lint": "large_enum_variant",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/turn_bridge/status_panel.rs",
+      "lint": "too_many_arguments",
+      "count": 4
+    },
+    {
+      "path": "src/services/discord/turn_bridge/terminal_controller_cutover.rs",
+      "lint": "too_many_arguments",
+      "count": 10
+    },
+    {
+      "path": "src/services/discord/turn_bridge/terminal_delivery.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/discord/turn_bridge/terminal_outcome_delivery/busy_followup_retry.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/turn_bridge/turn_analytics.rs",
+      "lint": "too_many_arguments",
+      "count": 4
+    },
+    {
+      "path": "src/services/discord/turn_bridge/two_message_panel.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/discord/turn_bridge/watcher_handoff.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/turn_finalizer/delivery_lease.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/turn_view_reconciler.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/discord/turn_view_reconciler/orphan_sweep.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/watchers/lifecycle.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/dispatches/discord_delivery/orchestration.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/dispatches/discord_delivery/thread_reuse.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/dispatches/outbox_claiming.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/dispatches/outbox_route.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/gemini.rs",
+      "lint": "too_many_arguments",
+      "count": 3
+    },
+    {
+      "path": "src/services/git/runner.rs",
+      "lint": "result_large_err",
+      "count": 4
+    },
+    {
+      "path": "src/services/maintenance/jobs/worktree_orphan_sweep.rs",
+      "lint": "result_large_err",
+      "count": 1
+    },
+    {
+      "path": "src/services/maintenance/jobs/worktree_orphan_sweep.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/message_outbox_circuit_authority.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/observability/emit.rs",
+      "lint": "too_many_arguments",
+      "count": 5
+    },
+    {
+      "path": "src/services/observability/turn_lifecycle.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/onboarding/mod.rs",
+      "lint": "too_many_arguments",
+      "count": 3
+    },
+    {
+      "path": "src/services/opencode.rs",
+      "lint": "too_many_arguments",
+      "count": 4
+    },
+    {
+      "path": "src/services/pipeline_routes.rs",
+      "lint": "too_many_arguments",
+      "count": 3
+    },
+    {
+      "path": "src/services/platform/binary_resolver.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/provider.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/provider_exec.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/qwen.rs",
+      "lint": "too_many_arguments",
+      "count": 4
+    },
+    {
+      "path": "src/services/qwen_tmux_wrapper.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/review_decision/accept.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    },
+    {
+      "path": "src/services/review_decision/tuning_aggregate.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/routines/agent_executor.rs",
+      "lint": "too_many_arguments",
+      "count": 5
+    },
+    {
+      "path": "src/services/routines/discord_log.rs",
+      "lint": "too_many_arguments",
+      "count": 3
+    },
+    {
+      "path": "src/services/routines/store.rs",
+      "lint": "type_complexity",
+      "count": 1
+    },
+    {
+      "path": "src/services/scheduled_messages.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/scheduling.rs",
+      "lint": "large_enum_variant",
+      "count": 1
+    },
+    {
+      "path": "src/services/session_activity.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/termination_audit.rs",
+      "lint": "too_many_arguments",
+      "count": 3
+    },
+    {
+      "path": "src/voice/prompt.rs",
+      "lint": "too_many_arguments",
+      "count": 2
+    }
+  ]
+}

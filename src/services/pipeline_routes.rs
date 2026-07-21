@@ -427,6 +427,7 @@ fn validate_pipeline_stages(stages: &[PipelineStageInput]) -> Result<(), Pipelin
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stage_json(
     id: i64,
     repo_id: Option<String>,
@@ -509,6 +510,7 @@ async fn list_pipeline_stages_pg(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_pipeline_history_json(
     id: String,
     kanban_card_id: Option<String>,
@@ -537,6 +539,7 @@ fn dispatch_pipeline_history_json(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_history_json(
     id: String,
     dispatch_type: Option<String>,

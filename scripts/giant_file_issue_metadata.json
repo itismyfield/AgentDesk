@@ -1,0 +1,138 @@
+{
+  "schema_version": 1,
+  "issues": [
+    {
+      "number": 4710,
+      "state": "open",
+      "title": "decompose(4519): server-runtime grandfathered giant follow-ups",
+      "owners": [
+        "server-runtime"
+      ],
+      "files": [
+        "src/cli/client.rs",
+        "src/cli/dcserver.rs",
+        "src/cli/direct.rs",
+        "src/cli/doctor/orchestrator.rs",
+        "src/cli/init.rs",
+        "src/cli/migrate/apply.rs",
+        "src/cli/migrate/plan.rs",
+        "src/cli/migrate/source.rs",
+        "src/cli/provider_cli/mod.rs",
+        "src/config.rs",
+        "src/db/postgres.rs",
+        "src/server/mod.rs",
+        "src/server/routes/agents.rs",
+        "src/server/routes/agents_crud.rs",
+        "src/server/routes/agents_setup.rs",
+        "src/server/routes/escalation.rs",
+        "src/server/routes/health_api.rs",
+        "src/server/routes/kanban.rs",
+        "src/server/routes/meetings.rs",
+        "src/server/routes/resume.rs",
+        "src/server/routes/v1.rs",
+        "src/services/claude.rs",
+        "src/services/claude_tui/input.rs",
+        "src/services/codex.rs",
+        "src/services/codex_tmux_wrapper.rs",
+        "src/services/codex_tui/input.rs",
+        "src/services/gemini.rs",
+        "src/services/memory/memento.rs",
+        "src/services/onboarding/mod.rs",
+        "src/services/opencode.rs",
+        "src/services/platform/binary_resolver.rs",
+        "src/services/provider.rs",
+        "src/services/qwen.rs",
+        "src/services/settings.rs",
+        "src/services/turn_orchestrator.rs",
+        "src/server/worker_registry.rs",
+        "src/server/maintenance.rs"
+      ]
+    },
+    {
+      "number": 4711,
+      "state": "open",
+      "title": "decompose(4519): automation-pipeline grandfathered giant follow-ups",
+      "owners": [
+        "automation-pipeline"
+      ],
+      "files": [
+        "src/db/auto_queue/entries.rs",
+        "src/db/auto_queue/phase_gates.rs",
+        "src/db/dispatched_sessions.rs",
+        "src/db/dispatches/mod.rs",
+        "src/dispatch/dispatch_context.rs",
+        "src/dispatch/dispatch_create.rs",
+        "src/dispatch/dispatch_status.rs",
+        "src/engine/loader.rs",
+        "src/engine/mod.rs",
+        "src/engine/ops/db_ops.rs",
+        "src/github/sync.rs",
+        "src/pipeline.rs",
+        "src/receipt.rs",
+        "src/reconcile.rs",
+        "src/services/auto_queue.rs",
+        "src/services/auto_queue/activate_command.rs",
+        "src/services/auto_queue/cancel_run.rs",
+        "src/services/dispatched_sessions.rs",
+        "src/services/dispatches/discord_delivery/orchestration.rs",
+        "src/services/dispatches/outbox_route.rs",
+        "src/services/routines/agent_executor.rs",
+        "src/services/routines/discord_log.rs",
+        "src/services/routines/store.rs",
+        "src/db/automation_candidates.rs"
+      ]
+    },
+    {
+      "number": 4712,
+      "state": "open",
+      "title": "decompose(4519): discord-relay grandfathered giant follow-ups",
+      "owners": [
+        "discord-finalizer",
+        "discord-relay"
+      ],
+      "files": [
+        "src/services/discord/commands/text_commands.rs",
+        "src/services/discord/formatting.rs",
+        "src/services/discord/meeting_orchestrator.rs",
+        "src/services/discord/mod.rs",
+        "src/services/discord/router/message_handler/headless_turn.rs",
+        "src/services/discord_config_audit.rs",
+        "src/services/tui_prompt_dedupe.rs",
+        "src/services/discord/tmux_watcher.rs",
+        "src/services/discord/tmux_watcher/turn_stream_collector.rs",
+        "src/services/discord/recovery_engine/restore_inflight.rs",
+        "src/services/discord/router/message_handler/intake_turn.rs",
+        "src/services/discord/router/intake_gate.rs",
+        "src/services/discord/health/recovery.rs",
+        "src/services/discord/watchers/lifecycle.rs",
+        "src/services/discord/tmux.rs",
+        "src/services/codex_tui/rollout_tail.rs",
+        "src/services/discord/session_relay_sink.rs",
+        "src/services/discord/outbound/turn_output_controller.rs",
+        "src/services/discord/relay_recovery.rs",
+        "src/services/discord/turn_finalizer.rs",
+        "src/services/discord/turn_view_reconciler.rs",
+        "src/services/discord/idle_recap.rs",
+        "src/services/discord/tui_direct_pending_start.rs",
+        "src/services/discord/outbound/delivery_record.rs",
+        "src/services/discord/tui_prompt_relay/synthetic_start.rs",
+        "src/services/tmux_common.rs",
+        "src/services/discord/recovery_engine/manual_rebind/mod.rs",
+        "src/services/discord/catch_up.rs"
+      ]
+    },
+    {
+      "number": 4713,
+      "state": "open",
+      "title": "decompose(4519): voice-runtime grandfathered giant follow-up",
+      "owners": [
+        "voice-runtime"
+      ],
+      "files": [
+        "src/voice/receiver.rs",
+        "src/services/discord/voice_barge_in.rs",
+        "src/voice/announce_meta.rs"
+      ]
+    }
+  ]
+}

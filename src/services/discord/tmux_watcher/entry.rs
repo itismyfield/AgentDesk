@@ -1,5 +1,6 @@
 use super::*;
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) async fn tmux_output_watcher(
     channel_id: ChannelId,
     http: Arc<serenity::Http>,

@@ -150,6 +150,7 @@ fn review_state_sync_pg_first(state: &AppState, payload: &serde_json::Value) -> 
     crate::engine::ops::review_state_sync_with_backends(state.pg_pool_ref(), &payload.to_string())
 }
 
+#[allow(clippy::type_complexity)]
 async fn enforce_session_reset_dilemma_fallback(
     state: &AppState,
     card_id: &str,

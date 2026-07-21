@@ -46,6 +46,7 @@ pub(crate) use self::codex_tui_replay::{
     codex_tui_rebind_start_after_crossed_provider_turn,
 };
 
+#[allow(clippy::large_enum_variant)]
 enum PendingRebindInflightRollback {
     RestoreExistingAdoption {
         state: super::inflight::InflightTurnState,
@@ -277,6 +278,7 @@ pub(crate) async fn rebind_inflight_for_channel_with_minimum_start_offset(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn rebind_inflight_for_channel_inner(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,

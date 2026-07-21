@@ -72,6 +72,7 @@ pub struct TurnCancellationDetails {
 impl TurnCancellationDetails {
     // Used only by #[cfg(test)] unit tests; kept for test ergonomics.
     #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         reason: &str,
         surface: &str,
@@ -95,6 +96,7 @@ impl TurnCancellationDetails {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_no_op(
         reason: &str,
         surface: &str,

@@ -143,6 +143,7 @@ impl PromptProfiles {
 // #3034: system-prompt assembly exercised by the dispatch-contract tests;
 // the prod path builds the prompt through other entry points. Test contract.
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_system_prompt(
     discord_context: &str,
     channel_participants: &[UserRecord],
@@ -185,6 +186,7 @@ pub(super) fn build_system_prompt(
     .system_prompt
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_system_prompt_with_manifest(
     discord_context: &str,
     channel_participants: &[UserRecord],

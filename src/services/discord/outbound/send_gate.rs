@@ -42,6 +42,7 @@ pub(crate) async fn send_message_with_backends(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_message_with_backends_and_delivery_id(
     registry: &HealthRegistry,
     pg_pool: Option<&PgPool>,
@@ -67,6 +68,7 @@ pub(crate) async fn send_message_with_backends_and_delivery_id(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_message_with_backends_and_delivery_id_for_caller(
     registry: &HealthRegistry,
     pg_pool: Option<&PgPool>,
@@ -121,6 +123,7 @@ pub(crate) struct ManualOutboundOptions {
     pub(crate) transcript_source_label: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_message_with_backends_and_delivery_options(
     registry: &HealthRegistry,
     pg_pool: Option<&PgPool>,
@@ -147,6 +150,7 @@ pub(crate) async fn send_message_with_backends_and_delivery_options(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_message_with_backends_and_delivery_options_for_caller(
     registry: &HealthRegistry,
     pg_pool: Option<&PgPool>,

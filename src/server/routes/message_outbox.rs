@@ -74,6 +74,7 @@ fn query_ids(value: &str) -> Result<Vec<i64>, &'static str> {
     exact_ids(parsed)
 }
 
+#[allow(clippy::result_large_err)]
 fn control_allowed(state: &AppState, peer: SocketAddr) -> Result<(), Response> {
     if local_or_configured_control_endpoint_allowed(&state.config, Some(peer)) {
         Ok(())

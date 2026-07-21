@@ -121,6 +121,7 @@ fn codex_external_input_bridge_stream_messages(
 
 #[cfg(unix)]
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn relay_tui_idle_response_through_bridge(
     shared: &Arc<SharedData>,
     provider: ProviderKind,
@@ -620,6 +621,7 @@ fn forward_idle_stream_into_bridge_with_logging(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_tui_direct_bridge_inflight_state(
     provider: ProviderKind,
     channel_id: ChannelId,

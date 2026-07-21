@@ -88,6 +88,7 @@ impl RoutineAgentExecutor {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_agent_run(
         &self,
         store: &RoutineStore,
@@ -187,6 +188,7 @@ impl RoutineAgentExecutor {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_claimed_agent_failure(
         &self,
         store: &RoutineStore,
@@ -576,6 +578,7 @@ impl RoutineAgentExecutor {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_running_agent_failure(
         &self,
         store: &RoutineStore,
@@ -922,6 +925,7 @@ impl RoutineAgentExecutor {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn start_turn(
         &self,
         store: &RoutineStore,
@@ -1660,6 +1664,7 @@ fn retry_next_at(retry_count_before_increment: i32) -> DateTime<Utc> {
     Utc::now() + Duration::seconds(secs)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn retry_scheduled_result_for_claimed(
     claimed: &ClaimedRoutineRun,
     failed_agent_id: &str,

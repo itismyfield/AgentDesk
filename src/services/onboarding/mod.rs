@@ -824,6 +824,7 @@ fn save_onboarding_completion_state(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_onboarding_completion_state(
     request_fingerprint: &str,
     guild_id: &str,
@@ -878,6 +879,7 @@ fn onboarding_rerun_policy_value(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn completion_response(
     status: StatusCode,
     ok: bool,
@@ -1807,6 +1809,7 @@ fn agent_channel_slot_ref<'a>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn verify_onboarding_settings_artifacts(
     runtime_root: &Path,
     primary_token: &str,

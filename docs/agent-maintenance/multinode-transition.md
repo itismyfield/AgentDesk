@@ -445,6 +445,7 @@
 
 ### Audited touches
 
+- #4706 structural lint debt backfill: item-level Clippy annotations and their checked-in occurrence ratchet change no runtime ownership, leader election, PG lease, or multinode routing behavior.
 - #4515 worker-local recovery supervision: `src/server/worker_recovery.rs` owns
   bounded restart handling for the worker-local dispatch-outbox and session-discovery
   tasks. Each node applies its own restart budget (at most 5 restarts within 10

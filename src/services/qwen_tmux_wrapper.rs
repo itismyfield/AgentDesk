@@ -47,6 +47,7 @@ enum TurnWatchdogOutcome {
     Retry { message: String },
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     output_file: &str,
     input_fifo: &str,
@@ -302,6 +303,7 @@ fn run_turn(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_turn_once(
     output: &mut std::fs::File,
     qwen_bin: &str,

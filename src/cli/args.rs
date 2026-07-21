@@ -931,6 +931,7 @@ pub(crate) enum FeatureStateArg {
     Disabled,
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ParseOutcome {
     RunServer,
     Command { command: Commands, json: bool },

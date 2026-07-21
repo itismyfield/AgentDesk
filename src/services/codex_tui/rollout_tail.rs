@@ -346,6 +346,7 @@ pub fn tail_warm_followup_rollout_for_tmux(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux(
     cwd: &Path,
     session_id: &str,
@@ -380,6 +381,7 @@ pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux(
 // #3034: test-only — the non-handoff resumed-tail variant is exercised by the
 // resume regression tests; production uses the `_with_handoff_for_tmux` form.
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 fn tail_resumed_rollout_for_session_with_options(
     cwd: &Path,
     session_id: &str,
@@ -407,6 +409,7 @@ fn tail_resumed_rollout_for_session_with_options(
     .map(|result| result.read_result)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tail_resumed_rollout_for_session_with_handoff_options(
     cwd: &Path,
     session_id: &str,
@@ -521,6 +524,7 @@ fn wait_for_latest_rollout_for_cwd(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn wait_for_resumed_rollout_for_session(
     cwd: &Path,
     session_id: &str,
@@ -750,6 +754,7 @@ fn same_path(left: &Path, right: &Path) -> bool {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tail_rollout_file_until_assistant_response(
     rollout_path: &Path,
     start_offset: u64,

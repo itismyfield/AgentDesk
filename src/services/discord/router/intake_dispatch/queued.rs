@@ -7,6 +7,7 @@ use super::{
 use crate::services::discord::Intervention;
 use crate::services::provider::ProviderKind;
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum QueuedAdmissionDisposition {
     Admitted(AdmittedQueuedIntake),
     Deferred,

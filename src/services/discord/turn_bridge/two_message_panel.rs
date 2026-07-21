@@ -68,6 +68,7 @@ pub(super) fn bridge_should_create_two_message_status_panel(
 /// This is pure msg-id / HTTP bookkeeping — it never tears down the
 /// per-channel `StatusPanelState` (that would drop item4's `session_banner`
 /// exactly-once claim), so the top session banner is unaffected.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn create_bridge_two_message_status_panel_below_answer<G: TurnGateway + ?Sized>(
     gateway: &G,
     channel_id: ChannelId,

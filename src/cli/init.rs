@@ -659,6 +659,7 @@ fn upsert_command_bot(
     config.discord.bots.insert("command".to_string(), bot);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_agentdesk_discord_config(
     root: &Path,
     guild_id: &str,
@@ -778,6 +779,7 @@ fn write_postgres_compose_template(
     Ok(Some(compose_path))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_init_artifacts(
     root: &Path,
     channel_mappings: &[(String, String, String)],

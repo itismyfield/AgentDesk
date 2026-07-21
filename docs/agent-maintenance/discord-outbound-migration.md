@@ -1,5 +1,7 @@
 # Discord Outbound Migration — Coverage Map (#1006 v3 / #1280 / #1436 / #1457)
 
+> Last refreshed: 2026-07-21 (against #4706 lint-debt annotations only; outbound callsite coverage and delivery semantics are unchanged).
+
 > Last refreshed: 2026-07-03 (against #3874 dead-code removal — manual outbound callsite coverage map refreshed after removing permanently-None `Option<&Db>` threading; no delivery semantics change).
 
 > Last refreshed: 2026-07-11 (#4424 — `outbound/source_registry.rs` is now the single typed, caller-class-scoped authorization table for send and message_outbox enqueue; eight verified producers are added for LoopbackInternal only. Delivery verbs and v3 callsite migration status are unchanged.)

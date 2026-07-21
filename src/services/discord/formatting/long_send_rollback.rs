@@ -121,6 +121,7 @@ pub(in crate::services::discord) async fn send_long_message_raw_with_reference_r
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_long_message_raw_with_reference_rollback_policy(
     http: &serenity::Http,
     channel_id: ChannelId,

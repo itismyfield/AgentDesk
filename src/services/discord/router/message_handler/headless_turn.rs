@@ -53,6 +53,7 @@ where
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) async fn start_headless_turn(
     ctx: &serenity::Context,
     channel_id: ChannelId,
@@ -143,6 +144,7 @@ fn routine_metadata_role_binding(
 }
 
 #[allow(dead_code)] // #3034: exported voice entry point, wired-but-dormant (no live dispatch yet).
+#[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) async fn start_voice_headless_turn(
     ctx: &serenity::Context,
     channel_id: ChannelId,

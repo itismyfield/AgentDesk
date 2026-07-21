@@ -281,6 +281,7 @@ fn append_feature_override_args(args: &mut Vec<String>, feature: &str, enabled: 
     args.push(feature.to_string());
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_codex_wrapper_tmux_script(
     env_lines: &str,
     exe: &str,
@@ -1192,6 +1193,7 @@ fn execute_command_simple_inner(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn execute_command_streaming(
     prompt: &str,
     session_id: Option<&str>,
@@ -1413,6 +1415,7 @@ pub(crate) fn compose_codex_developer_instructions(
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_streaming_direct(
     prompt: &str,
     session_id: Option<&str>,
@@ -1539,6 +1542,7 @@ fn execute_streaming_direct(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_streaming_remote_direct(
     _profile: &RemoteProfile,
     _session_id: Option<&str>,
@@ -1751,6 +1755,7 @@ fn dispatch_codex_tui_rollout_tail(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn execute_streaming_local_tui_tmux(
     prompt: &str,
     session_id: Option<&str>,
@@ -2213,6 +2218,7 @@ pub(crate) fn emit_codex_tui_post_tail_handoff(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn execute_streaming_local_tmux(
     prompt: &str,
     model: Option<&str>,
@@ -2698,6 +2704,7 @@ fn send_followup_to_tmux(
 }
 
 /// Execute Codex via ProcessBackend (direct child process, no tmux).
+#[allow(clippy::too_many_arguments)]
 fn execute_streaming_local_process_codex(
     prompt: &str,
     model: Option<&str>,

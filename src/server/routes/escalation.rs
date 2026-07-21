@@ -662,6 +662,7 @@ async fn load_card_context_pg_async(
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn load_escalation_emit_inputs_pg(
     pool: &sqlx::PgPool,
     config: &Config,
@@ -1212,6 +1213,7 @@ async fn emit_escalation_with_base_url(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn deliver_pm_fallback(
     client: &reqwest::Client,
     base_url: &str,

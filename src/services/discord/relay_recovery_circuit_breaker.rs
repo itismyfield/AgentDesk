@@ -597,6 +597,7 @@ pub(super) async fn queue_open_alert_once_with_enqueue(
     .await;
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn queue_or_resume_open_alert_with_enqueue(
     shared: &SharedData,
     provider: &ProviderKind,

@@ -176,6 +176,7 @@ fn load_local_host_aliases() -> HashSet<String> {
     aliases
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_effective_state_with<LiveProbe, ReadyProbe>(
     local_host_aliases: &HashSet<String>,
     session_key: Option<&str>,

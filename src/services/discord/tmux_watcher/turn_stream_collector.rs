@@ -8,6 +8,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
+#[allow(clippy::large_enum_variant)]
 pub(super) enum CollectOutcome {
     ContinueWatcherLoop,
     Fallthrough(CollectedTurnStream),

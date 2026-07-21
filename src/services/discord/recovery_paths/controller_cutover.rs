@@ -115,6 +115,7 @@ pub(in crate::services::discord) fn recovery_short_replace_should_cutover(
 /// inject a fake driving the REAL controller. `Replace { Active }` keeps
 /// `post_send_finalize` a no-op (the replace IS the edit); `NoLease` means no
 /// lease/heartbeat/double-acquire (transport-only).
+#[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) async fn deliver_recovery_replace_via_controller<G>(
     gateway: &G,
     shared: &Arc<SharedData>,
@@ -165,6 +166,7 @@ where
 /// closure yielding a fixed [`super::shared::ChannelProbeVerdict`] so the
 /// `DeliveryOutcome → RecoveryRelayOutcome` map (incl. the probe escalation) is
 /// exercised through the REAL controller without a live Discord client.
+#[allow(clippy::too_many_arguments)]
 async fn deliver_recovery_replace_via_controller_with_probe<G, F, Fut>(
     gateway: &G,
     shared: &Arc<SharedData>,

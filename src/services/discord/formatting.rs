@@ -3582,12 +3582,12 @@ pub(super) fn build_monitor_handoff_placeholder(
 const MONITOR_HANDOFF_CONTEXT_MAX_BYTES: usize = 200;
 const MONITOR_HANDOFF_REQUEST_MAX_BYTES: usize = 200;
 const MONITOR_HANDOFF_PROGRESS_MAX_BYTES: usize = 200;
-
 /// Variant of `build_monitor_handoff_placeholder` that surfaces an additional
 /// `context_line` slot — typically the last assistant prose line emitted just
 /// before a long-running tool call (e.g. `⏳ CI 통과 신호 대기`). Issue #1255
 /// requires this to give the user a "why is the agent calling this?" hint
 /// without forcing them to scroll back to the streaming body.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_monitor_handoff_placeholder_with_context(
     status: MonitorHandoffStatus<'_>,
     reason: MonitorHandoffReason,
@@ -3612,7 +3612,7 @@ pub(super) fn build_monitor_handoff_placeholder_with_context(
         None,
     )
 }
-
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_monitor_handoff_placeholder_with_live_events(
     status: MonitorHandoffStatus<'_>,
     reason: MonitorHandoffReason,

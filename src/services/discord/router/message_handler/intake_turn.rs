@@ -116,7 +116,7 @@ pub(crate) async fn execute_intake_turn_core(
     )
     .await
 }
-
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_text_message(
     deps: &IntakeDeps<'_>,
     channel_id: ChannelId,

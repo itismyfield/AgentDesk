@@ -318,6 +318,7 @@ fn recover_claude_tui_stranded_prompt_draft(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn run_claude_tui_warm_followup_submit_and_stream(
     submit_plan: ClaudeTuiWarmFollowupSubmitPlan,
     mut busy_waited: bool,
@@ -685,6 +686,7 @@ mod followup_wait_error_requeue_tests {
 /// Attempt a warm follow-up against an existing live Claude TUI tmux session.
 /// Mirrors the pre-refactor live-session branch: recovery, busy wait, submit/read/classify; `Terminal` returns before fresh-launch side effects, `Recreate` carries fall-through resolution.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn try_claude_tui_warm_followup(
     mut resolved_session_id: String,
     mut transcript_path: std::path::PathBuf,

@@ -451,6 +451,7 @@ pub(in crate::services::discord) async fn handle_vc_text_command(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) async fn auto_join_voice_channels(
     ctx: serenity::Context,
     receiver: crate::voice::VoiceReceiver,
