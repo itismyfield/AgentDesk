@@ -1361,9 +1361,7 @@ mod tests {
         let output_path = "/tmp/agentdesk-4615-live-yield.jsonl";
         let shared = crate::services::discord::make_shared_data_for_tests();
         let mut snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, 301_613);
-        let started_at = chrono::Local::now()
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string();
+        let started_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         snapshot.inflight_started_at = Some(started_at.clone());
         snapshot.inflight_updated_at = Some(started_at.clone());
         snapshot
@@ -1375,8 +1373,10 @@ mod tests {
             provider.clone(),
             channel_id.get(),
             None,
-            snapshot.inflight_user_msg_id.expect("snapshot user message"),
             0,
+            snapshot
+                .inflight_user_msg_id
+                .expect("snapshot user message"),
             0,
             "test".to_string(),
             None,
@@ -1427,9 +1427,7 @@ mod tests {
         let output_path = "/tmp/agentdesk-4615-cap.jsonl";
         let shared = crate::services::discord::make_shared_data_for_tests();
         let mut snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, 301_613);
-        let started_at = chrono::Local::now()
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string();
+        let started_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         snapshot.inflight_started_at = Some(started_at.clone());
         snapshot.inflight_updated_at = Some(started_at.clone());
         snapshot
@@ -1441,8 +1439,10 @@ mod tests {
             provider.clone(),
             channel_id.get(),
             None,
-            snapshot.inflight_user_msg_id.expect("snapshot user message"),
             0,
+            snapshot
+                .inflight_user_msg_id
+                .expect("snapshot user message"),
             0,
             "test".to_string(),
             None,
@@ -1459,12 +1459,8 @@ mod tests {
         let base = chrono::Utc::now().timestamp();
 
         for (expected, elapsed) in [0, 30, 90, 210, 450].into_iter().enumerate() {
-            let reserved = shared.redrive_attempt_decision(
-                &provider,
-                channel_id,
-                &snapshot,
-                base + elapsed,
-            );
+            let reserved =
+                shared.redrive_attempt_decision(&provider, channel_id, &snapshot, base + elapsed);
             assert_eq!(reserved.attempt, Some(expected as u8 + 1));
             assert_eq!(
                 shared.commit_redrive_success(
@@ -1481,27 +1477,11 @@ mod tests {
                 }
             );
         }
-        let sixth = shared.redrive_attempt_decision(
-            &provider,
-            channel_id,
-            &snapshot,
-            base + 930,
-        );
+        let sixth = shared.redrive_attempt_decision(&provider, channel_id, &snapshot, base + 930);
         assert_eq!(sixth.attempt, Some(6));
-        seed_liveness_verdict(
-            &provider,
-            channel_id,
-            &snapshot,
-            &inflight,
-            base,
-        );
-        let suppressed = shared.commit_redrive_success(
-            &provider,
-            channel_id,
-            channel_id,
-            base + 930,
-            false,
-        );
+        seed_liveness_verdict(&provider, channel_id, &snapshot, &inflight, base);
+        let suppressed =
+            shared.commit_redrive_success(&provider, channel_id, channel_id, base + 930, false);
         assert!(!suppressed.emit_capped_alarm);
         assert!(suppressed.capped_alarm_suppressed_reasons.is_some());
         assert!(
@@ -1513,12 +1493,8 @@ mod tests {
         );
 
         liveness_authority::clear_verdict_for_test(&provider, channel_id);
-        let after_death = shared.redrive_attempt_decision(
-            &provider,
-            channel_id,
-            &snapshot,
-            base + 960,
-        );
+        let after_death =
+            shared.redrive_attempt_decision(&provider, channel_id, &snapshot, base + 960);
         assert!(after_death.emit_capped_alarm);
         assert!(after_death.capped_alarm_suppressed_reasons.is_none());
         assert!(
