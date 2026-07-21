@@ -1244,7 +1244,7 @@ impl VoiceBargeInRuntime {
         };
         let count = tokens.len();
         for token in tokens {
-            token.set_cancel_source(reason);
+            token.publish_cancel(reason);
             token.cancel_with_tmux_cleanup();
         }
         if count > 0 {

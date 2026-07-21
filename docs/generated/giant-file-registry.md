@@ -81,7 +81,7 @@
 | `src/services/discord/tui_prompt_relay/synthetic_start.rs` | 1084 | shrink | discord-relay | 2026-10-31 | #4712 |  |
 | `src/services/discord/turn_finalizer.rs` | 1048 | shrink | discord-finalizer | 2026-08-31 | #4712 |  |
 | `src/services/discord/turn_view_reconciler.rs` | 2360 | shrink | discord-relay | 2026-08-31 | #4712 |  |
-| `src/services/discord/voice_barge_in.rs` | 2887 | shrink | voice-runtime | 2026-08-31 | #4713 |  |
+| `src/services/discord/voice_barge_in.rs` | 2878 | shrink | voice-runtime | 2026-08-31 | #4713 |  |
 | `src/services/discord/watchers/lifecycle.rs` | 2078 | shrink | discord-relay | 2026-10-31 | #4712 |  |
 | `src/services/discord_config_audit.rs` | 1288 | shrink | discord-relay | 2027-01-31 | #4712 |  |
 | `src/services/dispatched_sessions.rs` | 1767 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |
@@ -92,7 +92,7 @@
 | `src/services/onboarding/mod.rs` | 2884 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/opencode.rs` | 2764 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/platform/binary_resolver.rs` | 1496 | shrink | server-runtime | 2027-01-31 | #4710 |  |
-| `src/services/provider.rs` | 1828 | shrink | server-runtime | 2027-01-31 | #4710 |  |
+| `src/services/provider.rs` | 1885 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/qwen.rs` | 2196 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/routines/agent_executor.rs` | 2136 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |
 | `src/services/routines/discord_log.rs` | 1596 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |
@@ -100,7 +100,7 @@
 | `src/services/settings.rs` | 1112 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/tmux_common.rs` | 1357 | shrink | discord-relay | 2026-10-31 | #4712 |  |
 | `src/services/tui_prompt_dedupe.rs` | 2141 | shrink | discord-relay | 2027-01-31 | #4712 |  |
-| `src/services/turn_orchestrator.rs` | 3283 | shrink | server-runtime | 2027-01-31 | #4710 |  |
+| `src/services/turn_orchestrator.rs` | 3271 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/voice/announce_meta.rs` | 1001 | shrink | voice-runtime | 2026-08-31 | #4713 |  |
 | `src/voice/receiver.rs` | 1108 | shrink | voice-runtime | 2027-01-31 | #4713 |  |
 

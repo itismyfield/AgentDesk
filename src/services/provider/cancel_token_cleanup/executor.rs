@@ -135,7 +135,7 @@ impl CancelToken {
                 // not prevent a later CleanupSession from claiming a newly bound PID.
                 let identity_allows_dispatch = target
                     .identity
-                    .is_some_and(|identity| identity.matches(target.pid));
+                    .is_none_or(|identity| identity.matches(target.pid));
                 if identity_allows_dispatch {
                     pid_claimed = self
                         .pid_kill_claim

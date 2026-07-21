@@ -921,7 +921,7 @@
 | `services::discord::turn_view_reconciler::reaction_set` | `src/services/discord/turn_view_reconciler/reaction_set.rs` | 23 | 23 | 0 |  |
 | `services::discord::voice_acknowledgement` | `src/services/discord/voice_acknowledgement.rs` | 61 | 61 | 0 |  |
 | `services::discord::voice_background_driver` | `src/services/discord/voice_background_driver.rs` | 234 | 199 | 35 |  |
-| `services::discord::voice_barge_in` | `src/services/discord/voice_barge_in.rs` | 5165 | 2887 | 2278 | giant-file |
+| `services::discord::voice_barge_in` | `src/services/discord/voice_barge_in.rs` | 5156 | 2878 | 2278 | giant-file |
 | `services::discord::voice_barge_in::channel_state` | `src/services/discord/voice_barge_in/channel_state.rs` | 420 | 259 | 161 |  |
 | `services::discord::voice_barge_in::final_result_playback` | `src/services/discord/voice_barge_in/final_result_playback.rs` | 361 | 361 | 0 |  |
 | `services::discord::voice_barge_in::foreground_decision` | `src/services/discord/voice_barge_in/foreground_decision.rs` | 242 | 242 | 0 |  |
@@ -1028,13 +1028,13 @@
 | `services::platform::tmux::availability` | `src/services/platform/tmux/availability.rs` | 269 | 136 | 133 |  |
 | `services::pr_summary` | `src/services/pr_summary.rs` | 542 | 321 | 221 |  |
 | `services::process` | `src/services/process.rs` | 1252 | 782 | 470 |  |
-| `services::provider` | `src/services/provider.rs` | 2543 | 1828 | 715 | giant-file |
+| `services::provider` | `src/services/provider.rs` | 2659 | 1885 | 774 | giant-file |
 | `services::provider::cancel_token_claude_interrupt` | `src/services/provider/cancel_token_claude_interrupt.rs` | 366 | 169 | 197 |  |
 | `services::provider::cancel_token_cleanup` | `src/services/provider/cancel_token_cleanup.rs` | 5 | 5 | 0 |  |
 | `services::provider::cancel_token_cleanup::authority` | `src/services/provider/cancel_token_cleanup/authority.rs` | 209 | 141 | 68 |  |
-| `services::provider::cancel_token_cleanup::executor` | `src/services/provider/cancel_token_cleanup/executor.rs` | 525 | 352 | 173 |  |
+| `services::provider::cancel_token_cleanup::executor` | `src/services/provider/cancel_token_cleanup/executor.rs` | 524 | 351 | 173 |  |
 | `services::provider::cancel_token_cleanup::target` | `src/services/provider/cancel_token_cleanup/target.rs` | 17 | 17 | 0 |  |
-| `services::provider::cancel_watchdog` | `src/services/provider/cancel_watchdog.rs` | 228 | 99 | 129 |  |
+| `services::provider::cancel_watchdog` | `src/services/provider/cancel_watchdog.rs` | 268 | 102 | 166 |  |
 | `services::provider_auth` | `src/services/provider_auth.rs` | 628 | 400 | 228 |  |
 | `services::provider_cli` | `src/services/provider_cli/mod.rs` | 21 | 21 | 0 |  |
 | `services::provider_cli::canary` | `src/services/provider_cli/canary.rs` | 86 | 86 | 0 |  |
@@ -1108,7 +1108,7 @@
 | `services::tui_turn_state::completion_scan` | `src/services/tui_turn_state/completion_scan.rs` | 360 | 360 | 0 |  |
 | `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 479 | 150 | 329 |  |
 | `services::turn_lifecycle` | `src/services/turn_lifecycle.rs` | 564 | 436 | 128 |  |
-| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 7239 | 3283 | 3956 | giant-file |
+| `services::turn_orchestrator` | `src/services/turn_orchestrator.rs` | 7227 | 3271 | 3956 | giant-file |
 | `services::turn_orchestrator::active_source_dedup` | `src/services/turn_orchestrator/active_source_dedup.rs` | 129 | 129 | 0 |  |
 | `services::turn_orchestrator::dispatch_reservation` | `src/services/turn_orchestrator/dispatch_reservation.rs` | 743 | 475 | 268 |  |
 | `services::turn_orchestrator::overflow` | `src/services/turn_orchestrator/overflow.rs` | 35 | 35 | 0 |  |
