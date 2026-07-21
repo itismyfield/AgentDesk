@@ -318,6 +318,7 @@ src/
 │   ├── state.rs
 │   ├── task_dispatch_claims.rs
 │   ├── test_phase_runs.rs
+│   ├── worker_recovery.rs
 │   ├── worker_registry.rs
 │   └── ws.rs
 ├── services/

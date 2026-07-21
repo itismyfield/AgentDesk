@@ -13,7 +13,7 @@
 | --- | ---: | --- | --- | --- |
 | `src/db/automation_candidates.rs` | 1003 | automation-pipeline | 2026-08-31 | #3405 |
 | `src/server/maintenance.rs` | 1153 | server-runtime | 2026-10-31 | #3909 |
-| `src/server/worker_registry.rs` | 1313 | server-runtime | 2026-08-31 | #3739 |
+| `src/server/worker_registry.rs` | 1236 | server-runtime | 2026-08-31 | #3739 |
 | `src/services/codex_tui/rollout_tail.rs` | 1329 | discord-relay | 2026-10-31 | #3843 |
 | `src/services/discord/catch_up.rs` | 1809 | discord-relay | 2026-10-31 | #3405 |
 | `src/services/discord/health/recovery.rs` | 2567 | discord-relay | 2026-10-31 | #3839 |
@@ -68,7 +68,7 @@
 | `src/pipeline.rs` | 1383 |
 | `src/receipt.rs` | 1842 |
 | `src/reconcile.rs` | 1902 |
-| `src/server/mod.rs` | 2756 |
+| `src/server/mod.rs` | 2757 |
 | `src/server/routes/agents.rs` | 1240 |
 | `src/server/routes/agents_crud.rs` | 1295 |
 | `src/server/routes/agents_setup.rs` | 1365 |
