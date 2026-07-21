@@ -796,15 +796,14 @@ mod tests {
             }
         );
 
+        let store_key = (key.provider.clone(), key.channel_id);
+        let prior_verdict = VERDICTS.get(&store_key).unwrap().clone();
         store_verdict(
-            (key.provider.clone(), key.channel_id),
+            store_key,
             ProducerLivenessVerdict {
                 published_at_mono_secs: 300,
                 raw_turn_age_secs: Some(STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS - 1),
-                ..VERDICTS
-                    .get(&(key.provider.clone(), key.channel_id))
-                    .unwrap()
-                    .clone()
+                ..prior_verdict
             },
         );
         assert_eq!(

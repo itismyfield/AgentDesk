@@ -502,7 +502,7 @@
 | `services::discord::gateway_voice_queue` | `src/services/discord/gateway_voice_queue.rs` | 95 | 17 | 78 |  |
 | `services::discord::health` | `src/services/discord/health.rs` | 916 | 745 | 171 |  |
 | `services::discord::health::headless_turn` | `src/services/discord/health/headless_turn.rs` | 367 | 367 | 0 |  |
-| `services::discord::health::liveness_authority` | `src/services/discord/health/liveness_authority.rs` | 973 | 559 | 414 |  |
+| `services::discord::health::liveness_authority` | `src/services/discord/health/liveness_authority.rs` | 972 | 559 | 413 |  |
 | `services::discord::health::mailbox` | `src/services/discord/health/mailbox.rs` | 113 | 113 | 0 |  |
 | `services::discord::health::provider_probe` | `src/services/discord/health/provider_probe.rs` | 361 | 197 | 164 |  |
 | `services::discord::health::rebind_request` | `src/services/discord/health/rebind_request.rs` | 112 | 87 | 25 |  |
