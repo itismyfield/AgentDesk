@@ -1957,6 +1957,90 @@ pub(super) async fn handle_text_message(
     let watcher_tmux_name = inflight_tmux_name.clone();
     let watcher_output_path = inflight_output_path.clone();
     #[cfg(unix)]
+    if crate::services::tui_steering::tui_steering_enabled()
+        && matches!(turn_kind, TurnKind::Foreground)
+        && matches!(provider, ProviderKind::Claude | ProviderKind::Codex)
+        && remote_profile.is_none()
+        && !wait_for_completion
+        && dispatch_id.is_none()
+        && dispatch_id_for_thread.is_none()
+        && !is_voice_announcement
+        && pending_uploads.is_empty()
+        && let Some(steering_tmux_name) = tmux_session_name.as_deref()
+    {
+        let selection =
+            crate::services::provider_hosting::resolve_provider_session_selection_with_channel(
+                &provider,
+                claude::is_tmux_available(),
+                Some(channel_id.get()),
+            );
+        if crate::services::tui_steering::route_input_by_session_driver(&selection)
+            == crate::services::tui_steering::SteeringRoute::NativeTui
+            && crate::services::tmux_diagnostics::tmux_session_has_live_pane(steering_tmux_name)
+            && tui_busy_followup_diagnostic(
+                shared,
+                &provider,
+                channel_id,
+                Some(steering_tmux_name),
+                false,
+                Some(&current_path),
+                session_id.as_deref(),
+            )
+            .is_some_and(|diagnostic| diagnostic.transcript_turn_state.is_busy())
+        {
+            let steering_provider = provider.clone();
+            let steering_selection = selection.clone();
+            let steering_session = steering_tmux_name.to_string();
+            let steering_prompt = user_text.to_string();
+            let outcome = tokio::task::spawn_blocking(move || {
+                crate::services::tui_steering::inject_with_bounded_retry(
+                    &steering_provider,
+                    &steering_selection,
+                    &steering_session,
+                    &steering_prompt,
+                )
+            })
+            .await
+            .unwrap_or_else(|error| {
+                crate::services::tui_steering::SteeringOutcome::Failed(error.to_string())
+            });
+            let injected = matches!(
+                outcome,
+                crate::services::tui_steering::SteeringOutcome::Injected
+            );
+            let reaction = if injected { '🎯' } else { '⚠' };
+            #[cfg(not(test))]
+            let _ =
+                super::super::super::reaction_lifecycle::try_add_reaction_raw_with_shared_detailed(
+                    http,
+                    shared,
+                    channel_id,
+                    user_msg_id,
+                    reaction,
+                )
+                .await;
+            #[cfg(test)]
+            let _ = reaction;
+            let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
+            let _ = release_mailbox_after_hosted_tui_busy_pre_submit(
+                shared,
+                &bot_owner_provider,
+                channel_id,
+            )
+            .await;
+            let _ = channel_id.delete_message(http, placeholder_msg_id).await;
+            tv_clear_current(shared, http, channel_id, user_msg_id, "intake_tui_steering").await;
+            super::super::super::saturating_decrement_global_active(shared);
+            shared.turn_start_times.remove(&channel_id);
+            cancel_token
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            super::super::super::clear_watchdog_deadline_override(channel_id.get()).await;
+            intake_latency.log(channel_id.get(), provider_label, "tui_steered");
+            return Ok(());
+        }
+    }
+    #[cfg(unix)]
     let mut recapture_offset_after_busy_wait = false;
     // #2416: compute claude_tui busy-followup diagnostic with a wait+retry step.
     // If the first snapshot says busy, run wait_for_prompt_ready (Followup kind,
