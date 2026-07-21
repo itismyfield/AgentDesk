@@ -7,7 +7,7 @@ pub(crate) fn durable_voice_announcement_pending_key(
     format!("{correlation_id}::{semantic_event_id}")
 }
 
-pub(crate) fn decode_voice_announcement_value(
+pub(super) fn decode_voice_announcement_value(
     value: serde_json::Value,
 ) -> Result<VoiceTranscriptAnnouncement, sqlx::Error> {
     serde_json::from_value(value).map_err(|error| sqlx::Error::Decode(Box::new(error)))
