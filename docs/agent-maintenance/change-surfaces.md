@@ -1620,16 +1620,14 @@
     orchestration surface; tracked decompose target — see
     `giant-file-registry.md` (owner `voice-runtime`, deadline 2026-08-31,
     #3036)).
-  - `src/voice/receiver.rs` (1108 lines after #3914 added the songbird
-    `ClientDisconnect` handler that drops a leaver's SSRC→user mapping to stop
-    monotonic `ssrc_users` growth under channel churn; voice receive pipeline,
-    utterance segmentation, artifact cleanup, and retention policy surface;
-    split before adding non-bugfix behavior).
-  - `src/voice/announce_meta.rs` (1001 lines; voice announcement durability /
-    handoff metadata surface; crossed the giant threshold when #3034 restored
-    per-item dead_code reasoning on the runtime-gated durable helpers; tracked
-    decompose target — see `giant-file-registry.md` (owner `voice-runtime`,
-    deadline 2026-08-31, #3036)).
+  - `src/voice/receiver.rs` was decomposed in #4713: the root retains the
+    receiver state machine and timers, while `receiver/recording.rs` owns WAV
+    recording lifecycle and cleanup helpers. Both modules remain below the
+    production giant threshold.
+  - `src/voice/announce_meta.rs` was decomposed in #4713: the root retains the
+    process-local metadata store and `announce_meta/durable.rs` owns the durable
+    PostgreSQL announcement and handoff persistence helpers. Both modules remain
+    below the production giant threshold.
   - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
     lines).
