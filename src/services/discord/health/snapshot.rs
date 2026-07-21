@@ -91,6 +91,10 @@ pub struct WatcherStateSnapshot {
     /// mailbox is idle (no active turn).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mailbox_active_user_msg_id: Option<u64>,
+    /// Internal episode identity captured with the active message ID. It is
+    /// intentionally excluded from operator JSON and only authorizes repair.
+    #[serde(skip)]
+    pub(in crate::services::discord) mailbox_active_turn_nonce: Option<String>,
     /// #4408 phase-2 (I1): the transcript path the dcserver actually binds its
     /// relay tail to. Resolved with per-field precedence — a live inflight row's
     /// persisted `output_path` wins; otherwise the in-memory tmux runtime
@@ -656,6 +660,7 @@ async fn watcher_state_snapshot_for_shared(
         tmux_session_alive,
         has_pending_queue,
         mailbox_active_user_msg_id,
+        mailbox_active_turn_nonce: mailbox_snapshot.active_turn_nonce.clone(),
         bound_output_path,
         bound_session_id,
         inflight_terminal_delivery_committed: session.inflight_terminal_delivery_committed(),

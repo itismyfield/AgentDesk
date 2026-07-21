@@ -2326,6 +2326,7 @@ pub(super) async fn handle_text_message(
         inflight_input_fifo.clone(),
         inflight_offset,
     );
+    inflight_state.turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
     apply_prelaunch_runtime_kind(&mut inflight_state, prelaunch_runtime_kind);
     let (worktree_path, worktree_branch, base_commit) = {
         let data = shared.core.lock().await;

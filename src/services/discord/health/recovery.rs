@@ -56,6 +56,7 @@ pub struct IdleTmuxStaleTurnRepairResult {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct IdleTmuxStaleTurnInflightPin {
     identity: discord::inflight::InflightTurnIdentity,
+    turn_nonce: Option<String>,
     finalizer_turn_id: u64,
     updated_at: String,
     save_generation: u64,
@@ -155,6 +156,7 @@ fn capture_idle_tmux_stale_turn_inflight_pin(
     let finalizer_turn_id = state.effective_finalizer_turn_id();
     (finalizer_turn_id != 0).then(|| IdleTmuxStaleTurnInflightPin {
         identity: discord::inflight::InflightTurnIdentity::from_state(state),
+        turn_nonce: state.turn_nonce.clone(),
         finalizer_turn_id,
         updated_at: state.updated_at.clone(),
         save_generation: state.save_generation,
@@ -1066,11 +1068,12 @@ pub async fn clear_idle_tmux_stale_turn(
         .map(|pin| pin.identity.user_msg_id)
         .unwrap_or(0);
     let finish = if expected_user_msg_id != 0 {
-        discord::mailbox_finish_turn_if_matches_started_before(
+        discord::mailbox_finish_turn_if_matches_episode_started_before(
             &shared,
             &provider,
             channel_id,
             MessageId::new(expected_user_msg_id),
+            inflight_pin.as_ref().and_then(|pin| pin.turn_nonce.clone()),
             repair_started_at,
         )
         .await

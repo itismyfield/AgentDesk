@@ -338,11 +338,12 @@ pub(super) async fn finalize_abandoned_mailbox(
         );
         return AbandonedTmuxCleanupOutcome::from_plan(plan);
     };
-    let finish = super::super::mailbox_finish::mailbox_finish_turn_if_matches_started_before_without_completion(
+    let finish = super::super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_without_completion(
         shared,
         provider,
         channel,
         user_msg_id,
+        state.turn_nonce.clone(),
         sweep_started_before,
     )
     .await;

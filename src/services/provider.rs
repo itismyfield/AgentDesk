@@ -1013,6 +1013,9 @@ pub struct CancelToken {
     claude_interrupt_claim: AtomicU8,
     /// Monotonic Claude turn identity used for diagnostics and fence observability.
     claude_interrupt_generation: u64,
+    /// Durable episode identity shared with the Discord mailbox actor and inflight row.
+    /// `None` is reserved for explicitly restored legacy rows.
+    turn_nonce: Option<String>,
     /// Wrapper prompt handoff completed before its JSONL user envelope appeared.
     /// The stop path must treat this window as submitted, not as prior-turn idle.
     claude_interrupt_submit_pending: AtomicBool,
@@ -1025,6 +1028,16 @@ pub struct CancelToken {
 
 impl CancelToken {
     pub fn new() -> Self {
+        Self::with_turn_nonce(Some(uuid::Uuid::new_v4().to_string()))
+    }
+
+    /// Restore a durable turn episode. `None` preserves the legacy row's
+    /// identity instead of silently upgrading it to an unrelated episode.
+    pub fn from_persisted_turn_nonce(turn_nonce: Option<String>) -> Self {
+        Self::with_turn_nonce(turn_nonce.filter(|nonce| !nonce.is_empty()))
+    }
+
+    fn with_turn_nonce(turn_nonce: Option<String>) -> Self {
         static NEXT_CLAUDE_INTERRUPT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
         Self {
@@ -1042,11 +1055,16 @@ impl CancelToken {
             claude_interrupt_claim: AtomicU8::new(0),
             claude_interrupt_generation: NEXT_CLAUDE_INTERRUPT_GENERATION
                 .fetch_add(1, Ordering::Relaxed),
+            turn_nonce,
             claude_interrupt_submit_pending: AtomicBool::new(false),
             restart_mode: AtomicU8::new(0),
             pid_kill_claim: AtomicU8::new(0),
             name_kill_claim: AtomicU8::new(0),
         }
+    }
+
+    pub fn turn_nonce(&self) -> Option<&str> {
+        self.turn_nonce.as_deref()
     }
 
     /// claude-e rollout Phase 1: opt this token out of synchronous

@@ -33,8 +33,9 @@ itself**, never from comments. There are no ``// sym:`` labels anymore.
 
 * **The anchor NAME is parsed from that same code**, not a comment. The parser
   reads the ``use`` path / field expression, resolves ``super::`` /
-  ``crate::services::discord::`` to the canonical doc path, and that resolved
-  path is the anchor. Comment out the reference and the anchor vanishes with it;
+  ``crate::services::`` to the canonical doc path (with the historical
+  ``discord::`` segment omitted), and that resolved path is the anchor. Comment
+  out the reference and the anchor vanishes with it;
   the set comparison then fails. There is no label left to lie.
 
 * **Block cfg and item attributes are byte-exact whitelists, not parsed.** The
@@ -105,16 +106,18 @@ REFERENCE_SOURCE_MODULES: dict[str, tuple[str, ...]] = {
     "turn_bridge/terminal_delivery.rs": ("turn_bridge", "terminal_delivery"),
     "tmux_watcher/liveness.rs": ("tmux_watcher", "liveness"),
     "router/message_handler/watchdog.rs": ("router", "message_handler", "watchdog"),
+    "mailbox_finish.rs": ("mailbox_finish",),
 }
 
 DEFAULT_REFERENCE_SOURCES: tuple[Path, ...] = tuple(
     DISCORD_ROOT / rel for rel in REFERENCE_SOURCE_MODULES
 )
 
-# Absolute-path prefix that names items from the discord crate root. Stripped so
+# Absolute-path prefix that names items from the services root. Stripped so
 # `crate::services::discord::tmux::advance_watcher_confirmed_end` yields the doc
-# anchor `tmux::advance_watcher_confirmed_end`.
-CRATE_PREFIX: tuple[str, ...] = ("crate", "services", "discord")
+# anchor `tmux::advance_watcher_confirmed_end`, while service siblings such as
+# `crate::services::provider::CancelToken::turn_nonce` retain `provider::...`.
+SERVICES_PREFIX: tuple[str, ...] = ("crate", "services")
 
 # Distinct-anchor floor (defense in depth). Set comparison already fails if the
 # doc and code diverge, but a synchronized gutting of BOTH to a couple of anchors
@@ -269,17 +272,21 @@ def _resolve_symbol(path: str, module_base: tuple[str, ...]) -> str:
 
     `super::X`  (from a `relay_state_contract_refs` block whose parent module is
     `module_base`) -> `<module_base>::X`; every extra leading `super::` drops one
-    trailing component of `module_base`. `crate::services::discord::X` -> `X`.
+    trailing component of `module_base`. `crate::services::discord::X` -> `X`,
+    and `crate::services::provider::X` -> `provider::X`.
     """
 
     segs = path.split("::")
     if segs[0] == "crate":
-        if tuple(segs[: len(CRATE_PREFIX)]) != CRATE_PREFIX:
+        if tuple(segs[: len(SERVICES_PREFIX)]) != SERVICES_PREFIX:
             raise ValueError(
                 f"anchor path {path!r} is crate-absolute but not under "
-                f"{'::'.join(CRATE_PREFIX)}"
+                f"{'::'.join(SERVICES_PREFIX)}"
             )
-        return "::".join(segs[len(CRATE_PREFIX) :])
+        resolved = segs[len(SERVICES_PREFIX) :]
+        if resolved and resolved[0] == "discord":
+            resolved = resolved[1:]
+        return "::".join(resolved)
     if segs[0] == "super":
         supers = 0
         while supers < len(segs) and segs[supers] == "super":

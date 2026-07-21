@@ -2089,7 +2089,9 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 continue;
             }
         };
-        let cancel_token = Arc::new(CancelToken::new());
+        let cancel_token = Arc::new(CancelToken::from_persisted_turn_nonce(
+            state.turn_nonce.clone(),
+        ));
         super::turn_bridge::bind_cancel_token_tmux_runtime(
             provider,
             &cancel_token,
