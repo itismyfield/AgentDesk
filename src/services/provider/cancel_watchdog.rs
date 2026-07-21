@@ -1,5 +1,5 @@
-use super::{CancelSource, CancelToken};
 use super::cancel_token_cleanup::executor::{CleanupRequest, TmuxCleanupIntent};
+use super::{CancelSource, CancelToken};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -112,7 +112,10 @@ mod tests {
             assert_eq!(pid_kill_dispatches_for_test(), 1);
             assert_eq!(token.pid_kill_claim.load(Ordering::Acquire), 1);
             assert_eq!(token.cancel_source().as_deref(), Some("watchdog_timeout"));
-            assert_eq!(token.cancel_source_kind(), Some(CancelSource::WatchdogTimeout));
+            assert_eq!(
+                token.cancel_source_kind(),
+                Some(CancelSource::WatchdogTimeout)
+            );
         });
     }
 
@@ -127,7 +130,10 @@ mod tests {
             assert!(poll_cancel_watchdog(&token, "test-watchdog", 100));
             assert_eq!(pid_kill_dispatches_for_test(), 0);
             assert_eq!(token.pid_kill_claim.load(Ordering::Acquire), 0);
-            assert_eq!(token.cancel_source_kind(), Some(CancelSource::WatchdogTimeout));
+            assert_eq!(
+                token.cancel_source_kind(),
+                Some(CancelSource::WatchdogTimeout)
+            );
         });
     }
 

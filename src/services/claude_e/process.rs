@@ -138,8 +138,7 @@ pub fn execute_streaming(
 
     let child_pid = child.id();
     register_child_pid(cancel_token.as_deref(), child_pid);
-    let _cancel_watchdog =
-        spawn_cancel_watchdog(cancel_token.clone(), "claude-e-stream");
+    let _cancel_watchdog = spawn_cancel_watchdog(cancel_token.clone(), "claude-e-stream");
 
     // Send the RuntimeReady handoff so the turn-bridge stamps the
     // runtime kind for this dispatch. `output_path` is empty for

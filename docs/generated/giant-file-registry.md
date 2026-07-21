@@ -52,9 +52,9 @@
 | `src/services/auto_queue.rs` | 1545 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |
 | `src/services/auto_queue/activate_command.rs` | 1510 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |
 | `src/services/auto_queue/cancel_run.rs` | 1031 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |
-| `src/services/claude.rs` | 2949 | shrink | server-runtime | 2027-01-31 | #4710 |  |
+| `src/services/claude.rs` | 2948 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/claude_tui/input.rs` | 2187 | shrink | server-runtime | 2027-01-31 | #4710 |  |
-| `src/services/codex.rs` | 3120 | shrink | server-runtime | 2027-01-31 | #4710 |  |
+| `src/services/codex.rs` | 3119 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/codex_tmux_wrapper.rs` | 1405 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/codex_tui/input.rs` | 1670 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/codex_tui/rollout_tail.rs` | 1334 | shrink | discord-relay | 2026-10-31 | #4712 |  |
@@ -87,12 +87,12 @@
 | `src/services/dispatched_sessions.rs` | 1767 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |
 | `src/services/dispatches/discord_delivery/orchestration.rs` | 1502 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |
 | `src/services/dispatches/outbox_route.rs` | 1178 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |
-| `src/services/gemini.rs` | 1361 | shrink | server-runtime | 2027-01-31 | #4710 |  |
+| `src/services/gemini.rs` | 1360 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/memory/memento.rs` | 1893 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/onboarding/mod.rs` | 2884 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/opencode.rs` | 2764 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/platform/binary_resolver.rs` | 1496 | shrink | server-runtime | 2027-01-31 | #4710 |  |
-| `src/services/provider.rs` | 1881 | shrink | server-runtime | 2027-01-31 | #4710 |  |
+| `src/services/provider.rs` | 1797 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/qwen.rs` | 2196 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/routines/agent_executor.rs` | 2136 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |
 | `src/services/routines/discord_log.rs` | 1596 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |
