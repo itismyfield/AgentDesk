@@ -308,6 +308,47 @@ _staged_deploy_binary_path() {
     mktemp "$ADK_REL/bin/agentdesk.deploy.XXXXXX"
 }
 
+# #4727: pure-shell fallback for `server.port` when python3 lacks PyYAML.
+# Non-interactive SSH (peer/mac-mini deploy) may resolve a system python3 without
+# PyYAML on PATH even though the interactive shell's homebrew python3 has it.
+# Parses the simple top-level `server:` mapping agentdesk.yaml uses:
+#   server:
+#     port: 8791
+# Emits the DIRECT-child `server.port` only — matching PyYAML's
+# `config['server']['port']` semantics: it locks onto the server block's
+# child-indent level (set by the block's first child) and accepts a `port:`
+# only at exactly that indent, so a deeper `server.tls.port` is never mis-picked.
+# The value must be a clean integer after stripping a trailing `# comment` and
+# one surrounding quote pair; any non-digit residue (e.g. `8791abc`, `"87-91"`)
+# is rejected → no output → caller fails closed. Range is checked by the caller.
+_extract_yaml_server_port_shell() {
+    local path="$1"
+    [ -f "$path" ] || return 1
+    awk -v sq="'" '
+        function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+        # Top-level key line (column 0, non-comment) delimits the server block.
+        /^[^[:space:]#]/ { in_server = ($0 ~ /^server:[[:space:]]*(#.*)?$/); child_indent = -1; next }
+        in_server {
+            if ($0 ~ /^[[:space:]]*$/) next          # blank line
+            if ($0 ~ /^[[:space:]]*#/) next          # comment line
+            match($0, /^ */); ind = RLENGTH          # leading-space count (YAML forbids tabs)
+            if (child_indent == -1) child_indent = ind   # first child fixes the direct-child level
+            if (ind != child_indent) next            # deeper (grandchild) or shallower — not server.port
+            if ($1 != "port:") next
+            v = $0
+            sub(/#.*/, "", v)                        # strip inline comment
+            sub(/^[[:space:]]*port:[[:space:]]*/, "", v)  # strip the key
+            v = trim(v)
+            # strip a single matching surrounding quote pair (double or single)
+            if (v ~ /^".*"$/) v = substr(v, 2, length(v) - 2)
+            else if (length(v) >= 2 && substr(v, 1, 1) == sq && substr(v, length(v), 1) == sq) v = substr(v, 2, length(v) - 2)
+            v = trim(v)
+            if (v ~ /^[0-9]+$/) print v              # clean integer only — else reject
+            exit                                     # exactly one server.port; valid or not, stop
+        }
+    ' "$path"
+}
+
 _resolve_release_server_port() {
     local fallback_port="${AGENTDESK_REL_PORT:-$ADK_DEFAULT_PORT}"
     local config_path=""
@@ -326,12 +367,8 @@ _resolve_release_server_port() {
         return 0
     fi
 
-    if ! python3 -c 'import yaml' >/dev/null 2>&1; then
-        echo "✗ Cannot resolve server.port from $config_path: python3 PyYAML is required; aborting deploy" >&2
-        return 1
-    fi
-
-    if configured_port=$(python3 - "$config_path" "$fallback_port" <<'PY'
+    if python3 -c 'import yaml' >/dev/null 2>&1; then
+        if configured_port=$(python3 - "$config_path" "$fallback_port" <<'PY'
 import sys
 
 import yaml
@@ -348,12 +385,28 @@ if not 1 <= port <= 65535:
     raise ValueError("server.port must be between 1 and 65535")
 print(port)
 PY
-    ); then
+        ); then
+            printf '%s\n' "$configured_port"
+            return 0
+        fi
+
+        echo "✗ Cannot resolve server.port from $config_path: invalid or unreadable configuration; aborting deploy" >&2
+        return 1
+    fi
+
+    # #4727: PyYAML-less python3 on the resolved PATH (typically a peer deploy over
+    # non-interactive SSH). Fall back to a pure-shell parse so the deploy no longer
+    # depends on which python3 is first on PATH.
+    if configured_port=$(_extract_yaml_server_port_shell "$config_path") \
+        && [ -n "$configured_port" ] \
+        && [ "$configured_port" -ge 1 ] 2>/dev/null \
+        && [ "$configured_port" -le 65535 ] 2>/dev/null; then
+        echo "▸ Resolved server.port=$configured_port from $config_path via shell fallback (python3 PyYAML unavailable)" >&2
         printf '%s\n' "$configured_port"
         return 0
     fi
 
-    echo "✗ Cannot resolve server.port from $config_path: invalid or unreadable configuration; aborting deploy" >&2
+    echo "✗ Cannot resolve server.port from $config_path: python3 PyYAML unavailable and shell fallback could not read server.port; aborting deploy" >&2
     return 1
 }
 
@@ -3055,11 +3108,35 @@ PLIST_EOF
         elif _install_relay_watchdog_plist; then
             xattr -d com.apple.quarantine "$WATCHDOG_PLIST_PATH" 2>/dev/null || true
             # bootout+bootstrap (not kickstart) so a script/plist change is picked up.
+            # #4726: bootout is async — an immediate bootstrap races the still-running
+            # teardown and hits "5: Input/output error", leaving the watchdog unarmed
+            # and the relay unwatched on every deploy. Poll until the label is actually
+            # gone (max ~6s), then bootstrap with retry/backoff before declaring failure.
             launchctl bootout "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" 2>/dev/null || true
-            if launchctl bootstrap "$LAUNCHD_DOMAIN" "$WATCHDOG_PLIST_PATH"; then
+            _wd_bootout_polls=0
+            while launchctl print "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" >/dev/null 2>&1; do
+                if [ "$_wd_bootout_polls" -ge 12 ]; then
+                    echo "⚠ Relay watchdog still unloading ~6s after bootout — bootstrapping anyway"
+                    break
+                fi
+                sleep 0.5
+                _wd_bootout_polls=$((_wd_bootout_polls + 1))
+            done
+            _wd_armed=0
+            for _wd_attempt in 1 2 3; do
+                if launchctl bootstrap "$LAUNCHD_DOMAIN" "$WATCHDOG_PLIST_PATH"; then
+                    _wd_armed=1
+                    break
+                fi
+                if [ "$_wd_attempt" -lt 3 ]; then
+                    echo "⚠ Relay watchdog bootstrap attempt $_wd_attempt failed — retrying in 2s"
+                    sleep 2
+                fi
+            done
+            if [ "$_wd_armed" = "1" ]; then
                 echo "✓ Relay watchdog armed ($WATCHDOG_LABEL)"
             else
-                echo "⚠ Relay watchdog bootstrap FAILED — relay gaps will go unwatched"
+                echo "⚠ Relay watchdog bootstrap FAILED after 3 attempts — relay gaps will go unwatched"
             fi
         else
             rm -f "$WATCHDOG_PLIST_PATH.tmp" 2>/dev/null || true
