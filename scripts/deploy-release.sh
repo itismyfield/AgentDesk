@@ -314,18 +314,37 @@ _staged_deploy_binary_path() {
 # Parses the simple top-level `server:` mapping agentdesk.yaml uses:
 #   server:
 #     port: 8791
-# Emits the first `port:` under the top-level `server:` block (stopping at the
-# next top-level key), stripping inline `#` comments and quotes to digits only.
+# Emits the DIRECT-child `server.port` only — matching PyYAML's
+# `config['server']['port']` semantics: it locks onto the server block's
+# child-indent level (set by the block's first child) and accepts a `port:`
+# only at exactly that indent, so a deeper `server.tls.port` is never mis-picked.
+# The value must be a clean integer after stripping a trailing `# comment` and
+# one surrounding quote pair; any non-digit residue (e.g. `8791abc`, `"87-91"`)
+# is rejected → no output → caller fails closed. Range is checked by the caller.
 _extract_yaml_server_port_shell() {
     local path="$1"
     [ -f "$path" ] || return 1
-    awk '
-        /^[^[:space:]#]/ { in_server = ($0 ~ /^server:[[:space:]]*(#.*)?$/); next }
-        in_server && $1 == "port:" {
+    awk -v sq="'" '
+        function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+        # Top-level key line (column 0, non-comment) delimits the server block.
+        /^[^[:space:]#]/ { in_server = ($0 ~ /^server:[[:space:]]*(#.*)?$/); child_indent = -1; next }
+        in_server {
+            if ($0 ~ /^[[:space:]]*$/) next          # blank line
+            if ($0 ~ /^[[:space:]]*#/) next          # comment line
+            match($0, /^ */); ind = RLENGTH          # leading-space count (YAML forbids tabs)
+            if (child_indent == -1) child_indent = ind   # first child fixes the direct-child level
+            if (ind != child_indent) next            # deeper (grandchild) or shallower — not server.port
+            if ($1 != "port:") next
             v = $0
-            sub(/#.*/, "", v)
-            gsub(/[^0-9]/, "", v)
-            if (v != "") { print v; exit }
+            sub(/#.*/, "", v)                        # strip inline comment
+            sub(/^[[:space:]]*port:[[:space:]]*/, "", v)  # strip the key
+            v = trim(v)
+            # strip a single matching surrounding quote pair (double or single)
+            if (v ~ /^".*"$/) v = substr(v, 2, length(v) - 2)
+            else if (length(v) >= 2 && substr(v, 1, 1) == sq && substr(v, length(v), 1) == sq) v = substr(v, 2, length(v) - 2)
+            v = trim(v)
+            if (v ~ /^[0-9]+$/) print v              # clean integer only — else reject
+            exit                                     # exactly one server.port; valid or not, stop
         }
     ' "$path"
 }
