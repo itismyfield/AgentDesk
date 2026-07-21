@@ -717,4 +717,3 @@ fn row_to_record(row: &sqlx::postgres::PgRow) -> Result<IterationRecord, String>
             .map_err(|error| format!("decode created_at: {error}"))?,
     })
 }
-

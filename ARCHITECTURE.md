@@ -109,6 +109,7 @@ src/
 │   │   ├── postgres_tests.rs
 │   │   └── writes.rs
 │   ├── agents.rs
+│   ├── automation_candidate_card_program.rs
 │   ├── automation_candidates.rs
 │   ├── cancel_tombstones.rs
 │   ├── dispatch_semaphores.rs

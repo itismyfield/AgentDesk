@@ -1,6 +1,6 @@
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
-use crate::db::automation_candidates::{ensure_one_card_row_affected, MAX_ITERATIONS};
+use crate::db::automation_candidates::{MAX_ITERATIONS, ensure_one_card_row_affected};
 use crate::services::automation_candidate_contract::PIPELINE_STAGE_ID;
 
 /// Load the card's metadata JSON and extract the program contract.

@@ -1630,12 +1630,6 @@
     per-item dead_code reasoning on the runtime-gated durable helpers; tracked
     decompose target — see `giant-file-registry.md` (owner `voice-runtime`,
     deadline 2026-08-31, #3036)).
-  - `src/db/automation_candidates.rs` (1003 lines; pipeline-v2 automation
-    candidate iteration repository surface (#2064); crossed the giant threshold
-    when #3034 restored per-item dead_code reasoning on the still-unwired
-    iteration-loop helpers; tracked decompose target — see
-    `giant-file-registry.md` (owner `automation-pipeline`, deadline
-    2026-08-31, #3036)).
   - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
     lines).
