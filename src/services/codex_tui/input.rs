@@ -86,7 +86,7 @@
 
 use std::collections::HashSet;
 use std::process::Output;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::services::provider::{CancelToken, cancel_requested};
@@ -97,6 +97,20 @@ use tokio::sync::Notify;
 // final Enter as a distinct action is what lets submission confirmation reason
 // about a visible, still-stranded composer draft without ever double-submitting.
 const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
+
+static CODEX_COMPOSER_MUTATION_LOCKS: LazyLock<dashmap::DashMap<String, Arc<Mutex<()>>>> =
+    LazyLock::new(dashmap::DashMap::new);
+
+fn with_composer_mutation_lock<R>(session_name: &str, operation: impl FnOnce() -> R) -> R {
+    let composer_lock = CODEX_COMPOSER_MUTATION_LOCKS
+        .entry(session_name.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone();
+    let _composer_guard = composer_lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    operation()
+}
 const PROMPT_INPUT_BEFORE_ENTER_SETTLE: Duration = Duration::from_millis(200);
 const PROMPT_SUBMIT_INITIAL_SETTLE: Duration = Duration::from_millis(150);
 const PROMPT_SUBMIT_DRAFT_RECHECK_SETTLE: Duration = Duration::from_millis(250);
@@ -1115,6 +1129,100 @@ fn snapshot_allows_warm_followup_submit(snapshot: &PromptReadinessSnapshot) -> b
         && !snapshot.prompt_draft_detected
 }
 
+fn codex_snapshot_indicates_interactive_modal(snapshot: &PromptReadinessSnapshot) -> bool {
+    let lower = snapshot.pane_tail.to_ascii_lowercase();
+    [
+        "approval required",
+        "allow command",
+        "allow this action",
+        "confirm to continue",
+        "do you trust",
+        "trust this folder",
+        "sign in",
+        "log in",
+        "authentication required",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+pub(crate) fn steering_snapshot_decision(
+    snapshot: &PromptReadinessSnapshot,
+) -> Result<(), &'static str> {
+    if !snapshot.tmux_pane_alive {
+        return Err("pane dead");
+    }
+    if !snapshot.capture_available {
+        return Err("pane capture unavailable");
+    }
+    if !snapshot.composer_marker_detected {
+        return Err("composer not present");
+    }
+    if snapshot.prompt_draft_detected {
+        return Err("composer draft");
+    }
+    // Codex has no shared modal detector yet. Keep this conservative blacklist
+    // behind the positive canonical composer marker, which is the primary gate.
+    if codex_snapshot_indicates_interactive_modal(snapshot) {
+        return Err("interactive modal");
+    }
+    Ok(())
+}
+
+fn steering_submit_outcome_to_result(
+    outcome: CodexFollowupPromptSubmitOutcome,
+) -> Result<(), String> {
+    match outcome {
+        CodexFollowupPromptSubmitOutcome::Submitted => Ok(()),
+        CodexFollowupPromptSubmitOutcome::NotSubmitted { error }
+        | CodexFollowupPromptSubmitOutcome::Unconfirmed { error, .. } => Err(error),
+        CodexFollowupPromptSubmitOutcome::RetrySafeDraft { .. } => {
+            Err("codex tui steering prompt remained in the composer after submit".to_string())
+        }
+        CodexFollowupPromptSubmitOutcome::Cancelled => {
+            Err("codex tui steering prompt submission was cancelled".to_string())
+        }
+    }
+}
+
+fn inject_steering_prompt_using<C, R, U, S>(
+    session_name: &str,
+    prompt: &str,
+    mut capture: C,
+    mut record_prompt: R,
+    mut remove_prompt: U,
+    mut submit: S,
+) -> Result<(), String>
+where
+    C: FnMut(&str) -> PromptReadinessSnapshot,
+    R: FnMut(&str, &str, &str),
+    U: FnMut(&str, &str, &str),
+    S: FnMut(&str, &str) -> CodexFollowupPromptSubmitOutcome,
+{
+    plan_prompt_submit(prompt)?;
+    with_composer_mutation_lock(session_name, || {
+        let final_snapshot = capture(session_name);
+        steering_snapshot_decision(&final_snapshot).map_err(str::to_string)?;
+        record_prompt("codex", session_name, prompt);
+        let result = steering_submit_outcome_to_result(submit(session_name, prompt));
+        if result.is_err() {
+            remove_prompt("codex", session_name, prompt);
+        }
+        result
+    })
+}
+
+pub(crate) fn inject_steering_prompt(session_name: &str, prompt: &str) -> Result<(), String> {
+    inject_steering_prompt_using(
+        session_name,
+        prompt,
+        prompt_readiness_snapshot,
+        crate::services::tui_prompt_dedupe::record_discord_originated_prompt,
+        crate::services::tui_prompt_dedupe::remove_discord_originated_prompt,
+        |session_name, prompt| submit_codex_followup_prompt_under_lock(session_name, prompt, None),
+    )
+}
+
 /// Submit one Discord follow-up to an already-live Codex composer.
 ///
 /// The Enter key is sent at most once. A possible delivery error never causes
@@ -1123,6 +1231,16 @@ fn snapshot_allows_warm_followup_submit(snapshot: &PromptReadinessSnapshot) -> b
 /// This makes relaunch/replay legal only with positive evidence that the prompt
 /// remained in the editor.
 pub(crate) fn submit_codex_followup_prompt(
+    session_name: &str,
+    prompt: &str,
+    cancel_token: Option<&CancelToken>,
+) -> CodexFollowupPromptSubmitOutcome {
+    with_composer_mutation_lock(session_name, || {
+        submit_codex_followup_prompt_under_lock(session_name, prompt, cancel_token)
+    })
+}
+
+fn submit_codex_followup_prompt_under_lock(
     session_name: &str,
     prompt: &str,
     cancel_token: Option<&CancelToken>,
@@ -2035,6 +2153,154 @@ mod tests {
                Esc to interrupt   Ctrl+J newline   ⏎ send"
         );
         snapshot
+    }
+
+    #[test]
+    fn steering_snapshot_requires_composer_and_rejects_modal() {
+        let missing_composer = submit_snapshot(true, true, false, false);
+        assert_eq!(
+            steering_snapshot_decision(&missing_composer),
+            Err("composer not present")
+        );
+
+        let mut modal = submit_snapshot(true, true, true, false);
+        modal.pane_tail = "Approval required: allow command?".to_string();
+        assert_eq!(steering_snapshot_decision(&modal), Err("interactive modal"));
+    }
+
+    #[test]
+    fn codex_injection_records_before_confirmed_submit() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let record_events = events.clone();
+        let remove_events = events.clone();
+        let submit_events = events.clone();
+
+        inject_steering_prompt_using(
+            "agentdesk-codex-steering-dedupe-test",
+            "steer now",
+            |_| submit_snapshot(true, true, true, false),
+            move |provider, session_name, prompt| {
+                record_events
+                    .lock()
+                    .unwrap()
+                    .push(format!("record:{provider}:{session_name}:{prompt}"));
+            },
+            move |provider, session_name, prompt| {
+                remove_events
+                    .lock()
+                    .unwrap()
+                    .push(format!("remove:{provider}:{session_name}:{prompt}"));
+            },
+            move |_, _| {
+                submit_events.lock().unwrap().push("submit".to_string());
+                CodexFollowupPromptSubmitOutcome::Submitted
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "record:codex:agentdesk-codex-steering-dedupe-test:steer now",
+                "submit"
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_steering_production_path_uses_confirmed_submit() {
+        let module_src = include_str!("input.rs");
+        let steering_entry = module_src
+            .find("pub(crate) fn inject_steering_prompt(")
+            .expect("Codex steering entry point exists");
+        let warm_followup_entry = module_src[steering_entry..]
+            .find("pub(crate) fn submit_codex_followup_prompt(")
+            .map(|offset| steering_entry + offset)
+            .expect("warm-followup entry follows steering entry");
+        let steering_body = &module_src[steering_entry..warm_followup_entry];
+
+        assert!(steering_body.contains("submit_codex_followup_prompt_under_lock("));
+        assert!(!steering_body.contains("run_actions_with_executor("));
+    }
+
+    #[test]
+    fn codex_injection_rejects_stranded_draft_and_rolls_back_dedupe() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let record_events = events.clone();
+        let remove_events = events.clone();
+        let first = active_box_draft_snapshot("steer now");
+        let second = first.clone();
+
+        let error = inject_steering_prompt_using(
+            "agentdesk-codex-steering-confirmation-test",
+            "steer now",
+            |_| submit_snapshot(true, true, true, false),
+            move |provider, session_name, prompt| {
+                record_events
+                    .lock()
+                    .unwrap()
+                    .push(format!("record:{provider}:{session_name}:{prompt}"));
+            },
+            move |provider, session_name, prompt| {
+                remove_events
+                    .lock()
+                    .unwrap()
+                    .push(format!("remove:{provider}:{session_name}:{prompt}"));
+            },
+            move |_, _| CodexFollowupPromptSubmitOutcome::RetrySafeDraft {
+                first: first.clone(),
+                second: second.clone(),
+            },
+        )
+        .expect_err("a stranded draft must not report steering success");
+
+        assert!(error.contains("remained in the composer"));
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "record:codex:agentdesk-codex-steering-confirmation-test:steer now",
+                "remove:codex:agentdesk-codex-steering-confirmation-test:steer now"
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_injection_rejects_unconfirmed_submit_and_rolls_back_dedupe() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let record_events = events.clone();
+        let remove_events = events.clone();
+
+        let error = inject_steering_prompt_using(
+            "agentdesk-codex-steering-unconfirmed-test",
+            "steer now",
+            |_| submit_snapshot(true, true, true, false),
+            move |provider, session_name, prompt| {
+                record_events
+                    .lock()
+                    .unwrap()
+                    .push(format!("record:{provider}:{session_name}:{prompt}"));
+            },
+            move |provider, session_name, prompt| {
+                remove_events
+                    .lock()
+                    .unwrap()
+                    .push(format!("remove:{provider}:{session_name}:{prompt}"));
+            },
+            move |_, _| CodexFollowupPromptSubmitOutcome::Unconfirmed {
+                error: "submit could not be confirmed".to_string(),
+                snapshot: submit_snapshot(true, false, false, false),
+            },
+        )
+        .expect_err("an unconfirmed submit must not report steering success");
+
+        assert_eq!(error, "submit could not be confirmed");
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "record:codex:agentdesk-codex-steering-unconfirmed-test:steer now",
+                "remove:codex:agentdesk-codex-steering-unconfirmed-test:steer now"
+            ]
+        );
     }
 
     #[test]

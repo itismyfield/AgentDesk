@@ -53,3 +53,11 @@ old_cap = 997
 new_cap = 998
 decompose_issue = 4639
 count = 2
+
+[[admission]]
+ratchet = "giant_file_ratchet"
+file = "src/services/discord/router/message_handler/intake_turn.rs"
+old_cap = 2705
+new_cap = 2718
+decompose_issue = 4743
+count = 2

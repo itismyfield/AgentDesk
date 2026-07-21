@@ -9,15 +9,9 @@ use super::*;
 mod claim_bootstrap;
 mod race_loss;
 mod stale_dispatch_guard;
+mod steering_hook;
 mod turn_watchdog;
 mod voice_intake;
-
-/// Queue-marker reactions to strip when a queued turn is promoted to active.
-/// The promotion point only knows the head message id, so it clears every
-/// marker the queue gate can add (standalone, merged, and reconcile-gate).
-pub(super) const fn queue_pending_reactions_to_clear() -> [char; 3] {
-    super::super::super::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS
-}
 
 /// Bundle of Discord-runtime dependencies that `handle_text_message`
 /// reads from outside its per-message parameters. Phase 2-pre.2 of
@@ -1374,7 +1368,7 @@ pub(super) async fn handle_text_message(
     // never reacted the user message). A redundant remove is a no-op, so this
     // composes safely with the entrypoint drains.
     if queued_placeholder_handoff.is_some() && !turn_kind.is_background_trigger() {
-        for emoji in queue_pending_reactions_to_clear() {
+        for emoji in crate::services::discord::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS {
             queue_marker::note_removed_current(
                 shared,
                 http,
@@ -1956,6 +1950,34 @@ pub(super) async fn handle_text_message(
     };
     let watcher_tmux_name = inflight_tmux_name.clone();
     let watcher_output_path = inflight_output_path.clone();
+    #[cfg(unix)]
+    if let Some(result) =
+        steering_hook::maybe_handle_intake_steering(steering_hook::IntakeSteeringContext {
+            http,
+            shared,
+            token,
+            channel_id,
+            user_msg_id,
+            placeholder_msg_id,
+            provider: &provider,
+            provider_label,
+            tmux_session_name: tmux_session_name.as_deref(),
+            current_path: &current_path,
+            session_id: session_id.as_deref(),
+            user_text,
+            cancel_token: &cancel_token,
+            intake_latency: &intake_latency,
+            foreground: matches!(turn_kind, TurnKind::Foreground),
+            local: remote_profile.is_none(),
+            wait_for_completion,
+            has_dispatch: dispatch_id.is_some() || dispatch_id_for_thread.is_some(),
+            is_voice_announcement,
+            has_pending_uploads: !pending_uploads.is_empty(),
+        })
+        .await
+    {
+        return result;
+    }
     #[cfg(unix)]
     let mut recapture_offset_after_busy_wait = false;
     // #2416: compute claude_tui busy-followup diagnostic with a wait+retry step.
@@ -2961,7 +2983,7 @@ mod queue_pending_reaction_clear_tests {
 
     #[test]
     fn clears_every_queue_marker_reaction() {
-        let emojis = queue_pending_reactions_to_clear();
+        let emojis = crate::services::discord::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS;
         assert!(
             emojis.contains(&'📬'),
             "standalone queue-head 📬 must be cleared on dequeue"
@@ -2986,7 +3008,7 @@ mod queue_pending_reaction_clear_tests {
     /// emoji the dequeue path will not later remove.
     #[test]
     fn cleared_set_covers_every_intake_gate_queue_reaction() {
-        let cleared = queue_pending_reactions_to_clear();
+        let cleared = crate::services::discord::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS;
         for merged in [false, true] {
             let added = crate::services::discord::router::intake_gate::queue_pending_reaction_for(
                 crate::services::discord::MailboxEnqueueOutcome {

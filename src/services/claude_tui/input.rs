@@ -577,6 +577,45 @@ fn compact_pre_enter_modal_guard(snapshot: &PromptReadinessSnapshot) -> Result<(
     Ok(())
 }
 
+pub(crate) fn steering_snapshot_decision(
+    snapshot: &PromptReadinessSnapshot,
+) -> Result<(), &'static str> {
+    if snapshot.prompt_draft_detected {
+        return Err("composer draft");
+    }
+    compact_pre_enter_modal_guard(snapshot)?;
+    if !crate::services::tmux_common::tmux_capture_indicates_claude_tui_exact_empty_composer(
+        &snapshot.pane_tail,
+    ) {
+        return Err("composer not present");
+    }
+    Ok(())
+}
+
+pub(crate) fn inject_steering_prompt(session_name: &str, prompt: &str) -> Result<(), String> {
+    let actions = plan_prompt_submit(prompt)?;
+    crate::services::claude_tui::composer_lock::with_composer_mutation_lock(session_name, || {
+        let snapshot = prompt_readiness_snapshot(session_name);
+        steering_snapshot_decision(&snapshot).map_err(str::to_string)?;
+        crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
+            "claude",
+            session_name,
+            prompt,
+        );
+        match run_actions_with_submission_confirmation(session_name, &actions, None) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+                    "claude",
+                    session_name,
+                    prompt,
+                );
+                Err(error)
+            }
+        }
+    })
+}
+
 fn compact_queued_message_hint(pane_tail: &str) -> bool {
     let lower = pane_tail.to_ascii_lowercase();
     lower.contains("queued message")
