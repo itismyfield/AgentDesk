@@ -8,6 +8,30 @@ use super::{
     lock_inflight_state_path, persist_under_lock,
 };
 
+pub(crate) fn mark_steer_rollover_if_matches(
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_session_name: &str,
+) -> Result<bool, String> {
+    let root = inflight_runtime_root().ok_or_else(|| "Home directory not found".to_string())?;
+    let path = inflight_state_path(&root, provider, channel_id);
+    let _lock = lock_inflight_state_path(&path)?;
+    let Some(mut state) = load_inflight_state_unlocked(&path) else {
+        return Ok(false);
+    };
+    if state.tmux_session_name.as_deref() != Some(tmux_session_name) {
+        return Ok(false);
+    }
+    state.steer_rollover_after_offset = Some(state.response_sent_offset);
+    persist_under_lock(
+        &root,
+        &path,
+        &state,
+        "inflight::mark_steer_rollover_if_matches",
+    )?;
+    Ok(true)
+}
+
 // ---------------------------------------------------------------------------
 // #3077: typed status-panel ownership writes.
 //

@@ -1115,6 +1115,46 @@ fn snapshot_allows_warm_followup_submit(snapshot: &PromptReadinessSnapshot) -> b
         && !snapshot.prompt_draft_detected
 }
 
+pub(crate) fn steering_snapshot_decision(
+    snapshot: &PromptReadinessSnapshot,
+) -> Result<(), &'static str> {
+    if !snapshot.tmux_pane_alive {
+        return Err("pane dead");
+    }
+    if !snapshot.capture_available {
+        return Err("pane capture unavailable");
+    }
+    if snapshot.prompt_draft_detected {
+        return Err("composer draft");
+    }
+    let lower = snapshot.pane_tail.to_ascii_lowercase();
+    let unsafe_modal = [
+        "approval required",
+        "allow command",
+        "allow this action",
+        "confirm to continue",
+        "do you trust",
+        "trust this folder",
+        "sign in",
+        "log in",
+        "authentication required",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    if unsafe_modal {
+        return Err("interactive modal");
+    }
+    Ok(())
+}
+
+pub(crate) fn inject_steering_prompt(session_name: &str, prompt: &str) -> Result<(), String> {
+    let actions = plan_prompt_submit(prompt)?;
+    let final_snapshot = prompt_readiness_snapshot(session_name);
+    steering_snapshot_decision(&final_snapshot).map_err(str::to_string)?;
+    let mut executor = TmuxTuiActionExecutor::default();
+    run_actions_with_executor(session_name, &actions, None, &mut executor)
+}
+
 /// Submit one Discord follow-up to an already-live Codex composer.
 ///
 /// The Enter key is sent at most once. A possible delivery error never causes

@@ -106,10 +106,11 @@ fn session_bound_terminal_delivery_route(
     if !session_bound_discord_relay_can_own_terminal_delivery(Some(state), tmux_session_name) {
         return None;
     }
-    if matches!(
-        state.effective_relay_owner_kind(),
-        RelayOwnerKind::SessionBoundRelay
-    ) && matches!(state.turn_source, TurnSource::ExternalInput)
+    if state.steer_rollover_after_offset.is_some()
+        || (matches!(
+            state.effective_relay_owner_kind(),
+            RelayOwnerKind::SessionBoundRelay
+        ) && matches!(state.turn_source, TurnSource::ExternalInput))
     {
         return Some(SessionBoundTerminalDeliveryRoute::NewMessage);
     }
@@ -1965,6 +1966,20 @@ mod tests {
         assert!(!session_bound_should_send_new_chunks_for_placeholder(
             "[E2E:E15:BEGIN]\nE15-LINE-150\n[E2E:E15:END]"
         ));
+    }
+
+    #[test]
+    fn steer_rollover_routes_session_bound_delivery_as_new_message() {
+        let tmux = "AgentDesk-claude-steer-rollover";
+        let mut state = inflight_for(tmux, RelayOwnerKind::SessionBoundRelay, false);
+        state.current_msg_id = 9001;
+        state.steer_rollover_after_offset = Some(state.response_sent_offset);
+
+        assert_eq!(
+            session_bound_terminal_delivery_route(Some(&state), tmux),
+            Some(SessionBoundTerminalDeliveryRoute::NewMessage),
+            "a pending steer boundary must never edit the pre-steer response anchor"
+        );
     }
 
     #[test]

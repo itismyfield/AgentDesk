@@ -485,7 +485,33 @@ pub(super) async fn run_terminal_outcome_delivery(
                 inflight_state.turn_start_offset,
             )
             .format_and_prefix(response_sent_offset == 0, &delivery_response);
-            if can_chain_locally {
+            if can_chain_locally && inflight_state.steer_rollover_after_offset.is_some() {
+                match gateway
+                    .send_long_message_with_rollback(channel_id, current_msg_id, &delivery_response)
+                    .await
+                {
+                    Ok(message_ids) if !message_ids.is_empty() => {
+                        let message_id = *message_ids.last().expect("non-empty message ids");
+                        inflight_state.current_msg_id = message_id.get();
+                        inflight_state.current_msg_len =
+                            crate::services::discord::formatting::split_message(&delivery_response)
+                                .last()
+                                .map_or(0, String::len);
+                        inflight_state.steer_rollover_after_offset = None;
+                        terminal_delivery_committed = true;
+                        terminal_body_visible = true;
+                    }
+                    Ok(_) => preserve_inflight_for_cleanup_retry = true,
+                    Err(error) => {
+                        tracing::warn!(
+                            channel_id = channel_id.get(),
+                            error,
+                            "turn bridge failed to send post-steer response as new message chunks"
+                        );
+                        preserve_inflight_for_cleanup_retry = true;
+                    }
+                }
+            } else if can_chain_locally {
                 if terminal_delivery_should_send_new_chunks(can_chain_locally, &delivery_response) {
                     let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                     let bridge_end = tmux_last_offset.unwrap_or(0);

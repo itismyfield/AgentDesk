@@ -42,6 +42,7 @@ fn state_for_turn(user_msg_id: u64, tmux_session_name: &str) -> InflightTurnStat
         turn_start_offset: Some(0),
         full_response: String::new(),
         response_sent_offset: 0,
+        steer_rollover_after_offset: None,
         terminal_delivery_committed: false,
         current_tool_line: None,
         last_tool_name: None,

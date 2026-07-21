@@ -95,6 +95,7 @@ use self::watcher_state::{
 // panel-lifecycle race family) moved into a child module; re-exported below so
 // `inflight::*` paths stay byte-identical for discord-module callers.
 mod ownership_ops;
+pub(crate) use self::ownership_ops::mark_steer_rollover_if_matches;
 pub(in crate::services::discord) use self::ownership_ops::{
     StatusPanelBindGuard, StatusPanelBindOutcome, StatusPanelClearGuard, bind_status_panel,
     clear_current_msg_if_matches, clear_status_panel_if_current,

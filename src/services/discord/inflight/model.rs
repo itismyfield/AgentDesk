@@ -187,6 +187,10 @@ pub(in crate::services::discord) struct InflightTurnState {
     pub turn_start_offset: Option<u64>,
     pub full_response: String,
     pub response_sent_offset: usize,
+    /// A successful native TUI steer forces the next assistant output below the
+    /// source Discord message instead of editing the pre-steer response anchor.
+    #[serde(default)]
+    pub steer_rollover_after_offset: Option<usize>,
     /// True once the terminal assistant response has been committed to the
     /// outbound Discord delivery path. Completion/status UI may still be
     /// suppressed by a TUI quiescence timeout, but recovery must not treat
@@ -636,6 +640,18 @@ mod turn_source_tests {
     }
 
     #[test]
+    fn steer_rollover_boundary_defaults_absent_for_legacy_rows() {
+        #[derive(serde::Deserialize, Debug)]
+        struct Probe {
+            #[serde(default)]
+            steer_rollover_after_offset: Option<usize>,
+        }
+
+        let parsed: Probe = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed.steer_rollover_after_offset, None);
+    }
+
+    #[test]
     fn relay_owner_kind_defaults_to_none_for_legacy_rows() {
         #[derive(serde::Deserialize, Debug)]
         struct Probe {
@@ -1000,6 +1016,7 @@ impl InflightTurnState {
             turn_start_offset: Some(last_offset),
             full_response: String::new(),
             response_sent_offset: 0,
+            steer_rollover_after_offset: None,
             terminal_delivery_committed: false,
             current_tool_line: None,
             last_tool_name: None,
