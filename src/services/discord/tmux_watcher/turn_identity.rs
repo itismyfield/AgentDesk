@@ -272,7 +272,52 @@ impl WatcherDirectTerminalResponseDecision {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Pure core of the #4081/#4714 degenerate-key duplicate decision: the guard
+/// refuses ONLY a byte-identical content re-post (`duplicate`) that has no fresh
+/// in-range assistant text AND no pending user turn awaiting a response. Split
+/// out so the refusal logic is unit-tested directly without the global-state /
+/// delivery-record I/O the wrapper performs.
+pub(super) fn degenerate_duplicate_refuses_delivery(
+    duplicate: bool,
+    fresh_assistant_text_in_observed_range: bool,
+    pending_user_boundary: bool,
+) -> bool {
+    // #4714: a pending user boundary means a live follow-up turn is awaiting a
+    // response — never suppress it. Only a true re-post (no boundary, no fresh
+    // text) is a #4081 phantom duplicate.
+    duplicate && !fresh_assistant_text_in_observed_range && !pending_user_boundary
+}
+
+/// #4081 introduced this degenerate-key content-fingerprint guard to block the
+/// phantom RE-RELAY of the immediately-prior (already-delivered) response at a
+/// no-inflight soft boundary: with no inflight identity the lease key degenerates
+/// to `id-0`, and if the body byte-matches a recently-delivered fingerprint AND
+/// no fresh assistant text appears in the observed range, the watcher would
+/// re-post the same answer. That refusal is correct ONLY when no user turn is
+/// actually awaiting a response.
+///
+/// #4714 (the over-fire this guard now corrects): when the prior watcher-owned
+/// turn reaches terminal but its terminal submission / inflight / dispatch
+/// identity are lost (#3277 backstop path), a genuinely NEW follow-up user turn
+/// also runs under the degenerate `id-0` key. If that follow-up's body collides
+/// with the prior fingerprint and no fresh in-range assistant text is seen yet,
+/// the #4081 guard misjudged it as a duplicate and refused delivery — stranding
+/// the live channel with `route="duplicate_guard_refused"` and zero user-visible
+/// response (both placeholder and streaming suppressed).
+///
+/// The discriminator that separates the two: a PENDING user boundary. A prompt
+/// anchor / external-input lease is recorded when a user turn arrives and CLEARED
+/// once that turn's response is delivered. So at a #4081 phantom re-relay (the
+/// prior turn already delivered) no boundary is present, while at a #4714
+/// follow-up a boundary IS present (a user is still awaiting a response). When a
+/// pending boundary exists the matching content is a new turn whose identity was
+/// lost — NOT a re-post — so the guard must NOT refuse it. A genuine re-post of an
+/// already-delivered turn (no pending boundary) is still caught, preserving #4081.
+///
+/// The boundary is read here (not threaded from the caller) to keep the hot
+/// `tmux_watcher.rs` relay-loop call site byte-identical (#3016 hot-file rule);
+/// this function already performs delivery-record I/O, so the extra
+/// `tui_prompt_dedupe` read is consistent with its impurity.
 pub(super) fn watcher_direct_terminal_response_decision(
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -300,13 +345,32 @@ pub(super) fn watcher_direct_terminal_response_decision(
             tmux_session_name,
             response,
         );
-    if duplicate && !fresh_assistant_text_in_observed_range {
+    // #4714: a pending prompt anchor or external-input lease marks a live
+    // follow-up turn awaiting a response — mirrors the caller's
+    // `prompt_anchor_present_before_relay || external_input_lease_before_relay`.
+    let pending_user_boundary = crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
+        provider.as_str(),
+        tmux_session_name,
+        channel_id.get(),
+    )
+    .is_some()
+        || crate::services::tui_prompt_dedupe::external_input_relay_lease_present(
+            provider.as_str(),
+            tmux_session_name,
+            channel_id.get(),
+        );
+    if degenerate_duplicate_refuses_delivery(
+        duplicate,
+        fresh_assistant_text_in_observed_range,
+        pending_user_boundary,
+    ) {
         tracing::warn!(
             provider = %provider.as_str(),
             channel_id = channel_id.get(),
             tmux_session = %tmux_session_name,
             response_len = response.len(),
             fresh_assistant_text_in_observed_range,
+            pending_user_boundary,
             "watcher: suppressed degenerate-key duplicate terminal response by content fingerprint"
         );
         return WatcherDirectTerminalResponseDecision::RefusedDegenerateDuplicate;
