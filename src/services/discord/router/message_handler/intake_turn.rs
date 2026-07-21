@@ -9,24 +9,9 @@ use super::*;
 mod claim_bootstrap;
 mod race_loss;
 mod stale_dispatch_guard;
+mod steering_hook;
 mod turn_watchdog;
 mod voice_intake;
-
-/// Queue-marker reactions to strip when a queued turn is promoted to active.
-/// The promotion point only knows the head message id, so it clears every
-/// marker the queue gate can add (standalone, merged, and reconcile-gate).
-pub(super) const fn queue_pending_reactions_to_clear() -> [char; 3] {
-    super::super::super::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS
-}
-
-fn steering_injection_succeeded(
-    outcome: &crate::services::tui_steering::SteeringOutcome,
-) -> bool {
-    matches!(
-        outcome,
-        crate::services::tui_steering::SteeringOutcome::Injected
-    )
-}
 
 /// Bundle of Discord-runtime dependencies that `handle_text_message`
 /// reads from outside its per-message parameters. Phase 2-pre.2 of
@@ -1383,7 +1368,7 @@ pub(super) async fn handle_text_message(
     // never reacted the user message). A redundant remove is a no-op, so this
     // composes safely with the entrypoint drains.
     if queued_placeholder_handoff.is_some() && !turn_kind.is_background_trigger() {
-        for emoji in queue_pending_reactions_to_clear() {
+        for emoji in super::super::super::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS {
             queue_marker::note_removed_current(
                 shared,
                 http,
@@ -1966,88 +1951,17 @@ pub(super) async fn handle_text_message(
     let watcher_tmux_name = inflight_tmux_name.clone();
     let watcher_output_path = inflight_output_path.clone();
     #[cfg(unix)]
-    if crate::services::tui_steering::tui_steering_enabled()
-        && matches!(turn_kind, TurnKind::Foreground)
-        && matches!(provider, ProviderKind::Claude | ProviderKind::Codex)
-        && remote_profile.is_none()
-        && !wait_for_completion
-        && dispatch_id.is_none()
-        && dispatch_id_for_thread.is_none()
-        && !is_voice_announcement
-        && pending_uploads.is_empty()
-        && let Some(steering_tmux_name) = tmux_session_name.as_deref()
-    {
-        let selection =
-            crate::services::provider_hosting::resolve_provider_session_selection_with_channel(
-                &provider,
-                claude::is_tmux_available(),
-                Some(channel_id.get()),
-            );
-        if crate::services::tui_steering::route_input_by_session_driver(&selection)
-            == crate::services::tui_steering::SteeringRoute::NativeTui
-            && crate::services::tmux_diagnostics::tmux_session_has_live_pane(steering_tmux_name)
-            && tui_busy_followup_diagnostic(
-                shared,
-                &provider,
-                channel_id,
-                Some(steering_tmux_name),
-                false,
-                Some(&current_path),
-                session_id.as_deref(),
-            )
-            .is_some_and(|diagnostic| diagnostic.transcript_turn_state.is_busy())
-        {
-            let steering_provider = provider.clone();
-            let steering_selection = selection.clone();
-            let steering_session = steering_tmux_name.to_string();
-            let steering_prompt = user_text.to_string();
-            let outcome = tokio::task::spawn_blocking(move || {
-                crate::services::tui_steering::inject_with_bounded_retry(
-                    &steering_provider,
-                    &steering_selection,
-                    &steering_session,
-                    &steering_prompt,
-                )
-            })
-            .await
-            .unwrap_or_else(|error| {
-                crate::services::tui_steering::SteeringOutcome::Failed(error.to_string())
-            });
-            let injected = steering_injection_succeeded(&outcome);
-            let reaction = if injected { '🎯' } else { '⚠' };
-            #[cfg(not(test))]
-            let _ =
-                super::super::super::reaction_lifecycle::try_add_reaction_raw_with_shared_detailed(
-                    http,
-                    shared,
-                    channel_id,
-                    user_msg_id,
-                    reaction,
-                )
-                .await;
-            #[cfg(test)]
-            let _ = reaction;
-            if injected {
-                let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
-                let _ = release_mailbox_after_hosted_tui_busy_pre_submit(
-                    shared,
-                    &bot_owner_provider,
-                    channel_id,
-                )
-                .await;
-                let _ = channel_id.delete_message(http, placeholder_msg_id).await;
-                tv_clear_current(shared, http, channel_id, user_msg_id, "intake_tui_steering")
-                    .await;
-                super::super::super::saturating_decrement_global_active(shared);
-                shared.turn_start_times.remove(&channel_id);
-                cancel_token
-                    .cancelled
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                super::super::super::clear_watchdog_deadline_override(channel_id.get()).await;
-                intake_latency.log(channel_id.get(), provider_label, "tui_steered");
-                return Ok(());
-            }
-        }
+    #[rustfmt::skip]
+    if let Some(result) = steering_hook::maybe_handle_intake_steering(steering_hook::IntakeSteeringContext {
+        http, shared, token, channel_id, user_msg_id, placeholder_msg_id, provider: &provider,
+        provider_label, tmux_session_name: tmux_session_name.as_deref(), current_path: &current_path,
+        session_id: session_id.as_deref(), user_text, cancel_token: &cancel_token,
+        intake_latency: &intake_latency, foreground: matches!(turn_kind, TurnKind::Foreground),
+        local: remote_profile.is_none(), wait_for_completion,
+        has_dispatch: dispatch_id.is_some() || dispatch_id_for_thread.is_some(), is_voice_announcement,
+        has_pending_uploads: !pending_uploads.is_empty(),
+    }).await {
+        return result;
     }
     #[cfg(unix)]
     let mut recapture_offset_after_busy_wait = false;
@@ -2783,36 +2697,6 @@ pub(super) async fn handle_text_message(
 
 #[cfg(test)]
 mod tui_busy_pre_submit_queue_reaction_tests {
-    use crate::services::tui_steering::SteeringOutcome;
-
-    #[test]
-    fn failed_or_unsafe_steering_falls_through_to_busy_followup_enqueue() {
-        assert!(!super::steering_injection_succeeded(
-            &SteeringOutcome::Failed("submit failed".to_string())
-        ));
-        assert!(!super::steering_injection_succeeded(
-            &SteeringOutcome::Unsafe("composer changed".to_string())
-        ));
-        assert!(super::steering_injection_succeeded(
-            &SteeringOutcome::Injected
-        ));
-
-        let module_src = include_str!("intake_turn.rs");
-        let steering_guard = module_src
-            .find("if injected {")
-            .expect("steering success owns its teardown guard");
-        let steering_return = module_src[steering_guard..]
-            .find("return Ok(());")
-            .map(|offset| steering_guard + offset)
-            .expect("successful steering returns after teardown");
-        let busy_enqueue = module_src[steering_return..]
-            .find("enqueue_busy_tui_followup_for_retry(")
-            .map(|offset| steering_return + offset)
-            .expect("failed steering falls through to the existing busy enqueue");
-
-        assert!(steering_guard < steering_return && steering_return < busy_enqueue);
-    }
-
     #[test]
     fn busy_pre_submit_enqueue_keeps_the_authoritative_queue_view() {
         let module_src = include_str!("intake_turn.rs");
@@ -3084,7 +2968,7 @@ mod queue_pending_reaction_clear_tests {
 
     #[test]
     fn clears_every_queue_marker_reaction() {
-        let emojis = queue_pending_reactions_to_clear();
+        let emojis = super::super::super::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS;
         assert!(
             emojis.contains(&'📬'),
             "standalone queue-head 📬 must be cleared on dequeue"
@@ -3109,7 +2993,7 @@ mod queue_pending_reaction_clear_tests {
     /// emoji the dequeue path will not later remove.
     #[test]
     fn cleared_set_covers_every_intake_gate_queue_reaction() {
-        let cleared = queue_pending_reactions_to_clear();
+        let cleared = super::super::super::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS;
         for merged in [false, true] {
             let added = crate::services::discord::router::intake_gate::queue_pending_reaction_for(
                 crate::services::discord::MailboxEnqueueOutcome {
