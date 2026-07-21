@@ -1,0 +1,161 @@
+use super::{CancelSource, CancelToken};
+use super::cancel_token_cleanup::executor::{CleanupRequest, TmuxCleanupIntent};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
+
+pub(super) fn current_unix_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}
+
+pub(super) fn enforce_watchdog_deadline(token: &CancelToken, now_ms: i64) -> bool {
+    let deadline_ms = token.watchdog_deadline_ms.load(Ordering::Relaxed);
+    if deadline_ms > 0 && now_ms >= deadline_ms && !token.is_async_managed() {
+        token.set_cancel_source_kind(CancelSource::WatchdogTimeout);
+        token.cancelled.store(true, Ordering::Relaxed);
+        return true;
+    }
+    false
+}
+
+/// Poll one cancellation boundary. The token remains the sole owner of its target.
+pub(crate) fn poll_cancel_watchdog(token: &CancelToken, label: &'static str, now_ms: i64) -> bool {
+    enforce_watchdog_deadline(token, now_ms);
+    if token.is_completion_cleanup() {
+        tracing::debug!(
+            provider_cancel_watchdog = label,
+            cancel_source = ?token.cancel_source(),
+            cancel_source_kind = ?token.cancel_source_kind(),
+            "cancel watchdog exiting after normal completion cleanup"
+        );
+        return true;
+    }
+    if !token.cancelled.load(Ordering::Relaxed) {
+        return false;
+    }
+
+    let cleanup_outcome = token.request_cleanup(CleanupRequest {
+        cancel_source: "watchdog_timeout".to_string(),
+        intent: TmuxCleanupIntent::PidOnly,
+        termination_reason: None,
+        hard_stop_target: None,
+    });
+    tracing::warn!(
+        provider_cancel_watchdog = label,
+        cancel_source = ?token.cancel_source(),
+        cancel_source_kind = ?token.cancel_source_kind(),
+        ?cleanup_outcome,
+        "cancel watchdog dispatched token-owned cleanup"
+    );
+    true
+}
+
+pub struct CancelWatchdog {
+    done: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl CancelWatchdog {
+    fn new(done: Arc<AtomicBool>, handle: JoinHandle<()>) -> Self {
+        Self {
+            done,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for CancelWatchdog {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+pub fn spawn_cancel_watchdog(
+    token: Option<Arc<CancelToken>>,
+    label: &'static str,
+) -> Option<CancelWatchdog> {
+    let token = token?;
+    let done = Arc::new(AtomicBool::new(false));
+    let done_for_thread = Arc::clone(&done);
+    let handle = std::thread::spawn(move || {
+        while !done_for_thread.load(Ordering::Relaxed) {
+            if poll_cancel_watchdog(&token, label, current_unix_millis()) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    });
+    Some(CancelWatchdog::new(done, handle))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::provider::cancel_token_cleanup::executor::{
+        pid_kill_dispatches_for_test, with_executor_dispatch_seam,
+    };
+
+    #[test]
+    fn deadline_poll_dispatches_token_current_pid_without_raw_pid_argument() {
+        with_executor_dispatch_seam(|| {
+            let token = CancelToken::new();
+            token.store_child_pid(4711);
+            token.watchdog_deadline_ms.store(100, Ordering::Relaxed);
+
+            assert!(poll_cancel_watchdog(&token, "test-watchdog", 100));
+            assert_eq!(pid_kill_dispatches_for_test(), 1);
+            assert_eq!(token.pid_kill_claim.load(Ordering::Acquire), 1);
+            assert_eq!(token.cancel_source().as_deref(), Some("watchdog_timeout"));
+            assert_eq!(token.cancel_source_kind(), Some(CancelSource::WatchdogTimeout));
+        });
+    }
+
+    #[test]
+    fn completion_cleanup_after_deadline_skips_cleanup_dispatch() {
+        with_executor_dispatch_seam(|| {
+            let token = CancelToken::new();
+            token.store_child_pid(4712);
+            token.watchdog_deadline_ms.store(100, Ordering::Relaxed);
+            token.mark_completion_cleanup();
+
+            assert!(poll_cancel_watchdog(&token, "test-watchdog", 100));
+            assert_eq!(pid_kill_dispatches_for_test(), 0);
+            assert_eq!(token.pid_kill_claim.load(Ordering::Acquire), 0);
+            assert_eq!(token.cancel_source_kind(), Some(CancelSource::WatchdogTimeout));
+        });
+    }
+
+    #[test]
+    fn async_managed_deadline_remains_unhandled() {
+        let token = CancelToken::new();
+        token.mark_async_managed();
+        token.watchdog_deadline_ms.store(100, Ordering::Relaxed);
+
+        assert!(!poll_cancel_watchdog(&token, "test-watchdog", 100));
+        assert!(!token.cancelled.load(Ordering::Relaxed));
+        assert_eq!(token.cancel_source_kind(), None);
+    }
+
+    #[test]
+    fn cleanup_does_not_replace_existing_specific_cancel_source() {
+        with_executor_dispatch_seam(|| {
+            let token = CancelToken::new();
+            token.store_child_pid(4713);
+            token.set_cancel_source("voice_barge_in_explicit_stop");
+            token.cancelled.store(true, Ordering::Relaxed);
+
+            assert!(poll_cancel_watchdog(&token, "test-watchdog", 0));
+            assert_eq!(
+                token.cancel_source().as_deref(),
+                Some("voice_barge_in_explicit_stop")
+            );
+            assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
+        });
+    }
+}

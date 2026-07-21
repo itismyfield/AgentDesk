@@ -988,7 +988,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
     // Store child PID in cancel token so the caller can kill it externally
     register_child_pid(cancel_token.as_deref(), child.id());
     let _cancel_watchdog =
-        spawn_cancel_watchdog(cancel_token.clone(), child.id(), "claude-direct-stream");
+        spawn_cancel_watchdog(cancel_token.clone(), "claude-direct-stream");
 
     // Write prompt to stdin
     if let Some(mut stdin) = child.stdin.take() {

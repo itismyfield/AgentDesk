@@ -409,7 +409,7 @@ fn execute_gemini_streaming_attempt(
 
     register_child_pid(cancel_token.as_deref(), child.id());
     let _cancel_watchdog =
-        spawn_cancel_watchdog(cancel_token.clone(), child.id(), "gemini-direct-stream");
+        spawn_cancel_watchdog(cancel_token.clone(), "gemini-direct-stream");
     if cancel_requested(cancel_token.as_deref()) {
         kill_child_tree(&mut child);
         return Ok(StreamAttemptResult::Cancelled);

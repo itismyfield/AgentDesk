@@ -3,11 +3,13 @@ use crate::services::provider::cancel_token_cleanup::target::CapturedProcess;
 use crate::services::provider_auth::ProviderAuthSpec;
 use crate::utils::format::safe_prefix;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
+use std::sync::Mutex;
 
 pub(crate) mod cancel_token_claude_interrupt;
 pub(crate) mod cancel_token_cleanup;
+mod cancel_watchdog;
+pub use cancel_watchdog::{CancelWatchdog, spawn_cancel_watchdog};
+use cancel_watchdog::{current_unix_millis, enforce_watchdog_deadline};
 
 /// Tmux session name prefix — always "AgentDesk".
 pub const TMUX_SESSION_PREFIX: &str = "AgentDesk";
@@ -1225,96 +1227,10 @@ pub fn cancel_requested(token: Option<&CancelToken>) -> bool {
     })
 }
 
-fn current_unix_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(0)
-}
-
-fn enforce_watchdog_deadline(token: &CancelToken, now_ms: i64) -> bool {
-    let deadline_ms = token.watchdog_deadline_ms.load(Ordering::Relaxed);
-    // claude-e rollout Phase 1 (counter-review round 3 with Codex):
-    // Discord-managed tokens are watched by the async 30s reconcile
-    // loop. Skipping the synchronous fire here avoids a class of
-    // mid-stream cancellations seen during claude-e e2e (provider
-    // sync watchdog killed the per-turn child before the async path
-    // had a chance to extend the deadline). Non-Discord callers leave
-    // `async_managed=false` and keep the historical sub-30s
-    // enforcement.
-    if deadline_ms > 0 && now_ms >= deadline_ms && !token.is_async_managed() {
-        token.set_cancel_source_kind(CancelSource::WatchdogTimeout);
-        token.cancelled.store(true, Ordering::Relaxed);
-        return true;
-    }
-    false
-}
-
 pub fn register_child_pid(token: Option<&CancelToken>, child_pid: u32) {
     if let Some(token) = token {
         token.store_child_pid(child_pid);
     }
-}
-
-pub struct CancelWatchdog {
-    done: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
-}
-
-impl CancelWatchdog {
-    fn new(done: Arc<AtomicBool>, handle: JoinHandle<()>) -> Self {
-        Self {
-            done,
-            handle: Some(handle),
-        }
-    }
-}
-
-impl Drop for CancelWatchdog {
-    fn drop(&mut self) {
-        self.done.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
-fn cancel_watchdog_should_kill(token: &CancelToken) -> bool {
-    token.cancelled.load(Ordering::Relaxed) && !token.is_completion_cleanup()
-}
-
-pub fn spawn_cancel_watchdog(
-    token: Option<Arc<CancelToken>>,
-    child_pid: u32,
-    label: &'static str,
-) -> Option<CancelWatchdog> {
-    let token = token?;
-    let done = Arc::new(AtomicBool::new(false));
-    let done_for_thread = done.clone();
-    let handle = std::thread::spawn(move || {
-        while !done_for_thread.load(Ordering::Relaxed) {
-            enforce_watchdog_deadline(&token, current_unix_millis());
-            if token.cancelled.load(Ordering::Relaxed) {
-                if !cancel_watchdog_should_kill(&token) {
-                    tracing::debug!(
-                        provider_cancel_watchdog = label,
-                        child_pid,
-                        "cancel watchdog exiting after normal completion cleanup"
-                    );
-                    return;
-                }
-                tracing::warn!(
-                    provider_cancel_watchdog = label,
-                    child_pid,
-                    "cancel watchdog killing provider process tree"
-                );
-                crate::services::process::kill_pid_tree(child_pid);
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-    });
-    Some(CancelWatchdog::new(done, handle))
 }
 
 /// Result from reading a provider session output stream until completion or session death.
@@ -2192,8 +2108,8 @@ mod codex_context_window_tests {
 #[cfg(test)]
 mod cancel_token_tests {
     use super::{
-        CancelSource, CancelToken, cancel_requested, cancel_watchdog_should_kill,
-        current_unix_millis, enforce_watchdog_deadline, register_child_pid,
+        CancelSource, CancelToken, cancel_requested, current_unix_millis,
+        enforce_watchdog_deadline, register_child_pid,
     };
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Barrier};
@@ -2454,27 +2370,6 @@ mod cancel_token_tests {
         // Explicit cancel still works — the gate is deadline-only.
         token.cancelled.store(true, Ordering::Relaxed);
         assert!(cancel_requested(Some(&token)));
-    }
-
-    #[test]
-    fn cancel_watchdog_ignores_normal_completion_cleanup_cancel() {
-        let token = CancelToken::new();
-        token.mark_completion_cleanup();
-        token.cancelled.store(true, Ordering::Relaxed);
-
-        assert!(!cancel_watchdog_should_kill(&token));
-        assert!(
-            cancel_requested(Some(&token)),
-            "cleanup marker only suppresses provider watchdog killing"
-        );
-    }
-
-    #[test]
-    fn cancel_watchdog_still_kills_explicit_cancel() {
-        let token = CancelToken::new();
-        token.cancelled.store(true, Ordering::Relaxed);
-
-        assert!(cancel_watchdog_should_kill(&token));
     }
 
     #[test]

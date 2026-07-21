@@ -321,12 +321,28 @@ static TMUX_KILL_SUCCEEDS: AtomicBool = AtomicBool::new(true);
 static SUPPRESS_TMUX_AFTER_CLAIM: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::services::provider::ProviderKind;
+pub(crate) fn pid_kill_dispatches_for_test() -> usize {
+    PID_KILL_DISPATCHES.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+pub(crate) fn with_executor_dispatch_seam(test: impl FnOnce()) {
     use std::sync::{Mutex, OnceLock};
 
     static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _lock = TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    PID_KILL_DISPATCHES.store(0, Ordering::Relaxed);
+    TMUX_KILL_DISPATCHES.store(0, Ordering::Relaxed);
+    PID_KILL_SUCCEEDS.store(true, Ordering::Relaxed);
+    TMUX_KILL_SUCCEEDS.store(true, Ordering::Relaxed);
+    SUPPRESS_TMUX_AFTER_CLAIM.store(false, Ordering::Relaxed);
+    test();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::provider::ProviderKind;
 
     fn request(intent: TmuxCleanupIntent) -> CleanupRequest {
         CleanupRequest {
@@ -338,13 +354,7 @@ mod tests {
     }
 
     fn with_seam(test: impl FnOnce()) {
-        let _lock = TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-        PID_KILL_DISPATCHES.store(0, Ordering::Relaxed);
-        TMUX_KILL_DISPATCHES.store(0, Ordering::Relaxed);
-        PID_KILL_SUCCEEDS.store(true, Ordering::Relaxed);
-        TMUX_KILL_SUCCEEDS.store(true, Ordering::Relaxed);
-        SUPPRESS_TMUX_AFTER_CLAIM.store(false, Ordering::Relaxed);
-        test();
+        with_executor_dispatch_seam(test);
     }
 
     fn bind(token: &CancelToken, name: &str) {
