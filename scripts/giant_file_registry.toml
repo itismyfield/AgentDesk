@@ -158,7 +158,6 @@ grandfathered_baseline_paths = [
   "src/services/settings.rs",
   "src/services/tui_prompt_dedupe.rs",
   "src/services/turn_orchestrator.rs",
-  "src/voice/receiver.rs",
 ]
 
 # All former grandfathered paths were promoted to explicit tracked decisions in #4519.
@@ -620,12 +619,6 @@ owner = "server-runtime"
 deadline = "2027-01-31"
 decompose_issue = "#4710"
 
-[[entry]]
-file = "src/voice/receiver.rs"
-decision = "shrink"
-owner = "voice-runtime"
-deadline = "2027-01-31"
-decompose_issue = "#4713"
 
 # Tracked giant decisions. `decision = "shrink"` requires owner + deadline
 # (YYYY-MM-DD) + decompose_issue; `decision = "keep"` requires owner +
@@ -716,13 +709,6 @@ owner = "voice-runtime"
 deadline = "2026-08-31"
 decompose_issue = "#4713"
 
-[[entry]]
-# Crossed the 1000-prod-LoC threshold when #3034 restored per-item dead_code
-# reasoning on the runtime-gated voice announcement durability helpers.
-file = "src/voice/announce_meta.rs"
-owner = "voice-runtime"
-deadline = "2026-08-31"
-decompose_issue = "#4713"
 
 [[entry]]
 # Crossed the 1000-prod-LoC threshold when #3017 re-landed the single
