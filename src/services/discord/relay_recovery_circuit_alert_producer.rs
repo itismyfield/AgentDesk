@@ -218,7 +218,7 @@ mod tests {
             None => unsafe { std::env::remove_var(CIRCUIT_STAMP_ENV) },
         }
         let id = result.unwrap();
-        let row = sqlx::query("SELECT circuit_provider,circuit_channel_id,circuit_owner_instance_id,circuit_owner_generation,circuit_episode_key,circuit_baseline_relay_offset,circuit_open_generation,circuit_authority_epoch FROM message_outbox WHERE id=$1")
+        let row = sqlx::query("SELECT circuit_provider,circuit_channel_id,circuit_owner_instance_id,circuit_owner_generation,circuit_episode_key,circuit_baseline_relay_offset,circuit_open_generation,circuit_authority_epoch,circuit_dedupe_ttl_secs FROM message_outbox WHERE id=$1")
             .bind(id).fetch_one(&pool).await.unwrap();
         for column in [
             "circuit_provider",
@@ -233,6 +233,7 @@ mod tests {
             "circuit_baseline_relay_offset",
             "circuit_open_generation",
             "circuit_authority_epoch",
+            "circuit_dedupe_ttl_secs",
         ] {
             assert!(row.get::<Option<i64>, _>(column).is_none(), "{column}");
         }
