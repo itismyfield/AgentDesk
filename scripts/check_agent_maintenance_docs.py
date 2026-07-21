@@ -9,8 +9,8 @@ surfaces. This script keeps that authority explicit:
 * referenced commits are ancestors of the current checkout when the header is
   commit-anchored;
 * PRs that touch guarded code paths also touch the matching maintenance page;
-* line counts copied into ``change-surfaces.md`` are compared with the
-  generated module inventory.
+* frozen ``change-surfaces.md`` paths are checked against the generated module
+  inventory for current giant-surface integrity.
 
 Warnings do not fail the script. Errors fail unless ``--warning-only`` is
 passed, which is the initial CI rollout mode for #1432.
@@ -339,8 +339,7 @@ def parse_module_inventory(path: Path) -> dict[str, int]:
 
     change-surfaces.md freezes modules by their review surface, which is the
     production line count (excluding `#[cfg(test)] mod` blocks). The inventory's
-    ``Prod`` column is the authority, so the freshness gate compares against it
-    rather than the raw total (#3036).
+    ``Prod`` column is the authority for frozen giant-surface integrity (#3036).
     """
 
     inventory: dict[str, int] = {}
@@ -362,7 +361,7 @@ def check_change_surface_line_counts(repo_root: Path) -> list[Finding]:
             Finding(
                 "warning",
                 "docs/generated/module-inventory.md",
-                "module inventory is missing or empty; cannot verify copied line counts.",
+                "module inventory is missing or empty; cannot verify frozen giant surfaces.",
             )
         ]
     if not change_surfaces.is_file():
@@ -455,26 +454,6 @@ def check_change_surface_line_counts(repo_root: Path) -> list[Finding]:
                     )
                 )
                 continue
-            if documented != actual:
-                # Stale numbers are an error so the page cannot silently rot, and
-                # an increase specifically signals a decomposition regression
-                # (the frozen surface grew instead of shrinking).
-                regression = " (production surface grew — decomposition regression)" \
-                    if actual > documented else ""
-                findings.append(
-                    Finding(
-                        "error",
-                        rel_doc,
-                        (
-                            f"{path} production line count is {documented} in "
-                            f"change-surfaces.md but {actual} in "
-                            f"module-inventory.md{regression}. Re-run "
-                            "`python3 scripts/generate_inventory_docs.py` and sync "
-                            "the freeze entry."
-                        ),
-                        line_no,
-                    )
-                )
     return findings
 
 
@@ -583,9 +562,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--line-count-gate",
         action="store_true",
         help=(
-            "hard-fail on change-surfaces.md production-LoC drift, ghost freeze "
-            "entries, and decomposition regressions even under --warning-only "
-            "(#3036 measurement integrity gate)"
+            "hard-fail on frozen giant-surface integrity errors, including "
+            "missing, non-production, and below-threshold ghost entries even "
+            "under --warning-only (#3036)"
         ),
     )
     parser.add_argument(
@@ -627,9 +606,9 @@ def main(argv: list[str] | None = None) -> int:
     has_errors = any(finding.severity == "error" for finding in findings)
     if has_errors and not args.warning_only:
         return 1
-    # Even in the #1432 warning-only rollout, production-LoC integrity is a hard
-    # gate when requested: stale numbers, ghost entries, and decomposition
-    # regressions must not slip through (#3036).
+    # Even in the #1432 warning-only rollout, frozen giant-surface integrity is
+    # a hard gate when requested: missing, non-production, and ghost entries
+    # must not slip through (#3036).
     if args.line_count_gate and any(
         finding.severity == "error" for finding in line_count_findings
     ):

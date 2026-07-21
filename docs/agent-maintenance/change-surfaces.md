@@ -31,11 +31,12 @@
 
 - "giant-file" = `>= 1000` **production** lines per
   `scripts/generate_inventory_docs.py` (lines inside `#[cfg(test)] mod` blocks
-  are excluded; see the `Prod` column in `module-inventory.md`). New logic added
-  to a giant file inherits the file's review surface — every reviewer must
-  re-read the entire module — so adding to it without an extraction plan is
-  rejected. A module whose production surface falls below the threshold is no
-  longer frozen and must be removed from the lists below.
+  are excluded; see the `Prod` column in `module-inventory.md`). Exact LoC
+  numbers in this page are contextual snapshots, not PR-freshness obligations.
+  New logic added to a giant file inherits the file's review surface — every
+  reviewer must re-read the entire module — so adding to it without an extraction
+  plan is rejected. A module whose production surface falls below the threshold
+  is no longer frozen and must be removed from the lists below.
 - `do_not_edit_without_migration_plan` columns below mean: even though the
   file builds and runs, the scheduled migration owner will roll back ad-hoc
   additions. If you must change behaviour there, scope it to a single bugfix
@@ -1853,8 +1854,10 @@
 ### `services_misc_giants`
 
 The remaining giant-file modules under `src/services/` not covered above.
-Line counts are *production* LoC (the `Prod` column in `module-inventory.md`,
-which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync.
+Line counts are *production* LoC snapshots (the `Prod` column in
+`module-inventory.md`, which excludes `#[cfg(test)] mod` blocks). The integrity
+gate verifies frozen paths remain current production giants; it does not require
+these contextual numbers to match ordinary LoC churn.
 
 - `src/services/auto_queue.rs` (1545) and
   `src/services/auto_queue/activate_command.rs` (1510); auto-queue route
@@ -2097,12 +2100,11 @@ reintroducing bespoke clamp expressions.
 
 ## Updating This Page
 
-- Re-run `python3 scripts/generate_inventory_docs.py` and reconcile the
-  giant-file list against the `Prod` column in `module-inventory.md`. Each
-  `(N lines)` token on this page must equal the measured production LoC;
-  `scripts/check_agent_maintenance_docs.py` fails CI when it drifts, when a
-  frozen entry's production surface grows (decomposition regression), or when a
-  frozen entry has fallen below the threshold (ghost — remove it).
+- Do not refresh contextual LoC numbers for ordinary churn. Update this page
+  only when ownership, canonical module mapping, giant-threshold membership, or
+  operational guidance changes. The integrity gate derives frozen-path status
+  from the `Prod` column in `module-inventory.md` and fails when a frozen path is
+  missing, non-production, or below the threshold (ghost — remove it).
 - When a giant file is split, move its canonical_module entry to the new
   module path, remove it from `do_not_edit_without_migration_plan`, and drop it
   from `scripts/giant_file_registry.toml`.
