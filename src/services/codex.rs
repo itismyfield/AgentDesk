@@ -1470,8 +1470,7 @@ fn execute_streaming_direct(
         .map_err(|e| format!("Failed to start Codex: {}", e))?;
 
     register_child_pid(cancel_token.as_deref(), child.id());
-    let _cancel_watchdog =
-        spawn_cancel_watchdog(cancel_token.clone(), child.id(), "codex-direct-stream");
+    let _cancel_watchdog = spawn_cancel_watchdog(cancel_token.clone(), "codex-direct-stream");
     // Race condition fix: if /stop arrived before PID was stored, kill now
     if cancel_requested(cancel_token.as_deref()) {
         kill_child_tree(&mut child);

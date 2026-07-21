@@ -1572,7 +1572,7 @@
     `audit_maintainability_config.toml`; the root is no longer a prod giant and
     was removed from `giant_file_registry.toml`; #3038 S5 locked the final
     root ratchet at 274 production lines).
-  - `src/services/discord/voice_barge_in.rs` (2887 lines after #3906 added the
+  - `src/services/discord/voice_barge_in.rs` (2878 lines after #3906 added the
     deterministic voice intake feedback (P1 Phase-1 intake chime emitted right
     before `start_voice_turn` plus removal of the redundant foreground-start
     chime, and the P4 `DONE_CHIME_FILE_NAME` const; the bulky
@@ -1872,8 +1872,8 @@ which excludes `#[cfg(test)] mod` blocks); the freshness gate keeps them in sync
 - `src/services/dispatches/outbox_route.rs` (1178) — dispatch outbox route
   support extracted from the route layer; split before adding non-bugfix
   behavior.
-- `src/services/claude.rs` (2969; +9 net from #4553 replacing dead native cache-TTL launch wiring with guarded gateway-proxy launch decisions and covering the simple-command spawn; -21 from #4113 backend_routing/availability extraction), `src/services/gemini.rs` (1361),
-  `src/services/qwen.rs` (2196), `src/services/codex.rs` (3120),
+- `src/services/claude.rs` (2969; +9 net from #4553 replacing dead native cache-TTL launch wiring with guarded gateway-proxy launch decisions and covering the simple-command spawn; -21 from #4113 backend_routing/availability extraction), `src/services/gemini.rs` (1360),
+  `src/services/qwen.rs` (2196), `src/services/codex.rs` (3119),
   `src/services/opencode.rs` (2764), `src/services/provider.rs` (1818; +4 from #4566 publishing the session-generation registry binding as a monotonic max() guard with the token-local tmux-session name kept for SIGINT/pid tracking) —
   provider adapters. (#3034 removed dead non-cancel `execute_command_simple*`
   twins from the claude/codex/gemini adapters and a superseded

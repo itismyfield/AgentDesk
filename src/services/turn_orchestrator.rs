@@ -2323,10 +2323,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     if let Some(token) = token.as_ref()
                         && !already_stopping
                     {
-                        token.set_cancel_source(reason.clone());
-                        token
-                            .cancelled
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        token.publish_cancel(reason.clone());
                     }
                     let _ = reply.send(CancelActiveTurnResult {
                         token,
@@ -2374,10 +2371,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     if let Some(token) = token.as_ref()
                         && !already_stopping
                     {
-                        token.set_cancel_source(reason.clone());
-                        token
-                            .cancelled
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        token.publish_cancel(reason.clone());
                     }
                     let _ = reply.send(CancelActiveTurnResult {
                         token,
@@ -2408,10 +2402,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     if let Some(token) = token.as_ref()
                         && !already_stopping
                     {
-                        token.set_cancel_source(reason.clone());
-                        token
-                            .cancelled
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        token.publish_cancel(reason.clone());
                     }
                     let _ = reply.send(CancelActiveTurnResult {
                         token,
@@ -2433,12 +2424,9 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             Some(token)
                                 if !token.cancelled.load(std::sync::atomic::Ordering::Relaxed) =>
                             {
-                                token.set_cancel_source(
+                                token.publish_cancel(
                                     "idle_queue_user_supersede_background".to_string(),
                                 );
-                                token
-                                    .cancelled
-                                    .store(true, std::sync::atomic::Ordering::Relaxed);
                                 true
                             }
                             // Already cancelling (or, defensively, no token): no-op.

@@ -478,10 +478,7 @@ async fn generate_foreground_ack_text(
             // terminates the spawned child instead of letting it run to
             // natural exit. Without this, dropping the JoinHandle has no
             // effect on the running blocking task.
-            cancel_token.set_cancel_source("voice_foreground_ack_timeout");
-            cancel_token
-                .cancelled
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            cancel_token.publish_cancel("voice_foreground_ack_timeout");
             tracing::warn!(
                 timeout_ms = foreground.timeout_ms,
                 foreground_provider = %foreground.provider,
@@ -597,10 +594,7 @@ async fn generate_voice_channel_text_reply(
         Err(_) => {
             // #2250: see comment in `generate_foreground_ack_text` —
             // signal cancel so the detached blocking child is killed.
-            cancel_token.set_cancel_source("voice_channel_text_reply_timeout");
-            cancel_token
-                .cancelled
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            cancel_token.publish_cancel("voice_channel_text_reply_timeout");
             tracing::warn!(
                 timeout_ms = foreground.timeout_ms,
                 foreground_provider = %foreground.provider,
@@ -689,10 +683,7 @@ async fn generate_voice_background_result_summary(
         Err(_) => {
             // #2250: see comment in `generate_foreground_ack_text` —
             // signal cancel so the detached blocking child is killed.
-            cancel_token.set_cancel_source("voice_background_summary_timeout");
-            cancel_token
-                .cancelled
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            cancel_token.publish_cancel("voice_background_summary_timeout");
             tracing::warn!(
                 timeout_ms = foreground.timeout_ms,
                 foreground_provider = %foreground.provider,
@@ -1253,7 +1244,7 @@ impl VoiceBargeInRuntime {
         };
         let count = tokens.len();
         for token in tokens {
-            token.set_cancel_source(reason);
+            token.publish_cancel(reason);
             token.cancel_with_tmux_cleanup();
         }
         if count > 0 {
