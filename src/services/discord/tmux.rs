@@ -908,7 +908,8 @@ fn advance_buffer_start_offset(start_offset: u64, before_len: usize, after_len: 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn ensure_monitor_auto_turn_inflight(
+async fn ensure_monitor_auto_turn_inflight(
+    shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
     tmux_session_name: &str,
@@ -938,6 +939,9 @@ fn ensure_monitor_auto_turn_inflight(
         Some(input_fifo_path.to_string()),
         last_offset,
     );
+    synthetic.turn_nonce = super::mailbox_snapshot(shared, channel_id)
+        .await
+        .active_turn_nonce;
     synthetic.turn_start_offset = Some(turn_start_offset);
     synthetic.rebind_origin = true;
     // #2285 audit trail: monitor pattern fired this turn without an
@@ -1379,6 +1383,48 @@ mod monitor_auto_turn_signal_tests {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         signal.mark_done();
         waiter.await.expect("waiter task should not panic");
+    }
+
+    #[tokio::test]
+    async fn monitor_auto_turn_inflight_persists_actor_episode_nonce() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_595_240);
+        let synthetic_message_id = MessageId::new(4_595_340);
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+        assert!(
+            crate::services::discord::mailbox_try_start_turn_kinded(
+                &shared,
+                channel_id,
+                token.clone(),
+                UserId::new(1),
+                synthetic_message_id,
+                crate::services::turn_orchestrator::ActiveTurnKind::MonitorAutoTurn,
+            )
+            .await
+        );
+
+        ensure_monitor_auto_turn_inflight(
+            &shared,
+            &provider,
+            channel_id,
+            "AgentDesk-claude-4595",
+            "/tmp/agentdesk-4595.jsonl",
+            "/tmp/agentdesk-4595.fifo",
+            Some("session-4595"),
+            128,
+            256,
+        )
+        .await;
+
+        let persisted = super::super::inflight::load_inflight_state(&provider, channel_id.get())
+            .expect("monitor inflight must persist");
+        assert_eq!(persisted.turn_nonce.as_deref(), token.turn_nonce());
     }
 
     #[tokio::test]

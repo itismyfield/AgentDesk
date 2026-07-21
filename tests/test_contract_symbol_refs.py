@@ -116,13 +116,25 @@ class ResolveSymbolTest(unittest.TestCase):
             "inflight::save_store::save_inflight_state",
         )
 
-    def test_crate_prefix_stripped(self) -> None:
+    def test_discord_crate_prefix_stripped(self) -> None:
         self.assertEqual(
             CHECKER._resolve_symbol(
                 "crate::services::discord::tmux::advance_watcher_confirmed_end", INFLIGHT_BASE
             ),
             "tmux::advance_watcher_confirmed_end",
         )
+
+    def test_service_sibling_prefix_retained(self) -> None:
+        self.assertEqual(
+            CHECKER._resolve_symbol(
+                "crate::services::provider::CancelToken::turn_nonce", INFLIGHT_BASE
+            ),
+            "provider::CancelToken::turn_nonce",
+        )
+
+    def test_non_service_crate_path_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            CHECKER._resolve_symbol("crate::config::Config", INFLIGHT_BASE)
 
     def test_too_many_supers_raises(self) -> None:
         with self.assertRaises(ValueError):

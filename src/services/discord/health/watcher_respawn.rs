@@ -155,6 +155,7 @@ pub(super) async fn complete_force_clean_watcher_recovery(
         provider,
         channel_id,
         snapshot.mailbox_active_user_msg_id,
+        snapshot.mailbox_active_turn_nonce.clone(),
         repair_started_at,
     )
     .await;
@@ -235,11 +236,13 @@ fn runtime_owning_watcher<'a>(
 /// passed the desynced + stall predicate after the liveness gate allowed cleanup), so
 /// this never steals a genuinely live turn. `stale_user_msg_id` is the mailbox
 /// owner captured AT the stall-confirmation snapshot; the release is
-/// identity- and start-guarded (`mailbox_finish_turn_if_matches_started_before`)
+/// episode-, identity- and start-guarded
+/// (`mailbox_finish_turn_if_matches_episode_started_before`, #4595)
 /// so that if a NEW turn claimed the mailbox in the await-gap between the old
 /// `ClearOrphanPendingToken` path (`relay_recovery.rs`) and this call, we no-op
 /// rather than cancel the new turn's token + wrongly decrement `global_active`
-/// — including a retry that reuses the same user message id. Reuses that
+/// — including a retry that reuses the same user message id under a fresh
+/// episode nonce. Reuses that
 /// finalizer's token-cancel / `global_active`-decrement invariants so every
 /// turn-end path stays consistent.
 ///
@@ -252,17 +255,19 @@ pub(super) async fn release_stale_mailbox_ownership_after_force_clean(
     provider: &ProviderKind,
     channel_id: ChannelId,
     stale_user_msg_id: Option<u64>,
+    stale_turn_nonce: Option<String>,
     repair_started_at: Instant,
 ) -> bool {
     let Some(stale_user_msg_id) = stale_user_msg_id else {
         return false;
     };
     let expected = poise::serenity_prelude::MessageId::new(stale_user_msg_id);
-    let finish = discord::mailbox_finish_turn_if_matches_started_before(
+    let finish = discord::mailbox_finish_turn_if_matches_episode_started_before(
         shared,
         provider,
         channel_id,
         expected,
+        stale_turn_nonce,
         repair_started_at,
     )
     .await;
@@ -672,6 +677,7 @@ mod tests {
             tmux_session_alive: tmux_alive,
             has_pending_queue: false,
             mailbox_active_user_msg_id: mailbox_active,
+            mailbox_active_turn_nonce: None,
             bound_output_path: None,
             bound_session_id: None,
             inflight_terminal_delivery_committed: false,
@@ -912,6 +918,7 @@ mod tests {
                     &provider,
                     channel,
                     Some(1_515_137_342_367_862_825),
+                    token.turn_nonce().map(str::to_owned),
                     Instant::now(),
                 )
                 .await;
@@ -956,6 +963,7 @@ mod tests {
             &provider,
             channel,
             Some(7_777),
+            None,
             Instant::now(),
         )
         .await;
@@ -964,33 +972,36 @@ mod tests {
 
     /// #3410 P1-b: between stall-confirmation and the release, a NEW turn can
     /// claim the mailbox (the old `ClearOrphanPendingToken` path may have freed
-    /// it). The identity guard must leave that new turn ALONE — releasing it
-    /// would cancel a live turn's token and wrongly decrement `global_active`.
+    /// it) while reusing the same message ID. The episode guard must leave that
+    /// successor ALONE — releasing it would cancel a live turn's token and
+    /// wrongly decrement `global_active`.
     #[tokio::test]
-    async fn release_skips_when_a_new_turn_already_owns_the_mailbox() {
+    async fn release_skips_same_message_id_successor_with_new_episode() {
         let provider = ProviderKind::Codex;
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel = ChannelId::new(3_410_206);
-        // A NEW turn (different user_msg_id than the stalled one) now owns the
-        // mailbox — the await-gap claim the guard must protect.
+        // A NEW episode now owns the same message anchor. The durable save for
+        // this successor is intentionally not modeled: the stale snapshot still
+        // carries the predecessor nonce, which is the ABA window under test.
         let new_token = std::sync::Arc::new(CancelToken::new());
         let started = crate::services::discord::mailbox_try_start_turn(
             &shared,
             channel,
             new_token.clone(),
             UserId::new(9),
-            MessageId::new(2_222_222),
+            MessageId::new(1_111_111),
         )
         .await;
         assert!(started, "seed the NEW live turn owner");
         shared.restart.global_active.store(1, Ordering::Relaxed);
 
-        // Stall-confirmation captured the OLD (stale) owner id, not this one.
+        // Stall-confirmation captured the predecessor episode for this same ID.
         let released = release_stale_mailbox_ownership_after_force_clean(
             &shared,
             &provider,
             channel,
             Some(1_111_111),
+            Some("stale-episode".to_string()),
             Instant::now(),
         )
         .await;
@@ -1008,7 +1019,7 @@ mod tests {
             crate::services::discord::mailbox_snapshot(&shared, channel)
                 .await
                 .active_user_message_id,
-            Some(MessageId::new(2_222_222)),
+            Some(MessageId::new(1_111_111)),
             "the new turn must still own the mailbox"
         );
 
@@ -1017,7 +1028,8 @@ mod tests {
             &shared,
             &provider,
             channel,
-            Some(2_222_222),
+            Some(1_111_111),
+            new_token.turn_nonce().map(str::to_owned),
             Instant::now(),
         )
         .await;
@@ -1037,6 +1049,7 @@ mod tests {
             &shared,
             &provider,
             channel,
+            None,
             None,
             Instant::now(),
         )
