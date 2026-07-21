@@ -379,6 +379,7 @@ mod tests {
         let spawns = Arc::new(AtomicUsize::new(0));
         let factory_spawns = spawns.clone();
         let mut spec = restartable_spec();
+        spec.name = "test_budget_exhaustion_worker";
         spec.restart_policy = WorkerRestartPolicy::RestartableWithBudget(test_budget(2));
         supervise_worker_local(
             spec,
@@ -462,7 +463,7 @@ mod tests {
         assert_eq!(spawns.load(Ordering::Acquire), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn shutdown_waits_for_inner_cleanup() {
         for mut spec in [loop_owned_spec(), restartable_spec()] {
             let shutdown = Arc::new(AtomicBool::new(false));
