@@ -606,7 +606,7 @@
 | `services::discord::placeholder_sweeper` | `src/services/discord/placeholder_sweeper.rs` | 1293 | 998 | 295 |  |
 | `services::discord::placeholder_sweeper::abandon_guard` | `src/services/discord/placeholder_sweeper/abandon_guard.rs` | 915 | 493 | 422 |  |
 | `services::discord::prompt_builder` | `src/services/discord/prompt_builder/mod.rs` | 689 | 689 | 0 |  |
-| `services::discord::prompt_builder::channel_recent_context` | `src/services/discord/prompt_builder/channel_recent_context.rs` | 490 | 214 | 276 |  |
+| `services::discord::prompt_builder::channel_recent_context` | `src/services/discord/prompt_builder/channel_recent_context.rs` | 496 | 220 | 276 |  |
 | `services::discord::prompt_builder::dispatch_contract` | `src/services/discord/prompt_builder/dispatch_contract.rs` | 576 | 576 | 0 |  |
 | `services::discord::prompt_builder::layer_rendering` | `src/services/discord/prompt_builder/layer_rendering.rs` | 498 | 299 | 199 |  |
 | `services::discord::prompt_builder::manifest` | `src/services/discord/prompt_builder/manifest.rs` | 382 | 382 | 0 |  |
