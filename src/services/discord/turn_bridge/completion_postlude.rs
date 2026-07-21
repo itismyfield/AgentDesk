@@ -298,9 +298,12 @@ pub(super) async fn run_completion_postlude(
     // (channel-name-basis) key. Recompute the canonical key with the same
     // production helper (`build_adk_session_key(.., None)`) — which normal intake
     // and headless turns already use verbatim — and compare. When the turn's key
-    // is present and differs, the turn does NOT own the channel's live session,
-    // so its provider session_id / history must never be written back into
-    // `data.sessions[channel_id]` (the #4634 bug class, completion side).
+    // is present and differs, the turn does NOT own the channel's live session and
+    // must produce ZERO channel-scoped side-effects a later LIVE turn can observe.
+    // The full isolation invariant (the enumerated gated effects #1..#5 and the
+    // F-2 mid-turn-rebind recompute limitation) lives in the `channel_writeback`
+    // module doc — the single source of truth for what `!isolated_from_channel`
+    // gates below. (#4634 bug class, completion side.)
     let channel_canonical_session_key = super::super::adk_session::build_adk_session_key(
         &shared_owned,
         channel_id,
@@ -393,8 +396,13 @@ pub(super) async fn run_completion_postlude(
         None
     };
     if let Some(analysis) = recall_feedback_analysis.as_ref()
-        && let Some(reminder) = build_voluntary_feedback_reminder(analysis)
+        && let Some(reminder) = channel_writeback::feedback_reminder_to_stash(
+            isolated_from_channel,
+            build_voluntary_feedback_reminder(analysis),
+        )
     {
+        // #4658 F1: gated on channel ownership above — a scheduled-snapshot turn
+        // never reaches this stash (see feedback_reminder_to_stash).
         // #4307 PR-B: stash the reminder (provider-scoped key) so the NEXT turn's
         // intake takes it and injects it into the model context (turn N+1). The
         // transcript event below only records it in the session_transcripts DB —
@@ -542,7 +550,11 @@ pub(super) async fn run_completion_postlude(
         }
     }
 
-    if shared_owned.pg_pool.is_some() && !api_friction_reports.is_empty() {
+    // #4658 F1: `record_api_friction_reports` calls `backend.remember(..)`,
+    // landing in the agent's memento memory a live turn's recall can surface, so
+    // a scheduled-snapshot turn must skip it (isolation invariant, effect #5).
+    if !isolated_from_channel && shared_owned.pg_pool.is_some() && !api_friction_reports.is_empty()
+    {
         match crate::services::api_friction::record_api_friction_reports(
             shared_owned.pg_pool.as_ref(),
             &capture_memory_settings,

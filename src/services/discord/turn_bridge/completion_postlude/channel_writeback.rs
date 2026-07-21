@@ -12,6 +12,44 @@
 //! [`apply_channel_turn_writeback`] performs that writeback for a normal turn
 //! and SKIPS every channel-session mutation for a snapshot turn, leaving both
 //! `.history` and the provider `session_id` byte-for-byte unchanged.
+//!
+//! # Isolation invariant (single source of truth)
+//!
+//! `run_completion_postlude` computes `isolated_from_channel` once (a snapshot
+//! turn's `session_key` differs from the channel's canonical key). A snapshot
+//! turn must produce ZERO channel-scoped side-effects that a LATER LIVE TURN can
+//! observe. Every such effect is gated on `!isolated_from_channel`:
+//!   1. sessions-map writeback — provider `session_id` + history into
+//!      `data.sessions[channel_id]` (live intake resumes it). Guarded inside
+//!      [`apply_channel_turn_writeback`].
+//!   2. memento reflect  (`take_memento_reflect_request` → recalled at intake).
+//!   3. memento capture  (`should_spawn_memory_capture` → recalled at intake).
+//!   4. voluntary tool_feedback reminder stash — `store_voluntary_feedback_reminder`
+//!      writes a (provider, channel_id) KV that the NEXT live intake takes and
+//!      injects into the model prompt (`response_format.rs`). Gated via
+//!      [`feedback_reminder_to_stash`].
+//!   5. api-friction memory — `record_api_friction_reports` calls
+//!      `backend.remember(..)`, landing in the agent's memento memory that a live
+//!      turn's recall can surface.
+//!
+//! Turn-OWN, key-scoped, or observability-only effects are intentionally NOT
+//! gated: DB rows/metrics keyed by the snapshot's own `adk_session_key`, the
+//! session_transcripts / analytics / quality / metric emits (dashboards, never
+//! read back into a live prompt), and the identity-guarded inflight lifecycle +
+//! queued-turn drain (this turn's own row / required terminal cleanup).
+//!
+//! # F-2 (documented limitation, non-blocking)
+//!
+//! The `isolated_from_channel` signal is RECOMPUTED at completion rather than
+//! threading a start-time boolean (which would require a hotfile
+//! `turn_bridge/mod.rs` logic change). If `session.channel_name` changes
+//! mid-turn — a manual rebind (`recovery_engine/manual_rebind/episode_handoff.rs`)
+//! or a `/session` rename (`commands/session.rs`) concurrent with a channel
+//! rename — a NORMAL turn's recomputed canonical key could differ from its
+//! start-time `adk_session_key` and be wrongly treated as isolated, skipping its
+//! channel writeback. The window is extremely narrow and skip-in-rebind is safe
+//! (no corruption, only a dropped writeback that self-heals next turn), so it is
+//! recorded here, not re-architected.
 
 use super::super::super::DiscordSession;
 use super::super::memory_lifecycle::TurnEndMemoryPlan;
@@ -77,6 +115,29 @@ pub(in crate::services::discord::turn_bridge) fn apply_channel_turn_writeback(
         session_id_to_persist: session.session_id.clone(),
         persist_transcript,
     }
+}
+
+/// #4658 F1: gate the voluntary tool_feedback reminder stash on channel
+/// ownership. `store_voluntary_feedback_reminder` writes a (provider,
+/// channel_id) KV that the NEXT live intake takes and injects into the model
+/// prompt (`response_format.rs`), so a scheduled-snapshot turn stashing a
+/// reminder would leak its recall/feedback output into the live conversation's
+/// next turn (same F1-invariant class as the sessions-map writeback).
+///
+/// Returns the reminder to stash ONLY for a channel-owning turn; a snapshot turn
+/// (`isolated_from_channel`) yields `None` so nothing is written to the shared
+/// channel KV.
+pub(in crate::services::discord::turn_bridge) fn feedback_reminder_to_stash(
+    isolated_from_channel: bool,
+    reminder: Option<String>,
+) -> Option<String> {
+    // #4658 F1 isolation guard: removing this early return re-introduces the
+    // completion-side reminder leak (covered by
+    // `scheduled_snapshot_turn_does_not_stash_feedback_reminder`).
+    if isolated_from_channel {
+        return None;
+    }
+    reminder
 }
 
 #[cfg(test)]
@@ -164,6 +225,29 @@ mod tests {
         assert_eq!(
             outcome.session_id_to_persist, None,
             "snapshot turn must not persist a session_id read from the channel session"
+        );
+    }
+
+    /// Mutation proof (F-1): a scheduled-snapshot turn must NOT stash a
+    /// voluntary tool_feedback reminder into the channel-scoped KV — otherwise
+    /// the next live intake would inject it into the live prompt. Deleting the
+    /// isolation guard in `feedback_reminder_to_stash` makes this FAIL on the
+    /// `is_none()` assertion (not a compile error).
+    #[test]
+    fn scheduled_snapshot_turn_does_not_stash_feedback_reminder() {
+        let reminder = Some("please leave tool_feedback for your recall".to_string());
+
+        let stashed = feedback_reminder_to_stash(true, reminder.clone());
+        assert!(
+            stashed.is_none(),
+            "snapshot turn must not stash a feedback reminder into the channel KV"
+        );
+
+        // A normal (channel-owning) turn still stashes so live coverage stays.
+        let stashed_normal = feedback_reminder_to_stash(false, reminder.clone());
+        assert_eq!(
+            stashed_normal, reminder,
+            "normal turn must still stash the feedback reminder for next-turn injection"
         );
     }
 
