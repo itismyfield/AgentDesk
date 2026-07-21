@@ -445,6 +445,13 @@
 
 ### Audited touches
 
+- #4515 worker-local recovery supervision: `src/server/worker_recovery.rs` owns
+  bounded restart handling for the worker-local dispatch-outbox and session-discovery
+  tasks. Each node applies its own restart budget (at most 5 restarts within 10
+  minutes, with 1s-to-60s capped exponential backoff) and leaves an exhausted task
+  stopped on that node. `src/server/worker_registry.rs` retains both specs as
+  `WorkerExecutionScope::WorkerLocal`; this changes no leader election, leader-only
+  worker classification, lease acquisition, or cross-node ownership authority.
 - #4568 explicit queue cancellation: `/cancel-queued` removes only the selected
   queued item's primary Discord message ID through the existing per-channel
   mailbox actor; `/queue` exposes those primary IDs for the same channel. This
