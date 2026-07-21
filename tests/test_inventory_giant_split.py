@@ -596,6 +596,7 @@ class RegistryValidationTest(unittest.TestCase):
                 "state": "open",
                 "title": f"test tracker {number}",
                 "owners": ["team"],
+                "files": ["src/a.rs", "src/first.rs", "src/tracked.rs"],
             }
             for number in (1, 3036)
         }
@@ -952,7 +953,25 @@ class RegistryValidationTest(unittest.TestCase):
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig
-        self.assertIn("outside decompose_issue #1 scope", str(ctx.exception))
+        self.assertIn("outside decompose_issue #1 owner scope", str(ctx.exception))
+
+    def test_shrink_rejects_file_absent_from_issue_candidate_scope(self) -> None:
+        modules = [self._module("src/not-listed.rs", 1500, giant=True)]
+        entry = {
+            "file": "src/not-listed.rs",
+            "decision": "shrink",
+            "owner": "team",
+            "deadline": "2026-08-31",
+            "decompose_issue": "#1",
+        }
+        orig = GEN.load_giant_file_registry
+        GEN.load_giant_file_registry = self._patch_registry([], [entry])
+        try:
+            with self.assertRaises(GEN.ParseError) as ctx:
+                GEN.build_giant_registrations(modules)
+        finally:
+            GEN.load_giant_file_registry = orig
+        self.assertIn("not an explicit candidate", str(ctx.exception))
 
     def test_checked_in_issue_metadata_covers_every_shrink_entry(self) -> None:
         GEN.load_giant_file_issue_metadata = self._original_issue_metadata

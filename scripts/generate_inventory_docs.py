@@ -933,6 +933,7 @@ def load_giant_file_issue_metadata() -> dict[int, dict[str, object]]:
         state = issue.get("state")
         title = issue.get("title")
         owners = issue.get("owners")
+        files = issue.get("files")
         if (
             not isinstance(number, int)
             or isinstance(number, bool)
@@ -943,6 +944,13 @@ def load_giant_file_issue_metadata() -> dict[int, dict[str, object]]:
             or not isinstance(owners, list)
             or not owners
             or any(not isinstance(owner, str) or not _is_real_value(owner) for owner in owners)
+            or not isinstance(files, list)
+            or not files
+            or any(
+                not isinstance(file, str) or not file.startswith("src/") or not file.endswith(".rs")
+                for file in files
+            )
+            or len(files) != len(set(files))
             or number in issues
         ):
             raise ParseError(f"invalid or duplicate giant-file issue metadata record: {issue!r}")
@@ -967,7 +975,13 @@ def validate_decompose_issue_metadata(
     if owner not in owners:
         return (
             f"[[entry]] {path!r} owner {owner!r} is outside decompose_issue #{number} "
-            f"scope {owners!r}"
+            f"owner scope {owners!r}"
+        )
+    files = issue["files"]
+    if path not in files:
+        return (
+            f"[[entry]] {path!r} is not an explicit candidate in decompose_issue "
+            f"#{number} checked-in file scope"
         )
     return None
 
