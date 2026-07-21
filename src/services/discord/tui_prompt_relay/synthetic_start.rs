@@ -2375,6 +2375,7 @@ pub(super) async fn finish_tui_direct_synthetic_turn_if_current(
         .await;
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_tui_direct_synthetic_inflight_state(
     provider: ProviderKind,
     channel_id: ChannelId,

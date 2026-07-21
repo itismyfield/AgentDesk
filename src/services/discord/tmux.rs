@@ -907,6 +907,7 @@ fn advance_buffer_start_offset(start_offset: u64, before_len: usize, after_len: 
     start_offset.saturating_add(before_len.saturating_sub(after_len) as u64)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ensure_monitor_auto_turn_inflight(
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -1964,6 +1965,7 @@ fn persist_watcher_stream_progress(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finish_restored_watcher_active_turn(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -2161,6 +2163,7 @@ async fn release_restored_watcher_active_turn_before_panel_edit(
 /// Background watcher that continuously tails a tmux output file.
 /// When Claude produces output from terminal input (not Discord), relay it to Discord.
 #[path = "tmux_watcher.rs"]
+#[allow(clippy::too_many_arguments)]
 mod tmux_watcher;
 pub(super) use self::tmux_watcher::{
     TuiCompletionGateOutcome, emit_explicit_inflight_cleanup_signal, run_tui_completion_gate,

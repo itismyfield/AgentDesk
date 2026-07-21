@@ -41,6 +41,7 @@ impl ReservedEpisodeApplyBoundary for ImmediateApplyBoundary {
     async fn after_reserve(&self, _episode: &circuit_breaker::RelayReattachEpisode) {}
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn apply_relay_recovery_plan_with_seams(
     registry: &HealthRegistry,
     shared: &Arc<SharedData>,

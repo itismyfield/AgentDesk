@@ -258,6 +258,7 @@ pub(in crate::services::discord) fn emit_terminal_ui_transition(
 /// The clear itself has ALREADY run at the call site — this records the signals
 /// and fires the invariant; it NEVER gates cleanup. `record_invariant_check_*`
 /// only tracing-logs + emits + bumps `guard_fires`; its bool is discarded.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) fn emit_inflight_clear_with_invariant(
     provider: &str,
     channel_id: u64,

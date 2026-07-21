@@ -1254,6 +1254,7 @@ fn record_delivered_frontier_shadow(
 /// cutover passes the edit-target `channel_id` it actually edits. `None`/`None`
 /// writes a null anchor pair (unchanged from the absent-status-panel case), so
 /// OFF/None paths stay behaviorally identical.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
     shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,

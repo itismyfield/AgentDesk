@@ -320,6 +320,7 @@ pub(super) fn wrap_user_prompt_with_author(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_race_requeued_intervention(
     request_owner: UserId,
     user_msg_id: MessageId,

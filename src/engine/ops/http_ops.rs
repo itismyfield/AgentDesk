@@ -388,6 +388,7 @@ fn build_response(
 /// itself is plain http, so no real policy call reaches here). Kept behind
 /// `catch_unwind` because ureq-2.12.1 can still panic on the response read
 /// path (#2098).
+#[allow(clippy::result_large_err)]
 fn ureq_localhost_post(url: &str, body: &str, timeout: std::time::Duration) -> String {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let request = ureq::AgentBuilder::new()

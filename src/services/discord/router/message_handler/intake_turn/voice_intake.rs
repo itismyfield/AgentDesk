@@ -5,6 +5,7 @@ use super::*;
 /// resolved announcement (if any) plus the `already_accepted` flag exactly as
 /// the inline `let voice_announcement = ...` expression and its
 /// `voice_announcement_already_accepted` local produced.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn resolve_intake_voice_announcement(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,

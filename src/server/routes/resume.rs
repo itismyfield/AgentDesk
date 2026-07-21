@@ -328,6 +328,7 @@ pub async fn resume_card(
 }
 
 /// Core resume logic: analyze state and execute the appropriate recovery action.
+#[allow(clippy::too_many_arguments)]
 async fn determine_and_execute_resume(
     state: &AppState,
     card_id: &str,

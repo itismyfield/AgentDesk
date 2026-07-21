@@ -556,6 +556,7 @@ pub(super) fn watcher_handle_no_dispatch_post_work_idle_body(
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn discard_restored_response_seed_before_no_inflight_terminal_relay(
     full_response: &mut String,
     response_sent_offset: &mut usize,

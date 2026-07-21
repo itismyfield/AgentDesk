@@ -119,6 +119,7 @@ pub(super) async fn cleanup_orphan_external_input_status_panel(
 /// processing state — the caller must preserve a retry handle (enqueue the panel
 /// for the durable drain) before clearing the inflight, or the panel orphans
 /// (codex P2 r20).
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn complete_watcher_status_panel_v2(
     http: &serenity::Http,
     shared: &Arc<SharedData>,

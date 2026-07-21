@@ -688,6 +688,21 @@ class RegistryValidationTest(unittest.TestCase):
             GEN.load_giant_file_registry = orig
         self.assertIn("grandfathered_baseline_paths", str(ctx.exception))
 
+    def test_awaiting_backfill_records_are_rejected_after_4519(self) -> None:
+        modules = [self._module("src/a.rs", 1500, giant=True)]
+        orig = GEN.load_giant_file_registry
+        GEN.load_giant_file_registry = self._patch_registry(["src/a.rs"], [])
+        try:
+            with self.assertRaises(GEN.ParseError) as ctx:
+                GEN.build_giant_registrations(modules)
+        finally:
+            GEN.load_giant_file_registry = orig
+        self.assertIn("metadata backfill is closed", str(ctx.exception))
+
+    def test_registry_has_zero_awaiting_backfill_records(self) -> None:
+        grandfathered, _entries, _baseline = GEN.load_giant_file_registry()
+        self.assertEqual(grandfathered, [])
+
     def test_legacy_decision_omission_normalizes_to_shrink(self) -> None:
         modules = [self._module("src/a.rs", 1500, giant=True)]
         entry = {

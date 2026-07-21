@@ -889,6 +889,7 @@ fn fold_pane_paths(
     Some(paths)
 }
 
+#[allow(clippy::result_large_err)]
 pub(crate) async fn remove_orphan_worktree(path: &Path) -> Result<()> {
     // Try `git worktree remove --force <path>` first. This requires running
     // from the parent repo, which we infer by reading the .git file inside

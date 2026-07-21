@@ -276,6 +276,7 @@ fn should_wake_wait_queue_after_node_join(leader_active: &AtomicBool) -> bool {
     leader_active.load(Ordering::Acquire)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_heartbeat_loop(
     pool: PgPool,
     instance_id: String,
@@ -466,6 +467,7 @@ async fn mark_stale_worker_nodes_offline(
     Ok(affected)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn upsert_worker_node(
     pool: &PgPool,
     instance_id: &str,

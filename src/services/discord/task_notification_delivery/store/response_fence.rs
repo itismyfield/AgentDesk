@@ -63,7 +63,7 @@ pub(in crate::services::discord) struct ExistingResponseDelivery {
     pub(in crate::services::discord) response_turn_key: String,
     pub(in crate::services::discord) card_bot_key: String,
 }
-
+#[allow(clippy::too_many_arguments)]
 pub(in super::super) async fn claim_response_delivery(
     pool: Option<&PgPool>,
     scope: &TaskCardScope,

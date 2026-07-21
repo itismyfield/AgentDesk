@@ -33,6 +33,7 @@ impl ChannelRecentContextManifestInput {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn load_channel_recent_context<T>(
     pg_pool: Option<&PgPool>,
     channel_id: ChannelId,

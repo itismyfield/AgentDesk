@@ -2421,6 +2421,7 @@ Authoritative execution mode: `meeting_readonly`.
 }
 
 /// Execute a single agent turn using specialist draft/final -> reviewer critique.
+#[allow(clippy::too_many_arguments)]
 async fn execute_agent_turn(
     participant: &MeetingParticipant,
     agenda: &str,

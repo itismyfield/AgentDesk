@@ -1766,6 +1766,7 @@ pub fn followup_result_from_read_output_result(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn poll_output_file_until_result<
     State,
     IsAlive,

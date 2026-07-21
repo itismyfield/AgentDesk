@@ -134,6 +134,7 @@ impl TuiDirectPendingStart {
 /// `SharedData`). One `tokio::Mutex` per `(provider, channel_id)`; the worker
 /// holds it for the whole wait+claim so same-channel pending prompts serialize
 /// FIFO while different channels run fully in parallel.
+#[allow(clippy::type_complexity)]
 static CHANNEL_LOCKS: LazyLock<Mutex<HashMap<(String, u64), Arc<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 

@@ -7,8 +7,9 @@
 # >= 1000.
 #
 # Enforcement (generation fails otherwise):
-#   * Every current prod-giant must appear either in `grandfathered` below or as
-#     an `[[entry]]` table. A new giant with neither is rejected — register it
+#   * Every current prod-giant must appear as an `[[entry]]` table. The closed,
+#     empty `grandfathered` array is retained only as a zero-backfill ratchet.
+#     A new giant without an explicit decision is rejected — register it
 #     with shrink(owner + deadline + issue) or keep(owner + reason) first.
 #   * Each `[[entry]]` has a decision. Omitted legacy decisions normalize to
 #     `shrink` for backward compatibility. `shrink` requires a real owner,
@@ -161,114 +162,471 @@ grandfathered_baseline_paths = [
   "src/voice/receiver.rs",
 ]
 
-# Paths that predate the deadline mandate. No owner/deadline required yet,
-# but each must be either decomposed (removed) or promoted to an [[entry]]
-# over time. New giants must NOT be added here.
-grandfathered = [
-  "src/cli/client.rs",
-  "src/cli/dcserver.rs",
-  "src/cli/direct.rs",
-  "src/cli/doctor/orchestrator.rs",
-  "src/cli/init.rs",
-  "src/cli/migrate/apply.rs",
-  "src/cli/migrate/plan.rs",
-  "src/cli/migrate/source.rs",
-  "src/cli/provider_cli/mod.rs",
-  "src/config.rs",
-  "src/db/auto_queue/entries.rs",
-  "src/db/auto_queue/phase_gates.rs",
-  "src/db/dispatched_sessions.rs",
-  "src/db/dispatches/mod.rs",
-  "src/db/postgres.rs",
-  "src/dispatch/dispatch_context.rs",
-  "src/dispatch/dispatch_create.rs",
-  "src/dispatch/dispatch_status.rs",
-  "src/engine/loader.rs",
-  "src/engine/mod.rs",
-  "src/engine/ops/db_ops.rs",
-  "src/github/sync.rs",
-  "src/pipeline.rs",
-  "src/receipt.rs",
-  "src/reconcile.rs",
-  "src/server/mod.rs",
-  "src/server/routes/agents.rs",
-  "src/server/routes/agents_crud.rs",
-  "src/server/routes/agents_setup.rs",
-  "src/server/routes/escalation.rs",
-  "src/server/routes/health_api.rs",
-  "src/server/routes/kanban.rs",
-  "src/server/routes/meetings.rs",
-  "src/server/routes/resume.rs",
-  # decision_route.rs was decomposed in #3038 slice 1 and then S1-relocated in
-  # #3038 review-decision S1 (4392 prod LoC -> 26-line route shim +
-  # sub-1000-LoC modules under services/review_decision/); no longer a
-  # prod-giant, so it is removed from `grandfathered` (kept in the frozen
-  # baseline above) and the split outputs are ratcheted in
-  # scripts/audit_maintainability_giant_baseline.toml.
-  "src/server/routes/v1.rs",
-  "src/services/auto_queue.rs",
-  "src/services/auto_queue/activate_command.rs",
-  "src/services/auto_queue/cancel_run.rs",
-  "src/services/claude.rs",
-  "src/services/claude_tui/input.rs",
-  "src/services/codex.rs",
-  "src/services/codex_tmux_wrapper.rs",
-  "src/services/codex_tui/input.rs",
-  # commands/config.rs dropped to 954 prod LoC in #3038 S2 (session-override
-  # bookkeeping helpers moved to discord/shared_state.rs); no longer a
-  # prod-giant, so it is removed from `grandfathered` and from the baseline
-  # guard here (win-locked: a re-expanded config.rs cannot be
-  # re-grandfathered — it would have to land as a full [[entry]] or shrink).
-  # commands/diagnostics.rs was decomposed in #3479 (1022 prod LoC -> 389-line
-  # module root commands/diagnostics/mod.rs + sub-1000-LoC commands/diagnostics/
-  # reports.rs); no longer a prod-giant, so it is removed from `grandfathered`
-  # and from the baseline guard above (win-locked: a re-expanded diagnostics
-  # cannot be re-grandfathered — it would have to land as a full [[entry]] or
-  # shrink). The split outputs stay sub-threshold and are not ratcheted.
-  "src/services/discord/commands/text_commands.rs",
-  "src/services/discord/formatting.rs",
-  # health.rs was decomposed in #3038 Phase A (2293 prod LoC -> 402-line
-  # module root + 6 sub-1000-LoC directory modules under health/); no longer
-  # a prod-giant, so it is removed here AND from the frozen baseline above
-  # (win-locked: a re-expanded health.rs cannot be re-grandfathered). The
-  # split outputs stay sub-threshold and are not ratcheted.
-  "src/services/discord/meeting_orchestrator.rs",
-  "src/services/discord/mod.rs",
-  "src/services/discord/router/message_handler/headless_turn.rs",
-  # completion_guard.rs was decomposed in #3479 (1834 prod LoC -> 872-line
-  # module root + completion_guard/{completion_postgres,completion_context}.rs,
-  # both sub-1000-LoC); no longer a prod-giant, so it is removed here AND from
-  # the frozen baseline above (win-locked: a re-expanded completion_guard.rs
-  # cannot be re-grandfathered). The split outputs stay sub-threshold and are
-  # not ratcheted.
-  # turn_bridge/tmux_runtime.rs was decomposed in #3479 (1545 prod LoC -> 964-line
-  # module root + sub-1000-LoC tmux_runtime/{interrupt_policy,process_table,
-  # pid_exit}.rs); no longer a prod-giant, so it is removed from `grandfathered`
-  # and from the baseline guard above (win-locked: a re-expanded tmux_runtime
-  # cannot be re-grandfathered — it would have to land as a full [[entry]] or
-  # shrink). The split outputs stay sub-threshold and are not ratcheted.
-  "src/services/discord_config_audit.rs",
-  "src/services/dispatched_sessions.rs",
-  "src/services/dispatches/discord_delivery/orchestration.rs",
-  "src/services/dispatches/outbox_route.rs",
-  "src/services/gemini.rs",
-  "src/services/memory/memento.rs",
-  "src/services/onboarding/mod.rs",
-  "src/services/opencode.rs",
-  "src/services/platform/binary_resolver.rs",
-  "src/services/provider.rs",
-  "src/services/qwen.rs",
-  "src/services/routines/agent_executor.rs",
-  "src/services/routines/discord_log.rs",
-  # migrated.rs dropped to 883 prod LoC after the #3028 splitter fix (its inline
-  # test mod was previously miscounted as production); no longer a prod-giant, so
-  # it is removed from `grandfathered` (kept in the frozen baseline above).
-  "src/services/routines/store.rs",
-  "src/services/settings.rs",
-  "src/services/tui_prompt_dedupe.rs",
-  "src/services/turn_orchestrator.rs",
-  "src/voice/receiver.rs",
-]
+# All former grandfathered paths were promoted to explicit tracked decisions in #4519.
+# The empty array is retained as a closed admission surface: new giants must use [[entry]].
+grandfathered = []
+
+[[entry]]
+file = "src/cli/client.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/cli/dcserver.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/cli/direct.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/cli/doctor/orchestrator.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/cli/init.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/cli/migrate/apply.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/cli/migrate/plan.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/cli/migrate/source.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/cli/provider_cli/mod.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/config.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/db/auto_queue/entries.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/db/auto_queue/phase_gates.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/db/dispatched_sessions.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/db/dispatches/mod.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/db/postgres.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/dispatch/dispatch_context.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/dispatch/dispatch_create.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/dispatch/dispatch_status.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/engine/loader.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/engine/mod.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/engine/ops/db_ops.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/github/sync.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/pipeline.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/receipt.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/reconcile.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/server/mod.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/server/routes/agents.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/server/routes/agents_crud.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/server/routes/agents_setup.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/server/routes/escalation.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/server/routes/health_api.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/server/routes/kanban.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/server/routes/meetings.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/server/routes/resume.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/server/routes/v1.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/auto_queue.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/services/auto_queue/activate_command.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/services/auto_queue/cancel_run.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/services/claude.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/claude_tui/input.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/codex.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/codex_tmux_wrapper.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/codex_tui/input.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/discord/commands/text_commands.rs"
+decision = "shrink"
+owner = "discord-relay"
+deadline = "2027-01-31"
+decompose_issue = "#4712"
+
+[[entry]]
+file = "src/services/discord/formatting.rs"
+decision = "shrink"
+owner = "discord-relay"
+deadline = "2027-01-31"
+decompose_issue = "#4712"
+
+[[entry]]
+file = "src/services/discord/meeting_orchestrator.rs"
+decision = "shrink"
+owner = "discord-relay"
+deadline = "2027-01-31"
+decompose_issue = "#4712"
+
+[[entry]]
+file = "src/services/discord/mod.rs"
+decision = "shrink"
+owner = "discord-relay"
+deadline = "2027-01-31"
+decompose_issue = "#4712"
+
+[[entry]]
+file = "src/services/discord/router/message_handler/headless_turn.rs"
+decision = "shrink"
+owner = "discord-relay"
+deadline = "2027-01-31"
+decompose_issue = "#4712"
+
+[[entry]]
+file = "src/services/discord_config_audit.rs"
+decision = "shrink"
+owner = "discord-relay"
+deadline = "2027-01-31"
+decompose_issue = "#4712"
+
+[[entry]]
+file = "src/services/dispatched_sessions.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/services/dispatches/discord_delivery/orchestration.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/services/dispatches/outbox_route.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/services/gemini.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/memory/memento.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/onboarding/mod.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/opencode.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/platform/binary_resolver.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/provider.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/qwen.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/routines/agent_executor.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/services/routines/discord_log.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/services/routines/store.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/services/settings.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/tui_prompt_dedupe.rs"
+decision = "shrink"
+owner = "discord-relay"
+deadline = "2027-01-31"
+decompose_issue = "#4712"
+
+[[entry]]
+file = "src/services/turn_orchestrator.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/voice/receiver.rs"
+decision = "shrink"
+owner = "voice-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4713"
 
 # Tracked giant decisions. `decision = "shrink"` requires owner + deadline
 # (YYYY-MM-DD) + decompose_issue; `decision = "keep"` requires owner +

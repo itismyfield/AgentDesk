@@ -1163,6 +1163,13 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
             "shrink(owner + deadline + issue) or keep(owner + reason)"
         )
 
+    awaiting_backfill = [reg.file_path for reg in registrations if not reg.decision]
+    if awaiting_backfill:
+        problems.append(
+            "grandfathered metadata backfill is closed; promote every remaining path "
+            "to an explicit [[entry]] decision: " + ", ".join(sorted(awaiting_backfill))
+        )
+
     if problems:
         raise ParseError(
             "giant-file registry drift:\n  - " + "\n  - ".join(sorted(problems))

@@ -272,6 +272,7 @@ impl WatcherDirectTerminalResponseDecision {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn watcher_direct_terminal_response_decision(
     provider: &ProviderKind,
     channel_id: ChannelId,

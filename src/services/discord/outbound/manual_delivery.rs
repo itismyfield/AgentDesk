@@ -34,6 +34,7 @@ fn manual_delivery_log_emoji(bot: &str) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn send_resolved_manual_message_with_client<C: ManualOutboundClient>(
     client: &C,
     dedup: &OutboundDeduper,
@@ -497,6 +498,7 @@ async fn reserve_manual_delivery(dedup: &OutboundDeduper, key: &str) -> ManualDe
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn deliver_manual_v3_text<C: DiscordOutboundClient>(
     client: &C,
     dedup: &OutboundDeduper,

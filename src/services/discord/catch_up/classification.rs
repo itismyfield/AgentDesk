@@ -188,6 +188,7 @@ fn disposition_for_utility_ids(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn phase2_disposition_for_utility_ids(
     msg: &CatchUpMessageView,
     bot_user_id: Option<u64>,
@@ -289,6 +290,7 @@ pub(in crate::services::discord) fn classify_catch_up_message_with_utility_resol
 /// authorization-bypass semantics. Without that extra disposition bit, a
 /// false-flag announce message can look like an ordinary unauthorized human
 /// while the utility lookup is down and be irreversibly skipped.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) fn classify_phase2_message_with_utility_resolution(
     msg: &CatchUpMessageView,
     bot_user_id: Option<u64>,

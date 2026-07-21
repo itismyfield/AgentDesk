@@ -635,6 +635,7 @@ mod simple_launch_env_tests {
 /// Execute a command using Claude CLI with streaming output
 /// If `system_prompt` is None, uses the default file manager system prompt.
 /// If `system_prompt` is Some(""), no system prompt is appended.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_command_streaming(
     prompt: &str,
     session_id: Option<&str>,
@@ -1730,6 +1731,7 @@ pub(crate) fn claude_tui_turn_start_offset_after_timestamp(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn execute_streaming_local_tui_tmux(
     prompt: &str,
     session_id: Option<&str>,
@@ -2009,6 +2011,7 @@ fn cleanup_stale_claude_tui_session(tmux_session_name: &str) {
 /// Prepare the Claude TUI launch script and hosted tmux session.
 /// Verbatim prep/create extraction: temp cleanup, owner/runtime markers, launch script, create_session; marker `?` exits precede cleanup, later failures keep original cleanup, success returns owner path.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn prepare_and_create_claude_tui_session(
     tmux_session_name: &str,
     working_dir: &str,
@@ -2208,6 +2211,7 @@ pub(crate) fn emit_claude_tui_watcher_handoff(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn read_claude_tui_transcript_until_done(
     transcript_path: &str,
     start_offset: u64,
@@ -2286,6 +2290,7 @@ fn wait_for_claude_tui_transcript_file(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn wait_for_claude_tui_transcript_file_inner<Exists, Alive, Snapshot>(
     transcript_path: &str,
     start_offset: u64,
@@ -2558,6 +2563,7 @@ mod claude_tui_ready_probe_tests {
 /// - Input (Discord→Claude): parent writes stream-json to INPUT_FIFO
 /// - Input (terminal→Claude): wrapper reads stdin directly
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn execute_streaming_local_tmux(
     args: &[String],
     prompt: &str,

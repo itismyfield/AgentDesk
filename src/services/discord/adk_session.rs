@@ -167,6 +167,7 @@ pub(super) fn derive_adk_session_info(
     "AgentDesk 작업 진행 중".to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn post_adk_session_status(
     session_key: Option<&str>,
     name: Option<&str>,

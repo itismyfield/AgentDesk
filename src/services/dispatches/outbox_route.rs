@@ -1039,6 +1039,7 @@ fn minimal_dispatch_instruction_line(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_dispatch_message(
     dispatch_id: &str,
     title: &str,

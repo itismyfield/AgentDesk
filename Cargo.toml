@@ -25,6 +25,13 @@ unimplemented = "deny"
 # The allow count is ratcheted (monotonic decrease) by
 # scripts/check_await_holding_lock_ratchet.py.
 await_holding_lock = "deny"
+# #4519: structural complexity debt is grandfathered only at existing
+# item/module sites. New occurrences must fail Clippy instead of inheriting a
+# crate-root allow.
+large_enum_variant = "deny"
+result_large_err = "deny"
+too_many_arguments = "deny"
+type_complexity = "deny"
 
 [dependencies]
 # HTTP server

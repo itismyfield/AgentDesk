@@ -1002,6 +1002,7 @@ fn setup_json_response(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_planned_pair(
     ctx: &SetupContext,
     records: &mut Vec<MutationRecord>,

@@ -44,7 +44,6 @@ async fn enqueue_race_loss_requeued_intervention(
     }
     outcome
 }
-
 /// #3837 decomposition: the start-turn race-loss enqueue path lifted verbatim
 /// from `handle_text_message`. Behavior-preserving — this is the exact body of
 /// the `if !started { ... }` block (mailbox enqueue, queued-placeholder render,
@@ -52,6 +51,7 @@ async fn enqueue_race_loss_requeued_intervention(
 /// mailbox start-turn claim. Its `return Ok(())` / `return Err(..)` statements
 /// map 1:1 onto the original inline returns, so the caller does
 /// `if !started { return handle_race_loss_enqueue(..).await; }`.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_race_loss_enqueue(
     http: &Arc<serenity::http::Http>,
     shared: &Arc<SharedData>,

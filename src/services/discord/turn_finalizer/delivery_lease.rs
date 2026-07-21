@@ -34,6 +34,7 @@ pub(super) fn handle_acquire_delivery(
 /// offset) and via `advance_watcher_confirmed_end`'s monotonic CAS (never a
 /// double-advance). `NotDelivered`/`Unknown` never advance: an ambiguous
 /// terminal must not claim bytes as delivered.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_commit_delivery(
     lease: &DeliveryLeaseCell,
     key: DeliveryLeaseKey,

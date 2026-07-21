@@ -354,6 +354,7 @@ async fn release_cancelled_claim(
 /// `SharedData.restart.shutting_down`. Both the signal path and the shared
 /// gateway/standby restart-marker poller set it before restart acknowledgement,
 /// fencing new poll ticks while an active tick drains to completion.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_intake_worker_loop(
     pool: PgPool,
     http: Arc<serenity::http::Http>,
