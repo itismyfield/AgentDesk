@@ -41,6 +41,22 @@ pub(crate) enum CircuitActivation {
     NotOwner,
 }
 
+/// Idempotent resume outcome for a row whose immutable circuit coordinate is
+/// stored in `message_outbox`. `NotCircuit` deliberately leaves legacy rows on
+/// the existing activation path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResumeActivation {
+    Activated,
+    AlreadyDeliverable,
+    Terminal,
+    RevokedOrFenced,
+    Superseded,
+    OwnerAdvanced,
+    NotCircuit,
+    Missing,
+    Unknown,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FreshVouchRevoke {
     Revoked,
@@ -113,7 +129,7 @@ fn valid_same_episode_frontier_transition(
 /// `expected_authority_epoch` is the caller's current-file pin: `None` creates
 /// epoch 1; `Some(n)` may idempotently return the current coordinate at `n`, or
 /// advance a different caller-authorized coordinate to exactly `n + 1`.
-#[allow(dead_code, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn reserve_next_authority(
     pool: &PgPool,
     provider: &str,
@@ -256,7 +272,6 @@ async fn authority_is_current(
 
 /// Stage an exact worker-invisible row. Dedupe collisions are idempotent only
 /// when payload identity and every circuit stamp match; all others fail closed.
-#[allow(dead_code)]
 pub(crate) async fn stage_held(
     pool: &PgPool,
     message: crate::services::message_outbox::OutboxMessage<'_>,
@@ -443,6 +458,114 @@ pub(crate) async fn activate_fenced(
         CircuitActivation::AlreadyActivated
     } else {
         CircuitActivation::Stale
+    })
+}
+
+/// Resume a staged alert by its immutable outbox coordinate. The row itself,
+/// rather than the current feature flag, determines whether fenced activation is
+/// required so an ON→OFF rollback can never un-fence an already stamped row.
+pub(crate) async fn activate_fenced_by_id(
+    pool: &PgPool,
+    outbox_id: i64,
+) -> Result<ResumeActivation, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT status,circuit_provider,circuit_channel_id,circuit_owner_instance_id,
+                circuit_owner_generation,circuit_episode_key,circuit_baseline_relay_offset,
+                circuit_open_generation,circuit_authority_epoch
+           FROM message_outbox WHERE id=$1",
+    )
+    .bind(outbox_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Ok(ResumeActivation::Missing);
+    };
+    let Some(provider) = row.get::<Option<String>, _>("circuit_provider") else {
+        return Ok(ResumeActivation::NotCircuit);
+    };
+    let coordinate = CircuitCoordinate {
+        provider,
+        channel_id: row
+            .get::<Option<String>, _>("circuit_channel_id")
+            .unwrap_or_default(),
+        owner_instance_id: row
+            .get::<Option<String>, _>("circuit_owner_instance_id")
+            .unwrap_or_default(),
+        owner_generation: row
+            .get::<Option<i64>, _>("circuit_owner_generation")
+            .unwrap_or(-1),
+        episode_key: row
+            .get::<Option<String>, _>("circuit_episode_key")
+            .unwrap_or_default(),
+        baseline_relay_offset: row
+            .get::<Option<i64>, _>("circuit_baseline_relay_offset")
+            .unwrap_or(-1),
+        open_generation: row
+            .get::<Option<i64>, _>("circuit_open_generation")
+            .unwrap_or(-1),
+        authority_epoch: row
+            .get::<Option<i64>, _>("circuit_authority_epoch")
+            .unwrap_or(-1),
+    };
+    let status: String = row.get("status");
+    if status != "held" {
+        return Ok(match status.as_str() {
+            "pending" | "processing" | "sent" | "delivered" => ResumeActivation::AlreadyDeliverable,
+            "failed" => ResumeActivation::Terminal,
+            // Unlike legacy activation, circuit cancellation means authority
+            // revoke/fencing; reopening would re-stage a superseded alert.
+            "cancelled" => ResumeActivation::RevokedOrFenced,
+            _ => ResumeActivation::Unknown,
+        });
+    }
+
+    let mut tx = pool.begin().await?;
+    lock_channel(&mut tx, &coordinate.provider, &coordinate.channel_id).await?;
+    if !owner_is_current(&mut tx, &coordinate).await? {
+        tx.rollback().await?;
+        return Ok(ResumeActivation::OwnerAdvanced);
+    }
+    if !authority_is_current(&mut tx, &coordinate).await? {
+        tx.rollback().await?;
+        return Ok(ResumeActivation::Superseded);
+    }
+    let changed = sqlx::query(
+        "UPDATE message_outbox SET status='pending' WHERE id=$1 AND status='held'
+           AND circuit_provider=$2 AND circuit_channel_id=$3 AND circuit_episode_key=$4
+           AND circuit_baseline_relay_offset=$5 AND circuit_open_generation=$6
+           AND circuit_authority_epoch=$7 AND circuit_owner_instance_id=$8
+           AND circuit_owner_generation=$9",
+    )
+    .bind(outbox_id)
+    .bind(&coordinate.provider)
+    .bind(&coordinate.channel_id)
+    .bind(&coordinate.episode_key)
+    .bind(coordinate.baseline_relay_offset)
+    .bind(coordinate.open_generation)
+    .bind(coordinate.authority_epoch)
+    .bind(&coordinate.owner_instance_id)
+    .bind(coordinate.owner_generation)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if changed == 1 {
+        tx.commit().await?;
+        return Ok(ResumeActivation::Activated);
+    }
+    let status = sqlx::query_scalar::<_, String>("SELECT status FROM message_outbox WHERE id=$1")
+        .bind(outbox_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    tx.rollback().await?;
+    Ok(match status.as_deref() {
+        None => ResumeActivation::Missing,
+        Some("pending" | "processing" | "sent" | "delivered") => {
+            ResumeActivation::AlreadyDeliverable
+        }
+        Some("failed") => ResumeActivation::Terminal,
+        Some("cancelled") => ResumeActivation::RevokedOrFenced,
+        Some("held") => ResumeActivation::Superseded,
+        Some(_) => ResumeActivation::Unknown,
     })
 }
 

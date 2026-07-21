@@ -443,6 +443,57 @@ async fn non_owner_reserve_and_stage_leave_zero_rows_pg() {
 }
 
 #[tokio::test]
+async fn resume_activation_maps_deliverable_terminal_and_unknown_states_pg() {
+    let Some((db, pool)) = setup("circuit_resume_statuses").await else {
+        return;
+    };
+    owner(&pool, "509", "node-a").await;
+    let coordinate = reserve(&pool, "509", "e1", 1, None).await;
+    let id = match stage_held(&pool, message("channel:509", "resume"), &coordinate, 300)
+        .await
+        .unwrap()
+    {
+        StageHeldOutcome::Staged { id } => id,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        activate_fenced_by_id(&pool, id).await.unwrap(),
+        ResumeActivation::Activated
+    );
+    for status in ["pending", "processing", "sent", "delivered"] {
+        sqlx::query("UPDATE message_outbox SET status=$2 WHERE id=$1")
+            .bind(id)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            activate_fenced_by_id(&pool, id).await.unwrap(),
+            ResumeActivation::AlreadyDeliverable
+        );
+    }
+    for (status, expected) in [
+        ("failed", ResumeActivation::Terminal),
+        ("cancelled", ResumeActivation::RevokedOrFenced),
+        ("unexpected_status", ResumeActivation::Unknown),
+    ] {
+        sqlx::query("UPDATE message_outbox SET status=$2 WHERE id=$1")
+            .bind(id)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(activate_fenced_by_id(&pool, id).await.unwrap(), expected);
+    }
+    assert_eq!(
+        activate_fenced_by_id(&pool, id + 100_000).await.unwrap(),
+        ResumeActivation::Missing
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
 async fn activation_then_vouch_cancels_pending_and_releases_dedupe_pg() {
     let Some((db, pool)) = setup("circuit_pending_vouch").await else {
         return;

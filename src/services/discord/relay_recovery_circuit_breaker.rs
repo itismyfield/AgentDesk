@@ -69,6 +69,10 @@ impl RelayReattachEpisode {
     pub(super) fn pin(&self) -> &super::super::inflight::InflightEpisodePin {
         &self.pin
     }
+
+    pub(super) fn key(&self) -> &str {
+        &self.key
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -492,9 +496,14 @@ fn owner_mention(owner_user_id: u64) -> String {
 }
 
 pub(super) struct CircuitAlertRequest {
-    target: String,
-    content: String,
-    reason_code: String,
+    pub(super) target: String,
+    pub(super) content: String,
+    pub(super) reason_code: String,
+    pub(super) provider: String,
+    pub(super) channel_id: u64,
+    pub(super) episode_key: String,
+    pub(super) baseline_relay_offset: u64,
+    pub(super) open_generation: u64,
 }
 
 #[async_trait::async_trait]
@@ -522,28 +531,16 @@ impl CircuitAlertEnqueue for PgCircuitAlertEnqueue {
         pool: Option<&sqlx::PgPool>,
         request: &CircuitAlertRequest,
     ) -> Result<i64, String> {
-        let pool = pool.ok_or_else(|| "pg_pool unavailable".to_string())?;
-        crate::services::message_outbox::stage_outbox_pg_with_ttl(
+        super::relay_recovery_circuit_alert_producer::enqueue(
             pool,
-            crate::services::message_outbox::OutboxMessage {
-                target: &request.target,
-                content: &request.content,
-                bot: crate::services::discord::bot_role::UtilityBotRole::Announce.alias(),
-                source: "stall_watchdog",
-                reason_code: Some(&request.reason_code),
-                session_key: None,
-            },
+            request,
             CIRCUIT_ALERT_DEDUPE_TTL_SECS,
         )
         .await
-        .map_err(|error| error.to_string())
     }
 
     async fn activate(&self, pool: Option<&sqlx::PgPool>, id: i64) -> Result<bool, String> {
-        let pool = pool.ok_or_else(|| "pg_pool unavailable".to_string())?;
-        crate::services::message_outbox::activate_or_confirm_staged_outbox_pg(pool, id)
-            .await
-            .map_err(|error| error.to_string())
+        super::relay_recovery_circuit_alert_producer::activate(pool, id).await
     }
 
     async fn cancel(&self, pool: Option<&sqlx::PgPool>, id: i64) -> Result<(), String> {
@@ -622,6 +619,11 @@ pub(super) async fn queue_or_resume_open_alert_with_enqueue(
         content: format!(
             "⚠️ 릴레이 자동 복구 중단{mention}: 같은 세션 backlog가 {max_attempts}회 reattach 뒤에도 전달 frontier를 전진시키지 못했습니다. 세션과 inflight는 보존했으며 자동 redrive만 차단했습니다. 채널 {channel_id} 상태를 확인해 수동 복구 여부를 결정해 주세요."
         ),
+        provider: provider.as_str().to_string(),
+        channel_id: channel_id.get(),
+        episode_key: episode.key().to_string(),
+        baseline_relay_offset: open.baseline_relay_offset,
+        open_generation: open.generation,
     };
     // Stage first without any filesystem authority. `held` rows are invisible
     // to the outbox worker, so progress while this network await is in flight
