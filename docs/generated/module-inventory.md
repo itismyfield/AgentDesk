@@ -1089,7 +1089,7 @@
 | `services::shell_guard` | `src/services/shell_guard.rs` | 419 | 419 | 0 |  |
 | `services::slo` | `src/services/slo/mod.rs` | 535 | 508 | 27 |  |
 | `services::termination_audit` | `src/services/termination_audit.rs` | 192 | 192 | 0 |  |
-| `services::tmux_common` | `src/services/tmux_common.rs` | 2445 | 1384 | 1061 | giant-file |
+| `services::tmux_common` | `src/services/tmux_common.rs` | 2447 | 1385 | 1062 | giant-file |
 | `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 276 | 265 | 11 |  |
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 898 | 787 | 111 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 286 | 220 | 66 |  |

@@ -1107,6 +1107,7 @@ pub fn cleanup_session_temp_files(session_name: &str) {
         "spawn_nonce",
         "exit_reason",
         TMUX_RUNTIME_KIND_TEMP_EXT,
+        TMUX_CHANNEL_TEMP_EXT,
         TMUX_DEAD_MARKER_TEMP_EXT,
         CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT,
         CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
@@ -1393,6 +1394,7 @@ mod channel_binding_tests {
             Some(1_479_662_682_909_966_490)
         );
         cleanup_session_temp_files(session);
+        assert_eq!(read_tmux_channel_binding(session), None);
     }
 }
 
