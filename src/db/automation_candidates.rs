@@ -3,14 +3,14 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use crate::services::automation_candidate_contract::PIPELINE_STAGE_ID;
 
+pub(crate) use crate::db::automation_candidate_card_program::load_card_program_for_update_in_tx;
 pub use crate::db::automation_candidate_card_program::{
     approve_candidate_card_pg, create_child_candidate_card_pg, load_active_card_program_pg,
     load_card_final_gate_pg, load_card_program_pg, load_card_repo_dir_pg,
     transition_card_status_pg, update_card_program_current_iteration_pg,
 };
-pub(crate) use crate::db::automation_candidate_card_program::{
-    is_active_iteration_status, load_card_program_for_update_in_tx, program_current_iteration,
-    program_iteration_budget,
+use crate::db::automation_candidate_card_program::{
+    is_active_iteration_status, program_current_iteration, program_iteration_budget,
 };
 
 pub(crate) const MAX_ITERATIONS: i32 = 10;

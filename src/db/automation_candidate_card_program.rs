@@ -96,11 +96,11 @@ pub(crate) async fn load_card_program_for_update_in_tx(
     Ok(Some((status, program)))
 }
 
-pub(crate) fn is_active_iteration_status(status: &str) -> bool {
+pub(super) fn is_active_iteration_status(status: &str) -> bool {
     matches!(status, "ready" | "requested" | "in_progress")
 }
 
-pub(crate) fn program_current_iteration(program: &serde_json::Value) -> i32 {
+pub(super) fn program_current_iteration(program: &serde_json::Value) -> i32 {
     program
         .get("current_iteration")
         .and_then(|v| v.as_i64())
@@ -109,7 +109,7 @@ pub(crate) fn program_current_iteration(program: &serde_json::Value) -> i32 {
         .unwrap_or(0)
 }
 
-pub(crate) fn program_iteration_budget(program: &serde_json::Value) -> i32 {
+pub(super) fn program_iteration_budget(program: &serde_json::Value) -> i32 {
     program
         .get("iteration_budget")
         .and_then(|v| v.as_i64())
