@@ -3617,6 +3617,52 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
                 rt, chs, cid, retired_pending_paths
             )
         return
+
+    # A cleared/restarted provider session creates a new transcript. Once that
+    # selected successor has a delivered OK verdict, an idle prior transcript
+    # must remain historical evidence rather than own the channel's live outage
+    # forever. This is a retirement, not proof that the old LOST blocks arrived,
+    # so the normal RECOVERED notification must stay suppressed.
+    selected_path = str(selected.path) if selected is not None else None
+    selected_verdict = next(
+        (
+            verdict
+            for candidate, verdict in evaluated
+            if str(candidate.path) == selected_path
+        ),
+        None,
+    )
+    superseded_gap_owners: list[str] = []
+    if (
+        selected_path
+        and selected_verdict is not None
+        and selected_verdict.state == STATE_OK
+        and fresh_undelivered_by_path.get(selected_path, 0) == 0
+        and delivered_watermark_for_path(chs, selected_path) > 0
+    ):
+        for path in _validated_gap_owner_transcripts(chs):
+            if path == selected_path or path in semantic_growth_paths:
+                continue
+            candidate = candidate_by_path.get(path)
+            if candidate is None or selected is None:
+                continue
+            if candidate.mtime >= selected.mtime:
+                continue
+            superseded_gap_owners.append(path)
+            retired_transcripts[path] = (candidate.size, now)
+        if superseded_gap_owners:
+            _store_retired_transcripts(chs, retired_transcripts)
+            retired_pending_paths.extend(superseded_gap_owners)
+            evaluated = [
+                (candidate, verdict)
+                for candidate, verdict in evaluated
+                if str(candidate.path) not in superseded_gap_owners
+            ]
+            rt.log(
+                f"[{cid}] historical-gap-owner-retired "
+                f"successor={selected_path} count={len(superseded_gap_owners)}"
+            )
+
     state_rank = {STATE_OK: 0, STATE_LAGGING: 1, STATE_GAP: 2}
     verdict_candidate, v = max(
         evaluated,
@@ -3664,7 +3710,9 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     _store_recovered_gap_guards(chs, recovered_gap_guards)
 
     next_gap_owners = [
-        path for path in previous_gap_owners if path not in evaluated_paths
+        path
+        for path in previous_gap_owners
+        if path not in evaluated_paths and path not in superseded_gap_owners
     ]
     for candidate, verdict in evaluated:
         path = str(candidate.path)

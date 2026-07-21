@@ -4474,6 +4474,54 @@ class TickChannelTests(unittest.TestCase):
         )
         self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
 
+    def test_4715_delivered_successor_retires_idle_historical_gap_owner(self):
+        owner = self.proj_dir / "cleared-session-gap.jsonl"
+        successor = self.proj_dir / "current-session-ok.jsonl"
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        owner.write_text(
+            record(self.now - 4000, "historical block never delivered") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(owner, (self.now - 4000, self.now - 4000))
+        rt = self.make_rt()
+        rt.haystack = ""
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        chs = state["999"]
+        self.assertTrue(chs.get("alerting"))
+        self.assertIn(str(owner), chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY])
+        chs["issue_url"] = "https://example.test/issues/4715"
+
+        successor.write_text(
+            record(self.now + 1, "current session delivery proof") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(successor, (self.now + 1, self.now + 1))
+        rt.haystack = norm("current session delivery proof")
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+
+        self.assertEqual(chs[SELECTED_TRANSCRIPT_KEY], str(successor))
+        self.assertFalse(chs.get("alerting"), (chs, rt.log_lines))
+        self.assertNotIn("gap_since", chs)
+        self.assertNotIn(relay_watchdog.GAP_TRANSCRIPT_KEY, chs)
+        self.assertNotIn(relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY, chs)
+        self.assertIn(str(owner), chs[relay_watchdog.RETIRED_TRANSCRIPTS_KEY])
+        self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
+        self.assertTrue(
+            any("historical-gap-owner-retired" in line for line in rt.log_lines)
+        )
+
     def test_invariant_4435_retiring_one_of_two_gap_owners_keeps_incident_clock(self):
         owner_a = self.proj_dir / "multi-gap-a.jsonl"
         owner_b = self.proj_dir / "multi-gap-b.jsonl"
