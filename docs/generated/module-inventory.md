@@ -658,7 +658,7 @@
 | `services::discord::relay_recovery_auto_heal_apply` | `src/services/discord/relay_recovery_auto_heal_apply.rs` | 714 | 295 | 419 |  |
 | `services::discord::relay_recovery_auto_heal_attempts` | `src/services/discord/relay_recovery_auto_heal_attempts.rs` | 374 | 220 | 154 |  |
 | `services::discord::relay_recovery_auto_heal_confirm` | `src/services/discord/relay_recovery_auto_heal_confirm.rs` | 312 | 167 | 145 |  |
-| `services::discord::relay_recovery_circuit_alert_producer` | `src/services/discord/relay_recovery_circuit_alert_producer.rs` | 289 | 170 | 119 |  |
+| `services::discord::relay_recovery_circuit_alert_producer` | `src/services/discord/relay_recovery_circuit_alert_producer.rs` | 290 | 170 | 120 |  |
 | `services::discord::relay_recovery_circuit_breaker` | `src/services/discord/relay_recovery_circuit_breaker.rs` | 1684 | 719 | 965 |  |
 | `services::discord::relay_recovery_completion_footer` | `src/services/discord/relay_recovery_completion_footer.rs` | 9 | 9 | 0 |  |
 | `services::discord::relay_recovery_reattach_apply` | `src/services/discord/relay_recovery_reattach_apply.rs` | 66 | 66 | 0 |  |
