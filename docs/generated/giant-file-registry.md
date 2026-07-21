@@ -43,12 +43,12 @@
 | `src/server/routes/agents_crud.rs` | 1297 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/server/routes/agents_setup.rs` | 1366 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/server/routes/escalation.rs` | 1361 | shrink | server-runtime | 2027-01-31 | #4710 |  |
-| `src/server/routes/health_api.rs` | 1771 | shrink | server-runtime | 2027-01-31 | #4710 |  |
+| `src/server/routes/health_api.rs` | 1812 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/server/routes/kanban.rs` | 2426 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/server/routes/meetings.rs` | 1245 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/server/routes/resume.rs` | 1227 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/server/routes/v1.rs` | 1866 | shrink | server-runtime | 2027-01-31 | #4710 |  |
-| `src/server/worker_registry.rs` | 1236 | shrink | server-runtime | 2026-08-31 | #4710 |  |
+| `src/server/worker_registry.rs` | 1242 | shrink | server-runtime | 2026-08-31 | #4710 |  |
 | `src/services/auto_queue.rs` | 1545 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |
 | `src/services/auto_queue/activate_command.rs` | 1510 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |
 | `src/services/auto_queue/cancel_run.rs` | 1031 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |

@@ -52,6 +52,8 @@ pub(crate) fn leader_only_worker_status_json() -> serde_json::Value {
         "worker_local_terminal_signal_count": WORKER_LOCAL_TERMINAL_SIGNAL_COUNT.load(Ordering::Acquire),
         "worker_local_unexpected_terminal_signal_count": WORKER_LOCAL_UNEXPECTED_TERMINAL_SIGNAL_COUNT.load(Ordering::Acquire),
         "last_worker_local_terminal_signal": last_worker_local_signal,
+        // #4515 PR2: worker-local restart/exhaustion recovery counters.
+        "worker_local_recovery": super::worker_recovery::recovery_runtime_json(),
         // Backward-compatible aliases for clients deployed before #4515.
         "worker_local_loop_owned_terminal_signal_count": WORKER_LOCAL_TERMINAL_SIGNAL_COUNT.load(Ordering::Acquire),
         "worker_local_loop_owned_unexpected_terminal_signal_count": WORKER_LOCAL_UNEXPECTED_TERMINAL_SIGNAL_COUNT.load(Ordering::Acquire),
@@ -1059,6 +1061,10 @@ impl SupervisedWorkerRegistry {
                     restart_attempt,
                 );
             },
+            // #4515 PR3: restart-budget exhaustion completes the recovery circuit
+            // — readiness down (via the Exhausted recovery state) plus process
+            // exit so launchd KeepAlive restarts a clean process.
+            super::worker_recovery::production_fatal_hook(self.shutdown.clone()),
         );
         self.running.push(RunningWorker {
             spec,

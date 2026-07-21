@@ -1,15 +1,34 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
 use super::worker_registry::{WorkerRestartBudget, WorkerRestartPolicy, WorkerSpec};
 
 pub(super) const WORKER_LOCAL_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// #4515 PR2: how long an informational recovery observation (flapping or an
+/// unexpected LoopOwned termination) stays visible in `/api/health` before a
+/// read prunes it. Budget-exhausted (fatal) states are exempt — they persist
+/// until the process is restarted so readiness stays down for operators.
+const RECOVERY_OBSERVATION_TTL: Duration = Duration::from_secs(600);
+
+/// #4515 PR3: pause before `process::exit(1)` so the fatal log line and a final
+/// health scrape have time to flush before launchd KeepAlive respawns us.
+pub(super) const FATAL_EXIT_GRACE: Duration = Duration::from_secs(2);
+
+/// #4515 PR3 (§9.2): cross-process crash-loop guard window. If the same worker
+/// already drove this many fatal process exits inside the window, exiting again
+/// is proven not to help — hold Unhealthy(503) for human intervention instead.
+const FATAL_CROSS_PROCESS_WINDOW: Duration = Duration::from_secs(1800);
+const FATAL_CROSS_PROCESS_MAX: usize = 2;
+const FATAL_EXIT_LEDGER_FILE: &str = "worker_fatal_exits.json";
 
 static WORKER_RESTART_BUDGET_EXHAUSTED_COUNT: AtomicUsize = AtomicUsize::new(0);
 static WORKER_RECOVERY_STATES: LazyLock<Mutex<HashMap<&'static str, WorkerRecoveryState>>> =
@@ -32,13 +51,78 @@ impl WorkerLocalTerminalReason {
     }
 }
 
+/// #4515 PR2: classification of a worker-local recovery observation, driving
+/// how it maps onto `/api/health`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryClassification {
+    /// Restartable worker was re-spawned at least once inside the window but
+    /// still has budget left. Informational only — must NOT worsen HTTP status
+    /// (§9.3: an in-band Degraded here would trip deploy gates).
+    Flapping,
+    /// Restartable worker exhausted its budget → readiness down (Unhealthy/503)
+    /// and, in production, a process exit.
+    Exhausted,
+    /// Non-restartable LoopOwned worker terminated unexpectedly. Degraded so the
+    /// silent-wedge (`session_discovery` / `watcher_supervisor`) surfaces.
+    LoopOwnedTerminated,
+}
+
+impl RecoveryClassification {
+    const fn as_doc_str(self) -> &'static str {
+        match self {
+            Self::Flapping => "flapping",
+            Self::Exhausted => "exhausted",
+            Self::LoopOwnedTerminated => "loop_owned_terminated",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct WorkerRecoveryState {
     recent_restart_count: usize,
     last_reason: &'static str,
-    exhausted: bool,
+    classification: RecoveryClassification,
     observed_at: Instant,
 }
+
+impl WorkerRecoveryState {
+    /// #4515 PR2 (§9.5): informational states expire on read; the fatal
+    /// exhausted state is retained until the process restarts.
+    fn is_expired(&self, now: Instant) -> bool {
+        self.classification != RecoveryClassification::Exhausted
+            && now.duration_since(self.observed_at) >= RECOVERY_OBSERVATION_TTL
+    }
+}
+
+/// #4515 PR2: severity a recovery reason contributes to `/api/health`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecoveryReasonSeverity {
+    Degraded,
+    Unhealthy,
+}
+
+/// #4515 PR2: a status-worsening recovery reason for `/api/health`. Flapping is
+/// deliberately excluded (surfaced via [`recovery_flapping_info`] instead).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecoveryHealthReason {
+    pub(crate) reason: String,
+    pub(crate) severity: RecoveryReasonSeverity,
+}
+
+/// #4515 PR3: context handed to the fatal hook when a restart budget is
+/// exhausted.
+#[derive(Debug, Clone)]
+pub(crate) struct FatalExhaustionRecord {
+    pub(crate) worker: &'static str,
+    pub(crate) window_restart_count: usize,
+    pub(crate) max_restarts: u32,
+    pub(crate) window: Duration,
+}
+
+/// #4515 PR3: injected budget-exhaustion action. Production wires the process
+/// exit circuit ([`production_fatal_hook`]); tests inject a flag closure so the
+/// supervisor loop is exercised without killing the test process.
+pub(crate) type FatalHook = Arc<dyn Fn(&FatalExhaustionRecord) + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkerRunOutcome {
@@ -51,6 +135,7 @@ pub(super) async fn supervise_worker_local<MakeFuture, Fut, RecordTerminal>(
     shutdown: Arc<AtomicBool>,
     make_future: MakeFuture,
     mut record_terminal: RecordTerminal,
+    fatal_hook: FatalHook,
 ) where
     MakeFuture: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send + 'static,
@@ -58,10 +143,27 @@ pub(super) async fn supervise_worker_local<MakeFuture, Fut, RecordTerminal>(
 {
     match spec.restart_policy {
         WorkerRestartPolicy::RestartableWithBudget(budget) => {
-            supervise_restartable(spec, shutdown, make_future, budget, &mut record_terminal).await;
+            supervise_restartable(
+                spec,
+                shutdown,
+                make_future,
+                budget,
+                &mut record_terminal,
+                &fatal_hook,
+            )
+            .await;
         }
         _ => match run_worker_once(spec, shutdown, make_future()).await {
             WorkerRunOutcome::Unexpected(reason) => {
+                // #4515 PR2: expose the silent wedge of an un-migrated LoopOwned
+                // worker (session_discovery / watcher_supervisor) as a Degraded
+                // health reason — previously this only bumped a counter.
+                record_recovery_state(
+                    spec.name,
+                    0,
+                    reason,
+                    RecoveryClassification::LoopOwnedTerminated,
+                );
                 record_terminal(reason, false, false, 0);
             }
             WorkerRunOutcome::Shutdown(reason) => {
@@ -77,6 +179,7 @@ async fn supervise_restartable<MakeFuture, Fut, RecordTerminal>(
     make_future: MakeFuture,
     budget: WorkerRestartBudget,
     record_terminal: &mut RecordTerminal,
+    fatal_hook: &FatalHook,
 ) where
     MakeFuture: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send + 'static,
@@ -117,7 +220,12 @@ async fn supervise_restartable<MakeFuture, Fut, RecordTerminal>(
 
         if restart_times.len() >= budget.max_restarts as usize {
             record_terminal(reason, false, true, restart_times.len());
-            record_recovery_state(spec.name, restart_times.len(), reason, true);
+            record_recovery_state(
+                spec.name,
+                restart_times.len(),
+                reason,
+                RecoveryClassification::Exhausted,
+            );
             WORKER_RESTART_BUDGET_EXHAUSTED_COUNT.fetch_add(1, Ordering::AcqRel);
             tracing::error!(
                 worker = spec.name,
@@ -126,15 +234,29 @@ async fn supervise_restartable<MakeFuture, Fut, RecordTerminal>(
                 restart_count = restart_times.len(),
                 max_restarts = budget.max_restarts,
                 window_secs = budget.window.as_secs(),
-                "worker-local restart budget exhausted; leaving worker stopped"
+                "worker-local restart budget exhausted; promoting to fatal recovery circuit"
             );
+            // #4515 PR3: hand off to the fatal circuit (readiness down already
+            // wired via the Exhausted recovery state above; production also sets
+            // shutdown + exits so launchd KeepAlive restarts a clean process).
+            fatal_hook(&FatalExhaustionRecord {
+                worker: spec.name,
+                window_restart_count: restart_times.len(),
+                max_restarts: budget.max_restarts,
+                window: budget.window,
+            });
             return;
         }
 
         restart_times.push_back(now);
         let restart_attempt = restart_times.len();
         record_terminal(reason, false, true, restart_attempt);
-        record_recovery_state(spec.name, restart_attempt, reason, false);
+        record_recovery_state(
+            spec.name,
+            restart_attempt,
+            reason,
+            RecoveryClassification::Flapping,
+        );
 
         let backoff = exponential_backoff(budget, consecutive_failures);
         consecutive_failures = consecutive_failures.saturating_add(1);
@@ -236,7 +358,7 @@ fn record_recovery_state(
     worker: &'static str,
     recent_restart_count: usize,
     reason: WorkerLocalTerminalReason,
-    exhausted: bool,
+    classification: RecoveryClassification,
 ) {
     WORKER_RECOVERY_STATES
         .lock()
@@ -246,10 +368,219 @@ fn record_recovery_state(
             WorkerRecoveryState {
                 recent_restart_count,
                 last_reason: reason.as_doc_str(),
-                exhausted,
+                classification,
                 observed_at: Instant::now(),
             },
         );
+}
+
+/// #4515 PR2: prune expired informational observations (§9.5 read-time expiry)
+/// and return a stable snapshot of what remains.
+fn recovery_snapshot() -> Vec<(&'static str, WorkerRecoveryState)> {
+    let now = Instant::now();
+    let mut states = WORKER_RECOVERY_STATES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    states.retain(|_, state| !state.is_expired(now));
+    states
+        .iter()
+        .map(|(worker, state)| (*worker, state.clone()))
+        .collect()
+}
+
+/// #4515 PR2: status-worsening recovery reasons for `/api/health`.
+///
+/// - `worker_local_restart_budget_exhausted:<worker>` → Unhealthy (readiness
+///   503). A necessary worker is permanently dead; this node must stop serving.
+/// - `worker_local_loop_owned_terminated:<worker>` → Degraded. An un-migrated
+///   LoopOwned worker died unexpectedly.
+///
+/// Flapping is intentionally NOT returned here — see [`recovery_flapping_info`].
+pub(crate) fn recovery_health_reasons() -> Vec<RecoveryHealthReason> {
+    recovery_snapshot()
+        .into_iter()
+        .filter_map(|(worker, state)| match state.classification {
+            RecoveryClassification::Exhausted => Some(RecoveryHealthReason {
+                reason: format!("worker_local_restart_budget_exhausted:{worker}"),
+                severity: RecoveryReasonSeverity::Unhealthy,
+            }),
+            RecoveryClassification::LoopOwnedTerminated => Some(RecoveryHealthReason {
+                reason: format!("worker_local_loop_owned_terminated:{worker}"),
+                severity: RecoveryReasonSeverity::Degraded,
+            }),
+            RecoveryClassification::Flapping => None,
+        })
+        .collect()
+}
+
+/// #4515 PR2 (§9.3): flapping observations as an informational health-body
+/// field. These must never enter `degraded_reasons` (deploy gates would trip on
+/// intermittent, self-healing restarts before the budget is even exhausted).
+pub(crate) fn recovery_flapping_info() -> Vec<serde_json::Value> {
+    recovery_snapshot()
+        .into_iter()
+        .filter_map(|(worker, state)| match state.classification {
+            RecoveryClassification::Flapping => Some(serde_json::json!(format!(
+                "worker_local_restart_flapping:{worker}:{}",
+                state.recent_restart_count
+            ))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// #4515 PR2: worker-local recovery counters for `/api/cluster`
+/// `local_worker_runtime`.
+pub(crate) fn recovery_runtime_json() -> serde_json::Value {
+    let workers: Vec<serde_json::Value> = recovery_snapshot()
+        .into_iter()
+        .map(|(worker, state)| {
+            serde_json::json!({
+                "worker": worker,
+                "classification": state.classification.as_doc_str(),
+                "recent_restart_count": state.recent_restart_count,
+                "last_reason": state.last_reason,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "restart_budget_exhausted_total": WORKER_RESTART_BUDGET_EXHAUSTED_COUNT.load(Ordering::Acquire),
+        "workers": workers,
+    })
+}
+
+/// #4515 PR3: production budget-exhaustion action. Completes the recovery
+/// circuit — set the shutdown flag, log, grace-flush, then `process::exit(1)`
+/// so launchd `KeepAlive` respawns a clean process — unless the cross-process
+/// crash-loop guard (§9.2) proves a restart will not help.
+pub(crate) fn production_fatal_hook(shutdown: Arc<AtomicBool>) -> FatalHook {
+    Arc::new(move |record| commit_fatal_exit(record, &shutdown))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CrossProcessDecision {
+    Exit,
+    HoldWithoutExit { recent_fatal_exits: usize },
+}
+
+fn commit_fatal_exit(record: &FatalExhaustionRecord, shutdown: &Arc<AtomicBool>) {
+    let decision = match fatal_exit_ledger_path() {
+        Some(path) => record_and_check_cross_process_fatal_at(&path, record.worker, now_unix_ms()),
+        // No runtime root to persist the ledger — fall back to exiting; launchd
+        // ThrottleInterval still bounds any resulting boot loop.
+        None => CrossProcessDecision::Exit,
+    };
+
+    if let CrossProcessDecision::HoldWithoutExit { recent_fatal_exits } = decision {
+        tracing::error!(
+            worker = record.worker,
+            recent_fatal_exits,
+            window_secs = FATAL_CROSS_PROCESS_WINDOW.as_secs(),
+            "worker-local restart budget exhausted but the process already crash-looped on this worker within the window; holding Unhealthy(503) without exit for operator intervention"
+        );
+        return;
+    }
+
+    // #9.4: the fatal path cannot rely on registry-drop to set the shutdown
+    // flag, so set it here before granting the grace window.
+    shutdown.store(true, Ordering::Release);
+    tracing::error!(
+        worker = record.worker,
+        window_restart_count = record.window_restart_count,
+        max_restarts = record.max_restarts,
+        window_secs = record.window.as_secs(),
+        grace_secs = FATAL_EXIT_GRACE.as_secs(),
+        "worker-local restart budget exhausted; exiting process so launchd KeepAlive restarts a clean process"
+    );
+    std::thread::sleep(FATAL_EXIT_GRACE);
+    std::process::exit(1);
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FatalExitLedgerEntry {
+    worker: String,
+    observed_unix_ms: i64,
+}
+
+fn fatal_exit_ledger_path() -> Option<PathBuf> {
+    crate::config::runtime_root().map(|root| root.join(FATAL_EXIT_LEDGER_FILE))
+}
+
+fn now_unix_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// #4515 PR3 (§9.2): node-local (no PG / leader coordination) crash-loop guard.
+/// Records this fatal exit and decides whether exiting is still worthwhile.
+/// Returns [`CrossProcessDecision::HoldWithoutExit`] when the same worker has
+/// already caused `FATAL_CROSS_PROCESS_MAX` fatal exits inside the window.
+fn record_and_check_cross_process_fatal_at(
+    path: &Path,
+    worker: &str,
+    now_ms: i64,
+) -> CrossProcessDecision {
+    let window_ms = FATAL_CROSS_PROCESS_WINDOW.as_millis() as i64;
+    let mut entries = load_fatal_ledger(path);
+    entries.retain(|entry| now_ms.saturating_sub(entry.observed_unix_ms) < window_ms);
+
+    let recent_fatal_exits = entries
+        .iter()
+        .filter(|entry| entry.worker == worker)
+        .count();
+    if recent_fatal_exits >= FATAL_CROSS_PROCESS_MAX {
+        // Do not append: this exit is being suppressed, not performed.
+        save_fatal_ledger(path, &entries);
+        return CrossProcessDecision::HoldWithoutExit { recent_fatal_exits };
+    }
+
+    entries.push(FatalExitLedgerEntry {
+        worker: worker.to_string(),
+        observed_unix_ms: now_ms,
+    });
+    save_fatal_ledger(path, &entries);
+    CrossProcessDecision::Exit
+}
+
+fn load_fatal_ledger(path: &Path) -> Vec<FatalExitLedgerEntry> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "failed to read worker fatal-exit ledger; treating as empty"
+            );
+            Vec::new()
+        }
+    }
+}
+
+fn save_fatal_ledger(path: &Path, entries: &[FatalExitLedgerEntry]) {
+    let serialized = match serde_json::to_vec_pretty(entries) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(%error, "failed to serialize worker fatal-exit ledger");
+            return;
+        }
+    };
+    if let Some(parent) = path.parent()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!(
+            path = %parent.display(),
+            %error,
+            "failed to create worker fatal-exit ledger directory"
+        );
+        return;
+    }
+    if let Err(error) = std::fs::write(path, serialized) {
+        tracing::warn!(
+            path = %path.display(),
+            %error,
+            "failed to write worker fatal-exit ledger"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -294,6 +625,23 @@ mod tests {
         }
     }
 
+    fn noop_fatal_hook() -> FatalHook {
+        Arc::new(|_record: &FatalExhaustionRecord| {})
+    }
+
+    fn counting_fatal_hook(counter: Arc<AtomicUsize>) -> FatalHook {
+        Arc::new(move |_record: &FatalExhaustionRecord| {
+            counter.fetch_add(1, Ordering::AcqRel);
+        })
+    }
+
+    fn clear_recovery_state(worker: &str) {
+        WORKER_RECOVERY_STATES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(worker);
+    }
+
     async fn advance(duration: Duration) {
         tokio::time::advance(duration).await;
         tokio::task::yield_now().await;
@@ -313,6 +661,7 @@ mod tests {
                 }
             },
             |_, _, _, _| {},
+            noop_fatal_hook(),
         ));
         tokio::task::yield_now().await;
         assert_eq!(spawns.load(Ordering::Acquire), 1);
@@ -342,6 +691,7 @@ mod tests {
                     observed_panic.store(true, Ordering::Release);
                 }
             },
+            noop_fatal_hook(),
         ));
         tokio::task::yield_now().await;
         advance(Duration::from_secs(1)).await;
@@ -366,6 +716,7 @@ mod tests {
                 }
             },
             |_, _, _, _| {},
+            noop_fatal_hook(),
         ));
         tokio::task::yield_now().await;
         for (delay, expected) in [(1, 2), (2, 3), (4, 4), (4, 5)] {
@@ -378,10 +729,11 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn budget_exhaustion_stops_after_allowed_restarts() {
+    async fn budget_exhaustion_fires_fatal_hook_once() {
         WORKER_RESTART_BUDGET_EXHAUSTED_COUNT.store(0, Ordering::Release);
         let spawns = Arc::new(AtomicUsize::new(0));
         let factory_spawns = spawns.clone();
+        let fatal_calls = Arc::new(AtomicUsize::new(0));
         let mut spec = restartable_spec();
         spec.name = "test_budget_exhaustion_worker";
         spec.restart_policy = WorkerRestartPolicy::RestartableWithBudget(test_budget(2));
@@ -395,9 +747,13 @@ mod tests {
                 }
             },
             |_, _, _, _| {},
+            counting_fatal_hook(fatal_calls.clone()),
         )
         .await;
+        // max_restarts=2 → 1 initial + 2 restarts = 3 spawns, then no 4th.
         assert_eq!(spawns.load(Ordering::Acquire), 3);
+        // Fatal hook fires exactly once on exhaustion (readiness/exit circuit).
+        assert_eq!(fatal_calls.load(Ordering::Acquire), 1);
         assert_eq!(
             WORKER_RESTART_BUDGET_EXHAUSTED_COUNT.load(Ordering::Acquire),
             1
@@ -408,10 +764,22 @@ mod tests {
             .get(spec.name)
             .cloned()
             .expect("recovery state");
-        assert!(state.exhausted);
+        assert_eq!(state.classification, RecoveryClassification::Exhausted);
         assert_eq!(state.recent_restart_count, 2);
         assert_eq!(state.last_reason, "returned");
         assert_eq!(state.observed_at, Instant::now());
+        // Exhausted → Unhealthy health reason for readiness 503.
+        let reasons = recovery_health_reasons();
+        let exhausted = reasons
+            .iter()
+            .find(|reason| reason.reason.contains(spec.name))
+            .expect("exhausted health reason");
+        assert_eq!(exhausted.severity, RecoveryReasonSeverity::Unhealthy);
+        assert_eq!(
+            exhausted.reason,
+            format!("worker_local_restart_budget_exhausted:{}", spec.name)
+        );
+        clear_recovery_state(spec.name);
     }
 
     #[tokio::test(start_paused = true)]
@@ -432,6 +800,7 @@ mod tests {
                 }
             },
             |_, _, _, _| {},
+            noop_fatal_hook(),
         ));
         tokio::task::yield_now().await;
         advance(Duration::from_secs(1)).await;
@@ -473,6 +842,7 @@ mod tests {
                 observed_expected.store(expected_shutdown, Ordering::Release);
                 observed_attempt.store(attempt, Ordering::Release);
             },
+            noop_fatal_hook(),
         )
         .await;
 
@@ -508,6 +878,7 @@ mod tests {
                 }
             },
             |_, _, _, _| {},
+            noop_fatal_hook(),
         ));
         tokio::task::yield_now().await;
         shutdown.store(true, Ordering::Release);
@@ -546,6 +917,7 @@ mod tests {
                 move |_, expected_shutdown, _, _| {
                     observed_expected.store(expected_shutdown, Ordering::Release);
                 },
+                noop_fatal_hook(),
             ));
             tokio::task::yield_now().await;
             shutdown.store(true, Ordering::Release);
@@ -578,13 +950,141 @@ mod tests {
                 assert!(!auto_restart);
                 observed_terminal.fetch_add(1, Ordering::AcqRel);
             },
+            noop_fatal_hook(),
         )
         .await;
+        clear_recovery_state(loop_owned_spec().name);
         assert_eq!(spawns.load(Ordering::Acquire), 1);
         assert_eq!(terminal.load(Ordering::Acquire), 1);
         assert_eq!(
             DEFAULT_WORKER_LOCAL_RESTART_BUDGET.max_restarts, 5,
             "production policy remains explicit"
+        );
+    }
+
+    #[tokio::test]
+    async fn loop_owned_unexpected_exit_exposes_terminated_reason() {
+        let mut spec = loop_owned_spec();
+        spec.name = "test_loop_owned_terminated_worker";
+        supervise_worker_local(
+            spec,
+            Arc::new(AtomicBool::new(false)),
+            move || async move {},
+            |_, _, _, _| {},
+            noop_fatal_hook(),
+        )
+        .await;
+        let reasons = recovery_health_reasons();
+        let terminated = reasons
+            .iter()
+            .find(|reason| reason.reason.contains(spec.name))
+            .expect("loop-owned terminated health reason");
+        assert_eq!(terminated.severity, RecoveryReasonSeverity::Degraded);
+        assert_eq!(
+            terminated.reason,
+            format!("worker_local_loop_owned_terminated:{}", spec.name)
+        );
+        // A LoopOwned unexpected termination is Degraded, never a flapping entry.
+        assert!(
+            !recovery_flapping_info()
+                .iter()
+                .any(|value| value.as_str().is_some_and(|s| s.contains(spec.name)))
+        );
+        clear_recovery_state(spec.name);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn flapping_is_info_only_and_not_a_health_reason() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let factory_spawns = spawns.clone();
+        let mut spec = restartable_spec();
+        spec.name = "test_flapping_worker";
+        spec.restart_policy = WorkerRestartPolicy::RestartableWithBudget(test_budget(10));
+        let supervisor = tokio::spawn(supervise_worker_local(
+            spec,
+            Arc::new(AtomicBool::new(false)),
+            move || {
+                let spawns = factory_spawns.clone();
+                async move {
+                    spawns.fetch_add(1, Ordering::AcqRel);
+                }
+            },
+            |_, _, _, _| {},
+            noop_fatal_hook(),
+        ));
+        tokio::task::yield_now().await;
+        advance(Duration::from_secs(1)).await;
+        assert!(spawns.load(Ordering::Acquire) >= 2);
+        // Flapping must not worsen health (deploy-gate safety, §9.3) ...
+        assert!(
+            !recovery_health_reasons()
+                .iter()
+                .any(|reason| reason.reason.contains(spec.name))
+        );
+        // ... but is visible as an informational field.
+        assert!(
+            recovery_flapping_info()
+                .iter()
+                .any(|value| value.as_str().is_some_and(|s| s.contains(spec.name)))
+        );
+        supervisor.abort();
+        clear_recovery_state(spec.name);
+    }
+
+    #[test]
+    fn cross_process_guard_holds_after_repeated_fatal_exits() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(FATAL_EXIT_LEDGER_FILE);
+        let worker = "dispatch_outbox";
+        let base = 1_000_000_000_000_i64;
+
+        // First two fatal exits inside the window still exit (launchd may help).
+        assert_eq!(
+            record_and_check_cross_process_fatal_at(&path, worker, base),
+            CrossProcessDecision::Exit
+        );
+        assert_eq!(
+            record_and_check_cross_process_fatal_at(&path, worker, base + 1_000),
+            CrossProcessDecision::Exit
+        );
+        // Third within 30min: the guard proves restarting will not help → hold.
+        assert_eq!(
+            record_and_check_cross_process_fatal_at(&path, worker, base + 2_000),
+            CrossProcessDecision::HoldWithoutExit {
+                recent_fatal_exits: 2
+            }
+        );
+    }
+
+    #[test]
+    fn cross_process_guard_resets_after_window() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(FATAL_EXIT_LEDGER_FILE);
+        let worker = "session_discovery";
+        let base = 2_000_000_000_000_i64;
+        let past_window = FATAL_CROSS_PROCESS_WINDOW.as_millis() as i64 + 1;
+
+        record_and_check_cross_process_fatal_at(&path, worker, base);
+        record_and_check_cross_process_fatal_at(&path, worker, base + 1_000);
+        // The two prior exits age out of the window, so exiting is worthwhile again.
+        assert_eq!(
+            record_and_check_cross_process_fatal_at(&path, worker, base + past_window),
+            CrossProcessDecision::Exit
+        );
+    }
+
+    #[test]
+    fn cross_process_guard_is_per_worker() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(FATAL_EXIT_LEDGER_FILE);
+        let base = 3_000_000_000_000_i64;
+
+        record_and_check_cross_process_fatal_at(&path, "dispatch_outbox", base);
+        record_and_check_cross_process_fatal_at(&path, "dispatch_outbox", base + 1);
+        // A different worker is unaffected by dispatch_outbox's history.
+        assert_eq!(
+            record_and_check_cross_process_fatal_at(&path, "session_discovery", base + 2),
+            CrossProcessDecision::Exit
         );
     }
 }

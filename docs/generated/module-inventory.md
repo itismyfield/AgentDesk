@@ -67,7 +67,7 @@
 | `cli::discord_thread_create_lock` | `src/cli/discord_thread_create_lock.rs` | 669 | 611 | 58 |  |
 | `cli::doctor` | `src/cli/doctor.rs` | 9 | 9 | 0 |  |
 | `cli::doctor::contract` | `src/cli/doctor/contract.rs` | 100 | 100 | 0 |  |
-| `cli::doctor::health` | `src/cli/doctor/health.rs` | 318 | 250 | 68 |  |
+| `cli::doctor::health` | `src/cli/doctor/health.rs` | 387 | 288 | 99 |  |
 | `cli::doctor::mailbox` | `src/cli/doctor/mailbox.rs` | 215 | 215 | 0 |  |
 | `cli::doctor::orchestrator` | `src/cli/doctor/orchestrator.rs` | 4498 | 4381 | 117 | giant-file |
 | `cli::doctor::startup` | `src/cli/doctor/startup.rs` | 623 | 553 | 70 |  |
@@ -281,7 +281,7 @@
 | `server::routes::escalation` | `src/server/routes/escalation.rs` | 1627 | 1361 | 266 | giant-file |
 | `server::routes::github` | `src/server/routes/github.rs` | 940 | 663 | 277 |  |
 | `server::routes::github_dashboard` | `src/server/routes/github_dashboard.rs` | 190 | 190 | 0 |  |
-| `server::routes::health_api` | `src/server/routes/health_api.rs` | 2697 | 1771 | 926 | giant-file |
+| `server::routes::health_api` | `src/server/routes/health_api.rs` | 2738 | 1812 | 926 | giant-file |
 | `server::routes::home_metrics` | `src/server/routes/home_metrics.rs` | 352 | 352 | 0 |  |
 | `server::routes::hooks` | `src/server/routes/hooks.rs` | 136 | 136 | 0 |  |
 | `server::routes::idle_recap` | `src/server/routes/idle_recap.rs` | 406 | 406 | 0 |  |
@@ -328,8 +328,8 @@
 | `server::state` | `src/server/state.rs` | 11 | 11 | 0 |  |
 | `server::task_dispatch_claims` | `src/server/task_dispatch_claims.rs` | 1039 | 359 | 680 |  |
 | `server::test_phase_runs` | `src/server/test_phase_runs.rs` | 426 | 400 | 26 |  |
-| `server::worker_recovery` | `src/server/worker_recovery.rs` | 590 | 254 | 336 |  |
-| `server::worker_registry` | `src/server/worker_registry.rs` | 1328 | 1236 | 92 | giant-file |
+| `server::worker_recovery` | `src/server/worker_recovery.rs` | 1090 | 585 | 505 |  |
+| `server::worker_registry` | `src/server/worker_registry.rs` | 1334 | 1242 | 92 | giant-file |
 | `server::ws` | `src/server/ws.rs` | 140 | 140 | 0 |  |
 | `services` | `src/services/mod.rs` | 149 | 149 | 0 |  |
 | `services::agent_protocol` | `src/services/agent_protocol.rs` | 608 | 608 | 0 |  |
