@@ -3,6 +3,7 @@ use std::sync::{Arc, LazyLock};
 
 use poise::serenity_prelude::ChannelId;
 
+use super::liveness_authority::{self, LivenessVouch};
 use super::snapshot::WatcherStateSnapshot;
 use super::{HealthRegistry, stall_liveness};
 use crate::services::discord::inflight::{InflightTurnIdentity, InflightTurnState};
@@ -90,10 +91,11 @@ impl RedriveAttemptState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct RedriveAttemptDecision {
     attempt: Option<u8>,
     emit_capped_alarm: bool,
+    capped_alarm_suppressed_reasons: Option<String>,
 }
 
 static REDRIVE_ATTEMPTS: LazyLock<dashmap::DashMap<RedriveKey, RedriveAttemptState>> =
@@ -152,11 +154,19 @@ impl SharedData {
         if state.attempts >= REDRIVE_MAX_NO_PROGRESS_ATTEMPTS {
             debug_assert_eq!(state.attempts, REDRIVE_MAX_NO_PROGRESS_ATTEMPTS);
             debug_assert_eq!(REDRIVE_BACKOFF_SECS[REDRIVE_BACKOFF_SECS.len() - 1], 960);
+            if let Some(reasons) = redrive_alarm_suppression_reason(provider, channel_id) {
+                return RedriveAttemptDecision {
+                    attempt: None,
+                    emit_capped_alarm: false,
+                    capped_alarm_suppressed_reasons: Some(reasons),
+                };
+            }
             let emit_capped_alarm = !state.capped_alarm_emitted;
             state.capped_alarm_emitted = true;
             return RedriveAttemptDecision {
                 attempt: None,
                 emit_capped_alarm,
+                capped_alarm_suppressed_reasons: None,
             };
         }
         if state
@@ -166,6 +176,7 @@ impl SharedData {
             return RedriveAttemptDecision {
                 attempt: None,
                 emit_capped_alarm: false,
+                capped_alarm_suppressed_reasons: None,
             };
         }
         if state.attempts > 0 {
@@ -174,12 +185,14 @@ impl SharedData {
                 return RedriveAttemptDecision {
                     attempt: None,
                     emit_capped_alarm: false,
+                    capped_alarm_suppressed_reasons: None,
                 };
             }
         }
         RedriveAttemptDecision {
             attempt: Some(state.attempts + 1),
             emit_capped_alarm: false,
+            capped_alarm_suppressed_reasons: None,
         }
     }
 
@@ -217,12 +230,17 @@ impl SharedData {
                 state.episode.turn_nonce = turn_nonce;
             }
         }
+        let cap_reached = state.attempts == REDRIVE_MAX_NO_PROGRESS_ATTEMPTS;
+        let capped_alarm_suppressed_reasons = cap_reached
+            .then(|| redrive_alarm_suppression_reason(provider, channel_id))
+            .flatten();
         let emit_capped_alarm =
-            state.attempts == REDRIVE_MAX_NO_PROGRESS_ATTEMPTS && !state.capped_alarm_emitted;
+            cap_reached && capped_alarm_suppressed_reasons.is_none() && !state.capped_alarm_emitted;
         state.capped_alarm_emitted |= emit_capped_alarm;
         let decision = RedriveAttemptDecision {
             attempt: Some(state.attempts),
             emit_capped_alarm,
+            capped_alarm_suppressed_reasons,
         };
         let episode = if shield_channel_id == channel_id {
             state.episode.clone()
@@ -422,7 +440,7 @@ impl HealthRegistry {
         if !should_redrive_undelivered_backlog(provider, channel_id, &snapshot, token) {
             return Ok(false);
         }
-        if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot) {
+        if redrive_should_yield_to_live_relay(&shared, provider, channel_id, &snapshot) {
             return Ok(false);
         }
         let Some(_frontier_mutation) = shared.acquire_relay_frontier_mutation(channel_id, token)
@@ -431,7 +449,7 @@ impl HealthRegistry {
         };
         let attempt =
             shared.redrive_attempt_decision(provider, channel_id, &snapshot, now_unix_secs);
-        trace_redrive_cap_if_needed(provider, channel_id, &snapshot, attempt);
+        trace_redrive_cap_if_needed(provider, channel_id, &snapshot, &attempt);
         if attempt.attempt.is_none() {
             return Ok(false);
         }
@@ -446,7 +464,7 @@ impl HealthRegistry {
         ) {
             (true, false, None)
         } else {
-            if redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot)
+            if redrive_should_yield_to_live_relay(&shared, provider, channel_id, &snapshot)
                 || !shared.relay_frontier_token_is_current(channel_id, token)
             {
                 return Ok(false);
@@ -479,7 +497,7 @@ impl HealthRegistry {
                 now_unix_secs,
                 reattached,
             );
-            trace_redrive_cap_if_needed(provider, channel_id, &snapshot, committed);
+            trace_redrive_cap_if_needed(provider, channel_id, &snapshot, &committed);
         } else if let Some(cooldown_secs) = noop_cooldown_secs {
             shared.note_redrive_noop(provider, channel_id, now_unix_secs, cooldown_secs);
         }
@@ -510,13 +528,52 @@ fn redrive_shield_channel_for_action(
         .unwrap_or(fallback_channel_id)
 }
 
+fn redrive_liveness_vouch(provider: &ProviderKind, channel_id: ChannelId) -> LivenessVouch {
+    let Some(authoritative) = crate::services::discord::inflight::load_inflight_state_read_only(
+        provider,
+        channel_id.get(),
+    ) else {
+        return LivenessVouch::NotVouched {
+            reason: liveness_authority::VouchDenial::Missing,
+        };
+    };
+    liveness_authority::vouch_for_inflight(
+        provider,
+        channel_id,
+        &authoritative,
+        liveness_authority::monotonic_now_secs(),
+    )
+}
+
+fn redrive_alarm_suppression_reason(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> Option<String> {
+    match redrive_liveness_vouch(provider, channel_id) {
+        LivenessVouch::Vouched { reasons_csv, .. } => Some(reasons_csv),
+        LivenessVouch::DeferTransient { .. } => Some("transient_unknown".to_string()),
+        LivenessVouch::NotVouched { .. } => None,
+    }
+}
+
 fn trace_redrive_cap_if_needed(
     provider: &ProviderKind,
     channel_id: ChannelId,
     snapshot: &WatcherStateSnapshot,
-    decision: RedriveAttemptDecision,
+    decision: &RedriveAttemptDecision,
 ) {
-    if decision.emit_capped_alarm {
+    if let Some(reasons_csv) = decision.capped_alarm_suppressed_reasons.as_deref() {
+        tracing::info!(
+            target: "agentdesk::discord::relay_recovery",
+            event = "redrive_no_progress_capped_suppressed_live_turn",
+            provider = provider.as_str(),
+            channel_id = channel_id.get(),
+            last_relay_offset = snapshot.last_relay_offset,
+            attempts = REDRIVE_MAX_NO_PROGRESS_ATTEMPTS,
+            reasons_csv,
+            "redrive capped alarm suppressed by the producer-liveness authority"
+        );
+    } else if decision.emit_capped_alarm {
         tracing::error!(
             target: "agentdesk::discord::relay_recovery",
             event = "redrive_no_progress_capped",
@@ -565,11 +622,16 @@ fn live_relay_frontier_advanced_since_snapshot(
 /// duplicate, not a loss). Consulting the in-flight slot closes that window.
 fn redrive_should_yield_to_live_relay(
     shared: &SharedData,
+    provider: &ProviderKind,
     channel_id: ChannelId,
     snapshot: &WatcherStateSnapshot,
 ) -> bool {
     live_relay_frontier_advanced_since_snapshot(shared, channel_id, snapshot)
         || shared.relay_emission_in_flight(channel_id)
+        || matches!(
+            redrive_liveness_vouch(provider, channel_id),
+            LivenessVouch::Vouched { .. } | LivenessVouch::DeferTransient { .. }
+        )
 }
 
 fn nudge_existing_watcher_for_backlog(
@@ -602,7 +664,14 @@ fn nudge_existing_watcher_for_backlog(
     if snapshot.inflight_output_path.as_deref() != Some(watcher.output_path.as_str()) {
         return false;
     }
-    if !nudge_watcher_handle_for_backlog(shared, snapshot, watcher.value(), channel_id, token) {
+    if !nudge_watcher_handle_for_backlog(
+        shared,
+        provider,
+        snapshot,
+        watcher.value(),
+        channel_id,
+        token,
+    ) {
         return false;
     }
 
@@ -621,6 +690,7 @@ fn nudge_existing_watcher_for_backlog(
 
 fn nudge_watcher_handle_for_backlog(
     shared: &SharedData,
+    provider: &ProviderKind,
     snapshot: &WatcherStateSnapshot,
     watcher: &crate::services::discord::TmuxWatcherHandle,
     channel_id: ChannelId,
@@ -635,7 +705,7 @@ fn nudge_watcher_handle_for_backlog(
     let Ok(mut resume_offset) = watcher.resume_offset.lock() else {
         return false;
     };
-    if redrive_should_yield_to_live_relay(shared, channel_id, snapshot)
+    if redrive_should_yield_to_live_relay(shared, provider, channel_id, snapshot)
         || !shared.relay_frontier_token_is_current(channel_id, token)
     {
         return false;
@@ -1186,6 +1256,37 @@ mod tests {
         (result, output)
     }
 
+    fn seed_liveness_verdict(
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+        snapshot: &WatcherStateSnapshot,
+        inflight: &InflightTurnState,
+        now_unix_secs: i64,
+    ) {
+        let now_mono_secs = liveness_authority::monotonic_now_secs();
+        let mut before_advance = snapshot.clone();
+        before_advance.capture_coordinate.offset = snapshot
+            .capture_coordinate
+            .offset
+            .map(|offset| offset.saturating_sub(1));
+        liveness_authority::observe_and_publish_from_tick(
+            provider,
+            channel_id,
+            &before_advance,
+            Some(inflight),
+            now_unix_secs.saturating_sub(1),
+            now_mono_secs.saturating_sub(1),
+        );
+        liveness_authority::observe_and_publish_from_tick(
+            provider,
+            channel_id,
+            snapshot,
+            Some(inflight),
+            now_unix_secs,
+            now_mono_secs,
+        );
+    }
+
     fn clear_redrive_test_state(
         shared: &SharedData,
         provider: &ProviderKind,
@@ -1195,6 +1296,7 @@ mod tests {
         let key = shared.redrive_key(provider, channel_id);
         REDRIVE_ATTEMPTS.remove(&key);
         REDRIVE_PLACEHOLDER_SHIELDS.remove(&key);
+        liveness_authority::clear_verdict_for_test(provider, channel_id);
         stall_liveness::clear_stall_watchdog_liveness_state(
             provider,
             channel_id,
@@ -1217,7 +1319,7 @@ mod tests {
             return (false, None);
         }
         let decision = shared.redrive_attempt_decision(provider, channel_id, snapshot, now);
-        trace_redrive_cap_if_needed(provider, channel_id, snapshot, decision);
+        trace_redrive_cap_if_needed(provider, channel_id, snapshot, &decision);
         let Some(reserved_attempt) = decision.attempt else {
             return (false, None);
         };
@@ -1236,11 +1338,198 @@ mod tests {
                 .unwrap_or(channel_id);
             let committed =
                 shared.commit_redrive_success(provider, channel_id, shield_channel_id, now, false);
-            trace_redrive_cap_if_needed(provider, channel_id, snapshot, committed);
+            trace_redrive_cap_if_needed(provider, channel_id, snapshot, &committed);
             assert_eq!(committed.attempt, Some(reserved_attempt));
             return (true, committed.attempt);
         }
         (false, None)
+    }
+
+    #[test]
+    fn redrive_live_yield_consumes_authority_vouch_4615() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tmp.path(),
+        );
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(4_615_301);
+        let tmux_session = "AgentDesk-codex-4615-live-yield";
+        let output_path = "/tmp/agentdesk-4615-live-yield.jsonl";
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let mut snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, 301_613);
+        let started_at = chrono::Local::now()
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        snapshot.inflight_started_at = Some(started_at.clone());
+        snapshot.inflight_updated_at = Some(started_at.clone());
+        snapshot
+            .inflight_identity
+            .as_mut()
+            .expect("snapshot identity")
+            .started_at = started_at.clone();
+        let mut inflight = InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            None,
+            snapshot.inflight_user_msg_id.expect("snapshot user message"),
+            0,
+            0,
+            "test".to_string(),
+            None,
+            Some(tmux_session.to_string()),
+            Some(output_path.to_string()),
+            None,
+            snapshot.last_relay_offset,
+        );
+        inflight.started_at = snapshot.inflight_started_at.clone().expect("started at");
+        inflight.updated_at = inflight.started_at.clone();
+        crate::services::discord::inflight::save_inflight_state(&inflight)
+            .expect("seed authoritative inflight");
+        clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
+
+        assert!(
+            !redrive_should_yield_to_live_relay(&shared, &provider, channel_id, &snapshot),
+            "missing authority evidence must fail closed"
+        );
+        seed_liveness_verdict(
+            &provider,
+            channel_id,
+            &snapshot,
+            &inflight,
+            chrono::Utc::now().timestamp(),
+        );
+        assert!(
+            redrive_should_yield_to_live_relay(&shared, &provider, channel_id, &snapshot),
+            "a proven-live foreground turn must make the live-yield guard fire"
+        );
+
+        crate::services::discord::inflight::clear_inflight_state(&provider, channel_id.get());
+        clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
+    }
+
+    #[test]
+    fn redrive_capped_alarm_suppressed_while_vouched_then_fires_after_death_4615() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tmp.path(),
+        );
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(4_615_302);
+        let tmux_session = "AgentDesk-codex-4615-cap";
+        let output_path = "/tmp/agentdesk-4615-cap.jsonl";
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let mut snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, 301_613);
+        let started_at = chrono::Local::now()
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        snapshot.inflight_started_at = Some(started_at.clone());
+        snapshot.inflight_updated_at = Some(started_at.clone());
+        snapshot
+            .inflight_identity
+            .as_mut()
+            .expect("snapshot identity")
+            .started_at = started_at.clone();
+        let mut inflight = InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            None,
+            snapshot.inflight_user_msg_id.expect("snapshot user message"),
+            0,
+            0,
+            "test".to_string(),
+            None,
+            Some(tmux_session.to_string()),
+            Some(output_path.to_string()),
+            None,
+            snapshot.last_relay_offset,
+        );
+        inflight.started_at = snapshot.inflight_started_at.clone().expect("started at");
+        inflight.updated_at = inflight.started_at.clone();
+        crate::services::discord::inflight::save_inflight_state(&inflight)
+            .expect("seed authoritative inflight");
+        clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
+        let base = chrono::Utc::now().timestamp();
+
+        for (expected, elapsed) in [0, 30, 90, 210, 450].into_iter().enumerate() {
+            let reserved = shared.redrive_attempt_decision(
+                &provider,
+                channel_id,
+                &snapshot,
+                base + elapsed,
+            );
+            assert_eq!(reserved.attempt, Some(expected as u8 + 1));
+            assert_eq!(
+                shared.commit_redrive_success(
+                    &provider,
+                    channel_id,
+                    channel_id,
+                    base + elapsed,
+                    false,
+                ),
+                RedriveAttemptDecision {
+                    attempt: Some(expected as u8 + 1),
+                    emit_capped_alarm: false,
+                    capped_alarm_suppressed_reasons: None,
+                }
+            );
+        }
+        let sixth = shared.redrive_attempt_decision(
+            &provider,
+            channel_id,
+            &snapshot,
+            base + 930,
+        );
+        assert_eq!(sixth.attempt, Some(6));
+        seed_liveness_verdict(
+            &provider,
+            channel_id,
+            &snapshot,
+            &inflight,
+            base,
+        );
+        let suppressed = shared.commit_redrive_success(
+            &provider,
+            channel_id,
+            channel_id,
+            base + 930,
+            false,
+        );
+        assert!(!suppressed.emit_capped_alarm);
+        assert!(suppressed.capped_alarm_suppressed_reasons.is_some());
+        assert!(
+            !REDRIVE_ATTEMPTS
+                .get(&shared.redrive_key(&provider, channel_id))
+                .expect("capped attempt state")
+                .capped_alarm_emitted,
+            "suppression must not consume the one-shot alarm"
+        );
+
+        liveness_authority::clear_verdict_for_test(&provider, channel_id);
+        let after_death = shared.redrive_attempt_decision(
+            &provider,
+            channel_id,
+            &snapshot,
+            base + 960,
+        );
+        assert!(after_death.emit_capped_alarm);
+        assert!(after_death.capped_alarm_suppressed_reasons.is_none());
+        assert!(
+            !shared
+                .redrive_attempt_decision(&provider, channel_id, &snapshot, base + 961)
+                .emit_capped_alarm,
+            "the recovered alarm remains one-shot"
+        );
+
+        crate::services::discord::inflight::clear_inflight_state(&provider, channel_id.get());
+        clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
     }
 
     #[test]
@@ -1357,6 +1646,7 @@ mod tests {
                 RedriveAttemptDecision {
                     attempt: Some(expected as u8 + 1),
                     emit_capped_alarm: expected == 5,
+                    capped_alarm_suppressed_reasons: None,
                 }
             );
         }
@@ -1553,7 +1843,8 @@ mod tests {
             shared.redrive_attempt_decision(&provider, channel_id, &snapshot, base + 10 * 86_400,),
             RedriveAttemptDecision {
                 attempt: None,
-                emit_capped_alarm: false
+                emit_capped_alarm: false,
+                capped_alarm_suppressed_reasons: None,
             },
             "elapsed time and liveness-state GC must not re-arm capped redrive"
         );
@@ -1610,6 +1901,7 @@ mod tests {
             RedriveAttemptDecision {
                 attempt: Some(1),
                 emit_capped_alarm: false,
+                capped_alarm_suppressed_reasons: None,
             },
             "replacing the live watcher instance must re-arm the episode"
         );
@@ -1624,6 +1916,7 @@ mod tests {
             RedriveAttemptDecision {
                 attempt: Some(1),
                 emit_capped_alarm: false,
+                capped_alarm_suppressed_reasons: None,
             }
         );
         assert_ne!(
@@ -1665,6 +1958,7 @@ mod tests {
             RedriveAttemptDecision {
                 attempt: Some(1),
                 emit_capped_alarm: false,
+                capped_alarm_suppressed_reasons: None,
             }
         );
         let mut self_reattached = snapshot.clone();
@@ -1698,6 +1992,7 @@ mod tests {
             RedriveAttemptDecision {
                 attempt: Some(2),
                 emit_capped_alarm: false,
+                capped_alarm_suppressed_reasons: None,
             },
             "a reuse-existing reattach must advance the same capped episode"
         );
@@ -1746,6 +2041,7 @@ mod tests {
             RedriveAttemptDecision {
                 attempt: Some(3),
                 emit_capped_alarm: false,
+                capped_alarm_suppressed_reasons: None,
             }
         );
         let mut successor_snapshot = twice_reattached;

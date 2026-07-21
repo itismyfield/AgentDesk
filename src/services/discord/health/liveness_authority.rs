@@ -496,6 +496,14 @@ pub(in crate::services::discord) fn vouch_for_inflight(
     }
 }
 
+#[cfg(test)]
+pub(in crate::services::discord) fn clear_verdict_for_test(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) {
+    VERDICTS.remove(&(provider.as_str().to_string(), channel_id.get()));
+}
+
 pub(in crate::services::discord) fn clear_capture_state_for_session(
     provider: &ProviderKind,
     channel_id: ChannelId,
