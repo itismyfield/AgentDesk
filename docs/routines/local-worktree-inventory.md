@@ -58,7 +58,7 @@ REL_PORT="${AGENTDESK_REL_PORT:-8791}"
 API="http://127.0.0.1:${REL_PORT}"
 
 curl -sf "$API/api/routines" -X POST -H 'Content-Type: application/json' -d '{
-  "script_ref": "routines/local-worktree-gc.js",
+  "script_ref": "local-worktree-gc.js",
   "name": "local-agent-worktree-inventory",
   "agent_id": "project-agentdesk",
   "execution_strategy": "fresh",
