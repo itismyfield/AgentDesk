@@ -624,6 +624,125 @@ pub(super) async fn handle_tmux_watcher_observed_death(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GhostRestoreResolution {
+    NotGhost,
+    Rebound,
+    Cleaned,
+}
+
+fn is_ghost_restore_session(status: &str, active_dispatch_id: Option<&str>) -> bool {
+    status == "turn_active"
+        && active_dispatch_id.is_none_or(|dispatch_id| dispatch_id.trim().is_empty())
+}
+
+/// Repair a persisted session only when its live status has no dispatch link.
+/// Both writes retain the ghost predicate so a concurrently-started new turn is
+/// never rebound or cleared by an older recovery pass.
+async fn resolve_ghost_restore_session(
+    pg_pool: Option<&sqlx::PgPool>,
+    state: &super::super::inflight::InflightTurnState,
+) -> GhostRestoreResolution {
+    let (Some(pool), Some(session_key)) = (pg_pool, state.session_key.as_deref()) else {
+        return GhostRestoreResolution::NotGhost;
+    };
+    let channel_id = state.channel_id.to_string();
+    let persisted_shape: Option<(String, Option<String>)> = match sqlx::query_as(
+        "SELECT status, active_dispatch_id
+           FROM sessions
+          WHERE session_key = $1 AND channel_id = $2",
+    )
+    .bind(session_key)
+    .bind(&channel_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(shape) => shape,
+        Err(error) => {
+            tracing::warn!(
+                channel_id = state.channel_id,
+                error = %error,
+                "failed to inspect restored session for ghost turn shape"
+            );
+            return GhostRestoreResolution::NotGhost;
+        }
+    };
+    let Some((status, active_dispatch_id)) = persisted_shape else {
+        return GhostRestoreResolution::NotGhost;
+    };
+    if !is_ghost_restore_session(&status, active_dispatch_id.as_deref()) {
+        return GhostRestoreResolution::NotGhost;
+    }
+    let dispatch_id = state
+        .dispatch_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|dispatch_id| !dispatch_id.is_empty());
+
+    if let Some(dispatch_id) = dispatch_id {
+        match sqlx::query(
+            "UPDATE sessions s
+                SET active_dispatch_id = $3,
+                    session_info = 'Rebound restored ghost turn dispatch link',
+                    last_heartbeat = NOW()
+              WHERE s.session_key = $1
+                AND s.channel_id = $2
+                AND s.status = 'turn_active'
+                AND COALESCE(BTRIM(s.active_dispatch_id), '') = ''
+                AND EXISTS (
+                    SELECT 1 FROM task_dispatches d
+                     WHERE d.id = $3 AND d.status IN ('pending', 'dispatched')
+                )",
+        )
+        .bind(session_key)
+        .bind(&channel_id)
+        .bind(dispatch_id)
+        .execute(pool)
+        .await
+        {
+            Ok(result) if result.rows_affected() == 1 => return GhostRestoreResolution::Rebound,
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    channel_id = state.channel_id,
+                    dispatch_id,
+                    error = %error,
+                    "failed to CAS-rebind restored ghost turn dispatch"
+                );
+                return GhostRestoreResolution::NotGhost;
+            }
+        }
+    }
+
+    match sqlx::query(
+        "UPDATE sessions s
+            SET status = 'idle',
+                active_dispatch_id = NULL,
+                session_info = 'Cleared restored ghost turn without dispatch',
+                last_heartbeat = NOW()
+          WHERE s.session_key = $1
+            AND s.channel_id = $2
+            AND s.status IN ('turn_active', 'working')
+            AND COALESCE(BTRIM(s.active_dispatch_id), '') = ''",
+    )
+    .bind(session_key)
+    .bind(&channel_id)
+    .execute(pool)
+    .await
+    {
+        Ok(result) if result.rows_affected() == 1 => GhostRestoreResolution::Cleaned,
+        Ok(_) => GhostRestoreResolution::NotGhost,
+        Err(error) => {
+            tracing::warn!(
+                channel_id = state.channel_id,
+                error = %error,
+                "failed to clear restored ghost turn without dispatch"
+            );
+            GhostRestoreResolution::NotGhost
+        }
+    }
+}
+
 pub(super) fn extract_result_error_text(value: &serde_json::Value) -> String {
     let errors = value
         .get("errors")
@@ -2438,6 +2557,23 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             if let Some(restored_tmux) =
                 restored_watcher_turn_from_inflight(&state, session_name, false)
             {
+                let ghost_resolution =
+                    resolve_ghost_restore_session(shared.pg_pool.as_ref(), &state).await;
+                if ghost_resolution == GhostRestoreResolution::Cleaned {
+                    super::super::recovery::finish_recovered_turn_mailbox(
+                        &shared,
+                        &provider,
+                        *channel_id,
+                        "restore_ghost_turn_without_dispatch",
+                    )
+                    .await;
+                    super::super::inflight::clear_inflight_state(&provider, state.channel_id);
+                    tracing::warn!(
+                        channel_id = state.channel_id,
+                        "cleared restored ghost turn with no active dispatch; watcher will not reattach"
+                    );
+                    continue;
+                }
                 let finish_mailbox_on_completion =
                     super::super::recovery::reregister_active_turn_from_inflight(&shared, &state)
                         .await;
@@ -2796,7 +2932,10 @@ mod restored_session_cwd_channel_isolation_tests {
     //! share one `session_key`, and without the `channel_id = $2` predicate the
     //! recovering channel would recover into the OTHER channel's working tree.
     //! RED before the predicate was added, GREEN after.
-    use super::load_restored_session_cwd;
+    use super::{
+        GhostRestoreResolution, is_ghost_restore_session, load_restored_session_cwd,
+        resolve_ghost_restore_session,
+    };
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::services::discord::adk_session::build_namespaced_session_key;
     use crate::services::provider::ProviderKind;
@@ -2817,6 +2956,136 @@ mod restored_session_cwd_channel_isolation_tests {
         .execute(pool)
         .await
         .expect("seed sessions row");
+    }
+
+    #[test]
+    fn ghost_restore_shape_requires_live_status_and_missing_dispatch() {
+        assert!(
+            is_ghost_restore_session("turn_active", None),
+            "turn_active without a dispatch must enter the ghost repair path"
+        );
+        assert!(
+            is_ghost_restore_session("turn_active", Some("  ")),
+            "blank dispatch links must be treated as absent"
+        );
+        assert!(
+            !is_ghost_restore_session("working", None),
+            "legacy working rows are normalized before restore and are not a persisted live status"
+        );
+        assert!(
+            !is_ghost_restore_session("turn_active", Some("dispatch-4642")),
+            "a linked active turn must retain normal restore semantics"
+        );
+        assert!(
+            !is_ghost_restore_session("idle", None),
+            "idle sessions are not restored active turns"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ghost_restore_rebinds_valid_dispatch_with_cas() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let session_key = "claude/test/ghost-rebind-4642";
+        let channel_id = 464_200_001_u64;
+        let dispatch_id = "dispatch-4642-valid";
+        sqlx::query(
+            "INSERT INTO sessions (session_key, provider, status, channel_id, last_heartbeat)
+             VALUES ($1, 'claude', 'turn_active', $2, NOW())",
+        )
+        .bind(session_key)
+        .bind(channel_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("seed ghost session");
+        sqlx::query("INSERT INTO task_dispatches (id, status) VALUES ($1, 'dispatched')")
+            .bind(dispatch_id)
+            .execute(&pool)
+            .await
+            .expect("seed active dispatch");
+
+        let mut state = crate::services::discord::inflight::InflightTurnState::new(
+            crate::services::provider::ProviderKind::Claude,
+            channel_id,
+            Some("ghost-4642".to_string()),
+            7,
+            464_200_101,
+            464_200_102,
+            "ghost restore".to_string(),
+            Some(session_key.to_string()),
+            Some("AgentDesk-claude-ghost-4642".to_string()),
+            None,
+            None,
+            0,
+        );
+        state.session_key = Some(session_key.to_string());
+        state.dispatch_id = Some(dispatch_id.to_string());
+        assert_eq!(
+            resolve_ghost_restore_session(Some(&pool), &state).await,
+            GhostRestoreResolution::Rebound,
+            "a valid inflight dispatch must CAS-rebind the ghost session"
+        );
+        let linked: Option<String> =
+            sqlx::query_scalar("SELECT active_dispatch_id FROM sessions WHERE session_key = $1")
+                .bind(session_key)
+                .fetch_one(&pool)
+                .await
+                .expect("load rebound dispatch");
+        assert_eq!(linked.as_deref(), Some(dispatch_id));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ghost_restore_without_valid_dispatch_returns_session_to_idle() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let session_key = "claude/test/ghost-cleanup-4642";
+        let channel_id = 464_200_002_u64;
+        sqlx::query(
+            "INSERT INTO sessions (session_key, provider, status, channel_id, last_heartbeat)
+             VALUES ($1, 'claude', 'turn_active', $2, NOW())",
+        )
+        .bind(session_key)
+        .bind(channel_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("seed ghost session");
+
+        let mut state = crate::services::discord::inflight::InflightTurnState::new(
+            crate::services::provider::ProviderKind::Claude,
+            channel_id,
+            Some("ghost-4642".to_string()),
+            7,
+            464_200_201,
+            464_200_202,
+            "ghost restore".to_string(),
+            Some(session_key.to_string()),
+            Some("AgentDesk-claude-ghost-4642".to_string()),
+            None,
+            None,
+            0,
+        );
+        state.session_key = Some(session_key.to_string());
+        state.dispatch_id = Some("missing-dispatch-4642".to_string());
+        assert_eq!(
+            resolve_ghost_restore_session(Some(&pool), &state).await,
+            GhostRestoreResolution::Cleaned,
+            "an unlinked ghost must be returned to idle instead of restoring a watcher"
+        );
+        let row: (String, Option<String>) = sqlx::query_as(
+            "SELECT status, active_dispatch_id FROM sessions WHERE session_key = $1",
+        )
+        .bind(session_key)
+        .fetch_one(&pool)
+        .await
+        .expect("load cleared ghost session");
+        assert_eq!(row.0, "idle");
+        assert_eq!(row.1, None);
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

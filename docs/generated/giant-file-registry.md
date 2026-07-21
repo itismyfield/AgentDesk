@@ -80,7 +80,7 @@
 | `src/services/discord/turn_finalizer.rs` | 1048 | shrink | discord-finalizer | 2026-08-31 | #4712 |  |
 | `src/services/discord/turn_view_reconciler.rs` | 2360 | shrink | discord-relay | 2026-08-31 | #4712 |  |
 | `src/services/discord/voice_barge_in.rs` | 2878 | shrink | voice-runtime | 2026-08-31 | #4713 |  |
-| `src/services/discord/watchers/lifecycle.rs` | 2078 | shrink | discord-relay | 2026-10-31 | #4712 |  |
+| `src/services/discord/watchers/lifecycle.rs` | 2188 | shrink | discord-relay | 2026-10-31 | #4712 |  |
 | `src/services/discord_config_audit.rs` | 1288 | shrink | discord-relay | 2027-01-31 | #4712 |  |
 | `src/services/dispatched_sessions.rs` | 1767 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |
 | `src/services/dispatches/discord_delivery/orchestration.rs` | 1502 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |
