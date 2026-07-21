@@ -398,7 +398,7 @@ async fn emit_session_resume_failed_with_recovery(
         return;
     };
     let session_key =
-        super::super::adk_session::build_adk_session_key(shared, channel_id, provider).await;
+        super::super::adk_session::build_adk_session_key(shared, channel_id, provider, None).await;
     let recovery_action = if recovery.is_some() {
         "fresh_session_with_discord_history_context"
     } else {
@@ -731,7 +731,7 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
         && skip_reason.is_none()
     {
         let session_key =
-            super::super::adk_session::build_adk_session_key(shared, channel_id, provider)
+            super::super::adk_session::build_adk_session_key(shared, channel_id, provider, None)
                 .await
                 .unwrap_or_else(|| format!("channel:{}", channel_id.get()));
         let stored = store_session_retry_context_with_audit(

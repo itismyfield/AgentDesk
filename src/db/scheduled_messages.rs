@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 mod agent;
 mod outbox;
+mod writes;
 pub use agent::{
     RunningAgentDelivery, commit_delivery_agent_launch_pg, defer_delivery_without_retry_pg,
     list_running_agent_deliveries_pg, mark_delivery_agent_turn_started_pg,
@@ -22,6 +23,7 @@ pub use agent::{
     release_agent_delivery_to_poller_pg,
 };
 pub use outbox::outbox_statuses_for_deliveries_pg;
+pub use writes::{insert_scheduled_message_pg, insert_scheduled_message_tx};
 
 #[cfg(test)]
 mod postgres_tests;
@@ -42,7 +44,13 @@ pub const KIND_AGENT: &str = "agent";
 const DEFINITION_COLUMNS: &str = "id, content, title, target_channel_id, bot, delivery_kind, \
      agent_id, agent_instruction, on_agent_failure, scheduled_at, schedule, timezone, \
      expires_at, status, in_flight_delivery_id, fire_count, last_fired_at, last_error, \
-     source, created_by, dedupe_key, created_at, updated_at";
+     source, created_by, dedupe_key, context_strategy, context_snapshot_id, \
+     on_context_failure, created_at, updated_at";
+
+pub const CONTEXT_STRATEGY_FRESH: &str = "fresh";
+pub const CONTEXT_STRATEGY_SNAPSHOT: &str = "snapshot";
+pub const ON_CONTEXT_FAILURE_FAIL: &str = "fail";
+pub const ON_CONTEXT_FAILURE_FRESH: &str = "fresh";
 
 // ── Row types ───────────────────────────────────────────────────────────────
 
@@ -69,6 +77,13 @@ pub struct ScheduledMessageRow {
     pub source: String,
     pub created_by: Option<String>,
     pub dedupe_key: Option<String>,
+    /// #4658: 'fresh' (default) or 'snapshot'. Snapshot definitions reference an
+    /// immutable context row and run in an isolated fresh provider session.
+    pub context_strategy: String,
+    pub context_snapshot_id: Option<String>,
+    /// #4658: 'fail' (default, fail-closed) or 'fresh' (opt-in degrade) when the
+    /// snapshot cannot be validated at fire time.
+    pub on_context_failure: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -97,6 +112,9 @@ impl ScheduledMessageRow {
             "source": self.source,
             "createdBy": self.created_by,
             "dedupeKey": self.dedupe_key,
+            "contextStrategy": self.context_strategy,
+            "contextSnapshotId": self.context_snapshot_id,
+            "onContextFailure": self.on_context_failure,
             "createdAt": self.created_at.to_rfc3339(),
             "updatedAt": self.updated_at.to_rfc3339(),
         })
@@ -169,6 +187,12 @@ pub struct NewScheduledMessage {
     pub source: String,
     pub created_by: Option<String>,
     pub dedupe_key: Option<String>,
+    /// #4658: 'fresh' (default) or 'snapshot'. Defaulted by the route.
+    pub context_strategy: String,
+    /// Snapshot id captured before insert (snapshot strategy only). NULL for fresh.
+    pub context_snapshot_id: Option<String>,
+    /// #4658: 'fail' (default) or 'fresh'.
+    pub on_context_failure: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -205,39 +229,6 @@ pub fn is_unique_violation(error: &sqlx::Error) -> bool {
         error.as_database_error().and_then(|db| db.code()),
         Some(code) if code == "23505"
     )
-}
-
-pub async fn insert_scheduled_message_pg(
-    pool: &PgPool,
-    new: &NewScheduledMessage,
-) -> Result<ScheduledMessageRow, sqlx::Error> {
-    let id = format!("smsg_{}", Uuid::new_v4());
-    sqlx::query_as::<_, ScheduledMessageRow>(&format!(
-        "INSERT INTO scheduled_messages
-            (id, content, title, target_channel_id, bot, delivery_kind, agent_id,
-             agent_instruction, on_agent_failure, scheduled_at, schedule, timezone,
-             expires_at, source, created_by, dedupe_key)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-         RETURNING {DEFINITION_COLUMNS}"
-    ))
-    .bind(&id)
-    .bind(&new.content)
-    .bind(&new.title)
-    .bind(&new.target_channel_id)
-    .bind(&new.bot)
-    .bind(&new.delivery_kind)
-    .bind(&new.agent_id)
-    .bind(&new.agent_instruction)
-    .bind(&new.on_agent_failure)
-    .bind(new.scheduled_at)
-    .bind(&new.schedule)
-    .bind(&new.timezone)
-    .bind(new.expires_at)
-    .bind(&new.source)
-    .bind(&new.created_by)
-    .bind(&new.dedupe_key)
-    .fetch_one(pool)
-    .await
 }
 
 pub async fn get_scheduled_message_pg(

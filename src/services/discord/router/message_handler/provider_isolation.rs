@@ -589,7 +589,7 @@ pub(super) async fn reset_provider_session_after_worktree_isolation(
     if !outcome.applied {
         return;
     }
-    if let Some(key) = build_adk_session_key(shared, channel_id, provider).await {
+    if let Some(key) = build_adk_session_key(shared, channel_id, provider, None).await {
         super::super::super::adk_session::clear_provider_session_id(&key, shared.api_port).await;
     }
     if let Some(stale_session_id) = outcome.stale_session_id.as_deref() {

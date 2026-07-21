@@ -130,6 +130,68 @@ where
     ))
 }
 
+// #4658: frontier-bounded transcript reads for immutable context snapshots.
+//
+// The capture path (scheduled-message context snapshots) freezes a channel's
+// conversation at the last-observed `session_transcripts.id`. It reads the
+// frontier and the frontier-bounded recent pairs on the SAME transaction that
+// inserts the reservation, so the boundary is atomic with respect to concurrent
+// transcript inserts. Rendering/digesting happens in
+// `services::scheduled_messages::context_snapshot`.
+
+const FETCH_CHANNEL_PAIRS_UP_TO_FRONTIER_SQL: &str = "SELECT transcript.user_message,
+            transcript.assistant_message,
+            transcript.created_at,
+            clear_boundary.cleared_at
+     FROM session_transcripts AS transcript
+     LEFT JOIN channel_session_clear_boundaries AS clear_boundary
+       ON clear_boundary.channel_id = transcript.channel_id
+     WHERE transcript.channel_id = $1
+       AND transcript.id <= $2
+       AND BTRIM(transcript.user_message) <> ''
+       AND BTRIM(transcript.assistant_message) <> ''
+     ORDER BY transcript.created_at DESC, transcript.id DESC
+     LIMIT $3";
+
+/// The last `session_transcripts.id` for a channel, or 0 when it has none.
+/// Runs on a caller-owned transaction so the frontier is consistent with a
+/// subsequent [`fetch_channel_pairs_up_to_frontier_tx`] read.
+pub(crate) async fn fetch_channel_frontier_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    channel_id: &str,
+) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(id), 0) FROM session_transcripts WHERE channel_id = $1",
+    )
+    .bind(channel_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| anyhow!("channel transcript frontier lookup failed: {error}"))
+}
+
+/// Recent channel pairs at or before `frontier`, clear-boundary filtered and
+/// returned oldest-first (same ordering contract as `fetch_recent_channel_pairs`).
+pub(crate) async fn fetch_channel_pairs_up_to_frontier_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    channel_id: &str,
+    frontier: i64,
+    limit: u64,
+) -> Result<Vec<ChannelTranscriptPair>> {
+    let rows =
+        sqlx::query_as::<_, ChannelTranscriptPairRow>(FETCH_CHANNEL_PAIRS_UP_TO_FRONTIER_SQL)
+            .bind(channel_id)
+            .bind(frontier)
+            .bind(limit.min(i64::MAX as u64) as i64)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|error| {
+                anyhow!("frontier-bounded channel transcript lookup failed: {error}")
+            })?;
+    Ok(chronological_channel_pairs_from_desc(
+        channel_pairs_after_clear_boundary(rows),
+    ))
+}
+
 fn channel_pairs_after_clear_boundary(
     rows: Vec<ChannelTranscriptPairRow>,
 ) -> Vec<ChannelTranscriptPair> {

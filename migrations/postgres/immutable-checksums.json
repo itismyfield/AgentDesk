@@ -495,6 +495,11 @@
       "path": "migrations/postgres/0096_message_outbox_circuit_authority.sql",
       "sha256": "5fe12eb721b031455d04df854117fc21386c0528378d11ccb1486fef2f6f97cf",
       "version": 96
+    },
+    {
+      "path": "migrations/postgres/0097_scheduled_message_context_snapshots.sql",
+      "sha256": "82e4369c92f9ae2de8cc96c252851ec1c36997b5264b531c867c4b2f29c2c070",
+      "version": 97
     }
   ],
   "version": 1

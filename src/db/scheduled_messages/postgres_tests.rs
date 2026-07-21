@@ -46,6 +46,9 @@ async fn insert_due_message(pool: &PgPool, delivery_kind: &str) -> ScheduledMess
             source: "postgres_test".to_string(),
             created_by: Some("postgres_test".to_string()),
             dedupe_key: None,
+            context_strategy: "fresh".to_string(),
+            context_snapshot_id: None,
+            on_context_failure: "fail".to_string(),
         },
     )
     .await
@@ -544,6 +547,9 @@ async fn postgres_running_agent_poll_rotates_before_renewed_rows() {
                 source: "postgres_test".to_string(),
                 created_by: Some("postgres_test".to_string()),
                 dedupe_key: None,
+                context_strategy: "fresh".to_string(),
+                context_snapshot_id: None,
+                on_context_failure: "fail".to_string(),
             },
         )
         .await
@@ -1233,6 +1239,9 @@ async fn postgres_cancel_reports_committed_agent_handoff_not_intent() {
             source: "postgres_test".to_string(),
             created_by: Some("postgres_test".to_string()),
             dedupe_key: None,
+            context_strategy: "fresh".to_string(),
+            context_snapshot_id: None,
+            on_context_failure: "fail".to_string(),
         },
     )
     .await

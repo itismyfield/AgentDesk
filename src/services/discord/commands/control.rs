@@ -178,7 +178,7 @@ async fn resolve_session_key_for_clear(
     provider: &ProviderKind,
 ) -> Option<String> {
     if let Some(key) =
-        super::super::adk_session::build_adk_session_key(shared, channel_id, provider).await
+        super::super::adk_session::build_adk_session_key(shared, channel_id, provider, None).await
     {
         return Some(key);
     }

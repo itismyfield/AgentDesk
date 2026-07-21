@@ -1,17 +1,18 @@
 //! DB retention job (#1093 / 909-4; extended in #3865).
 //!
-//! Eight retention policies across the AgentDesk postgres backbone:
+//! Nine retention policies across the AgentDesk postgres backbone:
 //!
-//! | Table                    | Retention | Strategy                          |
-//! |--------------------------|-----------|-----------------------------------|
-//! | `agent_quality_event`    | 90 days   | Monthly aggregate, then DELETE    |
-//! | `session_transcripts`    | 90 days   | Archive-table copy, then DELETE   |
-//! | `message_outbox` (sent)  | 7 days    | DELETE (durable sentinels exempt) |
-//! | `auto_queue_entries`     | 30 days   | DELETE (status='completed')       |
-//! | `task_dispatches`        | 90 days   | Monthly aggregate, then DELETE    |
-//! | `turn_lifecycle_events`  | 30 days   | DELETE (on `created_at`)          |
-//! | `skill_usage`            | 90 days   | DELETE (on `used_at`)             |
-//! | `turns`                  | 90 days   | Archive-table copy, then DELETE   |
+//! | Table                                   | Retention | Strategy                          |
+//! |-----------------------------------------|-----------|-----------------------------------|
+//! | `agent_quality_event`                   | 90 days   | Monthly aggregate, then DELETE    |
+//! | `session_transcripts`                   | 90 days   | Archive-table copy, then DELETE   |
+//! | `message_outbox` (sent)                 | 7 days    | DELETE (durable sentinels exempt) |
+//! | `auto_queue_entries`                    | 30 days   | DELETE (status='completed')       |
+//! | `task_dispatches`                       | 90 days   | Monthly aggregate, then DELETE    |
+//! | `turn_lifecycle_events`                 | 30 days   | DELETE (on `created_at`)          |
+//! | `skill_usage`                           | 90 days   | DELETE (on `used_at`)             |
+//! | `turns`                                 | 90 days   | Archive-table copy, then DELETE   |
+//! | `scheduled_message_context_snapshots`   | 30 days   | DELETE (unreferenced by any def)  |
 //!
 //! `kanban_cards` is explicitly **not** touched — done cards are permanent
 //! history. See `docs/source-of-truth.md` §retention for the policy rationale.
@@ -87,6 +88,10 @@ const DISPATCH_RETENTION_DAYS: i32 = 90;
 const TURN_LIFECYCLE_RETENTION_DAYS: i32 = 30; // pure operational telemetry, highest volume (multi-row/turn)
 const SKILL_USAGE_RETENTION_DAYS: i32 = 90; // dashboard analytics (used_at DESC fast-path)
 const TURNS_RETENTION_DAYS: i32 = 90; // token/cost analytics → archive before delete
+// #4658 — immutable scheduled-message context snapshots. Deleted only once no
+// active (non-terminal) definition still references them AND they are older than
+// this window, so a live recurring reservation's snapshot is never reclaimed.
+const CONTEXT_SNAPSHOT_RETENTION_DAYS: i32 = 30;
 
 /// Run the full retention pass. Returns a per-table report. When
 /// `dry_run = true` no DML is executed — only SELECT COUNT(*) probes.
@@ -112,6 +117,8 @@ pub async fn db_retention_job(pool: &PgPool, dry_run: bool) -> Result<RetentionR
     retain_skill_usage(pool, dry_run, &mut report).await?;
     // 8. turns (archive-then-delete on finished_at). #3865
     retain_turns(pool, dry_run, &mut report).await?;
+    // 9. scheduled_message_context_snapshots (unreferenced, aged out). #4658
+    retain_context_snapshots(pool, dry_run, &mut report).await?;
 
     tracing::info!(
         dry_run,
@@ -591,6 +598,73 @@ async fn retain_turns(pool: &PgPool, dry_run: bool, report: &mut RetentionReport
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// 9. scheduled_message_context_snapshots: delete rows older than 30 days that
+// NO definition still references. #4658
+//
+// The `fk_smsg_context_snapshot` foreign key pins a snapshot for as long as any
+// definition (active OR terminal) references it, so retention must only reclaim
+// fully-unreferenced rows — deleting a still-referenced snapshot would violate
+// the FK. This makes AC-9 ("retention never deletes an active repeating
+// definition's snapshot") structural: an active definition is a reference, so it
+// is never a delete candidate.
+//
+// KNOWN LIMITATION (#4658 F3, follow-up #4723): in the current
+// system nothing ever deletes a `scheduled_messages` row — cancel sets
+// status='canceled' but keeps the row, and capture is same-transaction as the
+// definition insert (so orphaned snapshots are never produced). A snapshot
+// therefore stays referenced for the definition's entire lifetime, and this
+// policy in practice only reclaims rows a FUTURE definition-hard-delete path
+// would orphan. Consequence: each terminal snapshot definition retains its
+// rendered_context (≤32KB/row) indefinitely. This is BOUNDED (one small row per
+// snapshot definition ever created) and FK-safe, deliberately preferred over a
+// history-mutating reclaim (nulling context_snapshot_id / flipping a terminal
+// definition to 'fresh') which would need its own design review. A real reclaim
+// trigger (terminal-definition lifecycle cleanup) is deferred to the follow-up.
+// ─────────────────────────────────────────────────────────────────────────
+const CONTEXT_SNAPSHOT_UNREFERENCED_PREDICATE: &str = "created_at < NOW() - ($1::INT || ' days')::INTERVAL \
+       AND NOT EXISTS ( \
+           SELECT 1 FROM scheduled_messages m \
+           WHERE m.context_snapshot_id = scheduled_message_context_snapshots.id \
+       )";
+
+async fn retain_context_snapshots(
+    pool: &PgPool,
+    dry_run: bool,
+    report: &mut RetentionReport,
+) -> Result<()> {
+    if dry_run {
+        let would = sqlx::query(&format!(
+            "SELECT COUNT(*)::BIGINT AS n FROM scheduled_message_context_snapshots \
+             WHERE {CONTEXT_SNAPSHOT_UNREFERENCED_PREDICATE}"
+        ))
+        .bind(CONTEXT_SNAPSHOT_RETENTION_DAYS)
+        .fetch_one(pool)
+        .await?;
+        let n: i64 = would.try_get("n").unwrap_or(0);
+        report.push(TableReport {
+            table_name: "scheduled_message_context_snapshots",
+            action: "delete_would",
+            rows_affected: n,
+        });
+        return Ok(());
+    }
+
+    let del = sqlx::query(&format!(
+        "DELETE FROM scheduled_message_context_snapshots \
+         WHERE {CONTEXT_SNAPSHOT_UNREFERENCED_PREDICATE}"
+    ))
+    .bind(CONTEXT_SNAPSHOT_RETENTION_DAYS)
+    .execute(pool)
+    .await?;
+    report.push(TableReport {
+        table_name: "scheduled_message_context_snapshots",
+        action: "delete",
+        rows_affected: del.rows_affected() as i64,
+    });
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // #3865 — regression coverage for the three new retention policies.
 //
 // Uses the shared `DispatchPostgresTestDb` harness (same pattern as
@@ -953,6 +1027,92 @@ mod tests {
             count(&pool, "SELECT COUNT(*)::BIGINT AS n FROM turns_archive").await,
             1,
             "turns_archive must hold exactly one row after a double run"
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// #4658 AC-9: a snapshot referenced by an active definition is never
+    /// reclaimed, even when aged past the window; once no definition references
+    /// it (the referencing row is gone) the aged snapshot is deleted. A second
+    /// aged snapshot with no reference is deleted immediately.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn db_retention_context_snapshot_pg_reference_gate() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_4658_snapshots",
+            "db_retention #4658 context snapshot referenced/aged policy",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+
+        let hex64 = "0".repeat(64);
+        // Two aged snapshots: one referenced by an active definition, one orphan.
+        for id in ["smcs_active", "smcs_orphan"] {
+            sqlx::query(
+                "INSERT INTO scheduled_message_context_snapshots
+                    (id, source_channel_id, transcript_frontier, rendered_context,
+                     pair_count, content_digest, created_at)
+                 VALUES ($1, '1', 0, 'ctx', 1, $2, NOW() - INTERVAL '40 days')",
+            )
+            .bind(id)
+            .bind(&hex64)
+            .execute(&pool)
+            .await
+            .expect("seed aged snapshot");
+        }
+        // Active push definition referencing smcs_active (push avoids the agents FK;
+        // the retention guard keys only on status + context_snapshot_id).
+        sqlx::query(
+            "INSERT INTO scheduled_messages
+                (id, content, target_channel_id, delivery_kind, scheduled_at, status,
+                 context_strategy, context_snapshot_id)
+             VALUES ('smsg_ref', 'c', '1', 'push', NOW(), 'scheduled', 'snapshot', 'smcs_active')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed referencing active definition");
+
+        // First pass: orphan deleted, referenced-active survives.
+        db_retention_job(&pool, false)
+            .await
+            .expect("retention pass 1");
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*)::BIGINT AS n FROM scheduled_message_context_snapshots WHERE id = 'smcs_orphan'"
+            )
+            .await,
+            0,
+            "unreferenced aged snapshot must be deleted"
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*)::BIGINT AS n FROM scheduled_message_context_snapshots WHERE id = 'smcs_active'"
+            )
+            .await,
+            1,
+            "snapshot of an active definition must never be deleted (AC-9)"
+        );
+
+        // Remove the referencing definition; now the snapshot is reclaimable
+        // (the FK no longer pins it).
+        sqlx::query("DELETE FROM scheduled_messages WHERE id = 'smsg_ref'")
+            .execute(&pool)
+            .await
+            .expect("delete referencing definition");
+        db_retention_job(&pool, false)
+            .await
+            .expect("retention pass 2");
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*)::BIGINT AS n FROM scheduled_message_context_snapshots WHERE id = 'smcs_active'"
+            )
+            .await,
+            0,
+            "once no definition references it and it has aged, the snapshot is reclaimed"
         );
 
         pool.close().await;

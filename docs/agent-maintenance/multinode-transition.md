@@ -1571,3 +1571,18 @@
   classified `Failed` (never `Standby`), so a restart never skips leader
   drain-ack on an ambiguous lease result: every incomplete/failed/missing signal
   falls back to the existing drain path (fail-closed).
+- #4658 scheduled-message immutable context snapshots: **PG-lease-safe /
+  worker-local execution, no new leader or lease authority**. Snapshot capture
+  (`services::scheduled_messages::context_snapshot::capture_snapshot_tx`) and
+  validation (`validate_snapshot_pg`) store and read the fully-rendered context
+  inline in `scheduled_message_context_snapshots` (PostgreSQL), never provider
+  session files, so a snapshot captured on one node validates and fires on any
+  other node — the capture node and the fire node need not be the same. The fire
+  path reuses the existing `scheduled_message_deliveries` claim
+  (`FOR UPDATE SKIP LOCKED` + launch-commit barrier); snapshot validation runs
+  **before** that barrier, so recovery/adopt semantics and the at-most-once
+  launch contract are unchanged. The isolated session key
+  (`scheduled:{definition_id}`) is derived deterministically from PG-persisted
+  definition state, so any node computes the identical, channel-independent key
+  — the reserved turn never mutates the channel's live `sessions.session_key`
+  row. No node-local timer, leader singleton, or advisory lease is introduced.

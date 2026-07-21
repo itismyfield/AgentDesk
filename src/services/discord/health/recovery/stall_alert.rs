@@ -62,7 +62,7 @@ async fn canonical_alert_session_key(
                 .map(|key| (tmux_name.to_string(), key))
         });
     let channel_fallback =
-        discord::adk_session::build_adk_session_key(shared, channel_id, provider)
+        discord::adk_session::build_adk_session_key(shared, channel_id, provider, None)
             .await
             .filter(|key| session_key_tmux_for_provider(key, provider).is_some());
     let expected_tmux = tmux_fallback

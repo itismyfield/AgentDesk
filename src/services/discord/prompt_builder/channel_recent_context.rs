@@ -40,6 +40,11 @@ pub(crate) async fn load_channel_recent_context<T>(
     session_id: Option<&str>,
     force_fresh_provider_session: bool,
     session_was_cleared: bool,
+    // #4658: a scheduled-snapshot turn carries its own frozen context, so live
+    // channel pairs must never be injected on top of it. This is a dedicated,
+    // non-disruptive gate (it does NOT sever the channel's session or record a
+    // clear boundary the way `force_fresh_provider_session` does).
+    scheduled_snapshot: bool,
     dispatch_profile: DispatchProfile,
     active_dispatch_id_for_prompt: Option<&str>,
     session_retry_context: Option<&T>,
@@ -49,6 +54,7 @@ pub(crate) async fn load_channel_recent_context<T>(
         session_id,
         force_fresh_provider_session,
         session_was_cleared,
+        scheduled_snapshot,
         recent_pairs,
         dispatch_profile,
         active_dispatch_id_for_prompt,
@@ -95,10 +101,13 @@ pub(super) fn should_inject<T>(
     active_dispatch_id_for_prompt: Option<&str>,
     session_retry_context: Option<&T>,
 ) -> bool {
+    // #4658: `should_inject` covers the non-snapshot gates; the scheduled-snapshot
+    // gate is exercised directly against `injection_disabled_reason` in tests.
     injection_disabled_reason(
         session_id,
         force_fresh_provider_session,
         session_was_cleared,
+        false,
         recent_pairs,
         dispatch_profile,
         active_dispatch_id_for_prompt,
@@ -107,10 +116,12 @@ pub(super) fn should_inject<T>(
     .is_none()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn injection_disabled_reason<T>(
     session_id: Option<&str>,
     force_fresh_provider_session: bool,
     session_was_cleared: bool,
+    scheduled_snapshot: bool,
     recent_pairs: u64,
     dispatch_profile: DispatchProfile,
     active_dispatch_id_for_prompt: Option<&str>,
@@ -118,6 +129,8 @@ fn injection_disabled_reason<T>(
 ) -> Option<&'static str> {
     if session_id.is_some() {
         Some("resumed_session")
+    } else if scheduled_snapshot {
+        Some("scheduled_snapshot_context")
     } else if force_fresh_provider_session {
         Some("context_severed")
     } else if session_was_cleared {
@@ -262,6 +275,46 @@ mod tests {
                 .contains("(routine morning-briefing posted)")
         );
         assert!(context.rendered_context.contains("today's briefing"));
+    }
+
+    // #4658 F1 fix: a scheduled-snapshot turn disables live channel-context
+    // injection via its OWN dedicated gate — NOT `force_fresh_provider_session`
+    // (which severs the channel session + records a durable clear boundary). This
+    // asserts the gate reports the distinct `scheduled_snapshot_context` reason
+    // while leaving `force_fresh` unset. Mutation proof: drop the
+    // `scheduled_snapshot` branch in `injection_disabled_reason` and the disable
+    // assertion below fails (live pairs would inject over the frozen snapshot).
+    #[test]
+    fn scheduled_snapshot_disables_injection_without_forcing_channel_severance() {
+        // Snapshot gate on, force_fresh OFF, session_was_cleared OFF, fresh session.
+        assert_eq!(
+            injection_disabled_reason(
+                None,
+                false,
+                false,
+                true,
+                3,
+                DispatchProfile::Full,
+                None,
+                Option::<&()>::None,
+            ),
+            Some("scheduled_snapshot_context"),
+            "a snapshot turn must disable live-context injection via its own reason"
+        );
+        // Without the snapshot gate, the same fresh non-severed turn WOULD inject.
+        assert_eq!(
+            injection_disabled_reason(
+                None,
+                false,
+                false,
+                false,
+                3,
+                DispatchProfile::Full,
+                None,
+                Option::<&()>::None,
+            ),
+            None,
+        );
     }
 
     #[test]

@@ -141,7 +141,8 @@ pub(super) async fn send_codex_goal_lifecycle_notice(
             "failed to send Codex goal lifecycle notice: {error}"
         );
         let target = format!("channel:{}", channel_id.get());
-        let session_key = build_adk_session_key(shared, channel_id, &ProviderKind::Codex).await;
+        let session_key =
+            build_adk_session_key(shared, channel_id, &ProviderKind::Codex, None).await;
         crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
             shared.pg_pool.as_ref(),
             &target,

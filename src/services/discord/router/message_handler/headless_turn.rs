@@ -18,6 +18,19 @@ fn routine_metadata_agent_id(metadata: Option<&serde_json::Value>) -> Option<&st
         .filter(|value| !value.is_empty())
 }
 
+/// #4658: the isolated session-key basis for a scheduled-snapshot turn. When
+/// present, the turn (a) derives its ADK session key from this label instead of
+/// the channel name and (b) severs provider/transcript continuity so the frozen
+/// snapshot is the only conversation context. Absent for every other caller.
+fn scheduled_snapshot_session_label(metadata: Option<&serde_json::Value>) -> Option<String> {
+    metadata?
+        .get("scheduled_snapshot_session_label")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 /// Whether an explicit routine turn must sever provider and transcript continuity.
 /// Only `persistent` routines retain continuity; absent strategy preserves the
 /// legacy routine default of `fresh`. Non-routine metadata must never reset a
@@ -566,7 +579,17 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             .and_then(|session| session.category_name.clone());
         (channel_name, tmux_session_name, category_name)
     };
-    let adk_session_key = build_adk_session_key(shared, channel_id, &provider).await;
+    // #4658: scheduled-snapshot turns key their session off the reservation
+    // label so they never share (and thus never overwrite) the channel's live
+    // session_key row.
+    let scheduled_snapshot_label = scheduled_snapshot_session_label(metadata.as_ref());
+    let adk_session_key = build_adk_session_key(
+        shared,
+        channel_id,
+        &provider,
+        scheduled_snapshot_label.as_deref(),
+    )
+    .await;
     if valid_routine_metadata(metadata.as_ref()).is_some()
         && let (Some(pool), Some(binding), Some(session_key)) = (
             shared.pg_pool.as_ref(),
@@ -634,6 +657,15 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     // Routine metadata reasserts the fresh boundary on every routine run, while
     // later user-authored turns carry no routine marker. Persist both deliberate
     // severances so no later turn can re-inject transcript pairs from before one.
+    // #4658: a scheduled-snapshot turn must NOT join the channel-mutating
+    // `fresh_context_severance` path — that path records a DURABLE channel clear
+    // boundary (breaking future live turns' recent-context) and wipes the
+    // CHANNEL's in-memory provider session. The snapshot turn is isolated by its
+    // distinct `session_key` (adk_session_key override) alone: the DB `sessions`
+    // writeback is keyed by session_key, so it never touches the channel row.
+    // Its cold start + live-context suppression are handled separately below,
+    // WITHOUT disturbing the channel (F1: non-disruption is the design contract).
+    let scheduled_snapshot_turn = scheduled_snapshot_label.is_some();
     let fresh_context_severance = goal_fresh || fresh_routine;
     // Fresh routines use the same provider-severance machinery as `/goal fresh`:
     // clear in-memory, DB, stale IDs, and live-TUI bindings; skip restoration;
@@ -681,13 +713,29 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     } else {
         std::borrow::Cow::Borrowed(prompt)
     };
+    // #4658: cold-start the isolated snapshot session WITHOUT disturbing the
+    // channel. Drop the channel's in-memory session_id locally (do NOT mutate
+    // `shared.core.sessions` and do NOT clear the channel's stale id) so this
+    // turn neither resumes the live channel session nor a prior fire's scheduled
+    // session (AC-3 per-fire independence). The isolated tmux pane binding is
+    // cleared so a warm pane from a previous fire cannot recover resume mode.
+    if scheduled_snapshot_turn {
+        session_id = None;
+        memento_context_loaded = false;
+        session_strategy_reason = "scheduled_snapshot_context";
+        if let Some(ref tmux_session) = tmux_session_name {
+            crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(tmux_session);
+        }
+    }
     if session_id.is_none() {
-        if force_fresh_provider_session {
+        if force_fresh_provider_session || scheduled_snapshot_turn {
             let ts = chrono::Local::now().format("%H:%M:%S");
             let reason = if goal_fresh {
                 "/goal fresh session request"
             } else if routine_agent_identity_changed {
                 "routine agent identity change"
+            } else if scheduled_snapshot_turn {
+                "scheduled snapshot turn"
             } else {
                 "fresh routine turn"
             };
@@ -870,6 +918,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         session_id.as_deref(),
         force_fresh_provider_session,
         session_was_cleared,
+        scheduled_snapshot_turn,
         dispatch_profile,
         None,
         session_retry_context.as_ref(),
@@ -1701,6 +1750,60 @@ mod fresh_routine_tests {
             );
         }
         assert!(!fresh_routine_turn(None));
+    }
+
+    // #4658 F1 (non-disruption contract): a scheduled-snapshot turn must NOT join
+    // `fresh_context_severance`. That path records a DURABLE channel clear
+    // boundary and wipes the CHANNEL's in-memory provider session — disturbing
+    // future live turns. The snapshot turn is isolated by its distinct
+    // session_key alone and cold-starts by dropping the LOCAL session_id, never
+    // by mutating the shared channel map. Mutation proof: re-add
+    // `|| scheduled_snapshot_turn` to fresh_context_severance and this fails.
+    #[test]
+    fn scheduled_snapshot_turn_stays_out_of_channel_mutating_severance() {
+        let src = include_str!("headless_turn.rs");
+        // Needles are assembled by concatenation so their full literal never
+        // appears in this test body — otherwise `include_str!` would self-match.
+        let severance_excludes_snapshot = format!(
+            "{}{}",
+            "let fresh_context_severance = goal_fresh ", "|| fresh_routine;"
+        );
+        let severance_includes_snapshot = format!(
+            "{}{}",
+            "goal_fresh || fresh_routine ", "|| scheduled_snapshot_turn"
+        );
+        let local_cold_start = format!(
+            "{}{}",
+            "if scheduled_snapshot_turn {\n        ", "session_id = None;"
+        );
+        assert!(
+            src.contains(&severance_excludes_snapshot),
+            "fresh_context_severance must exclude scheduled_snapshot_turn"
+        );
+        assert!(
+            !src.contains(&severance_includes_snapshot),
+            "scheduled_snapshot_turn must never re-join the channel-clearing severance"
+        );
+        // Cold start is local-only: drops session_id without touching the shared
+        // channel session map or recording a channel clear boundary.
+        assert!(
+            src.contains(&local_cold_start),
+            "snapshot cold-start must null the LOCAL session_id, not wipe the channel"
+        );
+    }
+
+    #[test]
+    fn scheduled_snapshot_session_label_reads_metadata_marker() {
+        use super::scheduled_snapshot_session_label;
+        assert_eq!(
+            scheduled_snapshot_session_label(Some(&json!({
+                "scheduled_snapshot_session_label": "scheduled:smsg_abc"
+            })))
+            .as_deref(),
+            Some("scheduled:smsg_abc")
+        );
+        assert!(scheduled_snapshot_session_label(Some(&json!({ "routine_id": "r" }))).is_none());
+        assert!(scheduled_snapshot_session_label(None).is_none());
     }
 
     #[tokio::test]

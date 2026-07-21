@@ -106,7 +106,8 @@ src/
 │   ├── scheduled_messages/
 │   │   ├── agent.rs
 │   │   ├── outbox.rs
-│   │   └── postgres_tests.rs
+│   │   ├── postgres_tests.rs
+│   │   └── writes.rs
 │   ├── agents.rs
 │   ├── automation_candidates.rs
 │   ├── cancel_tombstones.rs
@@ -247,7 +248,8 @@ src/
 │   │   │   ├── helpers.rs
 │   │   │   └── responses.rs
 │   │   ├── scheduled_messages/
-│   │   │   └── postgres_tests.rs
+│   │   │   ├── postgres_tests.rs
+│   │   │   └── snapshot_capture.rs
 │   │   ├── tests/
 │   │   │   ├── preflight_harness/
 │   │   │   │   ├── types.rs
@@ -1150,6 +1152,7 @@ src/
 │   │   ├── session_control.rs
 │   │   └── store.rs
 │   ├── scheduled_messages/
+│   │   ├── context_snapshot.rs
 │   │   ├── evidence.rs
 │   │   ├── postgres_tests.rs
 │   │   └── timing.rs
