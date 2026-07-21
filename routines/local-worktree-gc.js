@@ -1,56 +1,71 @@
-// Local worktree inventory (#4684)
+// Local agent worktree inventory routine (#4684)
 //
-// The routine is intentionally report-only. Age, lock state, and git registration
-// are observations, not positive proof that AgentDesk owns a worktree lifecycle.
+// QuickJS routines intentionally have no filesystem/network bridge, so this
+// routine cannot enumerate `.claude/worktrees` itself. Matching the reviewed
+// daily-log-digest frame, it dispatches one fresh agent turn per KST day whose
+// only job is to run the deterministic, READ-ONLY sibling helper
+// (`routines/monitoring/local_worktree_inventory.js`) and return its JSON stdout
+// verbatim. The helper performs zero destructive actions by construction; this
+// routine likewise issues no cleanup — it only schedules the inventory.
 
-const REPO = "${AGENTDESK_REPO_DIR:-$HOME/.adk/release/workspaces/agentdesk}";
+const CHECKPOINT_VERSION = 1;
 
-function buildPrompt() {
+function dayKey(now) {
+  const value = typeof now === "string" ? now : now.toISOString();
+  const kst = new Date(new Date(value).getTime() + 9 * 60 * 60 * 1000);
+  return kst.toISOString().slice(0, 10);
+}
+
+function loadCheckpoint(raw) {
+  if (!raw || raw.version !== CHECKPOINT_VERSION) {
+    return { version: CHECKPOINT_VERSION, last_dispatched_day: null };
+  }
+  return { version: CHECKPOINT_VERSION, last_dispatched_day: raw.last_dispatched_day || null };
+}
+
+function buildPrompt(day) {
   return [
     "# Local agent worktree inventory",
     "",
-    `Canonical repository: ${REPO}`,
+    `Inventory day: ${day}`,
     "",
-    "Inventory only `.claude/worktrees/agent-*` entries associated with the canonical repository.",
-    "This run is report-only: perform zero destructive actions and do not modify worktrees, refs, files, or routine state outside the returned checkpoint.",
-    "Age and an unlocked state are never lifecycle ownership proof. A clean tree, merged commit, stale mtime, missing directory, or missing git registration is also not ownership proof.",
-    "Unknown, active, locked, dirty, unmerged, and registered worktrees must all be preserved.",
-    "",
-    "## Read-only collection",
-    "1. Read `git worktree list --porcelain` from the canonical repository and retain path, HEAD/ref, locked state, and registration state.",
-    "2. Enumerate matching directories without following symlinks. For each candidate, read directory mtime and calculate age_seconds relative to the current run time.",
-    "3. Include registered matching paths even when their directory is missing, and matching directories even when they are not registered.",
-    "4. Use read-only git inspection to classify ref/head presence and worktree state. Inspection failure produces `unknown`; it never authorizes cleanup.",
-    "",
-    "## Required structured report",
-    "Return one JSON object and no prose. Use this shape:",
-    "```json",
-    '{"mode":"report_only","destructive_actions":0,"candidate_count":0,"candidates":[{"path":"/absolute/path","age_seconds":null,"locked":"unknown","registered_worktree":"unknown","head":null,"ref":null,"worktree_state":"unknown","positive_ownership_proof":false,"ownership_proof_absence_reason":"No lifecycle owner record or owner-issued cleanup authorization is available."}],"inspection_errors":[]}',
+    "Run the repository-bundled deterministic, read-only helper:",
+    "```bash",
+    'ROOT="${AGENTDESK_ROOT_DIR:-${ADK_REL:-$HOME/.adk/release}}"',
+    'REPO="${AGENTDESK_REPO_DIR:-$ROOT/workspaces/agentdesk}"',
+    'AGENTDESK_REPO_DIR="$REPO" node "$REPO/routines/monitoring/local_worktree_inventory.js"',
     "```",
-    "`locked` and `registered_worktree` are true, false, or `unknown`. `worktree_state` is `clean`, `dirty`, `missing`, or `unknown`.",
-    "Every candidate must set `positive_ownership_proof` to false and give a concrete absence reason. If no candidates exist, return an empty candidates array.",
-    "Never infer ownership from path naming, age, lock state, registration, ref, HEAD ancestry, cleanliness, or process visibility.",
+    "",
+    "Return the helper stdout (a single JSON report) verbatim as your final response, with no preface.",
+    "This is a report-only inventory. Do NOT remove, prune, or modify any worktree, ref, branch, or file.",
+    "The helper never deletes anything; you must not either. Uncommitted, locked, and unmerged worktrees",
+    "are reported with disposition PRESERVE and must be left untouched.",
   ].join("\n");
 }
 
 agentdesk.routines.register({
-  name: "local-worktree-gc",
-  metadata: {
-    owner: "project-agentdesk",
-    description: "Report-only inventory of local Claude agent worktrees; no cleanup actions",
-    schedule_intent: "0 9 * * * Asia/Seoul",
-    safety_mode: "report_only",
-  },
+  name: "Local agent worktree inventory",
+
   tick(ctx) {
+    const day = dayKey(ctx.now);
+    const checkpoint = loadCheckpoint(ctx.checkpoint);
+    if (checkpoint.last_dispatched_day === day) {
+      return {
+        action: "complete",
+        result: {
+          status: "already_dispatched",
+          summary: `local worktree inventory already dispatched for ${day}`,
+        },
+        checkpoint,
+      };
+    }
+
+    checkpoint.last_dispatched_day = day;
     return {
       action: "agent",
-      prompt: buildPrompt(),
-      checkpoint: {
-        version: 2,
-        last_tick_at: ctx.now,
-        runs: (ctx.checkpoint?.runs || 0) + 1,
-      },
-      lastResult: "local worktree report-only inventory dispatched",
+      prompt: buildPrompt(day),
+      lastResult: `local worktree inventory dispatched for ${day}`,
+      checkpoint,
     };
   },
 });
