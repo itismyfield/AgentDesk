@@ -92,7 +92,7 @@
 | `src/services/onboarding/mod.rs` | 2884 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/opencode.rs` | 2764 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/platform/binary_resolver.rs` | 1496 | shrink | server-runtime | 2027-01-31 | #4710 |  |
-| `src/services/provider.rs` | 1797 | shrink | server-runtime | 2027-01-31 | #4710 |  |
+| `src/services/provider.rs` | 1828 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/qwen.rs` | 2196 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/routines/agent_executor.rs` | 2136 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |
 | `src/services/routines/discord_log.rs` | 1596 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |

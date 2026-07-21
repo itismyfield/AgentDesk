@@ -35,6 +35,7 @@ pub(crate) struct CleanupRequest {
 pub(crate) struct CleanupOutcome {
     pub(crate) authorization: KillAuthorizationState,
     pub(crate) pid_killed: bool,
+    pub(crate) retry_pid_cleanup: bool,
     pub(crate) tmux_killed: bool,
     pub(crate) duplicate: bool,
     pub(crate) termination_recorded: bool,
@@ -78,6 +79,7 @@ impl CancelToken {
                 CleanupOutcome {
                     authorization: KillAuthorizationState::Stale,
                     pid_killed: false,
+                    retry_pid_cleanup: false,
                     tmux_killed: false,
                     duplicate: false,
                     termination_recorded: false,
@@ -118,6 +120,7 @@ impl CancelToken {
         // public cleanup/bind API from here: those APIs can try to lock this slot.
         let _guard = guard;
         let mut pid_killed = false;
+        let mut retry_pid_cleanup = false;
         let mut tmux_killed = false;
         let mut termination_recorded = false;
         let mut pid_claimed = false;
@@ -133,7 +136,7 @@ impl CancelToken {
                 // not prevent a later CleanupSession from claiming a newly bound PID.
                 let identity_allows_dispatch = target
                     .identity
-                    .map_or(true, |identity| identity.matches(target.pid));
+                    .is_some_and(|identity| identity.matches(target.pid));
                 if identity_allows_dispatch {
                     pid_claimed = self
                         .pid_kill_claim
@@ -144,12 +147,14 @@ impl CancelToken {
                         if !pid_killed {
                             self.pid_kill_claim.store(0, Ordering::Release);
                             pid_claimed = false;
+                            retry_pid_cleanup = true;
                         }
                     }
                 } else {
                     tracing::debug!(
                         pid = target.pid,
-                        "skip cancellation PID kill because captured identity no longer matches"
+                        has_identity = target.identity.is_some(),
+                        "skip cancellation PID kill because captured identity is absent or no longer matches"
                     );
                 }
             }
@@ -194,6 +199,7 @@ impl CancelToken {
         CleanupOutcome {
             authorization,
             pid_killed,
+            retry_pid_cleanup,
             tmux_killed,
             duplicate: matches!(request.intent, TmuxCleanupIntent::CleanupSession)
                 && !pid_claimed
@@ -326,6 +332,11 @@ pub(crate) fn pid_kill_dispatches_for_test() -> usize {
 }
 
 #[cfg(test)]
+pub(crate) fn set_pid_kill_succeeds_for_test(succeeds: bool) {
+    PID_KILL_SUCCEEDS.store(succeeds, Ordering::Relaxed);
+}
+
+#[cfg(test)]
 pub(crate) fn with_executor_dispatch_seam(test: impl FnOnce()) {
     use std::sync::{Mutex, OnceLock};
 
@@ -376,11 +387,26 @@ mod tests {
     }
 
     #[test]
+    fn pid_only_without_identity_skips_dispatch_and_preserves_claim() {
+        with_seam(|| {
+            let token = CancelToken::new();
+            token.store_child_pid_without_identity_for_test(42);
+
+            let outcome = token.request_cleanup(request(TmuxCleanupIntent::PidOnly));
+
+            assert!(!outcome.pid_killed);
+            assert!(!outcome.retry_pid_cleanup);
+            assert_eq!(PID_KILL_DISPATCHES.load(Ordering::Relaxed), 0);
+            assert_eq!(token.pid_kill_claim.load(Ordering::Acquire), 0);
+        });
+    }
+
+    #[test]
     fn pid_only_claim_does_not_suppress_later_session_cleanup_name_kill() {
         with_seam(|| {
             let token = CancelToken::new();
             bind(&token, "AgentDesk-claude-executor-f1");
-            token.store_child_pid(42);
+            token.store_child_pid(std::process::id());
 
             token.request_cleanup(request(TmuxCleanupIntent::PidOnly));
             let outcome = token.request_cleanup(request(TmuxCleanupIntent::CleanupSession));
@@ -396,7 +422,7 @@ mod tests {
         with_seam(|| {
             let token = CancelToken::new();
             bind(&token, "AgentDesk-claude-executor-preserve");
-            token.store_child_pid(43);
+            token.store_child_pid(std::process::id());
 
             token.request_cleanup(request(TmuxCleanupIntent::PreserveSession));
             let outcome = token.request_cleanup(request(TmuxCleanupIntent::CleanupSession));
@@ -411,7 +437,7 @@ mod tests {
     fn failed_pid_dispatch_rolls_back_claim_for_retry() {
         with_seam(|| {
             let token = CancelToken::new();
-            token.store_child_pid(45);
+            token.store_child_pid(std::process::id());
             PID_KILL_SUCCEEDS.store(false, Ordering::Relaxed);
 
             token.request_cleanup(request(TmuxCleanupIntent::PidOnly));
@@ -464,7 +490,7 @@ mod tests {
             *token.tmux_binding.lock().unwrap() = Some(TmuxBinding::NameOnly {
                 name: "AgentDesk-codex-executor-unregistered".to_string(),
             });
-            token.store_child_pid(46);
+            token.store_child_pid(std::process::id());
 
             let outcome = token.request_cleanup(request(TmuxCleanupIntent::CleanupSession));
 
@@ -480,7 +506,7 @@ mod tests {
             let token = CancelToken::new();
             let name = "AgentDesk-claude-executor-stale";
             bind(&token, name);
-            token.store_child_pid(44);
+            token.store_child_pid(std::process::id());
             authority::publish(
                 ProviderKind::Claude,
                 name,

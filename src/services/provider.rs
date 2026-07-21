@@ -1091,6 +1091,14 @@ impl CancelToken {
         self.child_pid.lock().ok().and_then(|guard| guard.clone())
     }
 
+    #[cfg(test)]
+    pub(crate) fn store_child_pid_without_identity_for_test(&self, pid: u32) {
+        *self.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(CapturedProcess {
+            pid,
+            identity: None,
+        });
+    }
+
     pub(crate) fn clear_child_pid(&self) {
         *self.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
@@ -1169,6 +1177,29 @@ impl CancelToken {
     /// string for the variant when no label was previously recorded.
     pub fn set_cancel_source_kind(&self, kind: CancelSource) {
         self.set_cancel_source_kind_transactional(kind, |_| {});
+    }
+
+    pub(crate) fn try_mark_watchdog_timeout(&self) -> bool {
+        let mut kind = self
+            .cancel_source_kind
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut label = self
+            .cancel_source
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self
+            .cancelled
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        *kind = Some(CancelSource::WatchdogTimeout);
+        if label.is_none() {
+            *label = Some(CancelSource::WatchdogTimeout.as_label().to_string());
+        }
+        true
     }
 
     fn set_cancel_source_kind_transactional(

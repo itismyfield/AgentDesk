@@ -14,9 +14,7 @@ pub(super) fn current_unix_millis() -> i64 {
 pub(super) fn enforce_watchdog_deadline(token: &CancelToken, now_ms: i64) -> bool {
     let deadline_ms = token.watchdog_deadline_ms.load(Ordering::Relaxed);
     if deadline_ms > 0 && now_ms >= deadline_ms && !token.is_async_managed() {
-        token.set_cancel_source_kind(CancelSource::WatchdogTimeout);
-        token.cancelled.store(true, Ordering::Relaxed);
-        return true;
+        return token.try_mark_watchdog_timeout();
     }
     false
 }
@@ -55,7 +53,7 @@ pub(crate) fn poll_cancel_watchdog(token: &CancelToken, label: &'static str, now
         ?cleanup_outcome,
         "cancel watchdog dispatched token-owned cleanup"
     );
-    true
+    !cleanup_outcome.retry_pid_cleanup
 }
 
 pub struct CancelWatchdog {
@@ -168,6 +166,46 @@ mod tests {
                 Some("provider_cancel_dispatch")
             );
             assert_eq!(token.cancel_source_kind(), Some(CancelSource::Other));
+        });
+    }
+
+    #[test]
+    fn delayed_watchdog_preserves_existing_external_cancel_source() {
+        with_executor_dispatch_seam(|| {
+            let token = CancelToken::new();
+            token.store_child_pid(std::process::id());
+            token.watchdog_deadline_ms.store(100, Ordering::Relaxed);
+            token.set_cancel_source("voice_barge_in_explicit_stop");
+            token.cancelled.store(true, Ordering::Release);
+
+            assert!(poll_cancel_watchdog(&token, "test-watchdog", 200));
+            assert_eq!(pid_kill_dispatches_for_test(), 1);
+            assert_eq!(
+                token.cancel_source().as_deref(),
+                Some("voice_barge_in_explicit_stop")
+            );
+            assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
+        });
+    }
+
+    #[test]
+    fn failed_pid_cleanup_keeps_watchdog_alive_for_retry() {
+        use crate::services::provider::cancel_token_cleanup::executor::set_pid_kill_succeeds_for_test;
+
+        with_executor_dispatch_seam(|| {
+            let token = CancelToken::new();
+            token.store_child_pid(std::process::id());
+            token.cancelled.store(true, Ordering::Relaxed);
+            set_pid_kill_succeeds_for_test(false);
+
+            assert!(!poll_cancel_watchdog(&token, "test-watchdog", 0));
+            assert_eq!(pid_kill_dispatches_for_test(), 1);
+            assert_eq!(token.pid_kill_claim.load(Ordering::Acquire), 0);
+
+            set_pid_kill_succeeds_for_test(true);
+            assert!(poll_cancel_watchdog(&token, "test-watchdog", 1));
+            assert_eq!(pid_kill_dispatches_for_test(), 2);
+            assert_eq!(token.pid_kill_claim.load(Ordering::Acquire), 1);
         });
     }
 
