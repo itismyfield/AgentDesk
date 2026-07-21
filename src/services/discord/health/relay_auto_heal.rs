@@ -1273,8 +1273,8 @@ mod tests {
         (false, None)
     }
 
-    #[test]
-    fn redrive_actions_and_cap_alarm_continue_while_producer_is_vouched_4615() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn redrive_actions_and_cap_alarm_continue_while_producer_is_vouched_4615() {
         let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1286,9 +1286,41 @@ mod tests {
         let provider = ProviderKind::Codex;
         let channel_id = ChannelId::new(4_615_302);
         let tmux_session = "AgentDesk-codex-4615-cap";
-        let output_path = "/tmp/agentdesk-4615-cap.jsonl";
+        let output_path = tmp.path().join("agentdesk-4615-cap.jsonl");
+        std::fs::File::create(&output_path)
+            .expect("create capture fixture")
+            .set_len(301_613)
+            .expect("size capture fixture");
+        let output_path = output_path.to_string_lossy().into_owned();
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", tmux_session])
+            .status();
+        assert!(
+            std::process::Command::new("tmux")
+                .args(["new-session", "-d", "-s", tmux_session])
+                .status()
+                .expect("start tmux fixture")
+                .success(),
+            "production snapshot must observe a live producer tmux session"
+        );
+
         let shared = crate::services::discord::make_shared_data_for_tests();
-        let mut snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, 301_613);
+        let resume_offset = Arc::new(Mutex::new(None));
+        let turn_delivered = Arc::new(AtomicBool::new(true));
+        shared.tmux_watchers.insert(
+            channel_id,
+            watcher_handle(
+                tmux_session,
+                &output_path,
+                resume_offset.clone(),
+                turn_delivered,
+            ),
+        );
+        shared
+            .tmux_relay_coord(channel_id)
+            .confirmed_end_offset
+            .store(128, Ordering::Release);
+        let mut snapshot = backlog_snapshot(channel_id, tmux_session, &output_path, 128, 301_613);
         let started_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         snapshot.inflight_started_at = Some(started_at.clone());
         snapshot.inflight_updated_at = Some(started_at.clone());
@@ -1309,7 +1341,7 @@ mod tests {
             "test".to_string(),
             None,
             Some(tmux_session.to_string()),
-            Some(output_path.to_string()),
+            Some(output_path.clone()),
             None,
             snapshot.last_relay_offset,
         );
@@ -1321,45 +1353,73 @@ mod tests {
         let base = chrono::Utc::now().timestamp();
         seed_liveness_verdict(&provider, channel_id, &snapshot, &inflight, base);
         assert!(
-            !redrive_should_yield_to_live_relay(&shared, channel_id, &snapshot),
-            "producer liveness must not veto relay recovery action admission"
-        );
-
-        for (expected, elapsed) in [0, 30, 90, 210, 450].into_iter().enumerate() {
-            let reserved =
-                shared.redrive_attempt_decision(&provider, channel_id, &snapshot, base + elapsed);
-            assert_eq!(reserved.attempt, Some(expected as u8 + 1));
-            assert_eq!(
-                shared.commit_redrive_success(
+            matches!(
+                liveness_authority::vouch_for_inflight(
                     &provider,
                     channel_id,
-                    channel_id,
-                    base + elapsed,
-                    false,
+                    &inflight,
+                    liveness_authority::monotonic_now_secs(),
                 ),
-                RedriveAttemptDecision {
-                    attempt: Some(expected as u8 + 1),
-                    emit_capped_alarm: false,
-                }
+                liveness_authority::LivenessVouch::Vouched { .. }
+            ),
+            "the recovery entrypoint must be exercised while producer liveness is actually vouched"
+        );
+
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::ERROR)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(CapturingWriter(buffer.clone()))
+            .finish();
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let registry = HealthRegistry::new();
+        assert!(
+            !registry
+                .redrive_undelivered_backlog_at(
+                    &provider,
+                    shared.clone(),
+                    channel_id,
+                    base - stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
+                )
+                .await
+                .expect("seed redrive grace"),
+            "the initial observation seeds the no-progress grace"
+        );
+        for elapsed in [0, 30, 90, 210, 450, 930] {
+            assert!(
+                registry
+                    .redrive_undelivered_backlog_at(
+                        &provider,
+                        shared.clone(),
+                        channel_id,
+                        base + elapsed,
+                    )
+                    .await
+                    .expect("production redrive entrypoint"),
+                "producer liveness must not suppress admitted relay recovery attempt at +{elapsed}s"
             );
         }
-        let sixth = shared.redrive_attempt_decision(&provider, channel_id, &snapshot, base + 930);
-        assert_eq!(sixth.attempt, Some(6));
-        let capped =
-            shared.commit_redrive_success(&provider, channel_id, channel_id, base + 930, false);
         assert!(
-            capped.emit_capped_alarm,
-            "producer liveness must not suppress the relay no-progress alarm"
+            !registry
+                .redrive_undelivered_backlog_at(&provider, shared.clone(), channel_id, base + 931,)
+                .await
+                .expect("capped production redrive entrypoint"),
+            "the bounded redrive cap must stop a seventh action"
         );
-        assert!(
-            !shared
-                .redrive_attempt_decision(&provider, channel_id, &snapshot, base + 931)
-                .emit_capped_alarm,
-            "the relay no-progress alarm remains one-shot"
+        let logs = String::from_utf8_lossy(&buffer.lock().unwrap()).into_owned();
+        let capped_alarm_count = logs.matches("redrive_no_progress_capped").count();
+        assert_eq!(
+            capped_alarm_count, 1,
+            "a vouched producer must neither suppress nor duplicate the capped relay alarm"
         );
+        assert_eq!(*resume_offset.lock().unwrap(), Some(128));
 
         crate::services::discord::inflight::clear_inflight_state(&provider, channel_id.get());
         clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", tmux_session])
+            .status();
     }
 
     #[test]
