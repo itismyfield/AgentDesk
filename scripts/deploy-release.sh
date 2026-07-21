@@ -3055,11 +3055,35 @@ PLIST_EOF
         elif _install_relay_watchdog_plist; then
             xattr -d com.apple.quarantine "$WATCHDOG_PLIST_PATH" 2>/dev/null || true
             # bootout+bootstrap (not kickstart) so a script/plist change is picked up.
+            # #4726: bootout is async — an immediate bootstrap races the still-running
+            # teardown and hits "5: Input/output error", leaving the watchdog unarmed
+            # and the relay unwatched on every deploy. Poll until the label is actually
+            # gone (max ~6s), then bootstrap with retry/backoff before declaring failure.
             launchctl bootout "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" 2>/dev/null || true
-            if launchctl bootstrap "$LAUNCHD_DOMAIN" "$WATCHDOG_PLIST_PATH"; then
+            _wd_bootout_polls=0
+            while launchctl print "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" >/dev/null 2>&1; do
+                if [ "$_wd_bootout_polls" -ge 12 ]; then
+                    echo "⚠ Relay watchdog still unloading ~6s after bootout — bootstrapping anyway"
+                    break
+                fi
+                sleep 0.5
+                _wd_bootout_polls=$((_wd_bootout_polls + 1))
+            done
+            _wd_armed=0
+            for _wd_attempt in 1 2 3; do
+                if launchctl bootstrap "$LAUNCHD_DOMAIN" "$WATCHDOG_PLIST_PATH"; then
+                    _wd_armed=1
+                    break
+                fi
+                if [ "$_wd_attempt" -lt 3 ]; then
+                    echo "⚠ Relay watchdog bootstrap attempt $_wd_attempt failed — retrying in 2s"
+                    sleep 2
+                fi
+            done
+            if [ "$_wd_armed" = "1" ]; then
                 echo "✓ Relay watchdog armed ($WATCHDOG_LABEL)"
             else
-                echo "⚠ Relay watchdog bootstrap FAILED — relay gaps will go unwatched"
+                echo "⚠ Relay watchdog bootstrap FAILED after 3 attempts — relay gaps will go unwatched"
             fi
         else
             rm -f "$WATCHDOG_PLIST_PATH.tmp" 2>/dev/null || true
