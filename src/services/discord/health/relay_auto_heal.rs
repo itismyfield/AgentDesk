@@ -3,7 +3,6 @@ use std::sync::{Arc, LazyLock};
 
 use poise::serenity_prelude::ChannelId;
 
-use super::liveness_authority::{self, LivenessVouch};
 use super::snapshot::WatcherStateSnapshot;
 use super::{HealthRegistry, stall_liveness};
 use crate::services::discord::inflight::{InflightTurnIdentity, InflightTurnState};
@@ -91,11 +90,10 @@ impl RedriveAttemptState {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RedriveAttemptDecision {
     attempt: Option<u8>,
     emit_capped_alarm: bool,
-    capped_alarm_suppressed_reasons: Option<String>,
 }
 
 static REDRIVE_ATTEMPTS: LazyLock<dashmap::DashMap<RedriveKey, RedriveAttemptState>> =
@@ -154,19 +152,11 @@ impl SharedData {
         if state.attempts >= REDRIVE_MAX_NO_PROGRESS_ATTEMPTS {
             debug_assert_eq!(state.attempts, REDRIVE_MAX_NO_PROGRESS_ATTEMPTS);
             debug_assert_eq!(REDRIVE_BACKOFF_SECS[REDRIVE_BACKOFF_SECS.len() - 1], 960);
-            if let Some(reasons) = redrive_alarm_suppression_reason(provider, channel_id) {
-                return RedriveAttemptDecision {
-                    attempt: None,
-                    emit_capped_alarm: false,
-                    capped_alarm_suppressed_reasons: Some(reasons),
-                };
-            }
             let emit_capped_alarm = !state.capped_alarm_emitted;
             state.capped_alarm_emitted = true;
             return RedriveAttemptDecision {
                 attempt: None,
                 emit_capped_alarm,
-                capped_alarm_suppressed_reasons: None,
             };
         }
         if state
@@ -176,7 +166,6 @@ impl SharedData {
             return RedriveAttemptDecision {
                 attempt: None,
                 emit_capped_alarm: false,
-                capped_alarm_suppressed_reasons: None,
             };
         }
         if state.attempts > 0 {
@@ -185,14 +174,12 @@ impl SharedData {
                 return RedriveAttemptDecision {
                     attempt: None,
                     emit_capped_alarm: false,
-                    capped_alarm_suppressed_reasons: None,
                 };
             }
         }
         RedriveAttemptDecision {
             attempt: Some(state.attempts + 1),
             emit_capped_alarm: false,
-            capped_alarm_suppressed_reasons: None,
         }
     }
 
@@ -231,16 +218,11 @@ impl SharedData {
             }
         }
         let cap_reached = state.attempts == REDRIVE_MAX_NO_PROGRESS_ATTEMPTS;
-        let capped_alarm_suppressed_reasons = cap_reached
-            .then(|| redrive_alarm_suppression_reason(provider, channel_id))
-            .flatten();
-        let emit_capped_alarm =
-            cap_reached && capped_alarm_suppressed_reasons.is_none() && !state.capped_alarm_emitted;
+        let emit_capped_alarm = cap_reached && !state.capped_alarm_emitted;
         state.capped_alarm_emitted |= emit_capped_alarm;
         let decision = RedriveAttemptDecision {
             attempt: Some(state.attempts),
             emit_capped_alarm,
-            capped_alarm_suppressed_reasons,
         };
         let episode = if shield_channel_id == channel_id {
             state.episode.clone()
@@ -528,52 +510,13 @@ fn redrive_shield_channel_for_action(
         .unwrap_or(fallback_channel_id)
 }
 
-fn redrive_liveness_vouch(provider: &ProviderKind, channel_id: ChannelId) -> LivenessVouch {
-    let Some(authoritative) = crate::services::discord::inflight::load_inflight_state_read_only(
-        provider,
-        channel_id.get(),
-    ) else {
-        return LivenessVouch::NotVouched {
-            reason: liveness_authority::VouchDenial::Missing,
-        };
-    };
-    liveness_authority::vouch_for_inflight(
-        provider,
-        channel_id,
-        &authoritative,
-        liveness_authority::monotonic_now_secs(),
-    )
-}
-
-fn redrive_alarm_suppression_reason(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-) -> Option<String> {
-    match redrive_liveness_vouch(provider, channel_id) {
-        LivenessVouch::Vouched { reasons_csv, .. } => Some(reasons_csv),
-        LivenessVouch::DeferTransient { .. } => Some("transient_unknown".to_string()),
-        LivenessVouch::NotVouched { .. } => None,
-    }
-}
-
 fn trace_redrive_cap_if_needed(
     provider: &ProviderKind,
     channel_id: ChannelId,
     snapshot: &WatcherStateSnapshot,
     decision: &RedriveAttemptDecision,
 ) {
-    if let Some(reasons_csv) = decision.capped_alarm_suppressed_reasons.as_deref() {
-        tracing::info!(
-            target: "agentdesk::discord::relay_recovery",
-            event = "redrive_no_progress_capped_suppressed_live_turn",
-            provider = provider.as_str(),
-            channel_id = channel_id.get(),
-            last_relay_offset = snapshot.last_relay_offset,
-            attempts = REDRIVE_MAX_NO_PROGRESS_ATTEMPTS,
-            reasons_csv,
-            "redrive capped alarm suppressed by the producer-liveness authority"
-        );
-    } else if decision.emit_capped_alarm {
+    if decision.emit_capped_alarm {
         tracing::error!(
             target: "agentdesk::discord::relay_recovery",
             event = "redrive_no_progress_capped",
@@ -614,9 +557,9 @@ fn live_relay_frontier_advanced_since_snapshot(
 
 /// Redrive yields only when the committed frontier advanced or a relay
 /// emission is still in flight, closing the relay POST TOCTOU described by
-/// #4181. Producer liveness does not enter action admission: a live producer can
-/// coexist with a wedged relay, so #4615 gates only capped operator escalation
-/// while preserving every bounded recovery attempt.
+/// #4181. Producer liveness gates neither action admission nor capped operator
+/// escalation: a live producer can coexist with a wedged relay, so every bounded
+/// recovery attempt and the terminal no-progress alarm remain relay-authoritative.
 fn redrive_should_yield_to_live_relay(
     shared: &SharedData,
     channel_id: ChannelId,
@@ -779,6 +722,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
+    use crate::services::discord::health::liveness_authority;
     use crate::services::discord::relay_health::{RelayActiveTurn, RelayHealthSnapshot};
     use tracing_subscriber::fmt::MakeWriter;
 
@@ -1330,7 +1274,7 @@ mod tests {
     }
 
     #[test]
-    fn redrive_actions_continue_while_vouched_then_alarm_fires_after_death_4615() {
+    fn redrive_actions_and_cap_alarm_continue_while_producer_is_vouched_4615() {
         let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1396,34 +1340,22 @@ mod tests {
                 RedriveAttemptDecision {
                     attempt: Some(expected as u8 + 1),
                     emit_capped_alarm: false,
-                    capped_alarm_suppressed_reasons: None,
                 }
             );
         }
         let sixth = shared.redrive_attempt_decision(&provider, channel_id, &snapshot, base + 930);
         assert_eq!(sixth.attempt, Some(6));
-        let suppressed =
+        let capped =
             shared.commit_redrive_success(&provider, channel_id, channel_id, base + 930, false);
-        assert!(!suppressed.emit_capped_alarm);
-        assert!(suppressed.capped_alarm_suppressed_reasons.is_some());
         assert!(
-            !REDRIVE_ATTEMPTS
-                .get(&shared.redrive_key(&provider, channel_id))
-                .expect("capped attempt state")
-                .capped_alarm_emitted,
-            "suppression must not consume the one-shot alarm"
+            capped.emit_capped_alarm,
+            "producer liveness must not suppress the relay no-progress alarm"
         );
-
-        liveness_authority::clear_verdict_for_test(&provider, channel_id);
-        let after_death =
-            shared.redrive_attempt_decision(&provider, channel_id, &snapshot, base + 960);
-        assert!(after_death.emit_capped_alarm);
-        assert!(after_death.capped_alarm_suppressed_reasons.is_none());
         assert!(
             !shared
-                .redrive_attempt_decision(&provider, channel_id, &snapshot, base + 961)
+                .redrive_attempt_decision(&provider, channel_id, &snapshot, base + 931)
                 .emit_capped_alarm,
-            "the recovered alarm remains one-shot"
+            "the relay no-progress alarm remains one-shot"
         );
 
         crate::services::discord::inflight::clear_inflight_state(&provider, channel_id.get());
@@ -1544,7 +1476,6 @@ mod tests {
                 RedriveAttemptDecision {
                     attempt: Some(expected as u8 + 1),
                     emit_capped_alarm: expected == 5,
-                    capped_alarm_suppressed_reasons: None,
                 }
             );
         }
@@ -1742,7 +1673,6 @@ mod tests {
             RedriveAttemptDecision {
                 attempt: None,
                 emit_capped_alarm: false,
-                capped_alarm_suppressed_reasons: None,
             },
             "elapsed time and liveness-state GC must not re-arm capped redrive"
         );
@@ -1799,7 +1729,6 @@ mod tests {
             RedriveAttemptDecision {
                 attempt: Some(1),
                 emit_capped_alarm: false,
-                capped_alarm_suppressed_reasons: None,
             },
             "replacing the live watcher instance must re-arm the episode"
         );
@@ -1814,7 +1743,6 @@ mod tests {
             RedriveAttemptDecision {
                 attempt: Some(1),
                 emit_capped_alarm: false,
-                capped_alarm_suppressed_reasons: None,
             }
         );
         assert_ne!(
@@ -1856,7 +1784,6 @@ mod tests {
             RedriveAttemptDecision {
                 attempt: Some(1),
                 emit_capped_alarm: false,
-                capped_alarm_suppressed_reasons: None,
             }
         );
         let mut self_reattached = snapshot.clone();
@@ -1890,7 +1817,6 @@ mod tests {
             RedriveAttemptDecision {
                 attempt: Some(2),
                 emit_capped_alarm: false,
-                capped_alarm_suppressed_reasons: None,
             },
             "a reuse-existing reattach must advance the same capped episode"
         );
@@ -1939,7 +1865,6 @@ mod tests {
             RedriveAttemptDecision {
                 attempt: Some(3),
                 emit_capped_alarm: false,
-                capped_alarm_suppressed_reasons: None,
             }
         );
         let mut successor_snapshot = twice_reattached;
