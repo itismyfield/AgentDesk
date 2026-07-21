@@ -82,6 +82,16 @@ class ClippyAllowRatchetTest(unittest.TestCase):
             self.assertEqual(actual[("sample.rs", lint)], 1)
         self.assertEqual(len(RATCHET.validate_occurrences(actual, Counter())), 4)
 
+    def test_reason_string_parentheses_do_not_hide_allow(self) -> None:
+        actual = self._collect_source(
+            '#[allow(clippy::too_many_arguments, reason = "legacy (tracked)")]\n'
+            "fn sample() {}\n"
+        )
+        self.assertEqual(actual[("sample.rs", "too_many_arguments")], 1)
+        problems = RATCHET.validate_occurrences(actual, Counter())
+        self.assertEqual(len(problems), 1)
+        self.assertIn("too_many_arguments", problems[0])
+
 
 if __name__ == "__main__":
     unittest.main()

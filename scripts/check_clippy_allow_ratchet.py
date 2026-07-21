@@ -19,7 +19,7 @@ LINTS = (
     "type_complexity",
 )
 ATTRIBUTE_START_RE = re.compile(r"#!?\s*\[")
-SUPPRESSION_RE = re.compile(r"\b(?:allow|expect)\s*\((?P<body>[^()]*)\)", re.DOTALL)
+IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 LINT_RE = re.compile(r"\bclippy::(?P<lint>[a-zA-Z0-9_]+)\b")
 # Treat every Clippy lint group as suppressing all governed lints. This is
 # intentionally conservative: group membership changes across Clippy releases,
@@ -72,14 +72,57 @@ def rust_attributes(text: str) -> list[str]:
     return attributes
 
 
+def suppression_bodies(attribute: str) -> list[str]:
+    """Extract balanced allow/expect argument lists from one Rust attribute."""
+    bodies: list[str] = []
+    index = 0
+    while index < len(attribute):
+        identifier = IDENTIFIER_RE.match(attribute, index)
+        if identifier is None:
+            index += 1
+            continue
+        name = identifier.group()
+        index = identifier.end()
+        if name not in {"allow", "expect"}:
+            continue
+        while index < len(attribute) and attribute[index].isspace():
+            index += 1
+        if index >= len(attribute) or attribute[index] != "(":
+            continue
+        body_start = index + 1
+        depth = 1
+        index += 1
+        in_string = False
+        escaped = False
+        while index < len(attribute) and depth:
+            char = attribute[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+            elif char == '"':
+                in_string = True
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            index += 1
+        if depth == 0:
+            bodies.append(attribute[body_start : index - 1])
+    return bodies
+
+
 def collect_occurrences(source_root: Path = SOURCE_ROOT) -> Counter[tuple[str, str]]:
     occurrences: Counter[tuple[str, str]] = Counter()
     for path in sorted(source_root.rglob("*.rs")):
         relative = path.relative_to(REPO_ROOT).as_posix()
         text = path.read_text(encoding="utf-8")
         for attribute in rust_attributes(text):
-            for suppression in SUPPRESSION_RE.finditer(attribute):
-                for lint_match in LINT_RE.finditer(suppression.group("body")):
+            for body in suppression_bodies(attribute):
+                for lint_match in LINT_RE.finditer(body):
                     lint = lint_match.group("lint")
                     governed = LINTS if lint in CLIPPY_GROUPS else (lint,)
                     for governed_lint in governed:
