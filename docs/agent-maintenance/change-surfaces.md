@@ -222,7 +222,7 @@
   store-side CAS paths).
 - legacy_modules: none — relay routes are being consolidated, not replaced.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/services/discord/watchers/lifecycle.rs` (2078 lines — canonical
+  - `src/services/discord/watchers/lifecycle.rs` (2097 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior; #3016 phase-5b2 dropped the `mailbox_finalize_owed`
     construction from the watcher-spawn handle; #3718 moved runtime mtime
@@ -1139,7 +1139,7 @@
     normal long SILENT tool run (e.g. a big build) is never mistaken for an idle
     hang, with the 4h hard ceiling as the real backstop, and noted the limitation
     in the idle-kill error message + a delayed-event test).
-  - `src/services/tui_prompt_dedupe.rs` (2141 lines; +7 from #4693: seal a local-only raw/envelope half collapsed by the Discord marker gate so its stable entry ID remains replay-immune after a watermark reset; +29 from #4567: classify start-anchored structured task notifications as status-only observations before generic external-input ownership, preserving task-card/status delivery while leaving the next human prompt immediately admissible; -41 from #4591 R4: remove
+  - `src/services/tui_prompt_dedupe.rs` (2135 lines; +7 from #4693: seal a local-only raw/envelope half collapsed by the Discord marker gate so its stable entry ID remains replay-immune after a watermark reset; +29 from #4567: classify start-anchored structured task notifications as status-only observations before generic external-input ownership, preserving task-card/status delivery while leaving the next human prompt immediately admissible; -41 from #4591 R4: remove
     observation-layer raw/envelope pairing while leaving local execution independent of Discord rendering; local stable entry
     IDs are recorded after note delivery or when a duplicate marker half is sealed,
     while generic direct-input identity replay behavior remains eager; +4 from #4295: retain the
@@ -1620,16 +1620,14 @@
     orchestration surface; tracked decompose target — see
     `giant-file-registry.md` (owner `voice-runtime`, deadline 2026-08-31,
     #3036)).
-  - `src/voice/receiver.rs` (1108 lines after #3914 added the songbird
-    `ClientDisconnect` handler that drops a leaver's SSRC→user mapping to stop
-    monotonic `ssrc_users` growth under channel churn; voice receive pipeline,
-    utterance segmentation, artifact cleanup, and retention policy surface;
-    split before adding non-bugfix behavior).
-  - `src/voice/announce_meta.rs` (1001 lines; voice announcement durability /
-    handoff metadata surface; crossed the giant threshold when #3034 restored
-    per-item dead_code reasoning on the runtime-gated durable helpers; tracked
-    decompose target — see `giant-file-registry.md` (owner `voice-runtime`,
-    deadline 2026-08-31, #3036)).
+  - `src/voice/receiver.rs` was decomposed in #4713: the root retains the
+    receiver state machine and timers, while `receiver/recording.rs` owns WAV
+    recording lifecycle and cleanup helpers. Both modules remain below the
+    production giant threshold.
+  - `src/voice/announce_meta.rs` was decomposed in #4713: the root retains the
+    process-local metadata store and `announce_meta/durable.rs` owns the durable
+    PostgreSQL announcement and handoff persistence helpers. Both modules remain
+    below the production giant threshold.
   - `src/services/discord/{commands/text_commands.rs,
     discord_config_audit.rs, router/intake_gate.rs}` (all 1000+ production
     lines).
