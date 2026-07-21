@@ -10,6 +10,8 @@ use std::sync::atomic::Ordering;
 
 use super::*;
 
+mod channel_writeback;
+
 pub(super) struct CompletionPostludeContext {
     pub(super) shared_owned: Arc<SharedData>,
     pub(super) gateway: Arc<dyn TurnGateway>,
@@ -290,6 +292,26 @@ pub(super) async fn run_completion_postlude(
     let mut reflect_request = None;
     let mut clear_provider_session = false;
     let capture_memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
+    // #4658 F1 completion-side isolation: detect a scheduled-snapshot turn by its
+    // ISOLATED session_key. A snapshot turn derives its `session_key` from the
+    // reservation label (AC-2), so it differs from the channel's canonical
+    // (channel-name-basis) key. Recompute the canonical key with the same
+    // production helper (`build_adk_session_key(.., None)`) — which normal intake
+    // and headless turns already use verbatim — and compare. When the turn's key
+    // is present and differs, the turn does NOT own the channel's live session,
+    // so its provider session_id / history must never be written back into
+    // `data.sessions[channel_id]` (the #4634 bug class, completion side).
+    let channel_canonical_session_key = super::super::adk_session::build_adk_session_key(
+        &shared_owned,
+        channel_id,
+        &provider,
+        None,
+    )
+    .await;
+    let isolated_from_channel = match adk_session_key.as_deref() {
+        Some(turn_key) => channel_canonical_session_key.as_deref() != Some(turn_key),
+        None => false,
+    };
     let session_id_to_persist = {
         let mut data = shared_owned.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id) {
@@ -302,35 +324,34 @@ pub(super) async fn run_completion_postlude(
                 should_record_final_turn,
             ) {
                 clear_provider_session = memory_plan.clear_provider_session;
-                if memory_plan.persist_transcript {
-                    session.history.push(HistoryItem {
-                        item_type: HistoryType::User,
-                        content: user_text_owned.clone(),
-                    });
-                    session.history.push(HistoryItem {
-                        item_type: HistoryType::Assistant,
-                        content: full_response.clone(),
-                    });
-                    should_persist_transcript = true;
+                // #4658 F1: the writeback helper leaves the channel session
+                // completely unchanged for a scheduled-snapshot turn.
+                let writeback = channel_writeback::apply_channel_turn_writeback(
+                    session,
+                    isolated_from_channel,
+                    &memory_plan,
+                    &user_text_owned,
+                    &full_response,
+                    new_session_id.as_deref(),
+                );
+                should_persist_transcript = writeback.persist_transcript;
+                // A snapshot turn must not reflect/capture the channel session
+                // either — both mutate or summarize `data.sessions[channel_id]`.
+                if !isolated_from_channel {
+                    if let Some(reason) = memory_plan.session_end_reason {
+                        reflect_request = take_memento_reflect_request(
+                            session,
+                            &capture_memory_settings,
+                            &provider,
+                            role_binding.as_ref(),
+                            channel_id.get(),
+                            reason,
+                        );
+                    }
+                    should_spawn_memory_capture = memory_plan.spawn_capture;
                 }
-                if let Some(reason) = memory_plan.session_end_reason {
-                    reflect_request = take_memento_reflect_request(
-                        session,
-                        &capture_memory_settings,
-                        &provider,
-                        role_binding.as_ref(),
-                        channel_id.get(),
-                        reason,
-                    );
-                }
-                if memory_plan.clear_provider_session {
-                    session.clear_provider_session();
-                } else if let Some(sid) = new_session_id.as_ref() {
-                    session.restore_provider_session(Some(sid.clone()));
-                }
-                should_spawn_memory_capture = memory_plan.spawn_capture;
                 should_analyze_recall_feedback = memory_plan.analyze_recall_feedback;
-                session.session_id.clone()
+                writeback.session_id_to_persist
             } else {
                 None
             }

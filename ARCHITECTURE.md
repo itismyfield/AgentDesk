@@ -819,6 +819,8 @@ src/
 │   │   │   ├── completion_guard/
 │   │   │   │   ├── completion_context.rs
 │   │   │   │   └── completion_postgres.rs
+│   │   │   ├── completion_postlude/
+│   │   │   │   └── channel_writeback.rs
 │   │   │   ├── runtime_handoff_loop/
 │   │   │   │   ├── claude_e.rs
 │   │   │   │   └── guarded_save.rs
