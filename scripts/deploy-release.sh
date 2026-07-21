@@ -308,6 +308,28 @@ _staged_deploy_binary_path() {
     mktemp "$ADK_REL/bin/agentdesk.deploy.XXXXXX"
 }
 
+# #4727: pure-shell fallback for `server.port` when python3 lacks PyYAML.
+# Non-interactive SSH (peer/mac-mini deploy) may resolve a system python3 without
+# PyYAML on PATH even though the interactive shell's homebrew python3 has it.
+# Parses the simple top-level `server:` mapping agentdesk.yaml uses:
+#   server:
+#     port: 8791
+# Emits the first `port:` under the top-level `server:` block (stopping at the
+# next top-level key), stripping inline `#` comments and quotes to digits only.
+_extract_yaml_server_port_shell() {
+    local path="$1"
+    [ -f "$path" ] || return 1
+    awk '
+        /^[^[:space:]#]/ { in_server = ($0 ~ /^server:[[:space:]]*(#.*)?$/); next }
+        in_server && $1 == "port:" {
+            v = $0
+            sub(/#.*/, "", v)
+            gsub(/[^0-9]/, "", v)
+            if (v != "") { print v; exit }
+        }
+    ' "$path"
+}
+
 _resolve_release_server_port() {
     local fallback_port="${AGENTDESK_REL_PORT:-$ADK_DEFAULT_PORT}"
     local config_path=""
@@ -326,12 +348,8 @@ _resolve_release_server_port() {
         return 0
     fi
 
-    if ! python3 -c 'import yaml' >/dev/null 2>&1; then
-        echo "✗ Cannot resolve server.port from $config_path: python3 PyYAML is required; aborting deploy" >&2
-        return 1
-    fi
-
-    if configured_port=$(python3 - "$config_path" "$fallback_port" <<'PY'
+    if python3 -c 'import yaml' >/dev/null 2>&1; then
+        if configured_port=$(python3 - "$config_path" "$fallback_port" <<'PY'
 import sys
 
 import yaml
@@ -348,12 +366,28 @@ if not 1 <= port <= 65535:
     raise ValueError("server.port must be between 1 and 65535")
 print(port)
 PY
-    ); then
+        ); then
+            printf '%s\n' "$configured_port"
+            return 0
+        fi
+
+        echo "✗ Cannot resolve server.port from $config_path: invalid or unreadable configuration; aborting deploy" >&2
+        return 1
+    fi
+
+    # #4727: PyYAML-less python3 on the resolved PATH (typically a peer deploy over
+    # non-interactive SSH). Fall back to a pure-shell parse so the deploy no longer
+    # depends on which python3 is first on PATH.
+    if configured_port=$(_extract_yaml_server_port_shell "$config_path") \
+        && [ -n "$configured_port" ] \
+        && [ "$configured_port" -ge 1 ] 2>/dev/null \
+        && [ "$configured_port" -le 65535 ] 2>/dev/null; then
+        echo "▸ Resolved server.port=$configured_port from $config_path via shell fallback (python3 PyYAML unavailable)" >&2
         printf '%s\n' "$configured_port"
         return 0
     fi
 
-    echo "✗ Cannot resolve server.port from $config_path: invalid or unreadable configuration; aborting deploy" >&2
+    echo "✗ Cannot resolve server.port from $config_path: python3 PyYAML unavailable and shell fallback could not read server.port; aborting deploy" >&2
     return 1
 }
 
