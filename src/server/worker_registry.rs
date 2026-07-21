@@ -19,11 +19,10 @@ static LEADER_ONLY_WORKERS_STARTED: AtomicBool = AtomicBool::new(false);
 static LEADER_ONLY_WORKER_ACTIVE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static LEADER_ONLY_WORKER_LAST_SPAWN_UNIX_MS: AtomicI64 = AtomicI64::new(0);
 static RATE_LIMIT_SYNC_ACTIVE: AtomicBool = AtomicBool::new(false);
-static WORKER_LOCAL_LOOP_OWNED_TERMINAL_SIGNAL_COUNT: AtomicUsize = AtomicUsize::new(0);
-static WORKER_LOCAL_LOOP_OWNED_UNEXPECTED_TERMINAL_SIGNAL_COUNT: AtomicUsize = AtomicUsize::new(0);
-static WORKER_LOCAL_LOOP_OWNED_LAST_TERMINAL_SIGNAL: LazyLock<
-    Mutex<Option<WorkerLocalTerminalSignal>>,
-> = LazyLock::new(|| Mutex::new(None));
+static WORKER_LOCAL_TERMINAL_SIGNAL_COUNT: AtomicUsize = AtomicUsize::new(0);
+static WORKER_LOCAL_UNEXPECTED_TERMINAL_SIGNAL_COUNT: AtomicUsize = AtomicUsize::new(0);
+static WORKER_LOCAL_LAST_TERMINAL_SIGNAL: LazyLock<Mutex<Option<WorkerLocalTerminalSignal>>> =
+    LazyLock::new(|| Mutex::new(None));
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WorkerLocalTerminalSignal {
     worker: &'static str,
@@ -34,7 +33,7 @@ struct WorkerLocalTerminalSignal {
 
 pub(crate) fn leader_only_worker_status_json() -> serde_json::Value {
     let last_spawn_unix_ms = LEADER_ONLY_WORKER_LAST_SPAWN_UNIX_MS.load(Ordering::Acquire);
-    let last_worker_local_signal = worker_local_loop_owned_terminal_signal_snapshot().map(|signal| {
+    let last_worker_local_signal = worker_local_terminal_signal_snapshot().map(|signal| {
         serde_json::json!({
             "worker": signal.worker,
             "reason": signal.reason,
@@ -50,8 +49,12 @@ pub(crate) fn leader_only_worker_status_json() -> serde_json::Value {
         } else {
             None
         },
-        "worker_local_loop_owned_terminal_signal_count": WORKER_LOCAL_LOOP_OWNED_TERMINAL_SIGNAL_COUNT.load(Ordering::Acquire),
-        "worker_local_loop_owned_unexpected_terminal_signal_count": WORKER_LOCAL_LOOP_OWNED_UNEXPECTED_TERMINAL_SIGNAL_COUNT.load(Ordering::Acquire),
+        "worker_local_terminal_signal_count": WORKER_LOCAL_TERMINAL_SIGNAL_COUNT.load(Ordering::Acquire),
+        "worker_local_unexpected_terminal_signal_count": WORKER_LOCAL_UNEXPECTED_TERMINAL_SIGNAL_COUNT.load(Ordering::Acquire),
+        "last_worker_local_terminal_signal": last_worker_local_signal,
+        // Backward-compatible aliases for clients deployed before #4515.
+        "worker_local_loop_owned_terminal_signal_count": WORKER_LOCAL_TERMINAL_SIGNAL_COUNT.load(Ordering::Acquire),
+        "worker_local_loop_owned_unexpected_terminal_signal_count": WORKER_LOCAL_UNEXPECTED_TERMINAL_SIGNAL_COUNT.load(Ordering::Acquire),
         "last_worker_local_loop_owned_terminal_signal": last_worker_local_signal,
     })
 }
@@ -60,8 +63,8 @@ pub(crate) fn rate_limit_sync_active() -> bool {
     RATE_LIMIT_SYNC_ACTIVE.load(Ordering::Acquire)
 }
 
-fn worker_local_loop_owned_terminal_signal_snapshot() -> Option<WorkerLocalTerminalSignal> {
-    *WORKER_LOCAL_LOOP_OWNED_LAST_TERMINAL_SIGNAL
+fn worker_local_terminal_signal_snapshot() -> Option<WorkerLocalTerminalSignal> {
+    *WORKER_LOCAL_LAST_TERMINAL_SIGNAL
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -84,11 +87,11 @@ fn record_worker_local_terminal_signal(
         expected_shutdown,
         observed_unix_ms: chrono::Utc::now().timestamp_millis(),
     };
-    WORKER_LOCAL_LOOP_OWNED_TERMINAL_SIGNAL_COUNT.fetch_add(1, Ordering::AcqRel);
+    WORKER_LOCAL_TERMINAL_SIGNAL_COUNT.fetch_add(1, Ordering::AcqRel);
     if !expected_shutdown {
-        WORKER_LOCAL_LOOP_OWNED_UNEXPECTED_TERMINAL_SIGNAL_COUNT.fetch_add(1, Ordering::AcqRel);
+        WORKER_LOCAL_UNEXPECTED_TERMINAL_SIGNAL_COUNT.fetch_add(1, Ordering::AcqRel);
     }
-    *WORKER_LOCAL_LOOP_OWNED_LAST_TERMINAL_SIGNAL
+    *WORKER_LOCAL_LAST_TERMINAL_SIGNAL
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(signal);
 

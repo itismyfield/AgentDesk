@@ -92,6 +92,10 @@ async fn supervise_restartable<MakeFuture, Fut, RecordTerminal>(
 
         let started_at = Instant::now();
         let reason = match run_worker_once(spec, shutdown.clone(), make_future()).await {
+            WorkerRunOutcome::Unexpected(reason) if shutdown.load(Ordering::Acquire) => {
+                record_terminal(reason, true, true, restart_times.len());
+                return;
+            }
             WorkerRunOutcome::Unexpected(reason) => reason,
             WorkerRunOutcome::Shutdown(reason) => {
                 record_terminal(reason, true, true, restart_times.len());
@@ -438,6 +442,55 @@ mod tests {
         advance(Duration::from_millis(1)).await;
         assert_eq!(spawns.load(Ordering::Acquire), 3);
         supervisor.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn simultaneous_return_and_shutdown_is_expected_without_budget_use() {
+        WORKER_RESTART_BUDGET_EXHAUSTED_COUNT.store(0, Ordering::Release);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let factory_shutdown = shutdown.clone();
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let factory_spawns = spawns.clone();
+        let expected_terminal = Arc::new(AtomicBool::new(false));
+        let observed_expected = expected_terminal.clone();
+        let restart_attempt = Arc::new(AtomicUsize::new(usize::MAX));
+        let observed_attempt = restart_attempt.clone();
+        let mut spec = restartable_spec();
+        spec.name = "test_simultaneous_shutdown_worker";
+
+        supervise_worker_local(
+            spec,
+            shutdown,
+            move || {
+                let shutdown = factory_shutdown.clone();
+                let spawns = factory_spawns.clone();
+                async move {
+                    spawns.fetch_add(1, Ordering::AcqRel);
+                    shutdown.store(true, Ordering::Release);
+                }
+            },
+            move |_, expected_shutdown, _, attempt| {
+                observed_expected.store(expected_shutdown, Ordering::Release);
+                observed_attempt.store(attempt, Ordering::Release);
+            },
+        )
+        .await;
+
+        assert_eq!(spawns.load(Ordering::Acquire), 1);
+        assert!(expected_terminal.load(Ordering::Acquire));
+        assert_eq!(restart_attempt.load(Ordering::Acquire), 0);
+        assert_eq!(
+            WORKER_RESTART_BUDGET_EXHAUSTED_COUNT.load(Ordering::Acquire),
+            0
+        );
+        assert!(
+            WORKER_RECOVERY_STATES
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(spec.name)
+                .is_none(),
+            "normal shutdown must not consume or persist restart budget state"
+        );
     }
 
     #[tokio::test(start_paused = true)]
