@@ -51,7 +51,8 @@ BEGIN
                 -- snapshot strategy, snapshot reclaimed by retention (provenance kept)
              OR (context_strategy = 'snapshot'
                     AND context_snapshot_id IS NULL
-                    AND context_snapshot_reclaimed_at IS NOT NULL)
+                    AND context_snapshot_reclaimed_at IS NOT NULL
+                    AND status IN ('sent', 'failed', 'canceled', 'expired'))
                 -- fresh strategy never carries a snapshot or a reclaim marker
              OR (context_strategy = 'fresh'
                     AND context_snapshot_id IS NULL

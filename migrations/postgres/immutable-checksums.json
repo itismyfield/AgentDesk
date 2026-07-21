@@ -503,7 +503,7 @@
     },
     {
       "path": "migrations/postgres/0098_scheduled_message_snapshot_reclaim.sql",
-      "sha256": "829c6f0de6500553a86402389ef325e998dae7348a5a7d6e1a60efa80c88161c",
+      "sha256": "655db436b1545c761338a20460b81cee80269040fe1958bd8f52e7f24743ebb6",
       "version": 98
     }
   ],

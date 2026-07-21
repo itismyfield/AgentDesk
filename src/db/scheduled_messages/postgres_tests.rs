@@ -64,6 +64,61 @@ async fn claim_one(pool: &PgPool, owner: &str, lease_secs: i64) -> ClaimedFire {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_reclaimed_snapshot_rejects_nonterminal_status() {
+    let (pg_db, pool) = create_test_pool(
+        "agentdesk_smsg_reclaimed_nonterminal",
+        "reclaimed snapshot nonterminal status constraint",
+    )
+    .await;
+    let message = insert_due_message(&pool, KIND_PUSH).await;
+
+    let error = sqlx::query(
+        "UPDATE scheduled_messages
+         SET context_strategy = 'snapshot', context_snapshot_id = NULL,
+             context_snapshot_reclaimed_at = NOW()
+         WHERE id = $1",
+    )
+    .bind(&message.id)
+    .execute(&pool)
+    .await
+    .expect_err("scheduled definitions must not enter the reclaimed snapshot state");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database_error| database_error.constraint()),
+        Some("chk_smsg_snapshot_required")
+    );
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_reclaimed_snapshot_accepts_terminal_status() {
+    let (pg_db, pool) = create_test_pool(
+        "agentdesk_smsg_reclaimed_terminal",
+        "reclaimed snapshot terminal status constraint",
+    )
+    .await;
+    let message = insert_due_message(&pool, KIND_PUSH).await;
+
+    let result = sqlx::query(
+        "UPDATE scheduled_messages
+         SET status = 'sent', context_strategy = 'snapshot', context_snapshot_id = NULL,
+             context_snapshot_reclaimed_at = NOW()
+         WHERE id = $1",
+    )
+    .bind(&message.id)
+    .execute(&pool)
+    .await
+    .expect("terminal definitions may enter the reclaimed snapshot state");
+    assert_eq!(result.rows_affected(), 1);
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_scheduled_message_rearm_rotates_token_and_clears_attempt_fields() {
     let (pg_db, pool) = create_test_pool(
         "agentdesk_smsg_rearm",
