@@ -1,3 +1,10 @@
+// This module's body calls unix-only tmux helpers (is_tmux_available,
+// tui_busy_followup_diagnostic) and its sole call site in intake_turn.rs is
+// #[cfg(unix)]-gated. Gate the whole module from within so the `mod steering_hook;`
+// decl stays platform-neutral (net-zero for the intake_turn.rs giant ratchet)
+// while the body is excluded on Windows, avoiding E0425 there.
+#![cfg(unix)]
+
 use super::*;
 
 fn steering_injection_succeeded(outcome: &crate::services::tui_steering::SteeringOutcome) -> bool {

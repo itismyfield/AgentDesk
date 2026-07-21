@@ -694,7 +694,7 @@
 | `services::discord::router::message_handler::intake_turn::race_loss` | `src/services/discord/router/message_handler/intake_turn/race_loss.rs` | 699 | 604 | 95 |  |
 | `services::discord::router::message_handler::intake_turn::race_loss::mailbox_reaction` | `src/services/discord/router/message_handler/intake_turn/race_loss/mailbox_reaction.rs` | 88 | 88 | 0 |  |
 | `services::discord::router::message_handler::intake_turn::stale_dispatch_guard` | `src/services/discord/router/message_handler/intake_turn/stale_dispatch_guard.rs` | 76 | 76 | 0 |  |
-| `services::discord::router::message_handler::intake_turn::steering_hook` | `src/services/discord/router/message_handler/intake_turn/steering_hook.rs` | 161 | 141 | 20 |  |
+| `services::discord::router::message_handler::intake_turn::steering_hook` | `src/services/discord/router/message_handler/intake_turn/steering_hook.rs` | 168 | 148 | 20 |  |
 | `services::discord::router::message_handler::intake_turn::turn_watchdog` | `src/services/discord/router/message_handler/intake_turn/turn_watchdog.rs` | 256 | 256 | 0 |  |
 | `services::discord::router::message_handler::intake_turn::voice_intake` | `src/services/discord/router/message_handler/intake_turn/voice_intake.rs` | 156 | 156 | 0 |  |
 | `services::discord::router::message_handler::latency_spans` | `src/services/discord/router/message_handler/latency_spans.rs` | 230 | 158 | 72 |  |
