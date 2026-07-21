@@ -133,6 +133,17 @@
         "src/services/discord/voice_barge_in.rs",
         "src/voice/announce_meta.rs"
       ]
+    },
+    {
+      "number": 4738,
+      "state": "open",
+      "title": "decompose: inflight/model.rs crossed 1000-prod giant threshold (1002) via #4570 steer boundary field",
+      "owners": [
+        "discord-relay"
+      ],
+      "files": [
+        "src/services/discord/inflight/model.rs"
+      ]
     }
   ]
 }

@@ -167,6 +167,18 @@ grandfathered_baseline_paths = [
 grandfathered = []
 
 [[entry]]
+# Crossed the 1000-prod giant threshold (1002) in #4570 when the durable native-TUI
+# steer boundary field `steer_rollover_after_offset` was added to InflightTurnState.
+# The file was already a razor-thin near-giant (~997 prod); the field is irreducible
+# (it must live on the serde model). Reviewable-admission: net-zero would require an
+# out-of-scope refactor of this relay-adjacent CORE inflight-state file. Decompose in #4738.
+file = "src/services/discord/inflight/model.rs"
+decision = "shrink"
+owner = "discord-relay"
+deadline = "2027-01-31"
+decompose_issue = "#4738"
+
+[[entry]]
 file = "src/cli/client.rs"
 decision = "shrink"
 owner = "server-runtime"
