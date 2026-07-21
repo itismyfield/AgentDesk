@@ -59,7 +59,7 @@ class AlertDedupeWiringTests(unittest.TestCase):
         source_registry = (
             REPO_ROOT / "src/services/discord/outbound/source_registry.rs"
         ).read_text(encoding="utf-8")
-        maintenance = (REPO_ROOT / "src/server/maintenance.rs").read_text(
+        maintenance = (REPO_ROOT / "src/server/maintenance/mod.rs").read_text(
             encoding="utf-8"
         )
         quality_module = (
