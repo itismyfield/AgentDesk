@@ -951,6 +951,7 @@ pub(crate) const CODEX_TUI_HOME_TEMP_EXT: &str = "codex-tui-home";
 pub(crate) const CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT: &str = "codex-tui-rollout.json";
 pub(crate) const TMUX_DEAD_MARKER_TEMP_EXT: &str = "pane_dead";
 pub(crate) const TMUX_RUNTIME_KIND_TEMP_EXT: &str = "runtime-kind";
+pub(crate) const TMUX_CHANNEL_TEMP_EXT: &str = "channel";
 
 /// Returns the persistent AgentDesk sessions directory, if a runtime root
 /// is configured. This is the new canonical location for session temp files
@@ -1106,6 +1107,7 @@ pub fn cleanup_session_temp_files(session_name: &str) {
         "spawn_nonce",
         "exit_reason",
         TMUX_RUNTIME_KIND_TEMP_EXT,
+        TMUX_CHANNEL_TEMP_EXT,
         TMUX_DEAD_MARKER_TEMP_EXT,
         CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT,
         CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
@@ -1132,6 +1134,28 @@ pub fn current_tmux_owner_marker() -> String {
 /// Path to the owner marker file for a tmux session.
 pub fn tmux_owner_path(tmux_session_name: &str) -> String {
     session_temp_path(tmux_session_name, "owner")
+}
+
+/// Path to the durable Discord channel binding for a tmux session.
+pub fn tmux_channel_path(tmux_session_name: &str) -> String {
+    session_temp_path(tmux_session_name, TMUX_CHANNEL_TEMP_EXT)
+}
+
+/// Persist the Discord channel owning a tmux session across dcserver restarts.
+pub fn write_tmux_channel_binding(tmux_session_name: &str, channel_id: u64) -> Result<(), String> {
+    if channel_id == 0 {
+        return Err("tmux channel binding requires a non-zero channel id".to_string());
+    }
+    std::fs::write(tmux_channel_path(tmux_session_name), channel_id.to_string())
+        .map_err(|e| format!("Failed to write tmux channel binding: {e}"))
+}
+
+/// Read a durable Discord channel binding for a surviving tmux session.
+pub fn read_tmux_channel_binding(tmux_session_name: &str) -> Option<u64> {
+    std::fs::read_to_string(tmux_channel_path(tmux_session_name))
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .filter(|value: &u64| *value != 0)
 }
 
 /// Write the owner marker file so this runtime claims the tmux session.
@@ -1351,6 +1375,23 @@ pub fn truncate_jsonl_head_safe(
     }
     std::fs::rename(&tmp_path, path)?;
     Ok(Some(new_size))
+}
+
+#[cfg(test)]
+mod channel_binding_tests {
+    use super::*;
+
+    #[test]
+    fn channel_binding_round_trips_for_restart_recovery() {
+        let session = "AgentDesk-claude-dm-4145-test";
+        cleanup_session_temp_files(session);
+        write_tmux_channel_binding(session, 1_479_662_682_909_966_490).unwrap();
+        assert_eq!(
+            read_tmux_channel_binding(session),
+            Some(1_479_662_682_909_966_490)
+        );
+        cleanup_session_temp_files(session);
+    }
 }
 
 #[cfg(test)]

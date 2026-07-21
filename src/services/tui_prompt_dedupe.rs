@@ -339,6 +339,7 @@ pub fn register_tmux_channel(tmux_session_name: &str, channel_id: u64) {
     if tmux_session_name.is_empty() || channel_id == 0 {
         return;
     }
+    let _ = crate::services::tmux_common::write_tmux_channel_binding(tmux_session_name, channel_id);
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
     state.channel_by_tmux.insert(

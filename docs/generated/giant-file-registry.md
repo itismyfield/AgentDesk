@@ -33,8 +33,8 @@
 | `src/services/discord/turn_finalizer.rs` | 1048 | discord-finalizer | 2026-08-31 | #3016 |
 | `src/services/discord/turn_view_reconciler.rs` | 2358 | discord-relay | 2026-08-31 | #4049 |
 | `src/services/discord/voice_barge_in.rs` | 2887 | voice-runtime | 2026-08-31 | #3405 |
-| `src/services/discord/watchers/lifecycle.rs` | 2077 | discord-relay | 2026-10-31 | #3840 |
-| `src/services/tmux_common.rs` | 1357 | discord-relay | 2026-10-31 | #3924 |
+| `src/services/discord/watchers/lifecycle.rs` | 2097 | discord-relay | 2026-10-31 | #3840 |
+| `src/services/tmux_common.rs` | 1382 | discord-relay | 2026-10-31 | #3924 |
 | `src/voice/announce_meta.rs` | 1001 | voice-runtime | 2026-08-31 | #3405 |
 
 ## Grandfathered
@@ -106,6 +106,6 @@
 | `src/services/routines/discord_log.rs` | 1594 |
 | `src/services/routines/store.rs` | 3559 |
 | `src/services/settings.rs` | 1112 |
-| `src/services/tui_prompt_dedupe.rs` | 2134 |
+| `src/services/tui_prompt_dedupe.rs` | 2135 |
 | `src/services/turn_orchestrator.rs` | 3283 |
 | `src/voice/receiver.rs` | 1108 |

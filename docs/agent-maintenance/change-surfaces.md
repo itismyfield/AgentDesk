@@ -221,7 +221,7 @@
   store-side CAS paths).
 - legacy_modules: none — relay routes are being consolidated, not replaced.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/services/discord/watchers/lifecycle.rs` (2077 lines — canonical
+  - `src/services/discord/watchers/lifecycle.rs` (2097 lines — canonical
     lifecycle extraction surface from #1435; split further before adding new
     lifecycle behavior; #3016 phase-5b2 dropped the `mailbox_finalize_owed`
     construction from the watcher-spawn handle; #3718 moved runtime mtime
@@ -1138,7 +1138,7 @@
     normal long SILENT tool run (e.g. a big build) is never mistaken for an idle
     hang, with the 4h hard ceiling as the real backstop, and noted the limitation
     in the idle-kill error message + a delayed-event test).
-  - `src/services/tui_prompt_dedupe.rs` (2134 lines; +29 from #4567: classify start-anchored structured task notifications as status-only observations before generic external-input ownership, preserving task-card/status delivery while leaving the next human prompt immediately admissible; -41 from #4591 R4: remove
+  - `src/services/tui_prompt_dedupe.rs` (2135 lines; +29 from #4567: classify start-anchored structured task notifications as status-only observations before generic external-input ownership, preserving task-card/status delivery while leaving the next human prompt immediately admissible; -41 from #4591 R4: remove
     raw/envelope time-pair state so local slash-control representations may
     duplicate rather than swallowing a later human command; local stable entry
     IDs are now recorded only after the relay confirms its Discord session note,

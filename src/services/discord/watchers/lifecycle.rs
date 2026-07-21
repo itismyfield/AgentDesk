@@ -2060,7 +2060,27 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         }
     }
 
+    // Durable tmux channel bindings cover DM sessions whose channel ID cannot be
+    // reconstructed from the `dm-<user_id>` session name after restart.
+    for session_name in &agent_sessions {
+        if name_to_channel.contains_key(*session_name) {
+            continue;
+        }
+        if let Some(channel_id) =
+            crate::services::tmux_common::read_tmux_channel_binding(session_name)
+        {
+            if let Some((_, channel_name)) = parse_provider_and_channel_from_tmux_name(session_name)
+            {
+                name_to_channel.insert(
+                    session_name.to_string(),
+                    (ChannelId::new(channel_id), channel_name),
+                );
+            }
+        }
+    }
+
     // If in-memory sessions don't cover all tmux sessions, fetch from Discord API
+    // (durable bindings above intentionally handle DMs before guild-only lookup).
     let unresolved: Vec<&&str> = agent_sessions
         .iter()
         .filter(|s| !name_to_channel.contains_key(**s))

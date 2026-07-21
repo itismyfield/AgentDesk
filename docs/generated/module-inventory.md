@@ -935,7 +935,7 @@
 | `services::discord::voice_routing` | `src/services/discord/voice_routing.rs` | 163 | 138 | 25 |  |
 | `services::discord::voice_sensitivity` | `src/services/discord/voice_sensitivity.rs` | 113 | 113 | 0 |  |
 | `services::discord::watchers::codex_tui_restore` | `src/services/discord/watchers/codex_tui_restore.rs` | 178 | 146 | 32 |  |
-| `services::discord::watchers::lifecycle` | `src/services/discord/watchers/lifecycle.rs` | 2903 | 2077 | 826 | giant-file |
+| `services::discord::watchers::lifecycle` | `src/services/discord/watchers/lifecycle.rs` | 2923 | 2097 | 826 | giant-file |
 | `services::discord::watchers::lifecycle::activity` | `src/services/discord/watchers/lifecycle/activity.rs` | 212 | 212 | 0 |  |
 | `services::discord::watchers::lifecycle_decision` | `src/services/discord/watchers/lifecycle_decision.rs` | 363 | 212 | 151 |  |
 | `services::discord_config_audit` | `src/services/discord_config_audit.rs` | 1600 | 1288 | 312 | giant-file |
@@ -1089,12 +1089,12 @@
 | `services::shell_guard` | `src/services/shell_guard.rs` | 419 | 419 | 0 |  |
 | `services::slo` | `src/services/slo/mod.rs` | 535 | 508 | 27 |  |
 | `services::termination_audit` | `src/services/termination_audit.rs` | 192 | 192 | 0 |  |
-| `services::tmux_common` | `src/services/tmux_common.rs` | 2402 | 1357 | 1045 | giant-file |
+| `services::tmux_common` | `src/services/tmux_common.rs` | 2443 | 1382 | 1061 | giant-file |
 | `services::tmux_diagnostics` | `src/services/tmux_diagnostics.rs` | 276 | 265 | 11 |  |
 | `services::tmux_wrapper` | `src/services/tmux_wrapper.rs` | 898 | 787 | 111 |  |
 | `services::tool_output_guard` | `src/services/tool_output_guard.rs` | 286 | 220 | 66 |  |
 | `services::tui_prompt_control` | `src/services/tui_prompt_control.rs` | 246 | 208 | 38 |  |
-| `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 4759 | 2134 | 2625 | giant-file |
+| `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 4760 | 2135 | 2625 | giant-file |
 | `services::tui_prompt_dedupe::synthetic_prompt` | `src/services/tui_prompt_dedupe/synthetic_prompt.rs` | 34 | 34 | 0 |  |
 | `services::tui_turn_state` | `src/services/tui_turn_state.rs` | 2033 | 648 | 1385 |  |
 | `services::tui_turn_state::completion_scan` | `src/services/tui_turn_state/completion_scan.rs` | 360 | 360 | 0 |  |
