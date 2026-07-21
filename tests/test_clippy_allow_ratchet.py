@@ -162,6 +162,39 @@ class ClippyAllowRatchetTest(unittest.TestCase):
         )
         self.assertEqual(actual[("sample.rs", "too_many_arguments")], 1)
 
+    def test_c_string_with_brackets(self) -> None:
+        # Rust 2024 C string c"..." (has \" escapes like a plain string).
+        actual = self._collect_source(
+            '#[allow(a, c") ] \\" (", clippy::too_many_arguments)]\n'
+            "fn sample() {}\n"
+        )
+        self.assertEqual(actual[("sample.rs", "too_many_arguments")], 1)
+
+    def test_raw_c_string_with_brackets_and_quote(self) -> None:
+        actual = self._collect_source(
+            '#[allow(a, cr#"a" ) ] "b"#, clippy::too_many_arguments)]\n'
+            "fn sample() {}\n"
+        )
+        self.assertEqual(actual[("sample.rs", "too_many_arguments")], 1)
+
+    def test_raw_c_string_exact_repro_counts_one(self) -> None:
+        # Exact reviewer repro: cr raw string must not early-terminate and expose
+        # the ) ] inside as real structure; the nested allow must count as 1.
+        actual = self._collect_source(
+            '#[foo(cr#"a" ) ] "b"#, allow(clippy::too_many_arguments))]\n'
+            "fn sample() {}\n"
+        )
+        self.assertEqual(actual[("sample.rs", "too_many_arguments")], 1)
+
+    def test_c_and_cr_identifiers_do_not_trigger_string(self) -> None:
+        # Variables/idents named c / cr and identifiers ending in c/cr must NOT
+        # be misread as C-string prefixes.
+        cleaned, ambiguous = RATCHET.neutralize_source(
+            "let c = 1; let cr = 2; let sync = 3; let incr = c + cr;\n"
+        )
+        self.assertFalse(ambiguous)
+        self.assertEqual(cleaned, "let c = 1; let cr = 2; let sync = 3; let incr = c + cr;\n")
+
     # ------------------------------------------------------------------
     # Lexical pre-pass: char / byte-char literals and the lifetime split
     # ------------------------------------------------------------------

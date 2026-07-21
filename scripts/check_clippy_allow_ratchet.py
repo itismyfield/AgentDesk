@@ -5,10 +5,12 @@ Body extraction runs in two stages:
 
 1. ``neutralize_source`` performs one complete left-to-right lexical pre-pass
    over the Rust source, replacing the *interior* of every lexical construct
-   (line/block comments, all string/raw/byte-string forms, char and byte-char
-   literals) with harmless filler so their contents can never be mistaken for
-   attribute structure. Rust block comments nest and are handled with a depth
-   counter; lifetimes (``'a``) are distinguished from char literals (``'a'``).
+   (line/block comments; the complete Rust 2024 string-literal prefix grammar
+   -- plain, ``b``, ``r``, ``br``, ``c``, ``cr`` in quoted and hash-counted raw
+   forms; char and byte-char literals) with harmless filler so their contents
+   can never be mistaken for attribute structure. Rust block comments nest and
+   are handled with a depth counter; lifetimes (``'a``) are distinguished from
+   char literals (``'a'``).
 
 2. The bracket/paren balance scan then runs on the *cleaned* text, where no
    quote, comment, or literal delimiter survives to perturb it.
@@ -101,15 +103,17 @@ def _char_literal_end(text: str, pos: int) -> int | None:
 
 
 def _raw_string_end(text: str, pos: int) -> tuple[int | None, bool]:
-    """Match a (byte) raw string ``b?r#*"..."#*`` starting at ``pos``.
+    """Match a raw string ``[bc]?r#*"..."#*`` starting at ``pos``.
 
-    Returns ``(end_index, ambiguous)``. ``end_index`` is ``None`` when no raw
-    string begins here. ``ambiguous`` is True when a raw string opens but never
+    Covers every raw string prefix in the complete Rust 2024 grammar: ``r``
+    (raw), ``br`` (raw byte), and ``cr`` (raw C string). Returns
+    ``(end_index, ambiguous)``. ``end_index`` is ``None`` when no raw string
+    begins here. ``ambiguous`` is True when a raw string opens but never
     terminates before EOF.
     """
     n = len(text)
     i = pos
-    if i < n and text[i] == "b":
+    if i < n and text[i] in ("b", "c"):
         i += 1
     if i >= n or text[i] != "r":
         return None, False
@@ -188,6 +192,25 @@ def neutralize_source(text: str) -> tuple[str, bool]:
 
         # Byte string: b"..." (with escapes).
         if c == "b" and i + 1 < n and text[i + 1] == '"':
+            j = i + 2
+            terminated = False
+            while j < n:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == '"':
+                    j += 1
+                    terminated = True
+                    break
+                j += 1
+            if not terminated:
+                ambiguous = True
+            blank(i, j)
+            i = j
+            continue
+
+        # C string: c"..." (with escapes, Rust 2024).
+        if c == "c" and i + 1 < n and text[i + 1] == '"':
             j = i + 2
             terminated = False
             while j < n:
