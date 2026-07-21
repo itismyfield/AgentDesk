@@ -2479,7 +2479,7 @@ mod cancel_token_tests {
         let poll =
             std::thread::spawn(move || enforce_watchdog_deadline(&token_for_poll, now + 1_000));
 
-        token.mark_completion_cleanup();
+        token.completion_cleanup.store(true, Ordering::Release);
         drop(publication);
 
         assert!(!poll.join().expect("poll thread should finish"));
