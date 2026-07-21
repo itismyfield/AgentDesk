@@ -507,7 +507,7 @@
 | `services::discord::health::recovery::stall_alert` | `src/services/discord/health/recovery/stall_alert.rs` | 515 | 174 | 341 |  |
 | `services::discord::health::recovery::watchdog_decisions` | `src/services/discord/health/recovery/watchdog_decisions.rs` | 296 | 296 | 0 |  |
 | `services::discord::health::redaction` | `src/services/discord/health/redaction.rs` | 33 | 23 | 10 |  |
-| `services::discord::health::relay_auto_heal` | `src/services/discord/health/relay_auto_heal.rs` | 2162 | 775 | 1387 |  |
+| `services::discord::health::relay_auto_heal` | `src/services/discord/health/relay_auto_heal.rs` | 2087 | 718 | 1369 |  |
 | `services::discord::health::relay_dead_reattach` | `src/services/discord/health/relay_dead_reattach.rs` | 277 | 101 | 176 |  |
 | `services::discord::health::relay_progress` | `src/services/discord/health/relay_progress.rs` | 108 | 66 | 42 |  |
 | `services::discord::health::runtime_resolve` | `src/services/discord/health/runtime_resolve.rs` | 388 | 320 | 68 |  |
