@@ -1535,6 +1535,20 @@
   migration-specific CI gate activates only when the 0094 SQL file is in the
   changed-file set.
 
+- #4615 S3a dormant circuit-alert authority — **PG-lease-backed shared authority,
+  dormant**: migration 0096 adds a channel-scoped
+  `message_outbox_circuit_authority` watermark and complete circuit coordinate
+  stamps on `message_outbox`. Reservation, held staging, activation, and fresh-vouch
+  revocation reuse the existing `intake_session_owners` active
+  `(owner_instance_id, generation)` check and its deterministic
+  `OwnerIdentity::advisory_key()` transaction lock. A channel-global
+  `authority_epoch` orders episode resets while same-episode frontier transitions
+  must follow the coupled baseline/open-generation rule. Non-owner and stale
+  writers fail closed. S3a ships dormant: no relay producer or outbox worker uses
+  these APIs until S3b adds the final worker delivery fence, so no circuit alert
+  is exposed to an unfenced external send. Classification:
+  **generation-fenced PG-lease authority**; no leader-only singleton is added.
+
 - #4527 (safe-restart standby drain + standby health visibility): `runtime_bootstrap.rs`
   now registers a **confirmed-standby** node's provider `SharedData` into the
   `HealthRegistry` even when the gateway runtime never starts (lease held

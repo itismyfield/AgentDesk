@@ -22,7 +22,7 @@ use crate::services::cluster::intake_routing::{
 };
 use sqlx::PgPool;
 
-mod owner_record;
+pub(crate) mod owner_record;
 mod session_owner;
 
 use session_owner::SessionOwnerResolution;

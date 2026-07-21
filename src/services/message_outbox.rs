@@ -75,7 +75,7 @@ impl From<sqlx::Error> for OutboxEnqueueError {
     }
 }
 
-fn validate_outbox_source(source: &str) -> Result<(), OutboxEnqueueError> {
+pub(crate) fn validate_outbox_source(source: &str) -> Result<(), OutboxEnqueueError> {
     crate::services::discord::outbound::source_registry::validate_send_source_for(
         source,
         crate::services::discord::outbound::source_registry::SendCallerClass::LoopbackInternal,
@@ -85,7 +85,7 @@ fn validate_outbox_source(source: &str) -> Result<(), OutboxEnqueueError> {
     })
 }
 
-fn normalized_session_key(target: &str, session_key: Option<&str>) -> Option<String> {
+pub(crate) fn normalized_session_key(target: &str, session_key: Option<&str>) -> Option<String> {
     session_key
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -96,7 +96,7 @@ fn normalized_session_key(target: &str, session_key: Option<&str>) -> Option<Str
         })
 }
 
-fn normalized_reason_code(reason_code: Option<&str>) -> Option<&str> {
+pub(crate) fn normalized_reason_code(reason_code: Option<&str>) -> Option<&str> {
     reason_code.map(str::trim).filter(|value| !value.is_empty())
 }
 
@@ -143,7 +143,7 @@ pub(crate) fn delivery_bot_for_target_session<'a>(
     Cow::Borrowed(configured_bot)
 }
 
-fn dedupe_key_for_message(
+pub(crate) fn dedupe_key_for_message(
     target: &str,
     content: &str,
     reason_code: Option<&str>,
@@ -403,7 +403,7 @@ async fn find_duplicate_outbox_message_pg(
              WHERE target = $1
                AND reason_code = $2
                AND session_key = $3
-               AND status != 'failed'
+               AND status NOT IN ('failed', 'cancelled')
                AND created_at >= NOW() - ($4::BIGINT * INTERVAL '1 second')
              ORDER BY id DESC
              LIMIT 1",
@@ -423,7 +423,7 @@ async fn find_duplicate_outbox_message_pg(
            AND reason_code IS NULL
            AND content = $2
            AND session_key = $3
-           AND status != 'failed'
+           AND status NOT IN ('failed', 'cancelled')
            AND created_at >= NOW() - ($4::BIGINT * INTERVAL '1 second')
          ORDER BY id DESC
          LIMIT 1",
@@ -448,7 +448,7 @@ async fn release_expired_outbox_dedupe_key_pg(
             SET dedupe_key = NULL,
                 dedupe_expires_at = NULL
           WHERE dedupe_key = $1
-            AND status != 'failed'
+            AND status NOT IN ('failed', 'cancelled')
             AND dedupe_expires_at <= NOW()",
     )
     .bind(dedupe_key)
@@ -517,7 +517,7 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_persistent_dedupe(
          (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)
          ON CONFLICT (dedupe_key)
-             WHERE dedupe_key IS NOT NULL AND status != 'failed'
+             WHERE dedupe_key IS NOT NULL AND status NOT IN ('failed', 'cancelled')
          DO UPDATE SET dedupe_expires_at = NULL
          RETURNING id",
     )
@@ -557,7 +557,7 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_persistent_dedupe_on_tx(
          (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)
          ON CONFLICT (dedupe_key)
-             WHERE dedupe_key IS NOT NULL AND status != 'failed'
+             WHERE dedupe_key IS NOT NULL AND status NOT IN ('failed', 'cancelled')
          DO UPDATE SET dedupe_expires_at = NULL
          RETURNING id",
     )
@@ -668,7 +668,7 @@ pub(crate) async fn enqueue_outbox_pg_on_tx_with_ttl(
                       ELSE NULL
                  END)
          ON CONFLICT (dedupe_key)
-             WHERE dedupe_key IS NOT NULL AND status != 'failed'
+             WHERE dedupe_key IS NOT NULL AND status NOT IN ('failed', 'cancelled')
          DO NOTHING
          RETURNING id",
     )
@@ -740,7 +740,7 @@ pub(crate) async fn stage_outbox_pg_with_ttl(
          VALUES ($1,$2,$3,$4,'held',$5,$6,$7,
                  NOW() + ($8::BIGINT * INTERVAL '1 second'))
          ON CONFLICT (dedupe_key)
-             WHERE dedupe_key IS NOT NULL AND status != 'failed'
+             WHERE dedupe_key IS NOT NULL AND status NOT IN ('failed', 'cancelled')
          DO NOTHING
          RETURNING id",
     )
@@ -759,7 +759,7 @@ pub(crate) async fn stage_outbox_pg_with_ttl(
         None => {
             sqlx::query_scalar::<_, i64>(
                 "SELECT id FROM message_outbox
-              WHERE dedupe_key=$1 AND status!='failed'
+              WHERE dedupe_key=$1 AND status NOT IN ('failed', 'cancelled')
               ORDER BY id LIMIT 1",
             )
             .bind(&dedupe_key)
@@ -772,14 +772,15 @@ pub(crate) async fn stage_outbox_pg_with_ttl(
 }
 
 pub(crate) async fn activate_staged_outbox_pg(pool: &PgPool, id: i64) -> Result<bool, sqlx::Error> {
-    Ok(
-        sqlx::query("UPDATE message_outbox SET status='pending' WHERE id=$1 AND status='held'")
-            .bind(id)
-            .execute(pool)
-            .await?
-            .rows_affected()
-            == 1,
+    Ok(sqlx::query(
+        "UPDATE message_outbox SET status='pending'
+              WHERE id=$1 AND status='held' AND circuit_open_generation IS NULL",
     )
+    .bind(id)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1)
 }
 
 /// Activate a held row, or confirm that a prior activation already made the
@@ -794,7 +795,9 @@ pub(crate) async fn activate_or_confirm_staged_outbox_pg(
         return Ok(true);
     }
     Ok(sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM message_outbox WHERE id=$1 AND status!='held')",
+        "SELECT EXISTS(
+             SELECT 1 FROM message_outbox
+              WHERE id=$1 AND status NOT IN ('held', 'cancelled'))",
     )
     .bind(id)
     .fetch_one(pool)
@@ -832,7 +835,7 @@ pub(crate) async fn gc_stale_outbox_rows(pool: &PgPool) -> Result<(u64, u64, u64
     .rows_affected();
     let failed = sqlx::query(
         "DELETE FROM message_outbox
-          WHERE status = 'failed'
+          WHERE status IN ('failed', 'cancelled')
             AND created_at < NOW() - INTERVAL '7 days'",
     )
     .execute(pool)
@@ -947,7 +950,7 @@ pub(crate) async fn enqueue_lifecycle_notification_pg(
          VALUES ($1, $2, $3, $4, $5, $6, $7,
                  NOW() + ($8::BIGINT * INTERVAL '1 second'))
          ON CONFLICT (dedupe_key)
-             WHERE dedupe_key IS NOT NULL AND status != 'failed'
+             WHERE dedupe_key IS NOT NULL AND status NOT IN ('failed', 'cancelled')
          DO NOTHING
          RETURNING id",
     )
