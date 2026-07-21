@@ -612,14 +612,13 @@ fn live_relay_frontier_advanced_since_snapshot(
     shared.committed_relay_offset(channel_id) > snapshot.last_relay_offset
 }
 
-/// #4181 item-1: redrive must yield to a live relay either because the committed
-/// frontier already advanced past the snapshot (delivery landed) OR because a
-/// relay emission is still in-flight (`relay_slot` non-zero). The committed-only
-/// check has a TOCTOU: a single relay POST held >stall-grace under extreme
-/// rate-limiting freezes the committed offset without the emission having
-/// finished, so the offset-only stall test can pass while a POST is mid-flight;
-/// redriving then double-sends the range that POST is about to commit (a
-/// duplicate, not a loss). Consulting the in-flight slot closes that window.
+/// Redrive yields when the committed frontier advanced, a relay emission is
+/// still in flight, or the shared producer-liveness authority vouches for the
+/// foreground turn. The first two checks close the relay POST TOCTOU described
+/// by #4181. The authority check closes #4615's producer-live false positive,
+/// but only within its bounded verdict TTL/transient budget and four-hour turn
+/// ceiling; missing, stale, identity-mismatched, or evidence-free verdicts fail
+/// closed so they cannot disable bounded recovery.
 fn redrive_should_yield_to_live_relay(
     shared: &SharedData,
     provider: &ProviderKind,

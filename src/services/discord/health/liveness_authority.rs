@@ -462,9 +462,12 @@ pub(in crate::services::discord) fn vouch_for_inflight(
             reason: VouchDenial::IdentityMismatch,
         };
     }
-    if verdict
-        .raw_turn_age_secs
-        .is_some_and(|age| age >= STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS)
+    let Some(raw_turn_age_secs) = verdict.raw_turn_age_secs else {
+        return LivenessVouch::NotVouched {
+            reason: VouchDenial::NoEvidence,
+        };
+    };
+    if raw_turn_age_secs.saturating_add(published_age_secs) >= STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS
     {
         return LivenessVouch::NotVouched {
             reason: VouchDenial::PastAbsoluteCeiling,
@@ -791,6 +794,48 @@ mod tests {
             LivenessVouch::NotVouched {
                 reason: VouchDenial::PastAbsoluteCeiling
             }
+        );
+
+        store_verdict(
+            (key.provider.clone(), key.channel_id),
+            ProducerLivenessVerdict {
+                published_at_mono_secs: 300,
+                raw_turn_age_secs: Some(STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS - 1),
+                ..VERDICTS
+                    .get(&(key.provider.clone(), key.channel_id))
+                    .unwrap()
+                    .clone()
+            },
+        );
+        assert_eq!(
+            vouch_for_inflight(
+                &ProviderKind::Codex,
+                ChannelId::new(key.channel_id),
+                &inflight,
+                301
+            ),
+            LivenessVouch::NotVouched {
+                reason: VouchDenial::PastAbsoluteCeiling
+            },
+            "a verdict published just before the ceiling must expire when its monotonic age crosses it"
+        );
+
+        let store_key = (key.provider.clone(), key.channel_id);
+        let mut missing_age = VERDICTS.get(&store_key).unwrap().clone();
+        missing_age.published_at_mono_secs = 400;
+        missing_age.raw_turn_age_secs = None;
+        store_verdict(store_key, missing_age);
+        assert_eq!(
+            vouch_for_inflight(
+                &ProviderKind::Codex,
+                ChannelId::new(key.channel_id),
+                &inflight,
+                400
+            ),
+            LivenessVouch::NotVouched {
+                reason: VouchDenial::NoEvidence
+            },
+            "an unparseable authoritative start time must remain fail closed"
         );
     }
 
