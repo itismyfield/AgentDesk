@@ -208,13 +208,6 @@ pub(super) fn watcher_streaming_rollover_should_skip(current_portion: &str) -> b
     )
 }
 
-pub(super) fn watcher_should_suppress_streaming_after_bridge_delivery(
-    bridge_delivered_turn: bool,
-    has_assistant_response: bool,
-) -> bool {
-    bridge_delivered_turn && has_assistant_response
-}
-
 pub(in crate::services::discord::tmux) fn watcher_lifecycle_terminal_delivery_observed(
     terminal_delivery_observed: bool,
     bridge_delivered_turn: bool,

@@ -784,7 +784,7 @@
 | `services::discord::tmux_watcher::controller_heartbeat` | `src/services/discord/tmux_watcher/controller_heartbeat.rs` | 34 | 34 | 0 |  |
 | `services::discord::tmux_watcher::entry` | `src/services/discord/tmux_watcher/entry.rs` | 33 | 33 | 0 |  |
 | `services::discord::tmux_watcher::jsonl_rotation` | `src/services/discord/tmux_watcher/jsonl_rotation.rs` | 78 | 78 | 0 |  |
-| `services::discord::tmux_watcher::liveness` | `src/services/discord/tmux_watcher/liveness.rs` | 697 | 519 | 178 |  |
+| `services::discord::tmux_watcher::liveness` | `src/services/discord/tmux_watcher/liveness.rs` | 690 | 512 | 178 |  |
 | `services::discord::tmux_watcher::loop_poll_prologue` | `src/services/discord/tmux_watcher/loop_poll_prologue.rs` | 609 | 609 | 0 |  |
 | `services::discord::tmux_watcher::no_result_exits` | `src/services/discord/tmux_watcher/no_result_exits.rs` | 814 | 814 | 0 |  |
 | `services::discord::tmux_watcher::orphan_status_panel_cleanup` | `src/services/discord/tmux_watcher/orphan_status_panel_cleanup.rs` | 227 | 227 | 0 |  |
@@ -798,8 +798,8 @@
 | `services::discord::tmux_watcher::single_message_footer` | `src/services/discord/tmux_watcher/single_message_footer.rs` | 533 | 419 | 114 |  |
 | `services::discord::tmux_watcher::stall_exit` | `src/services/discord/tmux_watcher/stall_exit.rs` | 295 | 110 | 185 |  |
 | `services::discord::tmux_watcher::streaming_session_banner` | `src/services/discord/tmux_watcher/streaming_session_banner.rs` | 198 | 94 | 104 |  |
-| `services::discord::tmux_watcher::streaming_status_tick` | `src/services/discord/tmux_watcher/streaming_status_tick.rs` | 937 | 937 | 0 |  |
-| `services::discord::tmux_watcher::streaming_status_tick::types` | `src/services/discord/tmux_watcher/streaming_status_tick/types.rs` | 62 | 62 | 0 |  |
+| `services::discord::tmux_watcher::streaming_status_tick` | `src/services/discord/tmux_watcher/streaming_status_tick.rs` | 947 | 947 | 0 |  |
+| `services::discord::tmux_watcher::streaming_status_tick::types` | `src/services/discord/tmux_watcher/streaming_status_tick/types.rs` | 77 | 77 | 0 |  |
 | `services::discord::tmux_watcher::supervisor_relay` | `src/services/discord/tmux_watcher/supervisor_relay.rs` | 619 | 619 | 0 |  |
 | `services::discord::tmux_watcher::task_response_authority` | `src/services/discord/tmux_watcher/task_response_authority.rs` | 484 | 484 | 0 |  |
 | `services::discord::tmux_watcher::terminal_abort_exits` | `src/services/discord/tmux_watcher/terminal_abort_exits.rs` | 534 | 534 | 0 |  |

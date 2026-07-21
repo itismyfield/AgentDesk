@@ -197,9 +197,19 @@ pub(super) async fn update_streaming_status_tick(
         }
 
         let has_assistant_response_for_streaming = !full_response.trim().is_empty();
+        let bridge_committed_range =
+            crate::services::discord::outbound::delivery_frontier_probe::delivered_frontier_current_generation(
+                &watcher_provider,
+                channel_id,
+                &tmux_session_name,
+                Some(current_offset),
+            )
+            .map(|commit| commit.range);
         if watcher_should_suppress_streaming_after_bridge_delivery(
             turn_delivered.load(Ordering::Relaxed),
             has_assistant_response_for_streaming,
+            (data_start_offset, current_offset),
+            bridge_committed_range,
         ) {
             if let Some(msg_id) = placeholder_msg_id {
                 if watcher_should_delete_suppressed_placeholder(placeholder_from_restored_inflight)
