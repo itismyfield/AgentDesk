@@ -216,7 +216,7 @@
 | `runtime_layout::paths` | `src/runtime_layout/paths.rs` | 144 | 110 | 34 |  |
 | `runtime_layout::skill_refresh` | `src/runtime_layout/skill_refresh.rs` | 376 | 276 | 100 |  |
 | `runtime_layout::skill_sync` | `src/runtime_layout/skill_sync.rs` | 1253 | 962 | 291 |  |
-| `server` | `src/server/mod.rs` | 3477 | 2799 | 678 | giant-file |
+| `server` | `src/server/mod.rs` | 3526 | 2799 | 727 | giant-file |
 | `server::cluster` | `src/server/cluster.rs` | 9 | 9 | 0 |  |
 | `server::cluster_session_routing` | `src/server/cluster_session_routing.rs` | 9 | 9 | 0 |  |
 | `server::cron_catalog` | `src/server/cron_catalog.rs` | 67 | 67 | 0 |  |

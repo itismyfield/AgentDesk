@@ -2504,20 +2504,69 @@ mod message_outbox_retry_tests {
             return;
         };
         let pool = pg_db.connect_and_migrate().await;
-        // A fully circuit-stamped pending row with NO backing authority row:
-        // its stamped coordinate is superseded by absence, so the fence must
-        // cancel it instead of delivering.
-        let id: i64 = sqlx::query_scalar(
-            "INSERT INTO message_outbox(target,content,bot,source,status,
-                circuit_provider,circuit_channel_id,circuit_episode_key,
-                circuit_baseline_relay_offset,circuit_open_generation,circuit_authority_epoch,
-                circuit_dedupe_ttl_secs,circuit_owner_instance_id,circuit_owner_generation)
-             VALUES('channel:777','fenced body','notify','system','pending',
-                'discord','777','ep1',0,0,1,300,'node-a',7) RETURNING id",
+        // Build a genuine circuit-stamped pending row through the validated S3a
+        // producers (whose inserts live in the exempt `services::message_outbox_*`
+        // boundary — #4424), then supersede its authority so the fence must
+        // cancel it at delivery instead of sending.
+        use crate::services::message_outbox_circuit_authority as circuit;
+        sqlx::query(
+            "INSERT INTO intake_session_owners(provider,raw_channel_id,owner_instance_id,generation,status)
+             VALUES('discord','777','node-a',7,'active')",
         )
-        .fetch_one(&pool)
+        .execute(&pool)
         .await
-        .expect("insert superseded circuit row");
+        .expect("seed active intake owner");
+        let coord = match circuit::reserve_next_authority(
+            &pool, "discord", "777", "node-a", 7, "e1", 10, 1, None,
+        )
+        .await
+        .expect("reserve authority")
+        {
+            circuit::AuthorityReservation::Reserved(coordinate) => coordinate,
+            other => panic!("unexpected reservation: {other:?}"),
+        };
+        let id = match circuit::stage_held(
+            &pool,
+            crate::services::message_outbox::OutboxMessage {
+                target: "channel:777",
+                content: "fenced body",
+                bot: "notify",
+                source: "system",
+                reason_code: Some("fence"),
+                session_key: Some("channel:777"),
+            },
+            &coord,
+            300,
+        )
+        .await
+        .expect("stage held circuit row")
+        {
+            circuit::StageHeldOutcome::Staged { id } => id,
+            other => panic!("unexpected stage outcome: {other:?}"),
+        };
+        assert_eq!(
+            circuit::activate_fenced(&pool, id, &coord)
+                .await
+                .expect("activate"),
+            circuit::CircuitActivation::Activated
+        );
+        // A newer episode reserves epoch 2, superseding the row's stamped epoch 1.
+        assert!(matches!(
+            circuit::reserve_next_authority(
+                &pool,
+                "discord",
+                "777",
+                "node-a",
+                7,
+                "e2",
+                10,
+                1,
+                Some(1)
+            )
+            .await
+            .expect("supersede authority"),
+            circuit::AuthorityReservation::Reserved(_)
+        ));
 
         let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<i64>::new()));
         let observed_delivery = observed.clone();
