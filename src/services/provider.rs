@@ -1255,6 +1255,7 @@ impl CancelToken {
         self.cancelled.store(true, Ordering::Release);
     }
 
+
     fn set_cancel_source_kind_transactional(
         &self,
         kind: CancelSource,
@@ -2427,6 +2428,65 @@ mod cancel_token_tests {
             Some(CancelSource::WatchdogTimeout)
         );
         assert_eq!(token.cancel_source().as_deref(), Some("watchdog_timeout"));
+    }
+
+    #[test]
+    fn watchdog_poll_path_respects_completion_cleanup_before_timeout_commit() {
+        let token = CancelToken::new();
+        let now = current_unix_millis();
+        token
+            .watchdog_deadline_ms
+            .store(now + 1_000, Ordering::Relaxed);
+        token.mark_completion_cleanup();
+
+        assert!(!enforce_watchdog_deadline(&token, now + 1_000));
+        assert!(!token.cancelled.load(Ordering::Acquire));
+        assert!(!cancel_requested(Some(&token)));
+        assert_eq!(token.cancel_source_kind(), None);
+        assert_eq!(token.cancel_source(), None);
+    }
+
+    #[test]
+    fn watchdog_poll_path_commits_timeout_through_publication_boundary() {
+        let token = CancelToken::new();
+        let now = current_unix_millis();
+        token
+            .watchdog_deadline_ms
+            .store(now + 1_000, Ordering::Relaxed);
+
+        assert!(enforce_watchdog_deadline(&token, now + 1_000));
+        assert!(token.cancelled.load(Ordering::Acquire));
+        assert!(cancel_requested(Some(&token)));
+        assert_eq!(
+            token.cancel_source_kind(),
+            Some(CancelSource::WatchdogTimeout)
+        );
+        assert_eq!(token.cancel_source().as_deref(), Some("watchdog_timeout"));
+    }
+
+    #[test]
+    fn completion_cleanup_can_win_when_publication_is_held_before_poll() {
+        let token = Arc::new(CancelToken::new());
+        let now = current_unix_millis();
+        token
+            .watchdog_deadline_ms
+            .store(now + 1_000, Ordering::Relaxed);
+
+        let publication = token
+            .cancellation_publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let token_for_poll = Arc::clone(&token);
+        let poll =
+            std::thread::spawn(move || enforce_watchdog_deadline(&token_for_poll, now + 1_000));
+
+        token.mark_completion_cleanup();
+        drop(publication);
+
+        assert!(!poll.join().expect("poll thread should finish"));
+        assert!(!token.cancelled.load(Ordering::Acquire));
+        assert_eq!(token.cancel_source_kind(), None);
+        assert_eq!(token.cancel_source(), None);
     }
 
     /// claude-e rollout Phase 1 (counter-review round 3 with Codex): when
