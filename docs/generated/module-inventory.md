@@ -502,7 +502,7 @@
 | `services::discord::gateway_voice_queue` | `src/services/discord/gateway_voice_queue.rs` | 95 | 17 | 78 |  |
 | `services::discord::health` | `src/services/discord/health.rs` | 916 | 745 | 171 |  |
 | `services::discord::health::headless_turn` | `src/services/discord/health/headless_turn.rs` | 367 | 367 | 0 |  |
-| `services::discord::health::liveness_authority` | `src/services/discord/health/liveness_authority.rs` | 920 | 548 | 372 |  |
+| `services::discord::health::liveness_authority` | `src/services/discord/health/liveness_authority.rs` | 1043 | 559 | 484 |  |
 | `services::discord::health::mailbox` | `src/services/discord/health/mailbox.rs` | 113 | 113 | 0 |  |
 | `services::discord::health::provider_probe` | `src/services/discord/health/provider_probe.rs` | 361 | 197 | 164 |  |
 | `services::discord::health::rebind_request` | `src/services/discord/health/rebind_request.rs` | 112 | 87 | 25 |  |
@@ -511,7 +511,7 @@
 | `services::discord::health::recovery::stall_alert` | `src/services/discord/health/recovery/stall_alert.rs` | 515 | 174 | 341 |  |
 | `services::discord::health::recovery::watchdog_decisions` | `src/services/discord/health/recovery/watchdog_decisions.rs` | 300 | 300 | 0 |  |
 | `services::discord::health::redaction` | `src/services/discord/health/redaction.rs` | 33 | 23 | 10 |  |
-| `services::discord::health::relay_auto_heal` | `src/services/discord/health/relay_auto_heal.rs` | 1969 | 721 | 1248 |  |
+| `services::discord::health::relay_auto_heal` | `src/services/discord/health/relay_auto_heal.rs` | 2148 | 718 | 1430 |  |
 | `services::discord::health::relay_dead_reattach` | `src/services/discord/health/relay_dead_reattach.rs` | 278 | 101 | 177 |  |
 | `services::discord::health::relay_progress` | `src/services/discord/health/relay_progress.rs` | 108 | 66 | 42 |  |
 | `services::discord::health::runtime_resolve` | `src/services/discord/health/runtime_resolve.rs` | 388 | 320 | 68 |  |

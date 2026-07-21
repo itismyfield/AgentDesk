@@ -462,9 +462,12 @@ pub(in crate::services::discord) fn vouch_for_inflight(
             reason: VouchDenial::IdentityMismatch,
         };
     }
-    if verdict
-        .raw_turn_age_secs
-        .is_some_and(|age| age >= STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS)
+    let Some(raw_turn_age_secs) = verdict.raw_turn_age_secs else {
+        return LivenessVouch::NotVouched {
+            reason: VouchDenial::NoEvidence,
+        };
+    };
+    if raw_turn_age_secs.saturating_add(published_age_secs) >= STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS
     {
         return LivenessVouch::NotVouched {
             reason: VouchDenial::PastAbsoluteCeiling,
@@ -494,6 +497,14 @@ pub(in crate::services::discord) fn vouch_for_inflight(
             reason: VouchDenial::PastAbsoluteCeiling,
         },
     }
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn clear_verdict_for_test(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) {
+    VERDICTS.remove(&(provider.as_str().to_string(), channel_id.get()));
 }
 
 pub(in crate::services::discord) fn clear_capture_state_for_session(
@@ -692,6 +703,74 @@ mod tests {
         assert!(!observe_for_test(&key, coordinate(None, "a", None), 2, 2).transient_unknown);
     }
 
+    const VERDICT_OVERWRITE_CHILD_ENV: &str = "AGENTDESK_VERDICT_OVERWRITE_CHILD";
+
+    fn assert_verdict_overwrite_completes(mode: &str) {
+        let test_name = concat!(
+            "services::discord::health::liveness_authority::tests::",
+            "verdict_overwrite_child"
+        );
+        let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", test_name, "--nocapture"])
+            .env(VERDICT_OVERWRITE_CHILD_ENV, mode)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn isolated verdict overwrite test");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().expect("poll verdict overwrite child") {
+                assert!(status.success(), "isolated verdict overwrite child failed");
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                child
+                    .kill()
+                    .expect("kill deadlocked verdict overwrite child");
+                let _ = child.wait();
+                panic!("verdict overwrite must not deadlock while retaining a DashMap read guard");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn verdict_overwrite_child() {
+        let Ok(mode) = std::env::var(VERDICT_OVERWRITE_CHILD_ENV) else {
+            return;
+        };
+        let channel_id = if mode == "ceiling" { 461_503 } else { 461_513 };
+        let key = (ProviderKind::Codex.as_str().to_string(), channel_id);
+        VERDICTS.remove(&key);
+        let original = ProducerLivenessVerdict {
+            binding: binding(channel_id),
+            class: ProducerLivenessClass::ProvenAlive,
+            reasons: LivenessReasons {
+                capture_advancing: true,
+                ..Default::default()
+            },
+            coordinate: coordinate(Some(2), "a", Some((1, 2))),
+            raw_turn_age_secs: Some(1),
+            unknown_since_mono_secs: None,
+            published_at_mono_secs: 20,
+            published_at_unix_secs: 20,
+        };
+        store_verdict(key.clone(), original);
+        let prior_verdict = VERDICTS.get(&key).unwrap().clone();
+        store_verdict(
+            key,
+            ProducerLivenessVerdict {
+                published_at_mono_secs: if mode == "ceiling" { 300 } else { 19 },
+                class: if mode == "ceiling" {
+                    ProducerLivenessClass::ProvenAlive
+                } else {
+                    ProducerLivenessClass::NoEvidence
+                },
+                ..prior_verdict
+            },
+        );
+    }
+
     fn authoritative_inflight(key: &LivenessBinding) -> InflightTurnState {
         let mut state = InflightTurnState::new(
             ProviderKind::Codex,
@@ -783,6 +862,48 @@ mod tests {
             LivenessVouch::NotVouched {
                 reason: VouchDenial::PastAbsoluteCeiling
             }
+        );
+
+        assert_verdict_overwrite_completes("ceiling");
+        let store_key = (key.provider.clone(), key.channel_id);
+        let prior_verdict = VERDICTS.get(&store_key).unwrap().clone();
+        store_verdict(
+            store_key,
+            ProducerLivenessVerdict {
+                published_at_mono_secs: 300,
+                raw_turn_age_secs: Some(STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS - 1),
+                ..prior_verdict
+            },
+        );
+        assert_eq!(
+            vouch_for_inflight(
+                &ProviderKind::Codex,
+                ChannelId::new(key.channel_id),
+                &inflight,
+                301
+            ),
+            LivenessVouch::NotVouched {
+                reason: VouchDenial::PastAbsoluteCeiling
+            },
+            "a verdict published just before the ceiling must expire when its monotonic age crosses it"
+        );
+
+        let store_key = (key.provider.clone(), key.channel_id);
+        let mut missing_age = VERDICTS.get(&store_key).unwrap().clone();
+        missing_age.published_at_mono_secs = 400;
+        missing_age.raw_turn_age_secs = None;
+        store_verdict(store_key, missing_age);
+        assert_eq!(
+            vouch_for_inflight(
+                &ProviderKind::Codex,
+                ChannelId::new(key.channel_id),
+                &inflight,
+                400
+            ),
+            LivenessVouch::NotVouched {
+                reason: VouchDenial::NoEvidence
+            },
+            "an unparseable authoritative start time must remain fail closed"
         );
     }
 
@@ -906,10 +1027,12 @@ mod tests {
             published_at_unix_secs: 20,
         };
         store_verdict(key.clone(), original);
+        assert_verdict_overwrite_completes("monotonic");
+        let prior_verdict = VERDICTS.get(&key).unwrap().clone();
         let stale = ProducerLivenessVerdict {
             published_at_mono_secs: 19,
             class: ProducerLivenessClass::NoEvidence,
-            ..VERDICTS.get(&key).unwrap().clone()
+            ..prior_verdict
         };
         store_verdict(key.clone(), stale);
         assert_eq!(
