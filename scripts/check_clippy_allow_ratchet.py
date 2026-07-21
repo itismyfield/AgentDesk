@@ -18,8 +18,58 @@ LINTS = (
     "too_many_arguments",
     "type_complexity",
 )
-ATTRIBUTE_RE = re.compile(r"#!?\s*\[\s*(?:allow|expect)\s*\((?P<body>.*?)\)\s*\]", re.DOTALL)
+ATTRIBUTE_START_RE = re.compile(r"#!?\s*\[")
+SUPPRESSION_RE = re.compile(r"\b(?:allow|expect)\s*\((?P<body>[^()]*)\)", re.DOTALL)
 LINT_RE = re.compile(r"\bclippy::(?P<lint>[a-zA-Z0-9_]+)\b")
+# Treat every Clippy lint group as suppressing all governed lints. This is
+# intentionally conservative: group membership changes across Clippy releases,
+# and a broad allow must never bypass this occurrence ratchet.
+CLIPPY_GROUPS = frozenset(
+    {
+        "all",
+        "cargo",
+        "complexity",
+        "correctness",
+        "nursery",
+        "pedantic",
+        "perf",
+        "restriction",
+        "style",
+        "suspicious",
+    }
+)
+
+
+def rust_attributes(text: str) -> list[str]:
+    """Return balanced Rust attributes, including cfg_attr nested calls."""
+    attributes: list[str] = []
+    cursor = 0
+    while match := ATTRIBUTE_START_RE.search(text, cursor):
+        depth = 1
+        index = match.end()
+        in_string = False
+        escaped = False
+        while index < len(text) and depth:
+            char = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+            elif char == '"':
+                in_string = True
+            elif char == "[":
+                depth += 1
+            elif char == "]":
+                depth -= 1
+            index += 1
+        if depth:
+            break
+        attributes.append(text[match.start() : index])
+        cursor = index
+    return attributes
 
 
 def collect_occurrences(source_root: Path = SOURCE_ROOT) -> Counter[tuple[str, str]]:
@@ -27,11 +77,14 @@ def collect_occurrences(source_root: Path = SOURCE_ROOT) -> Counter[tuple[str, s
     for path in sorted(source_root.rglob("*.rs")):
         relative = path.relative_to(REPO_ROOT).as_posix()
         text = path.read_text(encoding="utf-8")
-        for attribute in ATTRIBUTE_RE.finditer(text):
-            for lint_match in LINT_RE.finditer(attribute.group("body")):
-                lint = lint_match.group("lint")
-                if lint in LINTS:
-                    occurrences[(relative, lint)] += 1
+        for attribute in rust_attributes(text):
+            for suppression in SUPPRESSION_RE.finditer(attribute):
+                for lint_match in LINT_RE.finditer(suppression.group("body")):
+                    lint = lint_match.group("lint")
+                    governed = LINTS if lint in CLIPPY_GROUPS else (lint,)
+                    for governed_lint in governed:
+                        if governed_lint in LINTS:
+                            occurrences[(relative, governed_lint)] += 1
     return occurrences
 
 

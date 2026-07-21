@@ -34,25 +34,53 @@ class ClippyAllowRatchetTest(unittest.TestCase):
         self.assertEqual(len(problems), 1)
         self.assertIn("baseline 0", problems[0])
 
-    def test_only_attributes_are_counted(self) -> None:
+    def _collect_source(self, text: str) -> Counter[tuple[str, str]]:
         with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
             root = Path(temp_dir)
             source = root / "sample.rs"
-            source.write_text(
-                "// clippy::too_many_arguments\n"
-                "#[allow(\n    clippy::too_many_arguments,\n    clippy::type_complexity\n)]\n"
-                "fn sample() {}\n",
-                encoding="utf-8",
-            )
+            source.write_text(text, encoding="utf-8")
             original_root = RATCHET.REPO_ROOT
             try:
                 RATCHET.REPO_ROOT = root
-                actual = RATCHET.collect_occurrences(root)
+                return RATCHET.collect_occurrences(root)
             finally:
                 RATCHET.REPO_ROOT = original_root
+
+    def test_only_attributes_are_counted(self) -> None:
+        actual = self._collect_source(
+            "// clippy::too_many_arguments\n"
+            "#[allow(\n    clippy::too_many_arguments,\n    clippy::type_complexity\n)]\n"
+            "fn sample() {}\n"
+        )
         self.assertEqual(actual[("sample.rs", "too_many_arguments")], 1)
         self.assertEqual(actual[("sample.rs", "type_complexity")], 1)
         self.assertEqual(sum(actual.values()), 2)
+
+    def test_clippy_all_group_allow_is_ratchet_visible(self) -> None:
+        actual = self._collect_source("#![allow(clippy::all)]\nfn sample() {}\n")
+        for lint in RATCHET.LINTS:
+            self.assertEqual(actual[("sample.rs", lint)], 1)
+        problems = RATCHET.validate_occurrences(actual, Counter())
+        self.assertEqual(len(problems), len(RATCHET.LINTS))
+
+    def test_cfg_attr_nested_allow_is_ratchet_visible(self) -> None:
+        actual = self._collect_source(
+            "#[cfg_attr(all(), allow(clippy::too_many_arguments))]\n"
+            "fn sample() {}\n"
+        )
+        self.assertEqual(actual[("sample.rs", "too_many_arguments")], 1)
+        problems = RATCHET.validate_occurrences(actual, Counter())
+        self.assertEqual(len(problems), 1)
+        self.assertIn("too_many_arguments", problems[0])
+
+    def test_cfg_attr_nested_group_allow_is_ratchet_visible(self) -> None:
+        actual = self._collect_source(
+            "#[cfg_attr(all(), expect(clippy::complexity))]\n"
+            "fn sample() {}\n"
+        )
+        for lint in RATCHET.LINTS:
+            self.assertEqual(actual[("sample.rs", lint)], 1)
+        self.assertEqual(len(RATCHET.validate_occurrences(actual, Counter())), 4)
 
 
 if __name__ == "__main__":
