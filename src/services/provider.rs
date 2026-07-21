@@ -1211,6 +1211,10 @@ impl CancelToken {
             .cancellation_publication
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        self.publish_watchdog_timeout_locked()
+    }
+
+    fn publish_watchdog_timeout_locked(&self) -> bool {
         if self.completion_cleanup.load(Ordering::Acquire) {
             return false;
         }
