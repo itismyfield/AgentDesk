@@ -9,9 +9,13 @@
 # Enforcement (generation fails otherwise):
 #   * Every current prod-giant must appear either in `grandfathered` below or as
 #     an `[[entry]]` table. A new giant with neither is rejected — register it
-#     with an owner, deadline, and decompose issue first.
-#   * Each `[[entry]]` must carry owner, deadline (YYYY-MM-DD), and
-#     decompose_issue. Deadline-less registration is forbidden.
+#     with shrink(owner + deadline + issue) or keep(owner + reason) first.
+#   * Each `[[entry]]` has a decision. Omitted legacy decisions normalize to
+#     `shrink` for backward compatibility. `shrink` requires a real owner,
+#     calendar-valid non-overdue deadline, and a real numeric decompose_issue;
+#     `keep` requires a real owner and substantive keep_reason, and forbids
+#     deadline/decompose_issue. Placeholder values (TBD/unknown/none/umbrella)
+#     and #4519 are never valid decompose issues.
 #   * A `grandfathered` path or `[[entry]]` whose module is no longer a
 #     prod-giant is a ghost registration and must be removed (decomposition
 #     complete).
@@ -28,8 +32,9 @@
 # `grandfathered` (decomposed or promoted to an [[entry]]), but a path
 # that is not already in the baseline can never be grandfathered. This
 # blocks smuggling a new prod-giant into `grandfathered` to skip the
-# owner/deadline/decompose_issue requirement (swap-in is rejected, not
-# just count growth). Only remove a path from the baseline once it has
+# shrink(owner + deadline + issue) or keep(owner + reason) requirement
+# (swap-in is rejected, not just count growth). Only remove a path from the
+# baseline once it has
 # been fully retired from `grandfathered`.
 grandfathered_baseline_paths = [
   "src/cli/client.rs",
@@ -265,11 +270,11 @@ grandfathered = [
   "src/voice/receiver.rs",
 ]
 
-# Tracked decompositions. Each requires owner + deadline (YYYY-MM-DD) +
-# decompose_issue. The generator renders these into the registry doc and the
-# freshness gate fails CI if the module's production LoC grows past the recorded
-# baseline (decomposition regression) or drops below the giant threshold while
-# the entry is still present (ghost registration).
+# Tracked giant decisions. `decision = "shrink"` requires owner + deadline
+# (YYYY-MM-DD) + decompose_issue; `decision = "keep"` requires owner +
+# keep_reason and must omit deadline/decompose_issue. Existing entries that omit
+# decision are legacy shrink entries. The generator renders these into the
+# registry doc and rejects ghost registrations.
 
 [[entry]]
 # #3721 first-batch promotion: largest relay hotfile by prod LoC, raw ratchet

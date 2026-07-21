@@ -8,6 +8,7 @@ import re
 import sys
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime, date, timezone
 from typing import Callable, Iterable
 from pathlib import Path
 
@@ -154,10 +155,17 @@ class ModuleEntry:
 @dataclass(frozen=True)
 class GiantFileRegistration:
     file_path: str
+    decision: str
     owner: str
     deadline: str
     decompose_issue: str
+    keep_reason: str
     prod_line_count: int
+
+
+# Kept as a module seam so registry validation has deterministic date coverage.
+def today_utc() -> date:
+    return datetime.now(timezone.utc).date()
 
 
 @dataclass(frozen=True)
@@ -880,8 +888,42 @@ _REGISTRY_LIST_KV_RE = re.compile(r'^"(?P<value>[^"]+)"\s*,?\s*$')
 _REGISTRY_KV_RE = re.compile(r'^(?P<key>[A-Za-z0-9_]+)\s*=\s*"(?P<value>[^"]*)"$')
 _REGISTRY_ARRAY_RE = re.compile(r"^(?P<name>[A-Za-z0-9_]+)\s*=\s*\[\s*(?P<rest>.*)$")
 _DEADLINE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_REGISTRY_ENTRY_FIELDS = ("file", "owner", "deadline", "decompose_issue")
+_ISSUE_RE = re.compile(r"^#(?P<number>[1-9]\d*)$")
+_REGISTRY_ENTRY_FIELDS = ("file",)
 _REGISTRY_ARRAY_NAMES = ("grandfathered", "grandfathered_baseline_paths")
+_PLACEHOLDER_VALUES = frozenset({"tbd", "unknown", "none", "umbrella"})
+_DECOMPOSE_ISSUE_SELF_REFERENCE = "#4519"
+_DECISION_SHRINK = "shrink"
+_DECISION_KEEP = "keep"
+
+
+def _is_real_value(value: str) -> bool:
+    return bool(value.strip()) and value.strip().lower() not in _PLACEHOLDER_VALUES
+
+
+def _parse_deadline(value: str) -> date | None:
+    if not _DEADLINE_RE.fullmatch(value):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _is_real_decompose_issue(value: str) -> bool:
+    match = _ISSUE_RE.fullmatch(value.strip())
+    return match is not None and value.strip() != _DECOMPOSE_ISSUE_SELF_REFERENCE
+
+
+def _markdown_table_value(value: str) -> str:
+    """Normalize registry metadata before interpolating it into Markdown cells."""
+    return (
+        value.replace("\\", "\\\\")
+        .replace("|", "\\|")
+        .replace("\r\n", " ")
+        .replace("\r", " ")
+        .replace("\n", " ")
+    )
 
 
 def _strip_toml_comment(line: str) -> str:
@@ -1014,8 +1056,8 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
             problems.append(
                 f"grandfathered path {path!r} is not in the frozen "
                 "`grandfathered_baseline_paths` baseline; new giants must be "
-                "registered as an [[entry]] with owner/deadline/decompose_issue "
-                "instead of grandfathered"
+                "registered as an [[entry]] with shrink(owner + deadline + issue) "
+                "or keep(owner + reason) instead of grandfathered"
             )
 
     registrations: list[GiantFileRegistration] = []
@@ -1028,10 +1070,44 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
             )
             continue
         path = entry["file"]
-        if not _DEADLINE_RE.fullmatch(entry["deadline"]):
+        # Registrations created before #4519 have no decision; retain their
+        # established decomposition contract by treating omission as `shrink`.
+        decision = entry.get("decision", _DECISION_SHRINK)
+        owner = entry.get("owner", "")
+        deadline = entry.get("deadline", "")
+        decompose_issue = entry.get("decompose_issue", "")
+        keep_reason = entry.get("keep_reason", "")
+        if decision not in {_DECISION_SHRINK, _DECISION_KEEP}:
             problems.append(
-                f"[[entry]] {path!r} deadline {entry['deadline']!r} is not YYYY-MM-DD"
+                f"[[entry]] {path!r} decision {decision!r} must be `shrink` or `keep`"
             )
+        elif decision == _DECISION_SHRINK:
+            if not _is_real_value(owner):
+                problems.append(f"[[entry]] {path!r} shrink requires a real owner")
+            parsed_deadline = _parse_deadline(deadline)
+            if parsed_deadline is None:
+                problems.append(
+                    f"[[entry]] {path!r} shrink deadline {deadline!r} is not a calendar-valid YYYY-MM-DD"
+                )
+            elif parsed_deadline < today_utc():
+                problems.append(
+                    f"[[entry]] {path!r} shrink deadline {deadline!r} is overdue"
+                )
+            if not _is_real_decompose_issue(decompose_issue):
+                problems.append(
+                    f"[[entry]] {path!r} shrink decompose_issue {decompose_issue!r} must be a real numeric issue and cannot be #4519"
+                )
+            if keep_reason:
+                problems.append(f"[[entry]] {path!r} shrink forbids keep_reason")
+        elif decision == _DECISION_KEEP:
+            if not _is_real_value(owner):
+                problems.append(f"[[entry]] {path!r} keep requires a real owner")
+            if not _is_real_value(keep_reason):
+                problems.append(f"[[entry]] {path!r} keep requires a substantive keep_reason")
+            if deadline:
+                problems.append(f"[[entry]] {path!r} keep forbids deadline")
+            if decompose_issue:
+                problems.append(f"[[entry]] {path!r} keep forbids decompose_issue")
         if path in seen:
             problems.append(f"duplicate registry path: {path!r}")
         seen.add(path)
@@ -1045,9 +1121,11 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
         registrations.append(
             GiantFileRegistration(
                 file_path=path,
-                owner=entry["owner"],
-                deadline=entry["deadline"],
-                decompose_issue=entry["decompose_issue"],
+                decision=decision,
+                owner=owner,
+                deadline=deadline,
+                decompose_issue=decompose_issue,
+                keep_reason=keep_reason,
                 prod_line_count=prod,
             )
         )
@@ -1067,9 +1145,11 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
         registrations.append(
             GiantFileRegistration(
                 file_path=path,
+                decision="",
                 owner="",
                 deadline="",
                 decompose_issue="",
+                keep_reason="",
                 prod_line_count=prod,
             )
         )
@@ -1079,8 +1159,8 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
         problems.append(
             f"unregistered giant: {path!r} has {prod_giants[path]} prod lines "
             f"(>= {GIANT_FILE_THRESHOLD}) but is missing from "
-            f"{rel_posix(GIANT_FILE_REGISTRY)}; add an [[entry]] with owner, "
-            "deadline, and decompose_issue"
+            f"{rel_posix(GIANT_FILE_REGISTRY)}; add an [[entry]] with "
+            "shrink(owner + deadline + issue) or keep(owner + reason)"
         )
 
     if problems:
@@ -1093,8 +1173,8 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
 
 
 def render_giant_file_registry(registrations: list[GiantFileRegistration]) -> str:
-    tracked = [reg for reg in registrations if reg.deadline]
-    grandfathered = [reg for reg in registrations if not reg.deadline]
+    tracked = [reg for reg in registrations if reg.decision]
+    grandfathered = [reg for reg in registrations if not reg.decision]
     lines = [
         "# Giant-file Registry",
         "",
@@ -1104,31 +1184,34 @@ def render_giant_file_registry(registrations: list[GiantFileRegistration]) -> st
         f"- Giant-file threshold: `>= {GIANT_FILE_THRESHOLD}` production lines "
         "(excludes `#[cfg(test)] mod` blocks).",
         f"- Registered giant files: `{len(registrations)}`",
-        f"- Tracked (owner + deadline + decompose issue): `{len(tracked)}`",
-        f"- Grandfathered (awaiting owner/deadline backfill or decomposition): "
+        f"- Tracked (decision + owner): `{len(tracked)}`",
+        f"- Grandfathered (awaiting owner/decision backfill or decomposition): "
         f"`{len(grandfathered)}`",
         "",
-        "## Tracked Decompositions",
+        "## Tracked Decisions",
         "",
-        "| Path | Prod | Owner | Deadline | Decompose Issue |",
-        "| --- | ---: | --- | --- | --- |",
+        "| Path | Prod | Decision | Owner | Deadline | Decompose Issue | Keep Reason |",
+        "| --- | ---: | --- | --- | --- | --- | --- |",
     ]
     if tracked:
         for reg in tracked:
             lines.append(
-                f"| `{reg.file_path}` | {reg.prod_line_count} | {reg.owner} | "
-                f"{reg.deadline} | {reg.decompose_issue} |"
+                f"| `{_markdown_table_value(reg.file_path)}` | {reg.prod_line_count} | "
+                f"{_markdown_table_value(reg.decision)} | {_markdown_table_value(reg.owner)} | "
+                f"{_markdown_table_value(reg.deadline)} | "
+                f"{_markdown_table_value(reg.decompose_issue)} | "
+                f"{_markdown_table_value(reg.keep_reason)} |"
             )
     else:
-        lines.append("| _none_ | | | | |")
+        lines.append("| _none_ | | | | | | |")
     lines.extend(
         [
             "",
             "## Grandfathered",
             "",
-            "> Predate the deadline mandate (#3036). Each must be decomposed "
-            "(drops off this list) or promoted to a tracked decomposition with "
-            "an owner and deadline.",
+            "> Predate the decision mandate (#4519). Each must be decomposed "
+            "(drops off this list) or promoted to shrink(owner + deadline + issue) "
+            "or keep(owner + reason).",
             "",
             "| Path | Prod |",
             "| --- | ---: |",
