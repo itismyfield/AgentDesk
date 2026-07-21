@@ -4490,10 +4490,10 @@ class TickChannelTests(unittest.TestCase):
             )
 
         owner.write_text(
-            record(self.now - 4000, "historical block never delivered") + "\n",
+            record(self.now - 2000, "historical block never delivered") + "\n",
             encoding="utf-8",
         )
-        os.utime(owner, (self.now - 4000, self.now - 4000))
+        os.utime(owner, (self.now - 2000, self.now - 2000))
         rt = self.make_rt()
         rt.haystack = ""
         state: dict = {}
@@ -4503,13 +4503,17 @@ class TickChannelTests(unittest.TestCase):
         self.assertIn(str(owner), chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY])
         chs["issue_url"] = "https://example.test/issues/4715"
 
+        successor_at = self.now + rt.cfg.idle_quiet_secs + 1
         successor.write_text(
-            record(self.now + 1, "current session delivery proof") + "\n",
+            record(successor_at, "current session delivery proof") + "\n",
             encoding="utf-8",
         )
-        os.utime(successor, (self.now + 1, self.now + 1))
+        os.utime(successor, (successor_at, successor_at))
         rt.haystack = norm("current session delivery proof")
-        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        rt.watcher_probe = WatcherStateProbe(
+            200, attached=True, desynced=False, bound_output_path=str(successor)
+        )
+        tick_channel(rt, TICK_CHANNEL, state, successor_at + 1)
 
         self.assertEqual(chs[SELECTED_TRANSCRIPT_KEY], str(successor))
         self.assertFalse(chs.get("alerting"), (chs, rt.log_lines))
@@ -4521,6 +4525,95 @@ class TickChannelTests(unittest.TestCase):
         self.assertTrue(
             any("historical-gap-owner-retired" in line for line in rt.log_lines)
         )
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+        self.assertNotIn(
+            str(owner), chs.get(relay_watchdog.PENDING_TRANSCRIPTS_KEY, [])
+        )
+        self.assertNotIn(
+            str(owner), chs.get(relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY, [])
+        )
+        self.assertFalse(chs.get("alerting"), (chs, rt.log_lines))
+
+    def test_4715_successor_without_runtime_binding_keeps_historical_gap_owner(self):
+        owner = self.proj_dir / "parallel-owner-gap.jsonl"
+        successor = self.proj_dir / "newer-delivered-unbound.jsonl"
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        owner.write_text(
+            record(self.now - 2000, "parallel owner remains missing") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(owner, (self.now - 2000, self.now - 2000))
+        rt = self.make_rt()
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        chs = state["999"]
+
+        successor_at = self.now + rt.cfg.idle_quiet_secs + 1
+        successor.write_text(
+            record(successor_at, "unbound successor delivered") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(successor, (successor_at, successor_at))
+        rt.haystack = norm("unbound successor delivered")
+        rt.watcher_probe = WatcherStateProbe(
+            200, attached=True, desynced=False, bound_output_path=str(owner)
+        )
+        tick_channel(rt, TICK_CHANNEL, state, successor_at + 1)
+
+        self.assertTrue(chs.get("alerting"), (chs, rt.log_lines))
+        self.assertIn(str(owner), chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY])
+        self.assertNotIn(str(owner), chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {}))
+
+    def test_4715_active_bound_predecessor_is_not_retired_by_mtime_order(self):
+        owner = self.proj_dir / "active-bound-owner.jsonl"
+        successor = self.proj_dir / "newer-delivered.jsonl"
+
+        def record(epoch: float, text: str) -> str:
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)
+                    ),
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+
+        owner.write_text(
+            record(self.now - 2000, "active owner remains missing") + "\n",
+            encoding="utf-8",
+        )
+        rt = self.make_rt()
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        chs = state["999"]
+
+        successor.write_text(
+            record(self.now + 1, "newer delivery does not prove predecessor ended") + "\n",
+            encoding="utf-8",
+        )
+        os.utime(successor, (self.now + 1, self.now + 1))
+        rt.haystack = norm("newer delivery does not prove predecessor ended")
+        rt.watcher_probe = WatcherStateProbe(
+            200, attached=True, desynced=False, bound_output_path=str(successor)
+        )
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+
+        self.assertTrue(chs.get("alerting"), (chs, rt.log_lines))
+        self.assertIn(str(owner), chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY])
+        self.assertNotIn(str(owner), chs.get(relay_watchdog.RETIRED_TRANSCRIPTS_KEY, {}))
 
     def test_invariant_4435_retiring_one_of_two_gap_owners_keeps_incident_clock(self):
         owner_a = self.proj_dir / "multi-gap-a.jsonl"

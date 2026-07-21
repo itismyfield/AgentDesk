@@ -3618,11 +3618,12 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             )
         return
 
-    # A cleared/restarted provider session creates a new transcript. Once that
-    # selected successor has a delivered OK verdict, an idle prior transcript
-    # must remain historical evidence rather than own the channel's live outage
-    # forever. This is a retirement, not proof that the old LOST blocks arrived,
-    # so the normal RECOVERED notification must stay suppressed.
+    # A cleared/restarted provider session creates a new transcript. Retire an
+    # old GAP owner only when dcserver proves that the channel is now bound to the
+    # delivered successor and the old file has crossed the normal idle boundary.
+    # File mtime ordering alone is not a session boundary: concurrent writers and
+    # delayed flushes can invert it. This is a retirement, not proof that the old
+    # LOST blocks arrived, so the normal RECOVERED notification stays suppressed.
     selected_path = str(selected.path) if selected is not None else None
     selected_verdict = next(
         (
@@ -3632,6 +3633,11 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         ),
         None,
     )
+    selected_probe = rt.watcher_state(cid) if selected_path else WatcherStateProbe(None)
+    successor_binding_proven = (
+        selected_probe.status == 200
+        and selected_probe.bound_output_path == selected_path
+    )
     superseded_gap_owners: list[str] = []
     if (
         selected_path
@@ -3639,24 +3645,46 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         and selected_verdict.state == STATE_OK
         and fresh_undelivered_by_path.get(selected_path, 0) == 0
         and delivered_watermark_for_path(chs, selected_path) > 0
+        and successor_binding_proven
     ):
         for path in _validated_gap_owner_transcripts(chs):
             if path == selected_path or path in semantic_growth_paths:
                 continue
             candidate = candidate_by_path.get(path)
-            if candidate is None or selected is None:
-                continue
-            if candidate.mtime >= selected.mtime:
+            if candidate is None or now - candidate.mtime < cfg.idle_quiet_secs:
                 continue
             superseded_gap_owners.append(path)
             retired_transcripts[path] = (candidate.size, now)
         if superseded_gap_owners:
+            superseded = set(superseded_gap_owners)
             _store_retired_transcripts(chs, retired_transcripts)
             retired_pending_paths.extend(superseded_gap_owners)
+            remaining_pending = [
+                path for path in remaining_pending if path not in superseded
+            ]
+            pending_failures = {
+                path: failures
+                for path, failures in pending_failures.items()
+                if path not in superseded
+            }
+            pending_since = {
+                path: since
+                for path, since in pending_since.items()
+                if path not in superseded
+            }
+            chs[PENDING_TRANSCRIPTS_KEY] = remaining_pending
+            if pending_failures:
+                chs[PENDING_TRANSCRIPT_FAILURES_KEY] = pending_failures
+            else:
+                chs.pop(PENDING_TRANSCRIPT_FAILURES_KEY, None)
+            if pending_since:
+                chs[PENDING_TRANSCRIPT_SINCE_KEY] = pending_since
+            else:
+                chs.pop(PENDING_TRANSCRIPT_SINCE_KEY, None)
             evaluated = [
                 (candidate, verdict)
                 for candidate, verdict in evaluated
-                if str(candidate.path) not in superseded_gap_owners
+                if str(candidate.path) not in superseded
             ]
             rt.log(
                 f"[{cid}] historical-gap-owner-retired "
