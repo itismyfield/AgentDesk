@@ -2089,7 +2089,9 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 continue;
             }
         };
-        let cancel_token = Arc::new(CancelToken::new());
+        let cancel_token = Arc::new(CancelToken::from_persisted_turn_nonce(
+            state.turn_nonce.clone(),
+        ));
         super::turn_bridge::bind_cancel_token_tmux_runtime(
             provider,
             &cancel_token,
@@ -2142,7 +2144,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         )
         .await;
 
-        let adk_session_key = build_adk_session_key(shared, channel_id, provider).await;
+        let adk_session_key = build_adk_session_key(shared, channel_id, provider, None).await;
         let adk_session_name = channel_name.clone();
         let adk_session_info = derive_adk_session_info(
             Some(&state.user_text),

@@ -132,6 +132,7 @@ fn finding_categories_from_dispatch_result(result: &str) -> Option<String> {
 }
 
 /// #119: Record a review tuning outcome for FP/FN aggregation.
+#[allow(clippy::too_many_arguments)]
 async fn record_tuning_outcome_pg(
     pool: &sqlx::PgPool,
     card_id: &str,

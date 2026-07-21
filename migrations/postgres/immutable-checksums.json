@@ -490,6 +490,21 @@
       "path": "migrations/postgres/0095_intake_outbox_idempotency_key_index.sql",
       "sha256": "3464e5a5657f99e808ac7125a8a68ed3e18cf3580e063f2649cf3fa7cc593d28",
       "version": 95
+    },
+    {
+      "path": "migrations/postgres/0096_message_outbox_circuit_authority.sql",
+      "sha256": "5fe12eb721b031455d04df854117fc21386c0528378d11ccb1486fef2f6f97cf",
+      "version": 96
+    },
+    {
+      "path": "migrations/postgres/0097_scheduled_message_context_snapshots.sql",
+      "sha256": "82e4369c92f9ae2de8cc96c252851ec1c36997b5264b531c867c4b2f29c2c070",
+      "version": 97
+    },
+    {
+      "path": "migrations/postgres/0098_scheduled_message_snapshot_reclaim.sql",
+      "sha256": "655db436b1545c761338a20460b81cee80269040fe1958bd8f52e7f24743ebb6",
+      "version": 98
     }
   ],
   "version": 1

@@ -28,6 +28,7 @@ fn tui_direct_bridge_uncommitted_delivery_error(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn ensure_tui_direct_bridge_delivery_committed(
     provider: &ProviderKind,
     channel_id: ChannelId,

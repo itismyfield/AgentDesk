@@ -90,6 +90,7 @@ pub(super) fn record_stopped_turn_terminal_replace_delivery(
 /// (always true on `Ok`, since the empty-Vec case errors in
 /// `send_ordered_long_terminal_chunks`); callers treat `None` as "no anchor,
 /// record range only" (safe, identical to the absent-status-panel case).
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn send_ordered_long_terminal_response(
     shared: &SharedData,
     gateway: &dyn TurnGateway,
@@ -163,6 +164,7 @@ async fn send_ordered_long_terminal_chunks(
     Ok((first_msg_id, last_msg_id, delete_result))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn turn_bridge_replace_outcome_committed(
     shared: &SharedData,
     provider: &ProviderKind,

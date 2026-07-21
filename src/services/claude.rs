@@ -19,7 +19,7 @@ use crate::services::claude_tui::hosting::{
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
-use crate::services::process::{kill_child_tree, kill_pid_tree, shell_escape};
+use crate::services::process::{kill_child_tree, shell_escape};
 use crate::services::provider::{
     CancelToken, ProviderKind, ReadOutputResult, SessionProbe, cancel_requested,
     cancel_token_claude_interrupt::{
@@ -473,10 +473,7 @@ where
     let (tx, rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
         let result = run_worker(std::sync::Arc::clone(&cancel_for_worker));
-        *cancel_for_worker
-            .child_pid
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = None;
+        cancel_for_worker.clear_child_pid();
         let _ = tx.send(result);
     });
 
@@ -503,20 +500,17 @@ where
                 "execute_command_simple_with_timeout timed out; cancelling and killing child"
             );
             cancel_token.cancel_with_tmux_cleanup();
-            let child_pid = cancel_token
-                .child_pid
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .take();
+            // request_cleanup owns signal delivery and deliberately leaves the PID
+            // published until the worker clears it, preserving the drain distinction.
+            let child_pid = cancel_token.child_pid_value();
             let child_pid_was_none = child_pid.is_none();
             if let Some(pid) = child_pid {
                 tracing::warn!(
                     provider = provider_name,
                     stage = %label_owned,
                     child_pid = pid,
-                    "execute_command_simple_with_timeout sending SIGTERM/SIGKILL to child process group"
+                    "execute_command_simple_with_timeout cleanup signal dispatched for child process group"
                 );
-                kill_pid_tree(pid);
             } else {
                 tracing::warn!(
                     provider = provider_name,
@@ -641,6 +635,7 @@ mod simple_launch_env_tests {
 /// Execute a command using Claude CLI with streaming output
 /// If `system_prompt` is None, uses the default file manager system prompt.
 /// If `system_prompt` is Some(""), no system prompt is appended.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_command_streaming(
     prompt: &str,
     session_id: Option<&str>,
@@ -992,8 +987,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
 
     // Store child PID in cancel token so the caller can kill it externally
     register_child_pid(cancel_token.as_deref(), child.id());
-    let _cancel_watchdog =
-        spawn_cancel_watchdog(cancel_token.clone(), child.id(), "claude-direct-stream");
+    let _cancel_watchdog = spawn_cancel_watchdog(cancel_token.clone(), "claude-direct-stream");
 
     // Write prompt to stdin
     if let Some(mut stdin) = child.stdin.take() {
@@ -1736,6 +1730,7 @@ pub(crate) fn claude_tui_turn_start_offset_after_timestamp(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn execute_streaming_local_tui_tmux(
     prompt: &str,
     session_id: Option<&str>,
@@ -2018,6 +2013,7 @@ fn cleanup_stale_claude_tui_session(tmux_session_name: &str) {
 /// Prepare the Claude TUI launch script and hosted tmux session.
 /// Verbatim prep/create extraction: temp cleanup, owner/runtime markers, launch script, create_session; marker `?` exits precede cleanup, later failures keep original cleanup, success returns owner path.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn prepare_and_create_claude_tui_session(
     tmux_session_name: &str,
     working_dir: &str,
@@ -2217,6 +2213,7 @@ pub(crate) fn emit_claude_tui_watcher_handoff(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn read_claude_tui_transcript_until_done(
     transcript_path: &str,
     start_offset: u64,
@@ -2295,6 +2292,7 @@ fn wait_for_claude_tui_transcript_file(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn wait_for_claude_tui_transcript_file_inner<Exists, Alive, Snapshot>(
     transcript_path: &str,
     start_offset: u64,
@@ -2567,6 +2565,7 @@ mod claude_tui_ready_probe_tests {
 /// - Input (Discord→Claude): parent writes stream-json to INPUT_FIFO
 /// - Input (terminal→Claude): wrapper reads stdin directly
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn execute_streaming_local_tmux(
     args: &[String],
     prompt: &str,
@@ -3137,9 +3136,7 @@ pub(crate) fn execute_streaming_local_process(
     })?;
 
     // Store child PID in cancel token
-    if let Some(ref token) = cancel_token {
-        *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle.pid());
-    }
+    register_child_pid(cancel_token.as_deref(), handle.pid());
 
     // Store handle for follow-up messages and protect it from tmux-takeover cleanup.
     let active_turn = insert_process_session_and_mark_active_turn(session_name.to_string(), handle);
@@ -3218,7 +3215,7 @@ fn send_followup_to_process(
     // Store session in cancel token
     if let Some(ref token) = cancel_token {
         if let Some(pid) = process_session_pid(session_name) {
-            *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(pid);
+            token.store_child_pid(pid);
         }
     }
 

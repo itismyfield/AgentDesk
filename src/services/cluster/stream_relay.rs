@@ -534,6 +534,7 @@ enum QueuePushResult {
     Closed,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum QueuePopResult {
     Frame(StreamFrame),
     Empty,
@@ -642,6 +643,7 @@ pub struct TerminalCommitFence {
     pub turn_start_offset: Option<u64>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn try_send_frame_inner(
     matched: &MatchedChannel,
     queue: &Arc<RelayFrameQueue>,

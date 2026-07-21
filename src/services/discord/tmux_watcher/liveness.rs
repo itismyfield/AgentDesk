@@ -208,13 +208,6 @@ pub(super) fn watcher_streaming_rollover_should_skip(current_portion: &str) -> b
     )
 }
 
-pub(super) fn watcher_should_suppress_streaming_after_bridge_delivery(
-    bridge_delivered_turn: bool,
-    has_assistant_response: bool,
-) -> bool {
-    bridge_delivered_turn && has_assistant_response
-}
-
 pub(in crate::services::discord::tmux) fn watcher_lifecycle_terminal_delivery_observed(
     terminal_delivery_observed: bool,
     bridge_delivered_turn: bool,
@@ -563,6 +556,7 @@ pub(super) fn watcher_handle_no_dispatch_post_work_idle_body(
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn discard_restored_response_seed_before_no_inflight_terminal_relay(
     full_response: &mut String,
     response_sent_offset: &mut usize,

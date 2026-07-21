@@ -1788,18 +1788,94 @@ fn slash_command_control_turn_dedupes_double_post_but_not_distinct_commands() {
     ));
 }
 
+fn local_control_prompt(tmux: &str, body: &str, entry_id: &str) -> ObservedTuiPrompt {
+    ObservedTuiPrompt {
+        provider: "claude".to_string(),
+        tmux_session_name: tmux.to_string(),
+        prompt: body.to_string(),
+        source_event_id: Some(entry_id.to_string()),
+        observed_at: chrono::Utc::now(),
+        external_input_lease_generation:
+            crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+        ssh_direct_observation_generation:
+            crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+    }
+}
+
 #[test]
-fn local_compact_bypasses_the_two_second_external_slash_control_gate() {
-    let sess = format!("local-compact-gate-{:p}", &0u8 as *const u8);
+fn local_slash_control_note_emission_is_wired_through_prepare_gate() {
+    let relay_source = include_str!("../tui_prompt_relay.rs");
+    assert!(
+        relay_source.contains(
+            "let Some(note) = prepare_local_only_slash_control_note(&prompt, kind) else {"
+        ),
+        "relay_observed_prompt must consume the gated note outcome before channel delivery"
+    );
+}
+
+#[test]
+fn local_slash_control_note_path_dedupes_and_seals_dropped_half() {
+    let sess = format!("local-control-note-path-{:p}", &0u8 as *const u8);
+    let raw = local_control_prompt(&sess, "/compact", "compact-half-a");
+    let envelope = local_control_prompt(&sess, compact_command_name_first_stub(), "compact-half-b");
+
+    assert!(
+        prepare_local_only_slash_control_note(&raw, "/compact").is_some(),
+        "the first transcript half must render one Discord marker"
+    );
+    assert!(
+        prepare_local_only_slash_control_note(&envelope, "/compact").is_none(),
+        "the near-simultaneous envelope half must not render a second marker"
+    );
+    assert_eq!(
+        crate::services::tui_prompt_dedupe::observe_prompt_by_tmux_with_entry_id_at(
+            "claude",
+            &sess,
+            compact_command_name_first_stub(),
+            Some("compact-half-b"),
+            chrono::Utc::now(),
+        ),
+        crate::services::tui_prompt_dedupe::PromptObservation::SuppressedReplayedEntry,
+        "the dropped half must be sealed against watermark-reset replay"
+    );
+
+    let loop_prompt = local_control_prompt(&sess, "/loop", "loop-entry");
+    assert!(
+        prepare_local_only_slash_control_note(&loop_prompt, "/loop").is_some(),
+        "different command kinds must remain independent"
+    );
+}
+
+#[test]
+fn local_slash_control_note_allows_same_kind_after_window() {
+    let sess = format!("local-control-note-window-{:p}", &0u8 as *const u8);
+    let first = local_control_prompt(&sess, "/compact", "compact-window-a");
+    assert!(prepare_local_only_slash_control_note(&first, "/compact").is_some());
+
+    let key = format!("{sess}\u{0}/compact");
+    SLASH_COMMAND_CONTROL_LAST_POSTED
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(
+            key,
+            std::time::Instant::now() - SLASH_COMMAND_CONTROL_DEDUPE_WINDOW,
+        );
+
+    let later = local_control_prompt(&sess, "/compact", "compact-window-b");
+    assert!(
+        prepare_local_only_slash_control_note(&later, "/compact").is_some(),
+        "the local note gate must allow a genuine command after the dedupe window"
+    );
+}
+
+#[test]
+fn local_compact_still_bypasses_the_external_replay_classifier() {
+    let sess = format!("local-compact-external-gate-{:p}", &0u8 as *const u8);
     let compact = relay_observed_prompt_injected_prompt_decision("/compact");
     assert!(compact.local_only_slash);
     assert!(
         !slash_command_control_turn_is_duplicate_external_replay(&compact, &sess),
-        "the first human local /compact must not enter the external /loop time gate"
-    );
-    assert!(
-        !slash_command_control_turn_is_duplicate_external_replay(&compact, &sess),
-        "a second human local /compact inside two seconds is still distinct"
+        "local controls must remain outside the external replay classifier"
     );
 
     let loop_control = relay_observed_prompt_injected_prompt_decision("/loop 5m inspect status");

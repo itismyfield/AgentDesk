@@ -11,7 +11,21 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use crate::app_state::AppState;
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::auto_queue::AutoQueueLogContext;
+
+fn auto_queue_tuple_error((status, body): (StatusCode, Json<serde_json::Value>)) -> AppError {
+    auto_queue_json_error(status, body)
+}
+
+fn auto_queue_json_error(status: StatusCode, Json(body): Json<serde_json::Value>) -> AppError {
+    let message = body
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("internal error")
+        .to_string();
+    AppError::new(status, ErrorCode::AutoQueue, message)
+}
 
 #[path = "activate_command.rs"]
 mod activate_command;

@@ -17,7 +17,7 @@ use crate::services::claude_tui::hook_server::current_hook_endpoint;
 use crate::services::discord::restart_report::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
-use crate::services::process::{kill_child_tree, kill_pid_tree, shell_escape};
+use crate::services::process::{kill_child_tree, shell_escape};
 use crate::services::provider::{
     CancelToken, FollowupResult, ProviderKind, SessionProbe, cancel_requested,
     fold_read_output_result, is_readonly_tool_policy, register_child_pid, spawn_cancel_watchdog,
@@ -281,6 +281,7 @@ fn append_feature_override_args(args: &mut Vec<String>, feature: &str, enabled: 
     args.push(feature.to_string());
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_codex_wrapper_tmux_script(
     env_lines: &str,
     exe: &str,
@@ -909,10 +910,7 @@ where
         // this PID at any moment. Clearing here prevents a late timeout
         // path (timer raced ahead of recv on a different timeline) from
         // signalling a reused, unrelated PID.
-        *cancel_for_worker
-            .child_pid
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
+        cancel_for_worker.clear_child_pid();
         let _ = tx.send(result);
     });
 
@@ -946,27 +944,17 @@ where
                 "execute_command_simple_with_timeout timed out; cancelling and killing child"
             );
             cancel_token.cancel_with_tmux_cleanup();
-            // Snapshot under lock and clear, so any concurrent observer
-            // sees the same "no PID" state we are about to act on.
-            let child_pid = cancel_token
-                .child_pid
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .take();
+            // request_cleanup owns signal delivery and leaves the PID visible
+            // until the worker clears it, preserving the timeout drain meaning.
+            let child_pid = cancel_token.child_pid_value();
             let child_pid_was_none = child_pid.is_none();
             if let Some(pid) = child_pid {
                 tracing::warn!(
                     provider = provider_name,
                     stage = %label_owned,
                     child_pid = pid,
-                    "execute_command_simple_with_timeout sending SIGTERM/SIGKILL to child process group"
+                    "execute_command_simple_with_timeout cleanup signal dispatched for child process group"
                 );
-                // kill_pid_tree sends SIGTERM to the process group (or
-                // PID fallback), waits ~200ms, then escalates to SIGKILL
-                // on the still-alive target. The Codex spawn is in its
-                // own group (configure_child_process_group above), so
-                // the negative-PID path reaches grand-descendants.
-                kill_pid_tree(pid);
             } else {
                 tracing::warn!(
                     provider = provider_name,
@@ -1205,6 +1193,7 @@ fn execute_command_simple_inner(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn execute_command_streaming(
     prompt: &str,
     session_id: Option<&str>,
@@ -1426,6 +1415,7 @@ pub(crate) fn compose_codex_developer_instructions(
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_streaming_direct(
     prompt: &str,
     session_id: Option<&str>,
@@ -1480,8 +1470,7 @@ fn execute_streaming_direct(
         .map_err(|e| format!("Failed to start Codex: {}", e))?;
 
     register_child_pid(cancel_token.as_deref(), child.id());
-    let _cancel_watchdog =
-        spawn_cancel_watchdog(cancel_token.clone(), child.id(), "codex-direct-stream");
+    let _cancel_watchdog = spawn_cancel_watchdog(cancel_token.clone(), "codex-direct-stream");
     // Race condition fix: if /stop arrived before PID was stored, kill now
     if cancel_requested(cancel_token.as_deref()) {
         kill_child_tree(&mut child);
@@ -1552,6 +1541,7 @@ fn execute_streaming_direct(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_streaming_remote_direct(
     _profile: &RemoteProfile,
     _session_id: Option<&str>,
@@ -1706,10 +1696,9 @@ pub(crate) fn wire_cancel_token_to_tmux_session(
     tmux_session_name: &str,
 ) {
     if let Some(token) = cancel_token {
-        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(tmux_session_name.to_string());
+        token.bind_unmanaged_session_name(tmux_session_name);
         if let Some(pid) = crate::services::platform::tmux::pane_pid(tmux_session_name) {
-            *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(pid);
+            token.store_child_pid(pid);
         }
     }
 }
@@ -1761,6 +1750,7 @@ fn dispatch_codex_tui_rollout_tail(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn execute_streaming_local_tui_tmux(
     prompt: &str,
     session_id: Option<&str>,
@@ -2226,6 +2216,7 @@ pub(crate) fn emit_codex_tui_post_tail_handoff(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn execute_streaming_local_tmux(
     prompt: &str,
     model: Option<&str>,
@@ -2441,8 +2432,7 @@ fn execute_streaming_local_tmux(
     }
 
     if let Some(ref token) = cancel_token {
-        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(tmux_session_name.to_string());
+        token.bind_unmanaged_session_name(tmux_session_name);
     }
 
     let read_result = read_output_file_until_result(
@@ -2607,8 +2597,7 @@ fn send_followup_to_tmux(
     }
 
     if let Some(ref token) = cancel_token {
-        *token.tmux_session.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(tmux_session_name.to_string());
+        token.bind_unmanaged_session_name(tmux_session_name);
     }
 
     let read_result = match read_output_file_until_result_tracked(
@@ -2713,6 +2702,7 @@ fn send_followup_to_tmux(
 }
 
 /// Execute Codex via ProcessBackend (direct child process, no tmux).
+#[allow(clippy::too_many_arguments)]
 fn execute_streaming_local_process_codex(
     prompt: &str,
     model: Option<&str>,
@@ -2832,9 +2822,7 @@ fn execute_streaming_local_process_codex(
     let backend = ProcessBackend::new();
     let handle = backend.create_session(&config)?;
 
-    if let Some(ref token) = cancel_token {
-        *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle.pid());
-    }
+    register_child_pid(cancel_token.as_deref(), handle.pid());
 
     insert_process_session(session_name.to_string(), handle);
 

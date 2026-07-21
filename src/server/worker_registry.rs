@@ -12,19 +12,17 @@ use crate::services::routines::validate_routine_runtime_config;
 use sqlx::PgPool;
 
 use super::cluster::ClusterRuntime;
+use super::worker_recovery::WorkerLocalTerminalReason;
 use super::ws::{BatchBuffer, BroadcastTx};
 
 static LEADER_ONLY_WORKERS_STARTED: AtomicBool = AtomicBool::new(false);
 static LEADER_ONLY_WORKER_ACTIVE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static LEADER_ONLY_WORKER_LAST_SPAWN_UNIX_MS: AtomicI64 = AtomicI64::new(0);
 static RATE_LIMIT_SYNC_ACTIVE: AtomicBool = AtomicBool::new(false);
-static WORKER_LOCAL_LOOP_OWNED_TERMINAL_SIGNAL_COUNT: AtomicUsize = AtomicUsize::new(0);
-static WORKER_LOCAL_LOOP_OWNED_UNEXPECTED_TERMINAL_SIGNAL_COUNT: AtomicUsize = AtomicUsize::new(0);
-static WORKER_LOCAL_LOOP_OWNED_LAST_TERMINAL_SIGNAL: LazyLock<
-    Mutex<Option<WorkerLocalTerminalSignal>>,
-> = LazyLock::new(|| Mutex::new(None));
-const WORKER_LOCAL_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
-
+static WORKER_LOCAL_TERMINAL_SIGNAL_COUNT: AtomicUsize = AtomicUsize::new(0);
+static WORKER_LOCAL_UNEXPECTED_TERMINAL_SIGNAL_COUNT: AtomicUsize = AtomicUsize::new(0);
+static WORKER_LOCAL_LAST_TERMINAL_SIGNAL: LazyLock<Mutex<Option<WorkerLocalTerminalSignal>>> =
+    LazyLock::new(|| Mutex::new(None));
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WorkerLocalTerminalSignal {
     worker: &'static str,
@@ -33,26 +31,9 @@ struct WorkerLocalTerminalSignal {
     observed_unix_ms: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WorkerLocalTerminalReason {
-    Returned,
-    Panicked,
-    Cancelled,
-}
-
-impl WorkerLocalTerminalReason {
-    const fn as_doc_str(self) -> &'static str {
-        match self {
-            Self::Returned => "returned",
-            Self::Panicked => "panicked",
-            Self::Cancelled => "cancelled",
-        }
-    }
-}
-
 pub(crate) fn leader_only_worker_status_json() -> serde_json::Value {
     let last_spawn_unix_ms = LEADER_ONLY_WORKER_LAST_SPAWN_UNIX_MS.load(Ordering::Acquire);
-    let last_worker_local_signal = worker_local_loop_owned_terminal_signal_snapshot().map(|signal| {
+    let last_worker_local_signal = worker_local_terminal_signal_snapshot().map(|signal| {
         serde_json::json!({
             "worker": signal.worker,
             "reason": signal.reason,
@@ -68,8 +49,14 @@ pub(crate) fn leader_only_worker_status_json() -> serde_json::Value {
         } else {
             None
         },
-        "worker_local_loop_owned_terminal_signal_count": WORKER_LOCAL_LOOP_OWNED_TERMINAL_SIGNAL_COUNT.load(Ordering::Acquire),
-        "worker_local_loop_owned_unexpected_terminal_signal_count": WORKER_LOCAL_LOOP_OWNED_UNEXPECTED_TERMINAL_SIGNAL_COUNT.load(Ordering::Acquire),
+        "worker_local_terminal_signal_count": WORKER_LOCAL_TERMINAL_SIGNAL_COUNT.load(Ordering::Acquire),
+        "worker_local_unexpected_terminal_signal_count": WORKER_LOCAL_UNEXPECTED_TERMINAL_SIGNAL_COUNT.load(Ordering::Acquire),
+        "last_worker_local_terminal_signal": last_worker_local_signal,
+        // #4515 PR2: worker-local restart/exhaustion recovery counters.
+        "worker_local_recovery": super::worker_recovery::recovery_runtime_json(),
+        // Backward-compatible aliases for clients deployed before #4515.
+        "worker_local_loop_owned_terminal_signal_count": WORKER_LOCAL_TERMINAL_SIGNAL_COUNT.load(Ordering::Acquire),
+        "worker_local_loop_owned_unexpected_terminal_signal_count": WORKER_LOCAL_UNEXPECTED_TERMINAL_SIGNAL_COUNT.load(Ordering::Acquire),
         "last_worker_local_loop_owned_terminal_signal": last_worker_local_signal,
     })
 }
@@ -78,20 +65,20 @@ pub(crate) fn rate_limit_sync_active() -> bool {
     RATE_LIMIT_SYNC_ACTIVE.load(Ordering::Acquire)
 }
 
-fn worker_local_loop_owned_terminal_signal_snapshot() -> Option<WorkerLocalTerminalSignal> {
-    *WORKER_LOCAL_LOOP_OWNED_LAST_TERMINAL_SIGNAL
+fn worker_local_terminal_signal_snapshot() -> Option<WorkerLocalTerminalSignal> {
+    *WORKER_LOCAL_LAST_TERMINAL_SIGNAL
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn record_worker_local_loop_owned_terminal_signal(
+fn record_worker_local_terminal_signal(
     spec: WorkerSpec,
     reason: WorkerLocalTerminalReason,
     expected_shutdown: bool,
+    auto_restart: bool,
+    restart_attempt: usize,
 ) {
-    if spec.restart_policy != WorkerRestartPolicy::LoopOwned
-        || spec.execution_scope != WorkerExecutionScope::WorkerLocal
-    {
+    if spec.execution_scope != WorkerExecutionScope::WorkerLocal {
         return;
     }
 
@@ -102,11 +89,11 @@ fn record_worker_local_loop_owned_terminal_signal(
         expected_shutdown,
         observed_unix_ms: chrono::Utc::now().timestamp_millis(),
     };
-    WORKER_LOCAL_LOOP_OWNED_TERMINAL_SIGNAL_COUNT.fetch_add(1, Ordering::AcqRel);
+    WORKER_LOCAL_TERMINAL_SIGNAL_COUNT.fetch_add(1, Ordering::AcqRel);
     if !expected_shutdown {
-        WORKER_LOCAL_LOOP_OWNED_UNEXPECTED_TERMINAL_SIGNAL_COUNT.fetch_add(1, Ordering::AcqRel);
+        WORKER_LOCAL_UNEXPECTED_TERMINAL_SIGNAL_COUNT.fetch_add(1, Ordering::AcqRel);
     }
-    *WORKER_LOCAL_LOOP_OWNED_LAST_TERMINAL_SIGNAL
+    *WORKER_LOCAL_LAST_TERMINAL_SIGNAL
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(signal);
 
@@ -125,7 +112,8 @@ fn record_worker_local_loop_owned_terminal_signal(
             responsibility = spec.responsibility,
             notes = spec.notes,
             reason,
-            auto_restart = false,
+            auto_restart,
+            restart_attempt,
             "worker-local loop-owned worker future exited after shutdown"
         );
     } else if reason == WorkerLocalTerminalReason::Panicked.as_doc_str() {
@@ -143,7 +131,8 @@ fn record_worker_local_loop_owned_terminal_signal(
             responsibility = spec.responsibility,
             notes = spec.notes,
             reason,
-            auto_restart = false,
+            auto_restart,
+            restart_attempt,
             "worker-local loop-owned worker future panicked"
         );
     } else {
@@ -161,59 +150,10 @@ fn record_worker_local_loop_owned_terminal_signal(
             responsibility = spec.responsibility,
             notes = spec.notes,
             reason,
-            auto_restart = false,
+            auto_restart,
+            restart_attempt,
             "worker-local loop-owned worker future exited unexpectedly"
         );
-    }
-}
-
-fn record_worker_local_tokio_join_result(
-    spec: WorkerSpec,
-    expected_shutdown: bool,
-    result: std::result::Result<(), tokio::task::JoinError>,
-) {
-    match result {
-        Ok(()) => {
-            record_worker_local_loop_owned_terminal_signal(
-                spec,
-                WorkerLocalTerminalReason::Returned,
-                expected_shutdown,
-            );
-        }
-        Err(error) if error.is_panic() => {
-            record_worker_local_loop_owned_terminal_signal(
-                spec,
-                WorkerLocalTerminalReason::Panicked,
-                expected_shutdown,
-            );
-        }
-        Err(error) if error.is_cancelled() => {
-            record_worker_local_loop_owned_terminal_signal(
-                spec,
-                WorkerLocalTerminalReason::Cancelled,
-                expected_shutdown,
-            );
-        }
-        Err(error) => {
-            tracing::warn!(
-                worker = spec.name,
-                target = spec.target,
-                kind = spec.kind.as_doc_str(),
-                stage = spec.start_stage.as_doc_str(),
-                order = spec.start_order,
-                restart = spec.restart_policy.as_doc_str(),
-                shutdown = spec.shutdown_policy.as_doc_str(),
-                execution_scope = spec.execution_scope.as_doc_str(),
-                owner = spec.owner,
-                health = spec.health_owner,
-                responsibility = spec.responsibility,
-                notes = spec.notes,
-                join_error = %error,
-                expected_shutdown,
-                auto_restart = false,
-                "worker-local Tokio worker join failed"
-            );
-        }
     }
 }
 
@@ -385,6 +325,21 @@ impl WorkerStartStage {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WorkerRestartBudget {
+    pub(crate) max_restarts: u32,
+    pub(crate) window: Duration,
+    pub(crate) initial_backoff: Duration,
+    pub(crate) max_backoff: Duration,
+}
+
+pub(crate) const DEFAULT_WORKER_LOCAL_RESTART_BUDGET: WorkerRestartBudget = WorkerRestartBudget {
+    max_restarts: 5,
+    window: Duration::from_secs(600),
+    initial_backoff: Duration::from_secs(1),
+    max_backoff: Duration::from_secs(60),
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkerRestartPolicy {
     SkipWhenDisabled,
     /// The worker future owns its retry/backoff loop and should only end during
@@ -392,6 +347,7 @@ pub(crate) enum WorkerRestartPolicy {
     /// the next leader epoch; worker-local Tokio workers record a terminal
     /// supervision signal and do not auto-restart.
     LoopOwned,
+    RestartableWithBudget(WorkerRestartBudget),
     ManualProcessRestart,
 }
 
@@ -400,6 +356,7 @@ impl WorkerRestartPolicy {
         match self {
             Self::SkipWhenDisabled => "skip_when_disabled",
             Self::LoopOwned => "loop_owned",
+            Self::RestartableWithBudget(_) => "restartable_with_budget",
             Self::ManualProcessRestart => "manual_process_restart",
         }
     }
@@ -552,13 +509,15 @@ pub(crate) const WORKER_SPECS: [WorkerSpec; 12] = [
         owner: "server::worker_registry",
         start_stage: WorkerStartStage::AfterBootReconcile,
         start_order: 50,
-        restart_policy: WorkerRestartPolicy::LoopOwned,
+        restart_policy: WorkerRestartPolicy::RestartableWithBudget(
+            DEFAULT_WORKER_LOCAL_RESTART_BUDGET,
+        ),
         shutdown_policy: WorkerShutdownPolicy::RuntimeShutdown,
         execution_scope: WorkerExecutionScope::WorkerLocal,
         health_owner: "dispatch outbox tables and delivery tracing",
         notes: "Runs on each cluster node; PostgreSQL row claims and capability filters select \
-                the worker. LoopOwned terminal semantics: unexpected return/panic is recorded \
-                as a worker-local terminal supervision signal; registry does not auto-restart.",
+                the worker. Unexpected return/panic is restarted with a bounded local budget \
+                and capped exponential backoff.",
     },
     WorkerSpec {
         id: ServerWorkerId::RoutineRuntime,
@@ -600,7 +559,9 @@ pub(crate) const WORKER_SPECS: [WorkerSpec; 12] = [
         owner: "server::worker_registry",
         start_stage: WorkerStartStage::AfterBootReconcile,
         start_order: 65,
-        restart_policy: WorkerRestartPolicy::LoopOwned,
+        restart_policy: WorkerRestartPolicy::RestartableWithBudget(
+            DEFAULT_WORKER_LOCAL_RESTART_BUDGET,
+        ),
         shutdown_policy: WorkerShutdownPolicy::RuntimeShutdown,
         execution_scope: WorkerExecutionScope::WorkerLocal,
         health_owner: "SessionRegistry contents and /api/cluster/sessions diagnostic",
@@ -608,9 +569,8 @@ pub(crate) const WORKER_SPECS: [WorkerSpec; 12] = [
                 sessions for the cluster registry. Reconcile is instance_id-scoped so peers \
                 cannot stomp each other's entries. Boot reconcile runs immediately; subsequent \
                 polls every 10s. External request_discovery_tick() nudges fire an immediate tick \
-                for E3 event hooks. LoopOwned terminal semantics: unexpected return/panic is \
-                recorded as a worker-local terminal supervision signal; registry does not \
-                auto-restart.",
+                for E3 event hooks. Unexpected return/panic is restarted with a bounded local \
+                budget and capped exponential backoff.",
     },
     WorkerSpec {
         id: ServerWorkerId::WatcherSupervisor,
@@ -930,14 +890,20 @@ impl SupervisedWorkerRegistry {
                 let claim_owner = self.cluster_runtime.instance_id().to_string();
                 let cluster_runtime = self.cluster_runtime.clone();
                 let cluster_config = self.config.cluster.clone();
-                self.register_tokio(spec, async move {
-                    super::routes::dispatches::dispatch_outbox_loop(
-                        dispatch_outbox_pg_pool,
-                        claim_owner,
-                        cluster_runtime,
-                        cluster_config,
-                    )
-                    .await;
+                self.register_tokio(spec, move || {
+                    let dispatch_outbox_pg_pool = dispatch_outbox_pg_pool.clone();
+                    let claim_owner = claim_owner.clone();
+                    let cluster_runtime = cluster_runtime.clone();
+                    let cluster_config = cluster_config.clone();
+                    async move {
+                        super::routes::dispatches::dispatch_outbox_loop(
+                            dispatch_outbox_pg_pool,
+                            claim_owner,
+                            cluster_runtime,
+                            cluster_config,
+                        )
+                        .await;
+                    }
                 });
                 Ok(None)
             }
@@ -979,14 +945,19 @@ impl SupervisedWorkerRegistry {
                 // so every node must enumerate its own sessions. The registry's
                 // reconcile_for_node is instance_id-scoped to keep peers from
                 // stomping each other's entries.
-                self.register_tokio(spec, async move {
-                    crate::services::cluster::session_discovery::run_discovery_loop(
-                        instance_id,
-                        discovery_pg_pool,
-                        crate::services::cluster::session_discovery::DiscoveryConfig::default(),
-                        shutdown,
-                    )
-                    .await;
+                self.register_tokio(spec, move || {
+                    let instance_id = instance_id.clone();
+                    let discovery_pg_pool = discovery_pg_pool.clone();
+                    let shutdown = shutdown.clone();
+                    async move {
+                        crate::services::cluster::session_discovery::run_discovery_loop(
+                            instance_id,
+                            discovery_pg_pool,
+                            crate::services::cluster::session_discovery::DiscoveryConfig::default(),
+                            shutdown,
+                        )
+                        .await;
+                    }
                 });
                 Ok(None)
             }
@@ -1008,12 +979,16 @@ impl SupervisedWorkerRegistry {
                     // its own relays. No leader gating — peer hosts can't observe
                     // each other's sessions anyway.
                     let health_registry = self.health_registry.clone();
-                    self.register_tokio(spec, async move {
-                        crate::services::discord::run_session_bound_discord_relay_supervisor(
-                            health_registry,
-                            shutdown,
-                        )
-                        .await;
+                    self.register_tokio(spec, move || {
+                        let health_registry = health_registry.clone();
+                        let shutdown = shutdown.clone();
+                        async move {
+                            crate::services::discord::run_session_bound_discord_relay_supervisor(
+                                health_registry,
+                                shutdown,
+                            )
+                            .await;
+                        }
                     });
                     Ok(None)
                 }
@@ -1068,11 +1043,29 @@ impl SupervisedWorkerRegistry {
         }
     }
 
-    fn register_tokio<F>(&mut self, spec: WorkerSpec, future: F)
+    fn register_tokio<MakeFuture, Fut>(&mut self, spec: WorkerSpec, make_future: MakeFuture)
     where
-        F: Future<Output = ()> + Send + 'static,
+        MakeFuture: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
     {
-        let future = Self::supervise_worker_local_tokio_worker(spec, self.shutdown.clone(), future);
+        let future = super::worker_recovery::supervise_worker_local(
+            spec,
+            self.shutdown.clone(),
+            make_future,
+            move |reason, expected_shutdown, auto_restart, restart_attempt| {
+                record_worker_local_terminal_signal(
+                    spec,
+                    reason,
+                    expected_shutdown,
+                    auto_restart,
+                    restart_attempt,
+                );
+            },
+            // #4515 PR3: restart-budget exhaustion completes the recovery circuit
+            // — readiness down (via the Exhausted recovery state) plus process
+            // exit so launchd KeepAlive restarts a clean process.
+            super::worker_recovery::production_fatal_hook(self.shutdown.clone()),
+        );
         self.running.push(RunningWorker {
             spec,
             _handle: WorkerHandle::Tokio {
@@ -1098,69 +1091,6 @@ impl SupervisedWorkerRegistry {
                 _handle: tokio::spawn(future),
             },
         });
-    }
-
-    async fn supervise_worker_local_tokio_worker<F>(
-        spec: WorkerSpec,
-        shutdown: Arc<AtomicBool>,
-        future: F,
-    ) where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        let mut worker_handle = tokio::spawn(future);
-        tokio::select! {
-            result = &mut worker_handle => {
-                record_worker_local_tokio_join_result(
-                    spec,
-                    shutdown.load(Ordering::Acquire),
-                    result,
-                );
-            }
-            _ = wait_until_shutdown(shutdown.clone()) => {
-                tracing::info!(
-                    worker = spec.name,
-                    target = spec.target,
-                    kind = spec.kind.as_doc_str(),
-                    stage = spec.start_stage.as_doc_str(),
-                    order = spec.start_order,
-                    restart = spec.restart_policy.as_doc_str(),
-                    shutdown = spec.shutdown_policy.as_doc_str(),
-                    execution_scope = spec.execution_scope.as_doc_str(),
-                    owner = spec.owner,
-                    health = spec.health_owner,
-                    responsibility = spec.responsibility,
-                    notes = spec.notes,
-                    "worker-local Tokio supervisor waiting for worker shutdown cleanup"
-                );
-                let grace = tokio::time::sleep(WORKER_LOCAL_SHUTDOWN_GRACE);
-                tokio::pin!(grace);
-                tokio::select! {
-                    result = &mut worker_handle => {
-                        record_worker_local_tokio_join_result(spec, true, result);
-                    }
-                    _ = &mut grace => {
-                        tracing::warn!(
-                            worker = spec.name,
-                            target = spec.target,
-                            kind = spec.kind.as_doc_str(),
-                            stage = spec.start_stage.as_doc_str(),
-                            order = spec.start_order,
-                            restart = spec.restart_policy.as_doc_str(),
-                            shutdown = spec.shutdown_policy.as_doc_str(),
-                            execution_scope = spec.execution_scope.as_doc_str(),
-                            owner = spec.owner,
-                            health = spec.health_owner,
-                            responsibility = spec.responsibility,
-                            notes = spec.notes,
-                            auto_restart = false,
-                            "worker-local Tokio worker exceeded graceful shutdown timeout; aborting"
-                        );
-                        worker_handle.abort();
-                        record_worker_local_tokio_join_result(spec, true, worker_handle.await);
-                    }
-                }
-            }
-        }
     }
 
     async fn supervise_leader_tokio_worker<MakeFuture, Fut>(
@@ -1302,152 +1232,6 @@ impl SupervisedWorkerRegistry {
 impl Drop for SupervisedWorkerRegistry {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
-    }
-}
-
-#[cfg(test)]
-mod worker_local_terminal_signal_tests {
-    use super::{
-        SupervisedWorkerRegistry, WORKER_LOCAL_LOOP_OWNED_LAST_TERMINAL_SIGNAL,
-        WORKER_LOCAL_LOOP_OWNED_TERMINAL_SIGNAL_COUNT,
-        WORKER_LOCAL_LOOP_OWNED_UNEXPECTED_TERMINAL_SIGNAL_COUNT, WORKER_SPECS,
-        WorkerExecutionScope, WorkerRestartPolicy,
-    };
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, LazyLock};
-    use std::time::Duration;
-
-    static TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
-        LazyLock::new(|| tokio::sync::Mutex::new(()));
-
-    fn reset_worker_local_terminal_signals_for_test() {
-        WORKER_LOCAL_LOOP_OWNED_TERMINAL_SIGNAL_COUNT.store(0, Ordering::Release);
-        WORKER_LOCAL_LOOP_OWNED_UNEXPECTED_TERMINAL_SIGNAL_COUNT.store(0, Ordering::Release);
-        *WORKER_LOCAL_LOOP_OWNED_LAST_TERMINAL_SIGNAL
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-    }
-
-    fn worker_local_loop_owned_spec_for_test() -> super::WorkerSpec {
-        WORKER_SPECS
-            .iter()
-            .copied()
-            .find(|spec| {
-                spec.execution_scope == WorkerExecutionScope::WorkerLocal
-                    && spec.restart_policy == WorkerRestartPolicy::LoopOwned
-                    && spec.kind == super::WorkerKind::TokioTask
-            })
-            .expect("at least one worker-local loop-owned Tokio worker spec is registered")
-    }
-
-    #[tokio::test]
-    async fn worker_local_loop_owned_return_records_terminal_signal() {
-        let _guard = TEST_LOCK.lock().await;
-        reset_worker_local_terminal_signals_for_test();
-
-        let spec = worker_local_loop_owned_spec_for_test();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let supervisor = tokio::spawn(
-            SupervisedWorkerRegistry::supervise_worker_local_tokio_worker(spec, shutdown, async {}),
-        );
-        tokio::time::timeout(Duration::from_secs(1), supervisor)
-            .await
-            .expect("worker-local supervisor should finish")
-            .expect("worker-local supervisor should not panic");
-
-        let status = super::leader_only_worker_status_json();
-        assert_eq!(
-            status["worker_local_loop_owned_terminal_signal_count"].as_u64(),
-            Some(1)
-        );
-        assert_eq!(
-            status["worker_local_loop_owned_unexpected_terminal_signal_count"].as_u64(),
-            Some(1)
-        );
-        let signal = &status["last_worker_local_loop_owned_terminal_signal"];
-        assert_eq!(signal["worker"].as_str(), Some(spec.name));
-        assert_eq!(signal["reason"].as_str(), Some("returned"));
-        assert_eq!(signal["expected_shutdown"].as_bool(), Some(false));
-        assert!(signal["observed_at"].is_string());
-    }
-
-    #[tokio::test]
-    async fn worker_local_loop_owned_panic_records_terminal_signal() {
-        let _guard = TEST_LOCK.lock().await;
-        reset_worker_local_terminal_signals_for_test();
-
-        let spec = worker_local_loop_owned_spec_for_test();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let supervisor = tokio::spawn(
-            SupervisedWorkerRegistry::supervise_worker_local_tokio_worker(spec, shutdown, async {
-                panic!("worker-local loop-owned panic regression");
-            }),
-        );
-        tokio::time::timeout(Duration::from_secs(1), supervisor)
-            .await
-            .expect("worker-local supervisor should finish")
-            .expect("worker-local supervisor should not panic");
-
-        let status = super::leader_only_worker_status_json();
-        assert_eq!(
-            status["worker_local_loop_owned_terminal_signal_count"].as_u64(),
-            Some(1)
-        );
-        assert_eq!(
-            status["worker_local_loop_owned_unexpected_terminal_signal_count"].as_u64(),
-            Some(1)
-        );
-        let signal = &status["last_worker_local_loop_owned_terminal_signal"];
-        assert_eq!(signal["worker"].as_str(), Some(spec.name));
-        assert_eq!(signal["reason"].as_str(), Some("panicked"));
-        assert_eq!(signal["expected_shutdown"].as_bool(), Some(false));
-        assert!(signal["observed_at"].is_string());
-    }
-
-    #[tokio::test]
-    async fn worker_local_shutdown_waits_for_inner_cleanup() {
-        let _guard = TEST_LOCK.lock().await;
-        reset_worker_local_terminal_signals_for_test();
-
-        let spec = worker_local_loop_owned_spec_for_test();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let cleanup_ran = Arc::new(AtomicBool::new(false));
-        let worker_shutdown = shutdown.clone();
-        let worker_cleanup = cleanup_ran.clone();
-        let supervisor = tokio::spawn(
-            SupervisedWorkerRegistry::supervise_worker_local_tokio_worker(
-                spec,
-                shutdown.clone(),
-                async move {
-                    super::wait_until_shutdown(worker_shutdown).await;
-                    worker_cleanup.store(true, Ordering::Release);
-                },
-            ),
-        );
-
-        shutdown.store(true, Ordering::Release);
-        tokio::time::timeout(Duration::from_secs(1), supervisor)
-            .await
-            .expect("worker-local supervisor should finish after inner cleanup")
-            .expect("worker-local supervisor should not panic");
-
-        assert!(
-            cleanup_ran.load(Ordering::Acquire),
-            "shutdown supervisor must not abort before the worker runs cleanup"
-        );
-        let status = super::leader_only_worker_status_json();
-        assert_eq!(
-            status["worker_local_loop_owned_terminal_signal_count"].as_u64(),
-            Some(1)
-        );
-        assert_eq!(
-            status["worker_local_loop_owned_unexpected_terminal_signal_count"].as_u64(),
-            Some(0)
-        );
-        let signal = &status["last_worker_local_loop_owned_terminal_signal"];
-        assert_eq!(signal["worker"].as_str(), Some(spec.name));
-        assert_eq!(signal["reason"].as_str(), Some("returned"));
-        assert_eq!(signal["expected_shutdown"].as_bool(), Some(true));
     }
 }
 

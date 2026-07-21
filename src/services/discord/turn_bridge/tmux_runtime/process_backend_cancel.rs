@@ -136,7 +136,7 @@ pub(super) async fn hard_stop_unresponsive_process_backend_turn(
         );
         return;
     };
-    let wrapper_pid = token.child_pid.lock().ok().and_then(|guard| *guard);
+    let wrapper_pid = token.child_pid_value();
 
     if wait_for_pid_exit(target_pid, super::PROVIDER_HARD_STOP_GRACE).await {
         return;

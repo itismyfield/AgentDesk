@@ -1,11 +1,15 @@
 use crate::services::platform::BinaryResolution;
+use crate::services::provider::cancel_token_cleanup::target::CapturedProcess;
 use crate::services::provider_auth::ProviderAuthSpec;
 use crate::utils::format::safe_prefix;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 
 pub(crate) mod cancel_token_claude_interrupt;
+pub(crate) mod cancel_token_cleanup;
+mod cancel_watchdog;
+pub use cancel_watchdog::{CancelWatchdog, spawn_cancel_watchdog};
+use cancel_watchdog::{current_unix_millis, enforce_watchdog_deadline};
 
 /// Tmux session name prefix — always "AgentDesk".
 pub const TMUX_SESSION_PREFIX: &str = "AgentDesk";
@@ -974,14 +978,16 @@ impl CancelSource {
 /// Cooperative cancellation token shared by provider runtimes and Discord orchestration.
 pub struct CancelToken {
     pub cancelled: AtomicBool,
-    pub child_pid: Mutex<Option<u32>>,
+    child_pid: Mutex<Option<CapturedProcess>>,
     cancel_source: Mutex<Option<String>>,
     cancel_source_kind: Mutex<Option<CancelSource>>,
+    /// Serializes cancellation attribution, timeout, and completion publication.
+    cancellation_publication: Mutex<()>,
     /// SSH cancel flag — set to true to signal remote execution to close the channel
     #[allow(dead_code)]
     pub ssh_cancel: Mutex<Option<std::sync::Arc<AtomicBool>>>,
-    /// tmux session name for cleanup on cancel
-    pub tmux_session: Mutex<Option<String>>,
+    /// Tmux binding for cleanup on cancel.
+    pub(crate) tmux_binding: Mutex<Option<cancel_token_cleanup::authority::TmuxBinding>>,
     /// Watchdog deadline as Unix timestamp in milliseconds.
     /// The watchdog fires when `now_ms >= deadline_ms`. Extend by setting a future value.
     /// Operator extensions may move this and the max cap together within configured limits.
@@ -1007,15 +1013,31 @@ pub struct CancelToken {
     claude_interrupt_claim: AtomicU8,
     /// Monotonic Claude turn identity used for diagnostics and fence observability.
     claude_interrupt_generation: u64,
+    /// Durable episode identity shared with the Discord mailbox actor and inflight row.
+    /// `None` is reserved for explicitly restored legacy rows.
+    turn_nonce: Option<String>,
     /// Wrapper prompt handoff completed before its JSONL user envelope appeared.
     /// The stop path must treat this window as submitted, not as prior-turn idle.
     claude_interrupt_submit_pending: AtomicBool,
     /// Lifecycle-aware restart/handoff mode for inflight preservation.
     pub restart_mode: AtomicU8,
+    /// Independent destructive claims prevent a PID-only cleanup from suppressing tmux cleanup.
+    pub(crate) pid_kill_claim: AtomicU8,
+    pub(crate) name_kill_claim: AtomicU8,
 }
 
 impl CancelToken {
     pub fn new() -> Self {
+        Self::with_turn_nonce(Some(uuid::Uuid::new_v4().to_string()))
+    }
+
+    /// Restore a durable turn episode. `None` preserves the legacy row's
+    /// identity instead of silently upgrading it to an unrelated episode.
+    pub fn from_persisted_turn_nonce(turn_nonce: Option<String>) -> Self {
+        Self::with_turn_nonce(turn_nonce.filter(|nonce| !nonce.is_empty()))
+    }
+
+    fn with_turn_nonce(turn_nonce: Option<String>) -> Self {
         static NEXT_CLAUDE_INTERRUPT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
         Self {
@@ -1023,8 +1045,9 @@ impl CancelToken {
             child_pid: Mutex::new(None),
             cancel_source: Mutex::new(None),
             cancel_source_kind: Mutex::new(None),
+            cancellation_publication: Mutex::new(()),
             ssh_cancel: Mutex::new(None),
-            tmux_session: Mutex::new(None),
+            tmux_binding: Mutex::new(None),
             watchdog_deadline_ms: AtomicI64::new(0),
             watchdog_max_deadline_ms: AtomicI64::new(0),
             async_managed: AtomicBool::new(false),
@@ -1032,9 +1055,16 @@ impl CancelToken {
             claude_interrupt_claim: AtomicU8::new(0),
             claude_interrupt_generation: NEXT_CLAUDE_INTERRUPT_GENERATION
                 .fetch_add(1, Ordering::Relaxed),
+            turn_nonce,
             claude_interrupt_submit_pending: AtomicBool::new(false),
             restart_mode: AtomicU8::new(0),
+            pid_kill_claim: AtomicU8::new(0),
+            name_kill_claim: AtomicU8::new(0),
         }
+    }
+
+    pub fn turn_nonce(&self) -> Option<&str> {
+        self.turn_nonce.as_deref()
     }
 
     /// claude-e rollout Phase 1: opt this token out of synchronous
@@ -1059,38 +1089,61 @@ impl CancelToken {
     }
 
     pub fn mark_completion_cleanup(&self) {
-        self.completion_cleanup.store(true, Ordering::Relaxed);
+        let _publication = self
+            .cancellation_publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.completion_cleanup.store(true, Ordering::Release);
     }
 
     pub fn is_completion_cleanup(&self) -> bool {
-        self.completion_cleanup.load(Ordering::Relaxed)
+        self.completion_cleanup.load(Ordering::Acquire)
     }
 
-    /// Cancel and clean up any associated tmux session.
-    pub fn cancel_with_tmux_cleanup(&self) {
-        self.cancelled.store(true, Ordering::Relaxed);
-        if let Some(name) = self
-            .tmux_session
+    pub(crate) fn store_child_pid(&self, pid: u32) {
+        *self.child_pid.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(CapturedProcess::capture(pid));
+    }
+
+    pub(crate) fn child_pid_value(&self) -> Option<u32> {
+        self.child_pid
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
-            #[cfg(unix)]
-            {
-                crate::services::tmux_diagnostics::record_tmux_exit_reason(
-                    &name,
-                    "턴 취소에 의한 tmux 세션 정리",
-                );
-                crate::services::platform::tmux::kill_session(
-                    &name,
-                    "턴 취소에 의한 tmux 세션 정리",
-                );
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = &name;
-            }
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|process| process.pid))
+    }
+
+    pub(crate) fn captured_child_process(&self) -> Option<CapturedProcess> {
+        self.child_pid.lock().ok().and_then(|guard| guard.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn store_child_pid_without_identity_for_test(&self, pid: u32) {
+        *self.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(CapturedProcess {
+            pid,
+            identity: None,
+        });
+    }
+
+    pub(crate) fn clear_child_pid(&self) {
+        *self.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    pub(crate) fn store_child_pid_if_empty(&self, pid: u32) {
+        let captured = CapturedProcess::capture(pid);
+        let mut child_pid = self.child_pid.lock().unwrap_or_else(|e| e.into_inner());
+        if child_pid.is_none() {
+            *child_pid = Some(captured);
         }
+    }
+
+    /// Compatibility adapter for legacy callers; cleanup authority lives in request_cleanup.
+    pub fn cancel_with_tmux_cleanup(&self) {
+        let _ = self.request_cleanup(cancel_token_cleanup::executor::CleanupRequest {
+            cancel_source: "tmux_cleanup".to_string(),
+            intent: cancel_token_cleanup::executor::TmuxCleanupIntent::CleanupSession,
+            termination_reason: None,
+            hard_stop_target: None,
+        });
     }
 
     pub fn set_restart_mode(&self, mode: Option<crate::services::discord::InflightRestartMode>) {
@@ -1107,38 +1160,151 @@ impl CancelToken {
         )
     }
 
-    pub fn set_cancel_source(&self, source: impl Into<String>) {
+    fn set_cancel_source_if_absent_locked(&self, source: impl Into<String>) {
         let label = source.into();
-        // Issue #2335 (a): keep the enum classification in sync with the
-        // free-form label so downstream consumers can branch on the variant
-        // without re-parsing the string. We only auto-classify when no
-        // explicit kind has been set yet so that callers using
-        // `set_cancel_source_kind` keep precedence.
         let classified = CancelSource::classify(&label);
-        {
-            let mut kind = self
-                .cancel_source_kind
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+        // All source writers take kind before label. Cleanup is provisional and
+        // may never replace an already recorded cancellation cause.
+        let mut kind = self
+            .cancel_source_kind
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut current_label = self.cancel_source.lock().unwrap_or_else(|e| e.into_inner());
+        if current_label.is_none() {
+            *current_label = Some(label);
             if kind.is_none() {
                 *kind = Some(classified);
             }
         }
-        *self.cancel_source.lock().unwrap_or_else(|e| e.into_inner()) = Some(label);
+    }
+
+    pub(crate) fn set_cancel_source_if_absent(&self, source: impl Into<String>) {
+        let _publication = self
+            .cancellation_publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.set_cancel_source_if_absent_locked(source);
+    }
+
+    fn set_cancel_source_locked(&self, source: impl Into<String>) {
+        let label = source.into();
+        let classified = CancelSource::classify(&label);
+        // Keep kind and label transactional. Specific kinds retain #3908's
+        // first-wins behavior, except that cleanup's Other classification is
+        // deliberately provisional and upgrades to a later specific source.
+        let mut kind = self
+            .cancel_source_kind
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut current_label = self.cancel_source.lock().unwrap_or_else(|e| e.into_inner());
+        if kind.is_none()
+            || (*kind == Some(CancelSource::Other) && classified != CancelSource::Other)
+        {
+            *kind = Some(classified);
+        }
+        *current_label = Some(label);
+    }
+
+    pub fn set_cancel_source(&self, source: impl Into<String>) {
+        let _publication = self
+            .cancellation_publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.set_cancel_source_locked(source);
     }
 
     /// Explicitly set the structured cancel source. Also updates the
     /// free-form label (used for tracing / dispatch reason) to the canonical
     /// string for the variant when no label was previously recorded.
     pub fn set_cancel_source_kind(&self, kind: CancelSource) {
-        *self
+        let _publication = self
+            .cancellation_publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.set_cancel_source_kind_transactional(kind, |_| {});
+    }
+
+    pub(crate) fn try_mark_watchdog_timeout(&self) -> bool {
+        let _publication = self
+            .cancellation_publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.publish_watchdog_timeout_locked()
+    }
+
+    fn publish_watchdog_timeout_locked(&self) -> bool {
+        if self.completion_cleanup.load(Ordering::Acquire) {
+            return false;
+        }
+
+        let mut kind = self
             .cancel_source_kind
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(kind);
-        let mut label = self.cancel_source.lock().unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(|error| error.into_inner());
+        let mut label = self
+            .cancel_source
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self
+            .cancelled
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        *kind = Some(CancelSource::WatchdogTimeout);
         if label.is_none() {
+            *label = Some(CancelSource::WatchdogTimeout.as_label().to_string());
+        }
+        true
+    }
+
+    pub(crate) fn publish_cancel(&self, source: impl Into<String>) {
+        let _publication = self
+            .cancellation_publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.set_cancel_source_locked(source);
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn publish_cancel_if_source_absent(&self, source: impl Into<String>) {
+        let _publication = self
+            .cancellation_publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.set_cancel_source_if_absent_locked(source);
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    fn set_cancel_source_kind_transactional(
+        &self,
+        kind: CancelSource,
+        after_kind_write: impl FnOnce(&Self),
+    ) {
+        // Hold both locks across the pair update so cleanup cannot leave a
+        // canonical kind paired with a cleanup-only label.
+        let mut current_kind = self
+            .cancel_source_kind
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut label = self.cancel_source.lock().unwrap_or_else(|e| e.into_inner());
+        let replace_provisional_cleanup_label =
+            *current_kind == Some(CancelSource::Other) && label.as_deref() == Some("tmux_cleanup");
+        *current_kind = Some(kind);
+        after_kind_write(self);
+        if label.is_none() || replace_provisional_cleanup_label {
             *label = Some(kind.as_label().to_string());
         }
+    }
+
+    #[cfg(test)]
+    fn set_cancel_source_kind_with_interleaving(
+        &self,
+        kind: CancelSource,
+        after_kind_write: impl FnOnce(&Self),
+    ) {
+        self.set_cancel_source_kind_transactional(kind, after_kind_write);
     }
 
     pub fn cancel_source(&self) -> Option<String> {
@@ -1167,96 +1333,10 @@ pub fn cancel_requested(token: Option<&CancelToken>) -> bool {
     })
 }
 
-fn current_unix_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(0)
-}
-
-fn enforce_watchdog_deadline(token: &CancelToken, now_ms: i64) -> bool {
-    let deadline_ms = token.watchdog_deadline_ms.load(Ordering::Relaxed);
-    // claude-e rollout Phase 1 (counter-review round 3 with Codex):
-    // Discord-managed tokens are watched by the async 30s reconcile
-    // loop. Skipping the synchronous fire here avoids a class of
-    // mid-stream cancellations seen during claude-e e2e (provider
-    // sync watchdog killed the per-turn child before the async path
-    // had a chance to extend the deadline). Non-Discord callers leave
-    // `async_managed=false` and keep the historical sub-30s
-    // enforcement.
-    if deadline_ms > 0 && now_ms >= deadline_ms && !token.is_async_managed() {
-        token.set_cancel_source_kind(CancelSource::WatchdogTimeout);
-        token.cancelled.store(true, Ordering::Relaxed);
-        return true;
-    }
-    false
-}
-
 pub fn register_child_pid(token: Option<&CancelToken>, child_pid: u32) {
     if let Some(token) = token {
-        *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(child_pid);
+        token.store_child_pid(child_pid);
     }
-}
-
-pub struct CancelWatchdog {
-    done: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
-}
-
-impl CancelWatchdog {
-    fn new(done: Arc<AtomicBool>, handle: JoinHandle<()>) -> Self {
-        Self {
-            done,
-            handle: Some(handle),
-        }
-    }
-}
-
-impl Drop for CancelWatchdog {
-    fn drop(&mut self) {
-        self.done.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
-fn cancel_watchdog_should_kill(token: &CancelToken) -> bool {
-    token.cancelled.load(Ordering::Relaxed) && !token.is_completion_cleanup()
-}
-
-pub fn spawn_cancel_watchdog(
-    token: Option<Arc<CancelToken>>,
-    child_pid: u32,
-    label: &'static str,
-) -> Option<CancelWatchdog> {
-    let token = token?;
-    let done = Arc::new(AtomicBool::new(false));
-    let done_for_thread = done.clone();
-    let handle = std::thread::spawn(move || {
-        while !done_for_thread.load(Ordering::Relaxed) {
-            enforce_watchdog_deadline(&token, current_unix_millis());
-            if token.cancelled.load(Ordering::Relaxed) {
-                if !cancel_watchdog_should_kill(&token) {
-                    tracing::debug!(
-                        provider_cancel_watchdog = label,
-                        child_pid,
-                        "cancel watchdog exiting after normal completion cleanup"
-                    );
-                    return;
-                }
-                tracing::warn!(
-                    provider_cancel_watchdog = label,
-                    child_pid,
-                    "cancel watchdog killing provider process tree"
-                );
-                crate::services::process::kill_pid_tree(child_pid);
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-    });
-    Some(CancelWatchdog::new(done, handle))
 }
 
 /// Result from reading a provider session output stream until completion or session death.
@@ -1708,6 +1788,7 @@ pub fn followup_result_from_read_output_result(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn poll_output_file_until_result<
     State,
     IsAlive,
@@ -2133,10 +2214,12 @@ mod codex_context_window_tests {
 #[cfg(test)]
 mod cancel_token_tests {
     use super::{
-        CancelSource, CancelToken, cancel_requested, cancel_watchdog_should_kill,
-        current_unix_millis, enforce_watchdog_deadline, register_child_pid,
+        CancelSource, CancelToken, cancel_requested, current_unix_millis,
+        enforce_watchdog_deadline, register_child_pid,
     };
     use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     #[test]
     fn cancel_token_helpers_register_source_and_state() {
@@ -2146,8 +2229,9 @@ mod cancel_token_tests {
         assert_eq!(token.cancel_source(), None);
 
         register_child_pid(Some(&token), 4242);
+        assert_eq!(token.child_pid_value(), Some(4242));
         assert_eq!(
-            *token.child_pid.lock().unwrap_or_else(|e| e.into_inner()),
+            token.captured_child_process().map(|process| process.pid),
             Some(4242)
         );
 
@@ -2229,6 +2313,125 @@ mod cancel_token_tests {
     }
 
     #[test]
+    fn cleanup_adapter_preserves_existing_voice_cancel_source_and_kind() {
+        let token = CancelToken::new();
+        token.set_cancel_source("voice_barge_in_explicit_stop");
+        token.set_cancel_source_kind(CancelSource::UserBargeIn);
+
+        token.cancel_with_tmux_cleanup();
+
+        assert_eq!(
+            token.cancel_source().as_deref(),
+            Some("voice_barge_in_explicit_stop")
+        );
+        assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
+    }
+
+    #[test]
+    fn cleanup_adapter_populates_source_for_fresh_token() {
+        let token = CancelToken::new();
+
+        token.cancel_with_tmux_cleanup();
+
+        assert_eq!(token.cancel_source().as_deref(), Some("tmux_cleanup"));
+        assert_eq!(token.cancel_source_kind(), Some(CancelSource::Other));
+    }
+
+    #[test]
+    fn concurrent_cleanup_cannot_downgrade_primary_cancel_source() {
+        let token = Arc::new(CancelToken::new());
+        token.set_cancel_source("voice_barge_in_live_cut");
+        let barrier = Arc::new(Barrier::new(3));
+        let mut cleaners = Vec::new();
+        for _ in 0..2 {
+            let token = Arc::clone(&token);
+            let barrier = Arc::clone(&barrier);
+            cleaners.push(thread::spawn(move || {
+                barrier.wait();
+                token.cancel_with_tmux_cleanup();
+            }));
+        }
+        barrier.wait();
+        for cleaner in cleaners {
+            cleaner.join().unwrap();
+        }
+
+        assert_eq!(
+            token.cancel_source().as_deref(),
+            Some("voice_barge_in_live_cut")
+        );
+        assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
+    }
+
+    #[test]
+    fn cleanup_first_upgrades_to_specific_voice_source() {
+        let token = CancelToken::new();
+        token.cancel_with_tmux_cleanup();
+        token.set_cancel_source("voice_barge_in_live_cut");
+
+        assert_eq!(
+            token.cancel_source().as_deref(),
+            Some("voice_barge_in_live_cut")
+        );
+        assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
+    }
+
+    #[test]
+    fn concurrent_cleanup_and_voice_source_never_leave_provisional_kind() {
+        for cleanup_first in [true, false] {
+            let token = Arc::new(CancelToken::new());
+            let cleanup_ready = Arc::new(Barrier::new(2));
+            let voice_ready = Arc::new(Barrier::new(2));
+            let cleanup_token = Arc::clone(&token);
+            let cleanup_ready_for_thread = Arc::clone(&cleanup_ready);
+            let voice_ready_for_thread = Arc::clone(&voice_ready);
+            let cleanup = thread::spawn(move || {
+                if cleanup_first {
+                    cleanup_token.cancel_with_tmux_cleanup();
+                    cleanup_ready_for_thread.wait();
+                    voice_ready_for_thread.wait();
+                } else {
+                    cleanup_ready_for_thread.wait();
+                    voice_ready_for_thread.wait();
+                    cleanup_token.cancel_with_tmux_cleanup();
+                }
+            });
+            let voice_token = Arc::clone(&token);
+            if cleanup_first {
+                cleanup_ready.wait();
+                voice_token.set_cancel_source("voice_barge_in_explicit_stop");
+                voice_ready.wait();
+            } else {
+                voice_token.set_cancel_source("voice_barge_in_explicit_stop");
+                cleanup_ready.wait();
+                voice_ready.wait();
+            }
+            cleanup.join().unwrap();
+
+            assert_eq!(
+                token.cancel_source().as_deref(),
+                Some("voice_barge_in_explicit_stop")
+            );
+            assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
+        }
+    }
+
+    #[test]
+    fn explicit_kind_pair_update_excludes_cleanup_interleaving() {
+        let token = CancelToken::new();
+
+        token.set_cancel_source_kind_with_interleaving(CancelSource::UserBargeIn, |token| {
+            assert!(
+                token.cancel_source.try_lock().is_err(),
+                "the label lock must remain held after the kind write"
+            );
+        });
+
+        assert_eq!(token.cancel_source_kind(), Some(CancelSource::UserBargeIn));
+        assert_eq!(token.cancel_source().as_deref(), Some("user_barge_in"));
+    }
+
+    #[test]
     fn watchdog_deadline_enforcement_marks_cancelled_timeout() {
         let token = CancelToken::new();
         let now = current_unix_millis();
@@ -2246,6 +2449,65 @@ mod cancel_token_tests {
             Some(CancelSource::WatchdogTimeout)
         );
         assert_eq!(token.cancel_source().as_deref(), Some("watchdog_timeout"));
+    }
+
+    #[test]
+    fn watchdog_poll_path_respects_completion_cleanup_before_timeout_commit() {
+        let token = CancelToken::new();
+        let now = current_unix_millis();
+        token
+            .watchdog_deadline_ms
+            .store(now + 1_000, Ordering::Relaxed);
+        token.mark_completion_cleanup();
+
+        assert!(!enforce_watchdog_deadline(&token, now + 1_000));
+        assert!(!token.cancelled.load(Ordering::Acquire));
+        assert!(!cancel_requested(Some(&token)));
+        assert_eq!(token.cancel_source_kind(), None);
+        assert_eq!(token.cancel_source(), None);
+    }
+
+    #[test]
+    fn watchdog_poll_path_commits_timeout_through_publication_boundary() {
+        let token = CancelToken::new();
+        let now = current_unix_millis();
+        token
+            .watchdog_deadline_ms
+            .store(now + 1_000, Ordering::Relaxed);
+
+        assert!(enforce_watchdog_deadline(&token, now + 1_000));
+        assert!(token.cancelled.load(Ordering::Acquire));
+        assert!(cancel_requested(Some(&token)));
+        assert_eq!(
+            token.cancel_source_kind(),
+            Some(CancelSource::WatchdogTimeout)
+        );
+        assert_eq!(token.cancel_source().as_deref(), Some("watchdog_timeout"));
+    }
+
+    #[test]
+    fn completion_cleanup_can_win_when_publication_is_held_before_poll() {
+        let token = Arc::new(CancelToken::new());
+        let now = current_unix_millis();
+        token
+            .watchdog_deadline_ms
+            .store(now + 1_000, Ordering::Relaxed);
+
+        let publication = token
+            .cancellation_publication
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let token_for_poll = Arc::clone(&token);
+        let poll =
+            std::thread::spawn(move || enforce_watchdog_deadline(&token_for_poll, now + 1_000));
+
+        token.completion_cleanup.store(true, Ordering::Release);
+        drop(publication);
+
+        assert!(!poll.join().expect("poll thread should finish"));
+        assert!(!token.cancelled.load(Ordering::Acquire));
+        assert_eq!(token.cancel_source_kind(), None);
+        assert_eq!(token.cancel_source(), None);
     }
 
     /// claude-e rollout Phase 1 (counter-review round 3 with Codex): when
@@ -2273,27 +2535,6 @@ mod cancel_token_tests {
         // Explicit cancel still works — the gate is deadline-only.
         token.cancelled.store(true, Ordering::Relaxed);
         assert!(cancel_requested(Some(&token)));
-    }
-
-    #[test]
-    fn cancel_watchdog_ignores_normal_completion_cleanup_cancel() {
-        let token = CancelToken::new();
-        token.mark_completion_cleanup();
-        token.cancelled.store(true, Ordering::Relaxed);
-
-        assert!(!cancel_watchdog_should_kill(&token));
-        assert!(
-            cancel_requested(Some(&token)),
-            "cleanup marker only suppresses provider watchdog killing"
-        );
-    }
-
-    #[test]
-    fn cancel_watchdog_still_kills_explicit_cancel() {
-        let token = CancelToken::new();
-        token.cancelled.store(true, Ordering::Relaxed);
-
-        assert!(cancel_watchdog_should_kill(&token));
     }
 
     #[test]

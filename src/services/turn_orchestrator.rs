@@ -13,6 +13,7 @@ use crate::services::provider::{CancelToken, ProviderKind};
 // #3293: non-creating registry lookup + operator-gated idle-entry purge.
 mod active_source_dedup;
 mod dispatch_reservation;
+mod episode_identity;
 mod overflow;
 mod pending_queue_persistence;
 mod queue_cancellation;
@@ -34,6 +35,7 @@ use dispatch_reservation::{
     pending_dispatch_lease_is_orphaned, reconcile_pending_dispatch_marker_before_take_next,
     record_valve_cleared_pending_dispatch, set_pending_user_dispatch,
 };
+use episode_identity::{TurnNonceGuard, turn_nonce_guard_matches};
 pub(crate) use overflow::SoftInterventionProbe;
 use overflow::drain_head_overflow;
 #[cfg(test)]
@@ -504,6 +506,7 @@ pub(crate) struct ChannelMailboxSnapshot {
     pub(crate) cancel_token: Option<Arc<CancelToken>>,
     pub(crate) active_request_owner: Option<UserId>,
     pub(crate) active_user_message_id: Option<MessageId>,
+    pub(crate) active_turn_nonce: Option<String>,
     /// #3167 — priority class of the active-turn slot. `UserOrAgent` (default)
     /// when idle or carrying a real user/agent turn; background variants cover
     /// monitor relay / self-paced TUI loop ownership. Lets the kickoff snapshot
@@ -1206,61 +1209,6 @@ impl ChannelMailboxHandle {
         .await
     }
 
-    /// #3016 — identity-guarded finish. Finalizes the active turn ONLY when
-    /// the mailbox's current `active_user_message_id` matches
-    /// `expected_user_message_id`; otherwise it is a no-op that returns
-    /// `removed_token = None` (so the caller's counter decrement is skipped)
-    /// and leaves the possibly-newer live turn untouched.
-    pub(crate) async fn finish_turn_if_matches(
-        &self,
-        expected_user_message_id: MessageId,
-        persistence: QueuePersistenceContext,
-    ) -> FinishTurnResult {
-        self.request(
-            |reply| ChannelMailboxMsg::FinishTurnIfMatches {
-                expected_user_message_id,
-                active_started_before: None,
-                persistence,
-                reply,
-            },
-            FinishTurnResult {
-                removed_token: None,
-                has_pending: false,
-                mailbox_online: false,
-                queue_exit_events: Vec::new(),
-                persistence_error: None,
-            },
-        )
-        .await
-    }
-
-    /// Identity + monotonic-start guarded finish. Used by repair code that
-    /// snapshots a candidate before clearing durable state: a fresh same-id turn
-    /// that starts after `active_started_before` must survive as a no-op.
-    pub(crate) async fn finish_turn_if_matches_started_before(
-        &self,
-        expected_user_message_id: MessageId,
-        active_started_before: Instant,
-        persistence: QueuePersistenceContext,
-    ) -> FinishTurnResult {
-        self.request(
-            |reply| ChannelMailboxMsg::FinishTurnIfMatches {
-                expected_user_message_id,
-                active_started_before: Some(active_started_before),
-                persistence,
-                reply,
-            },
-            FinishTurnResult {
-                removed_token: None,
-                has_pending: false,
-                mailbox_online: false,
-                queue_exit_events: Vec::new(),
-                persistence_error: None,
-            },
-        )
-        .await
-    }
-
     pub(crate) async fn hard_stop(&self) -> FinishTurnResult {
         self.request(
             |reply| ChannelMailboxMsg::HardStop { reply },
@@ -1842,6 +1790,7 @@ enum ChannelMailboxMsg {
     FinishTurnIfMatches {
         expected_user_message_id: MessageId,
         active_started_before: Option<Instant>,
+        turn_nonce_guard: TurnNonceGuard,
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<FinishTurnResult>,
     },
@@ -1983,6 +1932,7 @@ struct ChannelMailboxState {
     cancel_token: Option<Arc<CancelToken>>,
     active_request_owner: Option<UserId>,
     active_user_message_id: Option<MessageId>,
+    active_turn_nonce: Option<String>,
     /// #3167 — priority class of the active-turn slot. `UserOrAgent` (default)
     /// for a real user/agent turn; background variants cover monitor
     /// terminal-output relay or self-paced TUI loop turns. Reset to default
@@ -2084,6 +2034,7 @@ fn finalize_turn_state(
     let removed_token = state.cancel_token.take();
     state.active_request_owner = None;
     state.active_user_message_id = None;
+    state.active_turn_nonce = None;
     // #3167 — clear the priority class with the rest of the active-turn anchor.
     state.active_turn_kind = ActiveTurnKind::default();
     state.recovery_started_at = None;
@@ -2279,6 +2230,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         cancel_token: state.cancel_token.clone(),
                         active_request_owner: state.active_request_owner,
                         active_user_message_id: state.active_user_message_id,
+                        active_turn_nonce: state.active_turn_nonce.clone(),
                         active_turn_kind: state.active_turn_kind,
                         intervention_queue: state.intervention_queue.clone(),
                         pending_user_dispatch: state.pending_user_dispatch,
@@ -2323,10 +2275,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     if let Some(token) = token.as_ref()
                         && !already_stopping
                     {
-                        token.set_cancel_source(reason.clone());
-                        token
-                            .cancelled
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        token.publish_cancel(reason.clone());
                     }
                     let _ = reply.send(CancelActiveTurnResult {
                         token,
@@ -2374,10 +2323,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     if let Some(token) = token.as_ref()
                         && !already_stopping
                     {
-                        token.set_cancel_source(reason.clone());
-                        token
-                            .cancelled
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        token.publish_cancel(reason.clone());
                     }
                     let _ = reply.send(CancelActiveTurnResult {
                         token,
@@ -2408,10 +2354,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     if let Some(token) = token.as_ref()
                         && !already_stopping
                     {
-                        token.set_cancel_source(reason.clone());
-                        token
-                            .cancelled
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        token.publish_cancel(reason.clone());
                     }
                     let _ = reply.send(CancelActiveTurnResult {
                         token,
@@ -2433,12 +2376,9 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             Some(token)
                                 if !token.cancelled.load(std::sync::atomic::Ordering::Relaxed) =>
                             {
-                                token.set_cancel_source(
+                                token.publish_cancel(
                                     "idle_queue_user_supersede_background".to_string(),
                                 );
-                                token
-                                    .cancelled
-                                    .store(true, std::sync::atomic::Ordering::Relaxed);
                                 true
                             }
                             // Already cancelling (or, defensively, no token): no-op.
@@ -2525,6 +2465,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             false
                         } else {
                             reset_turn_finished_signal(channel_id);
+                            state.active_turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
                             state.cancel_token = Some(cancel_token);
                             state.active_request_owner = Some(request_owner);
                             state.active_user_message_id = Some(user_message_id);
@@ -2563,6 +2504,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 } => {
                     reset_turn_finished_signal(channel_id);
                     let was_idle = state.cancel_token.is_none();
+                    state.active_turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
                     state.cancel_token = Some(cancel_token);
                     state.active_request_owner = Some(request_owner);
                     state.active_user_message_id = Some(user_message_id);
@@ -2585,6 +2527,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 } => {
                     reset_turn_finished_signal(channel_id);
                     let activated_turn = state.cancel_token.is_none();
+                    state.active_turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
                     state.cancel_token = Some(cancel_token);
                     state.active_request_owner = Some(request_owner);
                     state.active_user_message_id = user_message_id;
@@ -2943,6 +2886,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 ChannelMailboxMsg::FinishTurnIfMatches {
                     expected_user_message_id,
                     active_started_before,
+                    turn_nonce_guard,
                     persistence,
                     reply,
                 } => {
@@ -2962,7 +2906,11 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             state
                                 .turn_started_instant
                                 .is_some_and(|started_at| started_at < started_before)
-                        });
+                        })
+                        && turn_nonce_guard_matches(
+                            &turn_nonce_guard,
+                            state.active_turn_nonce.as_deref(),
+                        );
                     if matches {
                         state.last_persistence = Some(persistence.clone());
                         let finished_user_message_id = state.active_user_message_id;
@@ -3036,6 +2984,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     let removed_token = state.cancel_token.take();
                     state.active_request_owner = None;
                     state.active_user_message_id = None;
+                    state.active_turn_nonce = None;
                     // #3167 — clear the priority class with the anchor.
                     state.active_turn_kind = ActiveTurnKind::default();
                     state.recovery_started_at = None;
@@ -3104,6 +3053,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         state.cancel_token = None;
                         state.active_request_owner = None;
                         state.active_user_message_id = None;
+                        state.active_turn_nonce = None;
                         // #3167 — clear the priority class with the anchor.
                         state.active_turn_kind = ActiveTurnKind::default();
                         state.recovery_started_at = None;

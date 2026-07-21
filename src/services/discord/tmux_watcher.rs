@@ -3415,7 +3415,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         if let Some(tokens) = result_usage.map(|usage| usage.context_occupancy_input_tokens()) {
             let provider = shared.settings.read().await.provider.clone();
             let session_key = crate::services::discord::adk_session::build_adk_session_key(
-                &shared, channel_id, &provider,
+                &shared, channel_id, &provider, None,
             )
             .await;
             let channel_name = {

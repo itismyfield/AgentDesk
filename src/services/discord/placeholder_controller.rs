@@ -224,8 +224,43 @@ async fn edit_message_with_retry<G: TurnGateway + ?Sized>(
 }
 
 #[derive(Debug, Default)]
+struct PlaceholderSlotState {
+    revoked: bool,
+    entry: PlaceholderEntry,
+}
+
+impl std::ops::Deref for PlaceholderSlotState {
+    type Target = PlaceholderEntry;
+
+    fn deref(&self) -> &Self::Target {
+        &self.entry
+    }
+}
+
+impl std::ops::DerefMut for PlaceholderSlotState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.entry
+    }
+}
+
+#[derive(Debug, Default)]
+struct PlaceholderEntrySlot {
+    state: Mutex<PlaceholderSlotState>,
+}
+
+/// Exact process-local authority for one controller entry incarnation.
+///
+/// The inner `Arc` is intentionally opaque: capability operations use it
+/// directly and never recover authority by looking up (or creating) a key.
+#[derive(Debug, Clone)]
+pub(super) struct PlaceholderIncarnation {
+    key: PlaceholderKey,
+    slot: Arc<PlaceholderEntrySlot>,
+}
+
+#[derive(Debug, Default)]
 pub(super) struct PlaceholderController {
-    entries: dashmap::DashMap<PlaceholderKey, Arc<Mutex<PlaceholderEntry>>>,
+    entries: dashmap::DashMap<PlaceholderKey, Arc<PlaceholderEntrySlot>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,7 +280,7 @@ pub(super) enum PlaceholderControllerOutcome {
 }
 
 impl PlaceholderController {
-    fn entry(&self, key: &PlaceholderKey) -> Arc<Mutex<PlaceholderEntry>> {
+    fn entry(&self, key: &PlaceholderKey) -> Arc<PlaceholderEntrySlot> {
         if let Some(existing) = self.entries.get(key) {
             return existing.clone();
         }
@@ -254,8 +289,24 @@ impl PlaceholderController {
         }
         self.entries
             .entry(key.clone())
-            .or_insert_with(|| Arc::new(Mutex::new(PlaceholderEntry::default())))
+            .or_insert_with(|| Arc::new(PlaceholderEntrySlot::default()))
             .clone()
+    }
+
+    pub(super) fn incarnation(&self, key: &PlaceholderKey) -> PlaceholderIncarnation {
+        PlaceholderIncarnation {
+            key: key.clone(),
+            slot: self.entry(key),
+        }
+    }
+
+    pub(super) async fn revoke_incarnation(&self, incarnation: &PlaceholderIncarnation) {
+        let mut guarded = incarnation.slot.state.lock().await;
+        guarded.revoked = true;
+        drop(guarded);
+        self.entries.remove_if(&incarnation.key, |_, current| {
+            Arc::ptr_eq(current, &incarnation.slot)
+        });
     }
 
     /// Sweep entries whose state is terminal (Completed/TimedOut/Aborted) or
@@ -266,7 +317,7 @@ impl PlaceholderController {
     fn evict_terminal_entries(&self) {
         let mut to_remove: Vec<PlaceholderKey> = Vec::new();
         for kv in self.entries.iter() {
-            if let Ok(guard) = kv.value().try_lock() {
+            if let Ok(guard) = kv.value().state.try_lock() {
                 if matches!(
                     guard.state,
                     PlaceholderLifecycle::NotCreated
@@ -314,8 +365,33 @@ impl PlaceholderController {
         input: PlaceholderActiveInput,
         live_events_block: Option<String>,
     ) -> PlaceholderControllerOutcome {
-        let entry = self.entry(&key);
-        let mut guarded = entry.lock().await;
+        let incarnation = self.incarnation(&key);
+        self.ensure_active_incarnation_inner(gateway, &incarnation, input, live_events_block)
+            .await
+    }
+
+    pub(super) async fn ensure_active_incarnation<G: TurnGateway + ?Sized>(
+        &self,
+        gateway: &G,
+        incarnation: &PlaceholderIncarnation,
+        input: PlaceholderActiveInput,
+    ) -> PlaceholderControllerOutcome {
+        self.ensure_active_incarnation_inner(gateway, incarnation, input, None)
+            .await
+    }
+
+    async fn ensure_active_incarnation_inner<G: TurnGateway + ?Sized>(
+        &self,
+        gateway: &G,
+        incarnation: &PlaceholderIncarnation,
+        input: PlaceholderActiveInput,
+        live_events_block: Option<String>,
+    ) -> PlaceholderControllerOutcome {
+        let key = &incarnation.key;
+        let mut guarded = incarnation.slot.state.lock().await;
+        if guarded.revoked {
+            return PlaceholderControllerOutcome::Rejected;
+        }
 
         // Forbid re-activating after a terminal transition — placeholder_sweeper
         // owns stale-Active recovery and we never want to drag a closed card
@@ -410,7 +486,7 @@ impl PlaceholderController {
         input: PlaceholderActiveInput,
     ) -> PlaceholderControllerOutcome {
         let entry = self.entry(&key);
-        let mut guarded = entry.lock().await;
+        let mut guarded = entry.state.lock().await;
 
         if matches!(
             guarded.state,
@@ -484,7 +560,7 @@ impl PlaceholderController {
             target
         );
         let entry = self.entry(&key);
-        let mut guarded = entry.lock().await;
+        let mut guarded = entry.state.lock().await;
 
         if matches!(
             guarded.state,
@@ -554,19 +630,29 @@ impl PlaceholderController {
         let Some(entry) = self.entries.get(key).map(|entry| entry.clone()) else {
             return false;
         };
-        let mut guarded = entry.lock().await;
+        let mut guarded = entry.state.lock().await;
         guarded.last_rendered = None;
         guarded.last_live_events_block = None;
         guarded.last_live_events_edit_at = None;
         true
     }
 
+    /// Revoke one current incarnation and remove it without emitting a Discord
+    /// PATCH. The slot mutex serializes revocation with PATCH admission and
+    /// commit, so a caller retaining this slot cannot commit after detachment.
+    pub(super) async fn revoke_and_detach(&self, key: &PlaceholderKey) {
+        let Some(slot) = self.entries.get(key).map(|entry| entry.clone()) else {
+            return;
+        };
+        self.revoke_incarnation(&PlaceholderIncarnation {
+            key: key.clone(),
+            slot,
+        })
+        .await;
+    }
+
     /// Drop a key from the controller without emitting any Discord PATCH.
-    /// Used by the rollover retarget path on `turn_bridge`: when the old
-    /// `current_msg_id` is overwritten with a frozen response chunk, the
-    /// controller's old entry is no longer referenced and must not survive as
-    /// a non-evictable `Active` row in the cap-bounded map (codex round-4
-    /// #1308 P2).
+    /// Used by rollover-retarget paths that do not retain a PATCH incarnation.
     pub(super) fn detach(&self, key: &PlaceholderKey) {
         self.entries.remove(key);
     }
@@ -598,6 +684,8 @@ mod edit_retry_tests {
     struct ScriptedGateway {
         responses: tokio::sync::Mutex<Vec<Result<(), String>>>,
         calls: AtomicUsize,
+        edit_started: tokio::sync::Notify,
+        edit_gate: Option<tokio::sync::Semaphore>,
     }
 
     impl ScriptedGateway {
@@ -605,7 +693,22 @@ mod edit_retry_tests {
             Self {
                 responses: tokio::sync::Mutex::new(responses),
                 calls: AtomicUsize::new(0),
+                edit_started: tokio::sync::Notify::new(),
+                edit_gate: None,
             }
+        }
+
+        fn blocked() -> Self {
+            Self {
+                responses: tokio::sync::Mutex::new(vec![Ok(())]),
+                calls: AtomicUsize::new(0),
+                edit_started: tokio::sync::Notify::new(),
+                edit_gate: Some(tokio::sync::Semaphore::new(0)),
+            }
+        }
+
+        fn release_edit(&self) {
+            self.edit_gate.as_ref().unwrap().add_permits(1);
         }
     }
 
@@ -626,6 +729,10 @@ mod edit_retry_tests {
         ) -> GatewayFuture<'a, Result<(), String>> {
             Box::pin(async move {
                 self.calls.fetch_add(1, Ordering::SeqCst);
+                self.edit_started.notify_one();
+                if let Some(gate) = &self.edit_gate {
+                    gate.acquire().await.unwrap().forget();
+                }
                 let mut queue = self.responses.lock().await;
                 if queue.is_empty() {
                     Err("scripted gateway exhausted".to_string())
@@ -731,6 +838,183 @@ mod edit_retry_tests {
             EditErrorCategory::Transient,
             "empty error string (5xx with no parsed body) must retry"
         );
+    }
+
+    fn key() -> PlaceholderKey {
+        PlaceholderKey {
+            provider: ProviderKind::Codex,
+            channel_id: ChannelId::new(1),
+            message_id: MessageId::new(2),
+        }
+    }
+
+    fn input() -> PlaceholderActiveInput {
+        PlaceholderActiveInput {
+            reason: MonitorHandoffReason::ExplicitCall,
+            started_at_unix: 1_700_000_000,
+            tool_summary: None,
+            command_summary: None,
+            reason_detail: None,
+            context_line: None,
+            request_line: None,
+            progress_line: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn incarnation_revocation_serializes_with_edits_and_cannot_rebind() {
+        let controller = Arc::new(PlaceholderController::default());
+        let gateway = Arc::new(ScriptedGateway::blocked());
+        let key = key();
+        let old = controller.incarnation(&key);
+
+        let edit = tokio::spawn({
+            let controller = controller.clone();
+            let gateway = gateway.clone();
+            let old = old.clone();
+            async move {
+                controller
+                    .ensure_active_incarnation(gateway.as_ref(), &old, input())
+                    .await
+            }
+        });
+        gateway.edit_started.notified().await;
+        let revoke = tokio::spawn({
+            let controller = controller.clone();
+            let old = old.clone();
+            async move { controller.revoke_incarnation(&old).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !revoke.is_finished(),
+            "revoke must wait for the admitted PATCH"
+        );
+
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
+        assert!(Arc::ptr_eq(
+            &controller.entries.get(&key).unwrap().clone(),
+            &old.slot
+        ));
+        gateway.release_edit();
+        assert_eq!(edit.await.unwrap(), PlaceholderControllerOutcome::Edited);
+        revoke.await.unwrap();
+        let committed_then_revoked = old.slot.state.lock().await;
+        assert!(committed_then_revoked.revoked);
+        assert_eq!(committed_then_revoked.state, PlaceholderLifecycle::Active);
+        drop(committed_then_revoked);
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            controller
+                .ensure_active_incarnation(gateway.as_ref(), &old, input())
+                .await,
+            PlaceholderControllerOutcome::Rejected
+        );
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
+
+        let replacement = controller.incarnation(&key);
+        let other_key = PlaceholderKey {
+            message_id: MessageId::new(99),
+            ..key.clone()
+        };
+        controller.revoke_incarnation(&old).await;
+        assert!(Arc::ptr_eq(
+            &controller.entries.get(&key).unwrap().clone(),
+            &replacement.slot
+        ));
+        assert!(!controller.entries.contains_key(&other_key));
+        assert_eq!(
+            controller.entries.len(),
+            1,
+            "stale capability must not recreate"
+        );
+    }
+
+    #[tokio::test]
+    async fn detach_tombstones_retained_incarnation_before_late_patch() {
+        let controller = PlaceholderController::default();
+        let gateway = ScriptedGateway::new(vec![Ok(())]);
+        let key = key();
+        let retained = controller.incarnation(&key);
+
+        controller.revoke_and_detach(&key).await;
+
+        assert!(!controller.entries.contains_key(&key));
+        assert!(retained.slot.state.lock().await.revoked);
+        assert_eq!(
+            controller
+                .ensure_active_incarnation(&gateway, &retained, input())
+                .await,
+            PlaceholderControllerOutcome::Rejected,
+            "a PATCH capability retained before detach must not commit to its tombstoned slot"
+        );
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 0);
+        assert!(!controller.entries.contains_key(&key));
+    }
+
+    #[tokio::test]
+    async fn mismatched_key_and_slot_capability_cannot_remove_or_mutate_maps() {
+        let controller = PlaceholderController::default();
+        let gateway = ScriptedGateway::new(vec![Ok(())]);
+        let key_a = key();
+        let key_b = PlaceholderKey {
+            message_id: MessageId::new(99),
+            ..key_a.clone()
+        };
+        let incarnation_a = controller.incarnation(&key_a);
+        let incarnation_b = controller.incarnation(&key_b);
+        let mismatched = PlaceholderIncarnation {
+            key: key_a.clone(),
+            slot: incarnation_b.slot.clone(),
+        };
+
+        controller.revoke_incarnation(&mismatched).await;
+        assert!(controller.entries.contains_key(&key_a));
+        assert!(controller.entries.contains_key(&key_b));
+        assert!(Arc::ptr_eq(
+            &controller.entries.get(&key_a).unwrap().clone(),
+            &incarnation_a.slot
+        ));
+        assert!(Arc::ptr_eq(
+            &controller.entries.get(&key_b).unwrap().clone(),
+            &incarnation_b.slot
+        ));
+        assert!(!incarnation_a.slot.state.lock().await.revoked);
+        assert!(incarnation_b.slot.state.lock().await.revoked);
+
+        assert_eq!(
+            controller
+                .ensure_active_incarnation(&gateway, &mismatched, input())
+                .await,
+            PlaceholderControllerOutcome::Rejected
+        );
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(controller.entries.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn cancelled_edit_releases_incarnation_mutex_without_claiming_wire_result() {
+        let controller = Arc::new(PlaceholderController::default());
+        let gateway = Arc::new(ScriptedGateway::blocked());
+        let key = key();
+        let incarnation = controller.incarnation(&key);
+        let edit = tokio::spawn({
+            let controller = controller.clone();
+            let gateway = gateway.clone();
+            let incarnation = incarnation.clone();
+            async move {
+                controller
+                    .ensure_active_incarnation(gateway.as_ref(), &incarnation, input())
+                    .await
+            }
+        });
+        gateway.edit_started.notified().await;
+        edit.abort();
+        assert!(edit.await.unwrap_err().is_cancelled());
+        controller.revoke_incarnation(&incarnation).await;
+        let guarded = incarnation.slot.state.lock().await;
+        assert!(guarded.revoked);
+        assert_eq!(guarded.state, PlaceholderLifecycle::NotCreated);
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
     }
 
     /// Rate-limited then success: helper must retry once and surface Ok.

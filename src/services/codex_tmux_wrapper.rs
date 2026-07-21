@@ -40,6 +40,7 @@ const DEFAULT_CODEX_TURN_IDLE_RECV_SECS: u64 = 3600;
 /// matches the per-turn Codex ceiling and clears any legitimate Codex turn.
 const DEFAULT_CODEX_TURN_HARD_CEILING_SECS: u64 = 4 * 3600;
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     output_file: &str,
     input_fifo: &str,
@@ -432,6 +433,7 @@ fn read_codex_terminal_input_lines<R: BufRead>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_turn(
     output: &mut RotatingJsonlWriter,
     codex_bin: &str,

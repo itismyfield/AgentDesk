@@ -28,6 +28,7 @@ pub(super) fn strip_placeholder_indicators_for_preserve(
         .trim_end()
         .to_string()
 }
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_placeholder_suppression(
     http: &Arc<serenity::Http>,
     channel_id: ChannelId,
@@ -136,6 +137,7 @@ pub(crate) async fn apply_placeholder_suppression(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn record_placeholder_cleanup(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -462,6 +464,7 @@ pub(crate) async fn delete_watcher_rollover_frozen_prefixes(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn delete_placeholder_with_operation(
     http: &Arc<serenity::Http>,
     channel_id: ChannelId,
@@ -489,6 +492,7 @@ async fn delete_placeholder_with_operation(
     outcome
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn edit_terminal_placeholder(
     http: &Arc<serenity::Http>,
     channel_id: ChannelId,
@@ -513,6 +517,7 @@ async fn edit_terminal_placeholder(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn edit_preserve_placeholder(
     http: &Arc<serenity::Http>,
     channel_id: ChannelId,
@@ -537,6 +542,7 @@ async fn edit_preserve_placeholder(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn edit_placeholder_with_operation(
     http: &Arc<serenity::Http>,
     channel_id: ChannelId,

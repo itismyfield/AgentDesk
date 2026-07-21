@@ -17,7 +17,6 @@ use super::{
     watcher_should_delete_suppressed_placeholder,
     watcher_should_direct_send_after_session_bound_ack,
     watcher_should_reclaim_orphan_turn_placeholder,
-    watcher_should_suppress_streaming_after_bridge_delivery,
     watcher_stream_seed_after_restored_seed_discard, watcher_terminal_commit_side_effects_for_test,
     watcher_terminal_edit_consumes_placeholder, watcher_terminal_response_for_direct_send,
     watcher_terminal_rewind_seed, watcher_wait_inflight_retry_plan,
@@ -3821,16 +3820,57 @@ fn legacy_watcher_streaming_edit_keeps_processing_footer() {
 }
 
 #[test]
-fn watcher_streaming_suppresses_after_bridge_delivery_only_for_response() {
-    assert!(watcher_should_suppress_streaming_after_bridge_delivery(
-        true, true
-    ));
-    assert!(!watcher_should_suppress_streaming_after_bridge_delivery(
-        true, false
-    ));
-    assert!(!watcher_should_suppress_streaming_after_bridge_delivery(
-        false, true
-    ));
+fn watcher_streaming_suppression_stops_at_bridge_committed_frontier() {
+    let committed_terminal_range = Some((100, 200));
+
+    assert!(
+        super::streaming_status_tick::watcher_should_suppress_streaming_after_bridge_delivery(
+            true,
+            true,
+            (100, 200),
+            committed_terminal_range,
+        )
+    );
+    assert!(
+        !super::streaming_status_tick::watcher_should_suppress_streaming_after_bridge_delivery(
+            true,
+            true,
+            (200, 240),
+            committed_terminal_range,
+        )
+    );
+    assert!(
+        !super::streaming_status_tick::watcher_should_suppress_streaming_after_bridge_delivery(
+            true,
+            true,
+            (180, 240),
+            committed_terminal_range,
+        )
+    );
+    assert!(
+        !super::streaming_status_tick::watcher_should_suppress_streaming_after_bridge_delivery(
+            true,
+            false,
+            (100, 200),
+            committed_terminal_range,
+        )
+    );
+    assert!(
+        !super::streaming_status_tick::watcher_should_suppress_streaming_after_bridge_delivery(
+            false,
+            true,
+            (100, 200),
+            committed_terminal_range,
+        )
+    );
+    assert!(
+        !super::streaming_status_tick::watcher_should_suppress_streaming_after_bridge_delivery(
+            true,
+            true,
+            (100, 200),
+            None,
+        )
+    );
 }
 
 #[test]

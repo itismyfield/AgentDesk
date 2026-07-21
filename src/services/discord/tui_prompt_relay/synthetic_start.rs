@@ -232,6 +232,14 @@ pub(super) async fn claim_tui_direct_synthetic_turn(
         }
     }
 
+    // Capture the actor-owned episode identity after admission. If this call
+    // observed an already-active matching synthetic turn, the fresh local token
+    // was not admitted; the mailbox snapshot, not that unused token, is the
+    // authority for the nonce persisted below.
+    let active_turn_nonce = super::super::mailbox_snapshot(shared, channel_id)
+        .await
+        .active_turn_nonce;
+
     // #3146 Part 1: a TUI-driven turn is now active for this channel (we either
     // just started it via `mailbox_try_start_turn` or already own the matching
     // turn). Clear any stale `📦 … idle N분` recap card the same way the
@@ -282,6 +290,7 @@ pub(super) async fn claim_tui_direct_synthetic_turn(
         && existing.user_msg_id == anchor_message_id.get()
     {
         let mut existing = existing;
+        existing.turn_nonce = active_turn_nonce.clone();
         existing.set_relay_owner_kind(relay_owner_kind);
         existing.session_key = lease.session_key.clone();
         existing.runtime_kind = lease.runtime_kind;
@@ -336,6 +345,7 @@ pub(super) async fn claim_tui_direct_synthetic_turn(
         lease,
         relay_owner_kind,
     );
+    inflight_state.turn_nonce = active_turn_nonce;
     // #4002/#4082: lower-level safety. Normal wiring gates neutral continuation
     // records before this point; if a suppressing class reaches the raw claim API,
     // keep it relay-ownership-only so watcher completion Path B skips it.
@@ -779,9 +789,10 @@ mod tests {
         let channel_id = ChannelId::new(4_019_230);
         let tmux = "AgentDesk-claude-4019-adopt";
         let anchor_id = MessageId::new(4_019_330);
-        let _token = seed_synthetic_mailbox_owner(&shared, channel_id, anchor_id).await;
+        let token = seed_synthetic_mailbox_owner(&shared, channel_id, anchor_id).await;
         shared.restart.global_active.store(0, Ordering::Relaxed);
-        let state = synthetic_state(channel_id, anchor_id, tmux, false);
+        let mut state = synthetic_state(channel_id, anchor_id, tmux, false);
+        state.turn_nonce = Some("stale-row-episode".to_string());
         inflight::save_inflight_state(&state).expect("save adopted synthetic inflight");
 
         let mut lease = ExternalInputRelayLease::unassigned(Some(channel_id.get()));
@@ -802,6 +813,10 @@ mod tests {
         );
         let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
         assert_eq!(snapshot.active_user_message_id, Some(anchor_id));
+        assert_eq!(snapshot.active_turn_nonce.as_deref(), token.turn_nonce());
+        let persisted = inflight::load_inflight_state(&provider, channel_id.get())
+            .expect("adopted synthetic inflight must persist");
+        assert_eq!(persisted.turn_nonce.as_deref(), token.turn_nonce());
     }
 
     #[cfg(unix)]
@@ -2375,6 +2390,7 @@ pub(super) async fn finish_tui_direct_synthetic_turn_if_current(
         .await;
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_tui_direct_synthetic_inflight_state(
     provider: ProviderKind,
     channel_id: ChannelId,

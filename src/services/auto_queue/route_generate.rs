@@ -13,7 +13,7 @@ use super::*;
 pub async fn generate(
     State(state): State<AppState>,
     Json(body): Json<GenerateBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let guild_id = state
         .config
         .onboarding
@@ -22,7 +22,7 @@ pub async fn generate(
     let force = body.force.unwrap_or(false);
     let review_mode = match normalize_auto_queue_review_mode(body.review_mode.as_deref()) {
         Ok(mode) => mode,
-        Err(err) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))),
+        Err(err) => return Err(AppError::bad_request(err).with_code(ErrorCode::AutoQueue)),
     };
     // Validate the request body BEFORE the PG availability check so callers
     // get a 400 with the actual error (e.g. unknown phase_gate_kind) instead
@@ -30,11 +30,11 @@ pub async fn generate(
     let requested_entries = match normalize_generate_entries(&body) {
         Ok(entries) => entries,
         Err(err) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({ "error": err })));
+            return Err(AppError::bad_request(err).with_code(ErrorCode::AutoQueue));
         }
     };
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable_response();
+        return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     let requested_issue_numbers = requested_entries
         .as_ref()
@@ -56,12 +56,14 @@ pub async fn generate(
         let mut cards =
             match resolve_dispatch_cards_with_pg(pool, body.repo.as_deref(), issue_numbers).await {
                 Ok(cards) => cards,
-                Err(error) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))),
+                Err(error) => {
+                    return Err(AppError::bad_request(error).with_code(ErrorCode::AutoQueue));
+                }
             };
         if let Err(error) =
             apply_dispatch_agent_assignments_with_pg(pool, &mut cards, Some(agent_id), true).await
         {
-            return (StatusCode::BAD_REQUEST, Json(json!({ "error": error })));
+            return Err(AppError::bad_request(error).with_code(ErrorCode::AutoQueue));
         }
     }
     // (index, batch_phase, thread_group, phase_gate_kind)
@@ -96,15 +98,12 @@ pub async fn generate(
         {
             Ok(runs) => runs,
             Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
+                return Err(AppError::internal(error).with_code(ErrorCode::AutoQueue));
             }
         };
         if let Some((run_id, status)) = conflicting_live_runs.first() {
             if !force {
-                return existing_live_run_conflict_response(run_id, status);
+                return Ok(existing_live_run_conflict_response(run_id, status));
             }
             let target_run_ids: Vec<String> = conflicting_live_runs
                 .iter()
@@ -118,10 +117,7 @@ pub async fn generate(
             )
             .await
             {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
+                return Err(AppError::internal(error).with_code(ErrorCode::AutoQueue));
             }
         }
 
@@ -148,7 +144,7 @@ pub async fn generate(
                     github_issue_number: card.github_issue_number,
                 })
                 .collect(),
-            Err(error) => return error.into_json_response(),
+            Err(error) => return Err(error),
         }
     };
 
@@ -200,15 +196,11 @@ pub async fn generate(
                 }
                 Ok(None) => retained.push(card),
                 Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({
-                            "error": format!(
-                                "active-dispatch lookup failed for card {}: {error}",
-                                card.card_id
-                            ),
-                        })),
-                    );
+                    return Err(AppError::internal(format!(
+                        "active-dispatch lookup failed for card {}: {error}",
+                        card.card_id
+                    ))
+                    .with_code(ErrorCode::AutoQueue));
                 }
             }
         }
@@ -294,7 +286,7 @@ pub async fn generate(
                 }
             }
         }
-        return (
+        return Ok((
             StatusCode::OK,
             Json(json!({
                 "run": null,
@@ -306,7 +298,7 @@ pub async fn generate(
                 "skipped_due_to_dependency": Vec::<serde_json::Value>::new(),
                 "skipped_due_to_filter": skip_breakdown.filter,
             })),
-        );
+        ));
     }
 
     let issue_to_idx: HashMap<i64, usize> = cards
@@ -396,7 +388,7 @@ pub async fn generate(
     }
 
     if filtered_cards.is_empty() {
-        return (
+        return Ok((
             StatusCode::OK,
             Json(json!({
                 "run": null,
@@ -406,7 +398,7 @@ pub async fn generate(
                 "skipped_due_to_dependency": skipped_due_to_dependency,
                 "skipped_due_to_filter": skip_breakdown.filter,
             })),
-        );
+        ));
     }
 
     let plan = build_group_plan(&filtered_cards);
@@ -501,10 +493,10 @@ pub async fn generate(
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("begin auto-queue generate transaction: {error}")})),
-            );
+            return Err(AppError::internal(format!(
+                "begin auto-queue generate transaction: {error}"
+            ))
+            .with_code(ErrorCode::AutoQueue));
         }
     };
     if let Err(error) = sqlx::query(
@@ -525,10 +517,7 @@ pub async fn generate(
     .execute(&mut *tx)
     .await
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("create auto-queue run: {error}")})),
-        );
+        return Err(AppError::internal(format!("create auto-queue run: {error}")).with_code(ErrorCode::AutoQueue));
     }
 
     let mut entry_ids = Vec::new();
@@ -563,17 +552,14 @@ pub async fn generate(
         .execute(&mut *tx)
         .await
         {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("create auto-queue entry: {error}")})),
-            );
+            return Err(AppError::internal(format!("create auto-queue entry: {error}")).with_code(ErrorCode::AutoQueue));
         }
         entry_ids.push(entry_id);
     }
     if let Err(error) = tx.commit().await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("commit auto-queue generate transaction: {error}")})),
+        return Err(
+            AppError::internal(format!("commit auto-queue generate transaction: {error}"))
+                .with_code(ErrorCode::AutoQueue),
         );
     };
 
@@ -594,7 +580,7 @@ pub async fn generate(
         .await
         .unwrap_or(serde_json::Value::Null);
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "run": run,
@@ -603,7 +589,7 @@ pub async fn generate(
             "skipped_due_to_dependency": skipped_due_to_dependency,
             "skipped_due_to_filter": skip_breakdown.filter,
         })),
-    )
+    ))
 }
 
 /// Structured skip-reason breakdown for `/api/queue/generate` (#1442).

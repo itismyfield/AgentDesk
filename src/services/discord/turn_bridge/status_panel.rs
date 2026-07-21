@@ -10,6 +10,7 @@ pub(super) fn status_panel_completion_ready_after_terminal_body(
     terminal_delivery_committed && terminal_body_visible && !preserve_inflight_for_cleanup_retry
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
     shared: &SharedData,
     gateway: &G,
@@ -148,6 +149,7 @@ fn completion_panel_with_wip_warning(
     (panel_text, reservation)
 }
 
+#[allow(clippy::large_enum_variant)]
 enum StatusPanelWipInflight<'a> {
     Preloaded(&'a super::super::InflightTurnState),
     Loaded(super::super::InflightTurnState),
@@ -204,6 +206,7 @@ fn status_panel_wip_inflight_for_completion<'a>(
     .map(StatusPanelWipInflight::Loaded)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn complete_status_panel_v2_fallback_with_gateway<G: TurnGateway + ?Sized>(
     shared: &SharedData,
     gateway: &G,
@@ -244,6 +247,7 @@ async fn complete_status_panel_v2_fallback_with_gateway<G: TurnGateway + ?Sized>
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) async fn complete_status_panel_v2_with_http(
     shared: &std::sync::Arc<SharedData>,
     http: &serenity::Http,
@@ -359,6 +363,7 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn complete_status_panel_v2_fallback_with_http(
     http: &serenity::Http,
     channel_id: ChannelId,

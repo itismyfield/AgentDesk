@@ -2,9 +2,11 @@
 //!
 //! Prompt observation runs below the Discord relay layer, so it must be able to
 //! decide whether a transcript record can create an external-turn lifecycle
-//! without depending on Discord command/rendering modules. Local command
-//! records are deliberately never text/time-paired: duplicate notes are safer
-//! than swallowing a later human command.
+//! without depending on Discord command/rendering modules. The Discord relay
+//! collapses a raw echo plus `<command-*>` envelope, and any sub-two-second
+//! same-kind machine repeat, into one cosmetic marker. This suppresses only the
+//! Discord note after local execution has completed; it cannot swallow command
+//! injection or execution, and the first marker is always retained.
 
 /// AgentDesk pass-through commands that complete locally in a Claude TUI.
 pub(crate) const LOCAL_ONLY_SLASH_COMMANDS: [&str; 4] =

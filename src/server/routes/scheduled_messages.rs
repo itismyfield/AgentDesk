@@ -21,6 +21,8 @@ use crate::db::scheduled_messages::{
 };
 use crate::error::{AppError, AppResult, ErrorCode};
 
+mod snapshot_capture;
+
 #[cfg(test)]
 mod postgres_tests;
 
@@ -91,6 +93,11 @@ pub struct CreateScheduledMessageBody {
     pub source: Option<String>,
     pub created_by: Option<String>,
     pub dedupe_key: Option<String>,
+    /// #4658: 'fresh' (default) or 'snapshot'. Snapshot freezes the source
+    /// channel's conversation context at creation time.
+    pub context_strategy: Option<String>,
+    /// #4658: 'fail' (default, fail-closed) or 'fresh' (opt-in degrade).
+    pub on_context_failure: Option<String>,
 }
 
 /// POST /api/scheduled-messages
@@ -100,6 +107,13 @@ pub async fn create_scheduled_message(
 ) -> ApiResponse {
     let pool = pool_or_unavailable(&state)?;
     let new = validate_create(pool, &body).await?;
+
+    // #4658: capture the immutable snapshot atomically with the definition
+    // insert. Success guarantees the snapshot row exists (FK + CHECK); an empty
+    // source channel fails closed with a 400 rather than degrading to fresh.
+    if new.context_strategy == db::CONTEXT_STRATEGY_SNAPSHOT {
+        return snapshot_capture::create_scheduled_message_with_snapshot(pool, new).await;
+    }
 
     match db::insert_scheduled_message_pg(pool, &new).await {
         Ok(row) => Ok((
@@ -161,6 +175,45 @@ async fn validate_create(
         return Err(app_error(
             StatusCode::BAD_REQUEST,
             "onAgentFailure must be 'fail' or 'push_raw'",
+        ));
+    }
+
+    // #4658: context snapshot strategy. Snapshot is agent-only (push has no
+    // conversation context to freeze).
+    let context_strategy = body
+        .context_strategy
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(db::CONTEXT_STRATEGY_FRESH)
+        .to_string();
+    if context_strategy != db::CONTEXT_STRATEGY_FRESH
+        && context_strategy != db::CONTEXT_STRATEGY_SNAPSHOT
+    {
+        return Err(app_error(
+            StatusCode::BAD_REQUEST,
+            "contextStrategy must be 'fresh' or 'snapshot'",
+        ));
+    }
+    if context_strategy == db::CONTEXT_STRATEGY_SNAPSHOT && delivery_kind != db::KIND_AGENT {
+        return Err(app_error(
+            StatusCode::BAD_REQUEST,
+            "contextStrategy 'snapshot' is only valid for agent delivery",
+        ));
+    }
+    let on_context_failure = body
+        .on_context_failure
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(db::ON_CONTEXT_FAILURE_FAIL)
+        .to_string();
+    if on_context_failure != db::ON_CONTEXT_FAILURE_FAIL
+        && on_context_failure != db::ON_CONTEXT_FAILURE_FRESH
+    {
+        return Err(app_error(
+            StatusCode::BAD_REQUEST,
+            "onContextFailure must be 'fail' or 'fresh'",
         ));
     }
 
@@ -267,6 +320,10 @@ async fn validate_create(
             .dedupe_key
             .clone()
             .filter(|value| !value.trim().is_empty()),
+        context_strategy,
+        // Captured in the create transaction (snapshot strategy only); NULL here.
+        context_snapshot_id: None,
+        on_context_failure,
     })
 }
 
@@ -580,6 +637,21 @@ fn normalize_effective_scheduled_at(
     Ok(scheduled_at)
 }
 
+/// #4658 F4: the source-binding fields a snapshot definition may NOT change via
+/// PATCH (they would silently retarget the frozen context). Returns the first
+/// offending key present in the patch body, or `None` when the patch is allowed.
+fn snapshot_patch_retarget_key(
+    context_strategy: &str,
+    body: &serde_json::Map<String, JsonValue>,
+) -> Option<&'static str> {
+    if context_strategy != db::CONTEXT_STRATEGY_SNAPSHOT {
+        return None;
+    }
+    ["targetChannelId", "agentId"]
+        .into_iter()
+        .find(|key| body.contains_key(*key))
+}
+
 async fn build_patch(
     pool: &PgPool,
     body: &serde_json::Map<String, JsonValue>,
@@ -587,6 +659,19 @@ async fn build_patch(
 ) -> Result<ScheduledMessagePatch, AppError> {
     let bad_request = |message: String| app_error(StatusCode::BAD_REQUEST, message);
     let mut patch = ScheduledMessagePatch::default();
+
+    // #4658 F4: a snapshot definition's frozen context is bound to the source
+    // channel/agent resolved at capture time. Reject re-targeting it (target
+    // channel or agent) without a re-capture — otherwise one channel's frozen
+    // context would be injected into another channel's turn (cross-channel
+    // bleed). Operators must cancel + recreate to re-capture.
+    if let Some(offending) = snapshot_patch_retarget_key(&existing.context_strategy, body) {
+        return Err(bad_request(format!(
+            "{offending} cannot be changed on a context_strategy='snapshot' reservation \
+             (its frozen context is bound to the source channel captured at creation); \
+             cancel and recreate to re-capture"
+        )));
+    }
 
     if let Some(content) = patch_string(body, "content").map_err(|e| bad_request(e))? {
         let content = content.ok_or_else(|| bad_request("content must not be null".to_string()))?;
@@ -900,6 +985,39 @@ async fn render_deliveries(
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    // #4658 F4: a snapshot definition cannot be re-targeted via PATCH (target
+    // channel / agent), else the frozen context bleeds into another channel's
+    // turn. Fresh definitions are unaffected. Mutation proof: make
+    // `snapshot_patch_retarget_key` always return None and the snapshot-reject
+    // assertions below fail.
+    #[test]
+    fn snapshot_patch_retarget_is_rejected_but_fresh_and_other_fields_pass() {
+        let with = |k: &str| {
+            let mut m = serde_json::Map::new();
+            m.insert(k.to_string(), json!("123456789"));
+            m
+        };
+        // Snapshot definition: retargeting keys are rejected.
+        assert_eq!(
+            snapshot_patch_retarget_key(db::CONTEXT_STRATEGY_SNAPSHOT, &with("targetChannelId")),
+            Some("targetChannelId")
+        );
+        assert_eq!(
+            snapshot_patch_retarget_key(db::CONTEXT_STRATEGY_SNAPSHOT, &with("agentId")),
+            Some("agentId")
+        );
+        // Non-retargeting fields (e.g. schedule) are allowed on a snapshot def.
+        assert_eq!(
+            snapshot_patch_retarget_key(db::CONTEXT_STRATEGY_SNAPSHOT, &with("schedule")),
+            None
+        );
+        // Fresh definitions may be retargeted freely.
+        assert_eq!(
+            snapshot_patch_retarget_key(db::CONTEXT_STRATEGY_FRESH, &with("targetChannelId")),
+            None
+        );
+    }
 
     #[test]
     fn target_channel_ids_are_normalized_and_invalid_values_rejected() {

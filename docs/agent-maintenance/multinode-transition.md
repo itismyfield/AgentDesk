@@ -12,6 +12,8 @@
 >
 > Last refreshed: 2026-07-11 (manual: scheduled-message leader worker ownership and touch gate).
 >
+> Last refreshed: 2026-07-21 (#4515 — worker-local restart budgets and the node-local fatal-exit ledger do not change worker ownership. The ledger serializes in-process read-modify-write operations and atomically replaces a node-local runtime-root file; it is deliberately not cluster-shared authority. Leader-only workers and PostgreSQL lease assumptions remain unchanged.)
+>
 > PR #3456 made the `src/server/worker_registry.rs` worker-lifecycle log fields
 > consistent: every started / stopped / future-exited / self-fenced /
 > supervisor-shutdown tracing event now emits the same structured spec fields
@@ -445,6 +447,14 @@
 
 ### Audited touches
 
+- #4706 structural lint debt backfill: item-level Clippy annotations and their checked-in occurrence ratchet change no runtime ownership, leader election, PG lease, or multinode routing behavior.
+- #4515 worker-local recovery supervision: `src/server/worker_recovery.rs` owns
+  bounded restart handling for the worker-local dispatch-outbox and session-discovery
+  tasks. Each node applies its own restart budget (at most 5 restarts within 10
+  minutes, with 1s-to-60s capped exponential backoff) and leaves an exhausted task
+  stopped on that node. `src/server/worker_registry.rs` retains both specs as
+  `WorkerExecutionScope::WorkerLocal`; this changes no leader election, leader-only
+  worker classification, lease acquisition, or cross-node ownership authority.
 - #4568 explicit queue cancellation: `/cancel-queued` removes only the selected
   queued item's primary Discord message ID through the existing per-channel
   mailbox actor; `/queue` exposes those primary IDs for the same channel. This
@@ -1535,6 +1545,20 @@
   migration-specific CI gate activates only when the 0094 SQL file is in the
   changed-file set.
 
+- #4615 S3a dormant circuit-alert authority — **PG-lease-backed shared authority,
+  dormant**: migration 0096 adds a channel-scoped
+  `message_outbox_circuit_authority` watermark and complete circuit coordinate
+  stamps on `message_outbox`. Reservation, held staging, activation, and fresh-vouch
+  revocation reuse the existing `intake_session_owners` active
+  `(owner_instance_id, generation)` check and its deterministic
+  `OwnerIdentity::advisory_key()` transaction lock. A channel-global
+  `authority_epoch` orders episode resets while same-episode frontier transitions
+  must follow the coupled baseline/open-generation rule. Non-owner and stale
+  writers fail closed. S3a ships dormant: no relay producer or outbox worker uses
+  these APIs until S3b adds the final worker delivery fence, so no circuit alert
+  is exposed to an unfenced external send. Classification:
+  **generation-fenced PG-lease authority**; no leader-only singleton is added.
+
 - #4527 (safe-restart standby drain + standby health visibility): `runtime_bootstrap.rs`
   now registers a **confirmed-standby** node's provider `SharedData` into the
   `HealthRegistry` even when the gateway runtime never starts (lease held
@@ -1549,3 +1573,18 @@
   classified `Failed` (never `Standby`), so a restart never skips leader
   drain-ack on an ambiguous lease result: every incomplete/failed/missing signal
   falls back to the existing drain path (fail-closed).
+- #4658 scheduled-message immutable context snapshots: **PG-lease-safe /
+  worker-local execution, no new leader or lease authority**. Snapshot capture
+  (`services::scheduled_messages::context_snapshot::capture_snapshot_tx`) and
+  validation (`validate_snapshot_pg`) store and read the fully-rendered context
+  inline in `scheduled_message_context_snapshots` (PostgreSQL), never provider
+  session files, so a snapshot captured on one node validates and fires on any
+  other node — the capture node and the fire node need not be the same. The fire
+  path reuses the existing `scheduled_message_deliveries` claim
+  (`FOR UPDATE SKIP LOCKED` + launch-commit barrier); snapshot validation runs
+  **before** that barrier, so recovery/adopt semantics and the at-most-once
+  launch contract are unchanged. The isolated session key
+  (`scheduled:{definition_id}`) is derived deterministically from PG-persisted
+  definition state, so any node computes the identical, channel-independent key
+  — the reserved turn never mutates the channel's live `sessions.session_key`
+  row. No node-local timer, leader singleton, or advisory lease is introduced.

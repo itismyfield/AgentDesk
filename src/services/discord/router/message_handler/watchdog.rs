@@ -194,6 +194,7 @@ pub(super) fn headless_watchdog_timeout_notice_visible(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn maybe_send_headless_watchdog_timeout_notice(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -755,6 +756,7 @@ fn schedule_pending_paused_turn_watcher_attach(request: PausedTurnWatcherAttachR
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn attach_paused_turn_watcher(
     shared: &Arc<SharedData>,
     http: Arc<serenity::Http>,
@@ -798,6 +800,7 @@ pub(super) fn attach_paused_turn_watcher(
     channel_id
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn attach_paused_turn_watcher_for_inflight(
     shared: &Arc<SharedData>,
     http: Arc<serenity::Http>,

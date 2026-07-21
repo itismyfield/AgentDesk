@@ -493,7 +493,15 @@
 # `intake_turn/claim_bootstrap.rs`. The helper remains after the stale-dispatch
 # guard and before the placeholder handoff; won-claim gating and bump-before-
 # captured-clear ordering are unchanged.
-"src/services/discord/router/message_handler/intake_turn.rs" = 2705
+# #4570 (reviewable admission, +13): flag-gated native TUI steer INJECTION dispatch
+# entry. The hook body (141 prod) is extracted to the `intake_turn/steering_hook.rs`
+# child module (under the 700-line namespace cap); the residual in the root is the
+# irreducible dispatch site — the enable/foreground/local/dispatch/upload guards plus
+# the ~15-field IntakeSteeringContext threading, which must live at the intake call
+# site. Net-zero would require an unrelated extraction from this CORE relay-intake
+# giant; the injection is inert by default (AGENTDESK_TUI_STEERING off). Delivery-order
+# boundary deferred to #4740.
+"src/services/discord/router/message_handler/intake_turn.rs" = 2718
 "src/services/discord/meeting_orchestrator.rs" = 3227
 # #3293: +3 for the `registry_purge` child-module declaration (peek +
 # operator-gated idle-entry purge live outside the frozen root); lowered

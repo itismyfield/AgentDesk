@@ -287,6 +287,7 @@ pub(super) fn clear_response_delivery_state(
     inflight_state.response_sent_offset = 0;
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn reset_gemini_retry_attempt_state(
     full_response: &mut String,
     current_tool_line: &mut Option<String>,
@@ -311,6 +312,7 @@ pub(super) fn reset_gemini_retry_attempt_state(
     inflight_state.has_post_tool_text = false;
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_gemini_retry_boundary(
     full_response: &mut String,
     current_tool_line: &mut Option<String>,
@@ -355,6 +357,7 @@ pub(super) fn handle_gemini_retry_boundary(
     had_local_session || should_reset
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn reset_session_for_auto_retry(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
@@ -392,12 +395,7 @@ pub(super) async fn reset_session_for_auto_retry(
     }
 
     #[cfg(unix)]
-    if let Some(name) = cancel_token
-        .tmux_session
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone())
-    {
+    if let Some(name) = cancel_token.tmux_session_name() {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
             "  [{ts}] ♻ auto-retry: killing tmux session {name} before retry ({reason})"

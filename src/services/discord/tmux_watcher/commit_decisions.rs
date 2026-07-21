@@ -19,6 +19,7 @@ pub(super) fn watcher_commit_should_advance_runtime_binding(
         && !watcher_tui_gate_blocks_lifecycle(gate_outcome, terminal_delivery_committed)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn mark_watcher_terminal_delivery_committed(
     provider: &ProviderKind,
     channel_id: ChannelId,

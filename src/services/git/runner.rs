@@ -77,19 +77,23 @@ impl GitCommand {
         self
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn run_text(self) -> Result<String, GitCommandError> {
         let output = self.run_output()?;
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn run_output(self) -> Result<Output, GitCommandError> {
         self.run_output_inner(None)
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn run_output_with_stdin(self, stdin: impl AsRef<[u8]>) -> Result<Output, GitCommandError> {
         self.run_output_inner(Some(stdin.as_ref().to_vec()))
     }
 
+    #[allow(clippy::result_large_err)]
     fn run_output_inner(self, stdin: Option<Vec<u8>>) -> Result<Output, GitCommandError> {
         let context = GitCommandContext::new(&self);
         let args_for_span = context.args.join(" ");

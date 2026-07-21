@@ -531,6 +531,7 @@ pub(super) fn tmux_death_should_attempt_restart_handoff(
         && !is_normal_completion
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_tmux_watcher_observed_death(
     channel_id: ChannelId,
     http: &Arc<serenity::Http>,

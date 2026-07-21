@@ -388,6 +388,9 @@ mod relay_state_contract_refs {
             let _ = &s.current_msg_id;
         };
         let _ = |s: &super::super::model::InflightTurnState| {
+            let _ = &s.turn_nonce;
+        };
+        let _ = |s: &super::super::model::InflightTurnState| {
             let _ = &s.last_offset;
         };
         let _ = |s: &super::super::model::InflightTurnState| {

@@ -481,6 +481,7 @@ impl AgentChannels {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 pub enum AgentChannel {
     Legacy(String),
     Detailed(AgentChannelConfig),

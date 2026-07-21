@@ -279,9 +279,11 @@ fn activate_raw(pg_pool: Option<&PgPool>, bridge: &BridgeHandle, body_json: &str
             let body = body;
             let engine = engine.clone();
             move |_bridge_pool| async move {
-                let (_status, response) =
-                    crate::server::routes::auto_queue::activate_with_bridge_pg(engine, body).await;
-                Ok(response.0.to_string())
+                match crate::server::routes::auto_queue::activate_with_bridge_pg(engine, body).await
+                {
+                    Ok((_status, response)) => Ok(response.0.to_string()),
+                    Err(error) => Ok(error.to_json_value().to_string()),
+                }
             }
         },
         |error| serde_json::json!({ "error": error }).to_string(),

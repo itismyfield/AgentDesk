@@ -536,6 +536,7 @@ async fn validate_thread_map_validation_row(
 /// Try to reuse an existing Discord thread for a dispatch.
 /// Returns `Some(true)` if reuse succeeded, `Some(false)` if the thread exists but is locked,
 /// or `None` if the thread couldn't be accessed (deleted, wrong parent, etc.).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn try_reuse_thread(
     client: &reqwest::Client,
     token: &str,

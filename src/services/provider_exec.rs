@@ -26,7 +26,6 @@ use std::time::Duration;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::platform::with_provider_execution_context;
-use crate::services::process::kill_pid_tree;
 use crate::services::provider::{CancelToken, ProviderExecutionAdapter, ProviderKind};
 use crate::services::provider_cli::ProviderExecutionContext;
 use crate::services::{claude, codex, gemini, opencode, qwen};
@@ -57,14 +56,6 @@ pub async fn execute_simple_with_timeout_and_context(
         joined = &mut handle => joined.map_err(|e| format!("Task join error: {}", e))?,
         _ = tokio::time::sleep(timeout) => {
             cancel_for_timeout.cancel_with_tmux_cleanup();
-            if let Some(pid) = cancel_for_timeout
-                .child_pid
-                .lock()
-                .ok()
-                .and_then(|guard| *guard)
-            {
-                kill_pid_tree(pid);
-            }
             let _ = tokio::time::timeout(Duration::from_secs(3), &mut handle).await;
             Err(simple_timeout_error(&stage_label, timeout))
         }
@@ -112,6 +103,7 @@ fn execute_simple_blocking_inner(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_structured(
     provider: ProviderKind,
     prompt: String,
@@ -136,6 +128,7 @@ pub async fn execute_structured(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_structured_with_context(
     provider: ProviderKind,
     prompt: String,
@@ -256,14 +249,6 @@ pub async fn execute_structured_with_context(
         joined = &mut handle => joined.map_err(|err| format!("Task join error: {err}"))?,
         _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => {
             cancel_for_timeout.cancel_with_tmux_cleanup();
-            if let Some(pid) = cancel_for_timeout
-                .child_pid
-                .lock()
-                .ok()
-                .and_then(|guard| *guard)
-            {
-                kill_pid_tree(pid);
-            }
             if tokio::time::timeout(Duration::from_secs(3), &mut handle).await.is_err() {
                 handle.abort();
             }

@@ -876,6 +876,7 @@ pub(in crate::services::discord) async fn defer_promoted_dispatch_if_hosted_tui_
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn enqueue_busy_tui_followup_for_retry(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -954,6 +955,7 @@ mod readiness_wait_status_tests {
 /// #4139: the enqueue-refusal branch restores the taken recovery context and
 /// rewrites the placeholder into the refusal notice. Lives here (non-baselined
 /// sibling) so the baselined intake root carries only the call.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn apply_tui_busy_enqueue_refusal(
     shared: &Arc<SharedData>,
     http: &Arc<serenity::http::Http>,
@@ -964,12 +966,24 @@ pub(super) async fn apply_tui_busy_enqueue_refusal(
         &crate::services::discord::router::turn_start::FormattedSessionRetryContext,
     >,
     feedback_reminder: Option<&str>,
+    wip_warning: Option<&str>,
     refusal_reason: Option<crate::services::turn_orchestrator::EnqueueRefusalReason>,
 ) {
     put_back_session_retry_context(
         shared,
         channel_id,
         session_retry_context,
+        refusal_reason.map(|reason| reason.as_str()),
+    );
+    // #4196: the refusal branch drops the message, so the WIP warning taken at
+    // intake (like the feedback reminder) must be put back or the next-turn nudge
+    // is lost; the successful-requeue branch instead carries it forward inside the
+    // enqueued follow-up's `reply_context`.
+    put_back_turn_end_wip_warning(
+        shared,
+        provider,
+        channel_id,
+        wip_warning,
         refusal_reason.map(|reason| reason.as_str()),
     );
     // #4307 PR-B: the refusal branch drops the message, so the reminder taken at

@@ -59,22 +59,48 @@ pub(super) async fn build_adk_session_key(
     shared: &Arc<SharedData>,
     channel_id: serenity::ChannelId,
     provider: &ProviderKind,
+    // #4658: when set (scheduled-snapshot turns), the key is derived from this
+    // label instead of the channel name, so the reserved turn gets a distinct
+    // `sessions.session_key` and never overwrites the channel's live session row
+    // (AC-2; independent of the #4634 session_key collision class).
+    session_basis_override: Option<&str>,
 ) -> Option<String> {
-    let channel_name = {
-        let data = shared.core.lock().await;
-        data.sessions
-            .get(&channel_id)
-            .and_then(|s| s.channel_name.as_ref())
-            .cloned()
-    }
-    .or_else(|| registered_channel_fallback_name(channel_id, provider))?;
-    let tmux_name = provider.build_tmux_session_name(&channel_name);
+    let channel_name = if session_basis_override.is_some() {
+        // Override short-circuits the channel-name lookup entirely, so a
+        // snapshot turn never needs (and never touches) the channel's session.
+        None
+    } else {
+        let from_memory = {
+            let data = shared.core.lock().await;
+            data.sessions
+                .get(&channel_id)
+                .and_then(|s| s.channel_name.as_ref())
+                .cloned()
+        };
+        from_memory.or_else(|| registered_channel_fallback_name(channel_id, provider))
+    };
+    let basis = resolve_session_key_basis(session_basis_override, channel_name.as_deref())?;
+    let tmux_name = provider.build_tmux_session_name(&basis);
 
     Some(build_namespaced_session_key(
         &shared.token_hash,
         provider,
         &tmux_name,
     ))
+}
+
+/// #4658 session-isolation guard: choose the session-key basis. When a
+/// scheduled-snapshot override is present it always wins over the channel name,
+/// so the derived `sessions.session_key` can never collide with the channel's
+/// live session (AC-2). Returns `None` only when neither source is available.
+pub(in crate::services::discord) fn resolve_session_key_basis(
+    session_basis_override: Option<&str>,
+    channel_name: Option<&str>,
+) -> Option<String> {
+    match session_basis_override {
+        Some(override_basis) => Some(override_basis.to_string()),
+        None => channel_name.map(str::to_string),
+    }
 }
 
 pub(super) fn registered_channel_fallback_name(
@@ -167,6 +193,7 @@ pub(super) fn derive_adk_session_info(
     "AgentDesk 작업 진행 중".to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn post_adk_session_status(
     session_key: Option<&str>,
     name: Option<&str>,
@@ -669,6 +696,55 @@ fn path_label(path: &str) -> Option<String> {
 fn clean_nonempty(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then_some(trimmed)
+}
+
+#[cfg(test)]
+mod session_key_basis_tests {
+    use super::{build_namespaced_session_key, resolve_session_key_basis};
+    use crate::services::provider::ProviderKind;
+
+    // #4658 session-isolation guard. Mutation proof: make
+    // `resolve_session_key_basis` ignore the override (always return the channel
+    // name) and both the override-wins and non-collision assertions below fail.
+    #[test]
+    fn snapshot_override_wins_over_channel_name() {
+        let basis = resolve_session_key_basis(Some("scheduled:smsg_abc"), Some("general"));
+        assert_eq!(basis.as_deref(), Some("scheduled:smsg_abc"));
+        // Falls back to the channel name only when no override is present.
+        assert_eq!(
+            resolve_session_key_basis(None, Some("general")).as_deref(),
+            Some("general")
+        );
+        assert_eq!(resolve_session_key_basis(None, None), None);
+    }
+
+    #[test]
+    fn snapshot_session_key_never_collides_with_channel_session_key() {
+        let provider = ProviderKind::Claude;
+        let token_hash = "tok";
+        let channel_name = "team-backend";
+
+        let channel_basis =
+            resolve_session_key_basis(None, Some(channel_name)).expect("channel basis");
+        let snapshot_basis =
+            resolve_session_key_basis(Some("scheduled:smsg_abc"), Some(channel_name))
+                .expect("snapshot basis");
+
+        let channel_key = build_namespaced_session_key(
+            token_hash,
+            &provider,
+            &provider.build_tmux_session_name(&channel_basis),
+        );
+        let snapshot_key = build_namespaced_session_key(
+            token_hash,
+            &provider,
+            &provider.build_tmux_session_name(&snapshot_basis),
+        );
+        assert_ne!(
+            channel_key, snapshot_key,
+            "a snapshot turn must derive a session_key distinct from the channel's live session"
+        );
+    }
 }
 
 #[cfg(test)]

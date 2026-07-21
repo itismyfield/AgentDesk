@@ -327,6 +327,7 @@ impl RoutineDiscordLogger {
         RoutineDiscordLogStatus::skipped()
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn log_to_routine_target(
         &self,
         store: Option<&RoutineStore>,
@@ -405,6 +406,7 @@ impl RoutineDiscordLogger {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn log_run_section(
         &self,
         store: &RoutineStore,

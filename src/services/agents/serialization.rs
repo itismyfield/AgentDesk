@@ -121,6 +121,7 @@ pub fn agent_skill_json(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn dispatched_session_json(
     id: i64,
     session_key: Option<String>,
@@ -181,6 +182,7 @@ pub fn timeline_event_json(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn transcript_json(
     id: i64,
     turn_id: String,

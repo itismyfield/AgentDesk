@@ -90,7 +90,7 @@ pub(super) async fn submit_order_with_pg(
     principal: Option<&RequestPrincipal>,
     body: &OrderBody,
     pool: &sqlx::PgPool,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let caller_agent_id =
         crate::services::kanban::resolve_requesting_agent_id_with_pg(pool, headers).await;
     let config = crate::config::load_graceful();
@@ -114,40 +114,40 @@ pub(super) async fn submit_order_with_pg(
     {
         Ok(row) => row,
         Err(error) => {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("load auto-queue run '{run_id}': {error}")})),
-            );
+            ));
         }
     };
     let Some(run_row) = run_row else {
-        return (
+        return Err(auto_queue_json_error(
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "run not found or not pending"})),
-        );
+        ));
     };
     let run_status: String = match run_row.try_get("status") {
         Ok(value) => value,
         Err(error) => {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("decode auto-queue run status: {error}")})),
-            );
+            ));
         }
     };
     if run_status != "pending" {
-        return (
+        return Err(auto_queue_json_error(
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "run not found or not pending"})),
-        );
+        ));
     }
     let run_repo: Option<String> = match run_row.try_get("repo") {
         Ok(value) => value,
         Err(error) => {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("decode auto-queue run repo: {error}")})),
-            );
+            ));
         }
     };
     let run_log_ctx = AutoQueueLogContext::new().run(run_id);
@@ -158,10 +158,10 @@ pub(super) async fn submit_order_with_pg(
             Ok(Some(card)) => card,
             Ok(None) => continue,
             Err(error) => {
-                return (
+                return Err(auto_queue_json_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"error": error})),
-                );
+                ));
             }
         };
 
@@ -225,10 +225,10 @@ pub(super) async fn submit_order_with_pg(
         .execute(pool)
         .await
         {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("activate auto-queue run '{run_id}': {error}")})),
-            );
+            ));
         }
     } else {
         crate::auto_queue_log!(
@@ -248,16 +248,16 @@ pub(super) async fn submit_order_with_pg(
         .execute(pool)
         .await
         {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("complete auto-queue run '{run_id}': {error}")})),
-            );
+            ));
         }
     }
 
     let _ = state;
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "ok": true,
@@ -265,7 +265,7 @@ pub(super) async fn submit_order_with_pg(
             "run_id": run_id,
             "message": "Queue active. Call POST /api/queue/dispatch-next to start dispatching.",
         })),
-    )
+    ))
 }
 
 pub async fn submit_order(
@@ -274,14 +274,14 @@ pub async fn submit_order(
     headers: HeaderMap,
     principal: Option<Extension<RequestPrincipal>>,
     Json(body): Json<OrderBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Err(response) =
         crate::services::kanban::require_explicit_bearer_token(&headers, "submit_order")
     {
-        return response;
+        return Err(auto_queue_tuple_error(response));
     }
     let Some(pg_pool) = state.pg_pool.clone() else {
-        return pg_unavailable_response();
+        return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     submit_order_with_pg(
         &state,

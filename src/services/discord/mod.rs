@@ -119,6 +119,7 @@ mod tui_direct_pending_start;
 mod tui_prompt_relay;
 mod tui_task_card;
 mod turn_bridge;
+#[allow(clippy::too_many_arguments)]
 mod turn_finalizer;
 mod turn_view_reconciler;
 mod voice_acknowledgement;
@@ -145,7 +146,7 @@ pub(in crate::services::discord) use catch_up::{
 };
 pub(in crate::services::discord) use mailbox_finish::{
     mailbox_finish_cancelled_turn, mailbox_finish_owned_turn, mailbox_finish_turn,
-    mailbox_finish_turn_if_matches, mailbox_finish_turn_if_matches_started_before,
+    mailbox_finish_turn_if_matches, mailbox_finish_turn_if_matches_episode_started_before,
 };
 pub(in crate::services::discord) use recovery_engine as recovery;
 // #3038 S1: re-export the extracted cluster type so the `SharedData` field

@@ -251,6 +251,38 @@ plan.
 
 ---
 
+## I7. mailbox turn cleanup is guarded by durable episode identity (#4595)
+
+- Definition:
+  - every modern `CancelToken` carries one immutable durable nonce
+    (`sym:provider::CancelToken::turn_nonce`), and the mailbox actor copies it
+    into `ChannelMailboxSnapshot::active_turn_nonce`
+    (`sym:turn_orchestrator::ChannelMailboxSnapshot::active_turn_nonce`) when it
+    serializes a turn admission;
+  - the same value is persisted in `InflightTurnState::turn_nonce`
+    (`sym:inflight::model::InflightTurnState::turn_nonce`).
+- Producers: Discord intake, headless intake, TUI-direct synthetic admission,
+  monitor auto-turn admission, and restart restoration bind the actor-owned
+  nonce to the durable row. Restart restoration preserves an explicit legacy
+  `None` instead of minting an unrelated modern episode.
+- Destructive consumer: stale durable-repair paths call
+  `mailbox_finish_turn_if_matches_episode_started_before`
+  (`sym:mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before`),
+  whose single mailbox-actor handler compares `(user_msg_id, turn_nonce)` plus
+  the monotonic start cutoff before taking the active token.
+- Legacy policy: `None` is an exact legacy identity, never a wildcard. A legacy
+  row can finish only a legacy actor claim; it cannot finish a modern claim and
+  a modern row cannot finish a legacy claim.
+- Invariant: cleanup for stale episode A must be a destructive no-op when episode
+  B owns the same message ID under a different nonce, including when B claimed
+  before the sweep cutoff and its durable save is delayed. B's token, owner,
+  message ID, nonce, soft queue, and `global_active` remain unchanged.
+- Violation surface: a stale placeholder sweep or health repair cancels a live
+  same-message-ID successor, drops queued work, decrements `global_active`, and
+  can kill the successor's tmux session.
+- Invariant key: `mailbox_episode_identity_exact` (enforced by the actor predicate
+  and mutation-proven regression tests rather than an observe-only hook).
+
 ## How to add a new invariant
 
 1. Document it here with the same structure (definition, producer,

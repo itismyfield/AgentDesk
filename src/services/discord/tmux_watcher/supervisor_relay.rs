@@ -141,6 +141,7 @@ pub(super) fn supervisor_relay_forward_fully_mirrors_turn(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn apply_initial_supervisor_relay_forward(
     all_data_fully_mirrored: &mut bool,
     all_data_session_bound_relay_ack: &mut Option<SessionBoundRelayAckTarget>,
@@ -177,6 +178,7 @@ pub(super) fn apply_initial_supervisor_relay_forward(
     turn_state
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn apply_streaming_supervisor_relay_forward(
     all_data_fully_mirrored: &mut bool,
     all_data_session_bound_relay_ack: &mut Option<SessionBoundRelayAckTarget>,

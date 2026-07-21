@@ -1308,6 +1308,7 @@ fn collect_existing_tree_files(root: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(outputs)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn persist_audit_state(
     audit_root: &Path,
     import_id: &str,

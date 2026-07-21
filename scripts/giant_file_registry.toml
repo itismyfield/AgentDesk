@@ -7,11 +7,16 @@
 # >= 1000.
 #
 # Enforcement (generation fails otherwise):
-#   * Every current prod-giant must appear either in `grandfathered` below or as
-#     an `[[entry]]` table. A new giant with neither is rejected — register it
-#     with an owner, deadline, and decompose issue first.
-#   * Each `[[entry]]` must carry owner, deadline (YYYY-MM-DD), and
-#     decompose_issue. Deadline-less registration is forbidden.
+#   * Every current prod-giant must appear as an `[[entry]]` table. The closed,
+#     empty `grandfathered` array is retained only as a zero-backfill ratchet.
+#     A new giant without an explicit decision is rejected — register it
+#     with shrink(owner + deadline + issue) or keep(owner + reason) first.
+#   * Each `[[entry]]` has a decision. Omitted legacy decisions normalize to
+#     `shrink` for backward compatibility. `shrink` requires a real owner,
+#     calendar-valid non-overdue deadline, and a real numeric decompose_issue;
+#     `keep` requires a real owner and substantive keep_reason, and forbids
+#     deadline/decompose_issue. Placeholder values (TBD/unknown/none/umbrella)
+#     and #4519 are never valid decompose issues.
 #   * A `grandfathered` path or `[[entry]]` whose module is no longer a
 #     prod-giant is a ghost registration and must be removed (decomposition
 #     complete).
@@ -28,8 +33,9 @@
 # `grandfathered` (decomposed or promoted to an [[entry]]), but a path
 # that is not already in the baseline can never be grandfathered. This
 # blocks smuggling a new prod-giant into `grandfathered` to skip the
-# owner/deadline/decompose_issue requirement (swap-in is rejected, not
-# just count growth). Only remove a path from the baseline once it has
+# shrink(owner + deadline + issue) or keep(owner + reason) requirement
+# (swap-in is rejected, not just count growth). Only remove a path from the
+# baseline once it has
 # been fully retired from `grandfathered`.
 grandfathered_baseline_paths = [
   "src/cli/client.rs",
@@ -60,7 +66,6 @@ grandfathered_baseline_paths = [
   "src/receipt.rs",
   "src/reconcile.rs",
   "src/runtime_layout/mod.rs",
-  "src/server/maintenance.rs",
   "src/server/mod.rs",
   "src/server/routes/agents.rs",
   "src/server/routes/agents_crud.rs",
@@ -156,120 +161,477 @@ grandfathered_baseline_paths = [
   "src/voice/receiver.rs",
 ]
 
-# Paths that predate the deadline mandate. No owner/deadline required yet,
-# but each must be either decomposed (removed) or promoted to an [[entry]]
-# over time. New giants must NOT be added here.
-grandfathered = [
-  "src/cli/client.rs",
-  "src/cli/dcserver.rs",
-  "src/cli/direct.rs",
-  "src/cli/doctor/orchestrator.rs",
-  "src/cli/init.rs",
-  "src/cli/migrate/apply.rs",
-  "src/cli/migrate/plan.rs",
-  "src/cli/migrate/source.rs",
-  "src/cli/provider_cli/mod.rs",
-  "src/config.rs",
-  "src/db/auto_queue/entries.rs",
-  "src/db/auto_queue/phase_gates.rs",
-  "src/db/dispatched_sessions.rs",
-  "src/db/dispatches/mod.rs",
-  "src/db/postgres.rs",
-  "src/dispatch/dispatch_context.rs",
-  "src/dispatch/dispatch_create.rs",
-  "src/dispatch/dispatch_status.rs",
-  "src/engine/loader.rs",
-  "src/engine/mod.rs",
-  "src/engine/ops/db_ops.rs",
-  "src/github/sync.rs",
-  "src/pipeline.rs",
-  "src/receipt.rs",
-  "src/reconcile.rs",
-  "src/server/mod.rs",
-  "src/server/routes/agents.rs",
-  "src/server/routes/agents_crud.rs",
-  "src/server/routes/agents_setup.rs",
-  "src/server/routes/escalation.rs",
-  "src/server/routes/health_api.rs",
-  "src/server/routes/kanban.rs",
-  "src/server/routes/meetings.rs",
-  "src/server/routes/resume.rs",
-  # decision_route.rs was decomposed in #3038 slice 1 and then S1-relocated in
-  # #3038 review-decision S1 (4392 prod LoC -> 26-line route shim +
-  # sub-1000-LoC modules under services/review_decision/); no longer a
-  # prod-giant, so it is removed from `grandfathered` (kept in the frozen
-  # baseline above) and the split outputs are ratcheted in
-  # scripts/audit_maintainability_giant_baseline.toml.
-  "src/server/routes/v1.rs",
-  "src/services/auto_queue.rs",
-  "src/services/auto_queue/activate_command.rs",
-  "src/services/auto_queue/cancel_run.rs",
-  "src/services/claude.rs",
-  "src/services/claude_tui/input.rs",
-  "src/services/codex.rs",
-  "src/services/codex_tmux_wrapper.rs",
-  "src/services/codex_tui/input.rs",
-  # commands/config.rs dropped to 954 prod LoC in #3038 S2 (session-override
-  # bookkeeping helpers moved to discord/shared_state.rs); no longer a
-  # prod-giant, so it is removed from `grandfathered` and from the baseline
-  # guard here (win-locked: a re-expanded config.rs cannot be
-  # re-grandfathered — it would have to land as a full [[entry]] or shrink).
-  # commands/diagnostics.rs was decomposed in #3479 (1022 prod LoC -> 389-line
-  # module root commands/diagnostics/mod.rs + sub-1000-LoC commands/diagnostics/
-  # reports.rs); no longer a prod-giant, so it is removed from `grandfathered`
-  # and from the baseline guard above (win-locked: a re-expanded diagnostics
-  # cannot be re-grandfathered — it would have to land as a full [[entry]] or
-  # shrink). The split outputs stay sub-threshold and are not ratcheted.
-  "src/services/discord/commands/text_commands.rs",
-  "src/services/discord/formatting.rs",
-  # health.rs was decomposed in #3038 Phase A (2293 prod LoC -> 402-line
-  # module root + 6 sub-1000-LoC directory modules under health/); no longer
-  # a prod-giant, so it is removed here AND from the frozen baseline above
-  # (win-locked: a re-expanded health.rs cannot be re-grandfathered). The
-  # split outputs stay sub-threshold and are not ratcheted.
-  "src/services/discord/meeting_orchestrator.rs",
-  "src/services/discord/mod.rs",
-  "src/services/discord/router/message_handler/headless_turn.rs",
-  # completion_guard.rs was decomposed in #3479 (1834 prod LoC -> 872-line
-  # module root + completion_guard/{completion_postgres,completion_context}.rs,
-  # both sub-1000-LoC); no longer a prod-giant, so it is removed here AND from
-  # the frozen baseline above (win-locked: a re-expanded completion_guard.rs
-  # cannot be re-grandfathered). The split outputs stay sub-threshold and are
-  # not ratcheted.
-  # turn_bridge/tmux_runtime.rs was decomposed in #3479 (1545 prod LoC -> 964-line
-  # module root + sub-1000-LoC tmux_runtime/{interrupt_policy,process_table,
-  # pid_exit}.rs); no longer a prod-giant, so it is removed from `grandfathered`
-  # and from the baseline guard above (win-locked: a re-expanded tmux_runtime
-  # cannot be re-grandfathered — it would have to land as a full [[entry]] or
-  # shrink). The split outputs stay sub-threshold and are not ratcheted.
-  "src/services/discord_config_audit.rs",
-  "src/services/dispatched_sessions.rs",
-  "src/services/dispatches/discord_delivery/orchestration.rs",
-  "src/services/dispatches/outbox_route.rs",
-  "src/services/gemini.rs",
-  "src/services/memory/memento.rs",
-  "src/services/onboarding/mod.rs",
-  "src/services/opencode.rs",
-  "src/services/platform/binary_resolver.rs",
-  "src/services/provider.rs",
-  "src/services/qwen.rs",
-  "src/services/routines/agent_executor.rs",
-  "src/services/routines/discord_log.rs",
-  # migrated.rs dropped to 883 prod LoC after the #3028 splitter fix (its inline
-  # test mod was previously miscounted as production); no longer a prod-giant, so
-  # it is removed from `grandfathered` (kept in the frozen baseline above).
-  "src/services/routines/store.rs",
-  "src/services/settings.rs",
-  "src/services/tui_prompt_dedupe.rs",
-  "src/services/turn_orchestrator.rs",
-  "src/voice/receiver.rs",
-]
+# All former grandfathered paths were promoted to explicit tracked decisions in #4519.
+# The empty array is retained as a closed admission surface: new giants must use [[entry]].
+grandfathered = []
 
-# Tracked decompositions. Each requires owner + deadline (YYYY-MM-DD) +
-# decompose_issue. The generator renders these into the registry doc and the
-# freshness gate fails CI if the module's production LoC grows past the recorded
-# baseline (decomposition regression) or drops below the giant threshold while
-# the entry is still present (ghost registration).
+[[entry]]
+file = "src/cli/client.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/cli/dcserver.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/cli/direct.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/cli/doctor/orchestrator.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/cli/init.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/cli/migrate/apply.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/cli/migrate/plan.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/cli/migrate/source.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/cli/provider_cli/mod.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/config.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/db/auto_queue/entries.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/db/auto_queue/phase_gates.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/db/dispatched_sessions.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/db/dispatches/mod.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/db/postgres.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/dispatch/dispatch_context.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/dispatch/dispatch_create.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/dispatch/dispatch_status.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/engine/loader.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/engine/mod.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/engine/ops/db_ops.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/github/sync.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/pipeline.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/receipt.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/reconcile.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/server/mod.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/server/routes/agents.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/server/routes/agents_crud.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/server/routes/agents_setup.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/server/routes/escalation.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/server/routes/health_api.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/server/routes/kanban.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/server/routes/meetings.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/server/routes/resume.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/server/routes/v1.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/auto_queue.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/services/auto_queue/activate_command.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/services/auto_queue/cancel_run.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/services/claude.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/claude_tui/input.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/codex.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/codex_tmux_wrapper.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/codex_tui/input.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/discord/commands/text_commands.rs"
+decision = "shrink"
+owner = "discord-relay"
+deadline = "2027-01-31"
+decompose_issue = "#4712"
+
+[[entry]]
+file = "src/services/discord/formatting.rs"
+decision = "shrink"
+owner = "discord-relay"
+deadline = "2027-01-31"
+decompose_issue = "#4712"
+
+[[entry]]
+file = "src/services/discord/meeting_orchestrator.rs"
+decision = "shrink"
+owner = "discord-relay"
+deadline = "2027-01-31"
+decompose_issue = "#4712"
+
+[[entry]]
+file = "src/services/discord/mod.rs"
+decision = "shrink"
+owner = "discord-relay"
+deadline = "2027-01-31"
+decompose_issue = "#4712"
+
+[[entry]]
+file = "src/services/discord/router/message_handler/headless_turn.rs"
+decision = "shrink"
+owner = "discord-relay"
+deadline = "2027-01-31"
+decompose_issue = "#4712"
+
+[[entry]]
+file = "src/services/discord_config_audit.rs"
+decision = "shrink"
+owner = "discord-relay"
+deadline = "2027-01-31"
+decompose_issue = "#4712"
+
+[[entry]]
+file = "src/services/dispatched_sessions.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/services/dispatches/discord_delivery/orchestration.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/services/dispatches/outbox_route.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/services/gemini.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/memory/memento.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/onboarding/mod.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/opencode.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/platform/binary_resolver.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/provider.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/qwen.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/routines/agent_executor.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/services/routines/discord_log.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/services/routines/store.rs"
+decision = "shrink"
+owner = "automation-pipeline"
+deadline = "2027-01-31"
+decompose_issue = "#4711"
+
+[[entry]]
+file = "src/services/settings.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/services/tui_prompt_dedupe.rs"
+decision = "shrink"
+owner = "discord-relay"
+deadline = "2027-01-31"
+decompose_issue = "#4712"
+
+[[entry]]
+file = "src/services/turn_orchestrator.rs"
+decision = "shrink"
+owner = "server-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4710"
+
+[[entry]]
+file = "src/voice/receiver.rs"
+decision = "shrink"
+owner = "voice-runtime"
+deadline = "2027-01-31"
+decompose_issue = "#4713"
+
+# Tracked giant decisions. `decision = "shrink"` requires owner + deadline
+# (YYYY-MM-DD) + decompose_issue; `decision = "keep"` requires owner +
+# keep_reason and must omit deadline/decompose_issue. Existing entries that omit
+# decision are legacy shrink entries. The generator renders these into the
+# registry doc and rejects ghost registrations.
 
 [[entry]]
 # #3721 first-batch promotion: largest relay hotfile by prod LoC, raw ratchet
@@ -278,7 +640,7 @@ grandfathered = [
 file = "src/services/discord/tmux_watcher.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3832"
+decompose_issue = "#4712"
 
 [[entry]]
 # #4229 S4 follow-up: turn stream collection was moved out of the watcher root
@@ -287,7 +649,7 @@ decompose_issue = "#3832"
 file = "src/services/discord/tmux_watcher/turn_stream_collector.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#4229"
+decompose_issue = "#4712"
 
 [[entry]]
 # #3834 r2: restart-path scan moved out of the recovery_engine root, but the
@@ -296,7 +658,7 @@ decompose_issue = "#4229"
 file = "src/services/discord/recovery_engine/restore_inflight.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3834"
+decompose_issue = "#4712"
 
 [[entry]]
 # #3721 first-batch promotion: Discord message intake execution mixes request
@@ -305,7 +667,7 @@ decompose_issue = "#3834"
 file = "src/services/discord/router/message_handler/intake_turn.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#4552"
+decompose_issue = "#4712"
 
 [[entry]]
 # #3721 first-batch promotion: Discord admission gate owns mention/self/queue,
@@ -313,7 +675,7 @@ decompose_issue = "#4552"
 file = "src/services/discord/router/intake_gate.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3838"
+decompose_issue = "#4712"
 
 [[entry]]
 # #3721 first-batch promotion: health recovery surface combines stop/cancel,
@@ -321,7 +683,7 @@ decompose_issue = "#3838"
 file = "src/services/discord/health/recovery.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3839"
+decompose_issue = "#4712"
 
 [[entry]]
 # #3721 first-batch promotion: watcher lifecycle root still mixes restore scan,
@@ -329,7 +691,7 @@ decompose_issue = "#3839"
 file = "src/services/discord/watchers/lifecycle.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3840"
+decompose_issue = "#4712"
 
 [[entry]]
 # #3721 first-batch promotion: residual tmux relay helper root remains giant
@@ -337,7 +699,7 @@ decompose_issue = "#3840"
 file = "src/services/discord/tmux.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3841"
+decompose_issue = "#4712"
 
 [[entry]]
 # #3721 first-batch promotion: Codex TUI rollout tailer mixes discovery,
@@ -345,23 +707,14 @@ decompose_issue = "#3841"
 file = "src/services/codex_tui/rollout_tail.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3843"
+decompose_issue = "#4712"
 
 [[entry]]
 # Highest prod-LoC voice surface; flagship decomposition target from #3036.
 file = "src/services/discord/voice_barge_in.rs"
 owner = "voice-runtime"
 deadline = "2026-08-31"
-decompose_issue = "#3405"
-
-[[entry]]
-# Crossed the 1000-prod-LoC threshold when #3034 restored per-item dead_code
-# reasoning on the (still-unwired) automation-candidate iteration repo helpers.
-# Active pipeline-v2 surface (#2064); decompose once the iteration loop is wired.
-file = "src/db/automation_candidates.rs"
-owner = "automation-pipeline"
-deadline = "2026-08-31"
-decompose_issue = "#3405"
+decompose_issue = "#4713"
 
 [[entry]]
 # Crossed the 1000-prod-LoC threshold when #3034 restored per-item dead_code
@@ -369,7 +722,7 @@ decompose_issue = "#3405"
 file = "src/voice/announce_meta.rs"
 owner = "voice-runtime"
 deadline = "2026-08-31"
-decompose_issue = "#3405"
+decompose_issue = "#4713"
 
 [[entry]]
 # Crossed the 1000-prod-LoC threshold when #3017 re-landed the single
@@ -380,7 +733,7 @@ decompose_issue = "#3405"
 file = "src/services/discord/session_relay_sink.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"
-decompose_issue = "#3405"
+decompose_issue = "#4712"
 
 [[entry]]
 # Crossed the 1000-prod-LoC threshold in #3998 E13 when the turn-output
@@ -391,7 +744,7 @@ decompose_issue = "#3405"
 file = "src/services/discord/outbound/turn_output_controller.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"
-decompose_issue = "#3405"
+decompose_issue = "#4712"
 
 # NOTE: src/services/discord/relay_recovery.rs previously had an [[entry]] here;
 # #3779 extracted auto-heal attempt accounting into a sibling module, dropping
@@ -407,18 +760,18 @@ decompose_issue = "#3405"
 file = "src/services/discord/relay_recovery.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"
-decompose_issue = "#3405"
+decompose_issue = "#4712"
 
 [[entry]]
 # Crossed the 1000-prod-LoC threshold in #3739: worker-local LoopOwned Tokio
 # tasks now have registry-owned terminal supervision for unexpected future
-# return/panic. The file already held the bootstrap worker inventory plus
-# leader-only supervision state; split worker-status/supervision helpers out
-# once the worker registry API stabilizes.
+# return/panic. #4515 moved restart budget/backoff execution into the sibling
+# worker_recovery.rs module, leaving factory registration and inventory wiring
+# here. Split the remaining worker-status helpers once the registry API stabilizes.
 file = "src/server/worker_registry.rs"
 owner = "server-runtime"
 deadline = "2026-08-31"
-decompose_issue = "#3739"
+decompose_issue = "#4710"
 
 [[entry]]
 # Crossed the 1000-prod-LoC threshold when #3041 P1-0 landed the dormant
@@ -430,7 +783,7 @@ decompose_issue = "#3739"
 file = "src/services/discord/turn_finalizer.rs"
 owner = "discord-finalizer"
 deadline = "2026-08-31"
-decompose_issue = "#3016"
+decompose_issue = "#4712"
 
 [[entry]]
 # Crossed the 1000-prod-LoC threshold in #4049 S4-a1: the notification-only
@@ -440,7 +793,7 @@ decompose_issue = "#3016"
 file = "src/services/discord/turn_view_reconciler.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"
-decompose_issue = "#4049"
+decompose_issue = "#4712"
 
 # NOTE: src/services/discord/idle_recap.rs previously had an [[entry]] here; #3479
 # extracted the scrollback-capture/Haiku-summarizer and token-context-display
@@ -457,7 +810,7 @@ decompose_issue = "#4049"
 file = "src/services/discord/idle_recap.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"
-decompose_issue = "#3405"
+decompose_issue = "#4712"
 
 # NOTE: src/services/discord/turn_bridge/terminal_delivery.rs previously had an
 # [[entry]] here; the #3028 splitter fix dropped its production LoC below the
@@ -489,7 +842,7 @@ decompose_issue = "#3405"
 file = "src/services/discord/tui_direct_pending_start.rs"
 owner = "discord-relay"
 deadline = "2026-08-31"
-decompose_issue = "#3540"
+decompose_issue = "#4712"
 
 [[entry]]
 # Crossed the 1000-prod-LoC giant threshold in #4081 when the durable delivery
@@ -500,7 +853,7 @@ decompose_issue = "#3540"
 file = "src/services/discord/outbound/delivery_record.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3405"
+decompose_issue = "#4712"
 
 [[entry]]
 # Crossed the 1000-prod-LoC giant threshold in #4019 R2: synthetic TUI-direct
@@ -511,21 +864,7 @@ decompose_issue = "#3405"
 file = "src/services/discord/tui_prompt_relay/synthetic_start.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#4019"
-
-[[entry]]
-# Crossed the 1000-prod-LoC giant threshold in #3909: the leader-only voice
-# TTS cache/temp sweep (`ProgressTtsCacheSweepJob`) added the 15th MaintenanceJob
-# to the static registry. The file was already a razor-thin near-giant (~976
-# prod LoC) of per-job `MaintenanceJob` impls; the contained #3909 wrapper
-# tipped it over. The sweep LOGIC already lives in
-# `services::maintenance::jobs::voice_cache_sweep` (the wrapper is thin);
-# decomposition would lift the storage/voice job-impl clusters into sibling
-# modules, leaving the registry + scheduler loop in the root.
-file = "src/server/maintenance.rs"
-owner = "server-runtime"
-deadline = "2026-10-31"
-decompose_issue = "#3909"
+decompose_issue = "#4712"
 
 [[entry]]
 # Crossed the 1000-prod-LoC giant threshold in #3924: the recovery-net
@@ -541,7 +880,16 @@ decompose_issue = "#3909"
 file = "src/services/tmux_common.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3924"
+decompose_issue = "#4712"
+
+[[entry]]
+# Crossed the giant threshold while #4706 backfilled explicit decision metadata.
+# Keep the manual-rebind authority cohesive until #3405 extracts the recovery
+# admission and execution halves behind one typed plan boundary.
+file = "src/services/discord/recovery_engine/manual_rebind/mod.rs"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#4712"
 
 [[entry]]
 # Crossed the 1000-prod-LoC giant threshold while catch-up phase1/phase2
@@ -550,4 +898,4 @@ decompose_issue = "#3924"
 file = "src/services/discord/catch_up.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#3405"
+decompose_issue = "#4712"

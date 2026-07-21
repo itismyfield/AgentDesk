@@ -475,6 +475,7 @@ fn routing_diagnostics(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stale_claim_owner_reassignment_diagnostics(
     previous_owner: &str,
     new_owner: Option<&str>,

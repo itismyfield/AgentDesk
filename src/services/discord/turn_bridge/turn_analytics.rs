@@ -1,6 +1,7 @@
 use super::*;
 use crate::db::turns::PersistTurnOwned;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_turn_quality_event(
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -36,6 +37,7 @@ pub(super) fn turn_duration_ms(started_at: std::time::Instant) -> i64 {
     i64::try_from(started_at.elapsed().as_millis()).unwrap_or(i64::MAX)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn record_turn_bridge_invariant(
     condition: bool,
     provider: &ProviderKind,
@@ -119,6 +121,7 @@ pub(super) fn discord_turn_id(
     turn_id
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn assert_response_sent_offset_progress(
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -260,6 +263,7 @@ pub(super) fn resolve_exact_completion_usage(
     (usage.context_occupancy_input_tokens() > 0).then_some(usage)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) fn persist_turn_analytics_row_with_handles(
     pg_pool: Option<&sqlx::PgPool>,
     provider: &ProviderKind,

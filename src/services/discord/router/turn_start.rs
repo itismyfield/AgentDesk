@@ -251,6 +251,76 @@ pub(super) fn take_and_merge_feedback_reminder(
     (feedback_reminder, reply_context)
 }
 
+/// #4196: one-shot take of the turn-end WIP warning stashed at the previous
+/// turn's end (provider-scoped key — see `recovery_text::turn_end_wip_warning`).
+/// Mirrors `take_voluntary_feedback_reminder`; the take deletes the stash so the
+/// warning is injected into exactly one turn.
+pub(super) fn take_turn_end_wip_warning(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> Option<String> {
+    super::super::turn_bridge::recovery_text::take_turn_end_wip_warning(
+        shared.pg_pool.as_ref(),
+        provider,
+        channel_id.get(),
+    )
+}
+
+/// #4196: take the WIP warning stashed at the previous turn's end and fold its
+/// formatted block into `reply_context`, so it reaches the next prompt (via the
+/// intake `context_chunks`) AND is carried forward inside `reply_context.clone()`
+/// if this turn is re-queued for a TUI-busy retry. Returns the owned warning
+/// (for the refusal-branch put-back) alongside the augmented reply context.
+/// Mirrors `take_and_merge_feedback_reminder`.
+pub(super) fn take_and_merge_wip_warning(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    reply_context: Option<String>,
+) -> (Option<String>, Option<String>) {
+    let wip_warning = take_turn_end_wip_warning(shared, provider, channel_id);
+    let reply_context = super::response_format::merge_reply_contexts(
+        reply_context,
+        wip_warning
+            .as_deref()
+            .and_then(super::response_format::format_turn_end_wip_warning_injection),
+    );
+    (wip_warning, reply_context)
+}
+
+/// #4196: put the taken WIP warning back when a turn consumed it but failed to
+/// establish (TUI-busy enqueue refusal), so it is not lost. Mirrors
+/// `put_back_voluntary_feedback_reminder`. The provider must match the take
+/// above so the put-back lands under the same provider-scoped key.
+pub(super) fn put_back_turn_end_wip_warning(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    warning: Option<&str>,
+    reason: Option<&str>,
+) {
+    let Some(warning) = warning else {
+        return;
+    };
+    if let Err(error) =
+        super::super::turn_bridge::recovery_text::restore_turn_end_wip_warning_after_take(
+            shared.pg_pool.as_ref(),
+            provider,
+            channel_id.get(),
+            warning,
+        )
+    {
+        tracing::warn!(
+            channel_id = channel_id.get(),
+            provider = provider.as_str(),
+            reason = reason.unwrap_or("unknown"),
+            error = %error,
+            "failed to put back turn-end WIP warning after TUI-busy enqueue refusal"
+        );
+    }
+}
+
 /// #4307 PR-B: put the taken reminder back when a turn consumed it but failed to
 /// establish (TUI-busy enqueue refusal), so it is not lost. Mirrors
 /// `put_back_session_retry_context`. The provider must match the take above so
@@ -283,6 +353,7 @@ pub(super) fn put_back_voluntary_feedback_reminder(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn emit_session_strategy_lifecycle(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
@@ -378,6 +449,7 @@ pub(super) fn cli_just_spawned_for_emit(tmux_session_name: Option<&str>) -> bool
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn log_session_strategy_diagnostic(
     channel_id: ChannelId,
     provider: &ProviderKind,

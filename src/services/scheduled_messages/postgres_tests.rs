@@ -65,6 +65,9 @@ async fn insert_agent_message(
             source: "postgres_test".to_string(),
             created_by: Some("postgres_test".to_string()),
             dedupe_key: None,
+            context_strategy: "fresh".to_string(),
+            context_snapshot_id: None,
+            on_context_failure: "fail".to_string(),
         },
     )
     .await
@@ -106,6 +109,9 @@ async fn insert_due_push_message(pool: &PgPool) -> ScheduledMessageRow {
             source: "postgres_test".to_string(),
             created_by: Some("postgres_test".to_string()),
             dedupe_key: None,
+            context_strategy: "fresh".to_string(),
+            context_snapshot_id: None,
+            on_context_failure: "fail".to_string(),
         },
     )
     .await
@@ -434,6 +440,9 @@ async fn postgres_trigger_now_retry_preserves_recurring_anchor() {
             source: "postgres_test".to_string(),
             created_by: Some("postgres_test".to_string()),
             dedupe_key: None,
+            context_strategy: "fresh".to_string(),
+            context_snapshot_id: None,
+            on_context_failure: "fail".to_string(),
         },
     )
     .await
@@ -516,6 +525,9 @@ async fn postgres_resume_anchor_compat_migration_preserves_active_trigger_now_an
             source: "postgres_test".to_string(),
             created_by: Some("postgres_test".to_string()),
             dedupe_key: None,
+            context_strategy: "fresh".to_string(),
+            context_snapshot_id: None,
+            on_context_failure: "fail".to_string(),
         },
     )
     .await
@@ -679,6 +691,9 @@ async fn postgres_agent_trigger_now_retry_preserves_recurring_anchor_through_pol
             source: "postgres_test".to_string(),
             created_by: Some("postgres_test".to_string()),
             dedupe_key: None,
+            context_strategy: "fresh".to_string(),
+            context_snapshot_id: None,
+            on_context_failure: "fail".to_string(),
         },
     )
     .await

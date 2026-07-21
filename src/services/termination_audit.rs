@@ -23,6 +23,7 @@ fn audit_runtime_slot() -> &'static Mutex<AuditRuntime> {
     AUDIT_RUNTIME.get_or_init(|| Mutex::new(AuditRuntime::default()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_record(
     session_key: &str,
     dispatch_id: Option<&str>,
@@ -56,6 +57,7 @@ pub fn init_audit_db(pg_pool: Option<sqlx::PgPool>) {
 }
 
 /// Record a session termination event. Fire-and-forget -- never blocks the kill path.
+#[allow(clippy::too_many_arguments)]
 pub fn record_termination(
     session_key: &str,
     dispatch_id: Option<&str>,
@@ -83,6 +85,7 @@ pub fn record_termination(
 }
 
 /// Record against explicit handles. PostgreSQL is authoritative for #868.
+#[allow(clippy::too_many_arguments)]
 pub fn record_termination_with_handles(
     pg_pool: Option<&sqlx::PgPool>,
     session_key: &str,

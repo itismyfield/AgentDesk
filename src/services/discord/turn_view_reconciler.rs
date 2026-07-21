@@ -809,6 +809,7 @@ impl TurnViewReconciler {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn note_state_delivery_with_clear_attempt_guard(
         &self,
         shared: &SharedData,
@@ -1560,6 +1561,7 @@ impl TurnViewReconciler {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn apply_diff_or_cold_terminal(
         &self,
         shared: &SharedData,

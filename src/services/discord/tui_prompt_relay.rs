@@ -341,6 +341,16 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     };
     if let Some(control) = relay_prompt_decision.local_only_control.as_ref() {
         let kind = control.kind.as_str();
+        let Some(note) = prepare_local_only_slash_control_note(&prompt, kind) else {
+            tracing::info!(
+                provider = %prompt.provider,
+                channel_id = channel_id.get(),
+                tmux_session_name = %prompt.tmux_session_name,
+                slash_command_kind = %kind,
+                "deduped near-simultaneous local slash-command control half"
+            );
+            return;
+        };
         let Some(notify_http) = shared.serenity_http_or_token_fallback() else {
             tracing::warn!(
                 provider = %prompt.provider,
@@ -351,8 +361,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             );
             return;
         };
-        let note =
-            format_slash_command_control_note(&prompt.tmux_session_name, kind, &prompt.prompt);
         match channel_id.say(&*notify_http, note).await {
             Ok(message) => {
                 crate::services::tui_prompt_dedupe::record_local_only_entry_id_after_note_delivery(
@@ -828,9 +836,19 @@ fn slash_command_control_turn_is_first_sighting(tmux_session_name: &str, kind: &
     true
 }
 
+fn prepare_local_only_slash_control_note(prompt: &ObservedTuiPrompt, kind: &str) -> Option<String> {
+    if !slash_command_control_turn_is_first_sighting(&prompt.tmux_session_name, kind) {
+        crate::services::tui_prompt_dedupe::seal_deduped_local_only_entry_id(prompt);
+        return None;
+    }
+    Some(format_slash_command_control_note(
+        &prompt.tmux_session_name,
+        kind,
+        &prompt.prompt,
+    ))
+}
+
 /// The two-second kind gate owns external machine controls such as `/loop`.
-/// Local controls deliberately bypass it, so no text/time-only rule can
-/// collapse a nearby human `/compact`.
 fn slash_command_control_turn_is_duplicate_external_replay(
     decision: &RelayObservedPromptInjectionDecision,
     tmux_session_name: &str,

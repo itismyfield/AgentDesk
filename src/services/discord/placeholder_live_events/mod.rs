@@ -529,6 +529,7 @@ impl PlaceholderLiveEvents {
         true
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::services::discord) fn set_context_panel_usage(
         &self,
         channel_id: ChannelId,

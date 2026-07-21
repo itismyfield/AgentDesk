@@ -907,7 +907,9 @@ fn advance_buffer_start_offset(start_offset: u64, before_len: usize, after_len: 
     start_offset.saturating_add(before_len.saturating_sub(after_len) as u64)
 }
 
-fn ensure_monitor_auto_turn_inflight(
+#[allow(clippy::too_many_arguments)]
+async fn ensure_monitor_auto_turn_inflight(
+    shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
     tmux_session_name: &str,
@@ -937,6 +939,9 @@ fn ensure_monitor_auto_turn_inflight(
         Some(input_fifo_path.to_string()),
         last_offset,
     );
+    synthetic.turn_nonce = super::mailbox_snapshot(shared, channel_id)
+        .await
+        .active_turn_nonce;
     synthetic.turn_start_offset = Some(turn_start_offset);
     synthetic.rebind_origin = true;
     // #2285 audit trail: monitor pattern fired this turn without an
@@ -1378,6 +1383,48 @@ mod monitor_auto_turn_signal_tests {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         signal.mark_done();
         waiter.await.expect("waiter task should not panic");
+    }
+
+    #[tokio::test]
+    async fn monitor_auto_turn_inflight_persists_actor_episode_nonce() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = EnvGuard::set_root(root.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_595_240);
+        let synthetic_message_id = MessageId::new(4_595_340);
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+        assert!(
+            crate::services::discord::mailbox_try_start_turn_kinded(
+                &shared,
+                channel_id,
+                token.clone(),
+                UserId::new(1),
+                synthetic_message_id,
+                crate::services::turn_orchestrator::ActiveTurnKind::MonitorAutoTurn,
+            )
+            .await
+        );
+
+        ensure_monitor_auto_turn_inflight(
+            &shared,
+            &provider,
+            channel_id,
+            "AgentDesk-claude-4595",
+            "/tmp/agentdesk-4595.jsonl",
+            "/tmp/agentdesk-4595.fifo",
+            Some("session-4595"),
+            128,
+            256,
+        )
+        .await;
+
+        let persisted = super::super::inflight::load_inflight_state(&provider, channel_id.get())
+            .expect("monitor inflight must persist");
+        assert_eq!(persisted.turn_nonce.as_deref(), token.turn_nonce());
     }
 
     #[tokio::test]
@@ -1964,6 +2011,7 @@ fn persist_watcher_stream_progress(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finish_restored_watcher_active_turn(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -2161,6 +2209,7 @@ async fn release_restored_watcher_active_turn_before_panel_edit(
 /// Background watcher that continuously tails a tmux output file.
 /// When Claude produces output from terminal input (not Discord), relay it to Discord.
 #[path = "tmux_watcher.rs"]
+#[allow(clippy::too_many_arguments)]
 mod tmux_watcher;
 pub(super) use self::tmux_watcher::{
     TuiCompletionGateOutcome, emit_explicit_inflight_cleanup_signal, run_tui_completion_gate,

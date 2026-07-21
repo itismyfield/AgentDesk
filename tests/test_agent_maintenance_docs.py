@@ -299,11 +299,11 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
         )
         _write(root, "docs/agent-maintenance/change-surfaces.md", surface_line)
 
-    def test_errors_when_copied_count_drifts_from_inventory_prod(self) -> None:
+    def test_ignores_copied_count_drift_from_inventory_prod(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            # total Lines=2100 but Prod=1500 (shrink, still giant); the gate
-            # compares the documented number against Prod, not the raw total.
+            # The frozen path remains a production giant even though the prose
+            # snapshot differs from current production LoC.
             self._setup(
                 root,
                 "| `services::foo` | `src/services/foo.rs` | 2100 | 1500 | 600 |  |",
@@ -311,10 +311,7 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
             )
             findings = CHECKER.check_change_surface_line_counts(root)
 
-        self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0].severity, "error")
-        self.assertIn("but 1500 in", findings[0].message)
-        self.assertNotIn("decomposition regression", findings[0].message)
+        self.assertEqual(findings, [])
 
     def test_no_finding_when_count_matches_prod(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -342,7 +339,7 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
         self.assertEqual(findings[0].severity, "error")
         self.assertIn("no longer a giant file", findings[0].message)
 
-    def test_errors_and_flags_decomposition_regression_on_growth(self) -> None:
+    def test_current_inventory_giant_remains_valid_despite_stale_snapshot(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._setup(
@@ -352,9 +349,47 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
             )
             findings = CHECKER.check_change_surface_line_counts(root)
 
-        self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0].severity, "error")
-        self.assertIn("decomposition regression", findings[0].message)
+        self.assertEqual(findings, [])
+
+    def test_warning_only_line_count_gate_hard_fails_ghost_entry(self) -> None:
+        with TemporaryDirectory() as tmp, patch.object(
+            CHECKER, "check_doc_headers", return_value=[]
+        ), patch.object(
+            CHECKER, "check_migration_0093_rollout_contract", return_value=[]
+        ), patch.object(
+            CHECKER, "check_doc_touch_rules", return_value=[]
+        ):
+            root = Path(tmp)
+            self._setup(
+                root,
+                "| `services::foo` | `src/services/foo.rs` | 4000 | 64 | 3936 |  |",
+                "- `src/services/foo.rs` (3550 lines, giant-file).\n",
+            )
+            result = CHECKER.main(
+                ["--repo-root", tmp, "--warning-only", "--line-count-gate"]
+            )
+
+        self.assertEqual(result, 1)
+
+    def test_warning_only_line_count_gate_allows_numeric_mismatch(self) -> None:
+        with TemporaryDirectory() as tmp, patch.object(
+            CHECKER, "check_doc_headers", return_value=[]
+        ), patch.object(
+            CHECKER, "check_migration_0093_rollout_contract", return_value=[]
+        ), patch.object(
+            CHECKER, "check_doc_touch_rules", return_value=[]
+        ):
+            root = Path(tmp)
+            self._setup(
+                root,
+                "| `services::foo` | `src/services/foo.rs` | 2200 | 2100 | 100 |  |",
+                "- `src/services/foo.rs` (1800 lines, giant-file).\n",
+            )
+            result = CHECKER.main(
+                ["--repo-root", tmp, "--warning-only", "--line-count-gate"]
+            )
+
+        self.assertEqual(result, 0)
 
     def test_gates_bare_shorthand_line_count(self) -> None:
         # The services_misc_giants list uses a bare `(N)` shorthand; the gate
@@ -372,7 +407,7 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
         self.assertEqual(findings[0].severity, "error")
         self.assertIn("no longer a giant file", findings[0].message)
 
-    def test_bare_shorthand_drift_is_error(self) -> None:
+    def test_bare_shorthand_drift_is_not_an_error(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._setup(
@@ -382,9 +417,7 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
             )
             findings = CHECKER.check_change_surface_line_counts(root)
 
-        self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0].severity, "error")
-        self.assertIn("but 1740 in", findings[0].message)
+        self.assertEqual(findings, [])
 
     def test_lines_form_not_double_counted_by_shorthand(self) -> None:
         # `(N lines …)` must be handled once, not also matched as `(N)`.

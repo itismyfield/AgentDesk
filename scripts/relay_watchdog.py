@@ -56,6 +56,7 @@ import shutil
 import stat as stat_mode
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -1444,6 +1445,20 @@ class WatcherStateProbe:
     # `relay_stall_state` plus nested `relay_health`. `None` is a legacy server
     # with neither field and preserves the pre-#4458 desync behavior.
     relay_activity: CoverageActivityProbe | None = None
+    # Provider session identity is authoritative across runtime-mirror/provider-
+    # project path representations. It is optional for legacy watcher-state.
+    bound_session_id: str | None = None
+
+
+def canonical_session_uuid(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError):
+        return None
+    canonical = str(parsed)
+    return canonical if value == canonical else None
 
 
 def parse_watcher_state_probe(
@@ -1458,15 +1473,19 @@ def parse_watcher_state_probe(
     attached_raw = payload.get("attached")
     desynced_raw = payload.get("desynced")
     bound_output_path = payload.get("bound_output_path")
+    bound_session_id_raw = payload.get("bound_session_id")
     attached = attached_raw if isinstance(attached_raw, bool) else None
     desynced = desynced_raw if isinstance(desynced_raw, bool) else None
     bound = bound_output_path if isinstance(bound_output_path, str) else None
+    bound_session_id = canonical_session_uuid(bound_session_id_raw)
 
     has_activity_schema = (
         "relay_stall_state" in payload or "relay_health" in payload
     )
     if not has_activity_schema:
-        return WatcherStateProbe(200, attached, desynced, bound)
+        return WatcherStateProbe(
+            200, attached, desynced, bound, bound_session_id=bound_session_id
+        )
 
     malformed = False
     stall_raw = payload.get("relay_stall_state")
@@ -1489,6 +1508,7 @@ def parse_watcher_state_probe(
                 relay_stall_state=relay_stall_state,
                 malformed=True,
             ),
+            bound_session_id,
         )
 
     def string_field(key: str) -> tuple[str | None, bool]:
@@ -1571,6 +1591,7 @@ def parse_watcher_state_probe(
             desynced=relay_desynced,
             malformed=malformed,
         ),
+        bound_session_id,
     )
 
 
@@ -3617,6 +3638,86 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
                 rt, chs, cid, retired_pending_paths
             )
         return
+
+    # A cleared/restarted provider session creates a new transcript. Retire an
+    # old GAP owner only when dcserver proves that the channel is now bound to the
+    # delivered successor and the old file has crossed the normal idle boundary.
+    # File mtime ordering alone is not a session boundary: concurrent writers and
+    # delayed flushes can invert it. This is a retirement, not proof that the old
+    # LOST blocks arrived, so the normal RECOVERED notification stays suppressed.
+    selected_path = str(selected.path) if selected is not None else None
+    selected_verdict = next(
+        (
+            verdict
+            for candidate, verdict in evaluated
+            if str(candidate.path) == selected_path
+        ),
+        None,
+    )
+    selected_probe = rt.watcher_state(cid) if selected_path else WatcherStateProbe(None)
+    selected_session_id = (
+        canonical_session_uuid(selected.path.stem) if selected is not None else None
+    )
+    successor_binding_proven = selected_probe.status == 200 and (
+        selected_probe.bound_output_path == selected_path
+        or (
+            selected_session_id is not None
+            and selected_probe.bound_session_id == selected_session_id
+        )
+    )
+    superseded_gap_owners: list[str] = []
+    if (
+        selected_path
+        and selected_verdict is not None
+        and selected_verdict.state == STATE_OK
+        and fresh_undelivered_by_path.get(selected_path, 0) == 0
+        and delivered_watermark_for_path(chs, selected_path) > 0
+        and successor_binding_proven
+    ):
+        for path in _validated_gap_owner_transcripts(chs):
+            if path == selected_path or path in semantic_growth_paths:
+                continue
+            candidate = candidate_by_path.get(path)
+            if candidate is None or now - candidate.mtime < cfg.idle_quiet_secs:
+                continue
+            superseded_gap_owners.append(path)
+            retired_transcripts[path] = (candidate.size, now)
+        if superseded_gap_owners:
+            superseded = set(superseded_gap_owners)
+            _store_retired_transcripts(chs, retired_transcripts)
+            retired_pending_paths.extend(superseded_gap_owners)
+            remaining_pending = [
+                path for path in remaining_pending if path not in superseded
+            ]
+            pending_failures = {
+                path: failures
+                for path, failures in pending_failures.items()
+                if path not in superseded
+            }
+            pending_since = {
+                path: since
+                for path, since in pending_since.items()
+                if path not in superseded
+            }
+            chs[PENDING_TRANSCRIPTS_KEY] = remaining_pending
+            if pending_failures:
+                chs[PENDING_TRANSCRIPT_FAILURES_KEY] = pending_failures
+            else:
+                chs.pop(PENDING_TRANSCRIPT_FAILURES_KEY, None)
+            if pending_since:
+                chs[PENDING_TRANSCRIPT_SINCE_KEY] = pending_since
+            else:
+                chs.pop(PENDING_TRANSCRIPT_SINCE_KEY, None)
+            evaluated = [
+                (candidate, verdict)
+                for candidate, verdict in evaluated
+                if str(candidate.path) not in superseded
+            ]
+            rt.log(
+                f"[{cid}] historical-gap-owner-retired "
+                f"successor={selected_path} count={len(superseded_gap_owners)}"
+            )
+
     state_rank = {STATE_OK: 0, STATE_LAGGING: 1, STATE_GAP: 2}
     verdict_candidate, v = max(
         evaluated,
@@ -3664,7 +3765,9 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     _store_recovered_gap_guards(chs, recovered_gap_guards)
 
     next_gap_owners = [
-        path for path in previous_gap_owners if path not in evaluated_paths
+        path
+        for path in previous_gap_owners
+        if path not in evaluated_paths and path not in superseded_gap_owners
     ]
     for candidate, verdict in evaluated:
         path = str(candidate.path)

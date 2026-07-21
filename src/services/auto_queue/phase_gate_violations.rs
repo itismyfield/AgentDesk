@@ -22,7 +22,10 @@ use serde::Serialize;
 use serde_json::json;
 use sqlx::{PgPool, Row as SqlxRow};
 
-use crate::app_state::AppState;
+use crate::{
+    app_state::AppState,
+    error::{AppError, AppResult, ErrorCode},
+};
 
 /// A single observed ordering violation.
 #[derive(Debug, Clone, Serialize)]
@@ -188,22 +191,21 @@ pub async fn scan_violations_pg(pool: &PgPool) -> Result<PhaseGateSnapshot, Stri
 /// `violations` vector is the success-and-clean signal.
 pub async fn violations_route(
     State(state): State<AppState>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return (
+        return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "postgres pool unavailable"})),
-        );
+            ErrorCode::AutoQueue,
+            "postgres pool unavailable",
+        ));
     };
     match scan_violations_pg(pool).await {
         Ok(snapshot) => match serde_json::to_value(&snapshot) {
-            Ok(value) => (StatusCode::OK, Json(value)),
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("serialize snapshot: {e}")})),
-            ),
+            Ok(value) => Ok((StatusCode::OK, Json(value))),
+            Err(e) => Err(AppError::internal(format!("serialize snapshot: {e}"))
+                .with_code(ErrorCode::AutoQueue)),
         },
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
+        Err(e) => Err(AppError::internal(e).with_code(ErrorCode::AutoQueue)),
     }
 }
 

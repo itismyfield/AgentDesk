@@ -1055,21 +1055,16 @@ mod tests {
             .expect("the stop Escape proceeds once the composer lock releases");
     }
 
-    /// P2 #4616 regression: the interactive stop-Escape must NOT hold the GLOBAL
-    /// interrupt-registry lock (`ACTIVE_GENERATION_BY_TMUX`) while it is parked on
-    /// the per-pane composer lock. `deliver_claimed_claude_stop_under_lock_order`
-    /// (the exact routing production uses) takes the composer lock OUTSIDE the
-    /// registry delivery guard, so while a busy-pane `/compact` holds the composer
-    /// lock for one pane, a *different* pane's turn-start bind — and every other
-    /// registry op — still proceeds immediately.
+    /// P2 #4616 regression: the interactive stop-Escape must not hold its session
+    /// slot while it is parked on the per-pane composer lock.
+    /// `deliver_claimed_claude_stop_under_lock_order` (the exact routing production
+    /// uses) takes the composer lock outside the delivery guard, so a busy-pane
+    /// `/compact` cannot delay another pane's turn-start bind.
     ///
-    /// Guard removal: reverting to the registry-first order (acquiring the registry
-    /// delivery guard before waiting on the composer lock, as the pre-#4616 rework
-    /// did via `deliver_claimed_claude_stop(.., || deliver_tui_escape_under_composer_lock(..))`)
-    /// would hold the global registry lock across the multi-second composer wait,
-    /// and the other-session `bind_claude_tmux_session` below would block until
-    /// `/compact` released — failing the `recv_timeout(..)` this test expects to
-    /// succeed promptly.
+    /// Guard removal: reverting to registry-first order would hold the first
+    /// session's slot across the multi-second composer wait. A global registry
+    /// regression would additionally block the other-session bind below, failing
+    /// the `recv_timeout(..)` this test expects to succeed promptly.
     #[cfg(unix)]
     #[test]
     fn stop_escape_never_holds_interrupt_registry_while_parked_on_composer_lock() {

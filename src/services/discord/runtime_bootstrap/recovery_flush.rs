@@ -8,6 +8,7 @@ static ORPHAN_INFLIGHT_LOCK_SWEEP_ONCE: std::sync::OnceLock<usize> = std::sync::
 /// flush loop starts and delivers/clears reports. Behavior-preserving
 /// extraction; JoinHandle discarded as inline. `api_port` is captured by the
 /// spawn (used by run_startup_diagnostic_after_reconcile_barrier).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
     ctx: &serenity::Context,
     shared_for_tmux: &Arc<SharedData>,

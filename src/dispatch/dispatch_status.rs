@@ -33,6 +33,7 @@ fn should_enqueue_status_reaction(to_status: &str, transition_source: &str) -> b
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_dispatch_quality_event(
     dispatch_id: &str,
     agent_id: Option<&str>,
@@ -477,6 +478,7 @@ fn plan_transition_effects(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn set_dispatch_status_on_pg_with_sync(
     pool: &PgPool,
     dispatch_id: &str,
@@ -1123,6 +1125,7 @@ pub async fn set_dispatch_status_on_pg_async(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 fn set_dispatch_status_with_backends_and_sync(
     pg_pool: Option<&PgPool>,
     dispatch_id: &str,

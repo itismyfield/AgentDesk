@@ -10,3 +10,6 @@ git config --local core.hooksPath .githooks
 chmod +x .githooks/pre-push
 
 echo "Configured core.hooksPath=.githooks"
+
+# Register custom merge drivers (regen-inventory for generated inventory docs, #4724).
+bash "$SCRIPT_DIR/setup-merge-drivers.sh"

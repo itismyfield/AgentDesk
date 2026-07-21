@@ -7,6 +7,7 @@ use crate::db::session_agent_resolution::{
 use crate::db::session_status::{
     is_live_status, is_user_wait_status, normalize_incoming_session_status,
 };
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
@@ -22,7 +23,7 @@ async fn hook_session_pg(
     state: &AppState,
     pool: &sqlx::PgPool,
     body: HookSessionBody,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let mut thread_channel_id = normalize_thread_channel_id(body.thread_channel_id.as_deref())
         .or_else(|| {
             body.name
@@ -178,12 +179,9 @@ async fn hook_session_pg(
                 }
             }
 
-            (StatusCode::OK, Json(json!({"ok": true})))
+            Ok((StatusCode::OK, Json(json!({"ok": true}))))
         }
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
+        Err(error) => Err(AppError::internal(error).with_code(ErrorCode::Database)),
     }
 }
 
@@ -272,7 +270,7 @@ pub struct DeleteSessionQuery {
 pub async fn list_dispatched_sessions(
     State(state): State<AppState>,
     Query(params): Query<ListDispatchedSessionsQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let include_all = params.include_merged.as_deref() == Some("1");
     if let Some(pool) = state.pg_pool_ref() {
         return match dispatched_sessions_db::list_dispatched_sessions_pg(pool, include_all).await {
@@ -296,79 +294,63 @@ pub async fn list_dispatched_sessions(
                     state.cluster_instance_id.as_deref(),
                     &worker_nodes,
                 );
-                (StatusCode::OK, Json(json!({"sessions": sessions})))
+                Ok((StatusCode::OK, Json(json!({"sessions": sessions}))))
             }
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            ),
+            Err(error) => Err(AppError::internal(error).with_code(ErrorCode::Database)),
         };
     }
 
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": "postgres pool unavailable"})),
-    )
+    Err(AppError::internal("postgres pool unavailable").with_code(ErrorCode::Database))
 }
 
 /// POST /api/dispatched-sessions/webhook — upsert session from dcserver
 pub async fn hook_session(
     State(state): State<AppState>,
     Json(body): Json<HookSessionBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Some(pool) = state.pg_pool_ref() {
         return hook_session_pg(&state, pool, body).await;
     }
 
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": "postgres pool unavailable"})),
-    )
+    Err(AppError::internal("postgres pool unavailable").with_code(ErrorCode::Database))
 }
 
 /// DELETE /api/dispatched-sessions/cleanup — manual: delete disconnected sessions
 pub async fn cleanup_sessions(
     State(state): State<AppState>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Some(pool) = state.pg_pool_ref() {
         return match dispatched_sessions_db::cleanup_disconnected_sessions_pg(pool).await {
-            Ok(result) => (StatusCode::OK, Json(json!({"ok": true, "deleted": result}))),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            ),
+            Ok(result) => Ok((StatusCode::OK, Json(json!({"ok": true, "deleted": result})))),
+            Err(error) => {
+                Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database))
+            }
         };
     }
 
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": "postgres pool unavailable"})),
-    )
+    Err(AppError::internal("postgres pool unavailable").with_code(ErrorCode::Database))
 }
 
 /// DELETE /api/dispatched-sessions/gc-threads — periodic: delete stale thread sessions
 pub async fn gc_thread_sessions(
     State(state): State<AppState>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Some(pool) = state.pg_pool_ref() {
         let deleted = dispatched_sessions_db::gc_stale_thread_sessions_pg(pool).await;
-        return (
+        return Ok((
             StatusCode::OK,
             Json(json!({"ok": true, "gc_threads": deleted.len()})),
-        );
+        ));
     }
 
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": "postgres pool unavailable"})),
-    )
+    Err(AppError::internal("postgres pool unavailable").with_code(ErrorCode::Database))
 }
 
 /// DELETE /api/dispatched-sessions/webhook — delete a session by session_key
 pub async fn delete_session(
     State(state): State<AppState>,
     Query(params): Query<DeleteSessionQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Some(pool) = state.pg_pool_ref() {
         return match dispatched_sessions_db::delete_session_by_key_pg(pool, &params.session_key)
             .await
@@ -381,22 +363,18 @@ pub async fn delete_session(
                         json!({"id": session_id.to_string()}),
                     );
                 }
-                (
+                Ok((
                     StatusCode::OK,
                     Json(json!({"ok": true, "deleted": result.deleted})),
-                )
+                ))
             }
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            ),
+            Err(error) => {
+                Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database))
+            }
         };
     }
 
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": "postgres pool unavailable"})),
-    )
+    Err(AppError::internal("postgres pool unavailable").with_code(ErrorCode::Database))
 }
 
 /// GET /api/dispatched-sessions/claude-session-id?session_key=...
@@ -404,7 +382,7 @@ pub async fn delete_session(
 pub async fn get_claude_session_id(
     State(state): State<AppState>,
     Query(params): Query<DeleteSessionQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Some(pool) = state.pg_pool_ref() {
         let _ = dispatched_sessions_db::disconnect_stale_fixed_session_by_key_pg(
             pool,
@@ -429,34 +407,28 @@ pub async fn get_claude_session_id(
                         &ids,
                     )
                     .await;
-                (
+                Ok((
                     StatusCode::OK,
                     Json(json!({
                         "claude_session_id": ids.claude_session_id,
                         "session_id": selected_session_id,
                         "raw_provider_session_id": ids.raw_provider_session_id,
                     })),
-                )
+                ))
             }
-            Ok(None) => (
+            Ok(None) => Ok((
                 StatusCode::OK,
                 Json(json!({
                     "claude_session_id": null,
                     "session_id": null,
                     "raw_provider_session_id": null,
                 })),
-            ),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            ),
+            )),
+            Err(error) => Err(AppError::internal(error).with_code(ErrorCode::Database)),
         };
     }
 
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": "postgres pool unavailable"})),
-    )
+    Err(AppError::internal("postgres pool unavailable").with_code(ErrorCode::Database))
 }
 
 /// POST /api/dispatched-sessions/clear-stale-session-id
@@ -464,31 +436,24 @@ pub async fn get_claude_session_id(
 pub async fn clear_stale_session_id(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(sid) = body
         .get("session_id")
         .and_then(|v| v.as_str())
         .or_else(|| body.get("claude_session_id").and_then(|v| v.as_str()))
     else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "session_id required"})),
-        );
+        return Err(AppError::bad_request("session_id required"));
     };
     if let Some(pool) = state.pg_pool_ref() {
         return match dispatched_sessions_db::clear_stale_session_id_pg(pool, sid).await {
-            Ok(result) => (StatusCode::OK, Json(json!({"cleared": result}))),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            ),
+            Ok(result) => Ok((StatusCode::OK, Json(json!({"cleared": result})))),
+            Err(error) => {
+                Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database))
+            }
         };
     }
 
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": "postgres pool unavailable"})),
-    )
+    Err(AppError::internal("postgres pool unavailable").with_code(ErrorCode::Database))
 }
 
 /// POST /api/dispatched-sessions/clear-session-id
@@ -497,27 +462,20 @@ pub async fn clear_stale_session_id(
 pub async fn clear_session_id_by_key(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(key) = body.get("session_key").and_then(|v| v.as_str()) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "session_key required"})),
-        );
+        return Err(AppError::bad_request("session_key required"));
     };
     if let Some(pool) = state.pg_pool_ref() {
         return match dispatched_sessions_db::clear_session_id_by_key_pg(pool, key).await {
-            Ok(result) => (StatusCode::OK, Json(json!({"cleared": result}))),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            ),
+            Ok(result) => Ok((StatusCode::OK, Json(json!({"cleared": result})))),
+            Err(error) => {
+                Err(AppError::internal(format!("{error}")).with_code(ErrorCode::Database))
+            }
         };
     }
 
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": "postgres pool unavailable"})),
-    )
+    Err(AppError::internal("postgres pool unavailable").with_code(ErrorCode::Database))
 }
 
 /// PATCH /api/dispatched-sessions/:id
@@ -525,7 +483,7 @@ pub async fn update_dispatched_session(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     Json(body): Json<UpdateDispatchedSessionBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Some(pool) = state.pg_pool_ref() {
         if body.status.is_none()
             && body.active_dispatch_id.is_none()
@@ -534,10 +492,7 @@ pub async fn update_dispatched_session(
             && body.cwd.is_none()
             && body.session_info.is_none()
         {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "no fields to update"})),
-            );
+            return Err(AppError::bad_request("no fields to update"));
         }
 
         let normalized_status = body
@@ -559,10 +514,7 @@ pub async fn update_dispatched_session(
         )
         .await
         {
-            Ok(0) => (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "session not found"})),
-            ),
+            Ok(0) => Err(AppError::not_found("session not found")),
             Ok(_) => {
                 match dispatched_sessions_db::load_session_update_payload_pg(pool, id).await {
                     Ok(Some(session)) => {
@@ -580,19 +532,13 @@ pub async fn update_dispatched_session(
                         error
                     ),
                 }
-                (StatusCode::OK, Json(json!({"ok": true})))
+                Ok((StatusCode::OK, Json(json!({"ok": true}))))
             }
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            ),
+            Err(error) => Err(AppError::internal(error).with_code(ErrorCode::Database)),
         };
     }
 
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": "postgres pool unavailable"})),
-    )
+    Err(AppError::internal("postgres pool unavailable").with_code(ErrorCode::Database))
 }
 
 #[derive(Deserialize)]

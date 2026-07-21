@@ -53,6 +53,8 @@ mod circuit_breaker;
 mod completion_footer;
 #[path = "relay_recovery_reattach_apply.rs"]
 mod reattach_apply;
+#[path = "relay_recovery_circuit_alert_producer.rs"]
+mod relay_recovery_circuit_alert_producer;
 
 use auto_heal_apply::apply_relay_recovery_plan;
 #[cfg(test)]

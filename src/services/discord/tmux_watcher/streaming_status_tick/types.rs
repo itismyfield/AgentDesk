@@ -1,5 +1,20 @@
 use super::*;
 
+pub(in crate::services::discord::tmux::tmux_watcher) fn watcher_should_suppress_streaming_after_bridge_delivery(
+    bridge_delivered_turn: bool,
+    has_assistant_response: bool,
+    observed_range: (u64, u64),
+    committed_range: Option<(u64, u64)>,
+) -> bool {
+    if !bridge_delivered_turn || !has_assistant_response {
+        return false;
+    }
+    committed_range.is_some_and(|(start, end)| {
+        let (observed_start, observed_end) = observed_range;
+        start <= observed_start && observed_start < observed_end && observed_end <= end
+    })
+}
+
 pub(in crate::services::discord::tmux::tmux_watcher) struct StreamingStatusTickContext<'a> {
     pub(in crate::services::discord::tmux::tmux_watcher) http: &'a Arc<serenity::Http>,
     pub(in crate::services::discord::tmux::tmux_watcher) shared: &'a Arc<SharedData>,

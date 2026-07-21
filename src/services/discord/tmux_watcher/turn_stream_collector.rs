@@ -8,6 +8,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
+#[allow(clippy::large_enum_variant)]
 pub(super) enum CollectOutcome {
     ContinueWatcherLoop,
     Fallthrough(CollectedTurnStream),
@@ -394,6 +395,26 @@ pub(super) async fn collect_turn_stream_until_terminal(
                 completion_footer_terminal_target.clone();
         }};
     }
+    // #4595: single expansion of the monitor-auto-turn synthetic inflight upsert.
+    // Both watcher-loop call sites pass identical arguments; the actor read is
+    // async (it snapshots the mailbox episode nonce), so this keeps the two
+    // await sites from duplicating the nine-argument call verbatim.
+    macro_rules! ensure_monitor_auto_turn_inflight_now {
+        () => {
+            ensure_monitor_auto_turn_inflight(
+                &shared,
+                &watcher_provider,
+                channel_id,
+                &tmux_session_name,
+                &output_path,
+                &input_fifo_path,
+                state.last_session_id.as_deref(),
+                data_start_offset,
+                current_offset,
+            )
+            .await
+        };
+    }
     // #1009: 1-shot tracker for the monitor-auto-turn preamble hint so the
     // hint text is emitted exactly once per watcher turn frame.
     let mut monitor_auto_turn_preamble_injected = false;
@@ -547,16 +568,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
             commit_collect_state!();
             return CollectOutcome::ContinueWatcherLoop;
         }
-        ensure_monitor_auto_turn_inflight(
-            &watcher_provider,
-            channel_id,
-            &tmux_session_name,
-            &output_path,
-            &input_fifo_path,
-            state.last_session_id.as_deref(),
-            data_start_offset,
-            current_offset,
-        );
+        ensure_monitor_auto_turn_inflight_now!();
         if let Some(hint) =
             consume_monitor_auto_turn_preamble_once(&mut monitor_auto_turn_preamble_injected)
         {
@@ -825,16 +837,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
                                 break;
                             }
                         }
-                        ensure_monitor_auto_turn_inflight(
-                            &watcher_provider,
-                            channel_id,
-                            &tmux_session_name,
-                            &output_path,
-                            &input_fifo_path,
-                            state.last_session_id.as_deref(),
-                            data_start_offset,
-                            current_offset,
-                        );
+                        ensure_monitor_auto_turn_inflight_now!();
                         if let Some(hint) = consume_monitor_auto_turn_preamble_once(
                             &mut monitor_auto_turn_preamble_injected,
                         ) {

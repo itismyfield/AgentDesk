@@ -364,6 +364,80 @@ pub(in crate::services::discord) fn restore_voluntary_feedback_reminder_after_ta
     store_voluntary_feedback_reminder(pg_pool, provider, channel_id, reminder)
 }
 
+// #4196: turn-end WIP (uncommitted-changes) warning stash. The #3792 detector
+// posts the warning to the Discord channel, but a bot-authored channel post is
+// never re-injected into the agent's turn context — only user-authored messages
+// become prompts. This stash mirrors the voluntary_feedback_reminder channel
+// above (same kv_meta layer, same provider-scoped key + one-shot take) so the
+// warning reaches the NEXT turn's prompt as agent context and the agent can
+// self-correct (commit/stash) before the worktree state is lost. Provider axis:
+// on a channel shared by multiple provider bots the WIP state is per provider
+// worktree, so provider B must not consume provider A's warning.
+fn turn_end_wip_warning_key(provider: &ProviderKind, channel_id: u64) -> String {
+    format!("turn_end_wip_warning:{}:{channel_id}", provider.as_str())
+}
+
+pub(in crate::services::discord) fn store_turn_end_wip_warning(
+    pg_pool: Option<&sqlx::PgPool>,
+    provider: &ProviderKind,
+    channel_id: u64,
+    warning: &str,
+) -> Result<(), String> {
+    let warning = warning.trim();
+    if warning.is_empty() {
+        return Ok(());
+    }
+
+    let key = turn_end_wip_warning_key(provider, channel_id);
+    match super::super::internal_api::set_kv_value(&key, warning) {
+        Ok(()) => Ok(()),
+        Err(err) if direct_runtime_context_unavailable(&err) => {
+            if let Some(pg_pool) = pg_pool {
+                store_kv_meta_value_pg(pg_pool, &key, warning)
+            } else {
+                Err(err)
+            }
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// One-shot take: reads and deletes the stashed WIP warning so it is injected
+/// into exactly one turn. If the worktree is still dirty at that turn's end a
+/// fresh warning is re-stashed, so the nudge self-refreshes while WIP persists.
+pub(in crate::services::discord) fn take_turn_end_wip_warning(
+    pg_pool: Option<&sqlx::PgPool>,
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Option<String> {
+    let key = turn_end_wip_warning_key(provider, channel_id);
+    let warning = match super::super::internal_api::take_kv_value(&key) {
+        Ok(Some(warning)) => Some(warning),
+        Ok(None) => None,
+        Err(err) if direct_runtime_context_unavailable(&err) => pg_pool
+            .and_then(|pg_pool| take_kv_meta_value_pg(pg_pool, &key))
+            .or_else(|| take_kv_meta_value_runtime_pg(&key)),
+        Err(_) => None,
+    }?;
+    let warning = warning.trim().to_string();
+    if warning.is_empty() {
+        None
+    } else {
+        Some(warning)
+    }
+}
+
+/// Put the stashed WIP warning back after a turn took it but failed to establish
+/// (TUI-busy enqueue refusal). Blind upsert, matching the sibling put-backs.
+pub(in crate::services::discord) fn restore_turn_end_wip_warning_after_take(
+    pg_pool: Option<&sqlx::PgPool>,
+    provider: &ProviderKind,
+    channel_id: u64,
+    warning: &str,
+) -> Result<(), String> {
+    store_turn_end_wip_warning(pg_pool, provider, channel_id, warning)
+}
+
 fn build_discord_recent_recovery_context_from_parts<'a>(
     messages: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> Option<(String, usize)> {
@@ -398,7 +472,7 @@ async fn emit_session_resume_failed_with_recovery(
         return;
     };
     let session_key =
-        super::super::adk_session::build_adk_session_key(shared, channel_id, provider).await;
+        super::super::adk_session::build_adk_session_key(shared, channel_id, provider, None).await;
     let recovery_action = if recovery.is_some() {
         "fresh_session_with_discord_history_context"
     } else {
@@ -432,9 +506,11 @@ async fn emit_session_resume_failed_with_recovery(
 mod tests {
     use super::{
         build_discord_recent_recovery_context_from_parts, direct_runtime_context_unavailable,
-        restore_session_retry_context_after_take, restore_voluntary_feedback_reminder_after_take,
-        store_session_retry_context_with_audit, store_voluntary_feedback_reminder,
-        take_session_retry_context_for_turn_with_audit, take_voluntary_feedback_reminder,
+        restore_session_retry_context_after_take, restore_turn_end_wip_warning_after_take,
+        restore_voluntary_feedback_reminder_after_take, store_session_retry_context_with_audit,
+        store_turn_end_wip_warning, store_voluntary_feedback_reminder,
+        take_session_retry_context_for_turn_with_audit, take_turn_end_wip_warning,
+        take_voluntary_feedback_reminder,
     };
 
     #[test]
@@ -586,6 +662,57 @@ mod tests {
         pg_db.drop().await;
     }
 
+    /// #4196: the turn-end WIP warning must survive the stash → take → put-back →
+    /// take round trip on its own kv_meta key, and a one-shot take must consume it
+    /// so a clean next turn is not re-nudged with a stale warning.
+    #[tokio::test]
+    async fn turn_end_wip_warning_stash_take_and_put_back_round_trips_pg() {
+        use crate::services::provider::ProviderKind;
+
+        let pg_db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_wip_warning",
+            "recovery text turn-end WIP warning round trip",
+        )
+        .await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let provider = ProviderKind::Claude;
+        let channel_id = 9_000_000_000_004_196;
+        let warning = "⚠️ **턴을 완료하기 전에 커밋되지 않은 변경사항을 확인하세요.**\n\
+             작업공간: `/tmp/wt`\n\
+             파일 수: 스테이징됨 1개 · 스테이징 안 됨 0개 · 추적되지 않음 2개\n\
+             턴을 끝내기 전에 변경사항을 커밋하거나 명시적으로 폐기하세요.";
+
+        // Nothing stashed → take yields nothing (clean worktree case).
+        assert!(
+            take_turn_end_wip_warning(Some(&pool), &provider, channel_id).is_none(),
+            "take without a stash must be None"
+        );
+
+        store_turn_end_wip_warning(Some(&pool), &provider, channel_id, warning)
+            .expect("stash turn-end WIP warning");
+
+        let first_take = take_turn_end_wip_warning(Some(&pool), &provider, channel_id)
+            .expect("first take returns the stashed WIP warning");
+        assert_eq!(first_take, warning);
+
+        // One-shot: the stash is consumed by the successful take.
+        assert!(
+            take_turn_end_wip_warning(Some(&pool), &provider, channel_id).is_none(),
+            "WIP warning must be consumed by the take (no duplicate injection)"
+        );
+
+        // Put-back after a take that failed to establish a turn.
+        restore_turn_end_wip_warning_after_take(Some(&pool), &provider, channel_id, &first_take)
+            .expect("put the WIP warning back after a refused turn");
+        let second_take = take_turn_end_wip_warning(Some(&pool), &provider, channel_id)
+            .expect("second take returns the restored WIP warning");
+        assert_eq!(second_take, warning);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
     /// #4307 PR-B rework (codex dual-review r1): on a channel shared by
     /// multiple provider bots, another provider's intake must neither consume
     /// nor clobber a reminder stashed by the originating provider — the key is
@@ -731,7 +858,7 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
         && skip_reason.is_none()
     {
         let session_key =
-            super::super::adk_session::build_adk_session_key(shared, channel_id, provider)
+            super::super::adk_session::build_adk_session_key(shared, channel_id, provider, None)
                 .await
                 .unwrap_or_else(|| format!("channel:{}", channel_id.get()));
         let stored = store_session_retry_context_with_audit(

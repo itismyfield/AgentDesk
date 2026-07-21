@@ -9,28 +9,28 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use crate::db::agents::load_all_agent_channel_bindings_pg;
+use crate::error::{AppError, AppResult, ErrorCode};
 
 // ── Handlers ───────────────────────────────────────────────────
 
 /// GET /api/discord/bindings
 ///
 /// Reads agent channel bindings from Postgres.
-pub async fn list_bindings(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+pub async fn list_bindings(
+    State(state): State<AppState>,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Some(pool) = state.pg_pool_ref() {
         return list_bindings_pg(pool).await;
     }
 
-    (StatusCode::OK, Json(json!({"bindings": []})))
+    Ok((StatusCode::OK, Json(json!({"bindings": []}))))
 }
 
-async fn list_bindings_pg(pool: &sqlx::PgPool) -> (StatusCode, Json<serde_json::Value>) {
+async fn list_bindings_pg(pool: &sqlx::PgPool) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let map = match load_all_agent_channel_bindings_pg(pool).await {
         Ok(m) => m,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("pg query failed: {e}")})),
-            );
+        Err(error) => {
+            return Err(AppError::internal(format!("pg query failed: {error}")));
         }
     };
 
@@ -57,7 +57,7 @@ async fn list_bindings_pg(pool: &sqlx::PgPool) -> (StatusCode, Json<serde_json::
         })
         .collect();
 
-    (StatusCode::OK, Json(json!({"bindings": bindings})))
+    Ok((StatusCode::OK, Json(json!({"bindings": bindings}))))
 }
 
 // ── Discord proxy APIs ──────────────────────────────────────────
@@ -71,13 +71,10 @@ pub struct MessagesQuery {
 
 /// Parse a channel id string into a `ChannelId`. Returns 400 if it isn't a
 /// valid u64.
-fn parse_channel_id(raw: &str) -> Result<ChannelId, (StatusCode, Json<serde_json::Value>)> {
-    raw.parse::<u64>().map(ChannelId::new).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "invalid channel id"})),
-        )
-    })
+fn parse_channel_id(raw: &str) -> AppResult<ChannelId> {
+    raw.parse::<u64>()
+        .map(ChannelId::new)
+        .map_err(|_| AppError::bad_request("invalid channel id"))
 }
 
 /// Issue #2047 Finding 5 — confused-deputy fix. The proxy uses the announce
@@ -89,9 +86,7 @@ fn parse_channel_id(raw: &str) -> Result<ChannelId, (StatusCode, Json<serde_json
 /// `org_schema`, or `role_map.json`) — the goal is "is this channel known to
 /// the operator?" not "which agent owns it?". Threads inherit the parent's
 /// binding via the resolver's parent walk where applicable.
-async fn ensure_channel_is_role_mapped(
-    channel_id: ChannelId,
-) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+async fn ensure_channel_is_role_mapped(channel_id: ChannelId) -> AppResult<()> {
     use crate::services::discord::resolve_channel_role_binding as resolve_role_binding;
 
     // First pass: try without a channel name (fast path for `byChannelId`
@@ -109,9 +104,10 @@ async fn ensure_channel_is_role_mapped(
         None => {
             // Without a bot token we can't fetch the channel name; behave as
             // a hard deny rather than open the proxy by accident.
-            return Err((
+            return Err(AppError::new(
                 StatusCode::FORBIDDEN,
-                Json(json!({"error": "channel not in role-map"})),
+                ErrorCode::Discord,
+                "channel not in role-map",
             ));
         }
     };
@@ -132,9 +128,10 @@ async fn ensure_channel_is_role_mapped(
         }
     };
 
-    Err((
+    Err(AppError::new(
         StatusCode::FORBIDDEN,
-        Json(json!({"error": "channel not in role-map"})),
+        ErrorCode::Discord,
+        "channel not in role-map",
     ))
 }
 
@@ -185,24 +182,17 @@ fn thread_parent_id(payload: &Value) -> Option<ChannelId> {
 pub async fn channel_messages(
     Path(channel_id_raw): Path<String>,
     Query(params): Query<MessagesQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let channel_id = match parse_channel_id(&channel_id_raw) {
-        Ok(id) => id,
-        Err(err) => return err,
-    };
-
-    if let Err(err) = ensure_channel_is_role_mapped(channel_id).await {
-        return err;
-    }
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let channel_id = parse_channel_id(&channel_id_raw)?;
+    ensure_channel_is_role_mapped(channel_id).await?;
 
     let token = match crate::credential::read_bot_token(
         crate::services::discord::bot_role::UtilityBotRole::Announce.alias(),
     ) {
         Some(t) => t,
         None => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "announce bot token not found"})),
+            return Err(
+                AppError::internal("announce bot token not found").with_code(ErrorCode::Discord)
             );
         }
     };
@@ -250,10 +240,11 @@ pub async fn channel_messages(
                 error = %error,
                 "[#2723] channel_messages discord request failed"
             );
-            return (
+            return Err(AppError::new(
                 StatusCode::BAD_GATEWAY,
-                Json(json!({"error": "discord request failed"})),
-            );
+                ErrorCode::Discord,
+                "discord request failed",
+            ));
         }
     };
 
@@ -280,7 +271,7 @@ pub async fn channel_messages(
                 rate_reset_after = rate_reset_after.as_deref().unwrap_or(""),
                 "[#2723] channel_messages ← upstream"
             );
-            (StatusCode::OK, Json(json!({"messages": data})))
+            Ok((StatusCode::OK, Json(json!({"messages": data}))))
         }
         Err(error) => {
             tracing::warn!(
@@ -289,10 +280,11 @@ pub async fn channel_messages(
                 error = %error,
                 "[#2723] channel_messages discord response decode failed"
             );
-            (
+            Err(AppError::new(
                 StatusCode::BAD_GATEWAY,
-                Json(json!({"error": "discord response decode failed"})),
-            )
+                ErrorCode::Discord,
+                "discord response decode failed",
+            ))
         }
     }
 }
@@ -314,24 +306,17 @@ fn snowflake_or_none(value: &String) -> Option<String> {
 /// Proxy to Discord REST API — get channel/thread info.
 pub async fn channel_info(
     Path(channel_id_raw): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let channel_id = match parse_channel_id(&channel_id_raw) {
-        Ok(id) => id,
-        Err(err) => return err,
-    };
-
-    if let Err(err) = ensure_channel_is_role_mapped(channel_id).await {
-        return err;
-    }
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let channel_id = parse_channel_id(&channel_id_raw)?;
+    ensure_channel_is_role_mapped(channel_id).await?;
 
     let token = match crate::credential::read_bot_token(
         crate::services::discord::bot_role::UtilityBotRole::Announce.alias(),
     ) {
         Some(t) => t,
         None => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "announce bot token not found"})),
+            return Err(
+                AppError::internal("announce bot token not found").with_code(ErrorCode::Discord)
             );
         }
     };
@@ -344,16 +329,18 @@ pub async fn channel_info(
         .await
     {
         Ok(resp) => match resp.json::<serde_json::Value>().await {
-            Ok(data) => (StatusCode::OK, Json(data)),
-            Err(_) => (
+            Ok(data) => Ok((StatusCode::OK, Json(data))),
+            Err(_) => Err(AppError::new(
                 StatusCode::BAD_GATEWAY,
-                Json(json!({"error": "discord response decode failed"})),
-            ),
+                ErrorCode::Discord,
+                "discord response decode failed",
+            )),
         },
-        Err(_) => (
+        Err(_) => Err(AppError::new(
             StatusCode::BAD_GATEWAY,
-            Json(json!({"error": "discord request failed"})),
-        ),
+            ErrorCode::Discord,
+            "discord request failed",
+        )),
     }
 }
 

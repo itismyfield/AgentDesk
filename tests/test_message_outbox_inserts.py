@@ -17,10 +17,25 @@ class MessageOutboxInsertAuditTests(unittest.TestCase):
             )
             self.assertEqual(len(audit(root)), 1)
 
-    def test_canonical_module_is_allowed(self):
+    def test_canonical_modules_are_allowed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            path = root / "src/services/message_outbox.rs"
+            for relative in (
+                "src/services/message_outbox.rs",
+                "src/services/message_outbox_circuit_authority.rs",
+            ):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    'sqlx::query("INSERT INTO message_outbox (target) VALUES ($1)");',
+                    encoding="utf-8",
+                )
+            self.assertEqual(audit(root), [])
+
+    def test_circuit_authority_fixture_is_allowed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "src/services/message_outbox_circuit_authority_tests.rs"
             path.parent.mkdir(parents=True)
             path.write_text(
                 'sqlx::query("INSERT INTO message_outbox (target) VALUES ($1)");',

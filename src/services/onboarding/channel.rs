@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::app_state::AppState;
+use crate::error::{AppError, AppResult};
 
 use super::{load_onboarding_config, pg_kv_value};
 
@@ -74,7 +75,7 @@ pub struct ChannelsBody {
 async fn load_channels(
     state: &AppState,
     token: Option<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     // Use provided token or saved token
     let token = match token {
         Some(token) => Some(token),
@@ -86,22 +87,14 @@ async fn load_channels(
             .await
             {
                 Ok(token) => token,
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": error})),
-                    );
-                }
+                Err(error) => return Err(AppError::internal(error)),
             }
         }
         None => saved_onboarding_bot_token_without_pg(state),
     };
 
     let Some(token) = token else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "No token provided"})),
-        );
+        return Err(AppError::bad_request("No token provided"));
     };
 
     let client = reqwest::Client::new();
@@ -115,10 +108,10 @@ async fn load_channels(
     {
         Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
         _ => {
-            return (
+            return Ok((
                 StatusCode::OK,
                 Json(json!({"guilds": [], "error": "Failed to fetch guilds"})),
-            );
+            ));
         }
     };
 
@@ -164,7 +157,7 @@ async fn load_channels(
         }));
     }
 
-    (StatusCode::OK, Json(json!({"guilds": result_guilds})))
+    Ok((StatusCode::OK, Json(json!({"guilds": result_guilds}))))
 }
 
 fn saved_onboarding_bot_token_without_pg(_state: &AppState) -> Option<String> {
@@ -185,7 +178,7 @@ fn saved_onboarding_bot_token_without_pg(_state: &AppState) -> Option<String> {
 pub async fn channels(
     state: &AppState,
     query: ChannelsQuery,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     load_channels(state, query.token).await
 }
 
@@ -194,6 +187,6 @@ pub async fn channels(
 pub async fn channels_post(
     state: &AppState,
     body: ChannelsBody,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     load_channels(state, body.token).await
 }

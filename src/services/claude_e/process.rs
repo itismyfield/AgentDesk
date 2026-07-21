@@ -35,6 +35,7 @@ use crate::services::session_backend::{
 /// for a per-turn `claude-e` invocation. TUI / tmux / remote profile
 /// arguments are intentionally absent — those routes do not flow
 /// through this adapter.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_streaming(
     prompt: &str,
     session_id: Option<&str>,
@@ -137,8 +138,7 @@ pub fn execute_streaming(
 
     let child_pid = child.id();
     register_child_pid(cancel_token.as_deref(), child_pid);
-    let _cancel_watchdog =
-        spawn_cancel_watchdog(cancel_token.clone(), child_pid, "claude-e-stream");
+    let _cancel_watchdog = spawn_cancel_watchdog(cancel_token.clone(), "claude-e-stream");
 
     // Send the RuntimeReady handoff so the turn-bridge stamps the
     // runtime kind for this dispatch. `output_path` is empty for

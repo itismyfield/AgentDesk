@@ -228,6 +228,7 @@ pub(super) fn provider_bot_key(provider: &str) -> String {
 }
 
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)]
 enum TaskCardPayload {
     Task(super::tui_task_card::TaskNotification),
     Subagent(String),
@@ -385,6 +386,7 @@ pub(in crate::services::discord) fn response_chunk_nonce_for_generation(
     format!("adktr{}", &digest[..20])
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) async fn claim_task_response_delivery(
     pool: Option<&PgPool>,
     channel_id: u64,

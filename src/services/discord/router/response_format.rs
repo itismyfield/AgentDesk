@@ -221,6 +221,22 @@ pub(super) fn format_voluntary_feedback_reminder(reminder: &str) -> Option<Strin
     }
 }
 
+/// #4196: wraps the turn-end WIP (uncommitted-changes) warning stashed at the
+/// end of the previous turn into a labeled context block for the next turn's
+/// prompt, so the agent is reminded to commit/stash before the worktree state is
+/// lost. Returns `None` for an empty warning so the prompt is byte-for-byte
+/// unchanged when nothing was stashed (clean worktree at the previous turn end).
+pub(super) fn format_turn_end_wip_warning_injection(warning: &str) -> Option<String> {
+    let warning = warning.trim();
+    if warning.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "[WIP 리마인더 — 이전 턴 종료 시 커밋되지 않은 변경사항 감지]\n\n{warning}"
+        ))
+    }
+}
+
 pub(super) fn merge_reply_contexts(
     primary: Option<String>,
     secondary: Option<String>,
@@ -320,6 +336,7 @@ pub(super) fn wrap_user_prompt_with_author(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_race_requeued_intervention(
     request_owner: UserId,
     user_msg_id: MessageId,
@@ -480,6 +497,68 @@ mod tests {
         // Nothing to inject and no prior context → the prompt gains no chunk.
         assert_eq!(
             merge_reply_contexts(None, format_voluntary_feedback_reminder("")),
+            None,
+        );
+    }
+
+    /// #4196: a WIP warning stashed at the previous turn's end, run through the
+    /// SAME assembly helpers the intake path uses (`take_and_merge_wip_warning` →
+    /// `format_turn_end_wip_warning_injection` + `merge_reply_contexts`), must
+    /// land in the reply context that feeds the next-turn prompt so the agent is
+    /// reminded to commit/stash its uncommitted changes. Mutation guard: if the
+    /// injection is removed (format helper returns `None`), the `.expect` below
+    /// panics and this test FAILS.
+    #[test]
+    fn wip_warning_is_injected_into_reply_context_when_uncommitted_changes_exist() {
+        let warning = "⚠️ **턴을 완료하기 전에 커밋되지 않은 변경사항을 확인하세요.**\n\
+             작업공간: `/tmp/wt`\n\
+             파일 수: 스테이징됨 1개 · 스테이징 안 됨 1개 · 추적되지 않음 1개\n\
+             턴을 끝내기 전에 변경사항을 커밋하거나 명시적으로 폐기하세요.";
+        let reply_context = merge_reply_contexts(
+            Some("[Reply context] earlier discord quote".to_string()),
+            format_turn_end_wip_warning_injection(warning),
+        )
+        .expect("reply context present when a WIP warning is stashed");
+
+        assert!(
+            reply_context.contains("[WIP 리마인더"),
+            "the injected block must carry the WIP reminder label"
+        );
+        assert!(
+            reply_context.contains(warning),
+            "the injected block must carry the raw WIP warning body"
+        );
+        assert!(
+            reply_context.contains("earlier discord quote"),
+            "the pre-existing reply context must be preserved"
+        );
+        // merge prepends the WIP warning (secondary) ahead of the prior context.
+        assert!(
+            reply_context.find("[WIP 리마인더").unwrap()
+                < reply_context.find("earlier discord quote").unwrap(),
+            "the WIP warning must lead the merged reply context"
+        );
+    }
+
+    /// #4196: with a CLEAN worktree the previous turn stashes nothing, so the
+    /// next turn's reply context is byte-for-byte unchanged —
+    /// `format_turn_end_wip_warning_injection` yields `None` for empty input and
+    /// `merge_reply_contexts` returns the primary untouched.
+    #[test]
+    fn absent_wip_warning_leaves_reply_context_unchanged_when_worktree_clean() {
+        let base = "[Reply context] earlier discord quote".to_string();
+
+        assert_eq!(format_turn_end_wip_warning_injection("   "), None);
+        assert_eq!(
+            merge_reply_contexts(
+                Some(base.clone()),
+                format_turn_end_wip_warning_injection("   "),
+            ),
+            Some(base.clone()),
+        );
+        // Nothing to inject and no prior context → the prompt gains no chunk.
+        assert_eq!(
+            merge_reply_contexts(None, format_turn_end_wip_warning_injection("")),
             None,
         );
     }

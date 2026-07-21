@@ -6,6 +6,7 @@ use super::*;
 /// with `?`, preserving the exact `(StatusCode, Json)` and control-flow of the
 /// original monolithic function.
 type ActivateResponse = (StatusCode, Json<serde_json::Value>);
+type ActivateResult = AppResult<ActivateResponse>;
 
 /// Plan produced by `compute_activate_groups_to_dispatch`: the ordered list of
 /// thread groups to attempt dispatching plus the concurrency counters the
@@ -20,34 +21,33 @@ struct ActivateGroupsPlan {
 pub(crate) async fn activate_with_deps_pg(
     deps: &AutoQueueActivateDeps,
     body: ActivateBody,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> ActivateResult {
     let _ignored_unified_thread = body.unified_thread.is_some();
     let Some(pool) = deps.pg_pool.as_ref() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "postgres pool is not configured"})),
+        return Err(
+            AppError::internal("postgres pool is not configured").with_code(ErrorCode::AutoQueue)
         );
     };
     let active_only = body.active_only.unwrap_or(false);
     let run_id = match resolve_activate_target_run_id(pool, &body, active_only).await {
         Ok(run_id) => run_id,
-        Err(response) => return response,
+        Err(response) => return activate_response_result(response),
     };
     let run_log_ctx = AutoQueueLogContext::new().run(&run_id);
     let _activate_lock_guard = match acquire_activate_run_lock(pool, &run_id).await {
         Ok(guard) => guard,
-        Err(response) => return response,
+        Err(response) => return activate_response_result(response),
     };
     if let Err(response) = promote_run_and_clear_inactive_slots(pool, &run_id, active_only).await {
-        return response;
+        return activate_response_result(response);
     }
     let mut cleared_slots: HashSet<(String, i64)> = HashSet::new();
     if let Err(response) = complete_run_if_empty(pool, &run_id, &run_log_ctx).await {
-        return response;
+        return activate_response_result(response);
     }
     let max_concurrent = match load_activate_capacity_and_prepare_slots(pool, &run_id).await {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) => return activate_response_result(response),
     };
     let ActivateGroupsPlan {
         groups_to_dispatch,
@@ -56,7 +56,7 @@ pub(crate) async fn activate_with_deps_pg(
         current_phase,
     } = match compute_activate_groups_to_dispatch(pool, &run_id, &body).await {
         Ok(plan) => plan,
-        Err(response) => return response,
+        Err(response) => return activate_response_result(response),
     };
     let mut dispatched = Vec::new();
     // feature: rate-limit-aware-dispatch-gate — additive per-entry defer
@@ -146,12 +146,10 @@ pub(crate) async fn activate_with_deps_pg(
         {
             Ok(value) => value,
             Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(
-                        json!({"error": format!("load postgres pending entry for {run_id}:{group}: {error}")}),
-                    ),
-                );
+                return Err(AppError::internal(format!(
+                    "load postgres pending entry for {run_id}:{group}: {error}"
+                ))
+                .with_code(ErrorCode::AutoQueue));
             }
         };
         let Some((entry_id, card_id, agent_id, batch_phase, retry_count)) = entry else {
@@ -307,12 +305,10 @@ pub(crate) async fn activate_with_deps_pg(
             Ok(Some(value)) => value,
             Ok(None) => false,
             Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(
-                        json!({"error": format!("recheck postgres auto-queue entry status for {entry_id}: {error}")}),
-                    ),
-                );
+                return Err(AppError::internal(format!(
+                    "recheck postgres auto-queue entry status for {entry_id}: {error}"
+                ))
+                .with_code(ErrorCode::AutoQueue));
             }
         };
         if !still_pending {
@@ -716,7 +712,7 @@ pub(crate) async fn activate_with_deps_pg(
     )
     .await
     {
-        Ok(response) | Err(response) => response,
+        Ok(response) | Err(response) => activate_response_result(response),
     }
 }
 
@@ -1444,6 +1440,14 @@ async fn finalize_activate_run_and_build_response(
     Ok((StatusCode::OK, Json(body)))
 }
 
+fn activate_response_result(response: ActivateResponse) -> ActivateResult {
+    if response.0.is_success() {
+        Ok(response)
+    } else {
+        Err(auto_queue_tuple_error(response))
+    }
+}
+
 fn activate_fallback_capacity_reached(
     active_turn_count: i64,
     active_group_count: i64,
@@ -1912,7 +1916,9 @@ mod tests {
             set_scope_status(&pool, Some("pending")).await;
 
             let deps = make_deps(&pool);
-            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await;
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body())
+                .await
+                .expect("activate response");
             assert_eq!(status, axum::http::StatusCode::OK);
 
             // The gate fired: the entry was NOT bound to the existing impl dispatch.
@@ -1943,7 +1949,9 @@ mod tests {
             set_scope_status(&pool, Some("completed")).await;
 
             let deps = make_deps(&pool);
-            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await;
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body())
+                .await
+                .expect("activate response");
             assert_eq!(status, axum::http::StatusCode::OK);
 
             assert_eq!(
@@ -1968,7 +1976,9 @@ mod tests {
             set_scope_status(&pool, None).await;
 
             let deps = make_deps(&pool);
-            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await;
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body())
+                .await
+                .expect("activate response");
             assert_eq!(status, axum::http::StatusCode::OK);
 
             assert_eq!(
@@ -2033,7 +2043,9 @@ mod tests {
             set_scope_completed_with_depth(&pool, "full").await;
 
             let deps = make_deps(&pool);
-            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await;
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body())
+                .await
+                .expect("activate response");
             assert_eq!(status, axum::http::StatusCode::OK);
 
             // Depth-aware: a `plan` dispatch was created, NOT a plain impl.
@@ -2070,7 +2082,9 @@ mod tests {
             set_scope_completed_with_depth(&pool, "plan_only").await;
 
             let deps = make_deps(&pool);
-            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await;
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body())
+                .await
+                .expect("activate response");
             assert_eq!(status, axum::http::StatusCode::OK);
 
             assert_eq!(
@@ -2109,7 +2123,9 @@ mod tests {
             set_scope_completed_with_depth(&pool, "direct").await;
 
             let deps = make_deps(&pool);
-            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await;
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body())
+                .await
+                .expect("activate response");
             assert_eq!(status, axum::http::StatusCode::OK);
 
             // No plan stage for direct.
@@ -2147,7 +2163,9 @@ mod tests {
             set_scope_completed_with_depth(&pool, "full").await;
 
             let deps = make_deps(&pool);
-            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await;
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body())
+                .await
+                .expect("activate response");
             assert_eq!(status, axum::http::StatusCode::OK);
 
             // No NEW plan was created — only the pre-existing completed plan remains.
@@ -2186,7 +2204,9 @@ mod tests {
             set_scope_status(&pool, None).await;
 
             let deps = make_deps(&pool);
-            let (status, _body) = activate_with_deps_pg(&deps, activate_body()).await;
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body())
+                .await
+                .expect("activate response");
             assert_eq!(status, axum::http::StatusCode::OK);
 
             assert_eq!(

@@ -78,6 +78,8 @@ async fn postgres_scheduled_message_create_persists_trimmed_explicit_bot() {
         source: Some("postgres_test".to_string()),
         created_by: Some("postgres_test".to_string()),
         dedupe_key: None,
+        context_strategy: None,
+        on_context_failure: None,
     };
 
     let new = validate_create(&pool, &body)
@@ -117,6 +119,8 @@ async fn postgres_scheduled_push_rejects_agent_id_before_foreign_key_insert() {
         source: Some("postgres_test".to_string()),
         created_by: Some("postgres_test".to_string()),
         dedupe_key: None,
+        context_strategy: None,
+        on_context_failure: None,
     };
 
     let err = validate_create(&pool, &body)
@@ -163,6 +167,9 @@ async fn postgres_scheduled_push_patch_distinguishes_values_from_null_clears() {
             source: "postgres_test".to_string(),
             created_by: Some("postgres_test".to_string()),
             dedupe_key: None,
+            context_strategy: "fresh".to_string(),
+            context_snapshot_id: None,
+            on_context_failure: "fail".to_string(),
         },
     )
     .await

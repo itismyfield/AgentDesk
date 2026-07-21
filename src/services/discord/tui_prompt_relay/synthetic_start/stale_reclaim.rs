@@ -327,6 +327,7 @@ fn classify_reclaimable_mailbox_owner(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn release_reclaimable_stale_synthetic_mailbox_owner_if_current(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

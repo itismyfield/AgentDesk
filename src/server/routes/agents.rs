@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use std::path::Path as FsPath;
 
 use super::AppState;
+use crate::error::{AppError, AppResult, ErrorCode};
 use crate::server::dto::agents::{
     AgentDispatchedSessionsResponse, AgentOfficesResponse, AgentSkillsResponse,
     AgentTimelineResponse, AgentTranscriptsResponse,
@@ -29,7 +30,7 @@ use crate::services::observability::session_inventory::{
 };
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, stop_turn_preserving_queue};
-use crate::utils::api::{bad_request, internal_error, not_found};
+use crate::utils::api::bad_request;
 
 // ── Query types ──────────────────────────────────────────────
 
@@ -120,6 +121,14 @@ pub struct AgentHandoffBody {
     pub metadata: Option<serde_json::Value>,
 }
 
+fn pg_required_error() -> AppError {
+    AppError::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        ErrorCode::Database,
+        "postgres pool unavailable",
+    )
+}
+
 fn pg_required_response() -> (StatusCode, Json<serde_json::Value>) {
     (
         StatusCode::SERVICE_UNAVAILABLE,
@@ -132,30 +141,31 @@ pub async fn agent_quality(
     Path(id): Path<String>,
     Query(query): Query<AgentQualityQuery>,
     State(state): State<AppState>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    match crate::services::observability::query_agent_quality_summary(
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    crate::services::observability::query_agent_quality_summary(
         state.pg_pool_ref(),
         &id,
         query.days.unwrap_or(30),
         query.limit.unwrap_or(60),
     )
     .await
-    {
-        Ok(summary) => (StatusCode::OK, Json(json!(summary))),
-        Err(error) => internal_error(format!("query agent quality summary: {error}")),
-    }
+    .map(|summary| (StatusCode::OK, Json(json!(summary))))
+    .map_err(|error| {
+        AppError::internal(format!("query agent quality summary: {error}"))
+            .with_code(ErrorCode::Database)
+    })
 }
 
 /// GET /api/agents/quality/ranking
 pub async fn agents_quality_ranking(
     Query(query): Query<AgentQualityRankingQuery>,
     State(state): State<AppState>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     use crate::services::observability::{QualityRankingMetric, QualityRankingWindow};
     let metric = QualityRankingMetric::parse(query.metric.as_deref());
     let window = QualityRankingWindow::parse(query.window.as_deref());
     let min_sample_size = query.min_sample_size.unwrap_or(5);
-    match crate::services::observability::query_agent_quality_ranking_with(
+    crate::services::observability::query_agent_quality_ranking_with(
         state.pg_pool_ref(),
         query.limit.unwrap_or(50),
         metric,
@@ -163,10 +173,11 @@ pub async fn agents_quality_ranking(
         min_sample_size,
     )
     .await
-    {
-        Ok(ranking) => (StatusCode::OK, Json(json!(ranking))),
-        Err(error) => internal_error(format!("query agent quality ranking: {error}")),
-    }
+    .map(|ranking| (StatusCode::OK, Json(json!(ranking))))
+    .map_err(|error| {
+        AppError::internal(format!("query agent quality ranking: {error}"))
+            .with_code(ErrorCode::Database)
+    })
 }
 
 fn resolve_channel_identifier(value: &str) -> Option<u64> {
@@ -205,18 +216,19 @@ fn channel_override_is_allowed(
 pub async fn agent_diag(
     State(state): State<AppState>,
     Path(identifier): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_required_response();
+        return Err(pg_required_error());
     };
 
     let session = match find_diag_session_pg(pool, &identifier).await {
         Ok(Some(session)) => session,
         Ok(None) => {
-            return not_found("agent/channel session not found");
+            return Err(AppError::not_found("agent/channel session not found"));
         }
         Err(error) => {
-            return internal_error(format!("query diag session: {error}"));
+            return Err(AppError::internal(format!("query diag session: {error}"))
+                .with_code(ErrorCode::Database));
         }
     };
 
@@ -314,7 +326,7 @@ pub async fn agent_diag(
         watcher_snapshot_json.as_ref(),
     );
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "target": identifier,
@@ -369,7 +381,7 @@ pub async fn agent_diag(
             "pending_queue_depth": pending_queue_depth,
             "task_notification_kind": task_notification_kind,
         })),
-    )
+    ))
 }
 
 #[cfg(unix)]
@@ -623,64 +635,44 @@ fn claude_transcript_turn_state_for_diag(
 pub async fn agent_offices(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return pg_required_response();
-    };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = state.pg_pool_ref().ok_or_else(pg_required_error)?;
     match agent_exists_pg(pool, &id).await {
         Ok(true) => {}
-        Ok(false) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "agent not found"})),
-            );
-        }
+        Ok(false) => return Err(AppError::not_found("agent not found")),
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("query: {e}")})),
-            );
+            return Err(AppError::internal(format!("query: {e}")).with_code(ErrorCode::Database));
         }
     }
 
-    match list_agent_offices_pg_json(pool, &id).await {
-        Ok(offices) => (
-            StatusCode::OK,
-            Json(json!(AgentOfficesResponse { offices })),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("query: {e}")})),
-        ),
-    }
+    list_agent_offices_pg_json(pool, &id)
+        .await
+        .map(|offices| {
+            (
+                StatusCode::OK,
+                Json(json!(AgentOfficesResponse { offices })),
+            )
+        })
+        .map_err(|e| AppError::internal(format!("query: {e}")).with_code(ErrorCode::Database))
 }
 
 /// GET /api/agents/:id/skills
 pub async fn agent_skills(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return pg_required_response();
-    };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = state.pg_pool_ref().ok_or_else(pg_required_error)?;
     match agent_exists_pg(pool, &id).await {
         Ok(true) => {}
-        Ok(false) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "agent not found"})),
-            );
-        }
+        Ok(false) => return Err(AppError::not_found("agent not found")),
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("query: {e}")})),
-            );
+            return Err(AppError::internal(format!("query: {e}")).with_code(ErrorCode::Database));
         }
     }
 
-    match list_agent_skills_pg_json(pool, &id).await {
-        Ok(skills) => {
+    list_agent_skills_pg_json(pool, &id)
+        .await
+        .map(|skills| {
             let total_count = skills.len();
             (
                 StatusCode::OK,
@@ -690,37 +682,26 @@ pub async fn agent_skills(
                     total_count,
                 })),
             )
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("query: {e}")})),
-        ),
-    }
+        })
+        .map_err(|e| AppError::internal(format!("query: {e}")).with_code(ErrorCode::Database))
 }
 
 /// GET /api/agents/:id/dispatched-sessions
 pub async fn agent_dispatched_sessions(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return pg_required_response();
-    };
-
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = state.pg_pool_ref().ok_or_else(pg_required_error)?;
     let guild_id = state.config.discord.guild_id.as_deref();
     match load_agent_dispatched_sessions_pg_json(pool, &id, guild_id).await {
-        Ok(sessions) => (
+        Ok(sessions) => Ok((
             StatusCode::OK,
             Json(json!(AgentDispatchedSessionsResponse { sessions })),
-        ),
-        Err(AgentQueryLookupError::AgentNotFound) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "agent not found"})),
-        ),
-        Err(AgentQueryLookupError::Query(e)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("query: {e}")})),
-        ),
+        )),
+        Err(AgentQueryLookupError::AgentNotFound) => Err(AppError::not_found("agent not found")),
+        Err(AgentQueryLookupError::Query(e)) => {
+            Err(AppError::internal(format!("query: {e}")).with_code(ErrorCode::Database))
+        }
     }
 }
 
@@ -728,20 +709,14 @@ pub async fn agent_dispatched_sessions(
 pub async fn agent_turn(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return pg_required_response();
-    };
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = state.pg_pool_ref().ok_or_else(pg_required_error)?;
     match load_agent_turn_status_pg(pool, &id).await {
-        Ok(body) => (StatusCode::OK, Json(body)),
-        Err(AgentTurnLookupError::AgentNotFound) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "agent not found"})),
-        ),
-        Err(AgentTurnLookupError::Query(error)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("query: {error}")})),
-        ),
+        Ok(body) => Ok((StatusCode::OK, Json(body))),
+        Err(AgentTurnLookupError::AgentNotFound) => Err(AppError::not_found("agent not found")),
+        Err(AgentTurnLookupError::Query(error)) => {
+            Err(AppError::internal(format!("query: {error}")).with_code(ErrorCode::Database))
+        }
     }
 }
 
@@ -1133,25 +1108,21 @@ pub async fn agent_timeline(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(params): Query<TimelineQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_required_response();
+        return Err(pg_required_error());
     };
 
     let limit = params.limit.unwrap_or(30);
     match load_agent_timeline_pg_json(pool, &id, limit).await {
-        Ok(events) => (
+        Ok(events) => Ok((
             StatusCode::OK,
             Json(json!(AgentTimelineResponse { events })),
-        ),
-        Err(AgentQueryLookupError::AgentNotFound) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "agent not found"})),
-        ),
-        Err(AgentQueryLookupError::Query(e)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("query: {e}")})),
-        ),
+        )),
+        Err(AgentQueryLookupError::AgentNotFound) => Err(AppError::not_found("agent not found")),
+        Err(AgentQueryLookupError::Query(e)) => {
+            Err(AppError::internal(format!("query: {e}")).with_code(ErrorCode::Database))
+        }
     }
 }
 
@@ -1160,38 +1131,29 @@ pub async fn agent_transcripts(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(params): Query<TranscriptQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_required_response();
+        return Err(pg_required_error());
     };
     match agent_exists_pg(pool, &id).await {
         Ok(true) => {}
-        Ok(false) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "agent not found"})),
-            );
-        }
+        Ok(false) => return Err(AppError::not_found("agent not found")),
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("query: {e}")})),
-            );
+            return Err(AppError::internal(format!("query: {e}")).with_code(ErrorCode::Database));
         }
     }
 
     match list_agent_turn_history_pg_json(pool, &id, params.limit.unwrap_or(8)).await {
-        Ok(transcripts) => (
+        Ok(transcripts) => Ok((
             StatusCode::OK,
             Json(json!(AgentTranscriptsResponse {
                 agent_id: id,
                 transcripts,
             })),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("transcripts: {e}")})),
-        ),
+        )),
+        Err(e) => {
+            Err(AppError::internal(format!("transcripts: {e}")).with_code(ErrorCode::Database))
+        }
     }
 }
 

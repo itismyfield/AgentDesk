@@ -58,6 +58,7 @@ pub fn reserve_headless_agent_turn(channel_id: ChannelId) -> HeadlessAgentTurnRe
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn start_reserved_headless_agent_turn(
     registry: &HealthRegistry,
     channel_id: ChannelId,
@@ -221,6 +222,7 @@ pub async fn reserve_headless_agent_turn_in_dm(
     Ok((dm_channel_id, reserve_headless_agent_turn(dm_channel_id)))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn start_reserved_headless_agent_turn_in_dm(
     registry: &HealthRegistry,
     owner_channel_id: ChannelId,

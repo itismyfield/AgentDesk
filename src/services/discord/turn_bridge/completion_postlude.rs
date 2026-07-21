@@ -10,6 +10,8 @@ use std::sync::atomic::Ordering;
 
 use super::*;
 
+mod channel_writeback;
+
 pub(super) struct CompletionPostludeContext {
     pub(super) shared_owned: Arc<SharedData>,
     pub(super) gateway: Arc<dyn TurnGateway>,
@@ -290,6 +292,29 @@ pub(super) async fn run_completion_postlude(
     let mut reflect_request = None;
     let mut clear_provider_session = false;
     let capture_memory_settings = settings::memory_settings_for_binding(role_binding.as_ref());
+    // #4658 F1 completion-side isolation: detect a scheduled-snapshot turn by its
+    // ISOLATED session_key. A snapshot turn derives its `session_key` from the
+    // reservation label (AC-2), so it differs from the channel's canonical
+    // (channel-name-basis) key. Recompute the canonical key with the same
+    // production helper (`build_adk_session_key(.., None)`) — which normal intake
+    // and headless turns already use verbatim — and compare. When the turn's key
+    // is present and differs, the turn does NOT own the channel's live session and
+    // must produce ZERO channel-scoped side-effects a later LIVE turn can observe.
+    // The full isolation invariant (the enumerated gated effects #1..#5 and the
+    // F-2 mid-turn-rebind recompute limitation) lives in the `channel_writeback`
+    // module doc — the single source of truth for what `!isolated_from_channel`
+    // gates below. (#4634 bug class, completion side.)
+    let channel_canonical_session_key = super::super::adk_session::build_adk_session_key(
+        &shared_owned,
+        channel_id,
+        &provider,
+        None,
+    )
+    .await;
+    let isolated_from_channel = match adk_session_key.as_deref() {
+        Some(turn_key) => channel_canonical_session_key.as_deref() != Some(turn_key),
+        None => false,
+    };
     let session_id_to_persist = {
         let mut data = shared_owned.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id) {
@@ -302,35 +327,34 @@ pub(super) async fn run_completion_postlude(
                 should_record_final_turn,
             ) {
                 clear_provider_session = memory_plan.clear_provider_session;
-                if memory_plan.persist_transcript {
-                    session.history.push(HistoryItem {
-                        item_type: HistoryType::User,
-                        content: user_text_owned.clone(),
-                    });
-                    session.history.push(HistoryItem {
-                        item_type: HistoryType::Assistant,
-                        content: full_response.clone(),
-                    });
-                    should_persist_transcript = true;
+                // #4658 F1: the writeback helper leaves the channel session
+                // completely unchanged for a scheduled-snapshot turn.
+                let writeback = channel_writeback::apply_channel_turn_writeback(
+                    session,
+                    isolated_from_channel,
+                    &memory_plan,
+                    &user_text_owned,
+                    &full_response,
+                    new_session_id.as_deref(),
+                );
+                should_persist_transcript = writeback.persist_transcript;
+                // A snapshot turn must not reflect/capture the channel session
+                // either — both mutate or summarize `data.sessions[channel_id]`.
+                if !isolated_from_channel {
+                    if let Some(reason) = memory_plan.session_end_reason {
+                        reflect_request = take_memento_reflect_request(
+                            session,
+                            &capture_memory_settings,
+                            &provider,
+                            role_binding.as_ref(),
+                            channel_id.get(),
+                            reason,
+                        );
+                    }
+                    should_spawn_memory_capture = memory_plan.spawn_capture;
                 }
-                if let Some(reason) = memory_plan.session_end_reason {
-                    reflect_request = take_memento_reflect_request(
-                        session,
-                        &capture_memory_settings,
-                        &provider,
-                        role_binding.as_ref(),
-                        channel_id.get(),
-                        reason,
-                    );
-                }
-                if memory_plan.clear_provider_session {
-                    session.clear_provider_session();
-                } else if let Some(sid) = new_session_id.as_ref() {
-                    session.restore_provider_session(Some(sid.clone()));
-                }
-                should_spawn_memory_capture = memory_plan.spawn_capture;
                 should_analyze_recall_feedback = memory_plan.analyze_recall_feedback;
-                session.session_id.clone()
+                writeback.session_id_to_persist
             } else {
                 None
             }
@@ -372,8 +396,13 @@ pub(super) async fn run_completion_postlude(
         None
     };
     if let Some(analysis) = recall_feedback_analysis.as_ref()
-        && let Some(reminder) = build_voluntary_feedback_reminder(analysis)
+        && let Some(reminder) = channel_writeback::feedback_reminder_to_stash(
+            isolated_from_channel,
+            build_voluntary_feedback_reminder(analysis),
+        )
     {
+        // #4658 F1: gated on channel ownership above — a scheduled-snapshot turn
+        // never reaches this stash (see feedback_reminder_to_stash).
         // #4307 PR-B: stash the reminder (provider-scoped key) so the NEXT turn's
         // intake takes it and injects it into the model context (turn N+1). The
         // transcript event below only records it in the session_transcripts DB —
@@ -396,6 +425,33 @@ pub(super) async fn run_completion_postlude(
         }
         push_transcript_event(&mut transcript_events, reminder_transcript_event(reminder));
         recall_feedback_analysis = Some(analyze_recall_feedback_turn(&transcript_events));
+    }
+    // #4196: if this turn ends with uncommitted changes in its worktree, stash a
+    // WIP warning (provider-scoped key) so the NEXT turn's intake takes it and
+    // injects it into the model context (turn N+1). Reuses the #3792 detector via
+    // `turn_end_wip_warning_text` — no re-implementation of git status parsing.
+    // Gated on channel ownership (mirrors the feedback stash) so a scheduled or
+    // isolated snapshot turn never nudges the interactive session. A clean
+    // worktree yields `None` here, so nothing is stashed and turn N+1 is
+    // byte-for-byte unchanged. A stash failure only loses the next-turn nudge
+    // (the channel-post backstop still fires), so warn+skip.
+    if !isolated_from_channel
+        && let Some(wip_warning) =
+            super::super::turn_end_wip_warning::turn_end_wip_warning_text(Some(&inflight_state))
+        && let Err(error) = super::recovery_text::store_turn_end_wip_warning(
+            shared_owned.pg_pool.as_ref(),
+            &provider,
+            channel_id.get(),
+            &wip_warning,
+        )
+    {
+        tracing::warn!(
+            channel_id = channel_id.get(),
+            turn_id = turn_id.as_str(),
+            provider = provider.as_str(),
+            error = %error,
+            "failed to stash turn-end WIP warning for next-turn injection"
+        );
     }
     let model_token_usage = TurnTokenUsage {
         input_tokens: accumulated_input_tokens,
@@ -521,7 +577,11 @@ pub(super) async fn run_completion_postlude(
         }
     }
 
-    if shared_owned.pg_pool.is_some() && !api_friction_reports.is_empty() {
+    // #4658 F1: `record_api_friction_reports` calls `backend.remember(..)`,
+    // landing in the agent's memento memory a live turn's recall can surface, so
+    // a scheduled-snapshot turn must skip it (isolation invariant, effect #5).
+    if !isolated_from_channel && shared_owned.pg_pool.is_some() && !api_friction_reports.is_empty()
+    {
         match crate::services::api_friction::record_api_friction_reports(
             shared_owned.pg_pool.as_ref(),
             &capture_memory_settings,

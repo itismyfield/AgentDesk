@@ -57,6 +57,9 @@ pub mod memory;
 // live on clean sibling modules. Remove during message_outbox dead-code cleanup.
 #[allow(dead_code)]
 pub mod message_outbox;
+pub(crate) mod message_outbox_circuit_authority;
+#[cfg(test)]
+mod message_outbox_circuit_authority_tests;
 pub mod message_outbox_recovery;
 pub(crate) mod message_outbox_recovery_support;
 #[cfg(test)]
@@ -131,6 +134,7 @@ pub mod tool_output_guard;
 pub(crate) mod tui_prompt_control;
 #[allow(dead_code)]
 pub(crate) mod tui_prompt_dedupe;
+pub(crate) mod tui_steering;
 pub(crate) mod tui_turn_state;
 pub mod turn_cancel_finalizer;
 pub mod turn_lifecycle;

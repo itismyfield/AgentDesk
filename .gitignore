@@ -67,3 +67,4 @@ routines/monitoring/*
 !routines/monitoring/daily_log_digest.py
 !routines/monitoring/log_digest_issue_drafts.py
 !routines/monitoring/weekly_churn_audit.py
+!routines/monitoring/local_worktree_inventory.js

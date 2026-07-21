@@ -8,6 +8,7 @@ use axum::{Json, http::StatusCode};
 use serde_json::json;
 
 use crate::app_state::AppState;
+use crate::error::AppError;
 use crate::services::review_decision::ReviewDecisionBody;
 
 use super::adapters::{dismiss_review_cleanup_pg_first, emit_card_updated};
@@ -37,10 +38,11 @@ pub(super) async fn decision_route_validate_input(
 ) -> Result<DecisionInput, DecisionResponse> {
     let valid = ["accept", "dispute", "dismiss"];
     if !valid.contains(&body.decision.as_str()) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("decision must be one of: {}", valid.join(", "))})),
-        ));
+        return Err(AppError::bad_request(format!(
+            "decision must be one of: {}",
+            valid.join(", ")
+        ))
+        .into_json_response());
     }
 
     let submitted_commit = match normalize_optional_commit_sha(body.commit_sha.as_deref()) {
@@ -54,10 +56,7 @@ pub(super) async fn decision_route_validate_input(
     };
 
     if !card_exists_pg_first(state, &body.card_id).await {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "card not found"})),
-        ));
+        return Err(AppError::not_found("card not found").into_json_response());
     }
 
     Ok(DecisionInput { submitted_commit })

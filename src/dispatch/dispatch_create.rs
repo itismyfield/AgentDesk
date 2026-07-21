@@ -578,6 +578,7 @@ fn dispatch_required_capabilities(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn create_dispatch_core_internal(
     pg_pool: &PgPool,
     dispatch_id: &str,
@@ -889,6 +890,7 @@ pub async fn create_dispatch_core_with_id(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_dispatch_core_with_id_and_options(
     pg_pool: &PgPool,
     dispatch_id: &str,
@@ -912,6 +914,7 @@ pub async fn create_dispatch_core_with_id_and_options(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_dispatch_with_options_pg_backed(
     pool: &PgPool,
     engine: &PolicyEngine,
@@ -1024,6 +1027,7 @@ pub fn create_dispatch_pg_only(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_dispatch_with_options_pg_only(
     pg_pool: &PgPool,
     engine: &PolicyEngine,
@@ -1187,6 +1191,7 @@ async fn cancel_stale_review_decisions_pg_tx(
     Ok(cancelled)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_dispatch_attached_intents_pg(
     pool: &PgPool,
     card_id: &str,
@@ -1258,6 +1263,7 @@ pub(crate) async fn apply_dispatch_attached_intents_pg(
 ///
 /// This exists for callers like review-automation handoff paths that need to
 /// compose dispatch creation with surrounding PG updates in one atomic unit.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_dispatch_attached_intents_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     card_id: &str,

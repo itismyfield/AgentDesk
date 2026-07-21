@@ -12,6 +12,7 @@ use crate::api_caller_observability::{
 };
 use crate::db::kanban_cards as kanban_db;
 use crate::db::kanban_cards::{IssueCardUpsert, upsert_card_from_issue_pg};
+use crate::error::{AppError, AppResult, ErrorCode};
 pub use crate::server::dto::kanban::{
     AssignCardBody, AssignIssueBody, BatchRereviewBody, CreateCardBody, DeferDodBody,
     ForceTransitionBody, ListCardsQuery, PmDecisionBody, RedispatchCardBody, ReopenBody,
@@ -205,11 +206,30 @@ async fn transition_card_to_backlog_with_cleanup(
     Ok(result)
 }
 
-fn pg_pool_required_error() -> (StatusCode, Json<serde_json::Value>) {
-    (
+fn pg_pool_required_error() -> AppError {
+    AppError::new(
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error": "postgres backend required for kanban transition (#1384)"})),
+        ErrorCode::Database,
+        "postgres backend required for kanban transition (#1384)",
     )
+}
+
+fn database_error(message: impl Into<String>) -> AppError {
+    AppError::internal(message).with_code(ErrorCode::Database)
+}
+
+fn kanban_error(status: StatusCode, message: impl Into<String>) -> AppError {
+    AppError::new(status, ErrorCode::Kanban, message)
+}
+
+fn tuple_error(response: (StatusCode, Json<serde_json::Value>)) -> AppError {
+    let (status, Json(body)) = response;
+    let message = body
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("kanban request failed")
+        .to_string();
+    kanban_error(status, message)
 }
 
 fn pg_pool_required_anyhow() -> anyhow::Error {
@@ -272,7 +292,7 @@ fn review_state_sync_pg(state: &AppState, payload: serde_json::Value) -> anyhow:
 pub async fn list_cards(
     State(state): State<AppState>,
     Query(params): Query<ListCardsQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let service = crate::services::kanban::KanbanService::new(state.pg_pool);
     match service
         .list_cards(crate::services::kanban::ListCardsInput {
@@ -282,8 +302,8 @@ pub async fn list_cards(
         })
         .await
     {
-        Ok(response) => (StatusCode::OK, Json(json!({"cards": response.cards}))),
-        Err(error) => error.into_json_response(),
+        Ok(response) => Ok((StatusCode::OK, Json(json!({"cards": response.cards})))),
+        Err(error) => Err(error),
     }
 }
 
@@ -291,29 +311,23 @@ pub async fn list_cards(
 pub async fn get_card(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Some(pool) = state.pg_pool_ref() {
         return match load_card_json_pg(pool, &id).await {
-            Ok(Some(card)) => (StatusCode::OK, Json(json!({"card": card}))),
-            Ok(None) => (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "card not found"})),
-            ),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            ),
+            Ok(Some(card)) => Ok((StatusCode::OK, Json(json!({"card": card})))),
+            Ok(None) => Err(AppError::not_found("card not found")),
+            Err(error) => Err(database_error(error)),
         };
     }
 
-    pg_pool_required_error()
+    Err(pg_pool_required_error())
 }
 
 /// POST /api/kanban-cards
 pub async fn create_card(
     State(state): State<AppState>,
     Json(body): Json<CreateCardBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let id = uuid::Uuid::new_v4().to_string();
     let priority = body.priority.unwrap_or_else(|| "medium".to_string());
 
@@ -332,10 +346,7 @@ pub async fn create_card(
         )
         .await
         {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
+            return Err(database_error(error));
         }
 
         return match load_card_json_pg(pool, &id).await {
@@ -345,20 +356,14 @@ pub async fn create_card(
                     "kanban_card_created",
                     card.clone(),
                 );
-                (StatusCode::CREATED, Json(json!({"card": card})))
+                Ok((StatusCode::CREATED, Json(json!({"card": card}))))
             }
-            Ok(None) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "failed to read card after create"})),
-            ),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            ),
+            Ok(None) => Err(database_error("failed to read card after create")),
+            Err(error) => Err(database_error(error)),
         };
     }
 
-    pg_pool_required_error()
+    Err(pg_pool_required_error())
 }
 
 /// PATCH /api/kanban-cards/:id
@@ -366,31 +371,25 @@ pub async fn update_card(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<UpdateCardBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_pool_required_error();
+        return Err(pg_pool_required_error());
     };
 
     let old_status = match kanban_db::card_status_pg(pool, &id).await {
         Ok(Some(status)) => status,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "card not found"})),
-            );
+            return Err(AppError::not_found("card not found"));
         }
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
+            return Err(database_error(error));
         }
     };
 
     let has_non_status_updates = match validate_update_card_fields(&body) {
         Ok(has_non_status_updates) => has_non_status_updates,
         Err(error) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": error})));
+            return Err(AppError::bad_request(error));
         }
     };
 
@@ -399,16 +398,10 @@ pub async fn update_card(
     if let Some(new_s) = &new_status {
         if new_s.as_str() != old_status {
             if !is_allowed_manual_transition(&old_status, new_s) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": format!(
-                            "PATCH /api/kanban-cards/{{id}} only allows manual status transitions backlog -> ready and any -> backlog (requested: {} -> {}). Use POST /api/kanban-cards/{{id}}/transition for administrative force transitions, or POST /api/kanban-cards/{{id}}/rereview for review reruns.",
-                            old_status,
-                            new_s,
-                        ),
-                    })),
-                );
+                return Err(AppError::bad_request(format!(
+                    "PATCH /api/kanban-cards/{{id}} only allows manual status transitions backlog -> ready and any -> backlog (requested: {} -> {}). Use POST /api/kanban-cards/{{id}}/transition for administrative force transitions, or POST /api/kanban-cards/{{id}}/rereview for review reruns.",
+                    old_status, new_s,
+                )));
             }
 
             let transition_result = if new_s == "backlog" {
@@ -428,10 +421,7 @@ pub async fn update_card(
             match transition_result {
                 Ok(_) => {}
                 Err(e) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({"error": format!("{e}")})),
-                    );
+                    return Err(AppError::bad_request(format!("{e}")));
                 }
             }
         }
@@ -463,17 +453,11 @@ pub async fn update_card(
         .await
         {
             Ok(false) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "card not found"})),
-                );
+                return Err(AppError::not_found("card not found"));
             }
             Ok(true) => {}
             Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
+                return Err(database_error(error));
             }
         }
     }
@@ -488,16 +472,10 @@ pub async fn update_card(
     match load_card_json_pg(pool, &id).await {
         Ok(Some(card)) => {
             crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card.clone());
-            (StatusCode::OK, Json(json!({"card": card})))
+            Ok((StatusCode::OK, Json(json!({"card": card}))))
         }
-        Ok(None) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "failed to read card after update"})),
-        ),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
+        Ok(None) => Err(database_error("failed to read card after update")),
+        Err(error) => Err(database_error(error)),
     }
 }
 
@@ -506,37 +484,25 @@ pub async fn assign_card(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<AssignCardBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Some(pool) = state.pg_pool_ref() {
         let old_status = match kanban_db::card_status_pg(pool, &id).await {
             Ok(Some(status)) => status,
             Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "card not found"})),
-                );
+                return Err(AppError::not_found("card not found"));
             }
             Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
+                return Err(database_error(error));
             }
         };
 
         match kanban_db::assign_card_agent_pg(pool, &id, &body.agent_id).await {
             Ok(false) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": "card not found"})),
-                );
+                return Err(AppError::not_found("card not found"));
             }
             Ok(true) => {}
             Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
+                return Err(database_error(error));
             }
         }
 
@@ -551,56 +517,44 @@ pub async fn assign_card(
                     "kanban_card_updated",
                     card.clone(),
                 );
-                (
+                Ok((
                     StatusCode::OK,
                     Json(json!({
                         "card": card,
                         "assignment": {"ok": true, "agent_id": body.agent_id},
                         "transition": transition,
                     })),
-                )
+                ))
             }
-            Ok(None) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "failed to read card after assign"})),
-            ),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            ),
+            Ok(None) => Err(database_error("failed to read card after assign")),
+            Err(error) => Err(database_error(error)),
         };
     }
 
-    pg_pool_required_error()
+    Err(pg_pool_required_error())
 }
 
 /// DELETE /api/kanban-cards/:id
 pub async fn delete_card(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Some(pool) = state.pg_pool_ref() {
         return match kanban_db::delete_card_pg(pool, &id).await {
-            Ok(false) => (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "card not found"})),
-            ),
+            Ok(false) => Err(AppError::not_found("card not found")),
             Ok(true) => {
                 crate::server::ws::emit_event(
                     &state.broadcast_tx,
                     "kanban_card_deleted",
                     json!({"id": id}),
                 );
-                (StatusCode::OK, Json(json!({"ok": true})))
+                Ok((StatusCode::OK, Json(json!({"ok": true}))))
             }
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            ),
+            Err(error) => Err(database_error(error)),
         };
     }
 
-    pg_pool_required_error()
+    Err(pg_pool_required_error())
 }
 
 /// POST /api/kanban-cards/:id/retry
@@ -614,33 +568,24 @@ pub async fn retry_card(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<RetryCardBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_pool_required_error();
+        return Err(pg_pool_required_error());
     };
     let retry_spec = match kanban_db::load_retry_dispatch_spec_pg(pool, &id).await {
         Ok(Some(spec)) => spec,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "card not found"})),
-            );
+            return Err(AppError::not_found("card not found"));
         }
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
+            return Err(database_error(error));
         }
     };
 
     let existing_dispatch_id = match kanban_db::latest_dispatch_id_for_card_pg(pool, &id).await {
         Ok(dispatch_id) => dispatch_id,
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
+            return Err(database_error(error));
         }
     };
     // #1442 (codex P2): only report `cancelled_dispatch_id` when the cancel
@@ -663,10 +608,7 @@ pub async fn retry_card(
                 }
             }
             Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
+                return Err(database_error(format!("{error}")));
             }
         }
     }
@@ -674,20 +616,14 @@ pub async fn retry_card(
     use crate::engine::transition::TransitionIntent as TI2;
     let agent_id_for_dispatch = if let Some(agent_id) = body.assignee_agent_id.as_deref() {
         if let Err(error) = kanban_db::assign_card_agent_pg(pool, &id, agent_id).await {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
+            return Err(database_error(error));
         }
         agent_id.to_string()
     } else {
         match kanban_db::assigned_agent_id_for_card_pg(pool, &id).await {
             Ok(agent_id) => agent_id.unwrap_or_default(),
             Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
+                return Err(database_error(error));
             }
         }
     };
@@ -699,10 +635,7 @@ pub async fn retry_card(
             dispatch_id: None,
         },
     ) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("{error}")})),
-        );
+        return Err(database_error(format!("{error}")));
     }
 
     let dispatch_agent_id = if agent_id_for_dispatch.is_empty() {
@@ -744,10 +677,7 @@ pub async fn retry_card(
                 }
             }
             Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
+                return Err(database_error(format!("{error}")));
             }
         }
     } else {
@@ -758,7 +688,7 @@ pub async fn retry_card(
     match load_card_json_pg(pool, &id).await {
         Ok(Some(card)) => {
             crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card.clone());
-            (
+            Ok((
                 StatusCode::OK,
                 Json(json!({
                     "card": card,
@@ -766,16 +696,10 @@ pub async fn retry_card(
                     "cancelled_dispatch_id": cancelled_dispatch_id,
                     "next_action": next_action,
                 })),
-            )
+            ))
         }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "card not found"})),
-        ),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
+        Ok(None) => Err(AppError::not_found("card not found")),
+        Err(error) => Err(database_error(error)),
     }
 }
 
@@ -790,24 +714,18 @@ pub async fn redispatch_card(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(_body): Json<RedispatchCardBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_pool_required_error();
+        return Err(pg_pool_required_error());
     };
 
     let spec = match kanban_db::load_retry_dispatch_spec_pg(pool, &id).await {
         Ok(Some(spec)) => spec,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "card not found"})),
-            );
+            return Err(AppError::not_found("card not found"));
         }
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
+            return Err(database_error(error));
         }
     };
     let agent_id = spec.agent_id;
@@ -817,10 +735,7 @@ pub async fn redispatch_card(
     let dispatch_id = match kanban_db::latest_dispatch_id_for_card_pg(pool, &id).await {
         Ok(dispatch_id) => dispatch_id,
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
+            return Err(database_error(error));
         }
     };
     // #1442 (codex P2): only report `cancelled_dispatch_id` when the cancel
@@ -843,10 +758,7 @@ pub async fn redispatch_card(
                 }
             }
             Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
+                return Err(database_error(format!("{error}")));
             }
         }
     }
@@ -867,10 +779,7 @@ pub async fn redispatch_card(
         },
     ] {
         if let Err(error) = execute_transition_intent_pg(&state, &intent) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            );
+            return Err(database_error(format!("{error}")));
         }
     }
 
@@ -907,10 +816,7 @@ pub async fn redispatch_card(
                 }
             }
             Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
+                return Err(database_error(format!("{error}")));
             }
         }
     } else {
@@ -921,7 +827,7 @@ pub async fn redispatch_card(
     match load_card_json_pg(pool, &id).await {
         Ok(Some(card)) => {
             crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card.clone());
-            (
+            Ok((
                 StatusCode::OK,
                 Json(json!({
                     "card": card,
@@ -929,16 +835,10 @@ pub async fn redispatch_card(
                     "cancelled_dispatch_id": cancelled_dispatch_id,
                     "next_action": next_action,
                 })),
-            )
+            ))
         }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "card not found"})),
-        ),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
+        Ok(None) => Err(AppError::not_found("card not found")),
+        Err(error) => Err(database_error(error)),
     }
 }
 
@@ -947,26 +847,20 @@ pub async fn defer_dod(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<DeferDodBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_pool_required_error();
+        return Err(pg_pool_required_error());
     };
 
     let row = match kanban_db::load_dod_state_pg(pool, &id).await {
         Ok(row) => row,
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
+            return Err(database_error(error));
         }
     };
 
     let Some(dod_state) = row else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "card not found"})),
-        );
+        return Err(AppError::not_found("card not found"));
     };
     let current = dod_state.deferred_dod_json;
     let card_status = dod_state.status;
@@ -975,10 +869,7 @@ pub async fn defer_dod(
     let dod = apply_deferred_dod_changes(current, body);
     let dod_str = serde_json::to_string(&dod).unwrap_or_default();
     if let Err(error) = kanban_db::update_deferred_dod_pg(pool, &id, &dod_str).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        );
+        return Err(database_error(error));
     }
 
     let is_review_state = {
@@ -1010,17 +901,11 @@ pub async fn defer_dod(
             },
         ] {
             if let Err(error) = execute_transition_intent_pg(&state, &intent) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
+                return Err(database_error(format!("{error}")));
             }
         }
         if let Err(error) = kanban_db::update_review_clock_after_dod_pg(pool, &id).await {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
+            return Err(database_error(error));
         }
     }
 
@@ -1035,16 +920,10 @@ pub async fn defer_dod(
     match load_card_json_pg(pool, &id).await {
         Ok(Some(mut card)) => {
             card["deferred_dod"] = dod;
-            (StatusCode::OK, Json(json!({"card": card})))
+            Ok((StatusCode::OK, Json(json!({"card": card}))))
         }
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "card not found"})),
-        ),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
+        Ok(None) => Err(AppError::not_found("card not found")),
+        Err(error) => Err(database_error(error)),
     }
 }
 
@@ -1053,21 +932,15 @@ pub async fn defer_dod(
 pub async fn get_card_review_state(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_pool_required_error();
+        return Err(pg_pool_required_error());
     };
 
     match kanban_db::load_card_review_state_json_pg(pool, &id).await {
-        Ok(Some(state_json)) => (StatusCode::OK, Json(state_json)),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "no review state for this card"})),
-        ),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
+        Ok(Some(state_json)) => Ok((StatusCode::OK, Json(state_json))),
+        Ok(None) => Err(AppError::not_found("no review state for this card")),
+        Err(error) => Err(database_error(error)),
     }
 }
 
@@ -1075,33 +948,29 @@ pub async fn get_card_review_state(
 pub async fn list_card_reviews(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_pool_required_error();
+        return Err(pg_pool_required_error());
     };
 
     match kanban_db::list_card_reviews_json_pg(pool, &id).await {
-        Ok(reviews) => (StatusCode::OK, Json(json!({"reviews": reviews}))),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        ),
+        Ok(reviews) => Ok((StatusCode::OK, Json(json!({"reviews": reviews})))),
+        Err(error) => Err(database_error(error)),
     }
 }
 
 /// GET /api/kanban-cards/stalled
-pub async fn stalled_cards(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+pub async fn stalled_cards(
+    State(state): State<AppState>,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_pool_required_error();
+        return Err(pg_pool_required_error());
     };
 
     let ids = match kanban_db::stalled_card_ids_pg(pool).await {
         Ok(ids) => ids,
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
+            return Err(database_error(error));
         }
     };
 
@@ -1111,22 +980,19 @@ pub async fn stalled_cards(State(state): State<AppState>) -> (StatusCode, Json<s
             Ok(Some(card)) => cards.push(card),
             Ok(None) => {}
             Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
+                return Err(database_error(error));
             }
         }
     }
 
-    (StatusCode::OK, Json(json!(cards)))
+    Ok((StatusCode::OK, Json(json!(cards))))
 }
 
 /// POST /api/kanban-cards/assign-issue
 pub async fn assign_issue(
     State(state): State<AppState>,
     Json(body): Json<AssignIssueBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Some(pool) = state.pg_pool_ref() {
         let upserted = match upsert_card_from_issue_pg(
             pool,
@@ -1146,10 +1012,7 @@ pub async fn assign_issue(
         {
             Ok(result) => result,
             Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
+                return Err(database_error(error));
             }
         };
 
@@ -1159,16 +1022,10 @@ pub async fn assign_issue(
             match kanban_db::card_status_pg(pool, &upserted.card_id).await {
                 Ok(Some(status)) => status,
                 Ok(None) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": "failed to reload card after upsert"})),
-                    );
+                    return Err(database_error("failed to reload card after upsert"));
                 }
                 Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": error})),
-                    );
+                    return Err(database_error(error));
                 }
             }
         };
@@ -1190,7 +1047,7 @@ pub async fn assign_issue(
                     "kanban_card_updated"
                 };
                 crate::server::ws::emit_event(&state.broadcast_tx, event_name, card.clone());
-                (
+                Ok((
                     if upserted.created {
                         StatusCode::CREATED
                     } else {
@@ -1202,20 +1059,14 @@ pub async fn assign_issue(
                         "assignment": {"ok": true, "agent_id": body.assignee_agent_id},
                         "transition": transition,
                     })),
-                )
+                ))
             }
-            Ok(None) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "failed to read card after assign"})),
-            ),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            ),
+            Ok(None) => Err(database_error("failed to read card after assign")),
+            Err(error) => Err(database_error(error)),
         };
     }
 
-    pg_pool_required_error()
+    Err(pg_pool_required_error())
 }
 
 // ── Helpers ────────────────────────────────────────────────────
@@ -1333,22 +1184,19 @@ pub(super) async fn load_card_json_pg(
 pub async fn card_audit_log(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_pool_required_error();
+        return Err(pg_pool_required_error());
     };
 
     let logs = match kanban_db::list_card_audit_logs_json_pg(pool, &id).await {
         Ok(logs) => logs,
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
+            return Err(database_error(error));
         }
     };
 
-    (StatusCode::OK, Json(json!({"logs": logs})))
+    Ok((StatusCode::OK, Json(json!({"logs": logs}))))
 }
 
 /// GET /api/kanban-cards/:id/comments
@@ -1356,34 +1204,28 @@ pub async fn card_audit_log(
 pub async fn card_github_comments(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_pool_required_error();
+        return Err(pg_pool_required_error());
     };
 
     let issue_ref = match kanban_db::card_github_issue_ref_pg(pool, &id).await {
         Ok(Some(issue_ref)) => issue_ref,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "card not found"})),
-            );
+            return Err(AppError::not_found("card not found"));
         }
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
+            return Err(database_error(error));
         }
     };
 
     let repo = match issue_ref.repo_id {
         Some(r) => r,
-        None => return (StatusCode::OK, Json(json!({"comments": []}))),
+        None => return Ok((StatusCode::OK, Json(json!({"comments": []})))),
     };
     let number = match issue_ref.issue_number {
         Some(n) => n,
-        None => return (StatusCode::OK, Json(json!({"comments": []}))),
+        None => return Ok((StatusCode::OK, Json(json!({"comments": []})))),
     };
 
     let result =
@@ -1398,25 +1240,22 @@ pub async fn card_github_comments(
             if let Err(error) =
                 kanban_db::update_card_description_if_changed_pg(pool, &id, &body).await
             {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
+                return Err(database_error(error));
             }
 
-            (
+            Ok((
                 StatusCode::OK,
                 Json(json!({"comments": comments, "body": body})),
-            )
+            ))
         }
-        Ok(Err(e)) => (
+        Ok(Err(e)) => Err(kanban_error(
             StatusCode::BAD_GATEWAY,
-            Json(json!({"error": format!("gh issue view failed: {e}")})),
-        ),
-        Err(e) => (
+            format!("gh issue view failed: {e}"),
+        )),
+        Err(e) => Err(kanban_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("join: {e}")})),
-        ),
+            format!("join: {e}"),
+        )),
     }
 }
 
@@ -1431,17 +1270,17 @@ pub async fn card_github_comments(
 pub async fn pm_decision(
     State(state): State<AppState>,
     Json(body): Json<PmDecisionBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(transition_pool) = state.pg_pool_ref() else {
-        return pg_pool_required_error();
+        return Err(pg_pool_required_error());
     };
 
     let valid = ["resume", "rework", "dismiss", "requeue"];
     if !valid.contains(&body.decision.as_str()) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("decision must be one of: {}", valid.join(", "))})),
-        );
+        return Err(AppError::bad_request(format!(
+            "decision must be one of: {}",
+            valid.join(", ")
+        )));
     }
 
     // Verify card exists and currently requires manual intervention.
@@ -1449,18 +1288,12 @@ pub async fn pm_decision(
         match kanban_db::load_pm_decision_card_info_pg(transition_pool, &body.card_id).await {
             Ok(row) => row,
             Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
+                return Err(database_error(error));
             }
         };
 
     let Some(card_info) = card_info else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "card not found"})),
-        );
+        return Err(AppError::not_found("card not found"));
     };
     let status = card_info.status;
     let review_status = card_info.review_status;
@@ -1474,12 +1307,10 @@ pub async fn pm_decision(
     );
     let legacy_manual_state = matches!(status.as_str(), "pending_decision" | "blocked");
     if !legacy_manual_state && manual_fingerprint.is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(
-                json!({"error": format!("card is '{}', which does not currently require manual decision", status)}),
-            ),
-        );
+        return Err(AppError::bad_request(format!(
+            "card is '{}', which does not currently require manual decision",
+            status
+        )));
     }
 
     // Complete any pending pm-decision dispatches (rework handles its own completion after dispatch success)
@@ -1491,10 +1322,7 @@ pub async fn pm_decision(
             {
                 Ok(ids) => ids,
                 Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": error})),
-                    );
+                    return Err(database_error(error));
                 }
             };
         for dispatch_id in pending_dispatch_ids {
@@ -1514,10 +1342,7 @@ pub async fn pm_decision(
     if let Err(error) =
         kanban_db::clear_manual_intervention_marker_pg(transition_pool, &body.card_id).await
     {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        );
+        return Err(database_error(error));
     }
     if legacy_manual_state || review_status.as_deref() == Some("dilemma_pending") {
         execute_transition_intent_pg(
@@ -1547,19 +1372,13 @@ pub async fn pm_decision(
                 {
                     Ok(has_live) => has_live,
                     Err(error) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": error})),
-                        );
+                        return Err(database_error(error));
                     }
                 };
             if !has_live {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(
-                        json!({"error": "cannot resume: no live dispatch/session for this card. Use 'rework' or 'requeue' instead."}),
-                    ),
-                );
+                return Err(AppError::conflict(
+                    "cannot resume: no live dispatch/session for this card. Use 'rework' or 'requeue' instead.",
+                ));
             }
             // Pipeline-driven: resume to first dispatchable state
             crate::pipeline::ensure_loaded();
@@ -1583,19 +1402,15 @@ pub async fn pm_decision(
             )
             .await
             {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("resume transition failed: {e}")})),
-                );
+                return Err(database_error(format!("resume transition failed: {e}")));
             }
             "Card resumed"
         }
         "rework" => {
             if agent_id.is_empty() {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": "card has no assigned agent for rework"})),
-                );
+                return Err(AppError::bad_request(
+                    "card has no assigned agent for rework",
+                ));
             }
             // Try dispatch creation FIRST — only transition on success
             match crate::dispatch::create_dispatch_pg_only(
@@ -1618,10 +1433,7 @@ pub async fn pm_decision(
                     {
                         Ok(ids) => ids,
                         Err(error) => {
-                            return (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(json!({"error": error})),
-                            );
+                            return Err(database_error(error));
                         }
                     };
                     for dispatch_id in pending_dispatch_ids {
@@ -1641,10 +1453,7 @@ pub async fn pm_decision(
                         match kanban_db::card_status_pg(transition_pool, &body.card_id).await {
                             Ok(status) => status.unwrap_or_default(),
                             Err(error) => {
-                                return (
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    Json(json!({"error": format!("load rework status: {error}")})),
-                                );
+                                return Err(database_error(format!("load rework status: {error}")));
                             }
                         };
                     let pipeline = crate::pipeline::get();
@@ -1673,10 +1482,7 @@ pub async fn pm_decision(
                     )
                     .await
                     {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": format!("rework transition failed: {e}")})),
-                        );
+                        return Err(database_error(format!("rework transition failed: {e}")));
                     }
                     // #155: Use intent for review_status mutation.
                     execute_transition_intent_pg(
@@ -1696,10 +1502,7 @@ pub async fn pm_decision(
                     "Rework dispatch created"
                 }
                 Err(e) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("rework dispatch failed: {}", e)})),
-                    );
+                    return Err(database_error(format!("rework dispatch failed: {e}")));
                 }
             }
         }
@@ -1722,10 +1525,7 @@ pub async fn pm_decision(
             )
             .await
             {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("dismiss transition failed: {e}")})),
-                );
+                return Err(database_error(format!("dismiss transition failed: {e}")));
             }
             "Card dismissed"
         }
@@ -1750,10 +1550,7 @@ pub async fn pm_decision(
             )
             .await
             {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("requeue transition failed: {e}")})),
-                );
+                return Err(database_error(format!("requeue transition failed: {e}")));
             }
             "Card requeued"
         }
@@ -1765,7 +1562,7 @@ pub async fn pm_decision(
         crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card);
     }
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "ok": true,
@@ -1773,7 +1570,7 @@ pub async fn pm_decision(
             "decision": body.decision,
             "message": message,
         })),
-    )
+    ))
 }
 
 // ── Administrative review recovery helpers ───────────────────────
@@ -1817,22 +1614,19 @@ pub async fn rereview_card(
     headers: HeaderMap,
     principal: Option<Extension<RequestPrincipal>>,
     Json(body): Json<RereviewBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Err(response) = require_explicit_bearer_token(&headers, "rereview") {
-        return response;
+        return Err(tuple_error(response));
     }
 
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_pool_required_error();
+        return Err(pg_pool_required_error());
     };
     let reason = body.reason.as_deref().unwrap_or("manual rereview");
     let card_info = match kanban_db::load_rereview_card_info_pg(pool, &id).await {
         Ok(Some(values)) => values,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": format!("card not found: {id}")})),
-            );
+            return Err(AppError::not_found(format!("card not found: {id}")));
         }
         Err(error) => {
             tracing::warn!(
@@ -1840,10 +1634,7 @@ pub async fn rereview_card(
                 %error,
                 "[rereview] postgres lookup failed"
             );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
+            return Err(database_error(error));
         }
     };
     let current_status = card_info.status;
@@ -1863,20 +1654,14 @@ pub async fn rereview_card(
     let assigned_agent_id = match assigned_agent_id.filter(|value| !value.is_empty()) {
         Some(value) => value,
         None => {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({"error": "card has no assigned agent"})),
-            );
+            return Err(AppError::conflict("card has no assigned agent"));
         }
     };
 
     let stale_ids = match kanban_db::stale_review_dispatch_ids_pg(pool, &id).await {
         Ok(ids) => ids,
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
+            return Err(database_error(error));
         }
     };
 
@@ -1888,18 +1673,12 @@ pub async fn rereview_card(
         )
         .await
         {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            );
+            return Err(database_error(format!("{error}")));
         }
     }
 
     if let Err(error) = kanban_db::cleanup_rereview_card_pg(pool, &id).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        );
+        return Err(database_error(error));
     }
 
     let sync_result = review_state_sync_pg(
@@ -1930,10 +1709,7 @@ pub async fn rereview_card(
         )
         .await
         {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
+            return Err(database_error(format!("{e}")));
         }
     } else {
         crate::kanban::fire_enter_hooks_with_backends(&state.engine, &id, "review");
@@ -1964,37 +1740,25 @@ pub async fn rereview_card(
                 review_dispatch_id = dispatch["id"].as_str().map(str::to_string);
             }
             Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                );
+                return Err(database_error(format!("{e}")));
             }
         }
     }
 
     let Some(review_dispatch_id) = review_dispatch_id else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "failed to create fresh review dispatch"})),
-        );
+        return Err(database_error("failed to create fresh review dispatch"));
     };
 
     crate::kanban::correct_tn_to_fn_on_reopen(state.pg_pool_ref(), &id);
 
     if let Err(error) = kanban_db::reset_completed_at_pg(pool, &id).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error})),
-        );
+        return Err(database_error(error));
     }
 
     let entry_ids = match kanban_db::active_auto_queue_entry_ids_for_rereview_pg(pool, &id).await {
         Ok(ids) => ids,
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
+            return Err(database_error(error));
         }
     };
 
@@ -2021,16 +1785,10 @@ pub async fn rereview_card(
     let card = match load_card_json_pg(pool, &id).await {
         Ok(Some(card)) => card,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": format!("card not found: {id}")})),
-            );
+            return Err(AppError::not_found(format!("card not found: {id}")));
         }
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{error}")})),
-            );
+            return Err(database_error(format!("{error}")));
         }
     };
 
@@ -2040,20 +1798,20 @@ pub async fn rereview_card(
         if let Some(url) = gh_url.as_deref() {
             if let Err(e) = crate::github::reopen_issue_by_url(url).await {
                 tracing::warn!("[kanban] Failed to reopen GitHub issue {url}: {e}");
-                return (
+                return Ok((
                     StatusCode::BAD_GATEWAY,
                     Json(json!({
                         "error": format!("github issue reopen failed before rereview response: {e}"),
                         "rereviewed": false,
                         "github_issue_url": url,
                     })),
-                );
+                ));
             }
         }
     }
 
     crate::server::ws::emit_event(&state.broadcast_tx, "kanban_card_updated", card.clone());
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "card": card,
@@ -2061,7 +1819,7 @@ pub async fn rereview_card(
             "review_dispatch_id": review_dispatch_id,
             "reason": reason,
         })),
-    )
+    ))
 }
 
 /// POST /api/kanban-cards/batch-rereview (formerly /api/re-review, removed in #1064)
@@ -2074,14 +1832,14 @@ pub async fn batch_rereview(
     headers: HeaderMap,
     principal: Option<Extension<RequestPrincipal>>,
     Json(body): Json<BatchRereviewBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Err(response) = require_explicit_bearer_token(&headers, "batch rereview") {
-        return response;
+        return Err(tuple_error(response));
     }
 
     let reason = body.reason.clone();
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_pool_required_error();
+        return Err(pg_pool_required_error());
     };
     let mut results = Vec::new();
 
@@ -2119,14 +1877,18 @@ pub async fn batch_rereview(
             reason: reason.clone(),
         };
 
-        let (status, Json(response)) = rereview_card(
+        let (status, Json(response)) = match rereview_card(
             State(state.clone()),
             Path(card_id),
             headers.clone(),
             principal.clone(),
             Json(rereview_body),
         )
-        .await;
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => error.into_json_response(),
+        };
 
         if status == StatusCode::OK {
             results.push(json!({
@@ -2143,7 +1905,7 @@ pub async fn batch_rereview(
         }
     }
 
-    (StatusCode::OK, Json(json!({ "results": results })))
+    Ok((StatusCode::OK, Json(json!({ "results": results }))))
 }
 
 /// POST /api/kanban-cards/:id/reopen
@@ -2157,15 +1919,15 @@ pub async fn reopen_card(
     headers: HeaderMap,
     principal: Option<Extension<RequestPrincipal>>,
     Json(body): Json<ReopenBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let reset_full = body.reset_full.unwrap_or(false);
 
     if let Err(response) = require_explicit_bearer_token(&headers, "reopen") {
-        return response;
+        return Err(tuple_error(response));
     }
 
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_pool_required_error();
+        return Err(pg_pool_required_error());
     };
     let caller_source = resolve_requesting_agent_id_with_pg(pool, &headers)
         .await
@@ -2181,16 +1943,10 @@ pub async fn reopen_card(
     let current_status: String = match kanban_db::card_status_pg(pool, &id).await {
         Ok(Some(status)) => status,
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": format!("card not found: {id}")})),
-            );
+            return Err(AppError::not_found(format!("card not found: {id}")));
         }
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
+            return Err(database_error(error));
         }
     };
 
@@ -2199,12 +1955,9 @@ pub async fn reopen_card(
     let pipeline = crate::pipeline::get();
     let is_terminal = pipeline.is_terminal(&current_status);
     if !is_terminal {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(
-                json!({"error": format!("card is not terminal (current: {current_status}), reopen only applies to terminal cards")}),
-            ),
-        );
+        return Err(AppError::bad_request(format!(
+            "card is not terminal (current: {current_status}), reopen only applies to terminal cards"
+        )));
     }
 
     // Determine reopen target: first dispatchable state that has gated outbound
@@ -2221,12 +1974,9 @@ pub async fn reopen_card(
 
     if let Some(pool) = state.pg_pool_ref() {
         if let Err(error) = kanban_db::mark_api_reopen_skip_preflight_on_pg(pool, &id).await {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    json!({"error": format!("failed to stage API reopen preflight skip: {error}")}),
-                ),
-            );
+            return Err(database_error(format!(
+                "failed to stage API reopen preflight skip: {error}"
+            )));
         }
 
         let transition_result = if reset_full {
@@ -2269,64 +2019,43 @@ pub async fn reopen_card(
 
                 if reset_full {
                     if let Err(error) = kanban_db::clear_all_threads_pg(pool, &id).await {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": format!("{error}")})),
-                        );
+                        return Err(database_error(format!("{error}")));
                     }
                     if let Err(error) =
                         kanban_db::clear_reopen_preflight_cache_on_pg(pool, &id).await
                     {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(
-                                json!({"error": format!("failed to clear reopen cache: {error}")}),
-                            ),
-                        );
+                        return Err(database_error(format!(
+                            "failed to clear reopen cache: {error}"
+                        )));
                     }
                 } else if let Err(error) =
                     kanban_db::consume_api_reopen_preflight_skip_on_pg(pool, &id).await
                 {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(
-                            json!({"error": format!("failed to persist API reopen preflight skip: {error}")}),
-                        ),
-                    );
+                    return Err(database_error(format!(
+                        "failed to persist API reopen preflight skip: {error}"
+                    )));
                 }
 
                 if let Err(error) = kanban_db::reset_completed_at_pg(pool, &id).await {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": error})),
-                    );
+                    return Err(database_error(error));
                 }
 
                 if let Some(ref rs) = body.review_status
                     && let Err(error) = kanban_db::update_card_review_status_pg(pool, &id, rs).await
                 {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": error})),
-                    );
+                    return Err(database_error(error));
                 }
 
                 if let Err(error) =
                     kanban_db::reactivate_done_auto_queue_entries_pg(pool, &id).await
                 {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("{error}")})),
-                    );
+                    return Err(database_error(format!("{error}")));
                 }
 
                 let gh_url = match kanban_db::github_issue_url_for_card_pg(pool, &id).await {
                     Ok(value) => value,
                     Err(error) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": error})),
-                        );
+                        return Err(database_error(error));
                     }
                 };
 
@@ -2335,14 +2064,14 @@ pub async fn reopen_card(
                 if let Some(url) = gh_url.as_deref() {
                     if let Err(error) = crate::github::reopen_issue_by_url(url).await {
                         tracing::warn!("[kanban] Failed to reopen GitHub issue {url}: {error}");
-                        return (
+                        return Ok((
                             StatusCode::BAD_GATEWAY,
                             Json(json!({
                                 "error": format!("github issue reopen failed before reopen response: {error}"),
                                 "reopened": false,
                                 "github_issue_url": url,
                             })),
-                        );
+                        ));
                     }
                 }
 
@@ -2353,7 +2082,7 @@ pub async fn reopen_card(
                             "kanban_card_updated",
                             card.clone(),
                         );
-                        (
+                        Ok((
                             StatusCode::OK,
                             Json(json!({
                                 "card": card,
@@ -2365,29 +2094,20 @@ pub async fn reopen_card(
                                 "to": to_status,
                                 "reason": reason,
                             })),
-                        )
+                        ))
                     }
-                    Ok(None) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": "failed to read card after reopen"})),
-                    ),
-                    Err(error) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": error})),
-                    ),
+                    Ok(None) => Err(database_error("failed to read card after reopen")),
+                    Err(error) => Err(database_error(error)),
                 };
             }
             Err(error) => {
                 let _ = kanban_db::clear_api_reopen_skip_preflight_on_pg(pool, &id).await;
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{error}")})),
-                );
+                return Err(database_error(format!("{error}")));
             }
         }
     }
 
-    pg_pool_required_error()
+    Err(pg_pool_required_error())
 }
 
 // ── Administrative force transition ──────────────────────────────
@@ -2426,9 +2146,9 @@ pub async fn force_transition(
     headers: HeaderMap,
     principal: Option<Extension<RequestPrincipal>>,
     Json(body): Json<ForceTransitionBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if let Err(response) = require_explicit_bearer_token(&headers, "force-transition") {
-        return response;
+        return Err(tuple_error(response));
     }
 
     // #1444 codex iter-2 P2: `force=true` is documented as opting into the
@@ -2445,10 +2165,11 @@ pub async fn force_transition(
     let pool = match state.pg_pool_ref() {
         Some(pool) => pool,
         None => {
-            return (
+            return Err(AppError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error": "force-transition requires postgres pool (#1239)"})),
-            );
+                ErrorCode::Database,
+                "force-transition requires postgres pool (#1239)",
+            ));
         }
     };
     let caller_source = resolve_requesting_agent_id_with_pg(pool, &headers)
@@ -2478,7 +2199,7 @@ pub async fn force_transition(
     // accidentally creates duplicate dispatches.
     if target_status == "ready" && !force_intent_present && !pre_active_dispatch_ids.is_empty() {
         let active_id = pre_active_dispatch_ids.first().cloned().unwrap_or_default();
-        return (
+        return Ok((
             StatusCode::CONFLICT,
             Json(json!({
                 "error": format!(
@@ -2488,16 +2209,13 @@ pub async fn force_transition(
                 "active_dispatch_ids": pre_active_dispatch_ids,
                 "next_action_hint": "card already has a live dispatch — inspect /api/dispatches/{id}; pass force=true (or legacy cancel_dispatches=true) on /transition to cancel + re-transition",
             })),
-        );
+        ));
     }
     let pre_latest_dispatch_id: Option<String> =
         match kanban_db::latest_dispatch_id_for_card_pg(pool, &id).await {
             Ok(value) => value,
             Err(error) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": error})),
-                );
+                return Err(database_error(error));
             }
         };
     let terminal_cleanup = match kanban_db::load_card_pipeline_context_pg(pool, &id).await {
@@ -2516,19 +2234,13 @@ pub async fn force_transition(
                     effective.is_terminal(&target_status) && cleanup_opt_in
                 }
                 Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("{error}")})),
-                    );
+                    return Err(database_error(format!("{error}")));
                 }
             }
         }
         Ok(None) => false,
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error})),
-            );
+            return Err(database_error(error));
         }
     };
 
@@ -2614,14 +2326,9 @@ pub async fn force_transition(
                         skipped_auto_queue_entries += noop_counts.skipped_auto_queue_entries;
                     }
                     Err(error) => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({
-                                "error": format!(
-                                    "force-transition no-op cleanup failed for card {id}: {error}"
-                                ),
-                            })),
-                        );
+                        return Err(database_error(format!(
+                            "force-transition no-op cleanup failed for card {id}: {error}"
+                        )));
                     }
                 }
             }
@@ -2691,7 +2398,7 @@ pub async fn force_transition(
                         "kanban_card_updated",
                         c.clone(),
                     );
-                    (
+                    Ok((
                         StatusCode::OK,
                         Json(json!({
                             "card": c,
@@ -2704,18 +2411,12 @@ pub async fn force_transition(
                             "next_action_hint": next_action_hint,
                             "skipped_auto_queue_entries": skipped_auto_queue_entries
                         })),
-                    )
+                    ))
                 }
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("{e}")})),
-                ),
+                Err(e) => Err(database_error(format!("{e}"))),
             }
         }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("{e}")})),
-        ),
+        Err(e) => Err(AppError::bad_request(format!("{e}"))),
     }
 }
 

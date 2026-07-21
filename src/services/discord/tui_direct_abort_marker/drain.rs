@@ -54,6 +54,7 @@ pub(in crate::services::discord) async fn drain_on_terminal_commit_with_offset(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) async fn drain_on_terminal_commit_with_offsets(
     shared: &Arc<SharedData>,
     provider: &str,
@@ -101,6 +102,7 @@ pub(in crate::services::discord) async fn drain_on_terminal_commit_with_applier(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) async fn drain_on_terminal_commit_with_applier_and_offset(
     provider: &str,
     tmux_session_name: &str,
@@ -125,6 +127,7 @@ pub(in crate::services::discord) async fn drain_on_terminal_commit_with_applier_
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn drain_on_terminal_commit_with_applier_and_offsets(
     provider: &str,
     tmux_session_name: &str,

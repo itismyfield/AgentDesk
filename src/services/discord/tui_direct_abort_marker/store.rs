@@ -291,6 +291,7 @@ pub(in crate::services::discord) fn record_commit_tombstone_at_with_offset(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) fn record_commit_tombstone_at_with_offsets(
     now_ms: u64,
     provider: &str,

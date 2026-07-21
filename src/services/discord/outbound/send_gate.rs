@@ -42,6 +42,7 @@ pub(crate) async fn send_message_with_backends(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_message_with_backends_and_delivery_id(
     registry: &HealthRegistry,
     pg_pool: Option<&PgPool>,
@@ -67,6 +68,7 @@ pub(crate) async fn send_message_with_backends_and_delivery_id(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_message_with_backends_and_delivery_id_for_caller(
     registry: &HealthRegistry,
     pg_pool: Option<&PgPool>,
@@ -76,6 +78,7 @@ pub(crate) async fn send_message_with_backends_and_delivery_id_for_caller(
     bot: &str,
     summary: Option<&str>,
     delivery_id: Option<ManualOutboundDeliveryId<'_>>,
+    options: ManualOutboundOptions,
     caller_class: SendCallerClass,
 ) -> (&'static str, String) {
     send_message_with_backends_and_delivery_options_for_caller(
@@ -87,7 +90,7 @@ pub(crate) async fn send_message_with_backends_and_delivery_id_for_caller(
         bot,
         summary,
         delivery_id,
-        ManualOutboundOptions::default(),
+        options,
         caller_class,
     )
     .await
@@ -113,11 +116,14 @@ pub(in crate::services::discord) fn dm_default_agent_authorizes_unmapped_private
         && crate::services::discord::agentdesk_config::resolve_dm_default_agent(provider).is_some())
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct ManualOutboundOptions {
     pub(crate) allow_unbound_internal_channel: bool,
+    pub(crate) record_transcript: bool,
+    pub(crate) transcript_source_label: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_message_with_backends_and_delivery_options(
     registry: &HealthRegistry,
     pg_pool: Option<&PgPool>,
@@ -144,6 +150,7 @@ pub(crate) async fn send_message_with_backends_and_delivery_options(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_message_with_backends_and_delivery_options_for_caller(
     registry: &HealthRegistry,
     pg_pool: Option<&PgPool>,
@@ -329,6 +336,9 @@ async fn send_message_with_backends_and_delivery_options_for_caller(
         bot,
         summary,
         delivery_id,
+        pg_pool,
+        options.record_transcript,
+        options.transcript_source_label.as_deref(),
     )
     .await
 }

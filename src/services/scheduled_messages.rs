@@ -15,6 +15,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
 use std::sync::Arc;
 
+pub(crate) mod context_snapshot;
 mod evidence;
 mod timing;
 
@@ -306,6 +307,11 @@ async fn fire_agent(pool: &PgPool, health_registry: Option<&HealthRegistry>, fir
             )
             .await;
         }
+        Ok(AgentTurnStartDisposition::SnapshotInvalid(reason)) => {
+            // Fail-closed: deterministic snapshot failure never re-arms; the
+            // recurring parent lands terminal for operator attention (AC-5).
+            finish_terminal_failure(pool, fire, &reason).await;
+        }
         Err(error) => {
             tracing::warn!(id = message.id, "[smsg] agent turn start failed: {error}");
             let reason = format!("agent turn start failed: {error}");
@@ -339,6 +345,10 @@ enum AgentTurnStartDisposition {
     /// A lifecycle command was consumed before provider/bridge spawn. Repeating
     /// it could repeat the lifecycle side effect, so terminalize instead.
     Consumed(String),
+    /// #4658: the referenced context snapshot could not be validated
+    /// (missing/digest mismatch) and `on_context_failure='fail'`. Deterministic —
+    /// no re-arm; terminalize the delivery with the recorded reason.
+    SnapshotInvalid(String),
 }
 
 fn runtime_defer_until(now: DateTime<Utc>) -> DateTime<Utc> {
@@ -399,7 +409,28 @@ async fn start_agent_turn(
     let owner_channel = poise::serenity_prelude::ChannelId::new(owner_channel_num);
     let turn_channel = poise::serenity_prelude::ChannelId::new(turn_channel_num);
 
-    let prompt = build_agent_prompt(message);
+    // #4658: resolve the immutable context snapshot (if any) BEFORE the launch
+    // commit barrier. A deterministic validation failure with
+    // `on_context_failure='fail'` terminalizes without recording an intent —
+    // recovery never sees a committed launch, so the barrier contract (AC-7) is
+    // unchanged.
+    // A transient DB error here propagates as Err → fire_agent routes it to the
+    // existing retry/defer path (never a terminal SnapshotInvalid). Only a
+    // deterministic Invalid terminalizes (F2).
+    let (prompt, snapshot_session_label) =
+        match context_snapshot::resolve_fire_snapshot(pool, message, build_agent_prompt(message))
+            .await?
+        {
+            context_snapshot::FireSnapshotResolution::Fresh(prompt) => (prompt, None),
+            context_snapshot::FireSnapshotResolution::Injected {
+                prompt,
+                session_label,
+            } => (prompt, Some(session_label)),
+            context_snapshot::FireSnapshotResolution::Invalid(reason) => {
+                return Ok(AgentTurnStartDisposition::SnapshotInvalid(reason));
+            }
+        };
+
     let reservation = reserve_headless_agent_turn(turn_channel);
     let turn_id = reservation.turn_id().to_string();
     let recorded = db::record_delivery_agent_turn_intent_pg(
@@ -416,13 +447,21 @@ async fn start_agent_turn(
             "scheduled message claim was lost before turn {turn_id} could start"
         ));
     }
-    let metadata = Some(serde_json::json!({
+    let mut metadata_map = serde_json::json!({
         "agent_id": agent_id,
         "scheduled_message_id": message.id,
         "turn_id": turn_id,
         "target_channel_id": message.target_channel_id,
         "parent_channel_id": owner_channel_num.to_string(),
-    }));
+    });
+    // #4658: when running against an immutable snapshot, mark the turn so the
+    // headless path (a) derives an isolated session key from this label instead
+    // of the channel name (AC-2, avoids #4634 collision), and (b) severs
+    // provider/transcript continuity so no live channel context leaks in.
+    if let Some(label) = snapshot_session_label.as_deref() {
+        metadata_map["scheduled_snapshot_session_label"] = serde_json::json!(label);
+    }
+    let metadata = Some(metadata_map);
 
     // Final cancellation/claim fence. Once this at-most-once barrier commits,
     // recovery must treat the turn as possibly launched even if this process
@@ -452,7 +491,7 @@ async fn start_agent_turn(
         Some(OUTBOX_SOURCE.to_string()),
         metadata,
         Some(primary_channel.clone()),
-        None,
+        snapshot_session_label.clone(),
         reservation,
     )
     .await
@@ -1221,6 +1260,9 @@ mod tests {
             source: "api".to_string(),
             created_by: None,
             dedupe_key: None,
+            context_strategy: "fresh".to_string(),
+            context_snapshot_id: None,
+            on_context_failure: "fail".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

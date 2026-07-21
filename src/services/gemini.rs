@@ -295,6 +295,7 @@ pub(crate) fn delete_project_session(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn execute_command_streaming(
     prompt: &str,
     session_id: Option<&str>,
@@ -381,6 +382,7 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_gemini_streaming_attempt(
     gemini_bin: &str,
     resolution: &crate::services::platform::BinaryResolution,
@@ -406,8 +408,7 @@ fn execute_gemini_streaming_attempt(
         .map_err(|e| format!("Failed to start Gemini: {}", e))?;
 
     register_child_pid(cancel_token.as_deref(), child.id());
-    let _cancel_watchdog =
-        spawn_cancel_watchdog(cancel_token.clone(), child.id(), "gemini-direct-stream");
+    let _cancel_watchdog = spawn_cancel_watchdog(cancel_token.clone(), "gemini-direct-stream");
     if cancel_requested(cancel_token.as_deref()) {
         kill_child_tree(&mut child);
         return Ok(StreamAttemptResult::Cancelled);
@@ -509,6 +510,7 @@ fn send_gemini_stream_failure(sender: &Sender<StreamMessage>, failure: StreamAtt
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_gemini_stream_events<F>(
     stdout_events: &mpsc::Receiver<GeminiStreamEvent>,
     sender: &Sender<StreamMessage>,

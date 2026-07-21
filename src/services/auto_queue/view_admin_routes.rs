@@ -4,9 +4,9 @@ use super::*;
 pub async fn status(
     State(state): State<AppState>,
     Query(query): Query<StatusQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable_response();
+        return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     let input = crate::services::auto_queue::StatusInput {
         repo: query.repo,
@@ -21,8 +21,8 @@ pub async fn status(
     let result = state.auto_queue_service().status_with_pg(pool, input).await;
 
     match result {
-        Ok(response) => (StatusCode::OK, Json(json!(response))),
-        Err(error) => error.into_json_response(),
+        Ok(response) => Ok((StatusCode::OK, Json(json!(response)))),
+        Err(error) => Err(error),
     }
 }
 
@@ -30,22 +30,22 @@ pub async fn status(
 pub async fn history(
     State(state): State<AppState>,
     Query(query): Query<HistoryQuery>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let limit = query.limit.unwrap_or(8).clamp(1, 20);
     let filter = crate::db::auto_queue::StatusFilter {
         repo: query.repo,
         agent_id: query.agent_id,
     };
     let Some(pool) = state.pg_pool_ref() else {
-        return pg_unavailable_response();
+        return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     let records = match crate::db::auto_queue::list_run_history_pg(pool, &filter, limit).await {
         Ok(records) => records,
         Err(error) => {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("list run history: {error}")})),
-            );
+            ));
         }
     };
 
@@ -114,7 +114,7 @@ pub async fn history(
         0.0
     };
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({
             "summary": AutoQueueHistorySummary {
@@ -125,7 +125,7 @@ pub async fn history(
             },
             "runs": runs,
         })),
-    )
+    ))
 }
 
 /// PATCH /api/queue/entries/{id}
@@ -135,7 +135,7 @@ pub(super) async fn update_entry_with_pg(
     body: &UpdateEntryBody,
     requested_status: Option<&str>,
     pool: &sqlx::PgPool,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let entry_row = match sqlx::query(
         "SELECT run_id, status
          FROM auto_queue_entries
@@ -147,35 +147,35 @@ pub(super) async fn update_entry_with_pg(
     {
         Ok(row) => row,
         Err(error) => {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("load auto-queue entry {id}: {error}")})),
-            );
+            ));
         }
     };
     let Some(entry_row) = entry_row else {
-        return (
+        return Err(auto_queue_json_error(
             StatusCode::NOT_FOUND,
             Json(json!({"error": "entry not found"})),
-        );
+        ));
     };
 
     let run_id: String = match entry_row.try_get("run_id") {
         Ok(value) => value,
         Err(error) => {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("decode auto-queue entry run_id: {error}")})),
-            );
+            ));
         }
     };
     let status: String = match entry_row.try_get("status") {
         Ok(value) => value,
         Err(error) => {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("decode auto-queue entry status: {error}")})),
-            );
+            ));
         }
     };
 
@@ -201,13 +201,13 @@ pub(super) async fn update_entry_with_pg(
         match update_result {
             Ok(result) => effective_status = result.to_status,
             Err(error) if error.contains("not found") => {
-                return (
+                return Err(auto_queue_json_error(
                     StatusCode::NOT_FOUND,
                     Json(json!({"error": "entry not found"})),
-                );
+                ));
             }
             Err(error) if error.contains("invalid auto-queue entry transition") => {
-                return (
+                return Err(auto_queue_json_error(
                     StatusCode::CONFLICT,
                     Json(json!({
                         "error": format!(
@@ -215,32 +215,32 @@ pub(super) async fn update_entry_with_pg(
                             status, new_status
                         ),
                     })),
-                );
+                ));
             }
             Err(error) => {
-                return (
+                return Err(auto_queue_json_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"error": error})),
-                );
+                ));
             }
         }
     }
 
     if body.thread_group.is_some() || body.priority_rank.is_some() || body.batch_phase.is_some() {
         if effective_status != crate::db::auto_queue::ENTRY_STATUS_PENDING {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::CONFLICT,
                 Json(json!({"error": "only pending entries can be reprioritized"})),
-            );
+            ));
         }
 
         let mut tx = match pool.begin().await {
             Ok(tx) => tx,
             Err(error) => {
-                return (
+                return Err(auto_queue_json_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"error": format!("open update_entry transaction: {error}")})),
-                );
+                ));
             }
         };
         let changed = match sqlx::query(
@@ -260,33 +260,33 @@ pub(super) async fn update_entry_with_pg(
         {
             Ok(result) => result.rows_affected(),
             Err(error) => {
-                return (
+                return Err(auto_queue_json_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"error": format!("update auto-queue entry {id}: {error}")})),
-                );
+                ));
             }
         };
         if changed == 0 {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": "entry not found or not pending"})),
-            );
+            ));
         }
 
         if body.thread_group.is_some() {
             if let Err(error) = sync_run_group_metadata_with_pg_tx(&mut tx, &run_id).await {
-                return (
+                return Err(auto_queue_json_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"error": error})),
-                );
+                ));
             }
         }
 
         if let Err(error) = tx.commit().await {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("commit update_entry transaction: {error}")})),
-            );
+            ));
         }
     }
 
@@ -296,46 +296,46 @@ pub(super) async fn update_entry_with_pg(
         .await
         .unwrap_or(serde_json::Value::Null);
 
-    (StatusCode::OK, Json(json!({ "ok": true, "entry": entry })))
+    Ok((StatusCode::OK, Json(json!({ "ok": true, "entry": entry }))))
 }
 
 pub async fn update_entry(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<UpdateEntryBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if body.thread_group.is_none()
         && body.priority_rank.is_none()
         && body.batch_phase.is_none()
         && body.status.is_none()
     {
-        return (
+        return Err(auto_queue_json_error(
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "no fields to update"})),
-        );
+        ));
     }
     if let Some(thread_group) = body.thread_group {
         if thread_group < 0 {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "thread_group must be >= 0"})),
-            );
+            ));
         }
     }
     if let Some(priority_rank) = body.priority_rank {
         if priority_rank < 0 {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "priority_rank must be >= 0"})),
-            );
+            ));
         }
     }
     if let Some(batch_phase) = body.batch_phase {
         if batch_phase < 0 {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "batch_phase must be >= 0"})),
-            );
+            ));
         }
     }
     let requested_status = match body.status.as_deref().map(str::trim) {
@@ -350,23 +350,23 @@ pub async fn update_entry(
             Some(crate::db::auto_queue::ENTRY_STATUS_DONE)
         }
         Some(crate::db::auto_queue::ENTRY_STATUS_DISPATCHED) => {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::BAD_REQUEST,
                 Json(json!({
                     "error": "manual entry status updates only support pending, skipped, or terminal done reconciliation"
                 })),
-            );
+            ));
         }
         Some(other) => {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": format!("unsupported entry status '{other}'")})),
-            );
+            ));
         }
     };
 
     let Some(pg_pool) = state.pg_pool.clone() else {
-        return pg_unavailable_response();
+        return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     update_entry_with_pg(&state, &id, &body, requested_status, &pg_pool).await
 }
@@ -378,7 +378,7 @@ pub(super) async fn add_run_entry_with_pg(
     body: &AddRunEntryBody,
     batch_phase: i64,
     pool: &sqlx::PgPool,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let run_row = match sqlx::query(
         "SELECT status, repo, agent_id
          FROM auto_queue_runs
@@ -390,55 +390,55 @@ pub(super) async fn add_run_entry_with_pg(
     {
         Ok(row) => row,
         Err(error) => {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("load auto-queue run '{run_id}': {error}")})),
-            );
+            ));
         }
     };
     let Some(run_row) = run_row else {
-        return (
+        return Err(auto_queue_json_error(
             StatusCode::NOT_FOUND,
             Json(json!({"error": format!("auto-queue run '{run_id}' not found")})),
-        );
+        ));
     };
 
     let run_status: String = match run_row.try_get("status") {
         Ok(value) => value,
         Err(error) => {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("decode auto-queue run status: {error}")})),
-            );
+            ));
         }
     };
     let run_repo: Option<String> = match run_row.try_get("repo") {
         Ok(value) => value,
         Err(error) => {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("decode auto-queue run repo: {error}")})),
-            );
+            ));
         }
     };
     let run_agent_id: Option<String> = match run_row.try_get("agent_id") {
         Ok(value) => value,
         Err(error) => {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("decode auto-queue run agent: {error}")})),
-            );
+            ));
         }
     };
     if run_status != "active" {
-        return (
+        return Ok((
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "error": format!("auto-queue run '{run_id}' is not active (status={run_status})"),
                 "run_id": run_id,
                 "status": run_status,
             })),
-        );
+        ));
     }
 
     let issue_numbers = [body.issue_number];
@@ -451,19 +451,19 @@ pub(super) async fn add_run_entry_with_pg(
                 } else {
                     StatusCode::BAD_REQUEST
                 };
-                return (status, Json(json!({"error": err})));
+                return Err(auto_queue_json_error(status, Json(json!({"error": err}))));
             }
         };
     let Some(card) = cards_by_issue.get(&body.issue_number) else {
-        return (
+        return Err(auto_queue_json_error(
             StatusCode::NOT_FOUND,
             Json(
                 json!({"error": format!("kanban card not found for issue #{}", body.issue_number)}),
             ),
-        );
+        ));
     };
     if card.status != "ready" {
-        return (
+        return Err(auto_queue_json_error(
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "error": format!(
@@ -472,7 +472,7 @@ pub(super) async fn add_run_entry_with_pg(
                     card.status
                 )
             })),
-        );
+        ));
     }
 
     let run_agent = run_agent_id
@@ -486,15 +486,15 @@ pub(super) async fn add_run_entry_with_pg(
         .filter(|value| !value.is_empty());
     match (run_agent, card_agent) {
         (_, None) => {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::BAD_REQUEST,
                 Json(json!({
                     "error": format!("issue #{} has no assigned agent", body.issue_number)
                 })),
-            );
+            ));
         }
         (Some(run_agent), Some(card_agent)) if run_agent != card_agent => {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::BAD_REQUEST,
                 Json(json!({
                     "error": format!(
@@ -504,7 +504,7 @@ pub(super) async fn add_run_entry_with_pg(
                         run_agent
                     )
                 })),
-            );
+            ));
         }
         _ => {}
     }
@@ -529,14 +529,14 @@ pub(super) async fn add_run_entry_with_pg(
             } else {
                 StatusCode::BAD_REQUEST
             };
-            return (status, Json(json!({"error": err})));
+            return Err(auto_queue_json_error(status, Json(json!({"error": err}))));
         }
     };
     let Some(inserted_entry) = inserted.into_iter().next() else {
-        return (
+        return Err(auto_queue_json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": "failed to create auto-queue entry"})),
-        );
+        ));
     };
     let entry = state
         .auto_queue_service()
@@ -544,7 +544,7 @@ pub(super) async fn add_run_entry_with_pg(
         .await
         .unwrap_or(serde_json::Value::Null);
 
-    (
+    Ok((
         StatusCode::CREATED,
         Json(json!({
             "ok": true,
@@ -553,37 +553,37 @@ pub(super) async fn add_run_entry_with_pg(
             "priority_rank": inserted_entry.priority_rank,
             "entry": entry,
         })),
-    )
+    ))
 }
 
 pub async fn add_run_entry(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
     Json(body): Json<AddRunEntryBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     if body.issue_number <= 0 {
-        return (
+        return Err(auto_queue_json_error(
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "issue_number must be > 0"})),
-        );
+        ));
     }
     if let Some(thread_group) = body.thread_group {
         if thread_group < 0 {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "thread_group must be >= 0"})),
-            );
+            ));
         }
     }
     let batch_phase = body.batch_phase.unwrap_or(0);
     if batch_phase < 0 {
-        return (
+        return Err(auto_queue_json_error(
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "batch_phase must be >= 0"})),
-        );
+        ));
     }
     let Some(pg_pool) = state.pg_pool.clone() else {
-        return pg_unavailable_response();
+        return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     add_run_entry_with_pg(&state, &run_id, &body, batch_phase, &pg_pool).await
 }
@@ -593,7 +593,7 @@ pub(super) async fn restore_run_with_pg(
     state: &AppState,
     run_id: &str,
     pool: &sqlx::PgPool,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let run_status = match sqlx::query_scalar::<_, String>(
         "SELECT status
          FROM auto_queue_runs
@@ -605,28 +605,28 @@ pub(super) async fn restore_run_with_pg(
     {
         Ok(status) => status,
         Err(error) => {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("load auto-queue run '{run_id}': {error}")})),
-            );
+            ));
         }
     };
     match run_status.as_deref() {
         None => {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": format!("auto-queue run '{run_id}' not found")})),
-            );
+            ));
         }
         Some("cancelled") | Some(RUN_STATUS_RESTORING) => {}
         Some("active") => {
-            return (
+            return Err(auto_queue_json_error(
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": format!("auto-queue run '{run_id}' is already active")})),
-            );
+            ));
         }
         Some(status) => {
-            return (
+            return Ok((
                 StatusCode::BAD_REQUEST,
                 Json(json!({
                     "error": format!(
@@ -635,7 +635,7 @@ pub(super) async fn restore_run_with_pg(
                     "run_id": run_id,
                     "status": status,
                 })),
-            );
+            ));
         }
     }
 
@@ -716,15 +716,15 @@ pub(super) async fn restore_run_with_pg(
         payload["warning"] = json!(warnings.join("; "));
     }
 
-    (StatusCode::OK, Json(payload))
+    Ok((StatusCode::OK, Json(payload)))
 }
 
 pub async fn restore_run(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pg_pool) = state.pg_pool.clone() else {
-        return pg_unavailable_response();
+        return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     restore_run_with_pg(&state, &run_id, &pg_pool).await
 }

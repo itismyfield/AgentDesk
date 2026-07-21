@@ -36,7 +36,7 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
     let api_port = shared.api_port;
     let provider = shared.settings.read().await.provider.clone();
     let session_key = crate::services::discord::adk_session::build_adk_session_key(
-        &shared, channel_id, &provider,
+        &shared, channel_id, &provider, None,
     )
     .await;
     let channel_name = {

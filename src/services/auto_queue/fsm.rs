@@ -593,6 +593,7 @@ pub(super) fn slot_requires_thread_reset_before_reuse_prefer_pg(
     Err("postgres backend required for auto-queue slot reset".to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn create_activate_dispatch_for_entry_prefer_pg(
     deps: &AutoQueueActivateDeps,
     card_id: &str,
@@ -646,11 +647,10 @@ pub(super) fn create_activate_dispatch_for_entry_prefer_pg(
 pub(crate) async fn activate_with_bridge_pg(
     engine: crate::engine::PolicyEngine,
     body: ActivateBody,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let Some(pg_pool) = engine.pg_pool().cloned() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "postgres pool is not configured"})),
+        return Err(
+            AppError::internal("postgres pool is not configured").with_code(ErrorCode::AutoQueue)
         );
     };
     let deps = AutoQueueActivateDeps {

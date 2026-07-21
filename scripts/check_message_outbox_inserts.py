@@ -10,10 +10,14 @@ from pathlib import Path
 INSERT = re.compile(r"INSERT\s+INTO\s+message_outbox\b", re.IGNORECASE)
 CANONICAL = {
     Path("src/services/message_outbox.rs"),
+    Path("src/services/message_outbox_circuit_authority.rs"),
     Path("src/services/message_outbox_recovery.rs"),
 }
 TEST_FIXTURE_PATH = Path("src/server/mod.rs")
-TEST_ONLY_PATHS = {Path("src/services/message_outbox_recovery_tests.rs")}
+TEST_ONLY_PATHS = {
+    Path("src/services/message_outbox_circuit_authority_tests.rs"),
+    Path("src/services/message_outbox_recovery_tests.rs"),
+}
 TEST_FIXTURE_COLUMNS = (
     "target, content, bot, source, status, retry_count, claimed_at, claim_owner"
 )
