@@ -440,7 +440,7 @@ fn copy_tail(source: &Path, dest: &Path, max_bytes: u64) -> io::Result<()> {
     output.flush()
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct TraceContext<'a> {
     pub(crate) dispatch_id: Option<&'a str>,
     pub(crate) card_id: Option<&'a str>,
@@ -572,7 +572,7 @@ mod rotation_tests {
         let context = super::TraceContext::from_payload(&payload);
 
         assert_eq!(context.dispatch_id, Some("dispatch-4221"));
-        assert_eq!(context.channel_id, Some("channel-4221"));
+        assert_eq!(context.channel_id.as_deref(), Some("channel-4221"));
         assert_eq!(context.turn_id, Some("turn-4221"));
         assert_eq!(context.session_key, Some("session-4221"));
     }
