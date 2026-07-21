@@ -422,6 +422,9 @@ pub(crate) struct TraceContext<'a> {
     pub(crate) card_id: Option<&'a str>,
     pub(crate) agent_id: Option<&'a str>,
     pub(crate) hook_name: Option<&'a str>,
+    pub(crate) channel_id: Option<&'a str>,
+    pub(crate) turn_id: Option<&'a str>,
+    pub(crate) session_key: Option<&'a str>,
 }
 
 impl<'a> TraceContext<'a> {
@@ -439,6 +442,9 @@ impl<'a> TraceContext<'a> {
                 ],
             ),
             hook_name: None,
+            channel_id: find_string(payload, &["channel_id", "discord_channel_id"]),
+            turn_id: find_string(payload, &["turn_id"]),
+            session_key: find_string(payload, &["session_key"]),
         }
     }
 
@@ -470,6 +476,9 @@ impl<'a> TraceContext<'a> {
             card_id = field::debug(self.card_id),
             agent_id = field::debug(self.agent_id),
             hook_name = field::debug(self.hook_name),
+            channel_id = field::debug(self.channel_id),
+            turn_id = field::debug(self.turn_id),
+            session_key = field::debug(self.session_key),
         )
     }
 }
@@ -515,6 +524,35 @@ mod rotation_tests {
         .unwrap();
 
         assert_eq!(redacted, "connection error carried *** into Display");
+    }
+
+    #[test]
+    fn trace_context_extracts_turn_correlation_fields_from_payload() {
+        let payload = serde_json::json!({
+            "dispatch_id": "dispatch-4221",
+            "discord_channel_id": "channel-4221",
+            "turn_id": "turn-4221",
+            "session_key": "session-4221"
+        });
+
+        let context = super::TraceContext::from_payload(&payload);
+
+        assert_eq!(context.dispatch_id, Some("dispatch-4221"));
+        assert_eq!(context.channel_id, Some("channel-4221"));
+        assert_eq!(context.turn_id, Some("turn-4221"));
+        assert_eq!(context.session_key, Some("session-4221"));
+    }
+
+    #[test]
+    fn trace_context_prefers_canonical_channel_id_key() {
+        let payload = serde_json::json!({
+            "channel_id": "canonical-channel",
+            "discord_channel_id": "legacy-channel"
+        });
+
+        let context = super::TraceContext::from_payload(&payload);
+
+        assert_eq!(context.channel_id, Some("canonical-channel"));
     }
 
     #[test]
