@@ -386,17 +386,17 @@ mod tests {
     }
 
     #[test]
-    fn pid_only_without_identity_skips_dispatch_and_preserves_claim() {
+    fn pid_only_without_identity_preserves_fail_open_dispatch() {
         with_seam(|| {
             let token = CancelToken::new();
             token.store_child_pid_without_identity_for_test(42);
 
             let outcome = token.request_cleanup(request(TmuxCleanupIntent::PidOnly));
 
-            assert!(!outcome.pid_killed);
+            assert!(outcome.pid_killed);
             assert!(!outcome.retry_pid_cleanup);
-            assert_eq!(PID_KILL_DISPATCHES.load(Ordering::Relaxed), 0);
-            assert_eq!(token.pid_kill_claim.load(Ordering::Acquire), 0);
+            assert_eq!(PID_KILL_DISPATCHES.load(Ordering::Relaxed), 1);
+            assert_eq!(token.pid_kill_claim.load(Ordering::Acquire), 1);
         });
     }
 
