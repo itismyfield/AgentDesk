@@ -51,10 +51,10 @@
 | `src/services/auto_queue/activate_command.rs` | 1510 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |
 | `src/services/auto_queue/cancel_run.rs` | 1031 | shrink | automation-pipeline | 2027-01-31 | #4711 |  |
 | `src/services/claude.rs` | 2948 | shrink | server-runtime | 2027-01-31 | #4710 |  |
-| `src/services/claude_tui/input.rs` | 2187 | shrink | server-runtime | 2027-01-31 | #4710 |  |
+| `src/services/claude_tui/input.rs` | 2226 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/codex.rs` | 3119 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/codex_tmux_wrapper.rs` | 1405 | shrink | server-runtime | 2027-01-31 | #4710 |  |
-| `src/services/codex_tui/input.rs` | 1670 | shrink | server-runtime | 2027-01-31 | #4710 |  |
+| `src/services/codex_tui/input.rs` | 1788 | shrink | server-runtime | 2027-01-31 | #4710 |  |
 | `src/services/codex_tui/rollout_tail.rs` | 1334 | shrink | discord-relay | 2026-10-31 | #4712 |  |
 | `src/services/discord/catch_up.rs` | 1809 | shrink | discord-relay | 2026-10-31 | #4712 |  |
 | `src/services/discord/commands/text_commands.rs` | 1482 | shrink | discord-relay | 2027-01-31 | #4712 |  |
@@ -70,7 +70,7 @@
 | `src/services/discord/relay_recovery.rs` | 1538 | shrink | discord-relay | 2026-08-31 | #4712 |  |
 | `src/services/discord/router/intake_gate.rs` | 1591 | shrink | discord-relay | 2026-10-31 | #4712 |  |
 | `src/services/discord/router/message_handler/headless_turn.rs` | 1443 | shrink | discord-relay | 2027-01-31 | #4712 |  |
-| `src/services/discord/router/message_handler/intake_turn.rs` | 2696 | shrink | discord-relay | 2026-10-31 | #4712 |  |
+| `src/services/discord/router/message_handler/intake_turn.rs` | 2718 | shrink | discord-relay | 2026-10-31 | #4712 |  |
 | `src/services/discord/session_relay_sink.rs` | 1682 | shrink | discord-relay | 2026-08-31 | #4712 |  |
 | `src/services/discord/tmux.rs` | 1628 | shrink | discord-relay | 2026-10-31 | #4712 |  |
 | `src/services/discord/tmux_watcher.rs` | 3558 | shrink | discord-relay | 2026-10-31 | #4712 |  |
