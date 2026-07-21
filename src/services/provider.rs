@@ -1255,7 +1255,6 @@ impl CancelToken {
         self.cancelled.store(true, Ordering::Release);
     }
 
-
     fn set_cancel_source_kind_transactional(
         &self,
         kind: CancelSource,
