@@ -38,6 +38,11 @@
 - [`known-legacy.md`](known-legacy.md) — code paths that intentionally remain
   legacy, with the cleanup-owner issue number. Touch them only inside the
   scope of the listed issue or for narrow bugfix.
+- [`merge-driver-inventory.md`](merge-driver-inventory.md) — the
+  `regen-inventory` git merge driver that auto-resolves conflicts in the
+  committed generated inventory docs by regenerating from the merged tree
+  (#4724). Includes the one-time `scripts/setup-merge-drivers.sh` step every
+  developer must run.
 - [`multinode-transition.md`](multinode-transition.md) — transition map for
   moving AgentDesk from one dcserver node to leader/worker execution, including
   single-node assumptions, side-effect ownership, invariants, and #876-#884
