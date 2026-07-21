@@ -72,7 +72,6 @@ const VOICE_TRANSCRIPT_ANNOUNCEMENT_META_GC_STARTUP_STAGGER: Duration = Duration
 /// connection on the same tick.
 const VOICE_BACKGROUND_HANDOFF_META_GC_STARTUP_STAGGER: Duration = Duration::from_secs(75);
 
-
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MaintenanceSchedule {
     every: Duration,
@@ -985,7 +984,6 @@ mod registry_membership_tests {
              leader-only maintenance scheduler (#3909)"
         );
     }
-
 
     #[test]
     fn voice_turn_link_gc_schedule_is_hourly() {

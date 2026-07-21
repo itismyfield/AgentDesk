@@ -119,7 +119,8 @@ impl MaintenanceJob for StorageWorktreeOrphanSweepJob {
     fn run<'a>(&'a self, pool: &'a PgPool) -> MaintenanceFuture<'a> {
         Box::pin(async move {
             crate::services::maintenance::jobs::worktree_orphan_sweep::run(
-                crate::services::maintenance::jobs::worktree_orphan_sweep::Config::default_runtime(),
+                crate::services::maintenance::jobs::worktree_orphan_sweep::Config::default_runtime(
+                ),
                 Some(pool.clone()),
             )
             .await
@@ -239,7 +240,8 @@ impl MaintenanceJob for MemoryMementoConsolidationJob {
         Box::pin(async move {
             let _ = pool;
             crate::services::maintenance::jobs::memento_consolidation::run(
-                crate::services::maintenance::jobs::memento_consolidation::Config::default_runtime(),
+                crate::services::maintenance::jobs::memento_consolidation::Config::default_runtime(
+                ),
             )
             .await
         })
@@ -255,7 +257,8 @@ mod tests {
         // #3909 — 30-minute cadence, 35s startup stagger (clear of the other
         // voice GC jobs at 25/60/75s).
         let job = ProgressTtsCacheSweepJob {
-            config: crate::services::maintenance::jobs::voice_cache_sweep::Config::default_runtime(),
+            config: crate::services::maintenance::jobs::voice_cache_sweep::Config::default_runtime(
+            ),
         };
         assert_eq!(job.schedule().every_ms(), 30 * 60 * 1_000);
         assert_eq!(job.schedule().startup_stagger_ms(), 35 * 1_000);

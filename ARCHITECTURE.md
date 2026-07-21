@@ -202,6 +202,9 @@ src/
 │   │   ├── kanban.rs
 │   │   ├── mod.rs
 │   │   └── settings.rs
+│   ├── maintenance/
+│   │   ├── mod.rs
+│   │   └── storage_jobs.rs
 │   ├── routes/
 │   │   ├── dispatches/
 │   │   │   ├── crud.rs
@@ -310,7 +313,6 @@ src/
 │   ├── cluster_session_routing.rs
 │   ├── cron_catalog.rs
 │   ├── issue_specs.rs
-│   ├── maintenance.rs
 │   ├── mod.rs
 │   ├── multinode_regression.rs
 │   ├── outbox_actionable_delivery.rs
