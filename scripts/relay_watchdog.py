@@ -56,6 +56,7 @@ import shutil
 import stat as stat_mode
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -1449,6 +1450,17 @@ class WatcherStateProbe:
     bound_session_id: str | None = None
 
 
+def canonical_session_uuid(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError):
+        return None
+    canonical = str(parsed)
+    return canonical if value == canonical else None
+
+
 def parse_watcher_state_probe(
     status: int | None, payload: object
 ) -> WatcherStateProbe:
@@ -1465,11 +1477,7 @@ def parse_watcher_state_probe(
     attached = attached_raw if isinstance(attached_raw, bool) else None
     desynced = desynced_raw if isinstance(desynced_raw, bool) else None
     bound = bound_output_path if isinstance(bound_output_path, str) else None
-    bound_session_id = (
-        bound_session_id_raw
-        if isinstance(bound_session_id_raw, str) and bound_session_id_raw
-        else None
-    )
+    bound_session_id = canonical_session_uuid(bound_session_id_raw)
 
     has_activity_schema = (
         "relay_stall_state" in payload or "relay_health" in payload
@@ -3647,9 +3655,15 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         None,
     )
     selected_probe = rt.watcher_state(cid) if selected_path else WatcherStateProbe(None)
+    selected_session_id = (
+        canonical_session_uuid(selected.path.stem) if selected is not None else None
+    )
     successor_binding_proven = selected_probe.status == 200 and (
         selected_probe.bound_output_path == selected_path
-        or selected_probe.bound_session_id == selected.path.stem
+        or (
+            selected_session_id is not None
+            and selected_probe.bound_session_id == selected_session_id
+        )
     )
     superseded_gap_owners: list[str] = []
     if (
