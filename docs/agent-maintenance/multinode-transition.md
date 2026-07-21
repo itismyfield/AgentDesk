@@ -12,6 +12,8 @@
 >
 > Last refreshed: 2026-07-11 (manual: scheduled-message leader worker ownership and touch gate).
 >
+> Last refreshed: 2026-07-21 (#4515 — worker-local restart budgets and the node-local fatal-exit ledger do not change worker ownership. The ledger serializes in-process read-modify-write operations and atomically replaces a node-local runtime-root file; it is deliberately not cluster-shared authority. Leader-only workers and PostgreSQL lease assumptions remain unchanged.)
+>
 > PR #3456 made the `src/server/worker_registry.rs` worker-lifecycle log fields
 > consistent: every started / stopped / future-exited / self-fenced /
 > supervisor-shutdown tracing event now emits the same structured spec fields

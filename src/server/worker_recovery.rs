@@ -1,5 +1,7 @@
 use std::collections::{HashMap, VecDeque};
+use std::fs::{File, OpenOptions};
 use std::future::Future;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -33,6 +35,7 @@ const FATAL_EXIT_LEDGER_FILE: &str = "worker_fatal_exits.json";
 static WORKER_RESTART_BUDGET_EXHAUSTED_COUNT: AtomicUsize = AtomicUsize::new(0);
 static WORKER_RECOVERY_STATES: LazyLock<Mutex<HashMap<&'static str, WorkerRecoveryState>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static FATAL_LEDGER_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum WorkerLocalTerminalReason {
@@ -482,7 +485,11 @@ fn commit_fatal_exit(record: &FatalExhaustionRecord, shutdown: &Arc<AtomicBool>)
     }
 
     // #9.4: the fatal path cannot rely on registry-drop to set the shutdown
-    // flag, so set it here before granting the grace window.
+    // flag, so set it here before granting the grace window. This short grace
+    // may truncate an in-flight dispatch outbox delivery. The row remains
+    // claimed in PostgreSQL and is reclaimed after 300 seconds; delivery uses
+    // its stable reservation/identity, so the crash window can cause a bounded
+    // duplicate retry but cannot silently lose the durable outbox row.
     shutdown.store(true, Ordering::Release);
     tracing::error!(
         worker = record.worker,
@@ -519,17 +526,28 @@ fn record_and_check_cross_process_fatal_at(
     worker: &str,
     now_ms: i64,
 ) -> CrossProcessDecision {
+    let _guard = FATAL_LEDGER_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let window_ms = FATAL_CROSS_PROCESS_WINDOW.as_millis() as i64;
     let mut entries = load_fatal_ledger(path);
-    entries.retain(|entry| now_ms.saturating_sub(entry.observed_unix_ms) < window_ms);
+    // A future entry indicates backward wall-clock skew. Ignore it rather than
+    // extending a stale crash-loop hold until the clock catches up.
+    entries.retain(|entry| {
+        entry.observed_unix_ms <= now_ms
+            && now_ms.saturating_sub(entry.observed_unix_ms) < window_ms
+    });
 
     let recent_fatal_exits = entries
         .iter()
         .filter(|entry| entry.worker == worker)
         .count();
     if recent_fatal_exits >= FATAL_CROSS_PROCESS_MAX {
-        // Do not append: this exit is being suppressed, not performed.
-        save_fatal_ledger(path, &entries);
+        // Do not append: this exit is being suppressed, not performed. Failure
+        // to compact the ledger is safe because the decision already holds.
+        if let Err(error) = save_fatal_ledger(path, &entries) {
+            log_fatal_ledger_save_error(path, &error);
+        }
         return CrossProcessDecision::HoldWithoutExit { recent_fatal_exits };
     }
 
@@ -537,14 +555,20 @@ fn record_and_check_cross_process_fatal_at(
         worker: worker.to_string(),
         observed_unix_ms: now_ms,
     });
-    save_fatal_ledger(path, &entries);
+    if let Err(error) = save_fatal_ledger(path, &entries) {
+        log_fatal_ledger_save_error(path, &error);
+        // Exiting without a durable record lets every fresh process repeat the
+        // same exit forever. Fail closed toward the existing Unhealthy(503)
+        // state whenever the cross-process guard cannot persist its evidence.
+        return CrossProcessDecision::HoldWithoutExit { recent_fatal_exits };
+    }
     CrossProcessDecision::Exit
 }
 
 fn load_fatal_ledger(path: &Path) -> Vec<FatalExitLedgerEntry> {
     match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(error) => {
             tracing::warn!(
                 path = %path.display(),
@@ -556,31 +580,48 @@ fn load_fatal_ledger(path: &Path) -> Vec<FatalExitLedgerEntry> {
     }
 }
 
-fn save_fatal_ledger(path: &Path, entries: &[FatalExitLedgerEntry]) {
-    let serialized = match serde_json::to_vec_pretty(entries) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            tracing::warn!(%error, "failed to serialize worker fatal-exit ledger");
-            return;
-        }
-    };
-    if let Some(parent) = path.parent()
-        && let Err(error) = std::fs::create_dir_all(parent)
-    {
-        tracing::warn!(
-            path = %parent.display(),
-            %error,
-            "failed to create worker fatal-exit ledger directory"
-        );
-        return;
+fn fatal_ledger_temp_path(path: &Path) -> io::Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "ledger path has no file name")
+        })?;
+    Ok(path.with_file_name(format!(".{file_name}.tmp")))
+}
+
+fn save_fatal_ledger(path: &Path, entries: &[FatalExitLedgerEntry]) -> io::Result<()> {
+    let serialized = serde_json::to_vec_pretty(entries).map_err(io::Error::other)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ledger path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+
+    let temp_path = fatal_ledger_temp_path(path)?;
+    let write_result = (|| -> io::Result<()> {
+        let mut temp = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temp_path)?;
+        temp.write_all(&serialized)?;
+        temp.sync_all()?;
+        std::fs::rename(&temp_path, path)?;
+        File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
     }
-    if let Err(error) = std::fs::write(path, serialized) {
-        tracing::warn!(
-            path = %path.display(),
-            %error,
-            "failed to write worker fatal-exit ledger"
-        );
-    }
+    write_result
+}
+
+fn log_fatal_ledger_save_error(path: &Path, error: &io::Error) {
+    tracing::warn!(
+        path = %path.display(),
+        %error,
+        "failed to atomically persist worker fatal-exit ledger"
+    );
 }
 
 #[cfg(test)]
@@ -1053,6 +1094,67 @@ mod tests {
             CrossProcessDecision::HoldWithoutExit {
                 recent_fatal_exits: 2
             }
+        );
+    }
+
+    #[test]
+    fn cross_process_guard_holds_when_ledger_persistence_fails() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let blocking_parent = dir.path().join("not-a-directory");
+        std::fs::write(&blocking_parent, b"file").expect("blocking parent file");
+        let path = blocking_parent.join(FATAL_EXIT_LEDGER_FILE);
+
+        assert_eq!(
+            record_and_check_cross_process_fatal_at(&path, "dispatch_outbox", 1_000),
+            CrossProcessDecision::HoldWithoutExit {
+                recent_fatal_exits: 0
+            }
+        );
+    }
+
+    #[test]
+    fn fatal_ledger_atomic_write_preserves_target_when_temp_write_fails() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(FATAL_EXIT_LEDGER_FILE);
+        let original = vec![FatalExitLedgerEntry {
+            worker: "original".to_string(),
+            observed_unix_ms: 1_000,
+        }];
+        std::fs::write(&path, serde_json::to_vec_pretty(&original).unwrap()).expect("seed ledger");
+        let temp_path = fatal_ledger_temp_path(&path).expect("temp path");
+        std::fs::create_dir(&temp_path).expect("block temp-file creation");
+
+        let replacement = vec![FatalExitLedgerEntry {
+            worker: "replacement".to_string(),
+            observed_unix_ms: 2_000,
+        }];
+        assert!(save_fatal_ledger(&path, &replacement).is_err());
+        let persisted: Vec<FatalExitLedgerEntry> =
+            serde_json::from_slice(&std::fs::read(&path).expect("read ledger"))
+                .expect("valid original ledger");
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].worker, "original");
+    }
+
+    #[test]
+    fn cross_process_guard_ignores_future_entries_after_backward_clock_skew() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(FATAL_EXIT_LEDGER_FILE);
+        let entries = vec![
+            FatalExitLedgerEntry {
+                worker: "session_discovery".to_string(),
+                observed_unix_ms: 10_000,
+            },
+            FatalExitLedgerEntry {
+                worker: "session_discovery".to_string(),
+                observed_unix_ms: 11_000,
+            },
+        ];
+        save_fatal_ledger(&path, &entries).expect("seed future ledger");
+
+        assert_eq!(
+            record_and_check_cross_process_fatal_at(&path, "session_discovery", 1_000),
+            CrossProcessDecision::Exit
         );
     }
 

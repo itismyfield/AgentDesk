@@ -328,7 +328,7 @@
 | `server::state` | `src/server/state.rs` | 11 | 11 | 0 |  |
 | `server::task_dispatch_claims` | `src/server/task_dispatch_claims.rs` | 1039 | 359 | 680 |  |
 | `server::test_phase_runs` | `src/server/test_phase_runs.rs` | 426 | 400 | 26 |  |
-| `server::worker_recovery` | `src/server/worker_recovery.rs` | 1090 | 585 | 505 |  |
+| `server::worker_recovery` | `src/server/worker_recovery.rs` | 1192 | 626 | 566 |  |
 | `server::worker_registry` | `src/server/worker_registry.rs` | 1334 | 1242 | 92 | giant-file |
 | `server::ws` | `src/server/ws.rs` | 140 | 140 | 0 |  |
 | `services` | `src/services/mod.rs` | 149 | 149 | 0 |  |
