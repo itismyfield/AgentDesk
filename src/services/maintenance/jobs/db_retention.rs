@@ -12,7 +12,7 @@
 //! | `turn_lifecycle_events`                 | 30 days   | DELETE (on `created_at`)          |
 //! | `skill_usage`                           | 90 days   | DELETE (on `used_at`)             |
 //! | `turns`                                 | 90 days   | Archive-table copy, then DELETE   |
-//! | `scheduled_message_context_snapshots`   | 30 days   | DELETE (unreferenced by any def)  |
+//! | `scheduled_message_context_snapshots`   | 30 days   | DELETE (all refs terminal + aged) |
 //!
 //! `kanban_cards` is explicitly **not** touched — done cards are permanent
 //! history. See `docs/source-of-truth.md` §retention for the policy rationale.
@@ -88,9 +88,10 @@ const DISPATCH_RETENTION_DAYS: i32 = 90;
 const TURN_LIFECYCLE_RETENTION_DAYS: i32 = 30; // pure operational telemetry, highest volume (multi-row/turn)
 const SKILL_USAGE_RETENTION_DAYS: i32 = 90; // dashboard analytics (used_at DESC fast-path)
 const TURNS_RETENTION_DAYS: i32 = 90; // token/cost analytics → archive before delete
-// #4658 — immutable scheduled-message context snapshots. Deleted only once no
-// active (non-terminal) definition still references them AND they are older than
-// this window, so a live recurring reservation's snapshot is never reclaimed.
+// #4658/#4723 — immutable scheduled-message context snapshots. Reclaimed once
+// every referencing definition is terminal AND older than this window (the FK
+// pointer is nulled with provenance kept, then the snapshot is deleted), so a
+// live recurring reservation's snapshot is never reclaimed.
 const CONTEXT_SNAPSHOT_RETENTION_DAYS: i32 = 30;
 
 /// Run the full retention pass. Returns a per-table report. When
@@ -117,7 +118,7 @@ pub async fn db_retention_job(pool: &PgPool, dry_run: bool) -> Result<RetentionR
     retain_skill_usage(pool, dry_run, &mut report).await?;
     // 8. turns (archive-then-delete on finished_at). #3865
     retain_turns(pool, dry_run, &mut report).await?;
-    // 9. scheduled_message_context_snapshots (unreferenced, aged out). #4658
+    // 9. scheduled_message_context_snapshots (all refs terminal + aged). #4658/#4723
     retain_context_snapshots(pool, dry_run, &mut report).await?;
 
     tracing::info!(
@@ -598,33 +599,47 @@ async fn retain_turns(pool: &PgPool, dry_run: bool, report: &mut RetentionReport
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// 9. scheduled_message_context_snapshots: delete rows older than 30 days that
-// NO definition still references. #4658
+// 9. scheduled_message_context_snapshots: reclaim a snapshot once EVERY
+// definition referencing it is terminal AND aged past the 30-day window. #4658,
+// real reclaim landed in #4723.
 //
-// The `fk_smsg_context_snapshot` foreign key pins a snapshot for as long as any
-// definition (active OR terminal) references it, so retention must only reclaim
-// fully-unreferenced rows — deleting a still-referenced snapshot would violate
-// the FK. This makes AC-9 ("retention never deletes an active repeating
-// definition's snapshot") structural: an active definition is a reference, so it
-// is never a delete candidate.
+// FK / lifecycle trace. `fk_smsg_context_snapshot` runs
+// scheduled_messages.context_snapshot_id (child) → …_snapshots.id (parent), so a
+// snapshot (parent) cannot be deleted while ANY definition (child) references it.
+// Nothing hard-deletes a `scheduled_messages` row — cancel only flips
+// status='canceled' — so a terminal definition keeps its snapshot FK-pinned
+// forever, and #4658's pure-unreferenced predicate almost never fired
+// (rendered_context, ≤32KB/row, leaked indefinitely). Definition lifecycle:
+// active = status IN ('scheduled','firing'); terminal = status IN
+// ('sent','failed','canceled','expired'); every terminal transition bumps
+// updated_at (see db/scheduled_messages.rs), so updated_at is a sound proxy for
+// "became terminal at". A recurring reservation re-arms back to 'scheduled'
+// between fires, so an active repeating definition is never terminal.
 //
-// KNOWN LIMITATION (#4658 F3, follow-up #4723): in the current
-// system nothing ever deletes a `scheduled_messages` row — cancel sets
-// status='canceled' but keeps the row, and capture is same-transaction as the
-// definition insert (so orphaned snapshots are never produced). A snapshot
-// therefore stays referenced for the definition's entire lifetime, and this
-// policy in practice only reclaims rows a FUTURE definition-hard-delete path
-// would orphan. Consequence: each terminal snapshot definition retains its
-// rendered_context (≤32KB/row) indefinitely. This is BOUNDED (one small row per
-// snapshot definition ever created) and FK-safe, deliberately preferred over a
-// history-mutating reclaim (nulling context_snapshot_id / flipping a terminal
-// definition to 'fresh') which would need its own design review. A real reclaim
-// trigger (terminal-definition lifecycle cleanup) is deferred to the follow-up.
+// FK-safe reclaim (chosen over the two deferred options — see #4723). For a
+// snapshot whose every referencing definition is terminal AND aged, null the FK
+// pointer on those terminal definitions (0098 adds context_snapshot_reclaimed_at
+// and relaxes chk_smsg_snapshot_required to admit a 'snapshot' row with a NULL
+// id once reclaimed), then delete the now-unreferenced snapshot. This keeps the
+// "was snapshot strategy" provenance (context_strategy stays 'snapshot',
+// reclaimed_at records the retention event) — resolving Option 2's objection —
+// while staying FK-safe. AC-9 is structural: an active/pending definition is not
+// terminal, so its snapshot is never eligible and is never pruned.
+//
+// Eligibility predicate (evaluated on the snapshot row `s`): aged past the
+// window AND no referencing definition is anything OTHER than terminal+aged.
+// Genuinely-unreferenced aged snapshots (the #4658 case) satisfy it trivially
+// via the empty NOT EXISTS, so this strictly supersedes the old predicate. `$1`
+// (retention days) is referenced twice — Postgres reuses the single bind.
 // ─────────────────────────────────────────────────────────────────────────
-const CONTEXT_SNAPSHOT_UNREFERENCED_PREDICATE: &str = "created_at < NOW() - ($1::INT || ' days')::INTERVAL \
+const CONTEXT_SNAPSHOT_RECLAIMABLE_PREDICATE: &str = "created_at < NOW() - ($1::INT || ' days')::INTERVAL \
        AND NOT EXISTS ( \
            SELECT 1 FROM scheduled_messages m \
            WHERE m.context_snapshot_id = scheduled_message_context_snapshots.id \
+             AND NOT ( \
+                 m.status IN ('sent', 'failed', 'canceled', 'expired') \
+                 AND m.updated_at < NOW() - ($1::INT || ' days')::INTERVAL \
+             ) \
        )";
 
 async fn retain_context_snapshots(
@@ -635,7 +650,7 @@ async fn retain_context_snapshots(
     if dry_run {
         let would = sqlx::query(&format!(
             "SELECT COUNT(*)::BIGINT AS n FROM scheduled_message_context_snapshots \
-             WHERE {CONTEXT_SNAPSHOT_UNREFERENCED_PREDICATE}"
+             WHERE {CONTEXT_SNAPSHOT_RECLAIMABLE_PREDICATE}"
         ))
         .bind(CONTEXT_SNAPSHOT_RETENTION_DAYS)
         .fetch_one(pool)
@@ -649,18 +664,43 @@ async fn retain_context_snapshots(
         return Ok(());
     }
 
-    let del = sqlx::query(&format!(
-        "DELETE FROM scheduled_message_context_snapshots \
-         WHERE {CONTEXT_SNAPSHOT_UNREFERENCED_PREDICATE}"
+    // Atomic two-step so the DELETE never races a definition transitioning back
+    // to active between the null and the prune: (1) null the FK pointer on the
+    // terminal+aged definitions of every reclaimable snapshot, preserving
+    // provenance; (2) delete the snapshots, now unreferenced.
+    let mut tx = pool.begin().await?;
+
+    let unref = sqlx::query(&format!(
+        "UPDATE scheduled_messages \
+         SET context_snapshot_id = NULL, context_snapshot_reclaimed_at = NOW() \
+         WHERE context_snapshot_id IN ( \
+             SELECT id FROM scheduled_message_context_snapshots \
+             WHERE {CONTEXT_SNAPSHOT_RECLAIMABLE_PREDICATE} \
+         )"
     ))
     .bind(CONTEXT_SNAPSHOT_RETENTION_DAYS)
-    .execute(pool)
+    .execute(&mut *tx)
+    .await?;
+    report.push(TableReport {
+        table_name: "scheduled_messages",
+        action: "reclaim_snapshot_ref",
+        rows_affected: unref.rows_affected() as i64,
+    });
+
+    let del = sqlx::query(&format!(
+        "DELETE FROM scheduled_message_context_snapshots \
+         WHERE {CONTEXT_SNAPSHOT_RECLAIMABLE_PREDICATE}"
+    ))
+    .bind(CONTEXT_SNAPSHOT_RETENTION_DAYS)
+    .execute(&mut *tx)
     .await?;
     report.push(TableReport {
         table_name: "scheduled_message_context_snapshots",
         action: "delete",
         rows_affected: del.rows_affected() as i64,
     });
+
+    tx.commit().await?;
     Ok(())
 }
 
@@ -1113,6 +1153,129 @@ mod tests {
             .await,
             0,
             "once no definition references it and it has aged, the snapshot is reclaimed"
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// #4723 real reclaim: a snapshot whose every referencing definition is
+    /// terminal AND aged is reclaimed (FK pointer nulled with provenance kept,
+    /// then snapshot deleted); a snapshot still referenced by an active/pending
+    /// definition (AC-9) or by a terminal-but-not-yet-aged definition survives.
+    /// The active-definition survival is the mutation guard: dropping the
+    /// terminal+aged eligibility from `CONTEXT_SNAPSHOT_RECLAIMABLE_PREDICATE`
+    /// would delete `smcs_active`'s snapshot and fail this test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn db_retention_context_snapshot_terminal_reclaim() {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_db_retention_4723_reclaim",
+            "db_retention #4723 terminal-definition snapshot reclaim",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+
+        let hex64 = "0".repeat(64);
+        // Three aged snapshots (created 40 days ago), one per referencing case.
+        for id in ["smcs_term_aged", "smcs_term_fresh", "smcs_active"] {
+            sqlx::query(
+                "INSERT INTO scheduled_message_context_snapshots
+                    (id, source_channel_id, transcript_frontier, rendered_context,
+                     pair_count, content_digest, created_at)
+                 VALUES ($1, '1', 0, 'ctx', 1, $2, NOW() - INTERVAL '40 days')",
+            )
+            .bind(id)
+            .bind(&hex64)
+            .execute(&pool)
+            .await
+            .expect("seed aged snapshot");
+        }
+
+        // (a) terminal + aged definition: updated_at 40 days ago → reclaimable.
+        // (b) terminal but freshly transitioned: updated_at now → NOT aged, keep.
+        // (c) active (pending) definition: never terminal → keep (AC-9).
+        // push delivery avoids the agents FK; the guard keys on status + updated_at.
+        for (def_id, snap_id, status, updated) in [
+            (
+                "smsg_term_aged",
+                "smcs_term_aged",
+                "canceled",
+                "NOW() - INTERVAL '40 days'",
+            ),
+            ("smsg_term_fresh", "smcs_term_fresh", "sent", "NOW()"),
+            ("smsg_active", "smcs_active", "scheduled", "NOW()"),
+        ] {
+            sqlx::query(&format!(
+                "INSERT INTO scheduled_messages
+                    (id, content, target_channel_id, delivery_kind, scheduled_at,
+                     status, context_strategy, context_snapshot_id, updated_at)
+                 VALUES ($1, 'c', '1', 'push', NOW(), $2, 'snapshot', $3, {updated})"
+            ))
+            .bind(def_id)
+            .bind(status)
+            .bind(snap_id)
+            .execute(&pool)
+            .await
+            .expect("seed referencing definition");
+        }
+
+        db_retention_job(&pool, false)
+            .await
+            .expect("retention pass");
+
+        // (a) reclaimed: snapshot gone, definition kept with provenance.
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*)::BIGINT AS n FROM scheduled_message_context_snapshots WHERE id = 'smcs_term_aged'"
+            )
+            .await,
+            0,
+            "snapshot whose every referencing definition is terminal + aged must be reclaimed"
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*)::BIGINT AS n FROM scheduled_messages \
+                 WHERE id = 'smsg_term_aged' AND context_strategy = 'snapshot' \
+                   AND context_snapshot_id IS NULL \
+                   AND context_snapshot_reclaimed_at IS NOT NULL"
+            )
+            .await,
+            1,
+            "reclaim must keep the definition row, null the FK, preserve 'snapshot' strategy, and stamp reclaimed_at"
+        );
+
+        // (b) terminal but not yet aged: snapshot survives, FK intact.
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*)::BIGINT AS n FROM scheduled_message_context_snapshots WHERE id = 'smcs_term_fresh'"
+            )
+            .await,
+            1,
+            "terminal-but-not-yet-aged definition still pins its snapshot"
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*)::BIGINT AS n FROM scheduled_messages \
+                 WHERE id = 'smsg_term_fresh' AND context_snapshot_id = 'smcs_term_fresh'"
+            )
+            .await,
+            1,
+            "not-yet-aged terminal definition keeps its FK reference"
+        );
+
+        // (c) MUTATION GUARD: active/pending definition's snapshot must survive.
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*)::BIGINT AS n FROM scheduled_message_context_snapshots WHERE id = 'smcs_active'"
+            )
+            .await,
+            1,
+            "snapshot referenced by an active/pending definition must never be reclaimed (AC-9)"
         );
 
         pool.close().await;

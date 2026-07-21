@@ -500,6 +500,11 @@
       "path": "migrations/postgres/0097_scheduled_message_context_snapshots.sql",
       "sha256": "82e4369c92f9ae2de8cc96c252851ec1c36997b5264b531c867c4b2f29c2c070",
       "version": 97
+    },
+    {
+      "path": "migrations/postgres/0098_scheduled_message_snapshot_reclaim.sql",
+      "sha256": "829c6f0de6500553a86402389ef325e998dae7348a5a7d6e1a60efa80c88161c",
+      "version": 98
     }
   ],
   "version": 1
