@@ -1368,7 +1368,7 @@ pub(super) async fn handle_text_message(
     // never reacted the user message). A redundant remove is a no-op, so this
     // composes safely with the entrypoint drains.
     if queued_placeholder_handoff.is_some() && !turn_kind.is_background_trigger() {
-        for emoji in super::super::super::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS {
+        for emoji in crate::services::discord::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS {
             queue_marker::note_removed_current(
                 shared,
                 http,
@@ -1951,16 +1951,31 @@ pub(super) async fn handle_text_message(
     let watcher_tmux_name = inflight_tmux_name.clone();
     let watcher_output_path = inflight_output_path.clone();
     #[cfg(unix)]
-    #[rustfmt::skip]
-    if let Some(result) = steering_hook::maybe_handle_intake_steering(steering_hook::IntakeSteeringContext {
-        http, shared, token, channel_id, user_msg_id, placeholder_msg_id, provider: &provider,
-        provider_label, tmux_session_name: tmux_session_name.as_deref(), current_path: &current_path,
-        session_id: session_id.as_deref(), user_text, cancel_token: &cancel_token,
-        intake_latency: &intake_latency, foreground: matches!(turn_kind, TurnKind::Foreground),
-        local: remote_profile.is_none(), wait_for_completion,
-        has_dispatch: dispatch_id.is_some() || dispatch_id_for_thread.is_some(), is_voice_announcement,
-        has_pending_uploads: !pending_uploads.is_empty(),
-    }).await {
+    if let Some(result) =
+        steering_hook::maybe_handle_intake_steering(steering_hook::IntakeSteeringContext {
+            http,
+            shared,
+            token,
+            channel_id,
+            user_msg_id,
+            placeholder_msg_id,
+            provider: &provider,
+            provider_label,
+            tmux_session_name: tmux_session_name.as_deref(),
+            current_path: &current_path,
+            session_id: session_id.as_deref(),
+            user_text,
+            cancel_token: &cancel_token,
+            intake_latency: &intake_latency,
+            foreground: matches!(turn_kind, TurnKind::Foreground),
+            local: remote_profile.is_none(),
+            wait_for_completion,
+            has_dispatch: dispatch_id.is_some() || dispatch_id_for_thread.is_some(),
+            is_voice_announcement,
+            has_pending_uploads: !pending_uploads.is_empty(),
+        })
+        .await
+    {
         return result;
     }
     #[cfg(unix)]
@@ -2968,7 +2983,7 @@ mod queue_pending_reaction_clear_tests {
 
     #[test]
     fn clears_every_queue_marker_reaction() {
-        let emojis = super::super::super::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS;
+        let emojis = crate::services::discord::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS;
         assert!(
             emojis.contains(&'📬'),
             "standalone queue-head 📬 must be cleared on dequeue"
@@ -2993,7 +3008,7 @@ mod queue_pending_reaction_clear_tests {
     /// emoji the dequeue path will not later remove.
     #[test]
     fn cleared_set_covers_every_intake_gate_queue_reaction() {
-        let cleared = super::super::super::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS;
+        let cleared = crate::services::discord::queue_reactions::QUEUE_PENDING_REACTION_EMOJIS;
         for merged in [false, true] {
             let added = crate::services::discord::router::intake_gate::queue_pending_reaction_for(
                 crate::services::discord::MailboxEnqueueOutcome {
