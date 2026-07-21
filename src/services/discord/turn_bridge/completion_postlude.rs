@@ -426,6 +426,33 @@ pub(super) async fn run_completion_postlude(
         push_transcript_event(&mut transcript_events, reminder_transcript_event(reminder));
         recall_feedback_analysis = Some(analyze_recall_feedback_turn(&transcript_events));
     }
+    // #4196: if this turn ends with uncommitted changes in its worktree, stash a
+    // WIP warning (provider-scoped key) so the NEXT turn's intake takes it and
+    // injects it into the model context (turn N+1). Reuses the #3792 detector via
+    // `turn_end_wip_warning_text` — no re-implementation of git status parsing.
+    // Gated on channel ownership (mirrors the feedback stash) so a scheduled or
+    // isolated snapshot turn never nudges the interactive session. A clean
+    // worktree yields `None` here, so nothing is stashed and turn N+1 is
+    // byte-for-byte unchanged. A stash failure only loses the next-turn nudge
+    // (the channel-post backstop still fires), so warn+skip.
+    if !isolated_from_channel
+        && let Some(wip_warning) =
+            super::super::turn_end_wip_warning::turn_end_wip_warning_text(Some(&inflight_state))
+        && let Err(error) = super::recovery_text::store_turn_end_wip_warning(
+            shared_owned.pg_pool.as_ref(),
+            &provider,
+            channel_id.get(),
+            &wip_warning,
+        )
+    {
+        tracing::warn!(
+            channel_id = channel_id.get(),
+            turn_id = turn_id.as_str(),
+            provider = provider.as_str(),
+            error = %error,
+            "failed to stash turn-end WIP warning for next-turn injection"
+        );
+    }
     let model_token_usage = TurnTokenUsage {
         input_tokens: accumulated_input_tokens,
         cache_create_tokens: accumulated_cache_create_tokens,

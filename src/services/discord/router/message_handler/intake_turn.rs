@@ -1576,6 +1576,11 @@ pub(super) async fn handle_text_message(
     // into `reply_context`; the owned reminder is kept for the refusal put-back.
     let (feedback_reminder, reply_context) =
         take_and_merge_feedback_reminder(shared, &provider, channel_id, reply_context);
+    // #4196: fold the turn-end WIP warning stashed last turn into `reply_context`
+    // so the agent is reminded to commit/stash its uncommitted changes; the owned
+    // warning is kept for the refusal put-back (same lifecycle as the reminder).
+    let (wip_warning, reply_context) =
+        take_and_merge_wip_warning(shared, &provider, channel_id, reply_context);
 
     // #3813 Phase 1a: the intake placeholder POST returned a live id.
     intake_latency.mark_placeholder_posted();
@@ -2192,6 +2197,7 @@ pub(super) async fn handle_text_message(
                 placeholder_msg_id,
                 session_retry_context.as_ref(),
                 feedback_reminder.as_deref(),
+                wip_warning.as_deref(),
                 enqueue_outcome.refusal_reason,
             )
             .await;
