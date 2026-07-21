@@ -23,7 +23,7 @@ pub(super) fn enforce_watchdog_deadline(token: &CancelToken, now_ms: i64) -> boo
 
 /// Poll one cancellation boundary. The token remains the sole owner of its target.
 pub(crate) fn poll_cancel_watchdog(token: &CancelToken, label: &'static str, now_ms: i64) -> bool {
-    enforce_watchdog_deadline(token, now_ms);
+    let deadline_enforced = enforce_watchdog_deadline(token, now_ms);
     if token.is_completion_cleanup() {
         tracing::debug!(
             provider_cancel_watchdog = label,
@@ -38,7 +38,12 @@ pub(crate) fn poll_cancel_watchdog(token: &CancelToken, label: &'static str, now
     }
 
     let cleanup_outcome = token.request_cleanup(CleanupRequest {
-        cancel_source: "watchdog_timeout".to_string(),
+        cancel_source: if deadline_enforced {
+            "watchdog_timeout"
+        } else {
+            "provider_cancel_dispatch"
+        }
+        .to_string(),
         intent: TmuxCleanupIntent::PidOnly,
         termination_reason: None,
         hard_stop_target: None,
@@ -149,10 +154,28 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_does_not_replace_existing_specific_cancel_source() {
+    fn external_cancel_before_deadline_does_not_become_watchdog_timeout() {
         with_executor_dispatch_seam(|| {
             let token = CancelToken::new();
             token.store_child_pid(4713);
+            token.watchdog_deadline_ms.store(200, Ordering::Relaxed);
+            token.cancelled.store(true, Ordering::Relaxed);
+
+            assert!(poll_cancel_watchdog(&token, "test-watchdog", 100));
+            assert_eq!(pid_kill_dispatches_for_test(), 1);
+            assert_eq!(
+                token.cancel_source().as_deref(),
+                Some("provider_cancel_dispatch")
+            );
+            assert_eq!(token.cancel_source_kind(), Some(CancelSource::Other));
+        });
+    }
+
+    #[test]
+    fn cleanup_does_not_replace_existing_specific_cancel_source() {
+        with_executor_dispatch_seam(|| {
+            let token = CancelToken::new();
+            token.store_child_pid(4714);
             token.set_cancel_source("voice_barge_in_explicit_stop");
             token.cancelled.store(true, Ordering::Relaxed);
 
