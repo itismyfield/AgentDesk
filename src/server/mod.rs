@@ -12,6 +12,7 @@ pub mod routes;
 mod startup_preflight;
 pub(crate) mod task_dispatch_claims;
 pub(crate) mod test_phase_runs;
+mod worker_recovery;
 mod worker_registry;
 pub mod ws;
 

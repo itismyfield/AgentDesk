@@ -1375,6 +1375,7 @@ def collect_workers() -> list[WorkerEntry]:
     restart_labels = {
         "SkipWhenDisabled": "skip_when_disabled",
         "LoopOwned": "loop_owned",
+        "RestartableWithBudget": "restartable_with_budget",
         "ManualProcessRestart": "manual_process_restart",
     }
     shutdown_labels = {

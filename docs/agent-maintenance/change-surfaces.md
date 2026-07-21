@@ -1761,8 +1761,9 @@
   sweep), `src/high_risk_recovery.rs` (PG recovery harness for delivery
   outbox/notify), `src/server/task_dispatch_claims.rs` (cluster-aware
   task-dispatch claim coordination), `src/server/cluster.rs`
-  (cluster role/leader-failover coordination), and `src/server/worker_registry.rs`
-  (supervised-worker registry / leader-only lifecycle).
+  (cluster role/leader-failover coordination), `src/server/worker_registry.rs`
+  (supervised-worker registry / leader-only lifecycle), and
+  `src/server/worker_recovery.rs` (worker-local restart budget/backoff execution).
 - legacy_modules: none — these are shared runtime coordination surfaces.
 - do_not_edit_without_migration_plan (giant-file):
   - `src/config.rs` (2763 lines; +25 net from #4553 global Claude gateway-proxy fields, defaults, resolver, parse coverage, and corrected retained cache-TTL docs; +51 from #4130 shared TestEnvVarGuard + shared_test_env_lock — centralized env-pin guard for #3293-class test races; +11 from #3573 failure_pause_auto_resume_secs config field; +16 from #3655 DB pool default 12→18 + 2-node-boot sizing-rationale comment; +47 from #3651 DatabaseConfig.foreground_reserve field (best-effort advisory docs) + manual Default impl + default-consistency tests; +8 from #3690 AgentDef.preferred_intake_node_labels field + doc; #3683 config hot-reload restart-fingerprint config surface; #3736 documents the disabled remote-profile compatibility shim; #3749 adds the `cluster.intake_routing` config authority and parse coverage; +13 from #3870 ServerConfig.allow_insecure_nonloopback_bind escape-hatch field + Debug/Default wiring + doc; +10 from #3805 P2 PR-A two_message_panel_enabled PlaceholderConfig field (two-message model scaffolding, default OFF, restart-required; +18 from #4351 ClusterConfig.gateway_preferred_instance_id + gateway_yield_grace_secs fields, Default wiring, and the yield-grace default fn — the yield protocol lives in discord::runtime_bootstrap::gateway_lease; +7 from #4305 channel recent-context injection config (limit + enable, live-reload)).

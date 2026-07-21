@@ -412,9 +412,9 @@ decompose_issue = "#3405"
 [[entry]]
 # Crossed the 1000-prod-LoC threshold in #3739: worker-local LoopOwned Tokio
 # tasks now have registry-owned terminal supervision for unexpected future
-# return/panic. The file already held the bootstrap worker inventory plus
-# leader-only supervision state; split worker-status/supervision helpers out
-# once the worker registry API stabilizes.
+# return/panic. #4515 moved restart budget/backoff execution into the sibling
+# worker_recovery.rs module, leaving factory registration and inventory wiring
+# here. Split the remaining worker-status helpers once the registry API stabilizes.
 file = "src/server/worker_registry.rs"
 owner = "server-runtime"
 deadline = "2026-08-31"
