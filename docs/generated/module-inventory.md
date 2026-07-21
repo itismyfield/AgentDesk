@@ -42,7 +42,7 @@
 | `reconcile` | 1 |
 | `runtime_layout` | 6 |
 | `server` | 115 |
-| `services` | 792 |
+| `services` | 793 |
 | `supervisor` | 1 |
 | `ui` | 2 |
 | `utils` | 11 |
@@ -333,7 +333,7 @@
 | `server::worker_recovery` | `src/server/worker_recovery.rs` | 1219 | 641 | 578 |  |
 | `server::worker_registry` | `src/server/worker_registry.rs` | 1334 | 1242 | 92 | giant-file |
 | `server::ws` | `src/server/ws.rs` | 140 | 140 | 0 |  |
-| `services` | `src/services/mod.rs` | 149 | 149 | 0 |  |
+| `services` | `src/services/mod.rs` | 150 | 150 | 0 |  |
 | `services::agent_protocol` | `src/services/agent_protocol.rs` | 608 | 608 | 0 |  |
 | `services::agent_quality` | `src/services/agent_quality/mod.rs` | 29 | 29 | 0 |  |
 | `services::agent_quality::regression_alerts` | `src/services/agent_quality/regression_alerts.rs` | 757 | 509 | 248 |  |
@@ -406,7 +406,7 @@
 | `services::claude_tui::hosting` | `src/services/claude_tui/hosting/mod.rs` | 13 | 13 | 0 |  |
 | `services::claude_tui::hosting::followup_support` | `src/services/claude_tui/hosting/followup_support.rs` | 519 | 402 | 117 |  |
 | `services::claude_tui::hosting::warm_followup` | `src/services/claude_tui/hosting/warm_followup.rs` | 771 | 714 | 57 |  |
-| `services::claude_tui::input` | `src/services/claude_tui/input.rs` | 3989 | 2187 | 1802 | giant-file |
+| `services::claude_tui::input` | `src/services/claude_tui/input.rs` | 4028 | 2226 | 1802 | giant-file |
 | `services::claude_tui::memento_feedback` | `src/services/claude_tui/memento_feedback.rs` | 1566 | 863 | 703 |  |
 | `services::claude_tui::session` | `src/services/claude_tui/session.rs` | 832 | 443 | 389 |  |
 | `services::claude_tui::startup_dialog` | `src/services/claude_tui/startup_dialog.rs` | 276 | 121 | 155 |  |
@@ -434,7 +434,7 @@
 | `services::codex_remote_policy` | `src/services/codex_remote_policy.rs` | 49 | 32 | 17 |  |
 | `services::codex_tmux_wrapper` | `src/services/codex_tmux_wrapper.rs` | 2556 | 1405 | 1151 | giant-file |
 | `services::codex_tui` | `src/services/codex_tui/mod.rs` | 5 | 5 | 0 |  |
-| `services::codex_tui::input` | `src/services/codex_tui/input.rs` | 2834 | 1670 | 1164 | giant-file |
+| `services::codex_tui::input` | `src/services/codex_tui/input.rs` | 2977 | 1768 | 1209 | giant-file |
 | `services::codex_tui::rollout_index` | `src/services/codex_tui/rollout_index.rs` | 1200 | 618 | 582 |  |
 | `services::codex_tui::rollout_tail` | `src/services/codex_tui/rollout_tail.rs` | 4259 | 1334 | 2925 | giant-file |
 | `services::codex_tui::rollout_tail::parser` | `src/services/codex_tui/rollout_tail/parser.rs` | 405 | 405 | 0 |  |
@@ -689,7 +689,7 @@
 | `services::discord::router::message_handler::control` | `src/services/discord/router/message_handler/control.rs` | 87 | 87 | 0 |  |
 | `services::discord::router::message_handler::goal_lifecycle` | `src/services/discord/router/message_handler/goal_lifecycle.rs` | 314 | 223 | 91 |  |
 | `services::discord::router::message_handler::headless_turn` | `src/services/discord/router/message_handler/headless_turn.rs` | 1850 | 1443 | 407 | giant-file |
-| `services::discord::router::message_handler::intake_turn` | `src/services/discord/router/message_handler/intake_turn.rs` | 3119 | 2696 | 423 | giant-file |
+| `services::discord::router::message_handler::intake_turn` | `src/services/discord/router/message_handler/intake_turn.rs` | 3203 | 2780 | 423 | giant-file |
 | `services::discord::router::message_handler::intake_turn::claim_bootstrap` | `src/services/discord/router/message_handler/intake_turn/claim_bootstrap.rs` | 59 | 59 | 0 |  |
 | `services::discord::router::message_handler::intake_turn::race_loss` | `src/services/discord/router/message_handler/intake_turn/race_loss.rs` | 699 | 604 | 95 |  |
 | `services::discord::router::message_handler::intake_turn::race_loss::mailbox_reaction` | `src/services/discord/router/message_handler/intake_turn/race_loss/mailbox_reaction.rs` | 88 | 88 | 0 |  |
@@ -1111,6 +1111,7 @@
 | `services::tui_prompt_control` | `src/services/tui_prompt_control.rs` | 248 | 210 | 38 |  |
 | `services::tui_prompt_dedupe` | `src/services/tui_prompt_dedupe.rs` | 4766 | 2141 | 2625 | giant-file |
 | `services::tui_prompt_dedupe::synthetic_prompt` | `src/services/tui_prompt_dedupe/synthetic_prompt.rs` | 34 | 34 | 0 |  |
+| `services::tui_steering` | `src/services/tui_steering.rs` | 246 | 130 | 116 |  |
 | `services::tui_turn_state` | `src/services/tui_turn_state.rs` | 2033 | 648 | 1385 |  |
 | `services::tui_turn_state::completion_scan` | `src/services/tui_turn_state/completion_scan.rs` | 360 | 360 | 0 |  |
 | `services::turn_cancel_finalizer` | `src/services/turn_cancel_finalizer.rs` | 479 | 150 | 329 |  |

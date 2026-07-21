@@ -2145,10 +2145,7 @@ mod tests {
 
         let mut modal = submit_snapshot(true, true, true, false);
         modal.pane_tail = "Approval required: allow command?".to_string();
-        assert_eq!(
-            steering_snapshot_decision(&modal),
-            Err("interactive modal")
-        );
+        assert_eq!(steering_snapshot_decision(&modal), Err("interactive modal"));
     }
 
     #[test]
@@ -2162,9 +2159,10 @@ mod tests {
             "steer now",
             |_| submit_snapshot(true, true, true, false),
             move |provider, session_name, prompt| {
-                record_events.lock().unwrap().push(format!(
-                    "record:{provider}:{session_name}:{prompt}"
-                ));
+                record_events
+                    .lock()
+                    .unwrap()
+                    .push(format!("record:{provider}:{session_name}:{prompt}"));
             },
             move |_, _| {
                 submit_events.lock().unwrap().push("submit".to_string());
