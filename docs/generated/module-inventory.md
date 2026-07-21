@@ -584,7 +584,7 @@
 | `services::discord::outbound::turn_output_controller` | `src/services/discord/outbound/turn_output_controller.rs` | 3519 | 1228 | 2291 | giant-file |
 | `services::discord::outbound::turn_output_controller::fresh_send` | `src/services/discord/outbound/turn_output_controller/fresh_send.rs` | 227 | 227 | 0 |  |
 | `services::discord::placeholder_cleanup` | `src/services/discord/placeholder_cleanup.rs` | 763 | 453 | 310 |  |
-| `services::discord::placeholder_controller` | `src/services/discord/placeholder_controller.rs` | 1230 | 663 | 567 |  |
+| `services::discord::placeholder_controller` | `src/services/discord/placeholder_controller.rs` | 1262 | 673 | 589 |  |
 | `services::discord::placeholder_live_events` | `src/services/discord/placeholder_live_events/mod.rs` | 682 | 682 | 0 |  |
 | `services::discord::placeholder_live_events::background_task_events` | `src/services/discord/placeholder_live_events/background_task_events.rs` | 109 | 109 | 0 |  |
 | `services::discord::placeholder_live_events::common` | `src/services/discord/placeholder_live_events/common.rs` | 226 | 226 | 0 |  |
@@ -604,7 +604,7 @@
 | `services::discord::placeholder_live_events::turn_anchor` | `src/services/discord/placeholder_live_events/turn_anchor.rs` | 210 | 115 | 95 |  |
 | `services::discord::placeholder_live_events::workflow_panel` | `src/services/discord/placeholder_live_events/workflow_panel.rs` | 270 | 270 | 0 |  |
 | `services::discord::placeholder_sweeper` | `src/services/discord/placeholder_sweeper.rs` | 1293 | 998 | 295 |  |
-| `services::discord::placeholder_sweeper::abandon_guard` | `src/services/discord/placeholder_sweeper/abandon_guard.rs` | 915 | 493 | 422 |  |
+| `services::discord::placeholder_sweeper::abandon_guard` | `src/services/discord/placeholder_sweeper/abandon_guard.rs` | 922 | 500 | 422 |  |
 | `services::discord::prompt_builder` | `src/services/discord/prompt_builder/mod.rs` | 689 | 689 | 0 |  |
 | `services::discord::prompt_builder::channel_recent_context` | `src/services/discord/prompt_builder/channel_recent_context.rs` | 496 | 220 | 276 |  |
 | `services::discord::prompt_builder::dispatch_contract` | `src/services/discord/prompt_builder/dispatch_contract.rs` | 576 | 576 | 0 |  |

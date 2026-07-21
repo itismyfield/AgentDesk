@@ -637,12 +637,22 @@ impl PlaceholderController {
         true
     }
 
+    /// Revoke one current incarnation and remove it without emitting a Discord
+    /// PATCH. The slot mutex serializes revocation with PATCH admission and
+    /// commit, so a caller retaining this slot cannot commit after detachment.
+    pub(super) async fn revoke_and_detach(&self, key: &PlaceholderKey) {
+        let Some(slot) = self.entries.get(key).map(|entry| entry.clone()) else {
+            return;
+        };
+        self.revoke_incarnation(&PlaceholderIncarnation {
+            key: key.clone(),
+            slot,
+        })
+        .await;
+    }
+
     /// Drop a key from the controller without emitting any Discord PATCH.
-    /// Used by the rollover retarget path on `turn_bridge`: when the old
-    /// `current_msg_id` is overwritten with a frozen response chunk, the
-    /// controller's old entry is no longer referenced and must not survive as
-    /// a non-evictable `Active` row in the cap-bounded map (codex round-4
-    /// #1308 P2).
+    /// Used by rollover-retarget paths that do not retain a PATCH incarnation.
     pub(super) fn detach(&self, key: &PlaceholderKey) {
         self.entries.remove(key);
     }
@@ -917,6 +927,28 @@ mod edit_retry_tests {
             1,
             "stale capability must not recreate"
         );
+    }
+
+    #[tokio::test]
+    async fn detach_tombstones_retained_incarnation_before_late_patch() {
+        let controller = PlaceholderController::default();
+        let gateway = ScriptedGateway::new(vec![Ok(())]);
+        let key = key();
+        let retained = controller.incarnation(&key);
+
+        controller.revoke_and_detach(&key).await;
+
+        assert!(!controller.entries.contains_key(&key));
+        assert!(retained.slot.state.lock().await.revoked);
+        assert_eq!(
+            controller
+                .ensure_active_incarnation(&gateway, &retained, input())
+                .await,
+            PlaceholderControllerOutcome::Rejected,
+            "a PATCH capability retained before detach must not commit to its tombstoned slot"
+        );
+        assert_eq!(gateway.calls.load(Ordering::SeqCst), 0);
+        assert!(!controller.entries.contains_key(&key));
     }
 
     #[tokio::test]
