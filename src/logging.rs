@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::borrow::Cow;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -93,6 +94,29 @@ mod tests {
 
         tracing::subscriber::with_default(subscriber, emit);
         String::from_utf8(buffer.lock().unwrap().clone()).unwrap()
+    }
+
+    #[test]
+    fn trace_context_span_records_turn_correlation_fields() {
+        let logs = capture_logs_with_default_filter(|| {
+            let payload = serde_json::json!({
+                "channel_id": 1473922824350601297_u64,
+                "turn_id": "turn-4221",
+                "session_key": "session-4221"
+            });
+            let span = TraceContext::from_payload(&payload).span("mutation-guard");
+            span.in_scope(|| tracing::info!("trace context mutation marker"));
+        });
+
+        assert!(
+            logs.contains("channel_id=Some(\"1473922824350601297\")"),
+            "logs={logs}"
+        );
+        assert!(logs.contains("turn_id=Some(\"turn-4221\")"), "logs={logs}");
+        assert!(
+            logs.contains("session_key=Some(\"session-4221\")"),
+            "logs={logs}"
+        );
     }
 
     #[test]
@@ -422,7 +446,7 @@ pub(crate) struct TraceContext<'a> {
     pub(crate) card_id: Option<&'a str>,
     pub(crate) agent_id: Option<&'a str>,
     pub(crate) hook_name: Option<&'a str>,
-    pub(crate) channel_id: Option<&'a str>,
+    pub(crate) channel_id: Option<Cow<'a, str>>,
     pub(crate) turn_id: Option<&'a str>,
     pub(crate) session_key: Option<&'a str>,
 }
@@ -442,7 +466,7 @@ impl<'a> TraceContext<'a> {
                 ],
             ),
             hook_name: None,
-            channel_id: find_string(payload, &["channel_id", "discord_channel_id"]),
+            channel_id: find_string_or_u64(payload, &["channel_id", "discord_channel_id"]),
             turn_id: find_string(payload, &["turn_id"]),
             session_key: find_string(payload, &["session_key"]),
         }
@@ -507,6 +531,16 @@ fn find_string<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a st
         .find_map(|key| value.get(key).and_then(|v| v.as_str()))
 }
 
+fn find_string_or_u64<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<Cow<'a, str>> {
+    keys.iter().find_map(|key| {
+        let value = value.get(key)?;
+        value
+            .as_str()
+            .map(Cow::Borrowed)
+            .or_else(|| value.as_u64().map(|number| Cow::Owned(number.to_string())))
+    })
+}
+
 #[cfg(test)]
 mod rotation_tests {
     use super::{RotatingLogWriter, redacted_log_bytes};
@@ -544,15 +578,15 @@ mod rotation_tests {
     }
 
     #[test]
-    fn trace_context_prefers_canonical_channel_id_key() {
+    fn trace_context_prefers_numeric_canonical_channel_id_key() {
         let payload = serde_json::json!({
-            "channel_id": "canonical-channel",
+            "channel_id": 1473922824350601297_u64,
             "discord_channel_id": "legacy-channel"
         });
 
         let context = super::TraceContext::from_payload(&payload);
 
-        assert_eq!(context.channel_id, Some("canonical-channel"));
+        assert_eq!(context.channel_id.as_deref(), Some("1473922824350601297"));
     }
 
     #[test]
