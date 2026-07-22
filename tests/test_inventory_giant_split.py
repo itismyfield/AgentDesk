@@ -11,6 +11,7 @@ Covers ``scripts/generate_inventory_docs.py``:
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 import textwrap
 import unittest
@@ -28,6 +29,37 @@ _SPEC.loader.exec_module(GEN)
 
 def _src(body: str) -> str:
     return textwrap.dedent(body).lstrip("\n")
+
+
+class InventoryTrackingContractTest(unittest.TestCase):
+    def test_line_count_snapshots_remain_untracked(self) -> None:
+        snapshots = [
+            "docs/generated/module-inventory.md",
+            "docs/generated/giant-file-registry.md",
+        ]
+        for snapshot in snapshots:
+            tracked = subprocess.run(
+                ["git", "ls-files", "--error-unmatch", snapshot],
+                cwd=REPO_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(
+                tracked.returncode,
+                0,
+                f"{snapshot} must stay de-committed to prevent O(N^2) PR conflicts",
+            )
+            ignored = subprocess.run(
+                ["git", "check-ignore", "--quiet", snapshot],
+                cwd=REPO_ROOT,
+                check=False,
+            )
+            self.assertEqual(
+                ignored.returncode,
+                0,
+                f"{snapshot} must remain ignored after de-commit",
+            )
 
 
 class ProdTestSplitTest(unittest.TestCase):
