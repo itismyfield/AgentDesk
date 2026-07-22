@@ -69,8 +69,13 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                     if !drain.persistence_errors.is_empty() {
                         tracing::error!(
                             failures = drain.persistence_errors.len(),
-                            "restart_pending quick exit continuing after pending-queue persistence failure(s)"
+                            "restart_pending persistence failed; retaining marker and runtime"
                         );
+                        shared_for_deferred
+                            .restart
+                            .shutdown_counted
+                            .store(false, Ordering::Release);
+                        continue;
                     }
                     let ids: std::collections::HashMap<u64, u64> = shared_for_deferred
                         .last_message_ids
@@ -98,10 +103,25 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                             "  [{ts2}] 👁 preserving {} inflight turn(s) for restart recovery",
                             inflight_states_qe.len()
                         );
-                        let marked_qe = inflight::mark_all_inflight_states_restart_mode(
-                            &provider_for_deferred,
-                            crate::services::discord::InflightRestartMode::DrainRestart,
-                        );
+                        let marked_qe =
+                            match inflight::mark_all_inflight_states_restart_mode_checked(
+                                &provider_for_deferred,
+                                crate::services::discord::InflightRestartMode::DrainRestart,
+                            ) {
+                                Ok(marked) => marked,
+                                Err(error) => {
+                                    tracing::error!(
+                                        provider = provider_for_deferred.as_str(),
+                                        error = %error,
+                                        "restart_pending inflight persistence failed; retaining marker and runtime"
+                                    );
+                                    shared_for_deferred
+                                        .restart
+                                        .shutdown_counted
+                                        .store(false, Ordering::Release);
+                                    continue;
+                                }
+                            };
                         tracing::info!(
                             "  [{ts2}] 🔖 marked {marked_qe} inflight turn(s) as drain_restart"
                         );
@@ -111,6 +131,24 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                         "  [{ts}] 🔄 restart_pending detected — quick exit after persisting {queue_count} queued item(s)"
                     );
                     if finish_deferred_restart(&shared_for_deferred, shutdown_permit) {
+                        let ack = root.join("restart_persisted");
+                        let ack_tmp =
+                            root.join(format!("restart_persisted.{}.tmp", std::process::id()));
+                        let ack_body = format!(
+                            "provider={}\ncommitted_at={}\n",
+                            provider_for_deferred.as_str(),
+                            chrono::Utc::now().to_rfc3339()
+                        );
+                        if let Err(error) = std::fs::write(&ack_tmp, ack_body)
+                            .and_then(|_| std::fs::rename(&ack_tmp, &ack))
+                        {
+                            let _ = std::fs::remove_file(&ack_tmp);
+                            tracing::error!(
+                                error = %error,
+                                "restart persistence acknowledgement publish failed; retaining marker and runtime"
+                            );
+                            std::process::exit(1);
+                        }
                         let _ = std::fs::remove_file(&marker);
                         std::process::exit(0);
                     }

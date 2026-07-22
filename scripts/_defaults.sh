@@ -829,6 +829,7 @@ wait_for_restart_persistence_or_fail() {
   local max_wait="${3:-30}"
   local waited=0
   local marker="$runtime_root/restart_pending"
+  local ack="$runtime_root/restart_persisted"
 
   if [ -z "$runtime_root" ]; then
     echo "✗ [gate] ${scope} runtime root is required for restart persistence" >&2
@@ -836,16 +837,18 @@ wait_for_restart_persistence_or_fail() {
   fi
 
   while [ "$waited" -lt "$max_wait" ]; do
-    if [ ! -e "$marker" ]; then
-      echo "✓ [gate] ${scope} restart persistence committed; runtime consumed marker"
+    if [ -f "$ack" ]; then
+      echo "✓ [gate] ${scope} restart persistence acknowledged by runtime"
       return 0
     fi
     sleep 1
     waited=$((waited + 1))
   done
 
-  echo "✗ [gate] ${scope} restart persistence was not committed within ${max_wait}s" >&2
-  echo "  Refusing bootout: the in-flight delivery frontier is not yet durable." >&2
+  clear_restart_drain_mode "$runtime_root" || true
+  rm -f "$ack" 2>/dev/null || true
+  echo "✗ [gate] ${scope} restart persistence was not acknowledged within ${max_wait}s" >&2
+  echo "  Cleared restart_pending and refused bootout: the in-flight delivery frontier is not durable." >&2
   return 1
 }
 
@@ -935,6 +938,8 @@ request_restart_drain_mode_or_fail() {
   if ! guard_no_foreign_active_turns_or_warn "$port" "$exempt_csv"; then
     return 1
   fi
+
+  rm -f "$runtime_root/restart_persisted" 2>/dev/null || true
 
   mkdir -p "$runtime_root" || {
     echo "✗ [gate] failed to create ${scope} runtime root: $runtime_root" >&2

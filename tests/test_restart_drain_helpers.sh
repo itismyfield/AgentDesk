@@ -340,7 +340,7 @@ echo "== Test 5g: restart persistence waits for runtime marker consumption =="
 TMP_RUNTIME3=$(mktemp -d)
 trap 'rm -rf "$TMP_FIXTURE_DIR" "$TMP_RUNTIME" "$TMPDIR_TEST" "$TMP_RUNTIME2" "$TMP_RUNTIME3"' EXIT
 touch "$TMP_RUNTIME3/restart_pending"
-( sleep 1; rm -f "$TMP_RUNTIME3/restart_pending" ) &
+( sleep 1; touch "$TMP_RUNTIME3/restart_persisted"; rm -f "$TMP_RUNTIME3/restart_pending" ) &
 BG_PID=$!
 set +e
 wait_for_restart_persistence_or_fail "release" "$TMP_RUNTIME3" 5 \
@@ -348,18 +348,31 @@ wait_for_restart_persistence_or_fail "release" "$TMP_RUNTIME3" 5 \
 rc=$?
 set -e
 wait "$BG_PID" 2>/dev/null || true
-assert_eq "persistence helper succeeds only after marker consumption" "0" "$rc"
+assert_eq "persistence helper succeeds only after positive acknowledgement" "0" "$rc"
+
+mkdir -p "$TMP_RUNTIME3/consumed-without-ack"
+touch "$TMP_RUNTIME3/consumed-without-ack/restart_pending"
+rm -f "$TMP_RUNTIME3/consumed-without-ack/restart_pending"
+set +e
+wait_for_restart_persistence_or_fail \
+  "release" "$TMP_RUNTIME3/consumed-without-ack" 1 >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "marker deletion without acknowledgement is not durability proof" "1" "$rc"
 
 mkdir -p "$TMP_RUNTIME3/still-pending"
 touch "$TMP_RUNTIME3/still-pending/restart_pending"
-_launchd_job_state() { echo "running"; }
 set +e
 wait_for_restart_persistence_or_fail \
   "release" "$TMP_RUNTIME3/still-pending" 1 >/dev/null 2>&1
 rc=$?
 set -e
-unset -f _launchd_job_state
 assert_eq "persistence helper refuses bootout while marker remains" "1" "$rc"
+if [ ! -e "$TMP_RUNTIME3/still-pending/restart_pending" ]; then
+  pass "persistence timeout clears restart marker"
+else
+  fail "persistence timeout clears restart marker"
+fi
 
 echo "== Test 6: clear_restart_drain_mode removes marker file =="
 touch "$TMPDIR_TEST/restart_pending"

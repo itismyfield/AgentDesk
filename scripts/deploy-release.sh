@@ -2075,6 +2075,7 @@ fi
 # Remove a marker left by an older deploy so its quiet window cannot mask this
 # restart boundary after the runtime has proved its replay frontier durable.
 rm -f "$ADK_REL/logs/relay-watchdog.deploy-marker" 2>/dev/null || true
+rm -f "$ADK_REL/runtime/restart_persisted" 2>/dev/null || true
 
 # Stop release only after the durable persistence acknowledgement.
 echo "▸ Stopping release..."

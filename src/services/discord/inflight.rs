@@ -483,8 +483,15 @@ pub(super) fn mark_all_inflight_states_restart_mode(
     provider: &ProviderKind,
     restart_mode: InflightRestartMode,
 ) -> usize {
+    mark_all_inflight_states_restart_mode_checked(provider, restart_mode).unwrap_or(0)
+}
+
+pub(super) fn mark_all_inflight_states_restart_mode_checked(
+    provider: &ProviderKind,
+    restart_mode: InflightRestartMode,
+) -> Result<usize, String> {
     let Some(root) = inflight_runtime_root() else {
-        return 0;
+        return Err("runtime root unavailable".to_string());
     };
     // #3860 — set restart_mode via a per-row lock-RMW instead of blind-saving
     // the unlocked snapshot. `load_inflight_states_from_root` reads each row
@@ -499,14 +506,27 @@ pub(super) fn mark_all_inflight_states_restart_mode(
     // row under the flock and sets ONLY restart_mode / restart_generation,
     // never the frontier, so it can no longer regress a concurrent writer.
     let states = load_inflight_states_from_root(&root, provider);
+    let expected = states.len();
     let mut updated = 0usize;
     for state in states {
         let path = inflight_state_path(&root, provider, state.channel_id);
         if set_inflight_restart_mode_under_lock(&path, restart_mode) {
             updated += 1;
+        } else {
+            return Err(format!(
+                "failed to persist restart mode for provider={} channel_id={}",
+                provider.as_str(),
+                state.channel_id
+            ));
         }
     }
-    updated
+    if updated != expected {
+        return Err(format!(
+            "persisted {updated}/{expected} inflight restart markers for provider={}",
+            provider.as_str()
+        ));
+    }
+    Ok(updated)
 }
 
 /// #3860 — RMW the restart-mode marker on one inflight row under its flock.
