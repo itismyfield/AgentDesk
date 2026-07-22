@@ -1164,11 +1164,25 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     inflight_state.delivery_bot = metadata_delivery_bot(metadata.as_ref());
     inflight_state.silent_turn = metadata_silent_flag(metadata.as_ref());
     inflight_state.source = metadata_turn_source(source, metadata.as_ref());
-    if let Err(error) =
-        crate::services::discord::inflight::save_inflight_state_create_new(&inflight_state)
-    {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!("  [{ts}]   ⚠ inflight state create failed: {error}");
+    match crate::services::discord::inflight::save_inflight_state_create_new(&inflight_state) {
+        Ok(()) => {}
+        Err(crate::services::discord::inflight::CreateNewInflightError::AlreadyExists) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id = channel_id.get(),
+                user_msg_id = inflight_state.user_msg_id,
+                "inflight create skipped because a durable row already exists; continuing fail-closed"
+            );
+        }
+        Err(crate::services::discord::inflight::CreateNewInflightError::Internal(error)) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id = channel_id.get(),
+                user_msg_id = inflight_state.user_msg_id,
+                %error,
+                "inflight create failed internally; continuing without durable row"
+            );
+        }
     }
 
     let _ = attach_paused_turn_watcher_for_inflight(

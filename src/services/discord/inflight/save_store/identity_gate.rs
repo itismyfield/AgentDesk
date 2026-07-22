@@ -21,11 +21,11 @@ pub(in crate::services::discord::inflight) fn save_inflight_state_if_identity_un
     save_inflight_state_identity_gated_in_root(root, state, caller, false)
 }
 
-/// #4259 PR-2a rework (codex r1): identity-guarded save that PINS the 4-field
-/// turn identity (`user_msg_id`, `started_at`, `tmux_session_name`,
-/// `turn_start_offset`) plus the restart/rebind authority and id-0 offsetless
-/// fail-closed gates of [`save_inflight_state_if_identity_unchanged`], but
-/// deliberately ALLOWS the snapshot to RESTAMP `output_path`.
+/// #4259: identity-guarded save for runtime-handoff restamps. It pins the
+/// stable turn key (`user_msg_id`, `started_at`, `tmux_session_name`) plus the
+/// restart/rebind authority and id-0 offsetless fail-closed gates of
+/// [`save_inflight_state_if_identity_unchanged`], while deliberately allowing
+/// both `output_path` and `turn_start_offset` to advance.
 ///
 /// Runtime-handoff stamps legitimately re-point the row at the output the live
 /// runtime actually writes: a warm follow-up reuses a resolved legacy `/tmp`
@@ -34,7 +34,9 @@ pub(in crate::services::discord::inflight) fn save_inflight_state_if_identity_un
 /// the strict `output_path` equality of the `_if_identity_unchanged` variant
 /// would refuse a legitimate same-turn stamp. Use THIS variant for
 /// runtime-handoff (re)stamp sites; it still refuses rows re-owned by another
-/// turn. The held-back blind sites in `turn_bridge/runtime_handoff_loop.rs`
+/// turn. `turn_start_offset` is intentionally not in this variant's comparison
+/// key because it is the cursor being restamped. The held-back blind sites in
+/// `turn_bridge/runtime_handoff_loop.rs`
 /// (RuntimeReady ProcessBackend/ClaudeEAdapter/ClaudeTui/CodexTui,
 /// ProcessReady, and the watcher-handoff helper — see
 /// `scripts/check_inflight_blind_save_ratchet.py`) are expected to convert to
@@ -57,6 +59,17 @@ pub(in crate::services::discord::inflight) fn save_inflight_state_if_identity_ma
     caller: &'static str,
 ) -> GuardedSaveOutcome {
     save_inflight_state_identity_gated_in_root(root, state, caller, true)
+}
+
+/// Compare the stable identity fields for a restamp. The offset is deliberately
+/// excluded because a valid rollover/recovery restamp advances that cursor.
+fn restamp_identity_matches_state(
+    expected: &InflightTurnIdentity,
+    state: &InflightTurnState,
+) -> bool {
+    expected.user_msg_id == state.user_msg_id
+        && expected.started_at == state.started_at
+        && expected.tmux_session_name == state.tmux_session_name
 }
 
 fn save_inflight_state_identity_gated_in_root(
@@ -127,7 +140,10 @@ fn save_inflight_state_identity_gated_in_root(
         );
         return GuardedSaveOutcome::IdentityMismatch;
     }
-    if on_disk.restart_mode.is_some() || on_disk.rebind_origin || !expected.matches_state(&on_disk)
+    if on_disk.restart_mode.is_some()
+        || on_disk.rebind_origin
+        || (allow_output_restamp && !restamp_identity_matches_state(&expected, &on_disk))
+        || (!allow_output_restamp && !expected.matches_state(&on_disk))
     {
         tracing::info!(
             provider = %provider.as_str(),
@@ -1210,6 +1226,76 @@ mod tests {
             GuardedSaveOutcome::IdentityMismatch,
             "an offsetless id-0 snapshot must be refused fail-closed even against a byte-identical durable row (#4370 R3-5)",
         );
+    }
+
+    // #4259: output restamps must advance the recovered cursor without turning
+    // the cursor itself into the CAS key. The three assertions below are mutation
+    // kills for the two callers: stale rollover offsets must save, while a
+    // different turn must remain sealed out.
+    #[test]
+    fn output_restamp_advances_stale_offset_but_rejects_different_turn() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::tempdir().expect("runtime root");
+        let mut durable = drain_restart_seed(42_590, "AgentDesk-codex-4259");
+        durable.turn_start_offset = Some(17);
+        durable.output_path = Some("/tmp/old-rollout.jsonl".to_string());
+        save_inflight_state_in_root(root.path(), &durable).expect("seed durable row");
+
+        let mut restamped = durable.clone();
+        restamped.turn_start_offset = Some(911);
+        restamped.last_offset = 911;
+        restamped.output_path = Some("/tmp/rotated-rollout.jsonl".to_string());
+        assert_eq!(
+            save_inflight_state_if_identity_matches_allow_output_restamp_in_root(
+                root.path(),
+                &restamped,
+                "test::codex_idle_rollout_stale_offset_repair",
+            ),
+            GuardedSaveOutcome::Saved,
+            "a rotated rollout's new offset must not be compared as the old CAS key",
+        );
+        let path = inflight_state_path(root.path(), &ProviderKind::Codex, durable.channel_id);
+        let persisted: InflightTurnState =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read restamped row"))
+                .expect("parse restamped row");
+        assert_eq!(persisted.turn_start_offset, Some(911));
+        assert_eq!(
+            persisted.output_path.as_deref(),
+            Some("/tmp/rotated-rollout.jsonl")
+        );
+
+        let mut synthetic_refresh = persisted.clone();
+        synthetic_refresh.turn_start_offset = Some(1_337);
+        synthetic_refresh.last_offset = 1_337;
+        assert_eq!(
+            save_inflight_state_if_identity_matches_allow_output_restamp_in_root(
+                root.path(),
+                &synthetic_refresh,
+                "test::synthetic_start_advanced_offset_refresh",
+            ),
+            GuardedSaveOutcome::Saved,
+            "a same-turn synthetic refresh must re-own after its cursor advances",
+        );
+
+        let mut different_turn = synthetic_refresh.clone();
+        different_turn.user_msg_id += 1;
+        different_turn.turn_start_offset = Some(2_048);
+        assert_eq!(
+            save_inflight_state_if_identity_matches_allow_output_restamp_in_root(
+                root.path(),
+                &different_turn,
+                "test::output_restamp_different_turn_rejected",
+            ),
+            GuardedSaveOutcome::IdentityMismatch,
+            "removing the stable user-message identity check would clobber another turn",
+        );
+        let preserved: InflightTurnState =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read sealed row"))
+                .expect("parse sealed row");
+        assert_eq!(preserved.user_msg_id, synthetic_refresh.user_msg_id);
+        assert_eq!(preserved.turn_start_offset, Some(1_337));
     }
 
     /// The zero-id headless row exactly as the #3107 watcher self-heal
