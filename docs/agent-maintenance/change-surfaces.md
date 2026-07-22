@@ -2025,6 +2025,18 @@ longer registry-tracked (the giant_file_registry.toml entry was removed).
 500 production lines) after the worktree, restore-cwd, and channel-routing
 clusters moved into child modules. It is no longer registry-tracked.
 
+- `src/services/discord/standby_relay.rs` (frozen giant surface, giant-file;
+  1012 production LoC) — the gateway-less worker standby relay. #4765 crossed
+  the threshold while fixing the mac-mini dash channel relay miss: durable
+  `turn_start_offset` baseline shared by both spawn paths (initial +
+  RuntimeReady re-spawn), a TUI fallback that relays the terminal assistant
+  event when the JSONL has no `result` line, drain-grace waiting with a
+  result-first expiry rescan, and the `resolve_expiry_delivery` orchestration.
+  Completion draining, terminal-response selection, and identity-guarded
+  delivery share one durable cursor contract; keep the cohesive verified relay
+  boundary (registry-tracked in `giant_file_registry.toml` with a `keep`
+  decision) until a scoped split is planned.
+
 Same rule: `bugfix` only without a split issue.
 
 ## Shared API Helpers
