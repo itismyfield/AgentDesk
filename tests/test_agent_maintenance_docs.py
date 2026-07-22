@@ -299,27 +299,34 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
         )
         _write(root, "docs/agent-maintenance/change-surfaces.md", surface_line)
 
-    def test_ignores_copied_count_drift_from_inventory_prod(self) -> None:
+    def test_allows_inventory_count_churn_without_doc_change(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            # The frozen path remains a production giant even though the prose
-            # snapshot differs from current production LoC.
+            surface_line = "- `src/services/foo.rs` (frozen giant surface).\n"
             self._setup(
                 root,
                 "| `services::foo` | `src/services/foo.rs` | 2100 | 1500 | 600 |  |",
-                "- `src/services/foo.rs` (1900 lines, giant-file).\n",
+                surface_line,
             )
-            findings = CHECKER.check_change_surface_line_counts(root)
+            findings_before = CHECKER.check_change_surface_line_counts(root)
+            _write(
+                root,
+                "docs/generated/module-inventory.md",
+                self._INVENTORY_HEADER
+                + "| `services::foo` | `src/services/foo.rs` | 2150 | 1550 | 600 |  |\n",
+            )
+            findings_after = CHECKER.check_change_surface_line_counts(root)
 
-        self.assertEqual(findings, [])
+        self.assertEqual(findings_before, [])
+        self.assertEqual(findings_after, [])
 
-    def test_no_finding_when_count_matches_prod(self) -> None:
+    def test_ignores_unmarked_path_references(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._setup(
                 root,
                 "| `services::foo` | `src/services/foo.rs` | 99 | 1500 | 57 |  |",
-                "- `src/services/foo.rs` (1500 lines, giant-file).\n",
+                "- `src/services/foo.rs` is documented elsewhere.\n",
             )
             findings = CHECKER.check_change_surface_line_counts(root)
 
@@ -331,7 +338,7 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
             self._setup(
                 root,
                 "| `services::foo` | `src/services/foo.rs` | 4000 | 64 | 3936 |  |",
-                "- `src/services/foo.rs` (3550 lines, giant-file).\n",
+                "- `src/services/foo.rs` (frozen giant surface).\n",
             )
             findings = CHECKER.check_change_surface_line_counts(root)
 
@@ -339,17 +346,6 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
         self.assertEqual(findings[0].severity, "error")
         self.assertIn("no longer a giant file", findings[0].message)
 
-    def test_current_inventory_giant_remains_valid_despite_stale_snapshot(self) -> None:
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self._setup(
-                root,
-                "| `services::foo` | `src/services/foo.rs` | 2200 | 2100 | 100 |  |",
-                "- `src/services/foo.rs` (1800 lines, giant-file).\n",
-            )
-            findings = CHECKER.check_change_surface_line_counts(root)
-
-        self.assertEqual(findings, [])
 
     def test_warning_only_line_count_gate_hard_fails_ghost_entry(self) -> None:
         with TemporaryDirectory() as tmp, patch.object(
@@ -363,7 +359,7 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
             self._setup(
                 root,
                 "| `services::foo` | `src/services/foo.rs` | 4000 | 64 | 3936 |  |",
-                "- `src/services/foo.rs` (3550 lines, giant-file).\n",
+                "- `src/services/foo.rs` (frozen giant surface).\n",
             )
             result = CHECKER.main(
                 ["--repo-root", tmp, "--warning-only", "--line-count-gate"]
@@ -371,7 +367,7 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
 
         self.assertEqual(result, 1)
 
-    def test_warning_only_line_count_gate_allows_numeric_mismatch(self) -> None:
+    def test_warning_only_line_count_gate_allows_count_free_giant(self) -> None:
         with TemporaryDirectory() as tmp, patch.object(
             CHECKER, "check_doc_headers", return_value=[]
         ), patch.object(
@@ -383,7 +379,7 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
             self._setup(
                 root,
                 "| `services::foo` | `src/services/foo.rs` | 2200 | 2100 | 100 |  |",
-                "- `src/services/foo.rs` (1800 lines, giant-file).\n",
+                "- `src/services/foo.rs` (frozen giant surface).\n",
             )
             result = CHECKER.main(
                 ["--repo-root", tmp, "--warning-only", "--line-count-gate"]
@@ -391,15 +387,13 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
 
         self.assertEqual(result, 0)
 
-    def test_gates_bare_shorthand_line_count(self) -> None:
-        # The services_misc_giants list uses a bare `(N)` shorthand; the gate
-        # must validate it too, not just the `(N lines)` form.
+    def test_gates_count_free_frozen_entry(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._setup(
                 root,
                 "| `services::foo` | `src/services/foo.rs` | 4000 | 64 | 3936 |  |",
-                "- `src/services/foo.rs` (3550) — provider adapter.\n",
+                "- `src/services/foo.rs` (frozen giant surface) — provider adapter.\n",
             )
             findings = CHECKER.check_change_surface_line_counts(root)
 
@@ -407,30 +401,18 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
         self.assertEqual(findings[0].severity, "error")
         self.assertIn("no longer a giant file", findings[0].message)
 
-    def test_bare_shorthand_drift_is_not_an_error(self) -> None:
+    def test_count_free_entry_is_not_double_counted(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._setup(
                 root,
-                "| `services::foo` | `src/services/foo.rs` | 2200 | 1740 | 460 |  |",
-                "- `src/services/foo.rs` (2177).\n",
+                "| `services::foo` | `src/services/foo.rs` | 2000 | 64 | 1936 |  |",
+                "- `src/services/foo.rs` (frozen giant surface, owner: services).\n",
             )
             findings = CHECKER.check_change_surface_line_counts(root)
 
-        self.assertEqual(findings, [])
-
-    def test_lines_form_not_double_counted_by_shorthand(self) -> None:
-        # `(N lines …)` must be handled once, not also matched as `(N)`.
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self._setup(
-                root,
-                "| `services::foo` | `src/services/foo.rs` | 2000 | 1500 | 500 |  |",
-                "- `src/services/foo.rs` (1500 lines, giant-file).\n",
-            )
-            findings = CHECKER.check_change_surface_line_counts(root)
-
-        self.assertEqual(findings, [])
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, "error")
 
     def test_errors_when_frozen_path_missing_from_disk(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -440,7 +422,7 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
             self._setup(
                 root,
                 "| `services::bar` | `src/services/bar.rs` | 1500 | 1500 | 0 |  |",
-                "- `src/services/gone.rs` (2000 lines, giant-file).\n",
+                "- `src/services/gone.rs` (frozen giant surface).\n",
             )
             findings = CHECKER.check_change_surface_line_counts(root)
 
@@ -456,7 +438,7 @@ class ChangeSurfaceLineCountTest(unittest.TestCase):
             self._setup(
                 root,
                 "| `services::bar` | `src/services/bar.rs` | 1500 | 1500 | 0 |  |",
-                "- `src/db/tests.rs` (3000 lines).\n",
+                "- `src/db/tests.rs` (frozen giant surface).\n",
             )
             findings = CHECKER.check_change_surface_line_counts(root)
 
