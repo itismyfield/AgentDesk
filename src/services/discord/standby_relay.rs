@@ -87,11 +87,13 @@ impl StandbyRelayTurnBinding {
         }
     }
 
-    pub(in crate::services::discord) fn polling_start_offset(&self) -> u64 {
+    pub(in crate::services::discord) fn polling_start_offset(&self, handoff_offset: u64) -> u64 {
         // The handoff's `last_offset` is a rehydration cursor and can already
         // point beyond assistant output written during prompt injection. Scan
         // from the durable turn baseline instead so standby cannot miss it.
-        self.turn_start_offset.unwrap_or(0)
+        // Legacy rows without that baseline retain their handoff cursor rather
+        // than scanning from byte zero into a prior turn.
+        self.turn_start_offset.unwrap_or(handoff_offset)
     }
 
     fn turn_id(&self, channel_id: ChannelId) -> Option<String> {
@@ -139,7 +141,6 @@ pub(super) async fn run_standby_relay(
     let mut tail_start_offset = start_offset;
     let mut pending_result_text: Option<String> = None;
     let mut pending_result_retry_offset: Option<u64> = None;
-    let mut latest_assistant_text: Option<(u64, String)> = None;
     let mut completed_signal_drain_until: Option<Instant> = None;
     // #2448: subscribe BEFORE the first poll tick so a `Completed` broadcast
     // emitted while we are setting up is queued instead of lost. Lag is
@@ -180,11 +181,13 @@ pub(super) async fn run_standby_relay(
             completed_signal_drain_until,
             Instant::now(),
         ) {
-            let assistant_text = super::recovery_engine::extract_response_from_output_pub(
+            let assistant_text = completed_drain_fallback_response(
+                pending_result_text.as_deref(),
+                true,
                 &output_path,
                 start_offset,
             );
-            if !assistant_text.trim().is_empty() {
+            if let Some(assistant_text) = assistant_text {
                 pending_result_text = Some(assistant_text);
                 completed_signal_drain_until = None;
                 continue;
@@ -258,14 +261,6 @@ pub(super) async fn run_standby_relay(
                 }
                 Err(TryRecvError::Closed) => break, // sender dropped — keep polling
             }
-        }
-        if pending_result_text.is_none()
-            && completed_signal_drain_until.is_some()
-            && let Some((assistant_offset, assistant_text)) = latest_assistant_text.take()
-        {
-            pending_result_retry_offset = Some(assistant_offset);
-            pending_result_text = Some(assistant_text);
-            completed_signal_drain_until = None;
         }
         if last_inflight_heartbeat.elapsed() >= INFLIGHT_HEARTBEAT_INTERVAL {
             refresh_standby_inflight_heartbeat(
@@ -352,17 +347,41 @@ pub(super) async fn run_standby_relay(
                 found_result_text = Some(result_text);
                 break;
             }
-            if let Some(assistant_text) = extract_assistant_text(&line) {
-                latest_assistant_text = Some((line_offset, assistant_text));
-            }
         }
         if let Some(result_text) = found_result_text {
             pending_result_text = Some(result_text);
             completed_signal_drain_until = None;
             continue;
         }
+        // The Completed broadcast can arrive before this tick consumes the
+        // terminal JSONL records. Resolve the current file slice first; only
+        // then use the same full response recovery as drain expiry.
+        if let Some(assistant_text) = completed_drain_fallback_response(
+            pending_result_text.as_deref(),
+            completed_signal_drain_until.is_some(),
+            &output_path,
+            start_offset,
+        ) {
+            pending_result_text = Some(assistant_text);
+            completed_signal_drain_until = None;
+            continue;
+        }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+fn completed_drain_fallback_response(
+    pending_result_text: Option<&str>,
+    completed_drain_active: bool,
+    output_path: &str,
+    start_offset: u64,
+) -> Option<String> {
+    if pending_result_text.is_some() || !completed_drain_active {
+        return None;
+    }
+    let response =
+        super::recovery_engine::extract_response_from_output_pub(output_path, start_offset);
+    (!response.trim().is_empty()).then_some(response)
 }
 
 fn read_file_range(path: &str, start: u64, end: u64) -> std::io::Result<Vec<u8>> {
@@ -435,21 +454,6 @@ fn extract_result_text(line: &str) -> Option<String> {
         return None;
     }
     cleaned_response_text(parsed.get("result").and_then(Value::as_str)?)
-}
-
-fn extract_assistant_text(line: &str) -> Option<String> {
-    let parsed: Value = serde_json::from_str(line.trim()).ok()?;
-    if parsed.get("type").and_then(Value::as_str) != Some("assistant") {
-        return None;
-    }
-    let content = parsed.get("message")?.get("content")?.as_array()?;
-    let text = content
-        .iter()
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
-        .filter_map(|block| block.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("");
-    cleaned_response_text(&text)
 }
 
 fn cleaned_response_text(text: &str) -> Option<String> {
@@ -976,24 +980,6 @@ mod tests {
     }
 
     #[test]
-    fn extract_assistant_text_returns_terminal_tui_text_blocks() {
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"first"},{"type":"tool_use","name":"Bash"},{"type":"text","text":" second"}]}}"#;
-        assert_eq!(
-            extract_assistant_text(line).as_deref(),
-            Some("first second")
-        );
-    }
-
-    #[test]
-    fn extract_assistant_text_skips_empty_and_tui_chrome_only_messages() {
-        let tool_only =
-            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}"#;
-        assert!(extract_assistant_text(tool_only).is_none());
-        let chrome_only = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"No response requested."}]}}"#;
-        assert!(extract_assistant_text(chrome_only).is_none());
-    }
-
-    #[test]
     fn extract_result_text_returns_text_for_result_subtype_success() {
         let line = r#"{"type":"result","subtype":"success","result":"hello"}"#;
         assert_eq!(extract_result_text(line).as_deref(), Some("hello"));
@@ -1017,6 +1003,30 @@ mod tests {
     fn extract_result_text_handles_invalid_json() {
         assert!(extract_result_text("not json").is_none());
         assert!(extract_result_text("").is_none());
+    }
+
+    #[test]
+    fn completed_drain_fallback_prefers_full_post_tool_response_over_cached_narration() {
+        let dir = tempfile::tempdir().expect("create TUI transcript directory");
+        let transcript = dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            concat!(
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"A1 narration\"},{\"type\":\"tool_use\",\"name\":\"Read\"}]}}\n",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"A2 final answer\"}]}}\n",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"A2 final answer\"}\n",
+            ),
+        )
+        .expect("write TUI transcript");
+
+        let response = completed_drain_fallback_response(
+            None,
+            true,
+            transcript.to_str().expect("UTF-8 transcript path"),
+            0,
+        );
+        assert_eq!(response.as_deref(), Some("A1 narrationA2 final answer"));
+        assert_ne!(response.as_deref(), Some("A1 narration"));
     }
 
     #[test]
@@ -1059,12 +1069,12 @@ mod tests {
         );
         state.turn_start_offset = Some(128);
         let binding = StandbyRelayTurnBinding::from_state(&state);
-        assert_eq!(binding.polling_start_offset(), 128);
+        assert_eq!(binding.polling_start_offset(512), 128);
 
         state.turn_start_offset = None;
         assert_eq!(
-            StandbyRelayTurnBinding::from_state(&state).polling_start_offset(),
-            0
+            StandbyRelayTurnBinding::from_state(&state).polling_start_offset(512),
+            512
         );
     }
 
