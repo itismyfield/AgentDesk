@@ -86,7 +86,7 @@
 - do_not_edit_without_migration_plan:
   - `src/services/discord/formatting.rs::send_long_message_raw` (line 1971,
     ordered-chunk continuation contract not yet modelled in v3).
-  - `src/services/discord/outbound/delivery_record.rs` (1323 prod lines; +47 from
+  - `src/services/discord/outbound/delivery_record.rs` (frozen giant surface; +47 from
     #4046 S1r-1 adding the isolated `discord_fresh_send_records` path,
     Result-returning fresh-send fingerprint writer, and dedicated current-generation
     lookup so anchor-less sends cannot enter watcher suppression authority; +60
@@ -328,10 +328,10 @@
     late-frame fresh row B is rejected; -576 from #3841 extracting placeholder
     suppression helpers to `tmux_placeholder_suppression/`;
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (5218 production lines; #4229 S4
+  - `src/services/discord/tmux_watcher.rs` (frozen giant surface; #4229 S4
     moved the turn stream collector (seed restore/first parse-forward/monitor
     auto-turn claim/active read-parse loop) verbatim to
-    `tmux_watcher/turn_stream_collector.rs` (1158 production lines), ratcheting
+    `tmux_watcher/turn_stream_collector.rs` (giant child module), ratcheting
     the root down after behavior-preserving decompose; #4229 S3 moved the
     throttled streaming status tick (orphan reclaim, streaming
     suppression, status-panel create/bind, rollover, re-anchor, placeholder
@@ -768,7 +768,7 @@
     worker-local relay lifecycle only, no PG lease/schema. The parent
     spawn/provider wiring surface stays preserved. Historical context:
     #3296
-  - `src/services/discord/tui_prompt_relay/synthetic_start.rs` (1039 prod LoC;
+  - `src/services/discord/tui_prompt_relay/synthetic_start.rs` (frozen giant surface;
     synthetic TUI-direct claim/adoption and idle-tail cleanup surface. Crossed
     the giant threshold in #4019 R2 when idle-tail cleanup moved from direct
     mailbox finish/counter decrement to finalizer authority, gained session-key
@@ -1021,7 +1021,7 @@
     commit + visible-completion consumption, and `sweep.rs` owns the TTL sweep.
     All files are below the giant-file threshold; the #4175 registry entry is
     retired.
-  - `src/services/discord/tui_direct_pending_start.rs` (1125 production lines;
+  - `src/services/discord/tui_direct_pending_start.rs` (frozen giant surface;
     the deferred TUI-direct synthetic turn-start path — the pending-start claim
     queue, the no-evict promote of a stalled inflight, and the deferred-claim
     owner handoff. #3540 added the B′ "no-evict promote" path (a stalled inflight
@@ -1045,7 +1045,7 @@
     extracted verbatim from `tui_prompt_relay.rs` — no `shared.`/`http.`/async-IO
     coupling, all items `pub(super)` and re-imported by the parent; below the
     giant-file threshold).
-  - `src/services/discord/tui_prompt_relay/rehydration.rs` (648 prod lines; #3479
+  - `src/services/discord/tui_prompt_relay/rehydration.rs` (sub-1000 production module; #3479
     rank-10: the Discord-IO/`SharedData`-coupled Claude TUI binding rehydration +
     dead/orphaned-session eviction pass extracted from `tui_prompt_relay.rs`. #3711
     extends the same rehydrate surface to Codex TUI restart recovery: persist/use
@@ -1213,15 +1213,14 @@
     marker suppression for stop-control transcript envelopes; +62 from #3304:
     slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
-  - `src/services/discord/relay_recovery.rs` (1131 production lines; +242 from
+  - `src/services/discord/relay_recovery.rs` (frozen giant surface; +242 from
     #4030 fix-round review hardening: destructive watcher-owner Cancel now routes
     through the shared death-evidence gate (`destructive_cancel_gate.rs`), pins
     decision-time turn/mailbox/tmux identity before apply-time finalizer submit,
     and covers frozen nonzero-frontier / empty-capture variants. This admission
     is bugfix-only for PR #4035; further recovery policy expansion should extract
     decision/apply helpers instead of growing this file.)
-  - `src/services/discord/recovery_engine/restore_inflight.rs` (2335 production
-    lines; tracked #3834 follow-up giant after the r2 behavior-preserving split.
+  - `src/services/discord/recovery_engine/restore_inflight.rs` (frozen giant surface; tracked #3834 follow-up giant after the r2 behavior-preserving split.
     Owns the restart-path inflight scan: retry-aware tmux liveness probes,
     `finish_recovered_turn_mailbox`, live output-path detection,
     `restore_inflight_turns`, watcher reattach, and the session-died generic
@@ -1230,7 +1229,7 @@
     recovery-context take helper remains in `turn_bridge/recovery_text.rs`.
     Further work should split internal scan/session-retry helpers out of this
     child before adding behavior.)
-  - `src/services/discord/recovery_engine.rs` (417 prod lines after #3834 r2;
+  - `src/services/discord/recovery_engine.rs` (sub-1000 production module after #3834 r2;
     no longer a prod giant. The facade keeps module declarations, re-imports, and
     the shared `RecoveryPhase` / `RebindOutcome` / `RebindError` types.
     `relay_recovered_terminal_text_to_placeholder`, `finish_recovered_turn_mailbox`,
@@ -1239,8 +1238,7 @@
   - `src/services/discord/recovery_engine/completion_delivery.rs` (sub-1000;
     behavior-preserving #3834 r2 extraction of recovery terminal relay,
     visible completion/status-panel completion helpers, and their tests.)
-  - `src/services/discord/recovery_engine/manual_rebind/mod.rs` (995 prod lines
-    after #4455; remains below the giant threshold. Keeps the manual rebind entrypoints,
+  - `src/services/discord/recovery_engine/manual_rebind/mod.rs` (frozen giant surface; keeps the manual rebind entrypoints,
     rollback carrier, session refresh, active-turn re-registration hook, and
     watcher claim/spawn path. #4465's durable automatic lane performs the
     blocking exact-episode adoption on `spawn_blocking`, retains that same
@@ -1256,8 +1254,8 @@
     lines) owns transcript-adoption offset and binding decisions. The retired
     `manual_rebind.rs` giant registration was removed from
     scripts/giant_file_registry.toml.)
-  - `src/services/discord/recovery_engine/rebind_runtime.rs` (980 prod lines
-    after #4455; below the giant threshold) owns provider runtime resolution
+  - `src/services/discord/recovery_engine/rebind_runtime.rs` (below the giant threshold
+    after #4455) owns provider runtime resolution
     and normalized Codex relay conversion. Its 89-line
     `rebind_runtime/codex_relay_generation.rs` child owns the per-path
     generation registry, prepare/truncate gate, and fenced JSONL write.
@@ -1355,7 +1353,7 @@
   - `src/services/discord/meeting_orchestrator.rs` (frozen giant surface; +1 from #4055
     preserving the typed transient delivery result; #3034 dead-code sweep
     removed `is_meeting_channel`).
-  - `src/services/discord/turn_bridge/tmux_runtime.rs` (993 prod lines; provider
+  - `src/services/discord/turn_bridge/tmux_runtime.rs` (below the giant threshold; provider
     stop-token/tmux binding runtime + the async interrupt/cancel/hard-stop
     orchestration + session-teardown. #3169: the claude-anonymous-teardown
     SIGINT suppression guard (death #3) lives in the `interrupt_policy` child.
@@ -1441,7 +1439,7 @@
     `work_dispatch_completion_context`, `build_work_dispatch_completion_result`,
     and the `noop`/tracked-change context builders. Reads git history + Postgres
     completion hints; not a giant-file).
-  - `src/services/discord/turn_bridge/tmux_runtime.rs` (993 prod lines; no longer
+  - `src/services/discord/turn_bridge/tmux_runtime.rs` (below the giant threshold; no longer
     a giant-file after #3479 — see the description above and the three child
     entries below).
   - `src/services/discord/turn_bridge/tmux_runtime/interrupt_policy.rs` (225 prod
@@ -1473,7 +1471,7 @@
     giant-file-registry [[entry]] was removed. #3038 turn_bridge S1 moved
     `advance_tmux_relay_confirmed_end` here; split the remaining lease wiring
     vs delivery helpers before adding behavior).
-  - `src/services/discord/turn_bridge/stream_loop.rs` (979 prod lines; #4230 S6
+  - `src/services/discord/turn_bridge/stream_loop.rs` (below the giant threshold; #4230 S6
     extracted the main stream-loop shell from `turn_bridge/mod.rs`, S7 moved the
     tool/result/task-notification arms to `stream_loop/tool_arms.rs`, and S8 moved
     the content/status/terminal arms to `stream_loop/content_arms.rs`. The root
@@ -1481,7 +1479,7 @@
     stream/status ticks, and long-running placeholder state wiring. Its #4230
     giant registry entry was retired after S8; the measured 979-line cap remains
     below the 1000-prod-LoC threshold).
-  - `src/services/discord/outbound/turn_output_controller.rs` (1228 prod lines;
+  - `src/services/discord/outbound/turn_output_controller.rs` (frozen giant surface;
     #4046 S1r-1 keeps the anchor-less `SendFresh` implementation in the 228-line
     `turn_output_controller/fresh_send.rs` child while the root owns only the
     shared verb/outcome contract and routing; crossed the giant threshold in
@@ -1490,7 +1488,7 @@
     `giant-file-registry.md` (owner `discord-relay`, deadline 2026-08-31, issue
     #3405). Keep further controller growth in narrower outbound/controller
     helper modules).
-  - `src/services/discord/turn_finalizer.rs` (1048 prod lines; single-authority
+  - `src/services/discord/turn_finalizer.rs` (frozen giant surface; single-authority
     turn-finalize state machine — ledger/actor-loop/reconciler. Crossed the
     giant-file threshold when #3041 P1-0 added the dormant `DeliveryLeaseCell`
     finalizer messages/handlers on top of #3143's `FinalizeContext::monitor()` +
@@ -1512,7 +1510,7 @@
     `turn_finalizer/finalize.rs` is now 246 prod LoC, `turn_finalizer/finalize_context.rs` 113 prod LoC,
     `turn_finalizer/reconcile.rs` 221 prod LoC, and
     `turn_finalizer/cleanup.rs` 565 prod LoC. No PG lease/schema change.
-  - `src/services/discord/turn_view_reconciler.rs` (2356 prod lines; +55 from #4606 migrating queued-state persistence to schema v3, converging legacy v2 marker+hourglass records, and making queued user-message views marker-only while `Queued*` → `Pending` adds a fresh `⏳` through the target-set diff; +45 from #4248/#4329 review hardening: queued-state schema v2 invalidates v1 queue records while keeping v1 pending-anchor recovery compatible, and multi-reaction transitions compensate already-applied operations on partial failure; #4248 moves
+  - `src/services/discord/turn_view_reconciler.rs` (frozen giant surface; +55 from #4606 migrating queued-state persistence to schema v3, converging legacy v2 marker+hourglass records, and making queued user-message views marker-only while `Queued*` → `Pending` adds a fresh `⏳` through the target-set diff; +45 from #4248/#4329 review hardening: queued-state schema v2 invalidates v1 queue records while keeping v1 pending-anchor recovery compatible, and multi-reaction transitions compensate already-applied operations on partial failure; #4248 moves
     the derived reaction mapping into `turn_view_reconciler/reaction_set.rs` and
     originally made queued user-message views include an immediate `⏳` alongside
     their queue-kind marker; #4606 supersedes that queue presentation while
@@ -1808,7 +1806,7 @@ these contextual numbers to match ordinary LoC churn.
   `src/services/auto_queue/cancel_run.rs` (frozen giant surface) is also giant-file territory;
   split before further non-bugfix growth.
 - `src/services/onboarding/mod.rs` (frozen giant surface),
-  `src/services/dispatched_sessions.rs` (1650; #4091 r2 adds the two-sample
+  `src/services/dispatched_sessions.rs` (frozen giant surface; #4091 r2 adds the two-sample
   growth-evidence selector cross-check wiring, claude_tui transcript-mtime
   runtime-activity anchors, and the flip-back window guard), and
   `src/services/settings.rs` (frozen giant surface) — service-layer route support surfaces
@@ -1817,9 +1815,9 @@ these contextual numbers to match ordinary LoC churn.
 - `src/services/dispatches/outbox_route.rs` (frozen giant surface) — dispatch outbox route
   support extracted from the route layer; split before adding non-bugfix
   behavior.
-- `src/services/claude.rs` (2969; +9 net from #4553 replacing dead native cache-TTL launch wiring with guarded gateway-proxy launch decisions and covering the simple-command spawn; -21 from #4113 backend_routing/availability extraction), `src/services/gemini.rs` (frozen giant surface),
+- `src/services/claude.rs` (frozen giant surface; +9 net from #4553 replacing dead native cache-TTL launch wiring with guarded gateway-proxy launch decisions and covering the simple-command spawn; -21 from #4113 backend_routing/availability extraction), `src/services/gemini.rs` (frozen giant surface),
   `src/services/qwen.rs` (frozen giant surface), `src/services/codex.rs` (frozen giant surface),
-  `src/services/opencode.rs` (frozen giant surface), `src/services/provider.rs` (1818; +4 from #4566 publishing the session-generation registry binding as a monotonic max() guard with the token-local tmux-session name kept for SIGINT/pid tracking) —
+  `src/services/opencode.rs` (frozen giant surface), `src/services/provider.rs` (frozen giant surface; +4 from #4566 publishing the session-generation registry binding as a monotonic max() guard with the token-local tmux-session name kept for SIGINT/pid tracking) —
   provider adapters. (#3034 removed dead non-cancel `execute_command_simple*`
   twins from the claude/codex/gemini adapters and a superseded
   `select_counterpart_from` from provider. #3263 added the Codex max-of-cache
@@ -1879,7 +1877,7 @@ these contextual numbers to match ordinary LoC churn.
   fast with an actionable, non-timeout reason instead of false-submitting then
   blind-waiting/retrying the full timeout; gate every ready-return path —
   including the recorded-turn idle-transcript fallbacks — on the MCP-auth check.)
-- `src/services/tmux_common.rs` (~1090 prod LoC) — Claude/Codex TUI pane-capture
+- `src/services/tmux_common.rs` (frozen giant surface) — Claude/Codex TUI pane-capture
   heuristics: ready-for-input, prompt-draft vs idle-suggestion-ghost, active-work
   streaming, MCP-auth banner, and `/effort` selector detection, plus session
   temp-file paths. Treat as giant-file territory; split focused detector helpers
@@ -1896,7 +1894,7 @@ these contextual numbers to match ordinary LoC churn.
   the AUTHORITATIVE transcript turn-state in `claude_tui_followup_stranded_prompt_
   draft_state`, not by the pane.)
 - `src/services/memory/memento.rs` (frozen giant surface).
-- `src/services/dispatched_sessions.rs` (1633; +87 from #4091 server-selected session id — freshness cross-check picks the growing raw transcript over a stale cached claude_session_id) — dispatched session domain
+- `src/services/dispatched_sessions.rs` (frozen giant surface; +87 from #4091 server-selected session id — freshness cross-check picks the growing raw transcript over a stale cached claude_session_id) — dispatched session domain
   service. This is the post-#1515 SRP extraction target for route/database
   callsites, but the module itself is now giant-file territory; split focused
   helpers before adding non-bugfix behavior. (+5 from #3169 exposing the idle-
@@ -1929,7 +1927,7 @@ these contextual numbers to match ordinary LoC churn.
   `resolve_claude_binary_sealed` (consumed only by `ClaudeBinary::resolve`) is
   fenced by the `sealed_claude_seam_confined_to_chokepoint` guard in
   `claude_command.rs`.
-- `src/services/discord/mod.rs` (now 4152 prod LoC after #4049 S4-a2 moved
+- `src/services/discord/mod.rs` (frozen giant surface; formerly 4152 prod LoC after #4049 S4-a2 moved
   queue-marker routing into `queue_marker.rs` and retired direct reaction
   mutation call sites; 4157 prod LoC after #4048 S3 extracted
   the mailbox-release completion publish helper to `turn_completion_events.rs`
@@ -1963,8 +1961,8 @@ these contextual numbers to match ordinary LoC churn.
   — the thirteen restart-lifecycle fields — into
   `shared_state::RestartLifecycle`, leaving a single `restart: RestartLifecycle`
   group field on `SharedData` with the type re-exported for surface freeze),
-  `src/services/discord_config_audit.rs` (1288; +15 from #3692 leader-ownership gate on the config-audit agent sync path).
-- `src/services/discord/inflight/save_store.rs` (1083; crossed the 1000
+  `src/services/discord_config_audit.rs` (frozen giant surface; +15 from #3692 leader-ownership gate on the config-audit agent sync path).
+- `src/services/discord/inflight/save_store.rs` (below the giant threshold; crossed the 1000
   threshold in #4185 — added the restart-only locked `full_response` patch
   helper `patch_restart_full_response_if_identity_unchanged` (identity +
   restart_mode/generation equality + rebind/output_path invariance + id-0
@@ -1975,21 +1973,21 @@ these contextual numbers to match ordinary LoC churn.
   guarded inflight save/patch authority. Keep growth bugfix-only; decomposition
   tracked in #4280 (move inline tests to a child module, extract identity-gate
   predicates).
-- `src/services/discord/catch_up.rs` (1077; +70 from #4118 bugfix — retry-mode
+- `src/services/discord/catch_up.rs` (frozen giant surface; +70 from #4118 bugfix — retry-mode
   REST fetch failure re-arms `catch_up_retry_pending` with a bounded attempt
   cap (4) instead of one-shot consumption, so a transient fetch error no longer
   permanently drops the over-cap backlog into next-restart TooOld loss; state
   widened to `{checkpoint, fetch_failures}`) — catch-up phase 1/2 scan and
   checkpoint orchestration. Keep growth bugfix-only and prefer `catch_up/*`
   helpers for new classification or commit policy.
-- `src/services/turn_orchestrator.rs` (3194; +3 from #3293 declaring the
+- `src/services/turn_orchestrator.rs` (frozen giant surface; +3 from #3293 declaring the
   `registry_purge` child module — the non-creating `peek` lookup and the
   operator-gated `remove_idle_entry` purge live in
   `turn_orchestrator/registry_purge.rs`, outside the frozen module root; +95
   from #3864 moving SIGTERM queue-restore merge inside the mailbox actor; +10
   from #4018 round-2 adding the distinct `MonitorAutoTurn` active-turn marker
   while keeping monitor turns background for queue-yield/cancel semantics).
-- `src/services/discord/session_relay_sink.rs` (1677 prod lines; +1 from #4046
+- `src/services/discord/session_relay_sink.rs` (frozen giant surface; +1 from #4046
   S1r-1 conservatively rejecting the dormant fresh-send-only outcome at this
   replace-only caller; -59 from #3998 S1-f2 retiring the A2b rollout getter/cache
   and flag-OFF pin tests; +7 from #3610 PR-1 passing the terminal anchor into the
