@@ -422,7 +422,7 @@ pub(super) fn restored_worktree_belongs_to_parent(parent_path: &str, worktree_pa
 /// worktree lives elsewhere and must NOT be treated as a disposable
 /// AgentDesk-owned worktree — otherwise idle session cleanup could remove the
 /// user's checkout and delete its branch (#3011 codex review P1).
-pub(in crate::services::discord) fn is_managed_worktree_path(path: &str) -> bool {
+pub(super) fn is_managed_worktree_path(path: &str) -> bool {
     let Some(root) = worktrees_root() else {
         return false;
     };
@@ -436,7 +436,7 @@ pub(in crate::services::discord) fn is_managed_worktree_path(path: &str) -> bool
 /// checkout. A linked worktree's per-worktree git dir
 /// (`<repo>/.git/worktrees/<name>`) differs from the shared common dir
 /// (`<repo>/.git`), whereas they are identical for the main checkout.
-pub(in crate::services::discord) fn is_linked_worktree(path: &str) -> bool {
+fn is_linked_worktree(path: &str) -> bool {
     let git_dir = git_command_stdout(path, &["rev-parse", "--path-format=absolute", "--git-dir"])
         .ok()
         .filter(|dir| !dir.is_empty());
@@ -547,7 +547,7 @@ pub(in crate::services::discord) fn resolve_reusable_worktree(
 /// checkout). Used by the auto-restore paths so a thread session that resumes
 /// after a dcserver restart regains its worktree metadata, inflight worktree
 /// context, and a stable cleanup root instead of silently dropping them (#3011).
-pub(super) fn reconstruct_managed_worktree_metadata(
+pub(in crate::services::discord) fn reconstruct_managed_worktree_metadata(
     session: &mut DiscordSession,
     provider: &ProviderKind,
     channel_id: ChannelId,
