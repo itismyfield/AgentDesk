@@ -4,10 +4,10 @@
 //! classifier into an operator-facing decision, and only applies local,
 //! idempotent cleanup when the evidence is strong enough.
 //!
-//! Known residual limitations for follow-up issues: a committed-but-leaked
-//! inflight row self-heals only when a pending-start backstop can prove the
-//! terminal envelope and complete it through the finalizer; relay recovery still
-//! has no independent sweep for that shape. Rows whose `output_path` is missing
+//! Known residual limitations for follow-up issues: committed-but-leaked and
+//! stale foreign inflight rows are swept independently of TUI-direct pending-start
+//! records, while retaining the same terminal/death-evidence and identity gates.
+//! Rows whose `output_path` is missing
 //! or points at a deleted file are permanently denied by the destructive cancel
 //! gate because no frozen-capture or terminal-envelope evidence can be re-probed.
 //! Stage-3 recovery where `watcher_attached=false` still relies on the
@@ -51,6 +51,8 @@ mod auto_heal_confirm;
 mod circuit_breaker;
 #[path = "relay_recovery_completion_footer.rs"]
 mod completion_footer;
+#[path = "relay_recovery_leaked_row_sweep.rs"]
+pub(super) mod leaked_row_sweep;
 #[path = "relay_recovery_reattach_apply.rs"]
 mod reattach_apply;
 #[path = "relay_recovery_circuit_alert_producer.rs"]
