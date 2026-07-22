@@ -505,6 +505,11 @@
       "path": "migrations/postgres/0098_scheduled_message_snapshot_reclaim.sql",
       "sha256": "655db436b1545c761338a20460b81cee80269040fe1958bd8f52e7f24743ebb6",
       "version": 98
+    },
+    {
+      "path": "migrations/postgres/0099_dispatched_origin_turn_marker.sql",
+      "sha256": "737bf8d3fa5a05cdd51b041bed6e94825bd7829f79c3b4366c823097cf4f9c14",
+      "version": 99
     }
   ],
   "version": 1

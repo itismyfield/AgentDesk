@@ -1211,6 +1211,8 @@ mod selector_cleanup_tests {
                 channel_id: None,
                 claude_session_id,
                 raw_provider_session_id,
+                turn_start_nonce: None,
+                dispatched_origin: false,
             },
         )
         .await
@@ -2353,6 +2355,8 @@ pub(crate) struct HookSessionUpsert<'a> {
     pub(crate) channel_id: Option<&'a str>,
     pub(crate) claude_session_id: Option<&'a str>,
     pub(crate) raw_provider_session_id: Option<&'a str>,
+    pub(crate) turn_start_nonce: Option<&'a str>,
+    pub(crate) dispatched_origin: bool,
 }
 
 pub(crate) struct DeleteSessionResult {
@@ -2446,6 +2450,12 @@ pub(crate) async fn upsert_hook_session_pg(
               ELSE COALESCE(sessions.claude_session_id_recorded_at, NOW())
             END,
             raw_provider_session_id = COALESCE(EXCLUDED.raw_provider_session_id, sessions.raw_provider_session_id),
+            active_turn_nonce = COALESCE(EXCLUDED.active_turn_nonce, sessions.active_turn_nonce),
+            dispatched_origin_turn_nonce = CASE
+              WHEN EXCLUDED.active_turn_nonce IS NULL THEN sessions.dispatched_origin_turn_nonce
+              WHEN EXCLUDED.dispatched_origin_turn_nonce IS NULL THEN NULL
+              ELSE EXCLUDED.dispatched_origin_turn_nonce
+            END,
             last_heartbeat = NOW()
          RETURNING (xmax = 0) AS inserted",
     )
@@ -2463,6 +2473,8 @@ pub(crate) async fn upsert_hook_session_pg(
     .bind(params.channel_id)
     .bind(params.claude_session_id)
     .bind(params.raw_provider_session_id)
+    .bind(params.turn_start_nonce)
+    .bind(params.dispatched_origin)
     .fetch_one(pool)
     .await
     .map_err(|error| format!("upsert postgres session {}: {error}", params.session_key))?;

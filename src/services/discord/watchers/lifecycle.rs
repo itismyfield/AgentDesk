@@ -11,6 +11,9 @@ pub(in crate::services::discord) use self::activity::{
 
 #[path = "codex_tui_restore.rs"]
 mod codex_restore;
+#[path = "dispatched_origin_ghost.rs"]
+mod dispatched_origin_ghost;
+use dispatched_origin_ghost::consume_dispatched_origin_ghost_if_current;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum LivenessProbeOutcome {
@@ -2518,7 +2521,18 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             if let Some(restored_tmux) =
                 restored_watcher_turn_from_inflight(&state, session_name, false)
             {
-                let _ = rebind_restored_dispatch_if_missing(shared.pg_pool.as_ref(), &state).await;
+                let rebound =
+                    rebind_restored_dispatch_if_missing(shared.pg_pool.as_ref(), &state).await;
+                if rebound == RestoreDispatchRebindOutcome::NotRebound
+                    && consume_dispatched_origin_ghost_if_current(shared.pg_pool.as_ref(), &state)
+                        .await
+                {
+                    tracing::info!(
+                        channel_id = state.channel_id,
+                        "cleared orphaned dispatched-origin turn during watcher restore"
+                    );
+                    continue;
+                }
                 let finish_mailbox_on_completion =
                     super::super::recovery::reregister_active_turn_from_inflight(&shared, &state)
                         .await;
@@ -2878,8 +2892,8 @@ mod restored_session_cwd_channel_isolation_tests {
     //! recovering channel would recover into the OTHER channel's working tree.
     //! RED before the predicate was added, GREEN after.
     use super::{
-        RestoreDispatchRebindOutcome, load_restored_session_cwd,
-        rebind_restored_dispatch_if_missing,
+        RestoreDispatchRebindOutcome, consume_dispatched_origin_ghost_if_current,
+        load_restored_session_cwd, rebind_restored_dispatch_if_missing,
     };
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::services::discord::adk_session::build_namespaced_session_key;
@@ -3016,6 +3030,58 @@ mod restored_session_cwd_channel_isolation_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatched_origin_ghost_marker_is_consumed_only_for_matching_turn() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let session_key = "claude/test/dispatched-origin-ghost-4642";
+        let channel_id = 464_200_004_u64;
+        let turn_nonce = "turn-nonce-4642";
+        sqlx::query(
+            "INSERT INTO sessions (session_key, provider, status, channel_id, active_turn_nonce, dispatched_origin_turn_nonce, last_heartbeat)
+             VALUES ($1, 'claude', 'turn_active', $2, $3, $3, NOW())",
+        )
+        .bind(session_key)
+        .bind(channel_id.to_string())
+        .bind(turn_nonce)
+        .execute(&pool)
+        .await
+        .expect("seed dispatched-origin ghost");
+
+        let mut state = crate::services::discord::inflight::InflightTurnState::new(
+            crate::services::provider::ProviderKind::Claude,
+            channel_id,
+            Some("dispatched-origin-ghost-4642".to_string()),
+            7,
+            464_200_401,
+            464_200_402,
+            "orphaned dispatch".to_string(),
+            Some(session_key.to_string()),
+            Some("AgentDesk-claude-dispatched-origin-ghost-4642".to_string()),
+            None,
+            None,
+            0,
+        );
+        state.session_key = Some(session_key.to_string());
+        state.turn_nonce = Some(turn_nonce.to_string());
+        // No runtime root is configured in this database mutation proof, so the
+        // identity-guarded clear reports Missing and is safe to consume.
+        assert!(consume_dispatched_origin_ghost_if_current(Some(&pool), &state).await);
+        let row: (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT status, active_dispatch_id, dispatched_origin_turn_nonce FROM sessions WHERE session_key = $1",
+        )
+        .bind(session_key)
+        .fetch_one(&pool)
+        .await
+        .expect("load consumed ghost");
+        assert_eq!(row.0, "idle");
+        assert!(row.1.is_none());
+        assert!(row.2.is_none());
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn interactive_restore_without_dispatch_is_untouched() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
@@ -3050,6 +3116,10 @@ mod restored_session_cwd_channel_isolation_tests {
             rebind_restored_dispatch_if_missing(Some(&pool), &state).await,
             RestoreDispatchRebindOutcome::NotRebound,
             "dispatch-less interactive inflight must retain ordinary restore behavior"
+        );
+        assert!(
+            !consume_dispatched_origin_ghost_if_current(Some(&pool), &state).await,
+            "dispatch-less interactive turn must fail closed without a dispatched-origin marker"
         );
         let row: (String, Option<String>) = sqlx::query_as(
             "SELECT status, active_dispatch_id FROM sessions WHERE session_key = $1",
