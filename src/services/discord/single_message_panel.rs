@@ -673,7 +673,7 @@ fn is_spinner_prefix_char(ch: char) -> bool {
 fn text_has_single_message_footer_surface(text: &str) -> bool {
     text.lines()
         .filter_map(|line| {
-            let line = line.trim();
+            let line = strip_subtext_prefix(line.trim());
             (!line.is_empty()).then_some(line)
         })
         .any(|line| {
@@ -1442,6 +1442,22 @@ mod tests {
         assert_eq!(
             super::finalize_streaming_footer(&rendered, &ProviderKind::Claude),
             None
+        );
+    }
+
+    #[test]
+    fn subtext_footer_only_completion_surface_is_exposed_4080() {
+        let footer = super::completion_footer_subtext(
+            "Context   📦 10 / 100 tokens\n\nTasks\n└ Bash Done ✓\n⏱ 2m 34s",
+        );
+
+        assert!(super::streaming_footer_only_surface_was_exposed(
+            &footer,
+            &ProviderKind::Claude
+        ));
+        assert_eq!(
+            super::strip_streaming_footer(&footer, &ProviderKind::Claude),
+            Some(String::new())
         );
     }
 
