@@ -338,12 +338,6 @@ pub(in crate::services::discord) async fn handle_event(
                     )
                     .await;
                 }
-                if super::super::steering::is_steer_cancel_custom_id(&component.data.custom_id) {
-                    return super::super::steering::handle_steer_cancel_interaction(
-                        ctx, component, data,
-                    )
-                    .await;
-                }
                 if super::super::commands::is_node_picker_custom_id(&component.data.custom_id) {
                     let settings_snapshot = { data.shared.settings.read().await.clone() };
                     if !super::super::provider_handles_channel(

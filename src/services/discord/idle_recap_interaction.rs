@@ -850,7 +850,7 @@ mod tests {
         assert!(is_idle_recap_custom_id("idle_recap:relay_diag:1"));
         assert!(is_idle_recap_custom_id("idle_recap:compact:1"));
         assert!(is_idle_recap_custom_id("idle_recap:suggest:1"));
-        assert!(!is_idle_recap_custom_id("steer:cancel:1"));
+        assert!(!is_idle_recap_custom_id("foreign:action:1"));
     }
 
     fn recap_target(session_key: &str) -> RecapClearTarget {
@@ -1333,7 +1333,7 @@ mod tests {
     #[test]
     fn recap_prompt_route_rejects_unrelated_custom_ids() {
         assert_eq!(recap_prompt_route("idle_recap:clear:42"), None);
-        assert_eq!(recap_prompt_route("steer:cancel:42"), None);
+        assert_eq!(recap_prompt_route("foreign:action:42"), None);
     }
 
     #[test]

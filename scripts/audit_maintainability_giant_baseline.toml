@@ -530,10 +530,6 @@
 # `.queued.queued_placeholders` re-wires (two extra method-chain lines) forced by
 # the cluster-C extraction. Net program-wide: mod.rs -201.
 # intake DB-error-log elevation (#3446): 2960 -> 2969.
-# /steer P1.5 (PR #740): +6 for the steer-cancel message-component routing arm in
-# `handle_event` (mirrors the model-picker / idle-recap arms — the dispatch can
-# only live in the root event handler). The cancel handler body itself lives in
-# the non-giant `steering.rs`, not here. Combined with #3446: 2969 -> 2975.
 # #3576 announce-trigger restore: +1 (2977 -> 2978) for the extra
 # `announce_bot_id,` argument line on the `is_allowed_turn_sender` call in
 # `handle_event` (restores the announce branch removed by #3478). The call

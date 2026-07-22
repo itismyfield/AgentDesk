@@ -561,8 +561,8 @@
   gateway subscriptions plus the only destructive `ReactionRemove` intake
   route. This narrows connection-level event intake on every node; it does not
   change gateway lease acquisition, singleton ownership, worker routing, or
-  node-local/shared-Postgres authority. Explicit authenticated `/steer` and
-  `/stop` cancellation remain on their existing owners.
+  node-local/shared-Postgres authority. Explicit authenticated `/stop`
+  cancellation remains on its existing owner.
 
 - #4424 message_outbox source-contract recovery: the protected
   `GET /api/message-outbox/failed` inspection route is read-only on any control

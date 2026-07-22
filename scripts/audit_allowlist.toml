@@ -35,7 +35,7 @@ direct_discord_sends = [
   "src/services/discord/commands/text_commands.rs#direct_discord_sends:08f62d5d5d316f20",
   "src/services/discord/discord_io.rs#direct_discord_sends:2f398342de1e7cd7",
   "src/services/discord/gateway.rs#direct_discord_sends:b61365ed28b915b2",
-  "src/services/discord/gateway.rs#direct_discord_sends:ddb44ff4289daaf5",
+  "src/services/discord/gateway.rs#direct_discord_sends:60a609bdefcf51c2",
   "src/services/discord/gateway.rs#direct_discord_sends:a78022596f453395",
   "src/services/discord/meeting_orchestrator.rs#direct_discord_sends:64c7fa00eace25a9",
   "src/services/discord/meeting_orchestrator.rs#direct_discord_sends:5e0310b8b9e373ff",
