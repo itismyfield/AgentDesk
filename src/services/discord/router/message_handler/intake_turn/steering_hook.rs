@@ -38,6 +38,13 @@ pub(super) struct IntakeSteeringContext<'a> {
     pub(super) has_pending_uploads: bool,
 }
 
+fn steering_route_is_native(
+    selection: &crate::services::provider_hosting::ProviderSessionSelection,
+) -> bool {
+    crate::services::tui_steering::route_input_by_session_driver(selection)
+        == crate::services::tui_steering::SteeringRoute::NativeTui
+}
+
 fn steering_intake_eligible(
     provider: &ProviderKind,
     foreground: bool,
@@ -104,8 +111,7 @@ pub(super) async fn maybe_handle_intake_steering(
             claude::is_tmux_available(),
             Some(channel_id.get()),
         );
-    if crate::services::tui_steering::route_input_by_session_driver(&selection)
-        != crate::services::tui_steering::SteeringRoute::NativeTui
+    if !steering_route_is_native(&selection)
         || !crate::services::tmux_diagnostics::tmux_session_has_live_pane(steering_tmux_name)
         || !tui_busy_followup_diagnostic(
             shared,
@@ -217,17 +223,40 @@ mod tests {
         assert!(!eligible(true, true, false, false, false, false, true));
         assert!(!eligible(false, true, false, false, false, false, false));
 
+        assert!(!steering_intake_eligible(
+            &ProviderKind::Gemini,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn non_native_tui_driver_is_blocked_by_the_actual_hook_route_gate() {
+        let selection = crate::services::provider_hosting::ProviderSessionSelection {
+            provider_id: "claude".to_string(),
+            requested_tui_hosting: false,
+            driver: crate::services::provider_hosting::ProviderSessionDriver::ClaudeE,
+            fallback_reason: None,
+        };
         assert_eq!(
-            crate::services::tui_steering::route_input_by_session_driver(
-                &crate::services::provider_hosting::ProviderSessionSelection {
-                    provider_id: "claude".to_string(),
-                    requested_tui_hosting: false,
-                    driver: crate::services::provider_hosting::ProviderSessionDriver::ClaudeE,
-                    fallback_reason: None,
-                },
-            ),
+            crate::services::tui_steering::route_input_by_session_driver(&selection),
             crate::services::tui_steering::SteeringRoute::ExistingMailbox,
         );
+
+        assert!(!steering_route_is_native(&selection));
+
+        let native_selection = crate::services::provider_hosting::ProviderSessionSelection {
+            provider_id: "claude".to_string(),
+            requested_tui_hosting: true,
+            driver: crate::services::provider_hosting::ProviderSessionDriver::TuiHosting,
+            fallback_reason: None,
+        };
+        assert!(steering_route_is_native(&native_selection));
     }
 
     #[test]
