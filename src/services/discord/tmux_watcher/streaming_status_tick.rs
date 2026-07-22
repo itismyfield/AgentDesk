@@ -131,6 +131,7 @@ pub(super) async fn update_streaming_status_tick(
             }
         }
 
+        // @persist-order-guard-start #4104
         // #4104: persist the parsed watcher snapshot on every throttled tick,
         // independently of whether this tick needs a Discord edit. A provider can
         // emit pre-tool text and then spend a long time inside a tool while the
@@ -911,6 +912,7 @@ pub(super) async fn update_streaming_status_tick(
             commit_streaming_status_tick_state!();
             return StreamingStatusTickOutcome::ContinueStreamingLoop;
         }
+        // @persist-order-guard-end #4104
         let mut display_text = build_watcher_streaming_edit_text_with_session_banner(
             &shared,
             channel_id,

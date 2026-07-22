@@ -2271,19 +2271,26 @@ mod watcher_stream_progress_tests {
     use crate::services::provider::ProviderKind;
     use poise::serenity_prelude::{ChannelId, MessageId};
 
+    fn streaming_tick_persist_order_guard_4104() -> &'static str {
+        let source = include_str!("tmux_watcher/streaming_status_tick.rs");
+        source
+            .split_once("// @persist-order-guard-start #4104")
+            .and_then(|(_, guarded)| {
+                guarded
+                    .split_once("// @persist-order-guard-end #4104")
+                    .map(|(guarded, _)| guarded)
+            })
+            .expect("#4104 persist-order markers must delimit production code")
+    }
+
     #[test]
     fn streaming_tick_persists_tool_hold_without_requiring_discord_edit_4104() {
-        let source = include_str!("tmux_watcher/streaming_status_tick.rs");
-        let unconditional_marker = source
-            .find("#4104: persist the parsed watcher snapshot on every throttled tick")
-            .expect("streaming tick must carry the #4104 durable hold guard");
-        let hold_persist = source[unconditional_marker..]
+        let guarded = streaming_tick_persist_order_guard_4104();
+        let hold_persist = guarded
             .find("persist_watcher_stream_progress(")
-            .map(|offset| unconditional_marker + offset)
             .expect("tool-hold snapshot must be persisted before render decisions");
-        let render_gate = source[unconditional_marker..]
+        let render_gate = guarded
             .find("let raw_current_portion =")
-            .map(|offset| unconditional_marker + offset)
             .expect("streaming tick render gate");
 
         assert!(
@@ -2294,16 +2301,11 @@ mod watcher_stream_progress_tests {
 
     #[test]
     fn streaming_tick_persists_silent_tool_hold_before_render_suppression_4104() {
-        let source = include_str!("tmux_watcher/streaming_status_tick.rs");
-        let hold_persist = source
-            .find("#4104: persist the parsed watcher snapshot on every throttled tick")
-            .and_then(|marker| {
-                source[marker..]
-                    .find("persist_watcher_stream_progress(")
-                    .map(|offset| marker + offset)
-            })
+        let guarded = streaming_tick_persist_order_guard_4104();
+        let hold_persist = guarded
+            .find("persist_watcher_stream_progress(")
             .expect("silent tool-hold snapshot must be persisted");
-        let silent_gate = source
+        let silent_gate = guarded
             .find("if streaming_silent_turn {")
             .expect("silent rendering suppression gate");
 
