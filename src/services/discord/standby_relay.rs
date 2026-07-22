@@ -39,7 +39,6 @@ use super::outbound::turn_output_controller as toc;
 use super::placeholder_controller::{PlaceholderKey, PlaceholderLifecycle};
 use crate::services::provider::ProviderKind;
 
-/// #3089 A3/#3998 S1-f2: pure short-replace cut-over decision.
 /// Routes the standby short-replace branch onto the unified controller when the
 /// post-format body is non-empty. The `!formatted.is_empty()` half is
 /// LOAD-BEARING and single-sourced here: legacy
@@ -61,8 +60,6 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// fires when neither the broadcast (same-node) nor the on-disk inflight
 /// poll (cross-node) ever observe completion. 30 min comfortably covers
 /// any sane long-running turn.
-// #3034: canonical backstop value retained as documentation; current callers
-// pass an explicit `timeout`, so no live read of this default yet.
 #[allow(dead_code)]
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1800);
 const MAX_FILE_BYTES_PER_TICK: u64 = 1_048_576; // 1 MiB safety cap
@@ -88,11 +85,6 @@ impl StandbyRelayTurnBinding {
     }
 
     pub(in crate::services::discord) fn polling_start_offset(&self, handoff_offset: u64) -> u64 {
-        // The handoff's `last_offset` is a rehydration cursor and can already
-        // point beyond assistant output written during prompt injection. Scan
-        // from the durable turn baseline instead so standby cannot miss it.
-        // Legacy rows without that baseline retain their handoff cursor rather
-        // than scanning from byte zero into a prior turn.
         self.turn_start_offset.unwrap_or(handoff_offset)
     }
 
@@ -107,8 +99,6 @@ impl StandbyRelayTurnBinding {
         ))
     }
 
-    /// Start at the durable pre-prompt baseline rather than a handoff's
-    /// current EOF, which can already be past a fast TUI response.
     fn standby_start_offset(&self, handoff_offset: u64) -> u64 {
         self.turn_start_offset.unwrap_or(handoff_offset)
     }
@@ -142,11 +132,6 @@ pub(super) async fn run_standby_relay(
     let mut pending_result_text: Option<String> = None;
     let mut pending_result_retry_offset: Option<u64> = None;
     let mut completed_signal_drain_until: Option<Instant> = None;
-    // #2448: subscribe BEFORE the first poll tick so a `Completed` broadcast
-    // emitted while we are setting up is queued instead of lost. Lag is
-    // expected on heavy load — `RecvError::Lagged` is treated as "you may
-    // have missed an exit-eligible signal" and triggers a force-poll +
-    // state re-fetch on the next tick (matches the issue pitfalls section).
     let mut inflight_signals = shared.inflight_signals.subscribe();
     let ts_start = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
@@ -328,46 +313,50 @@ pub(super) async fn run_standby_relay(
         };
         current_offset = read_to;
 
-        let mut found_result_text = None;
         let decoded_lines = standby_complete_lines_from_chunk(
             &mut tail_buf,
             &mut tail_start_offset,
             read_from,
             new_chunk,
         );
-        for (line_start, line) in decoded_lines.lines {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let line_offset = decoded_lines
-                .stitched_start_offset
-                .saturating_add(line_start as u64);
-            if let Some(result_text) = extract_result_text(&line) {
-                pending_result_retry_offset = Some(line_offset);
-                found_result_text = Some(result_text);
-                break;
-            }
-        }
-        if let Some(result_text) = found_result_text {
-            pending_result_text = Some(result_text);
-            completed_signal_drain_until = None;
-            continue;
-        }
-        // The Completed broadcast can arrive before this tick consumes the
-        // terminal JSONL records. Resolve the current file slice first; only
-        // then use the same full response recovery as drain expiry.
-        if let Some(assistant_text) = completed_drain_fallback_response(
+        if let Some((result_offset, response)) = standby_response_after_poll_scan(
+            &decoded_lines,
             pending_result_text.as_deref(),
             completed_signal_drain_until.is_some(),
             &output_path,
             start_offset,
         ) {
-            pending_result_text = Some(assistant_text);
+            pending_result_retry_offset = Some(result_offset);
+            pending_result_text = Some(response);
             completed_signal_drain_until = None;
             continue;
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+fn standby_response_after_poll_scan(
+    decoded_lines: &StandbyDecodedLines,
+    pending_result_text: Option<&str>,
+    completed_drain_active: bool,
+    output_path: &str,
+    start_offset: u64,
+) -> Option<(u64, String)> {
+    for (line_start, line) in &decoded_lines.lines {
+        let line_offset = decoded_lines
+            .stitched_start_offset
+            .saturating_add(*line_start as u64);
+        if let Some(result_text) = extract_result_text(line) {
+            return Some((line_offset, result_text));
+        }
+    }
+    completed_drain_fallback_response(
+        pending_result_text,
+        completed_drain_active,
+        output_path,
+        start_offset,
+    )
+    .map(|response| (start_offset, response))
 }
 
 fn completed_drain_fallback_response(
@@ -379,9 +368,45 @@ fn completed_drain_fallback_response(
     if pending_result_text.is_some() || !completed_drain_active {
         return None;
     }
-    let response =
-        super::recovery_engine::extract_response_from_output_pub(output_path, start_offset);
+    let response = final_assistant_response_from_output(output_path, start_offset);
     (!response.trim().is_empty()).then_some(response)
+}
+
+fn final_assistant_response_from_output(output_path: &str, start_offset: u64) -> String {
+    let Ok(bytes) = std::fs::read(output_path) else {
+        return String::new();
+    };
+    let start = usize::try_from(start_offset)
+        .ok()
+        .map(|offset| offset.min(bytes.len()))
+        .unwrap_or(bytes.len());
+
+    let mut final_response = String::new();
+    for line in String::from_utf8_lossy(&bytes[start..]).lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(content) = value
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        let text = content
+            .iter()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<String>();
+        let text = super::response_sanitizer::strip_leading_tui_response_chrome(&text);
+        if !text.trim().is_empty() {
+            final_response = text;
+        }
+    }
+    final_response
 }
 
 fn read_file_range(path: &str, start: u64, end: u64) -> std::io::Result<Vec<u8>> {
@@ -1006,6 +1031,42 @@ mod tests {
     }
 
     #[test]
+    fn poll_scan_prefers_result_before_completed_fallback() {
+        let dir = tempfile::tempdir().expect("create transcript directory");
+        let transcript = dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            concat!(
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"A1 narration\"},{\"type\":\"tool_use\",\"name\":\"Read\"}]}}\n",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"A2 final answer\"}]}}\n",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"A2 final answer\"}\n",
+            ),
+        )
+        .expect("write transcript");
+        let decoded_lines = StandbyDecodedLines {
+            stitched_start_offset: 0,
+            lines: std::fs::read_to_string(&transcript)
+                .expect("read transcript")
+                .lines()
+                .enumerate()
+                .map(|(index, line)| (index, line.to_string()))
+                .collect(),
+        };
+
+        let response = standby_response_after_poll_scan(
+            &decoded_lines,
+            None,
+            true,
+            transcript.to_str().expect("UTF-8 transcript path"),
+            0,
+        );
+        assert_eq!(
+            response.map(|(_, text)| text),
+            Some("A2 final answer".to_string())
+        );
+    }
+
+    #[test]
     fn completed_drain_fallback_prefers_full_post_tool_response_over_cached_narration() {
         let dir = tempfile::tempdir().expect("create TUI transcript directory");
         let transcript = dir.path().join("transcript.jsonl");
@@ -1025,7 +1086,7 @@ mod tests {
             transcript.to_str().expect("UTF-8 transcript path"),
             0,
         );
-        assert_eq!(response.as_deref(), Some("A1 narrationA2 final answer"));
+        assert_eq!(response.as_deref(), Some("A2 final answer"));
         assert_ne!(response.as_deref(), Some("A1 narration"));
     }
 
