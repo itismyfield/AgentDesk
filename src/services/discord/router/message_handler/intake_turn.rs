@@ -6,6 +6,7 @@ use super::super::super::turn_view_reconciler::{
 use super::voice_announcement_route::route_voice_transcript_announcement_once;
 use super::*;
 
+mod adk_thread;
 mod claim_bootstrap;
 mod race_loss;
 mod stale_dispatch_guard;
@@ -1879,16 +1880,8 @@ pub(super) async fn handle_text_message(
         channel_name.as_deref(),
         Some(&current_path),
     );
-    let adk_thread_channel_id = adk_session_name
-        .as_deref()
-        .and_then(super::super::super::adk_session::parse_thread_channel_id_from_name)
-        .or_else(|| {
-            shared
-                .dispatch
-                .thread_parents
-                .contains_key(&channel_id)
-                .then_some(channel_id.get())
-        });
+    let adk_thread_channel_id =
+        adk_thread::resolve_channel_id(adk_session_name.as_deref(), shared, channel_id);
     // #222: DB-based dispatch lookup takes priority over text parsing.
     // In unified threads, user_text may contain a stale DISPATCH: prefix
     // from a previous dispatch in the same thread. DB lookup uses the
