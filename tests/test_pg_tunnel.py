@@ -171,7 +171,15 @@ class DeploymentWiringTests(unittest.TestCase):
     def _pg_block() -> str:
         deploy = DEPLOY.read_text(encoding="utf-8")
         start = deploy.index("PG_TUNNEL_LABEL=\"com.agentdesk.pg-tunnel\"")
-        end = deploy.index("# #4381: a deploy restarts dcserver", start)
+        # #4735 replaced the old "# #4381: a deploy restarts dcserver" boundary
+        # comment (which touched the watchdog deploy-marker to suppress relay
+        # gaps) with the durable restart-persistence fence. That fence comment
+        # now marks the same boundary — right after the PG-tunnel migration and
+        # before dcserver is stopped — so the extracted block is unchanged.
+        end = deploy.index(
+            "# Fence new relay admissions and let dcserver atomically persist",
+            start,
+        )
         return deploy[start:end]
 
     def test_ci_script_checks_runs_this_suite(self):

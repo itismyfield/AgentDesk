@@ -926,6 +926,12 @@ guard_no_foreign_active_turns_or_warn() {
   return 1
 }
 
+# AGENTDESK_RESTART_REQUEST_NONCE and AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED
+# are intentional out-parameters: the sourcing deploy script (deploy-release.sh
+# lines ~2069-2070) reads them after this function returns. shellcheck analyses
+# this library in isolation and cannot see that cross-file consumption, so it
+# reports SC2034 (appears unused). Silence it for this function.
+# shellcheck disable=SC2034
 request_restart_drain_mode_or_fail() {
   local scope="$1"
   local label="$2"
