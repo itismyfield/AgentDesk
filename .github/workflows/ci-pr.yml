@@ -18,9 +18,11 @@ on:
 concurrency:
   # A PR number is unique inside the base repository, unlike `head_ref`: two
   # forks can use the same source branch name and must never cancel each other.
-  # Merge queue runs have no PR payload, so key them by the queue head ref before
-  # falling back to github.ref for manual dispatch and any other non-PR event.
-  group: ci-pr-${{ github.repository }}-${{ github.event.pull_request.number || github.event.merge_group.head_ref || github.ref }}
+  # Manual dispatch has no PR payload, so isolate it by the selected ref.
+  # Merge queue runs also have no PR payload; `github.ref` for a merge_group
+  # event is the unique `refs/heads/gh-readonly-queue/<base>/pr-N-<sha>` entry
+  # ref, so the existing fallback already isolates each queue run.
+  group: ci-pr-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
   # A newer push makes every result from the older SHA stale, so release its
   # hosted runners immediately. The `*_required_context` mirrors remain
   # fail-closed: cancellation may leave failed/cancelled contexts on the OLD
