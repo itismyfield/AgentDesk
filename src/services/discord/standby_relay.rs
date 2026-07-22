@@ -322,7 +322,8 @@ pub(super) async fn run_standby_relay(
         if let Some((result_offset, response)) = standby_response_after_poll_scan(
             &decoded_lines,
             pending_result_text.as_deref(),
-            completed_signal_drain_until.is_some(),
+            completed_signal_drain_until,
+            Instant::now(),
             &output_path,
             start_offset,
         ) {
@@ -338,7 +339,8 @@ pub(super) async fn run_standby_relay(
 fn standby_response_after_poll_scan(
     decoded_lines: &StandbyDecodedLines,
     pending_result_text: Option<&str>,
-    completed_drain_active: bool,
+    completed_drain_until: Option<Instant>,
+    now: Instant,
     output_path: &str,
     start_offset: u64,
 ) -> Option<(u64, String)> {
@@ -352,7 +354,7 @@ fn standby_response_after_poll_scan(
     }
     completed_drain_fallback_response(
         pending_result_text,
-        completed_drain_active,
+        completed_drain_until.is_some_and(|until| now >= until),
         output_path,
         start_offset,
     )
@@ -1038,8 +1040,8 @@ mod tests {
             &transcript,
             concat!(
                 "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"A1 narration\"},{\"type\":\"tool_use\",\"name\":\"Read\"}]}}\n",
-                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"A2 final answer\"}]}}\n",
-                "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"A2 final answer\"}\n",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"FALLBACK_FINAL\"}]}}\n",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"RESULT_FINAL\"}\n",
             ),
         )
         .expect("write transcript");
@@ -1052,16 +1054,87 @@ mod tests {
                 .map(|(index, line)| (index, line.to_string()))
                 .collect(),
         };
+        let now = Instant::now();
 
-        let response = standby_response_after_poll_scan(
+        let result_response = standby_response_after_poll_scan(
             &decoded_lines,
             None,
-            true,
+            Some(now),
+            now,
             transcript.to_str().expect("UTF-8 transcript path"),
             0,
         );
         assert_eq!(
-            response.map(|(_, text)| text),
+            result_response.map(|(_, text)| text),
+            Some("RESULT_FINAL".to_string())
+        );
+
+        let no_result_lines = StandbyDecodedLines {
+            stitched_start_offset: 0,
+            lines: decoded_lines.lines[..2].to_vec(),
+        };
+        let fallback_response = standby_response_after_poll_scan(
+            &no_result_lines,
+            None,
+            Some(now),
+            now,
+            transcript.to_str().expect("UTF-8 transcript path"),
+            0,
+        );
+        assert_eq!(
+            fallback_response.map(|(_, text)| text),
+            Some("FALLBACK_FINAL".to_string())
+        );
+    }
+
+    #[test]
+    fn poll_scan_defers_fallback_until_completed_grace_expires() {
+        let dir = tempfile::tempdir().expect("create transcript directory");
+        let transcript = dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"A1 narration\"}]}}\n",
+        )
+        .expect("write transcript");
+        let decoded_lines = StandbyDecodedLines {
+            stitched_start_offset: 0,
+            lines: vec![(
+                0,
+                std::fs::read_to_string(&transcript).expect("read transcript"),
+            )],
+        };
+        let now = Instant::now();
+
+        assert!(
+            standby_response_after_poll_scan(
+                &decoded_lines,
+                None,
+                Some(now + Duration::from_secs(1)),
+                now,
+                transcript.to_str().expect("UTF-8 transcript path"),
+                0,
+            )
+            .is_none()
+        );
+
+        std::fs::write(
+            &transcript,
+            concat!(
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"A1 narration\"}]}}\n",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"A2 final answer\"}]}}\n",
+            ),
+        )
+        .expect("write final transcript");
+        let final_response = standby_response_after_poll_scan(
+            &decoded_lines,
+            None,
+            Some(now),
+            now,
+            transcript.to_str().expect("UTF-8 transcript path"),
+            0,
+        );
+        assert_eq!(
+            final_response.map(|(_, text)| text),
             Some("A2 final answer".to_string())
         );
     }
