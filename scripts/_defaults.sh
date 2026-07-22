@@ -1030,10 +1030,24 @@ request_restart_drain_mode_or_fail() {
     return 0
   fi
 
-  echo "✗ [gate] ${scope} restart drain mode was not acknowledged within ${ack_wait}s" >&2
-  echo "  Refusing restart to avoid bypassing live-turn drain protection." >&2
+  # Drain condition removed: a stuck/hung turn that never drains must not
+  # permanently block a deploy. #4735 durable restart relay reattaches turns
+  # after restart (silent reattach + inflight rebind), so an unacknowledged
+  # drain is no longer fatal — clear the marker and proceed. The only cost is a
+  # possible mid-stream truncation in the SIGTERM window. Set
+  # AGENTDESK_RESTART_STRICT_DRAIN=1 to restore the classic refuse-on-timeout
+  # behaviour when chunk-level stream integrity is required.
+  if [ "${AGENTDESK_RESTART_STRICT_DRAIN:-0}" = "1" ]; then
+    echo "✗ [gate] ${scope} restart drain mode was not acknowledged within ${ack_wait}s" >&2
+    echo "  Refusing restart (AGENTDESK_RESTART_STRICT_DRAIN=1)." >&2
+    clear_restart_drain_mode "$runtime_root" || true
+    return 1
+  fi
+  echo "⚠ [gate] ${scope} restart drain mode not acknowledged within ${ack_wait}s — proceeding anyway (drain condition removed; durable relay reattaches turns)" >&2
   clear_restart_drain_mode "$runtime_root" || true
-  return 1
+  AGENTDESK_RESTART_REQUEST_NONCE="$nonce"
+  AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=1
+  return 0
 }
 
 wait_for_live_turns_to_drain_or_fail() {
