@@ -1000,7 +1000,7 @@ which is REST-safe and identical on both sides.
 | Worker post-accept turn failure (provider error, panic in tmux) | worker writes `failed_post_accept` via transition 6b | terminal; operator decides via CLI |
 | Discord token revoked on worker (REST 401) | worker writes `failed_post_accept` (we already POSTed placeholder under that token) | terminal; operator rotates token + `retry-as-new` |
 | PG pool/owner query unavailable in `Enforce` | central admission dependency guard | block local execution and emit a throttled operator-facing notice; retry after PG/owner visibility recovers |
-| Pending uploads on message | owner-aware admission | local owner/`NoOwner` runs local; foreign owner blocks and queued work is front-requeued |
+| Pending uploads on message | owner-aware admission | local owner/`NoOwner` runs local. Nonportable attachments are blocked before any outbox INSERT on foreign-owner routes **and** on `/node`/preferred-label foreign targets. A live nonportable attachment returns `Blocked`; a queued nonportable attachment (surfaced at `QueuedDrain`) is notified and terminated via `RejectedNonPortableAttachment` (consumed, **not** front-requeued) so it cannot loop |
 | Active session pinned to stale foreign worker | owner classification | block local/label fallback; operator stops/clears the old session before retry |
 | Single-PG-primary assumption violated | startup self-check at boot | refuse to start with intake_routing.enabled=true; log error |
 | Two same-channel forward attempts (round-2 P0 #1) | partial unique index `intake_outbox_one_open_route_per_channel` | same `(channel_id, user_msg_id)` is an idempotent skip; a distinct message returns `DeferredOpenRoute` and is preserved/retried, never executed locally |
