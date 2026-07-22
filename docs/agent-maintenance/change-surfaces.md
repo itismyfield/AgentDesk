@@ -331,7 +331,7 @@
   - `src/services/discord/tmux_watcher.rs` (frozen giant surface; #4229 S4
     moved the turn stream collector (seed restore/first parse-forward/monitor
     auto-turn claim/active read-parse loop) verbatim to
-    `tmux_watcher/turn_stream_collector.rs` (giant child module), ratcheting
+    `src/services/discord/tmux_watcher/turn_stream_collector.rs` (frozen giant surface), ratcheting
     the root down after behavior-preserving decompose; #4229 S3 moved the
     throttled streaming status tick (orphan reclaim, streaming
     suppression, status-panel create/bind, rollover, re-anchor, placeholder
