@@ -596,6 +596,9 @@ pub(super) fn sync_inflight_worktree_context(
 ) {
     if let Some(mut inflight) = super::super::inflight::load_inflight_state(provider, channel_id) {
         inflight.set_worktree_context(worktree_path, worktree_branch, base_commit);
-        let _ = super::super::inflight::save_inflight_state(&inflight);
+        let _ = super::super::inflight::save_inflight_state_if_identity_unchanged(
+            &inflight,
+            "sync_inflight_worktree_context",
+        );
     }
 }
