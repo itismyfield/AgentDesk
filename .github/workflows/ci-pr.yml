@@ -11,13 +11,16 @@ on:
   # source with no cancellation. Branch CI is obtained by opening a PR; main is
   # covered by ci-main.yml.
   pull_request:
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
 concurrency:
   # A PR number is unique inside the base repository, unlike `head_ref`: two
   # forks can use the same source branch name and must never cancel each other.
-  # Manual dispatch has no PR payload, so isolate it by the selected ref.
-  group: ci-pr-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
+  # Merge queue runs have no PR payload, so key them by the queue head ref before
+  # falling back to github.ref for manual dispatch and any other non-PR event.
+  group: ci-pr-${{ github.repository }}-${{ github.event.pull_request.number || github.event.merge_group.head_ref || github.ref }}
   # A newer push makes every result from the older SHA stale, so release its
   # hosted runners immediately. The `*_required_context` mirrors remain
   # fail-closed: cancellation may leave failed/cancelled contexts on the OLD
