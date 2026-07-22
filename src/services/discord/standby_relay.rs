@@ -104,11 +104,17 @@ impl StandbyRelayTurnBinding {
             self.identity.user_msg_id
         ))
     }
+
+    /// Start at the durable pre-prompt baseline rather than a handoff's
+    /// current EOF, which can already be past a fast TUI response.
+    fn standby_start_offset(&self, handoff_offset: u64) -> u64 {
+        self.turn_start_offset.unwrap_or(handoff_offset)
+    }
 }
 
 /// Spawned per-turn on cluster-standby nodes. Returns when:
 /// - `cancel` or `shared.restart.shutting_down` flips to true,
-/// - the JSONL emits a `{"type":"result"}` event and we deliver the response,
+/// - the JSONL emits a terminal result or the completed TUI assistant response,
 /// - or `timeout` elapses.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_standby_relay(
@@ -123,6 +129,7 @@ pub(super) async fn run_standby_relay(
     provider: ProviderKind,
     timeout: Duration,
 ) {
+    let start_offset = turn_binding.standby_start_offset(start_offset);
     let deadline = Instant::now() + timeout;
     let mut current_offset = start_offset;
     let mut last_inflight_heartbeat = Instant::now();
@@ -132,6 +139,7 @@ pub(super) async fn run_standby_relay(
     let mut tail_start_offset = start_offset;
     let mut pending_result_text: Option<String> = None;
     let mut pending_result_retry_offset: Option<u64> = None;
+    let mut latest_assistant_text: Option<(u64, String)> = None;
     let mut completed_signal_drain_until: Option<Instant> = None;
     // #2448: subscribe BEFORE the first poll tick so a `Completed` broadcast
     // emitted while we are setting up is queued instead of lost. Lag is
@@ -251,6 +259,14 @@ pub(super) async fn run_standby_relay(
                 Err(TryRecvError::Closed) => break, // sender dropped — keep polling
             }
         }
+        if pending_result_text.is_none()
+            && completed_signal_drain_until.is_some()
+            && let Some((assistant_offset, assistant_text)) = latest_assistant_text.take()
+        {
+            pending_result_retry_offset = Some(assistant_offset);
+            pending_result_text = Some(assistant_text);
+            completed_signal_drain_until = None;
+        }
         if last_inflight_heartbeat.elapsed() >= INFLIGHT_HEARTBEAT_INTERVAL {
             refresh_standby_inflight_heartbeat(
                 &provider,
@@ -328,14 +344,16 @@ pub(super) async fn run_standby_relay(
             if line.trim().is_empty() {
                 continue;
             }
+            let line_offset = decoded_lines
+                .stitched_start_offset
+                .saturating_add(line_start as u64);
             if let Some(result_text) = extract_result_text(&line) {
-                pending_result_retry_offset = Some(
-                    decoded_lines
-                        .stitched_start_offset
-                        .saturating_add(line_start as u64),
-                );
+                pending_result_retry_offset = Some(line_offset);
                 found_result_text = Some(result_text);
                 break;
+            }
+            if let Some(assistant_text) = extract_assistant_text(&line) {
+                latest_assistant_text = Some((line_offset, assistant_text));
             }
         }
         if let Some(result_text) = found_result_text {
@@ -343,7 +361,6 @@ pub(super) async fn run_standby_relay(
             completed_signal_drain_until = None;
             continue;
         }
-
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
@@ -417,12 +434,27 @@ fn extract_result_text(line: &str) -> Option<String> {
     if parsed.get("type").and_then(Value::as_str) != Some("result") {
         return None;
     }
-    let result_text = parsed.get("result").and_then(Value::as_str)?;
-    let cleaned = super::response_sanitizer::strip_leading_tui_response_chrome(result_text);
-    if cleaned.trim().is_empty() {
+    cleaned_response_text(parsed.get("result").and_then(Value::as_str)?)
+}
+
+fn extract_assistant_text(line: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(line.trim()).ok()?;
+    if parsed.get("type").and_then(Value::as_str) != Some("assistant") {
         return None;
     }
-    Some(cleaned)
+    let content = parsed.get("message")?.get("content")?.as_array()?;
+    let text = content
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("");
+    cleaned_response_text(&text)
+}
+
+fn cleaned_response_text(text: &str) -> Option<String> {
+    let cleaned = super::response_sanitizer::strip_leading_tui_response_chrome(text);
+    (!cleaned.trim().is_empty()).then_some(cleaned)
 }
 
 fn standby_inflight_matches(
@@ -941,6 +973,24 @@ mod tests {
     fn extract_result_text_returns_none_for_non_result_lines() {
         let line = r#"{"type":"assistant","message":{"content":[{"text":"hi"}]}}"#;
         assert!(extract_result_text(line).is_none());
+    }
+
+    #[test]
+    fn extract_assistant_text_returns_terminal_tui_text_blocks() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"first"},{"type":"tool_use","name":"Bash"},{"type":"text","text":" second"}]}}"#;
+        assert_eq!(
+            extract_assistant_text(line).as_deref(),
+            Some("first second")
+        );
+    }
+
+    #[test]
+    fn extract_assistant_text_skips_empty_and_tui_chrome_only_messages() {
+        let tool_only =
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}"#;
+        assert!(extract_assistant_text(tool_only).is_none());
+        let chrome_only = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"No response requested."}]}}"#;
+        assert!(extract_assistant_text(chrome_only).is_none());
     }
 
     #[test]
