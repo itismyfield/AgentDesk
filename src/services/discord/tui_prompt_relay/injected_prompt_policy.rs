@@ -68,6 +68,16 @@ impl InjectedPromptClass {
     pub(super) fn is_subagent_notification_event(self) -> bool {
         matches!(self, InjectedPromptClass::SubagentNotificationEvent)
     }
+
+    /// Read-only status text for a provider machine turn. This classification
+    /// intentionally does not participate in generic user-turn lifecycle state.
+    pub(super) fn machine_turn_busy_reason(self) -> Option<&'static str> {
+        match self {
+            Self::TaskNotificationEvent => Some("background task 완료 알림"),
+            Self::SubagentNotificationEvent => Some("subagent 완료 알림"),
+            Self::HumanTuiDirect | Self::SystemContinuation | Self::SlashCommandControl => None,
+        }
+    }
 }
 
 /// Pure classifier for injected TUI prompt text. Order is load-bearing:

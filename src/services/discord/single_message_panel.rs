@@ -242,7 +242,7 @@ fn is_panel_header_status_marker(marker: char) -> bool {
     // for the spinner like every other leading status emoji.
     matches!(
         marker,
-        '🟢' | '💤' | '⏰' | '✅' | '🔧' | '🧵' | '🧬' | '🟡'
+        '🟢' | '💤' | '⏰' | '✅' | '🔧' | '🧵' | '🧬' | '🤖' | '🟡'
     )
 }
 

@@ -407,6 +407,11 @@ pub enum StatusEvent {
         background: bool,
         background_agent_pending: bool,
     },
+    /// A provider-injected completion notification started a machine-only turn.
+    /// This is display-only: it never creates user-turn ownership or queue state.
+    MachineTurnBusy {
+        reason: String,
+    },
     Heartbeat,
 }
 

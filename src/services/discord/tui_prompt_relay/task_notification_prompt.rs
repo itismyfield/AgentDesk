@@ -27,6 +27,14 @@ pub(super) fn observe(
 ) -> TaskPromptObservation {
     let start_anchored = matches!(injected_class, InjectedPromptClass::TaskNotificationEvent)
         && injected_prompt_policy::is_start_anchored_task_notification(&prompt.prompt);
+    if let Some(reason) = injected_class.machine_turn_busy_reason() {
+        shared.ui.placeholder_live_events.push_status_event(
+            channel_id,
+            crate::services::agent_protocol::StatusEvent::MachineTurnBusy {
+                reason: reason.to_string(),
+            },
+        );
+    }
     if start_anchored {
         shared
             .ui

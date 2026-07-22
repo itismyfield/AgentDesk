@@ -899,6 +899,10 @@ fn classify_injected_prompt_task_notification_event() {
         "task-notification detection must honor tag boundaries",
     );
     assert!(!classify_injected_prompt(bare).is_human_active_turn());
+    assert_eq!(
+        classify_injected_prompt(bare).machine_turn_busy_reason(),
+        Some("background task 완료 알림")
+    );
 }
 
 // #3716: Codex subagent completions arrive as start-anchored
@@ -956,6 +960,10 @@ fn classify_injected_prompt_subagent_notification_event() {
     assert!(
         !super::injected_prompt_policy::is_start_anchored_subagent_notification(quoted),
         "mid-body quote must not pass the start-anchored detector"
+    );
+    assert_eq!(
+        classify_injected_prompt(unwrapped).machine_turn_busy_reason(),
+        Some("subagent 완료 알림")
     );
 }
 

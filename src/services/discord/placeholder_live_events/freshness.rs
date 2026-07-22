@@ -95,6 +95,13 @@ pub(super) fn render_activity_line(status: &DerivedStatus) -> String {
             let label = escape_status_panel_markdown(label);
             format!("🧬 workflow 실행 중 ({})", truncate_chars(&label, 120))
         }
+        DerivedStatus::MachineTurnBusy { reason } => {
+            let reason = escape_status_panel_markdown(reason);
+            format!(
+                "🤖 백그라운드 완료 알림 처리 중 ({})",
+                truncate_chars(&reason, 120)
+            )
+        }
     }
 }
 
@@ -141,6 +148,16 @@ mod tests {
     }
 
     #[test]
+    fn machine_turn_busy_renders_distinct_background_notification_label() {
+        assert_eq!(
+            render_activity_line(&DerivedStatus::MachineTurnBusy {
+                reason: "subagent 완료 알림".to_string(),
+            }),
+            "🤖 백그라운드 완료 알림 처리 중 (subagent 완료 알림)"
+        );
+    }
+
+    #[test]
     fn activity_labels_lead_with_a_spinner_swap_marker() {
         // Every actively-rendered label must lead with a status emoji so the
         // spinner-merge swaps it for the animation cleanly (spinner-prefix parity).
@@ -158,6 +175,9 @@ mod tests {
             DerivedStatus::WorkflowRunning {
                 label: "review".to_string(),
             },
+            DerivedStatus::MachineTurnBusy {
+                reason: "subagent 완료 알림".to_string(),
+            },
             DerivedStatus::Completed {
                 kind: CompletedKind::Foreground,
             },
@@ -165,7 +185,7 @@ mod tests {
             let line = render_activity_line(&status);
             let first = line.chars().next().expect("non-empty label");
             assert!(
-                ['🟢', '💤', '⏰', '🔧', '🧵', '🧬', '✅'].contains(&first),
+                ['🟢', '💤', '⏰', '🔧', '🧵', '🧬', '🤖', '✅'].contains(&first),
                 "label {line:?} must lead with a spinner-swap marker"
             );
         }

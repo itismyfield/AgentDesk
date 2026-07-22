@@ -374,6 +374,31 @@ fn status_panel_turn_completed_renders_foreground_completion() {
 }
 
 #[test]
+fn status_panel_machine_turn_busy_replaces_idle_activity_label() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4783);
+    events.push_status_event(
+        channel_id,
+        StatusEvent::MachineTurnBusy {
+            reason: "subagent 완료 알림".to_string(),
+        },
+    );
+
+    assert_eq!(
+        status_for(&events, channel_id),
+        DerivedStatus::MachineTurnBusy {
+            reason: "subagent 완료 알림".to_string(),
+        }
+    );
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+    assert!(
+        rendered.starts_with("🤖 백그라운드 완료 알림 처리 중 (subagent 완료 알림)"),
+        "machine turn activity: {rendered:?}"
+    );
+    assert!(!rendered.contains("🟢 진행 중"));
+}
+
+#[test]
 fn status_panel_absorbs_stale_and_final_into_the_activity_emoji() {
     // #3983 items 2 + B: the separate 신뢰도 line is retired; the freshness class is
     // absorbed into the activity emoji, and the following fields carry stable times.

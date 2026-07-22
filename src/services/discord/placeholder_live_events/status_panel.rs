@@ -73,6 +73,9 @@ pub(super) enum DerivedStatus {
     WorkflowRunning {
         label: String,
     },
+    MachineTurnBusy {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -548,6 +551,12 @@ impl StatusPanelState {
                 };
                 self.background_agent_pending = background_agent_pending;
                 self.completed_at = Some(std::time::Instant::now()); // #3477 item 3
+            }
+            StatusEvent::MachineTurnBusy { reason } => {
+                self.status = DerivedStatus::MachineTurnBusy {
+                    reason: normalize_summary(&reason),
+                };
+                self.completed_at = None;
             }
             StatusEvent::Heartbeat => {
                 if matches!(self.status, DerivedStatus::Running) {
