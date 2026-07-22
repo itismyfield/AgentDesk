@@ -627,6 +627,15 @@ decompose_issue = "#4710"
 # registry doc and rejects ghost registrations.
 
 [[entry]]
+# Standby JSONL relay has completion draining, terminal response selection, and
+# identity-guarded delivery in one module; split its polling and delivery paths
+# without changing durable cursor or result-first semantics.
+file = "src/services/discord/standby_relay.rs"
+owner = "discord-relay"
+decision = "keep"
+keep_reason = "Completion draining, terminal response selection, and identity-guarded delivery share one durable cursor contract; preserve the cohesive verified relay boundary until a scoped split is planned."
+
+[[entry]]
 # #3721 first-batch promotion: largest relay hotfile by prod LoC, raw ratchet
 # pressure, and recent touch count; decompose watcher loop orchestration in
 # narrow behavior-preserving slices.

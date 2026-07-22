@@ -1,3 +1,27 @@
+//! Phase 5.3 of intake-node-routing (issue #2011): standalone JSONL → Discord
+//! relay task for cluster-standby nodes.
+//!
+//! On the leader, the tmux watcher (`tmux_watcher.rs`) handles streaming
+//! agent output to Discord. The watcher's relay path has many gateway-coupled
+//! assumptions (cached cache, inflight reconciliation, monitor-auto-turn
+//! claims, recent_stop suppression, paused/pause_epoch coordination, etc.)
+//! that don't hold on cluster-standby nodes. Phase 5.2 made the watcher
+//! *start* on standby via `serenity_http_or_token_fallback()`, but the watcher's
+//! relay step still doesn't fire on standby in production (verified
+//! 2026-05-10 with channel `1475086789696946196` outbox_id=2: response sat in
+//! tmux indefinitely while the placeholder froze at "응답 처리 중").
+//!
+//! Phase 5.3 takes the simpler, more robust path: when on standby, skip the
+//! watcher entirely and run this self-contained relay loop instead. It
+//! polls the agent's JSONL output file for the `{"type":"result"}` event,
+//! extracts the assistant response, and posts it to Discord via REST
+//! (replacing the bridge-allocated placeholder when one is known, otherwise
+//! sending a new channel message). No reliance on cached_serenity_ctx,
+//! inflight reconciliation, or any of the watcher's leader-only state
+//! machinery.
+//!
+//! Leader path is unchanged.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
