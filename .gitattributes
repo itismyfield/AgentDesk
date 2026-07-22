@@ -2,9 +2,9 @@ scripts/** text eol=lf
 .githooks/** text eol=lf
 .github/workflows/*.yml text eol=lf
 
-# Custom merge driver for COMMITTED generated inventory docs (#4724 slice B).
-# These four files are the ones `scripts/generate_inventory_docs.py` overwrites
-# wholesale; line-count churn makes concurrent PRs collide on them. The
+# Custom merge driver for tracked generated inventory docs (#4724 slice B).
+# These two files are generated wholesale; line-count churn makes concurrent PRs
+# collide on them. The
 # `regen-inventory` driver takes git's clean 3-way merge when rows are
 # independent, and only regenerates on a genuine same-row conflict. Requires
 # local registration (a .gitattributes driver is inert without it):
@@ -13,7 +13,5 @@ scripts/** text eol=lf
 # docs/generated/*.md files (README.md, db-file-duplication-audit.md,
 # maintainability-audit.md, pg-audit-checklist.md, policy-db-inventory.md) are
 # hand-authored / emitted by a different generator and must never be clobbered.
-docs/generated/module-inventory.md merge=regen-inventory
 docs/generated/route-inventory.md merge=regen-inventory
 docs/generated/worker-inventory.md merge=regen-inventory
-docs/generated/giant-file-registry.md merge=regen-inventory

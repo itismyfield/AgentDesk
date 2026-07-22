@@ -18,7 +18,6 @@ var _notifications = require("./kanban-notifications");
 var notifyCardOwner = _notifications.notifyCardOwner;
 
 var INVENTORY_DOC_PATHS = [
-  "docs/generated/module-inventory.md",
   "docs/generated/route-inventory.md",
   "docs/generated/worker-inventory.md"
 ];

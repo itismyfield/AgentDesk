@@ -387,13 +387,15 @@ jobs:
 
           exit $FAIL
 
-      - name: Generated docs drift (warn)
+      - name: Generated tracked-doc drift (warn)
         shell: bash
         run: |
-          if python3 scripts/generate_inventory_docs.py --check; then
-            echo "Inventory docs are up to date."
+          set -euo pipefail
+          python3 scripts/generate_inventory_docs.py
+          if git diff --quiet -- ARCHITECTURE.md docs/generated/route-inventory.md docs/generated/worker-inventory.md; then
+            echo "Tracked generated docs are up to date."
           else
-            echo "::warning::Inventory docs drift detected. The weekly Regen inventory docs workflow opens a maintenance PR; this check is intentionally warning-only."
+            echo "::warning::Tracked generated docs drift detected. The weekly Regen inventory docs workflow opens a maintenance PR; this check is intentionally warning-only."
           fi
 
   cli_smoke:

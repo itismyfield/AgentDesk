@@ -3,10 +3,9 @@
 # git-merge-regen-inventory.sh — custom git merge driver for generated inventory
 # docs (#4724 slice B).
 #
-# Problem it solves: docs/generated/module-inventory.md (and its siblings) are
-# COMMITTED generated files. When two branches both change the SAME module's
-# line count (or a shared summary line), they edit the same row of the doc, so a
-# plain 3-way merge leaves conflict markers on that row — and with the inventory
+# Problem it solves: the tracked route and worker inventory docs are generated
+# files. When two branches both change the SAME summary row, a plain 3-way merge
+# can leave conflict markers — and with the inventories
 # regenerated on every prod-line change, concurrent PRs collide constantly →
 # O(N^2) serial rebases.
 #
@@ -22,8 +21,8 @@
 #      time, so the regenerated counts for that module may be momentarily stale.
 #      This is intentional and safe: the driver is a best-effort auto-resolver,
 #      and the AUTHORITATIVE correctness check is the server-side CI freshness
-#      gate (scripts/ci-script-checks.sh runs `generate_inventory_docs.py
-#      --check`, a hard PR failure on drift). Any residual drift the driver
+#      gate (scripts/ci-script-checks.sh regenerates then checks tracked-doc
+#      diffs, a hard PR failure on drift). Any residual drift the driver
 #      produces is caught there — exactly as a stale manual resolution would be —
 #      so it can never reach `main`. See docs/agent-maintenance/merge-driver-
 #      inventory.md ("Correctness backstops"). We deliberately do NOT regenerate
@@ -36,7 +35,7 @@
 #     %A = ours/current version (temp path) — the driver MUST leave the merge
 #          result here; git reads it back as the resolved content
 #     %B = theirs version (temp path)
-#     %P = pathname in the repo (e.g. docs/generated/module-inventory.md)
+#     %P = pathname in the repo (e.g. docs/generated/route-inventory.md)
 #
 # Fail-closed contract: if a conflict needs regeneration and regeneration fails
 # for ANY reason, exit non-zero. git then leaves the normal conflict in place

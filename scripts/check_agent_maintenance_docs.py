@@ -584,10 +584,11 @@ MODULE_INVENTORY_DOC = "docs/generated/module-inventory.md"
 
 
 def ensure_module_inventory(repo_root: Path) -> Finding | None:
-    """Generate the untracked inventory when a fresh checkout lacks it."""
+    """Regenerate the inventory before parsing its line counts."""
 
-    if (repo_root / MODULE_INVENTORY_DOC).is_file():
-        return None
+    # The generator currently writes all inventory docs, including tracked
+    # snapshots. This standalone gate favors fresh line-count data over a clean
+    # worktree; CI separately rejects any resulting tracked-doc drift.
     generator = repo_root / "scripts/generate_inventory_docs.py"
     if not generator.is_file():
         return None
