@@ -237,7 +237,10 @@
     `TmuxDeathLifecycleDecision` plumbing; +25 from #4455 adding the explicit
     force-replace claim action used only when Codex rebind proves that a live
     same-output watcher still belongs to an earlier provider turn).
-  - `src/services/discord/tmux.rs` (frozen giant surface; test-only #4253 wires the
+  - `src/services/discord/tmux.rs` (frozen giant surface; test-only #4104 pins
+    watcher tool-hold progress persistence before both silent-render suppression
+    and unchanged-render early returns; runtime wiring lives in the non-giant
+    `tmux_watcher/streaming_status_tick.rs`; test-only #4253 wires the
     deterministic task-notification-kind disk-save/reload/restart roundtrip
     module, with no production-LoC or runtime behavior change; +11 from #4380 broadening the
     watcher-yield escape hatch (`watcher_should_yield_to_inflight_state`) to honour

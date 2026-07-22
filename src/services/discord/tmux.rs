@@ -2293,6 +2293,27 @@ mod watcher_stream_progress_tests {
     }
 
     #[test]
+    fn streaming_tick_persists_silent_tool_hold_before_render_suppression_4104() {
+        let source = include_str!("tmux_watcher/streaming_status_tick.rs");
+        let hold_persist = source
+            .find("#4104: persist the parsed watcher snapshot on every throttled tick")
+            .and_then(|marker| {
+                source[marker..]
+                    .find("persist_watcher_stream_progress(")
+                    .map(|offset| marker + offset)
+            })
+            .expect("silent tool-hold snapshot must be persisted");
+        let silent_gate = source
+            .find("if streaming_silent_turn {")
+            .expect("silent rendering suppression gate");
+
+        assert!(
+            hold_persist < silent_gate,
+            "silent turns must persist tool-hold state before suppressing Discord rendering"
+        );
+    }
+
+    #[test]
     fn persist_watcher_stream_progress_persists_tool_hold_witness() {
         // Serialize on the PROCESS-WIDE `AGENTDESK_ROOT_DIR` lock so this test
         // is mutually exclusive with every other test that mutates the runtime
