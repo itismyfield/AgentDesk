@@ -39,29 +39,11 @@ use super::outbound::turn_output_controller as toc;
 use super::placeholder_controller::{PlaceholderKey, PlaceholderLifecycle};
 use crate::services::provider::ProviderKind;
 
-/// Routes the standby short-replace branch onto the unified controller when the
-/// post-format body is non-empty. The `!formatted.is_empty()` half is
-/// LOAD-BEARING and single-sourced here: legacy
-/// `replace_long_message_raw_with_outcome` treats a zero-chunk (empty) body as
-/// `EditedOriginal` → committed → **true** (no network), whereas the controller
-/// short-circuits an empty body to `Skipped` → **false**. Dropping the empty-body
-/// exclusion would wrongly flip empty bodies true→false, so it is pinned by
-/// `standby_short_replace_should_cutover_pins_both_conditions`. Mirrors A2b's
-/// `sink_guard_lease_range` extraction.
 fn standby_short_replace_should_cutover(formatted: &str) -> bool {
     !formatted.is_empty()
 }
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
-/// #2448 graduation: the 900s (15min) cap was the heuristic stop signal —
-/// "after this long the primary turn is presumed dead". Now that
-/// `CompletionGuard` broadcasts `InflightSignal::Completed` explicitly,
-/// the wall-clock deadline is demoted to a pure safety backstop: it only
-/// fires when neither the broadcast (same-node) nor the on-disk inflight
-/// poll (cross-node) ever observe completion. 30 min comfortably covers
-/// any sane long-running turn.
-#[allow(dead_code)]
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1800);
 const MAX_FILE_BYTES_PER_TICK: u64 = 1_048_576; // 1 MiB safety cap
 const INFLIGHT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const COMPLETED_SIGNAL_DRAIN_GRACE: Duration = Duration::from_secs(5);
@@ -166,13 +148,20 @@ pub(super) async fn run_standby_relay(
             completed_signal_drain_until,
             Instant::now(),
         ) {
-            let assistant_text = completed_drain_fallback_response(
+            if let Some((result_offset, result_text)) =
+                result_from_unread_complete_lines(&output_path, current_offset)
+            {
+                pending_result_retry_offset = Some(result_offset);
+                pending_result_text = Some(result_text);
+                completed_signal_drain_until = None;
+                continue;
+            }
+            if let Some(assistant_text) = completed_drain_fallback_response(
                 pending_result_text.as_deref(),
                 true,
                 &output_path,
                 start_offset,
-            );
-            if let Some(assistant_text) = assistant_text {
+            ) {
                 pending_result_text = Some(assistant_text);
                 completed_signal_drain_until = None;
                 continue;
@@ -185,12 +174,6 @@ pub(super) async fn run_standby_relay(
             );
             return;
         }
-        // #2448: drain the broadcast queue NON-blocking before each poll
-        // tick. If we observe `Completed { channel_id: self }` before this
-        // task has parsed a result, keep polling for a short grace period.
-        // The result line may already be on disk but not yet consumed by this
-        // relay; exiting immediately leaves the placeholder without a final
-        // response.
         loop {
             use tokio::sync::broadcast::error::TryRecvError;
             match inflight_signals.try_recv() {
@@ -334,6 +317,24 @@ pub(super) async fn run_standby_relay(
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+fn result_from_unread_complete_lines(output_path: &str, offset: u64) -> Option<(u64, String)> {
+    let bytes = std::fs::read(output_path).ok()?;
+    let start = usize::try_from(offset).ok()?.min(bytes.len());
+    let complete_end = bytes[start..]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map(|index| start + index + 1)?;
+    let lines = String::from_utf8_lossy(&bytes[start..complete_end]);
+    let mut line_offset = offset;
+    for line in lines.lines() {
+        if let Some(result_text) = extract_result_text(line) {
+            return Some((line_offset, result_text));
+        }
+        line_offset = line_offset.saturating_add(line.len() as u64 + 1);
+    }
+    None
 }
 
 fn standby_response_after_poll_scan(
@@ -1030,6 +1031,24 @@ mod tests {
     fn extract_result_text_handles_invalid_json() {
         assert!(extract_result_text("not json").is_none());
         assert!(extract_result_text("").is_none());
+    }
+
+    #[test]
+    fn expired_drain_scans_unread_result_before_fallback() {
+        let dir = tempfile::tempdir().expect("create transcript directory");
+        let transcript = dir.path().join("transcript.jsonl");
+        let prefix = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"FALLBACK_FINAL\"}]}}\n";
+        let result = "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"RESULT_FINAL\"}\n";
+        std::fs::write(&transcript, format!("{prefix}{result}")).expect("write transcript");
+
+        let response = result_from_unread_complete_lines(
+            transcript.to_str().expect("UTF-8 transcript path"),
+            prefix.len() as u64,
+        );
+        assert_eq!(
+            response,
+            Some((prefix.len() as u64, "RESULT_FINAL".to_string()))
+        );
     }
 
     #[test]
