@@ -1,27 +1,3 @@
-//! Phase 5.3 of intake-node-routing (issue #2011): standalone JSONL → Discord
-//! relay task for cluster-standby nodes.
-//!
-//! On the leader, the tmux watcher (`tmux_watcher.rs`) handles streaming
-//! agent output to Discord. The watcher's relay path has many gateway-coupled
-//! assumptions (cached cache, inflight reconciliation, monitor-auto-turn
-//! claims, recent_stop suppression, paused/pause_epoch coordination, etc.)
-//! that don't hold on cluster-standby nodes. Phase 5.2 made the watcher
-//! *start* on standby via `serenity_http_or_token_fallback()`, but the watcher's
-//! relay step still doesn't fire on standby in production (verified
-//! 2026-05-10 with channel `1475086789696946196` outbox_id=2: response sat in
-//! tmux indefinitely while the placeholder froze at "응답 처리 중").
-//!
-//! Phase 5.3 takes the simpler, more robust path: when on standby, skip the
-//! watcher entirely and run this self-contained relay loop instead. It
-//! polls the agent's JSONL output file for the `{"type":"result"}` event or,
-//! for interactive TUI transcripts, the final `{"type":"assistant"}` text,
-//! then posts the response to Discord via REST (replacing the bridge-allocated
-//! placeholder when one is known, otherwise
-//! sending a new channel message). No reliance on cached_serenity_ctx,
-//! inflight reconciliation, or any of the watcher's leader-only state
-//! machinery.
-//!
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -141,11 +117,10 @@ pub(super) async fn run_standby_relay(
             completed_signal_drain_until,
             Instant::now(),
         ) {
-            if let Some((result_offset, response)) = resolve_standby_delivery(
-                result_from_unread_complete_lines(&output_path, current_offset),
-                pending_result_text.as_deref(),
-                true,
+            if let Some((result_offset, response)) = resolve_expiry_delivery(
                 &output_path,
+                current_offset,
+                pending_result_text.as_deref(),
                 start_offset,
             ) {
                 pending_result_retry_offset = Some(result_offset);
@@ -314,6 +289,21 @@ fn result_from_unread_complete_lines(output_path: &str, offset: u64) -> Option<(
         line_offset = line_offset.saturating_add(line.len() as u64 + 1);
     }
     None
+}
+
+fn resolve_expiry_delivery(
+    output_path: &str,
+    current_offset: u64,
+    pending_result_text: Option<&str>,
+    start_offset: u64,
+) -> Option<(u64, String)> {
+    resolve_standby_delivery(
+        result_from_unread_complete_lines(output_path, current_offset),
+        pending_result_text,
+        true,
+        output_path,
+        start_offset,
+    )
 }
 
 fn resolve_standby_delivery(
@@ -1040,14 +1030,10 @@ mod tests {
         let result = "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"RESULT_FINAL\"}\n";
         std::fs::write(&transcript, format!("{prefix}{result}")).expect("write transcript");
 
-        let response = resolve_standby_delivery(
-            result_from_unread_complete_lines(
-                transcript.to_str().expect("UTF-8 transcript path"),
-                prefix.len() as u64,
-            ),
-            None,
-            true,
+        let response = resolve_expiry_delivery(
             transcript.to_str().expect("UTF-8 transcript path"),
+            prefix.len() as u64,
+            None,
             0,
         );
         assert_eq!(
