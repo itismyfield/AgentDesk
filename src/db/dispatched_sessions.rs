@@ -2416,13 +2416,16 @@ pub(crate) async fn upsert_hook_session_pg(
             channel_id,
             claude_session_id,
             raw_provider_session_id,
+            active_turn_nonce,
+            dispatched_origin_turn_nonce,
             claude_session_id_recorded_at,
             last_heartbeat
          ) VALUES (
             $1, $2, $3, $4, $5, $6, $7,
             COALESCE($8, 0),
             CASE WHEN $8 IS NOT NULL THEN NOW() ELSE NULL END,
-            $9, $10, $11, $12, $13, $14,
+            $9, $10, $11, $12, $13, $14, $15,
+            CASE WHEN $16 THEN $15 ELSE NULL END,
             CASE WHEN NULLIF(BTRIM($13), '') IS NOT NULL THEN NOW() ELSE NULL END,
             NOW()
          )

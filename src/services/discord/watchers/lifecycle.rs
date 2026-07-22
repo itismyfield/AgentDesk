@@ -640,7 +640,7 @@ async fn rebind_restored_dispatch_if_missing(
     pg_pool: Option<&sqlx::PgPool>,
     state: &super::super::inflight::InflightTurnState,
 ) -> RestoreDispatchRebindOutcome {
-    let (Some(pool), Some(session_key), Some(dispatch_id)) = (
+    let (Some(pool), Some(session_key), Some(dispatch_id), Some(turn_nonce)) = (
         pg_pool,
         state.session_key.as_deref(),
         state
@@ -648,6 +648,10 @@ async fn rebind_restored_dispatch_if_missing(
             .as_deref()
             .map(str::trim)
             .filter(|dispatch_id| !dispatch_id.is_empty()),
+        state
+            .turn_nonce
+            .as_deref()
+            .filter(|nonce| !nonce.is_empty()),
     ) else {
         return RestoreDispatchRebindOutcome::NotRebound;
     };
@@ -661,6 +665,7 @@ async fn rebind_restored_dispatch_if_missing(
           WHERE s.session_key = $1
             AND s.channel_id = $2
             AND s.status = 'turn_active'
+            AND s.active_turn_nonce = $4
             AND COALESCE(BTRIM(s.active_dispatch_id), '') = ''
             AND EXISTS (
                 SELECT 1 FROM task_dispatches d
@@ -670,6 +675,7 @@ async fn rebind_restored_dispatch_if_missing(
     .bind(session_key)
     .bind(&channel_id)
     .bind(dispatch_id)
+    .bind(turn_nonce)
     .execute(pool)
     .await
     {
@@ -2896,8 +2902,41 @@ mod restored_session_cwd_channel_isolation_tests {
         load_restored_session_cwd, rebind_restored_dispatch_if_missing,
     };
     use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::db::dispatched_sessions::{HookSessionUpsert, upsert_hook_session_pg};
     use crate::services::discord::adk_session::build_namespaced_session_key;
     use crate::services::provider::ProviderKind;
+
+    async fn write_turn_start_marker(
+        pool: &sqlx::PgPool,
+        session_key: &str,
+        channel_id: u64,
+        turn_nonce: &str,
+        dispatched_origin: bool,
+    ) {
+        upsert_hook_session_pg(
+            pool,
+            HookSessionUpsert {
+                session_key,
+                instance_id: None,
+                agent_id: None,
+                provider: "claude",
+                status: "turn_active",
+                session_info: None,
+                model: None,
+                tokens: None,
+                cwd: None,
+                active_dispatch_id: None,
+                thread_channel_id: None,
+                channel_id: Some(&channel_id.to_string()),
+                claude_session_id: None,
+                raw_provider_session_id: None,
+                turn_start_nonce: Some(turn_nonce),
+                dispatched_origin,
+            },
+        )
+        .await
+        .expect("write turn-start marker");
+    }
 
     async fn seed_session(
         pool: &sqlx::PgPool,
@@ -2955,6 +2994,13 @@ mod restored_session_cwd_channel_isolation_tests {
         );
         state.session_key = Some(session_key.to_string());
         state.dispatch_id = Some(dispatch_id.to_string());
+        state.turn_nonce = Some("rebind-valid-4642".to_string());
+        sqlx::query("UPDATE sessions SET active_turn_nonce = $2 WHERE session_key = $1")
+            .bind(session_key)
+            .bind("rebind-valid-4642")
+            .execute(&pool)
+            .await
+            .expect("seed matching rebind nonce");
         assert_eq!(
             rebind_restored_dispatch_if_missing(Some(&pool), &state).await,
             RestoreDispatchRebindOutcome::Rebound,
@@ -3036,16 +3082,16 @@ mod restored_session_cwd_channel_isolation_tests {
         let session_key = "claude/test/dispatched-origin-ghost-4642";
         let channel_id = 464_200_004_u64;
         let turn_nonce = "turn-nonce-4642";
-        sqlx::query(
-            "INSERT INTO sessions (session_key, provider, status, channel_id, active_turn_nonce, dispatched_origin_turn_nonce, last_heartbeat)
-             VALUES ($1, 'claude', 'turn_active', $2, $3, $3, NOW())",
+        write_turn_start_marker(&pool, session_key, channel_id, turn_nonce, true).await;
+        let marker: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT active_turn_nonce, dispatched_origin_turn_nonce FROM sessions WHERE session_key = $1",
         )
         .bind(session_key)
-        .bind(channel_id.to_string())
-        .bind(turn_nonce)
-        .execute(&pool)
+        .fetch_one(&pool)
         .await
-        .expect("seed dispatched-origin ghost");
+        .expect("load persisted dispatched-origin marker");
+        assert_eq!(marker.0.as_deref(), Some(turn_nonce));
+        assert_eq!(marker.1.as_deref(), Some(turn_nonce));
 
         let mut state = crate::services::discord::inflight::InflightTurnState::new(
             crate::services::provider::ProviderKind::Claude,
@@ -3087,15 +3133,17 @@ mod restored_session_cwd_channel_isolation_tests {
         let pool = pg_db.connect_and_migrate().await;
         let session_key = "claude/test/interactive-restore-4642";
         let channel_id = 464_200_003_u64;
-        sqlx::query(
-            "INSERT INTO sessions (session_key, provider, status, channel_id, last_heartbeat)
-             VALUES ($1, 'claude', 'turn_active', $2, NOW())",
+        let turn_nonce = "interactive-turn-4642";
+        write_turn_start_marker(&pool, session_key, channel_id, turn_nonce, false).await;
+        let marker: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT active_turn_nonce, dispatched_origin_turn_nonce FROM sessions WHERE session_key = $1",
         )
         .bind(session_key)
-        .bind(channel_id.to_string())
-        .execute(&pool)
+        .fetch_one(&pool)
         .await
-        .expect("seed dispatch-less interactive turn");
+        .expect("load persisted interactive marker");
+        assert_eq!(marker.0.as_deref(), Some(turn_nonce));
+        assert!(marker.1.is_none());
 
         let mut state = crate::services::discord::inflight::InflightTurnState::new(
             crate::services::provider::ProviderKind::Claude,
@@ -3112,6 +3160,7 @@ mod restored_session_cwd_channel_isolation_tests {
             0,
         );
         state.session_key = Some(session_key.to_string());
+        state.turn_nonce = Some(turn_nonce.to_string());
         assert_eq!(
             rebind_restored_dispatch_if_missing(Some(&pool), &state).await,
             RestoreDispatchRebindOutcome::NotRebound,
