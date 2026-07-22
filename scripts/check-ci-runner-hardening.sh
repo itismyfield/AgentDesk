@@ -68,7 +68,8 @@ targets = {
     "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
     "runs_on" => '${{ matrix.os }}',
     # #4466 formally admits the non-advisory Windows named-mutex runtime proof.
-    "job_sha256" => "4acdcbdcb8f28852cb152525a85790058cb638bce093bcec75af5d95deb83f52",
+    # #4747 (opt.3) re-pins after unifying the Cargo dependency cache key.
+    "job_sha256" => "251c51ab0df5990760240e82e181fce5703e834b55d6f90ed6334dddcec1434a",
     "cargo_steps" => {
       "cargo check" => {
         "commands" => ["cargo check --workspace --all-targets"],
@@ -106,7 +107,8 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.pg_db == 'true'",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "7dd44900af3595344bc0156f378d2bfe8d11c8434adf223f0d76b78817036050",
+    # #4747 (opt.3) re-pins after unifying the Cargo dependency cache key.
+    "job_sha256" => "d497e398e7930ca72c4f2341bacc589ecb1d5bc3e8cb5a45f7c38934e1a756c3",
     "cargo_steps" => {
       "just test-postgres" => {
         "commands" => ["just test-postgres"],
