@@ -95,6 +95,22 @@ pub(in crate::services::discord) fn compose_footer_status_block(
     clamp_footer_status_block(status_block)
 }
 
+/// Render terminal relay context as Discord subtext. Every non-empty line is
+/// explicitly prefixed because Discord does not carry a multiline subtext span.
+pub(in crate::services::discord) fn completion_footer_subtext(block: &str) -> String {
+    block
+        .lines()
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else {
+                format!("-# {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub(in crate::services::discord) fn compose_completion_footer_text(
     body: &str,
     completion_block: Option<&str>,
@@ -106,8 +122,9 @@ pub(in crate::services::discord) fn compose_completion_footer_text(
     else {
         return body.to_string();
     };
+    let block = completion_footer_subtext(block);
     if body.is_empty() {
-        return clamp_footer_status_block(block.to_string());
+        return clamp_footer_status_block(block);
     }
 
     let suffix = format!("\n\n{block}");
@@ -490,11 +507,15 @@ fn line_is_truncation_marker(line: &str) -> bool {
 /// streaming/merged status line, a `Tasks`/`Subagents` header, a `└ ` slot line,
 /// or a `Context   ` summary. Used only by the tail-anchored reclaim split.
 fn line_is_footer_shaped(line: &str) -> bool {
-    let trimmed = line.trim();
+    let trimmed = strip_subtext_prefix(line.trim());
     is_single_message_footer_status_line(trimmed)
         || completion_footer_section_header(trimmed)
         || completion_footer_context_line(trimmed)
         || trimmed.starts_with("└ ")
+}
+
+fn strip_subtext_prefix(line: &str) -> &str {
+    line.strip_prefix("-# ").unwrap_or(line)
 }
 
 fn line_ends_with_spinner_glyph(line: &str) -> bool {
@@ -652,7 +673,7 @@ fn is_spinner_prefix_char(ch: char) -> bool {
 fn text_has_single_message_footer_surface(text: &str) -> bool {
     text.lines()
         .filter_map(|line| {
-            let line = line.trim();
+            let line = strip_subtext_prefix(line.trim());
             (!line.is_empty()).then_some(line)
         })
         .any(|line| {
@@ -749,15 +770,17 @@ fn completion_footer_starts_after_body(footer: &str, body: &str) -> bool {
 }
 
 fn completion_footer_context_line(line: &str) -> bool {
-    line.starts_with("Context   ")
+    strip_subtext_prefix(line).starts_with("Context   ")
 }
 
 fn completion_footer_section_header(line: &str) -> bool {
-    line == "Tasks" || line == "Subagents"
+    matches!(strip_subtext_prefix(line), "Tasks" | "Subagents")
 }
 
 fn completion_footer_has_slot_shape(footer: &str) -> bool {
-    footer.lines().any(|line| line.starts_with("└ "))
+    footer
+        .lines()
+        .any(|line| strip_subtext_prefix(line).starts_with("└ "))
 }
 
 fn completion_footer_first_line_is_section_header(footer: &str) -> bool {
@@ -1246,6 +1269,25 @@ mod tests {
     /// any repair touching the body's closed fence — parity stays even and both
     /// the fenced body and the footer survive intact.
     #[test]
+    fn completion_footer_subtext_prefixes_each_nonempty_line_4080() {
+        assert_eq!(
+            super::completion_footer_subtext(
+                "Context   📦 10 / 100 tokens\n\nTasks\n└ Bash Done ✓\n⏱ 2m 34s"
+            ),
+            "-# Context   📦 10 / 100 tokens\n\n-# Tasks\n-# └ Bash Done ✓\n-# ⏱ 2m 34s"
+        );
+    }
+
+    #[test]
+    fn subtext_completion_footer_is_stripped_at_terminal_reconciliation_4080() {
+        let text = "Final answer\n\n-# Context   📦 10 / 100 tokens\n\n-# Tasks\n-# └ Bash Done ✓\n-# ⏱ 2m 34s";
+        assert_eq!(
+            super::strip_streaming_footer(text, &ProviderKind::Claude),
+            Some("Final answer".to_string())
+        );
+    }
+
+    #[test]
     fn compose_completion_footer_keeps_balanced_body_fence_intact_3394() {
         let body = "intro\n\n```text\nclosed body\n```\noutro";
         let footer = "Context   📦 1.0k / 1.0M tokens (1%)\n\nTasks\n└ Bash Done ✓";
@@ -1400,6 +1442,22 @@ mod tests {
         assert_eq!(
             super::finalize_streaming_footer(&rendered, &ProviderKind::Claude),
             None
+        );
+    }
+
+    #[test]
+    fn subtext_footer_only_completion_surface_is_exposed_4080() {
+        let footer = super::completion_footer_subtext(
+            "Context   📦 10 / 100 tokens\n\nTasks\n└ Bash Done ✓\n⏱ 2m 34s",
+        );
+
+        assert!(super::streaming_footer_only_surface_was_exposed(
+            &footer,
+            &ProviderKind::Claude
+        ));
+        assert_eq!(
+            super::strip_streaming_footer(&footer, &ProviderKind::Claude),
+            Some(String::new())
         );
     }
 
