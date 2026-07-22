@@ -137,3 +137,19 @@ pub async fn kill_tmux_session(
     )
     .await
 }
+
+/// POST /api/sessions/{session_key}/resume-previous
+pub async fn resume_previous_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_key): Path<String>,
+    Json(body): Json<crate::services::session_resume::ResumePreviousOptions>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    crate::services::session_resume::resume_previous_session(
+        State(state),
+        headers,
+        Path(session_key),
+        Json(body),
+    )
+    .await
+}

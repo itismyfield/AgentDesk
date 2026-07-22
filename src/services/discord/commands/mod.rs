@@ -131,7 +131,7 @@ pub(in crate::services::discord) use node::{
 pub(super) use receipt::{cmd_receipt, cmd_usage};
 pub(super) use recovery_ops::{cmd_deadlock_recover, cmd_machine_flip, cmd_stuck_pr_rebase};
 pub(super) use restart::cmd_restart;
-pub(super) use session::{cmd_pwd, cmd_start};
+pub(super) use session::{cmd_pwd, cmd_resume, cmd_start};
 pub(super) use sidecar::cmd_sidecar;
 pub(in crate::services::discord) use skill::build_provider_skill_prompt;
 pub(super) use skill::{cmd_cc, cmd_skill};

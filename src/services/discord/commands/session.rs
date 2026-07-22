@@ -198,6 +198,108 @@ pub(in crate::services::discord) async fn cmd_start(
     Ok(())
 }
 
+/// Rebind this channel to a previous provider session (empty = auto-select).
+#[poise::command(slash_command, rename = "resume")]
+pub(in crate::services::discord) async fn cmd_resume(
+    ctx: Context<'_>,
+    #[description = "Provider session id to resume (empty = auto-select previous)"]
+    session_id: Option<String>,
+    #[description = "Worktree path for the resumed session (defaults to current)"] cwd: Option<
+        String,
+    >,
+) -> Result<(), Error> {
+    let user_id = ctx.author().id;
+    let user_name = &ctx.author().name;
+    if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
+        return Ok(());
+    }
+    // Runtime-control tier — owner-only, same as /clear and /stop.
+    if !super::enforce_slash_command_policy(&ctx, "/resume").await? {
+        return Ok(());
+    }
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!("  [{ts}] ◀ [{user_name}] /resume session_id={session_id:?} cwd={cwd:?}");
+
+    let shared = &ctx.data().shared;
+    let provider = &ctx.data().provider;
+    let channel_id = ctx.channel_id();
+
+    let Some(session_key) =
+        super::super::adk_session::build_adk_session_key(shared, channel_id, provider, None).await
+    else {
+        ctx.say("이 채널의 session_key를 확인할 수 없어요. `/start`로 세션을 먼저 붙여주세요.")
+            .await?;
+        return Ok(());
+    };
+    let tmux_name = super::super::session_identity::tmux_name_from_session_key(&session_key)
+        .unwrap_or_default();
+
+    let Some(pool) = shared.pg_pool.clone() else {
+        ctx.say("Error: postgres pool unavailable.").await?;
+        return Ok(());
+    };
+    let registry = shared.health_registry();
+
+    let opts = crate::services::session_resume::ResumePreviousOptions {
+        session_id: session_id.and_then(|s| {
+            let trimmed = s.trim().to_string();
+            (!trimmed.is_empty()).then_some(trimmed)
+        }),
+        cwd: cwd.and_then(|c| {
+            let trimmed = c.trim().to_string();
+            (!trimmed.is_empty()).then_some(trimmed)
+        }),
+    };
+
+    let outcome = crate::services::session_resume::perform_resume_rebind(
+        &pool,
+        registry.as_deref(),
+        &session_key,
+        Some(provider.clone()),
+        Some(channel_id),
+        &tmux_name,
+        &opts,
+    )
+    .await;
+
+    match outcome {
+        Ok(result) => {
+            let mode = if result.auto_selected {
+                "직전 세션 자동 선택"
+            } else {
+                "지정 세션"
+            };
+            let mut lines = vec![
+                format!("↻ 세션 재바인딩 완료 ({mode})"),
+                format!("• session_id: `{}`", result.target_session_id),
+                format!("• cwd: `{}`", result.target_cwd),
+            ];
+            if let Some(prev) = result.previous_session_id.as_deref() {
+                lines.push(format!("• 이전 session_id: `{prev}`"));
+            }
+            lines.push("다음 메시지부터 이 세션의 맥락으로 이어집니다.".to_string());
+            send_long_message_ctx(ctx, &lines.join("\n")).await?;
+            tracing::info!(
+                "  [{ts}] ▶ [{user_name}] /resume rebound → {} @ {}",
+                result.target_session_id,
+                result.target_cwd
+            );
+        }
+        Err(error) => {
+            let (_status, body) = error.into_response();
+            let message = body
+                .get("error")
+                .and_then(|value| value.as_str())
+                .unwrap_or("세션 재바인딩에 실패했어요.")
+                .to_string();
+            ctx.say(format!("⚠ /resume 실패: {message}")).await?;
+        }
+    }
+
+    Ok(())
+}
+
 /// /pwd — Show current working directory
 #[poise::command(slash_command, rename = "pwd")]
 pub(in crate::services::discord) async fn cmd_pwd(ctx: Context<'_>) -> Result<(), Error> {

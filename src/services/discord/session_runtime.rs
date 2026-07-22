@@ -106,6 +106,55 @@ pub(super) fn restored_memento_context_loaded(
     previous_loaded && previous_session_id == next_session_id && next_session_id.is_some()
 }
 
+/// #4790 `/resume` rebind: repoint a channel's in-memory session at a previous
+/// provider session so the next turn resumes that conversation from the target
+/// worktree. Mirrors the DB rebind (`rebind_session_provider_pg`) into memory so
+/// the change takes effect immediately, without waiting for a restart or relying
+/// on `auto_restore_session_force` (which early-returns when the in-memory
+/// `current_path` is already set — a stale value would otherwise shadow the DB
+/// rebind). Creates the session entry when the channel has none yet.
+///
+/// Returns the previously-bound `(current_path, session_id)` for logging.
+pub(in crate::services::discord) async fn rebind_channel_session(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    cwd: &str,
+    session_id: &str,
+) -> (Option<String>, Option<String>) {
+    let mut data = shared.core.lock().await;
+    let session = data
+        .sessions
+        .entry(channel_id)
+        .or_insert_with(|| DiscordSession {
+            session_id: None,
+            memento_context_loaded: false,
+            memento_reflected: false,
+            current_path: None,
+            history: Vec::new(),
+            pending_uploads: Vec::new(),
+            cleared: false,
+            channel_id: Some(channel_id.get()),
+            channel_name: None,
+            category_name: None,
+            remote_profile_name: None,
+            last_active: tokio::time::Instant::now(),
+            worktree: None,
+            born_generation: runtime_store::load_generation(),
+        });
+    let previous_path = session.current_path.clone();
+    let previous_session_id = session.session_id.clone();
+    session.channel_id = Some(channel_id.get());
+    session.last_active = tokio::time::Instant::now();
+    session.current_path = Some(cwd.to_string());
+    // Drop stale worktree metadata so `reconstruct_managed_worktree_metadata`
+    // (which no-ops when `worktree.is_some()`) re-derives it for the target path.
+    session.worktree = None;
+    session.restore_provider_session(Some(session_id.to_string()));
+    reconstruct_managed_worktree_metadata(session, provider, channel_id, cwd);
+    (previous_path, previous_session_id)
+}
+
 /// Auto-restore session from bot_settings.json if not in memory
 pub(super) async fn auto_restore_session(
     shared: &Arc<SharedData>,

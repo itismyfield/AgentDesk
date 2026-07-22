@@ -212,6 +212,7 @@ pub(super) async fn run_bot_framework_setup(
 pub(super) fn run_bot_build_slash_commands() -> Vec<poise::Command<Data, Error>> {
     let mut slash_commands = vec![
         commands::cmd_start(),
+        commands::cmd_resume(),
         commands::cmd_pwd(),
         commands::cmd_status(),
         commands::cmd_inflight(),

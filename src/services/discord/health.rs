@@ -61,7 +61,6 @@ pub use headless_turn::{
     start_reserved_headless_agent_turn_with_owner_channel,
 };
 pub use mailbox::purge_idle_channel_mailbox_registry_entry;
-pub(crate) use recovery::stop_provider_channel_runtime_with_policy;
 #[allow(unused_imports)]
 pub use recovery::{
     HardStopRuntimeResult, IdleTmuxStaleTurnRepairResult, PendingQueueSnapshot,
@@ -73,6 +72,10 @@ pub use recovery::{
     schedule_pending_queue_drain_after_cancel, snapshot_pending_queue_state, spawn_stall_watchdog,
     spawn_watchdog, stop_providerless_runtime_turn_preserving_watcher_strict_ownership,
     stop_runtime_turn_preserving_watcher,
+};
+pub(crate) use recovery::{
+    channel_has_active_turn, rebind_channel_provider_session,
+    stop_provider_channel_runtime_with_policy,
 };
 pub(crate) use runtime_resolve::resolve_utility_bot_http;
 pub use runtime_resolve::{fetch_channel_name, resolve_bot_http};

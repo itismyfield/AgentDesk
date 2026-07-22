@@ -170,8 +170,8 @@ pub(in crate::services::discord) fn slash_command_risk(slash_cmd: &str) -> Comma
         }
 
         // Per-channel session shaping (mirrors text-command tiers).
-        "/start" | "/down" | "/cc" | "/skill" | "/meeting" | "/model" | "/node" | "/fast"
-        | "/goals" | "/effort" | "/compact" | "/clear" | "/deletesession" | "/stop"
+        "/start" | "/resume" | "/down" | "/cc" | "/skill" | "/meeting" | "/model" | "/node"
+        | "/fast" | "/goals" | "/effort" | "/compact" | "/clear" | "/deletesession" | "/stop"
         | "/cancel-queued" | "/restart" | "/debug" => CommandRisk::Mutating,
 
         // RCE-equivalent surface.
