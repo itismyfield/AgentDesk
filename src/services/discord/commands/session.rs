@@ -232,8 +232,6 @@ pub(in crate::services::discord) async fn cmd_resume(
             .await?;
         return Ok(());
     };
-    let tmux_name = super::super::session_identity::tmux_name_from_session_key(&session_key)
-        .unwrap_or_default();
 
     let Some(pool) = shared.pg_pool.clone() else {
         ctx.say("Error: postgres pool unavailable.").await?;
@@ -252,49 +250,62 @@ pub(in crate::services::discord) async fn cmd_resume(
         }),
     };
 
-    let outcome = crate::services::session_resume::perform_resume_rebind(
+    // S1: route through the same forwarding-aware dispatch the HTTP endpoint
+    // uses so a gateway node whose runtime does not own this channel delegates
+    // to the owner node (mirrors `/stop`'s remote-cancel forwarding) instead of
+    // mutating a session it does not run.
+    let forward_context =
+        crate::services::session_forwarding::ForwardCallerContext::from_live_globals(Some(
+            pool.clone(),
+        ));
+    let (_status, body) = crate::services::session_resume::dispatch_resume_previous(
         &pool,
         registry.as_deref(),
+        &forward_context,
+        false,
         &session_key,
-        Some(provider.clone()),
-        Some(channel_id),
-        &tmux_name,
         &opts,
     )
     .await;
 
-    match outcome {
-        Ok(result) => {
-            let mode = if result.auto_selected {
-                "직전 세션 자동 선택"
-            } else {
-                "지정 세션"
-            };
-            let mut lines = vec![
-                format!("↻ 세션 재바인딩 완료 ({mode})"),
-                format!("• session_id: `{}`", result.target_session_id),
-                format!("• cwd: `{}`", result.target_cwd),
-            ];
-            if let Some(prev) = result.previous_session_id.as_deref() {
-                lines.push(format!("• 이전 session_id: `{prev}`"));
-            }
-            lines.push("다음 메시지부터 이 세션의 맥락으로 이어집니다.".to_string());
-            send_long_message_ctx(ctx, &lines.join("\n")).await?;
-            tracing::info!(
-                "  [{ts}] ▶ [{user_name}] /resume rebound → {} @ {}",
-                result.target_session_id,
-                result.target_cwd
-            );
+    if body.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let auto = body
+            .get("auto_selected")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let mode = if auto {
+            "직전 세션 자동 선택"
+        } else {
+            "지정 세션"
+        };
+        let target_session_id = body
+            .get("target_session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let target_cwd = body
+            .get("target_cwd")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let mut lines = vec![
+            format!("↻ 세션 재바인딩 완료 ({mode})"),
+            format!("• session_id: `{target_session_id}`"),
+            format!("• cwd: `{target_cwd}`"),
+        ];
+        if let Some(prev) = body.get("previous_session_id").and_then(|v| v.as_str()) {
+            lines.push(format!("• 이전 session_id: `{prev}`"));
         }
-        Err(error) => {
-            let (_status, body) = error.into_response();
-            let message = body
-                .get("error")
-                .and_then(|value| value.as_str())
-                .unwrap_or("세션 재바인딩에 실패했어요.")
-                .to_string();
-            ctx.say(format!("⚠ /resume 실패: {message}")).await?;
-        }
+        lines.push("다음 메시지부터 이 세션의 맥락으로 이어집니다.".to_string());
+        send_long_message_ctx(ctx, &lines.join("\n")).await?;
+        tracing::info!(
+            "  [{ts}] ▶ [{user_name}] /resume rebound → {target_session_id} @ {target_cwd}"
+        );
+    } else {
+        let message = body
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or("세션 재바인딩에 실패했어요.")
+            .to_string();
+        ctx.say(format!("⚠ /resume 실패: {message}")).await?;
     }
 
     Ok(())

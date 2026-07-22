@@ -205,12 +205,42 @@ pub(crate) async fn load_session_rebind_context_pg(
     }))
 }
 
+/// #4790 `/resume` auto-select guard: every provider session id that is
+/// *currently bound* to some channel's session row. The auto-select path must
+/// never adopt a transcript that another live channel is actively using —
+/// doing so would repoint two channels at one session id and thrash their
+/// bindings (the #2843 live-binding hazard). A rotated/superseded prior session
+/// is not in this set (its row was overwritten), so it stays selectable.
+pub(crate) async fn load_live_bound_session_ids_pg(
+    pool: &PgPool,
+) -> Result<std::collections::HashSet<String>, String> {
+    let rows = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT claude_session_id FROM sessions
+         WHERE claude_session_id IS NOT NULL AND BTRIM(claude_session_id) <> ''
+         UNION
+         SELECT raw_provider_session_id FROM sessions
+         WHERE raw_provider_session_id IS NOT NULL AND BTRIM(raw_provider_session_id) <> ''",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("load live-bound session ids: {error}"))?;
+    Ok(rows.into_iter().flatten().collect())
+}
+
 /// Rebind a session row to a previous provider session: point `cwd` at the
 /// target worktree and `claude_session_id`/`raw_provider_session_id` at the
 /// target provider session id so the next turn resumes that conversation
 /// (`--resume <id>` in the target cwd). `claude_session_id_recorded_at` is
 /// refreshed when the id actually changes. Returns the number of rows updated
 /// (0 when the `session_key` no longer exists).
+///
+/// N2 caveat: both `claude_session_id` and `raw_provider_session_id` are set to
+/// the same `$3`. The auto-select path is Claude-only, where these coincide. For
+/// an *explicit* non-Claude rebind (e.g. Codex, where the raw provider session
+/// id can differ from the resume selector) this collapses the two ids; callers
+/// needing a distinct raw id must widen this signature. Acceptable today because
+/// the only non-Claude entry is an explicit `session_id` the caller already
+/// treats as the provider resume token.
 pub(crate) async fn rebind_session_provider_pg(
     pool: &PgPool,
     session_key: &str,
