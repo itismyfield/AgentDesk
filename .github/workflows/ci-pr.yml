@@ -342,9 +342,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-cargo-registry-git-v1-
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -449,9 +449,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-cargo-registry-git-v1-
 
       # Stage 1 keeps Windows inline and default-feature-only instead of
       # `just check`: this lane's job is cross-OS compile and targeted test
@@ -621,9 +621,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-fast-tests-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-fast-tests-
+            ${{ runner.os }}-cargo-registry-git-v1-
 
       - name: just test-postgres
         timeout-minutes: 20
@@ -677,9 +677,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-recovery-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-recovery-
+            ${{ runner.os }}-cargo-registry-git-v1-
 
       - name: High-risk recovery lane
         run: "cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1"
@@ -740,9 +740,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-lint-
+            ${{ runner.os }}-cargo-registry-git-v1-
 
       - name: just fmt-check
         run: just fmt-check

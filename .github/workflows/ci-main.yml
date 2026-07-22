@@ -92,9 +92,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-main-full-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-main-full-
+            ${{ runner.os }}-cargo-registry-git-v1-
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -166,9 +166,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-postgres-main-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-postgres-main-
+            ${{ runner.os }}-cargo-registry-git-v1-
 
       - name: just test-postgres
         timeout-minutes: 20
@@ -222,9 +222,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-recovery-main-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-recovery-main-
+            ${{ runner.os }}-cargo-registry-git-v1-
 
       - name: High-risk recovery lane
         run: "cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1"

@@ -122,9 +122,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-trusted-macos-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-trusted-macos-
+            ${{ runner.os }}-cargo-registry-git-v1-
 
       - name: cargo check
         run: cargo check --all-targets
@@ -245,9 +245,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-trusted-macos-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-trusted-macos-
+            ${{ runner.os }}-cargo-registry-git-v1-
 
       # `nice -n 10` (lower scheduling priority) on the CPU-heavy cargo steps so
       # the co-located production Postgres preempts CI under contention (#3658,
