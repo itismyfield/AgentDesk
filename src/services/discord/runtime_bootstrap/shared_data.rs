@@ -164,6 +164,7 @@ pub(super) fn run_bot_build_shared_data(
             global_finalizing,
             shutdown_remaining,
             shutdown_counted: std::sync::atomic::AtomicBool::new(false),
+            shutdown_slot_consumed: std::sync::atomic::AtomicBool::new(false),
         },
         turn_finalizer: crate::services::discord::turn_finalizer::TurnFinalizer::spawn(),
         // #3479 Item 3: dispatch intake/routing cluster. All three members are

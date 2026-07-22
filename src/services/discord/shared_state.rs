@@ -679,6 +679,9 @@ pub(in crate::services) struct RestartLifecycle {
     /// Per-provider flag: ensures this provider decrements `shutdown_remaining` at most once,
     /// even if both the deferred restart poll loop and SIGTERM handler run.
     pub(in crate::services) shutdown_counted: std::sync::atomic::AtomicBool,
+    /// Whether this provider already consumed its process-wide barrier slot.
+    /// Cancellation restores only consumed slots, not merely acquired permits.
+    pub(in crate::services) shutdown_slot_consumed: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(test)]

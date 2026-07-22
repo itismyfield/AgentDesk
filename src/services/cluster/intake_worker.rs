@@ -75,6 +75,10 @@ impl IntakeWorkerLifecycle {
         self.admission_fenced.store(true, Ordering::SeqCst);
     }
 
+    pub(crate) fn unfence_admission(&self) {
+        self.admission_fenced.store(false, Ordering::SeqCst);
+    }
+
     pub(crate) fn admission_is_fenced(&self) -> bool {
         self.admission_fenced.load(Ordering::SeqCst)
     }

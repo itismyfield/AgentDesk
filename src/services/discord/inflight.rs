@@ -506,7 +506,6 @@ pub(super) fn mark_all_inflight_states_restart_mode_checked(
     // row under the flock and sets ONLY restart_mode / restart_generation,
     // never the frontier, so it can no longer regress a concurrent writer.
     let states = load_inflight_states_from_root(&root, provider);
-    let expected = states.len();
     let mut updated = 0usize;
     for state in states {
         let path = inflight_state_path(&root, provider, state.channel_id);
@@ -519,12 +518,6 @@ pub(super) fn mark_all_inflight_states_restart_mode_checked(
                 state.channel_id
             ));
         }
-    }
-    if updated != expected {
-        return Err(format!(
-            "persisted {updated}/{expected} inflight restart markers for provider={}",
-            provider.as_str()
-        ));
     }
     Ok(updated)
 }

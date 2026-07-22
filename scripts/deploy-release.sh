@@ -2060,14 +2060,23 @@ OLD_PID=""
 if [ -f "$LOCK_FILE" ]; then
     OLD_PID=$(cat "$LOCK_FILE" 2>/dev/null || true)
 fi
-if ! AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS=1 \
-    request_restart_drain_mode_or_fail \
-        "release" "$PLIST_REL" "$REL_PORT" "$ADK_REL/runtime" "deploy-release"; then
+AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS=1
+export AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS
+if ! request_restart_drain_mode_or_fail \
+    "release" "$PLIST_REL" "$REL_PORT" "$ADK_REL/runtime" "deploy-release"; then
     exit 1
 fi
-if ! wait_for_restart_persistence_or_fail \
-    "release" "$ADK_REL/runtime" 30; then
-    exit 1
+RESTART_REQUEST_NONCE="${AGENTDESK_RESTART_REQUEST_NONCE:-}"
+if [ "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-0}" != "1" ]; then
+    if [ -z "$RESTART_REQUEST_NONCE" ]; then
+        echo "✗ [gate] release restart request nonce missing" >&2
+        clear_restart_drain_mode "$ADK_REL/runtime" || true
+        exit 1
+    fi
+    if ! wait_for_restart_persistence_or_fail \
+        "release" "$ADK_REL/runtime" "$RESTART_REQUEST_NONCE" 30; then
+        exit 1
+    fi
 fi
 
 # A planned restart no longer suppresses transcript gaps: the watchdog's durable

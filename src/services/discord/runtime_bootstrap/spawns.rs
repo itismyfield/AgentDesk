@@ -30,11 +30,39 @@ async fn prepare_deferred_restart(shared: &SharedData) -> Option<DeferredRestart
 }
 
 fn finish_deferred_restart(shared: &SharedData, _permit: DeferredRestartPermit) -> bool {
-    shared
+    let is_final = shared
         .restart
         .shutdown_remaining
         .fetch_sub(1, Ordering::AcqRel)
-        == 1
+        == 1;
+    shared
+        .restart
+        .shutdown_slot_consumed
+        .store(true, Ordering::Release);
+    is_final
+}
+
+fn rollback_deferred_restart(shared: &SharedData) {
+    shared.restart.intake_worker_lifecycle.unfence_admission();
+    shared.restart.shutting_down.store(false, Ordering::SeqCst);
+    shared
+        .restart
+        .restart_pending
+        .store(false, Ordering::SeqCst);
+    shared
+        .restart
+        .shutdown_counted
+        .store(false, Ordering::Release);
+    if shared
+        .restart
+        .shutdown_slot_consumed
+        .swap(false, Ordering::AcqRel)
+    {
+        shared
+            .restart
+            .shutdown_remaining
+            .fetch_add(1, Ordering::AcqRel);
+    }
 }
 
 /// Background: poll for the deferred restart marker for gateway and standby
@@ -56,6 +84,15 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
             // rehydrates transcript tailing from runtime state.
             if let Some(root) = crate::agentdesk_runtime_root() {
                 let marker = root.join("restart_pending");
+                let cancel = root.join("restart_cancelled");
+                if cancel.exists() {
+                    rollback_deferred_restart(&shared_for_deferred);
+                    tracing::warn!(
+                        provider = provider_for_deferred.as_str(),
+                        "restart request cancelled; intake admission restored"
+                    );
+                    continue;
+                }
                 if marker.exists() {
                     let Some(shutdown_permit) =
                         prepare_deferred_restart(&shared_for_deferred).await
@@ -71,10 +108,7 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                             failures = drain.persistence_errors.len(),
                             "restart_pending persistence failed; retaining marker and runtime"
                         );
-                        shared_for_deferred
-                            .restart
-                            .shutdown_counted
-                            .store(false, Ordering::Release);
+                        rollback_deferred_restart(&shared_for_deferred);
                         continue;
                     }
                     let ids: std::collections::HashMap<u64, u64> = shared_for_deferred
@@ -115,10 +149,7 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                                         error = %error,
                                         "restart_pending inflight persistence failed; retaining marker and runtime"
                                     );
-                                    shared_for_deferred
-                                        .restart
-                                        .shutdown_counted
-                                        .store(false, Ordering::Release);
+                                    rollback_deferred_restart(&shared_for_deferred);
                                     continue;
                                 }
                             };
@@ -134,8 +165,20 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                         let ack = root.join("restart_persisted");
                         let ack_tmp =
                             root.join(format!("restart_persisted.{}.tmp", std::process::id()));
+                        let request = std::fs::read_to_string(&marker).unwrap_or_default();
+                        let nonce = request
+                            .lines()
+                            .find_map(|line| line.strip_prefix("nonce="))
+                            .unwrap_or_default();
+                        if nonce.is_empty() {
+                            tracing::error!(
+                                "restart persistence request lacks nonce; retaining runtime"
+                            );
+                            rollback_deferred_restart(&shared_for_deferred);
+                            continue;
+                        }
                         let ack_body = format!(
-                            "provider={}\ncommitted_at={}\n",
+                            "nonce={nonce}\nprovider={}\ncommitted_at={}\n",
                             provider_for_deferred.as_str(),
                             chrono::Utc::now().to_rfc3339()
                         );
@@ -145,7 +188,7 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                             let _ = std::fs::remove_file(&ack_tmp);
                             tracing::error!(
                                 error = %error,
-                                "restart persistence acknowledgement publish failed; retaining marker and runtime"
+                                "restart persistence acknowledgement publish failed; exiting without success sentinel"
                             );
                             std::process::exit(1);
                         }
@@ -393,6 +436,39 @@ mod tests {
             shared.restart.shutdown_remaining.load(Ordering::Acquire),
             0,
             "the standby provider consumes its barrier slot exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_restores_admission_health_and_consumed_barrier_slot() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        shared.restart.shutdown_remaining.store(2, Ordering::SeqCst);
+
+        let permit = prepare_deferred_restart(&shared)
+            .await
+            .expect("first restart permit");
+        assert!(!finish_deferred_restart(&shared, permit));
+        assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 1);
+        assert!(shared.restart.intake_worker_lifecycle.admission_is_fenced());
+        assert!(shared.restart.shutting_down.load(Ordering::Acquire));
+        assert!(shared.restart.restart_pending.load(Ordering::Acquire));
+
+        rollback_deferred_restart(&shared);
+
+        assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 2);
+        assert!(!shared.restart.intake_worker_lifecycle.admission_is_fenced());
+        assert!(!shared.restart.shutting_down.load(Ordering::Acquire));
+        assert!(!shared.restart.restart_pending.load(Ordering::Acquire));
+        assert!(!shared.restart.shutdown_counted.load(Ordering::Acquire));
+
+        let second_permit = prepare_deferred_restart(&shared)
+            .await
+            .expect("restart permit after cancellation");
+        assert!(!finish_deferred_restart(&shared, second_permit));
+        assert_eq!(
+            shared.restart.shutdown_remaining.load(Ordering::Acquire),
+            1,
+            "a new request consumes exactly one restored barrier slot"
         );
     }
 }

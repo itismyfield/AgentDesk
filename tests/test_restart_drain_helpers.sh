@@ -340,22 +340,37 @@ echo "== Test 5g: restart persistence waits for runtime marker consumption =="
 TMP_RUNTIME3=$(mktemp -d)
 trap 'rm -rf "$TMP_FIXTURE_DIR" "$TMP_RUNTIME" "$TMPDIR_TEST" "$TMP_RUNTIME2" "$TMP_RUNTIME3"' EXIT
 touch "$TMP_RUNTIME3/restart_pending"
-( sleep 1; touch "$TMP_RUNTIME3/restart_persisted"; rm -f "$TMP_RUNTIME3/restart_pending" ) &
+( sleep 1; printf 'nonce=test-nonce\n' >"$TMP_RUNTIME3/restart_persisted"; rm -f "$TMP_RUNTIME3/restart_pending" ) &
 BG_PID=$!
 set +e
-wait_for_restart_persistence_or_fail "release" "$TMP_RUNTIME3" 5 \
-  >/dev/null 2>&1
+wait_for_restart_persistence_or_fail \
+  "release" "$TMP_RUNTIME3" "test-nonce" 5 >/dev/null 2>&1
 rc=$?
 set -e
 wait "$BG_PID" 2>/dev/null || true
-assert_eq "persistence helper succeeds only after positive acknowledgement" "0" "$rc"
+assert_eq "persistence helper succeeds only after matching positive acknowledgement" "0" "$rc"
+
+mkdir -p "$TMP_RUNTIME3/wrong-nonce"
+touch "$TMP_RUNTIME3/wrong-nonce/restart_pending"
+printf 'nonce=stale-nonce\n' >"$TMP_RUNTIME3/wrong-nonce/restart_persisted"
+set +e
+wait_for_restart_persistence_or_fail \
+  "release" "$TMP_RUNTIME3/wrong-nonce" "current-nonce" 1 >/dev/null 2>&1
+rc=$?
+set -e
+assert_eq "persistence helper rejects acknowledgement from another request" "1" "$rc"
+if [ -e "$TMP_RUNTIME3/wrong-nonce/restart_cancelled" ]; then
+  pass "nonce mismatch publishes restart cancellation"
+else
+  fail "nonce mismatch publishes restart cancellation"
+fi
 
 mkdir -p "$TMP_RUNTIME3/consumed-without-ack"
 touch "$TMP_RUNTIME3/consumed-without-ack/restart_pending"
 rm -f "$TMP_RUNTIME3/consumed-without-ack/restart_pending"
 set +e
 wait_for_restart_persistence_or_fail \
-  "release" "$TMP_RUNTIME3/consumed-without-ack" 1 >/dev/null 2>&1
+  "release" "$TMP_RUNTIME3/consumed-without-ack" "test-nonce" 1 >/dev/null 2>&1
 rc=$?
 set -e
 assert_eq "marker deletion without acknowledgement is not durability proof" "1" "$rc"
@@ -364,7 +379,7 @@ mkdir -p "$TMP_RUNTIME3/still-pending"
 touch "$TMP_RUNTIME3/still-pending/restart_pending"
 set +e
 wait_for_restart_persistence_or_fail \
-  "release" "$TMP_RUNTIME3/still-pending" 1 >/dev/null 2>&1
+  "release" "$TMP_RUNTIME3/still-pending" "test-nonce" 1 >/dev/null 2>&1
 rc=$?
 set -e
 assert_eq "persistence helper refuses bootout while marker remains" "1" "$rc"

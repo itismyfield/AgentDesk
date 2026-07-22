@@ -769,11 +769,15 @@ assert_restart_helpers_loaded() {
 
 clear_restart_drain_mode() {
   local runtime_root="$1"
+  local cancel="$runtime_root/restart_cancelled"
+  local cancel_tmp="${cancel}.$$"
   if [ -z "$runtime_root" ]; then
     echo "✗ [gate] runtime root is required to clear restart drain mode" >&2
     return 1
   fi
   rm -f "$runtime_root/restart_pending"
+  printf 'cancelled_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >"$cancel_tmp" \
+    && mv "$cancel_tmp" "$cancel"
 }
 
 _health_origin_header() {
@@ -826,7 +830,8 @@ _restart_pending_acknowledged() {
 wait_for_restart_persistence_or_fail() {
   local scope="$1"
   local runtime_root="$2"
-  local max_wait="${3:-30}"
+  local expected_nonce="$3"
+  local max_wait="${4:-30}"
   local waited=0
   local marker="$runtime_root/restart_pending"
   local ack="$runtime_root/restart_persisted"
@@ -837,7 +842,8 @@ wait_for_restart_persistence_or_fail() {
   fi
 
   while [ "$waited" -lt "$max_wait" ]; do
-    if [ -f "$ack" ]; then
+    if [ -f "$ack" ] \
+      && grep -Fqx "nonce=${expected_nonce}" "$ack" 2>/dev/null; then
       echo "✓ [gate] ${scope} restart persistence acknowledged by runtime"
       return 0
     fi
@@ -923,6 +929,10 @@ request_restart_drain_mode_or_fail() {
   local marker
   local tmp_marker
   local job_state
+  local nonce
+
+  AGENTDESK_RESTART_REQUEST_NONCE=""
+  AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=0
 
   if [ -z "$runtime_root" ]; then
     echo "✗ [gate] ${scope} runtime root is required for restart drain mode" >&2
@@ -939,7 +949,7 @@ request_restart_drain_mode_or_fail() {
     return 1
   fi
 
-  rm -f "$runtime_root/restart_persisted" 2>/dev/null || true
+  rm -f "$runtime_root/restart_persisted" "$runtime_root/restart_cancelled" 2>/dev/null || true
 
   mkdir -p "$runtime_root" || {
     echo "✗ [gate] failed to create ${scope} runtime root: $runtime_root" >&2
@@ -948,7 +958,9 @@ request_restart_drain_mode_or_fail() {
 
   marker="$runtime_root/restart_pending"
   tmp_marker="${marker}.$$"
+  nonce="$(date -u '+%Y%m%dT%H%M%S')-$$-${RANDOM:-0}"
   {
+    printf 'nonce=%s\n' "$nonce"
     printf 'source=%s\n' "$source"
     printf 'scope=%s\n' "$scope"
     printf 'label=%s\n' "$label"
@@ -966,6 +978,7 @@ request_restart_drain_mode_or_fail() {
   while [ "$waited" -lt "$ack_wait" ]; do
     if _restart_pending_acknowledged "$port"; then
       echo "✓ [gate] ${scope} restart drain mode acknowledged by runtime"
+      AGENTDESK_RESTART_REQUEST_NONCE="$nonce"
       return 0
     fi
     # #1447 review P2: idle runtime may consume the marker (restart_ctrl
@@ -974,6 +987,7 @@ request_restart_drain_mode_or_fail() {
     # has disappeared, the runtime acknowledged it the only way it can.
     if [ ! -e "$marker" ]; then
       echo "▸ [gate] ${scope} restart drain marker consumed by runtime — treating as acknowledged"
+      AGENTDESK_RESTART_REQUEST_NONCE="$nonce"
       return 0
     fi
     sleep 1
@@ -987,7 +1001,9 @@ request_restart_drain_mode_or_fail() {
     # and call exit(0) — flapping under KeepAlive. The service is not
     # running, so there is nothing to drain; clear the marker and report
     # success.
-    rm -f "$marker" 2>/dev/null || true
+    rm -f "$marker" "$runtime_root/restart_persisted" \
+      "$runtime_root/restart_cancelled" 2>/dev/null || true
+    AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=1
     echo "▸ [gate] ${scope} launchd job is not running; cleared restart drain marker (no in-flight turns to drain)"
     return 0
   fi
@@ -995,6 +1011,7 @@ request_restart_drain_mode_or_fail() {
   # last poll and the post-loop launchd check. Same ack semantics as above.
   if [ ! -e "$marker" ]; then
     echo "▸ [gate] ${scope} restart drain marker consumed by runtime during timeout window — treating as acknowledged"
+    AGENTDESK_RESTART_REQUEST_NONCE="$nonce"
     return 0
   fi
 

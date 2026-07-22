@@ -2518,6 +2518,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
             global_finalizing: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             shutdown_remaining: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             shutdown_counted: std::sync::atomic::AtomicBool::new(false),
+            shutdown_slot_consumed: std::sync::atomic::AtomicBool::new(false),
         },
         turn_finalizer: turn_finalizer::TurnFinalizer::spawn(),
         dispatch: DispatchRoutingState {

@@ -1361,6 +1361,7 @@ mod tests {
                 global_finalizing: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 shutdown_remaining: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 shutdown_counted: std::sync::atomic::AtomicBool::new(false),
+                shutdown_slot_consumed: std::sync::atomic::AtomicBool::new(false),
             },
             turn_finalizer: super::super::turn_finalizer::TurnFinalizer::spawn(),
             dispatch: super::super::DispatchRoutingState {
