@@ -287,9 +287,6 @@ pub(crate) enum RanLocalReason {
     NodeOverrideRoutingDisabled,
     /// This instance is the durable live owner for the session.
     LiveSessionOwnerIsLocal,
-    /// A channel without an existing owner establishes its first placement
-    /// locally when the payload contains node-local upload paths.
-    NoOwnerWithNonPortableAttachment,
 }
 
 /// Inputs to the hook. Bundled into a struct so the intake gate can
@@ -510,14 +507,6 @@ pub(crate) async fn try_route_intake(
             unreachable!("owner fail-safe outcomes return before the open-route fence")
         }
         SessionOwnerResolution::NoOwner => {
-            if ctx.has_nonportable_uploads {
-                return apply_observe_mode(
-                    ctx.mode,
-                    IntakeRouterDecision::RanLocal {
-                        reason: RanLocalReason::NoOwnerWithNonPortableAttachment,
-                    },
-                );
-            }
             if let Some(target) = node_override {
                 route_node_override_without_owner(pool, ctx, target).await
             } else {
@@ -645,6 +634,19 @@ async fn route_by_preferred_labels(
         }
     };
 
+    // The text-only routed pilot has no attachment staging contract: upload
+    // records contain gateway-local paths and must not enter the outbox.
+    if ctx.has_nonportable_uploads {
+        return apply_observe_mode(
+            ctx.mode,
+            IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::NonPortableAttachment {
+                    owner_instance_id: target,
+                },
+            },
+        );
+    }
+
     route_to_instance(
         pool,
         ctx,
@@ -684,6 +686,19 @@ async fn route_node_override_without_owner(
             ctx.mode,
             IntakeRouterDecision::RanLocal {
                 reason: RanLocalReason::NodeOverrideIsLeader,
+            },
+        );
+    }
+
+    // The text-only routed pilot has no attachment staging contract: upload
+    // records contain gateway-local paths and must not enter the outbox.
+    if ctx.has_nonportable_uploads {
+        return apply_observe_mode(
+            ctx.mode,
+            IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::NonPortableAttachment {
+                    owner_instance_id: target.to_string(),
+                },
             },
         );
     }
@@ -1180,6 +1195,45 @@ mod pg_tests {
                 reason: RanLocalReason::DisabledButPreferenceSet
             }
         );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn eligible_worker_forwards_portable_text_to_outbox_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        seed_agent_with_preference(
+            &pool,
+            "agent-portable-text",
+            "ch-portable-text",
+            serde_json::json!(["unreal"]),
+        )
+        .await;
+        seed_worker_node(&pool, "worker-mac", serde_json::json!(["unreal"]), "online").await;
+
+        let decision = try_route_intake(
+            &pool,
+            &ctx_for_channel(IntakeRoutingMode::Enforce, "ch-portable-text"),
+        )
+        .await;
+        assert!(matches!(
+            decision,
+            IntakeRouterDecision::Forwarded {
+                ref target_instance_id,
+                ..
+            } if target_instance_id == "worker-mac"
+        ));
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = $1")
+                .bind("ch-portable-text")
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(count, 1, "portable text must create the routed outbox row");
 
         pool.close().await;
         pg_db.drop().await;
@@ -2144,17 +2198,42 @@ mod pg_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn no_owner_attachment_establishes_local_first_placement_pg() {
+    async fn no_owner_attachment_is_blocked_before_preferred_target_outbox_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
+        seed_agent_with_preference(
+            &pool,
+            "agent-new-upload",
+            "ch-new-upload",
+            serde_json::json!(["mac-mini"]),
+        )
+        .await;
+        seed_worker_node(
+            &pool,
+            "worker-mac-mini",
+            serde_json::json!(["mac-mini"]),
+            "online",
+        )
+        .await;
         let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, "ch-new-upload");
         ctx.has_nonportable_uploads = true;
-        let decision = try_route_intake(&pool, &ctx).await;
         assert_eq!(
-            decision,
-            IntakeRouterDecision::RanLocal {
-                reason: RanLocalReason::NoOwnerWithNonPortableAttachment
+            try_route_intake(&pool, &ctx).await,
+            IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::NonPortableAttachment {
+                    owner_instance_id: "worker-mac-mini".to_string()
+                }
             }
+        );
+        let outbox_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = 'ch-new-upload'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count outbox rows");
+        assert_eq!(
+            outbox_count, 0,
+            "non-portable uploads must be rejected before outbox insertion"
         );
 
         pool.close().await;

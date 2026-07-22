@@ -275,9 +275,11 @@ CREATE TRIGGER trg_intake_outbox_touch_updated_at
 its own bot token via `credential::read_bot_token()` at startup;
 nothing token-shaped is ever serialized into PG.
 
-**Column note: no attachment payload.** If the original message has
-file uploads, the leader handles it locally (see "Pending uploads"
-below); we never copy uploaded bytes into the outbox.
+**Column note: text-only attachment contract.** The initial routed pilot
+allows no attachment payload. Upload records contain node-local filesystem paths,
+not portable object references. Before any foreign-target `intake_outbox` insert,
+the router explicitly rejects uploads; only text-only requests are eligible for
+cross-node routing (see "Pending uploads" below).
 
 #### B-bis. Canonical state-transition SQL (codex round-2 P1 #3)
 
@@ -768,10 +770,12 @@ Decision tree (evaluation order is important):
    provider-capable worker advertisement, or two live owners, blocks
    intake. It never falls through to local or preference placement;
    only an explicit session stop/clear makes a new placement safe.
-5. **Non-portable uploads**: a foreign live owner plus raw attachments
-   or queued `pending_uploads` blocks intake. A local owner handles the
-   upload locally; a channel with no owner establishes its first
-   placement locally.
+5. **Text-only routed pilot**: raw attachments or queued `pending_uploads`
+   carry gateway-local filesystem paths, not portable references. Any decision
+   that would route to a foreign live owner, explicit `/node` target, or
+   preferred-label worker blocks before an outbox insert. A local live owner
+   may handle an upload locally; the routed pilot never creates a new local
+   fallback session for an upload.
 6. **Explicit `/node`**: only after owner lookup proves `NoOwner`.
    An unavailable explicit target blocks rather than silently falling
    through. `/node` does not migrate an existing tmux session.
@@ -945,17 +949,18 @@ during `handle_text_message` (today) and stores temp paths in
 `shared.pending_uploads`. **These local paths are not portable to
 worker.**
 
-Current policy is owner-aware. A local live owner handles uploads
-locally, and `NoOwner` establishes the first session locally. A live
-foreign owner returns `BlockedNonPortableAttachment`; queued drains
-front-requeue the original Intervention before marker teardown and arm
-only the slow backstop. Stale/conflicting owner blocks take precedence.
-No local absolute upload path is written to `intake_outbox`.
+The routed pilot is explicitly text-only. A local live owner may handle
+uploads locally. When a foreign owner, explicit `/node`, or preferred-label
+placement would route the request, `NonPortableAttachment` blocks before the
+outbox insert and the live notice says: “현재 mac-mini routed session은 파일
+첨부를 지원하지 않습니다.” The one-minute per-channel notice throttle prevents
+retry spam. Queued drains retain the original Intervention, but create neither
+an outbox row nor a local fallback session. Stale/conflicting owner blocks take
+precedence. No local absolute upload path is written to `intake_outbox`.
 
-v2 (out of scope for this PR): forward upload bytes through
-`message_outbox`-style payload table, or have worker re-download
-from Discord CDN (requires re-resolving attachment URLs from the
-message; possibly cleaner).
+Full attachment portability remains out of scope: either stage bytes through a
+durable object/payload store or let the worker securely re-download the Discord
+CDN attachment from its canonical URL.
 
 ### Worker → Discord response
 

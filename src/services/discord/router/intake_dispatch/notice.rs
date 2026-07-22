@@ -62,7 +62,7 @@ pub(super) async fn notify_blocked_intake(
         }
     };
     let content = format!(
-        "⛔ {detail} 잘못된 노드에 새 세션을 만들지 않도록 turn을 시작하지 않았습니다. 기존 세션을 stop/clear한 뒤 다시 보내거나, 첨부가 있었다면 text-only로 다시 보내세요."
+        "⛔ {detail} 현재 mac-mini routed session은 파일 첨부를 지원하지 않습니다. 잘못된 노드에 새 세션을 만들지 않도록 turn을 시작하지 않았습니다. text-only로 다시 보내세요."
     );
     if let Err(error) = crate::services::discord::http::send_channel_message(
         deps.http.as_ref(),
