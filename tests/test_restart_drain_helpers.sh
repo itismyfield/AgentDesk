@@ -389,15 +389,30 @@ else
   fail "persistence timeout clears restart marker"
 fi
 
-echo "== Test 6: clear_restart_drain_mode removes marker file =="
-touch "$TMPDIR_TEST/restart_pending"
+echo "== Test 6: clear_restart_drain_mode publishes cancellation before marker removal =="
+printf 'nonce=handoff-order\n' >"$TMPDIR_TEST/restart_pending"
 # shellcheck source=/dev/null
 . "$DEFAULTS_SH"
+marker_remove_saw_cancel=0
+rm() {
+  if [ "$1" = "-f" ] && [ "$2" = "$TMPDIR_TEST/restart_pending" ] \
+    && [ -f "$TMPDIR_TEST/restart_cancelled" ]; then
+    marker_remove_saw_cancel=1
+  fi
+  command rm "$@"
+}
 clear_restart_drain_mode "$TMPDIR_TEST" >/dev/null 2>&1 || true
+unset -f rm
 if [ ! -e "$TMPDIR_TEST/restart_pending" ]; then
   pass "marker removed"
 else
   fail "marker removed"
+fi
+if [ "$marker_remove_saw_cancel" = "1" ] \
+  && grep -q '^nonce=handoff-order$' "$TMPDIR_TEST/restart_cancelled"; then
+  pass "cancellation nonce published before marker removal"
+else
+  fail "cancellation nonce published before marker removal"
 fi
 
 echo "== Test 7: #1686 — wait_for_live_turns_to_drain_or_fail self-hosted/skip semantics =="

@@ -103,6 +103,32 @@ fn finish_deferred_restart(shared: &SharedData, _permit: DeferredRestartPermit) 
     is_final
 }
 
+/// Write the durable sentinel, then make the final cancellation decision at
+/// the closest practical point before the atomic rename. A successful rename
+/// is the point of no return: cancellation observed afterwards is intentionally
+/// ignored so persistence and process exit remain a single durable outcome.
+fn commit_deferred_restart_sentinel(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    nonce: &str,
+    guard: &DeferredRestartCancellationGuard,
+) -> std::io::Result<bool> {
+    let ack = root.join("restart_persisted");
+    let ack_tmp = root.join(format!("restart_persisted.{}.tmp", std::process::id()));
+    let ack_body = format!(
+        "nonce={nonce}\nprovider={}\ncommitted_at={}\n",
+        provider.as_str(),
+        chrono::Utc::now().to_rfc3339()
+    );
+    std::fs::write(&ack_tmp, ack_body)?;
+    if guard.cancelled() {
+        let _ = std::fs::remove_file(&ack_tmp);
+        return Ok(false);
+    }
+    std::fs::rename(ack_tmp, ack)?;
+    Ok(true)
+}
+
 fn rollback_deferred_restart(shared: &SharedData) {
     shared.restart.intake_worker_lifecycle.unfence_admission();
     shared.restart.shutting_down.store(false, Ordering::SeqCst);
@@ -227,31 +253,22 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                     tracing::info!(
                         "  [{ts}] 🔄 restart_pending detected — quick exit after persisting {queue_count} queued item(s)"
                     );
-                    // The final cancellation check is immediately before the
-                    // durable sentinel commit. Once `restart_persisted` is
-                    // published, that commit is intentionally irreversible:
-                    // later cancellation must not split persistence from exit.
-                    if cancellation_guard.cancelled() {
-                        continue;
-                    }
                     if finish_deferred_restart(&shared_for_deferred, shutdown_permit) {
-                        let ack = root.join("restart_persisted");
-                        let ack_tmp =
-                            root.join(format!("restart_persisted.{}.tmp", std::process::id()));
-                        let ack_body = format!(
-                            "nonce={nonce}\nprovider={}\ncommitted_at={}\n",
-                            provider_for_deferred.as_str(),
-                            chrono::Utc::now().to_rfc3339()
-                        );
-                        if let Err(error) = std::fs::write(&ack_tmp, ack_body)
-                            .and_then(|_| std::fs::rename(&ack_tmp, &ack))
-                        {
-                            let _ = std::fs::remove_file(&ack_tmp);
-                            tracing::error!(
-                                error = %error,
-                                "restart persistence acknowledgement publish failed; retaining runtime"
-                            );
-                            continue;
+                        match commit_deferred_restart_sentinel(
+                            &root,
+                            &provider_for_deferred,
+                            &nonce,
+                            &cancellation_guard,
+                        ) {
+                            Ok(false) => continue,
+                            Err(error) => {
+                                tracing::error!(
+                                    error = %error,
+                                    "restart persistence acknowledgement publish failed; retaining runtime"
+                                );
+                                continue;
+                            }
+                            Ok(true) => {}
                         }
                         cancellation_guard.disarm();
                         let _ = std::fs::remove_file(&marker);
@@ -567,6 +584,42 @@ mod tests {
         assert!(!shared.restart.shutting_down.load(Ordering::Acquire));
         assert!(!shared.restart.restart_pending.load(Ordering::Acquire));
         assert!(!shared.restart.shutdown_counted.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn cancellation_after_sentinel_write_before_rename_rolls_back() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        shared.restart.shutdown_remaining.store(1, Ordering::SeqCst);
+        let root = tempfile::tempdir().expect("runtime root");
+        let nonce = "rename-boundary";
+        std::fs::write(
+            root.path().join("restart_pending"),
+            format!("nonce={nonce}\n"),
+        )
+        .expect("restart request");
+        let permit = begin_deferred_restart(&shared).expect("restart permit");
+        assert!(finish_deferred_restart(&shared, permit));
+        let guard = DeferredRestartCancellationGuard::new(
+            shared.clone(),
+            root.path().to_path_buf(),
+            nonce.to_owned(),
+        );
+        // This models timeout publication after sentinel staging but before
+        // rename. The production helper must observe it after writing its tmp
+        // sentinel and leave no committed acknowledgement behind.
+        std::fs::write(
+            root.path().join("restart_cancelled"),
+            format!("nonce={nonce}\n"),
+        )
+        .expect("cancel before rename");
+        assert!(
+            !commit_deferred_restart_sentinel(root.path(), &ProviderKind::Codex, nonce, &guard,)
+                .expect("sentinel staging")
+        );
+        assert!(!root.path().join("restart_persisted").exists());
+        drop(guard);
+        assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 1);
+        assert!(!shared.restart.intake_worker_lifecycle.admission_is_fenced());
     }
 
     #[test]
