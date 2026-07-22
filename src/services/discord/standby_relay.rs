@@ -13,9 +13,10 @@
 //!
 //! Phase 5.3 takes the simpler, more robust path: when on standby, skip the
 //! watcher entirely and run this self-contained relay loop instead. It
-//! polls the agent's JSONL output file for the `{"type":"result"}` event,
-//! extracts the assistant response, and posts it to Discord via REST
-//! (replacing the bridge-allocated placeholder when one is known, otherwise
+//! polls the agent's JSONL output file for the `{"type":"result"}` event or,
+//! for interactive TUI transcripts, the final `{"type":"assistant"}` text,
+//! then posts the response to Discord via REST (replacing the bridge-allocated
+//! placeholder when one is known, otherwise
 //! sending a new channel message). No reliance on cached_serenity_ctx,
 //! inflight reconciliation, or any of the watcher's leader-only state
 //! machinery.
@@ -84,6 +85,13 @@ impl StandbyRelayTurnBinding {
             session_key: state.session_key.clone(),
             turn_start_offset: state.turn_start_offset,
         }
+    }
+
+    pub(in crate::services::discord) fn polling_start_offset(&self) -> u64 {
+        // The handoff's `last_offset` is a rehydration cursor and can already
+        // point beyond assistant output written during prompt injection. Scan
+        // from the durable turn baseline instead so standby cannot miss it.
+        self.turn_start_offset.unwrap_or(0)
     }
 
     fn turn_id(&self, channel_id: ChannelId) -> Option<String> {
@@ -164,6 +172,15 @@ pub(super) async fn run_standby_relay(
             completed_signal_drain_until,
             Instant::now(),
         ) {
+            let assistant_text = super::recovery_engine::extract_response_from_output_pub(
+                &output_path,
+                start_offset,
+            );
+            if !assistant_text.trim().is_empty() {
+                pending_result_text = Some(assistant_text);
+                completed_signal_drain_until = None;
+                continue;
+            }
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] 👁 standby_relay exit after Completed drain grace for channel {} (offset={})",
@@ -950,6 +967,55 @@ mod tests {
     fn extract_result_text_handles_invalid_json() {
         assert!(extract_result_text("not json").is_none());
         assert!(extract_result_text("").is_none());
+    }
+
+    #[test]
+    fn tui_assistant_fallback_extracts_final_text_without_result_event() {
+        let dir = tempfile::tempdir().expect("create TUI transcript directory");
+        let transcript = dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            concat!(
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"draft\"},{\"type\":\"tool_use\",\"name\":\"Read\"}]}}\n",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"final TUI response\"}]}}\n",
+            ),
+        )
+        .expect("write TUI transcript");
+
+        assert_eq!(
+            super::super::recovery_engine::extract_response_from_output_pub(
+                transcript.to_str().expect("UTF-8 transcript path"),
+                0,
+            ),
+            "draftfinal TUI response"
+        );
+    }
+
+    #[test]
+    fn standby_polling_start_offset_uses_turn_baseline() {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            1234,
+            None,
+            42,
+            100,
+            5678,
+            "test".to_string(),
+            None,
+            Some("tmux".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            0,
+        );
+        state.turn_start_offset = Some(128);
+        let binding = StandbyRelayTurnBinding::from_state(&state);
+        assert_eq!(binding.polling_start_offset(), 128);
+
+        state.turn_start_offset = None;
+        assert_eq!(
+            StandbyRelayTurnBinding::from_state(&state).polling_start_offset(),
+            0
+        );
     }
 
     #[test]
