@@ -367,7 +367,7 @@ fi
 
 mkdir -p "$TMP_RUNTIME3/consumed-without-ack"
 touch "$TMP_RUNTIME3/consumed-without-ack/restart_pending"
-rm -f "$TMP_RUNTIME3/consumed-without-ack/restart_pending"
+command rm -f "$TMP_RUNTIME3/consumed-without-ack/restart_pending"
 set +e
 wait_for_restart_persistence_or_fail \
   "release" "$TMP_RUNTIME3/consumed-without-ack" "test-nonce" 1 >/dev/null 2>&1
