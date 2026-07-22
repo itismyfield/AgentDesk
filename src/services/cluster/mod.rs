@@ -9,6 +9,7 @@
 //! Phase 3 will add the worker-side polling loop in a sibling submodule.
 
 pub(crate) mod capability_routing;
+pub(crate) mod intake_preflight;
 pub(crate) mod intake_router_hook;
 pub(crate) mod intake_routing;
 pub(crate) mod intake_worker;

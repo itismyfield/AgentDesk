@@ -13,6 +13,23 @@
 > [Appendix C (round 3)](#appendix-c-codex-v3-review), and
 > [Appendix D (round 4)](#appendix-d-codex-v4-review).
 
+## Planned handoff target preflight (#4779)
+
+Before a generation-fenced owner transfer, the coordinator evaluates the target
+`worker_nodes` record and its `capabilities.intake_preflight` probe snapshot with
+`services::cluster::intake_preflight::evaluate_target_preflight`. The structured
+report exposes stable reason codes for node/provider worker readiness, release
+SHA and config-schema parity, provider binary/credential/quota/access probes,
+workspace policy, disk/memory, recent DB-pool errors, terminal and standby relay,
+and the intake-outbox operator surface. Missing evidence fails closed.
+
+The transfer boundary is `transfer_if_target_ready`: it invokes the planned
+handoff's #4777 generation-fenced transfer closure only after a PASS report. A
+FAIL report cannot invoke the closure, so owner and generation remain unchanged.
+Until portable attachments are available, `text_only_pilot` is a passing result
+with an explicit pre-handoff rejection notice; `unsupported` blocks transfer.
+Probe collection and the #4778 state-machine caller remain separate interfaces.
+
 ## Background
 
 The AgentDesk Discord control plane has a hard asymmetry between
