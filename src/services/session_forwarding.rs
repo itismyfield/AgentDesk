@@ -340,6 +340,28 @@ pub(crate) async fn forward_kill_tmux(
     forward_json_response(request, "kill-tmux", target).await
 }
 
+pub(crate) async fn forward_resume_previous(
+    state: &ForwardCallerContext,
+    target: &ForwardTarget,
+    session_key: &str,
+    session_id: Option<&str>,
+    cwd: Option<&str>,
+) -> (StatusCode, Json<Value>) {
+    let url = format!(
+        "{}/api/sessions/{}/resume-previous",
+        target.base_url,
+        encode_path_segment(session_key)
+    );
+    let request = apply_node_headers(
+        state,
+        target,
+        client()
+            .post(url)
+            .json(&json!({ "session_id": session_id, "cwd": cwd })),
+    );
+    forward_json_response(request, "resume-previous", target).await
+}
+
 pub(crate) async fn forward_cancel_turn(
     state: &ForwardCallerContext,
     target: &ForwardTarget,

@@ -1257,6 +1257,7 @@ src/
 │   ├── session_activity.rs
 │   ├── session_backend.rs
 │   ├── session_forwarding.rs
+│   ├── session_resume.rs
 │   ├── session_selector_validity.rs
 │   ├── settings.rs
 │   ├── shell_guard.rs

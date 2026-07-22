@@ -84,6 +84,59 @@ async fn shared_for_provider(
         .await
 }
 
+/// #4790 `/resume` rebind (HTTP-side bridge): repoint the in-memory session for
+/// `channel_id` at a previous provider session, resolving the owning runtime via
+/// the registry. Returns `true` when a runtime owned the channel and the rebind
+/// was applied in memory (the DB rebind is done by the caller regardless, so a
+/// `false` here only means no live runtime mirror was updated — e.g. the channel
+/// is owned by another node). No-op safe when no runtime is registered.
+pub(crate) async fn rebind_channel_provider_session(
+    registry: &HealthRegistry,
+    provider_name: &str,
+    channel_id: ChannelId,
+    cwd: &str,
+    session_id: &str,
+) -> bool {
+    let Some(provider) = ProviderKind::from_str(provider_name) else {
+        return false;
+    };
+    let Some(shared) = shared_for_provider(registry, &provider, channel_id).await else {
+        return false;
+    };
+    let (previous_path, previous_session_id) =
+        discord::rebind_channel_session(&shared, &provider, channel_id, cwd, session_id).await;
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!(
+        provider = provider.as_str(),
+        channel_id = channel_id.get(),
+        previous_path = previous_path.as_deref().unwrap_or("<none>"),
+        previous_session_id = previous_session_id.as_deref().unwrap_or("<none>"),
+        target_cwd = cwd,
+        target_session_id = session_id,
+        "  [{ts}] ↻ /resume: rebound in-memory session to previous provider session",
+    );
+    true
+}
+
+/// #4790 `/resume` guard: report whether `channel_id` has an active or
+/// recovery-blocking turn for `provider_name`. The rebind path refuses to
+/// repoint a channel that is mid-turn (its running tmux/provider process would
+/// keep writing to the OLD transcript). Returns `false` when no runtime owns the
+/// channel (nothing in flight here).
+pub(crate) async fn channel_has_active_turn(
+    registry: &HealthRegistry,
+    provider_name: &str,
+    channel_id: ChannelId,
+) -> bool {
+    let Some(provider) = ProviderKind::from_str(provider_name) else {
+        return false;
+    };
+    let Some(shared) = shared_for_provider(registry, &provider, channel_id).await else {
+        return false;
+    };
+    discord::mailbox_has_blocking_active_turn(&shared, channel_id).await
+}
+
 async fn owning_runtime_http_for_channel(
     registry: &HealthRegistry,
     provider: &ProviderKind,

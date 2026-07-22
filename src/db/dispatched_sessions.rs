@@ -154,6 +154,119 @@ pub(crate) async fn load_session_channel_id_pg(
     Ok(Some((channel_id, instance_id)))
 }
 
+/// Current provider-binding context for a session row, used by the
+/// `/resume` rebind path. Returns the row's `active_dispatch_id` (so the caller
+/// can refuse to rebind a channel with in-flight dispatch work), plus the
+/// currently-bound `cwd` and `claude_session_id` that the rebind will replace.
+/// `Ok(None)` means no session row exists for `session_key`.
+pub(crate) struct SessionRebindContext {
+    pub(crate) active_dispatch_id: Option<String>,
+    pub(crate) cwd: Option<String>,
+    pub(crate) claude_session_id: Option<String>,
+}
+
+pub(crate) async fn load_session_rebind_context_pg(
+    pool: &PgPool,
+    session_key: &str,
+) -> Result<Option<SessionRebindContext>, String> {
+    let row = sqlx::query(
+        "SELECT active_dispatch_id, cwd, claude_session_id
+         FROM sessions
+         WHERE session_key = $1",
+    )
+    .bind(session_key)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        format!(
+            "load rebind context for session {session_key}: {}",
+            crate::utils::redact::redact_known_secrets(&error.to_string())
+        )
+    })?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let active_dispatch_id: Option<String> = row
+        .try_get("active_dispatch_id")
+        .map_err(|error| format!("decode active_dispatch_id for {session_key}: {error}"))?;
+    let cwd: Option<String> = row
+        .try_get("cwd")
+        .map_err(|error| format!("decode cwd for {session_key}: {error}"))?;
+    let claude_session_id: Option<String> = row
+        .try_get("claude_session_id")
+        .map_err(|error| format!("decode claude_session_id for {session_key}: {error}"))?;
+
+    Ok(Some(SessionRebindContext {
+        active_dispatch_id,
+        cwd,
+        claude_session_id,
+    }))
+}
+
+/// #4790 `/resume` auto-select guard: every provider session id that is
+/// *currently bound* to some channel's session row. The auto-select path must
+/// never adopt a transcript that another live channel is actively using —
+/// doing so would repoint two channels at one session id and thrash their
+/// bindings (the #2843 live-binding hazard). A rotated/superseded prior session
+/// is not in this set (its row was overwritten), so it stays selectable.
+pub(crate) async fn load_live_bound_session_ids_pg(
+    pool: &PgPool,
+) -> Result<std::collections::HashSet<String>, String> {
+    let rows = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT claude_session_id FROM sessions
+         WHERE claude_session_id IS NOT NULL AND BTRIM(claude_session_id) <> ''
+         UNION
+         SELECT raw_provider_session_id FROM sessions
+         WHERE raw_provider_session_id IS NOT NULL AND BTRIM(raw_provider_session_id) <> ''",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("load live-bound session ids: {error}"))?;
+    Ok(rows.into_iter().flatten().collect())
+}
+
+/// Rebind a session row to a previous provider session: point `cwd` at the
+/// target worktree and `claude_session_id`/`raw_provider_session_id` at the
+/// target provider session id so the next turn resumes that conversation
+/// (`--resume <id>` in the target cwd). `claude_session_id_recorded_at` is
+/// refreshed when the id actually changes. Returns the number of rows updated
+/// (0 when the `session_key` no longer exists).
+///
+/// N2 caveat: both `claude_session_id` and `raw_provider_session_id` are set to
+/// the same `$3`. The auto-select path is Claude-only, where these coincide. For
+/// an *explicit* non-Claude rebind (e.g. Codex, where the raw provider session
+/// id can differ from the resume selector) this collapses the two ids; callers
+/// needing a distinct raw id must widen this signature. Acceptable today because
+/// the only non-Claude entry is an explicit `session_id` the caller already
+/// treats as the provider resume token.
+pub(crate) async fn rebind_session_provider_pg(
+    pool: &PgPool,
+    session_key: &str,
+    target_cwd: &str,
+    target_session_id: &str,
+) -> Result<u64, String> {
+    sqlx::query(
+        "UPDATE sessions
+         SET cwd = $2,
+             claude_session_id = $3,
+             raw_provider_session_id = $3,
+             claude_session_id_recorded_at = CASE
+               WHEN claude_session_id IS DISTINCT FROM $3 THEN NOW()
+               ELSE COALESCE(claude_session_id_recorded_at, NOW())
+             END
+         WHERE session_key = $1",
+    )
+    .bind(session_key)
+    .bind(target_cwd)
+    .bind(target_session_id)
+    .execute(pool)
+    .await
+    .map(|result| result.rows_affected())
+    .map_err(|error| format!("rebind session {session_key} provider binding: {error}"))
+}
+
 pub(crate) async fn disconnect_session_and_prepare_retry_pg(
     pool: &PgPool,
     session_key: &str,

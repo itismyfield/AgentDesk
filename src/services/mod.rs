@@ -117,6 +117,7 @@ pub(crate) mod session_selector_validity;
 #[allow(dead_code)]
 pub mod session_backend;
 pub mod session_forwarding;
+pub mod session_resume;
 pub mod settings;
 pub mod shell_guard;
 pub mod slo;

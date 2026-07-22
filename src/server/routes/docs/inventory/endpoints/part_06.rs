@@ -127,6 +127,67 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             json!({"error": "session not found"}),
         ),
         ep(
+            "POST",
+            "/api/sessions/{session_key}/resume-previous",
+            "sessions",
+            "Rebind a channel to a previous provider session (resume its conversation). With session_id (+optional cwd) forces that session; without either, auto-selects the channel workspace's most recent prior session.",
+        )
+        .with_params([
+            (
+                "session_key",
+                path_param(
+                    "Session key in legacy host:tmux_name or namespaced provider/token/host:tmux_name form",
+                ),
+            ),
+            (
+                "session_id",
+                body_param(
+                    "string",
+                    false,
+                    "Target provider session id to resume. Omit to auto-select the previous session.",
+                ),
+            ),
+            (
+                "cwd",
+                body_param(
+                    "string",
+                    false,
+                    "Target worktree the resumed session lives in. Defaults to the row's current cwd when session_id is given.",
+                ),
+            ),
+        ])
+        .with_example(
+            json!({
+                "path": {"session_key": "claude/hash123/mac-mini:AgentDesk-claude-adk-cc"},
+                "body": {
+                    "session_id": "acd0ea18-a5a9-4fa6-a29c-f7034cb06273",
+                    "cwd": "/Users/itismyfield/.adk/release/worktrees/claude-adk-cc-20260723-050333"
+                }
+            }),
+            json!({
+                "ok": true,
+                "session_key": "claude/hash123/mac-mini:AgentDesk-claude-adk-cc",
+                "target_session_id": "acd0ea18-a5a9-4fa6-a29c-f7034cb06273",
+                "target_cwd": "/Users/itismyfield/.adk/release/worktrees/claude-adk-cc-20260723-050333",
+                "previous_session_id": "11111111-1111-1111-1111-111111111111",
+                "previous_cwd": "/Users/itismyfield/.adk/release/worktrees/claude-adk-cc-20260723-054531",
+                "tmux_killed": true,
+                "lifecycle_path": "canonical",
+                "in_memory_rebound": true,
+                "auto_selected": false
+            }),
+        )
+        .with_error_example(
+            409,
+            json!({"path": {"session_key": "claude/hash123/mac-mini:AgentDesk-claude-adk-cc"}, "body": {}}),
+            json!({"error": "channel has an active turn or dispatch; stop it before resuming a previous session"}),
+        )
+        .with_error_example(
+            404,
+            json!({"path": {"session_key": "claude/hash123/mac-mini:AgentDesk-claude-adk-cc"}, "body": {}}),
+            json!({"error": "no previous provider session found to resume; pass an explicit session_id"}),
+        ),
+        ep(
             "GET",
             "/api/sessions/{id}/tmux-output",
             "sessions",
