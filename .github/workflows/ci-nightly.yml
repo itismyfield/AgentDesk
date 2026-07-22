@@ -114,9 +114,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-nightly-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-nightly-
+            ${{ runner.os }}-cargo-registry-git-v1-
 
       - name: cargo test (non-PG)
         run: cargo test --all-targets -- --skip _pg_ --skip postgres_
@@ -148,9 +148,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-nightly-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-nightly-
+            ${{ runner.os }}-cargo-registry-git-v1-
 
       - name: cargo test (non-PG)
         run: cargo test --all-targets -- --skip _pg_ --skip postgres_
@@ -195,9 +195,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-postgres-nightly-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-postgres-nightly-
+            ${{ runner.os }}-cargo-registry-git-v1-
 
       - name: cargo test (postgres bootstrap)
         timeout-minutes: 15
@@ -253,9 +253,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-multinode-nightly-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-multinode-nightly-
+            ${{ runner.os }}-cargo-registry-git-v1-
 
       - name: Rust multinode invariants
         timeout-minutes: 15
@@ -305,9 +305,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-recovery-nightly-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-recovery-nightly-
+            ${{ runner.os }}-cargo-registry-git-v1-
 
       - name: High-risk recovery lane
         run: "cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1"
@@ -419,9 +419,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-cli-nightly-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-cli-nightly-
+            ${{ runner.os }}-cargo-registry-git-v1-
 
       - name: CLI smoke test (agentdesk --help)
         run: cargo run --quiet -- --help
