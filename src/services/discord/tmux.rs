@@ -2272,6 +2272,27 @@ mod watcher_stream_progress_tests {
     use poise::serenity_prelude::{ChannelId, MessageId};
 
     #[test]
+    fn streaming_tick_persists_tool_hold_without_requiring_discord_edit_4104() {
+        let source = include_str!("tmux_watcher/streaming_status_tick.rs");
+        let unconditional_marker = source
+            .find("#4104: persist the parsed watcher snapshot on every throttled tick")
+            .expect("streaming tick must carry the #4104 durable hold guard");
+        let hold_persist = source[unconditional_marker..]
+            .find("persist_watcher_stream_progress(")
+            .map(|offset| unconditional_marker + offset)
+            .expect("tool-hold snapshot must be persisted before render decisions");
+        let render_gate = source[unconditional_marker..]
+            .find("let raw_current_portion =")
+            .map(|offset| unconditional_marker + offset)
+            .expect("streaming tick render gate");
+
+        assert!(
+            hold_persist < render_gate,
+            "tool-hold persistence must precede the no-edit early return"
+        );
+    }
+
+    #[test]
     fn persist_watcher_stream_progress_persists_tool_hold_witness() {
         // Serialize on the PROCESS-WIDE `AGENTDESK_ROOT_DIR` lock so this test
         // is mutually exclusive with every other test that mutates the runtime
