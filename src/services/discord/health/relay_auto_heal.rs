@@ -382,7 +382,7 @@ pub(super) async fn run_orphan_token_auto_heal_pass(
             }
         }
     }
-    applied
+    applied + relay_recovery::leaked_row_sweep::sweep_leaked_inflight_rows(registry, provider).await
 }
 
 async fn redrive_undelivered_backlog(

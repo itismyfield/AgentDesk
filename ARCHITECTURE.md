@@ -994,6 +994,7 @@ src/
 │   │   ├── relay_recovery_circuit_alert_producer.rs
 │   │   ├── relay_recovery_circuit_breaker.rs
 │   │   ├── relay_recovery_completion_footer.rs
+│   │   ├── relay_recovery_leaked_row_sweep.rs
 │   │   ├── relay_recovery_reattach_apply.rs
 │   │   ├── replace_outcome_policy.rs
 │   │   ├── response_sanitizer.rs
