@@ -15,14 +15,14 @@
 CI가 강제하는 것을 로컬에서 미리 통과시키는 순서. **권위 있는 CI 정의는
 [`.github/workflows/ci-pr.yml`](.github/workflows/ci-pr.yml)와
 [`scripts/ci-script-checks.sh`](scripts/ci-script-checks.sh)** (실제 CI는 `cargo check --workspace --all-targets`,
-`cargo fmt --all --check`, docs 게이트 `generate_inventory_docs.py --check` +
+`cargo fmt --all --check`, docs 게이트 `generate_inventory_docs.py` + tracked-output `git diff` +
 `check_agent_maintenance_docs.py --warning-only --line-count-gate`로 더 넓다).
 
 1. `cargo fmt` → `cargo fmt --check` 클린
 2. `cargo check --lib` 클린 + 관련 `cargo test --lib <module>` 통과 (CI는 워크스페이스 전체)
 3. `python3 scripts/generate_inventory_docs.py` 실행 후 `python3 scripts/check_agent_maintenance_docs.py`가
    `agent-maintenance freshness check passed`를 낼 때까지 반복
-   - production line count 불일치 → `change-surfaces.md`를 module-inventory 진실값에 맞춤
+   - frozen giant surface membership/threshold 오류 → fresh module inventory와 `change-surfaces.md` marker를 대조
    - `multinode-transition.md must be touched` → `docs/agent-maintenance/multinode-transition.md`의 `### Audited touches`에 노트 추가
    - DB migration 추가 시 `migrations/postgres/immutable-checksums.json` checksum 등록
 

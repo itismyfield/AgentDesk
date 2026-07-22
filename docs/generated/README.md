@@ -7,6 +7,10 @@ about the generated report or its generator.
 
 ## Current Policy
 
+- `module-inventory.md` and `giant-file-registry.md` are deliberately untracked
+  checkout-local views. Generate them before reading them; CI does so before
+  maintenance checks. Their absence from git is what removes production-line
+  churn from concurrent PR merges (#4724).
 - PR CI in `.github/workflows/ci-pr.yml` does not hard-block solely on
   inventory-doc markdown freshness drift.
 - `ci-pr.yml` and `ci-main.yml` run `scripts/ci-script-checks.sh`, which calls
@@ -14,10 +18,10 @@ about the generated report or its generator.
   downstream maintainability checks on the current generated view, but generic
   committed markdown freshness drift is not the hard failure and does not need
   to be committed in unrelated PRs.
-- `ci-nightly.yml` runs `Generated docs drift (warn)` with
-  `python3 scripts/generate_inventory_docs.py --check` so accumulated drift is
-  visible without blocking ordinary PRs. That warning points contributors to
-  the weekly refresh workflow or to a local regeneration command.
+- `ci-nightly.yml` regenerates all inventory views, then reports drift only for
+  the tracked outputs: `ARCHITECTURE.md`, route inventory, and worker inventory.
+  The warning points contributors to the weekly refresh workflow or to a local
+  regeneration command.
 - `python3 scripts/audit_maintainability.py --check` is still allowed to fail
   for configured hard or baseline maintainability gates. The warning-only drift
   policy applies to the committed markdown report freshness, not to new

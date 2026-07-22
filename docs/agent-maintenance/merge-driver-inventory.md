@@ -1,16 +1,12 @@
 # Inventory Docs Merge Driver (`regen-inventory`)
 
-> Why: `docs/generated/module-inventory.md` and its siblings are **committed
-> generated files**. When two branches change the same module's line count (or a
-> shared summary line), they edit the same row, so a plain 3-way merge leaves
-> conflict markers there — and because the inventory is regenerated on every
-> prod-line change, concurrent PRs collide constantly, forcing O(N²) serial
-> rebases (#4724). The `regen-inventory` git merge driver removes that class of
-> conflict: it lets git's normal line merge handle independent rows, and only
-> when a row genuinely collides does it **regenerate** the inventory to drop the
-> markers. It is a best-effort ergonomic auto-resolver — the authoritative
-> correctness check is the server-side CI freshness gate (see *Correctness
-> backstops* below), not the driver.
+> `docs/generated/module-inventory.md` and
+> `docs/generated/giant-file-registry.md` are now untracked, checkout-local
+> views (#4724). This removes their production-line churn from git merges
+> entirely. The `regen-inventory` driver remains only for the two generated
+> inventories that are still committed: route and worker. It is a best-effort
+> ergonomic auto-resolver; source-of-truth invariants and tracked-doc drift are
+> enforced after generation in `scripts/ci-script-checks.sh`.
 
 ## One-time developer setup (REQUIRED)
 
@@ -31,13 +27,15 @@ git config --local --get merge.regen-inventory.driver
 
 ## What it covers
 
-`.gitattributes` assigns `merge=regen-inventory` to exactly the four files that
-`scripts/generate_inventory_docs.py` overwrites wholesale:
+`.gitattributes` assigns `merge=regen-inventory` to exactly the two generated
+files that remain tracked:
 
-- `docs/generated/module-inventory.md`
 - `docs/generated/route-inventory.md`
 - `docs/generated/worker-inventory.md`
-- `docs/generated/giant-file-registry.md`
+
+The generator also emits `module-inventory.md` and `giant-file-registry.md`, but
+`.gitignore` keeps those checkout-local. CI generates them before maintenance
+checks consume them, so no merge driver is needed for either file.
 
 **Deliberately excluded** (hand-authored, or emitted by a different generator —
 the driver would clobber real content): `docs/generated/README.md`,
@@ -98,22 +96,21 @@ partially-generated content.
 
 ## Correctness backstops (authoritative vs convenience)
 
-- **Authoritative, server-side, non-bypassable — the CI freshness gate.**
+- **Authoritative, server-side — generation plus focused tracked diff.**
   `scripts/ci-script-checks.sh` (run by the required *Script checks* job in
-  `.github/workflows/ci-pr.yml`) executes `python3
-  scripts/generate_inventory_docs.py --check` under `set -euo pipefail`;
-  generated-docs drift (exit 1) is a **hard PR failure**. It regenerates from the
-  merged source tree and compares, so **driver-produced drift can be pushed to a
-  branch but cannot reach `main`** — CI fails the PR, exactly as it would for a
-  human who committed a stale/incorrect manual resolution. This is the guarantee
-  the driver relies on. (Note: the `check_agent_maintenance_docs.py` invocation
-  in the same script is `--warning-only`; the hard gate is the
-  `generate_inventory_docs.py --check` call.)
+  `.github/workflows/ci-pr.yml`) first runs `python3
+  scripts/generate_inventory_docs.py`. Generation hard-fails source-of-truth
+  violations such as an unregistered giant or invalid registry metadata. CI
+  then runs `git diff --exit-code` for `ARCHITECTURE.md`, route inventory, and
+  worker inventory, the three generated outputs that remain tracked.
+  `check_agent_maintenance_docs.py` consumes the freshly generated, untracked
+  module inventory and keeps frozen-surface membership/threshold checks active.
 - **Local convenience — the pre-push hook.** `.githooks/pre-push` regenerates
-  inventory docs when `src` changed and blocks/amends before push, so most drift
-  never leaves the machine. It is a convenience only: it is skippable with
-  `git push --no-verify` and requires `core.hooksPath=.githooks` (set by
-  `scripts/setup-hooks.sh`). It is **not** the correctness authority — CI is.
+  inventory docs when `src` changed and blocks/amends before push, so most
+  tracked drift never leaves the machine. It is a convenience only: it is
+  skippable with `git push --no-verify` and requires
+  `core.hooksPath=.githooks` (set by `scripts/setup-hooks.sh`). CI remains the
+  correctness authority.
 
 ## CI note
 
@@ -121,6 +118,6 @@ CI needs no *driver* registration: `.github/workflows/ci-pr.yml` uses
 `actions/checkout@v4` and never performs a local `git merge`, and GitHub's
 server-side PR merge / merge-queue does **not** honor custom `.gitattributes`
 merge drivers. The driver's value is entirely local (developer rebases/merges).
-No existing CI gate is changed or weakened — in particular the hard
-`generate_inventory_docs.py --check` drift gate above remains the enforcement
-point.
+The server-side gate does not rely on the driver: it regenerates from the merged
+source tree, validates inventory invariants, and rejects drift in the remaining
+tracked outputs.
