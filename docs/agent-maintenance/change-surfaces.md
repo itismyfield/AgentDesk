@@ -1879,7 +1879,11 @@ these contextual numbers to match ordinary LoC churn.
   MCP-authentication-required cold-boot welcome screen during readiness and fail
   fast with an actionable, non-timeout reason instead of false-submitting then
   blind-waiting/retrying the full timeout; gate every ready-return path —
-  including the recorded-turn idle-transcript fallbacks — on the MCP-auth check.)
+  including the recorded-turn idle-transcript fallbacks — on the MCP-auth check;
+  #4785 keeps the giant root wiring thin by extracting transcript-aware foreground
+  busy/timeout policy to `claude_tui/prompt_readiness.rs`; authoritative Idle may
+  exclude background-agent-only chrome while Streaming/UserSubmitted keeps the
+  conservative pane veto.)
 - `src/services/tmux_common.rs` (frozen giant surface) — Claude/Codex TUI pane-capture
   heuristics: ready-for-input, prompt-draft vs idle-suggestion-ghost, active-work
   streaming, MCP-auth banner, and `/effort` selector detection, plus session

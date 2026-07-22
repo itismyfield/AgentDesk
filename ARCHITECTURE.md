@@ -407,6 +407,7 @@ src/
 │   │   ├── input.rs
 │   │   ├── memento_feedback.rs
 │   │   ├── mod.rs
+│   │   ├── prompt_readiness.rs
 │   │   ├── session.rs
 │   │   ├── startup_dialog.rs
 │   │   ├── transcript_tail.rs

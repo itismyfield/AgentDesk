@@ -367,11 +367,20 @@ pub(crate) fn tmux_capture_indicates_claude_tui_background_agent_pending(capture
         return false;
     }
     let start = non_empty.len().saturating_sub(CLAUDE_TUI_ACTIVE_SCAN_LINES);
-    non_empty[start..].iter().any(|line| {
-        let lower = line.to_ascii_lowercase();
-        (lower.contains("waiting for") && lower.contains("background agent"))
-            || lower.contains("backgrounded agent")
-    })
+    non_empty[start..]
+        .iter()
+        .any(|line| tmux_line_is_claude_tui_background_agent_status(line))
+}
+
+/// Identify background-agent-only TUI chrome, including task-list rows. This is
+/// shared by completion pending detection and foreground readiness filtering so
+/// the two consumers cannot drift onto different status-line shapes.
+pub(crate) fn tmux_line_is_claude_tui_background_agent_status(line: &str) -> bool {
+    let line = trim_prompt_line(line);
+    let lower = line.to_ascii_lowercase();
+    (lower.contains("waiting for") && lower.contains("background agent"))
+        || lower.contains("backgrounded agent")
+        || line.starts_with('◯')
 }
 
 /// Shared producer for the Claude TUI background-agent pending bit.
