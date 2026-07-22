@@ -182,10 +182,12 @@ pub(crate) async fn finish_admitted_local(
     submission: IntakeSubmission,
 ) -> Result<(), super::super::Error> {
     let preserve_on_cancel = submission.preserve_on_cancel;
+    let queued_drain = matches!(submission.origin, IntakeOrigin::QueuedDrain);
     message_handler::finish_admitted_local(
         deps,
         submission.request,
         preserve_on_cancel,
+        queued_drain,
         submission.preloaded_uploads,
         submission.voice_announcement,
     )

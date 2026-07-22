@@ -32,9 +32,29 @@ pub(super) struct IntakeSteeringContext<'a> {
     pub(super) foreground: bool,
     pub(super) local: bool,
     pub(super) wait_for_completion: bool,
+    pub(super) queued_drain: bool,
     pub(super) has_dispatch: bool,
     pub(super) is_voice_announcement: bool,
     pub(super) has_pending_uploads: bool,
+}
+
+fn steering_intake_eligible(
+    provider: &ProviderKind,
+    foreground: bool,
+    local: bool,
+    wait_for_completion: bool,
+    queued_drain: bool,
+    has_dispatch: bool,
+    is_voice_announcement: bool,
+    has_pending_uploads: bool,
+) -> bool {
+    foreground
+        && matches!(provider, ProviderKind::Claude | ProviderKind::Codex)
+        && local
+        && (!wait_for_completion || queued_drain)
+        && !has_dispatch
+        && !is_voice_announcement
+        && !has_pending_uploads
 }
 
 pub(super) async fn maybe_handle_intake_steering(
@@ -58,18 +78,22 @@ pub(super) async fn maybe_handle_intake_steering(
         foreground,
         local,
         wait_for_completion,
+        queued_drain,
         has_dispatch,
         is_voice_announcement,
         has_pending_uploads,
     } = context;
     if !crate::services::tui_steering::tui_steering_enabled()
-        || !foreground
-        || !matches!(provider, ProviderKind::Claude | ProviderKind::Codex)
-        || !local
-        || wait_for_completion
-        || has_dispatch
-        || is_voice_announcement
-        || has_pending_uploads
+        || !steering_intake_eligible(
+            provider,
+            foreground,
+            local,
+            wait_for_completion,
+            queued_drain,
+            has_dispatch,
+            is_voice_announcement,
+            has_pending_uploads,
+        )
     {
         return None;
     }
@@ -150,6 +174,61 @@ pub(super) async fn maybe_handle_intake_steering(
 mod tests {
     use super::*;
     use crate::services::tui_steering::SteeringOutcome;
+
+    #[test]
+    fn queued_drain_waiting_for_completion_remains_steering_eligible() {
+        assert!(steering_intake_eligible(
+            &ProviderKind::Claude,
+            true,
+            true,
+            true,
+            true,
+            false,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn steering_intake_eligibility_rejects_non_drain_and_other_exclusions() {
+        let eligible = |foreground,
+                        local,
+                        wait_for_completion,
+                        queued_drain,
+                        has_dispatch,
+                        is_voice_announcement,
+                        has_pending_uploads| {
+            steering_intake_eligible(
+                &ProviderKind::Claude,
+                foreground,
+                local,
+                wait_for_completion,
+                queued_drain,
+                has_dispatch,
+                is_voice_announcement,
+                has_pending_uploads,
+            )
+        };
+
+        assert!(!eligible(true, true, true, false, false, false, false));
+        assert!(!eligible(true, true, false, false, true, false, false));
+        assert!(!eligible(true, false, false, false, false, false, false));
+        assert!(!eligible(true, true, false, false, false, true, false));
+        assert!(!eligible(true, true, false, false, false, false, true));
+        assert!(!eligible(false, true, false, false, false, false, false));
+
+        assert_eq!(
+            crate::services::tui_steering::route_input_by_session_driver(
+                &crate::services::provider_hosting::ProviderSessionSelection {
+                    provider_id: "claude".to_string(),
+                    requested_tui_hosting: false,
+                    driver: crate::services::provider_hosting::ProviderSessionDriver::ClaudeE,
+                    fallback_reason: None,
+                },
+            ),
+            crate::services::tui_steering::SteeringRoute::ExistingMailbox,
+        );
+    }
 
     #[test]
     fn failed_or_unsafe_steering_falls_through_to_busy_followup_enqueue() {

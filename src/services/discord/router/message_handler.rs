@@ -163,6 +163,7 @@ pub(super) async fn finish_admitted_local(
     deps: &IntakeDeps<'_>,
     request: IntakeRequest,
     preserve_on_cancel: bool,
+    queued_drain: bool,
     preloaded_uploads: Vec<String>,
     voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Result<(), Error> {
@@ -198,6 +199,7 @@ pub(super) async fn finish_admitted_local(
         dm_hint,
         turn_kind,
         preserve_on_cancel,
+        queued_drain,
         preloaded_uploads,
         voice_announcement,
     )
