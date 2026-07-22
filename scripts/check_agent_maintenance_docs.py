@@ -580,6 +580,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 # Path/severity of findings produced by check_change_surface_line_counts.
 CHANGE_SURFACE_DOC = "docs/agent-maintenance/change-surfaces.md"
+MODULE_INVENTORY_DOC = "docs/generated/module-inventory.md"
+
+
+def ensure_module_inventory(repo_root: Path) -> Finding | None:
+    """Generate the untracked inventory when a fresh checkout lacks it."""
+
+    if (repo_root / MODULE_INVENTORY_DOC).is_file():
+        return None
+    generator = repo_root / "scripts/generate_inventory_docs.py"
+    if not generator.is_file():
+        return None
+    result = subprocess.run(
+        [sys.executable, str(generator)],
+        cwd=repo_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode == 0 and (repo_root / MODULE_INVENTORY_DOC).is_file():
+        return None
+    detail = (result.stderr or result.stdout).strip()
+    return Finding(
+        "error",
+        MODULE_INVENTORY_DOC,
+        f"failed to generate untracked module inventory: {detail or 'unknown error'}",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -587,6 +614,9 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = args.repo_root.resolve()
 
     findings: list[Finding] = []
+    inventory_finding = ensure_module_inventory(repo_root)
+    if inventory_finding is not None:
+        findings.append(inventory_finding)
     findings.extend(check_doc_headers(repo_root, args.today, args.freshness_days))
     line_count_findings = check_change_surface_line_counts(repo_root)
     findings.extend(line_count_findings)

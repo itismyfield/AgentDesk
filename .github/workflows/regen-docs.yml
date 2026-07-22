@@ -32,14 +32,14 @@ jobs:
       - name: Generate inventory docs
         run: python3 scripts/generate_inventory_docs.py
 
-      - name: Detect drift
+      - name: Detect tracked-doc drift
         id: drift
         shell: bash
         run: |
           set -euo pipefail
-          if git diff --quiet -- ARCHITECTURE.md docs/generated; then
+          if git diff --quiet -- ARCHITECTURE.md docs/generated/route-inventory.md docs/generated/worker-inventory.md; then
             echo "has_drift=false" >> "$GITHUB_OUTPUT"
-            echo "Inventory docs are up to date."
+            echo "Tracked inventory docs are up to date."
           else
             echo "has_drift=true" >> "$GITHUB_OUTPUT"
           fi
@@ -63,7 +63,7 @@ jobs:
           fi
 
           git checkout -b "$branch"
-          git add ARCHITECTURE.md docs/generated
+          git add ARCHITECTURE.md docs/generated/route-inventory.md docs/generated/worker-inventory.md
           git commit -m "chore: regenerate inventory docs"
           git push -u origin "$branch"
 
