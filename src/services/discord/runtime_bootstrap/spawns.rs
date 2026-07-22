@@ -2,6 +2,59 @@ use super::*;
 
 struct DeferredRestartPermit;
 
+fn restart_request_matches(root: &std::path::Path, name: &str, nonce: &str) -> bool {
+    std::fs::read_to_string(root.join(name))
+        .ok()
+        .and_then(|request| {
+            request
+                .lines()
+                .find_map(|line| line.strip_prefix("nonce="))
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some(nonce)
+}
+
+/// Rolls back a restart cycle if its request was cancelled or its task is
+/// dropped before its request has been superseded. The nonce prevents an old
+/// poller from restoring admission for a newer restart request.
+struct DeferredRestartCancellationGuard {
+    shared: Arc<SharedData>,
+    root: std::path::PathBuf,
+    nonce: String,
+    armed: bool,
+}
+
+impl DeferredRestartCancellationGuard {
+    fn new(shared: Arc<SharedData>, root: std::path::PathBuf, nonce: String) -> Self {
+        Self {
+            shared,
+            root,
+            nonce,
+            armed: true,
+        }
+    }
+
+    fn cancelled(&self) -> bool {
+        restart_request_matches(&self.root, "restart_cancelled", &self.nonce)
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for DeferredRestartCancellationGuard {
+    fn drop(&mut self) {
+        if self.armed
+            && (self.cancelled()
+                || restart_request_matches(&self.root, "restart_pending", &self.nonce))
+        {
+            rollback_deferred_restart(&self.shared);
+        }
+    }
+}
+
 /// Publish the admission fence before health can acknowledge the marker. The
 /// per-provider CAS gives exactly one poller permission to wait, persist, and
 /// consume that provider's shutdown-barrier slot.
@@ -16,17 +69,25 @@ fn begin_deferred_restart(shared: &SharedData) -> Option<DeferredRestartPermit> 
         .map(|_| DeferredRestartPermit)
 }
 
-async fn prepare_deferred_restart(shared: &SharedData) -> Option<DeferredRestartPermit> {
+async fn prepare_deferred_restart(
+    shared: &Arc<SharedData>,
+    root: &std::path::Path,
+    nonce: String,
+) -> Option<(DeferredRestartPermit, DeferredRestartCancellationGuard)> {
     let permit = begin_deferred_restart(shared)?;
+    let guard = DeferredRestartCancellationGuard::new(shared.clone(), root.to_path_buf(), nonce);
     shared
         .restart
         .intake_worker_lifecycle
         .wait_until_drained()
         .await;
+    if guard.cancelled() {
+        return None;
+    }
     // `restart_pending` is the health-visible acknowledgement consumed by the
     // wrapper. Publish it only after an accepted tick has fully executed.
     shared.restart.restart_pending.store(true, Ordering::SeqCst);
-    Some(permit)
+    Some((permit, guard))
 }
 
 fn finish_deferred_restart(shared: &SharedData, _permit: DeferredRestartPermit) -> bool {
@@ -84,31 +145,42 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
             // rehydrates transcript tailing from runtime state.
             if let Some(root) = crate::agentdesk_runtime_root() {
                 let marker = root.join("restart_pending");
-                let cancel = root.join("restart_cancelled");
-                if cancel.exists() {
-                    rollback_deferred_restart(&shared_for_deferred);
-                    tracing::warn!(
-                        provider = provider_for_deferred.as_str(),
-                        "restart request cancelled; intake admission restored"
-                    );
-                    continue;
-                }
                 if marker.exists() {
-                    let Some(shutdown_permit) =
-                        prepare_deferred_restart(&shared_for_deferred).await
+                    let request = std::fs::read_to_string(&marker).unwrap_or_default();
+                    let nonce = request
+                        .lines()
+                        .find_map(|line| line.strip_prefix("nonce="))
+                        .unwrap_or_default()
+                        .to_owned();
+                    if nonce.is_empty() {
+                        tracing::error!("restart request lacks nonce; retaining runtime");
+                        continue;
+                    }
+                    if restart_request_matches(&root, "restart_cancelled", &nonce) {
+                        rollback_deferred_restart(&shared_for_deferred);
+                        tracing::warn!(
+                            provider = provider_for_deferred.as_str(),
+                            "restart request cancelled; intake admission restored"
+                        );
+                        continue;
+                    }
+                    let Some((shutdown_permit, mut cancellation_guard)) =
+                        prepare_deferred_restart(&shared_for_deferred, &root, nonce.clone()).await
                     else {
                         continue;
                     };
                     let drain =
                         mailbox_restart_drain_all(&shared_for_deferred, &provider_for_deferred)
                             .await;
+                    if cancellation_guard.cancelled() {
+                        continue;
+                    }
                     let queue_count = drain.queued_count;
                     if !drain.persistence_errors.is_empty() {
                         tracing::error!(
                             failures = drain.persistence_errors.len(),
                             "restart_pending persistence failed; retaining marker and runtime"
                         );
-                        rollback_deferred_restart(&shared_for_deferred);
                         continue;
                     }
                     let ids: std::collections::HashMap<u64, u64> = shared_for_deferred
@@ -122,14 +194,6 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                             &ids,
                         );
                     }
-                    // Quick-exit must preserve inflight state with
-                    // bumped mtime + DrainRestart marker. Without
-                    // this, repeated quick-exits (e.g. destructive
-                    // E2E scenarios that restart release multiple
-                    // times) leave file mtime frozen at first save,
-                    // and stale-removal trips after 1800s even
-                    // while the tmux pane is still alive. Mirrors
-                    // the graceful-shutdown preserve block below.
                     let inflight_states_qe = inflight::load_inflight_states(&provider_for_deferred);
                     if !inflight_states_qe.is_empty() {
                         let ts2 = chrono::Local::now().format("%H:%M:%S");
@@ -149,13 +213,15 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                                         error = %error,
                                         "restart_pending inflight persistence failed; retaining marker and runtime"
                                     );
-                                    rollback_deferred_restart(&shared_for_deferred);
                                     continue;
                                 }
                             };
                         tracing::info!(
                             "  [{ts2}] 🔖 marked {marked_qe} inflight turn(s) as drain_restart"
                         );
+                    }
+                    if cancellation_guard.cancelled() {
+                        continue;
                     }
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!(
@@ -165,18 +231,6 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                         let ack = root.join("restart_persisted");
                         let ack_tmp =
                             root.join(format!("restart_persisted.{}.tmp", std::process::id()));
-                        let request = std::fs::read_to_string(&marker).unwrap_or_default();
-                        let nonce = request
-                            .lines()
-                            .find_map(|line| line.strip_prefix("nonce="))
-                            .unwrap_or_default();
-                        if nonce.is_empty() {
-                            tracing::error!(
-                                "restart persistence request lacks nonce; retaining runtime"
-                            );
-                            rollback_deferred_restart(&shared_for_deferred);
-                            continue;
-                        }
                         let ack_body = format!(
                             "nonce={nonce}\nprovider={}\ncommitted_at={}\n",
                             provider_for_deferred.as_str(),
@@ -188,49 +242,30 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                             let _ = std::fs::remove_file(&ack_tmp);
                             tracing::error!(
                                 error = %error,
-                                "restart persistence acknowledgement publish failed; exiting without success sentinel"
+                                "restart persistence acknowledgement publish failed; retaining runtime"
                             );
-                            std::process::exit(1);
+                            continue;
                         }
+                        cancellation_guard.disarm();
                         let _ = std::fs::remove_file(&marker);
                         std::process::exit(0);
                     }
+
+                    // A non-final provider must keep its guard alive until the
+                    // final provider publishes the sentinel or cancellation
+                    // arrives. Returning here would strand its consumed slot.
+                    loop {
+                        tokio::time::sleep(DEFERRED_RESTART_POLL_INTERVAL).await;
+                        if cancellation_guard.cancelled() {
+                            break;
+                        }
+                        if !restart_request_matches(&root, "restart_pending", &nonce) {
+                            cancellation_guard.disarm();
+                            return;
+                        }
+                    }
+                    continue;
                 }
-            }
-            // Use process-global counters so we wait for ALL providers
-            let g_active = shared_for_deferred
-                .restart
-                .global_active
-                .load(Ordering::Relaxed);
-            let g_finalizing = shared_for_deferred
-                .restart
-                .global_finalizing
-                .load(Ordering::Relaxed);
-            if g_active == 0
-                && g_finalizing == 0
-                && shared_for_deferred
-                    .restart
-                    .restart_pending
-                    .load(Ordering::Relaxed)
-            {
-                let drain =
-                    mailbox_restart_drain_all(&shared_for_deferred, &provider_for_deferred).await;
-                let queue_count = drain.queued_count;
-                if !drain.persistence_errors.is_empty() {
-                    tracing::error!(
-                        failures = drain.persistence_errors.len(),
-                        "deferred restart observed pending-queue persistence failure(s)"
-                    );
-                }
-                if queue_count > 0 {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        "  [{ts}] 📋 DRAIN: mailbox persisted {queue_count} pending queue item(s) before deferred restart"
-                    );
-                }
-                check_deferred_restart(&shared_for_deferred);
-                // This provider has saved and decremented — stop polling
-                return;
             }
         }
     });
@@ -398,8 +433,18 @@ mod tests {
         execute_started.notified().await;
 
         let shared_for_prepare = shared.clone();
-        let prepare =
-            tokio::spawn(async move { prepare_deferred_restart(&shared_for_prepare).await });
+        let prepare = tokio::spawn(async move {
+            prepare_deferred_restart(
+                &shared_for_prepare,
+                std::path::Path::new("/nonexistent"),
+                "test-nonce".to_owned(),
+            )
+            .await
+            .map(|(permit, mut guard)| {
+                guard.disarm();
+                permit
+            })
+        });
         while !shared.restart.shutting_down.load(Ordering::Acquire) {
             tokio::task::yield_now().await;
         }
@@ -439,14 +484,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cancellation_guard_rolls_back_consumed_slot_when_cancel_arrives_after_finish() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        shared.restart.shutdown_remaining.store(2, Ordering::SeqCst);
+        let root = tempfile::tempdir().expect("runtime root");
+        let nonce = "timeout-during-await";
+        std::fs::write(
+            root.path().join("restart_pending"),
+            format!("nonce={nonce}\n"),
+        )
+        .expect("restart request");
+
+        let permit = begin_deferred_restart(&shared).expect("restart permit");
+        assert!(!finish_deferred_restart(&shared, permit));
+        assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 1);
+
+        let guard = DeferredRestartCancellationGuard::new(
+            shared.clone(),
+            root.path().to_path_buf(),
+            nonce.to_owned(),
+        );
+        std::fs::remove_file(root.path().join("restart_pending")).expect("remove request");
+        std::fs::write(
+            root.path().join("restart_cancelled"),
+            format!("nonce={nonce}\n"),
+        )
+        .expect("publish cancellation during persistence await");
+        drop(guard);
+
+        assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 2);
+        assert!(!shared.restart.intake_worker_lifecycle.admission_is_fenced());
+        assert!(!shared.restart.shutting_down.load(Ordering::Acquire));
+        assert!(!shared.restart.restart_pending.load(Ordering::Acquire));
+        assert!(!shared.restart.shutdown_counted.load(Ordering::Acquire));
+    }
+
     #[tokio::test]
     async fn cancellation_restores_admission_health_and_consumed_barrier_slot() {
         let shared = crate::services::discord::make_shared_data_for_tests();
         shared.restart.shutdown_remaining.store(2, Ordering::SeqCst);
 
-        let permit = prepare_deferred_restart(&shared)
-            .await
-            .expect("first restart permit");
+        let permit = prepare_deferred_restart(
+            &shared,
+            std::path::Path::new("/nonexistent"),
+            "test-nonce".to_owned(),
+        )
+        .await
+        .map(|(permit, mut guard)| {
+            guard.disarm();
+            permit
+        })
+        .expect("first restart permit");
         assert!(!finish_deferred_restart(&shared, permit));
         assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 1);
         assert!(shared.restart.intake_worker_lifecycle.admission_is_fenced());
@@ -461,9 +550,17 @@ mod tests {
         assert!(!shared.restart.restart_pending.load(Ordering::Acquire));
         assert!(!shared.restart.shutdown_counted.load(Ordering::Acquire));
 
-        let second_permit = prepare_deferred_restart(&shared)
-            .await
-            .expect("restart permit after cancellation");
+        let second_permit = prepare_deferred_restart(
+            &shared,
+            std::path::Path::new("/nonexistent"),
+            "test-nonce".to_owned(),
+        )
+        .await
+        .map(|(permit, mut guard)| {
+            guard.disarm();
+            permit
+        })
+        .expect("restart permit after cancellation");
         assert!(!finish_deferred_restart(&shared, second_permit));
         assert_eq!(
             shared.restart.shutdown_remaining.load(Ordering::Acquire),

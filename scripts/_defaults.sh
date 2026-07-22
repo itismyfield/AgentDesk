@@ -769,15 +769,22 @@ assert_restart_helpers_loaded() {
 
 clear_restart_drain_mode() {
   local runtime_root="$1"
+  local marker="$runtime_root/restart_pending"
   local cancel="$runtime_root/restart_cancelled"
   local cancel_tmp="${cancel}.$$"
+  local nonce=""
   if [ -z "$runtime_root" ]; then
     echo "✗ [gate] runtime root is required to clear restart drain mode" >&2
     return 1
   fi
-  rm -f "$runtime_root/restart_pending"
-  printf 'cancelled_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >"$cancel_tmp" \
-    && mv "$cancel_tmp" "$cancel"
+  if [ -f "$marker" ]; then
+    nonce=$(grep '^nonce=' "$marker" 2>/dev/null | cut -d= -f2- | tr -d '\n')
+  fi
+  rm -f "$marker"
+  {
+    [ -n "$nonce" ] && printf 'nonce=%s\n' "$nonce"
+    printf 'cancelled_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  } >"$cancel_tmp" && mv "$cancel_tmp" "$cancel"
 }
 
 _health_origin_header() {
