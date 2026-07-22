@@ -50,15 +50,10 @@ MODULE_INVENTORY_ROW_RE = re.compile(
     r"^\|\s*`[^`]+`\s*\|\s*`(?P<path>[^`]+\.rs)`\s*\|"
     r"\s*(?P<lines>\d+)\s*\|\s*(?P<prod>\d+)\s*\|\s*(?P<test>\d+)\s*\|"
 )
-# `` `path` (1234 lines …) `` or `` `path` (~1234 lines …) `` — explicit form.
-CHANGE_SURFACE_LINE_RE = re.compile(
-    r"`(?P<path>src/[^`]+\.rs)`\s*\(~?(?P<lines>\d+)\s+lines\b"
-)
-# `` `path` (1234) `` or `` `path` (~1234) `` — bare line-count shorthand used in
-# the services_misc_giants list. The parenthetical must be a number only (no
-# trailing prose), so `(line 1971, …)` or `(directory, refactored)` are ignored.
+# `` `path` (frozen giant surface …) `` — count-free frozen-entry shorthand.
+# The explicit marker keeps these entries distinct from ordinary path references.
 CHANGE_SURFACE_SHORTHAND_RE = re.compile(
-    r"`(?P<path>src/[^`]+\.rs)`\s*\(~?(?P<lines>\d+)\)"
+    r"`(?P<path>src/[^`]+\.rs)`\s*\(frozen giant surface\b"
 )
 GIANT_FILE_THRESHOLD = 1000
 MIGRATION_0093_PATH = (
@@ -375,22 +370,11 @@ def check_change_surface_line_counts(repo_root: Path) -> list[Finding]:
 
     findings: list[Finding] = []
     rel_doc = rel_posix(change_surfaces, repo_root)
-    for line_no, line in enumerate(change_surfaces.read_text(encoding="utf-8").splitlines(), start=1):
-        # Collect (path, documented_lines) pairs from both the explicit
-        # "(N lines)" form and the bare "(N)"/"(~N)" shorthand, de-duplicating
-        # overlaps where the shorthand regex also matches inside a longer span.
-        matched: dict[tuple[int, str], int] = {}
-        for match in CHANGE_SURFACE_LINE_RE.finditer(line):
-            matched[(match.start(), match.group("path"))] = int(match.group("lines"))
-        explicit_spans = [
-            match.span() for match in CHANGE_SURFACE_LINE_RE.finditer(line)
-        ]
+    for line_no, line in enumerate(
+        change_surfaces.read_text(encoding="utf-8").splitlines(), start=1
+    ):
         for match in CHANGE_SURFACE_SHORTHAND_RE.finditer(line):
-            if any(start <= match.start() < end for start, end in explicit_spans):
-                continue
-            matched[(match.start(), match.group("path"))] = int(match.group("lines"))
-
-        for (_pos, path), documented in sorted(matched.items()):
+            path = match.group("path")
             actual = inventory.get(path)
             if actual is None:
                 # The module-inventory only lists *production* modules, so a
@@ -411,7 +395,7 @@ def check_change_surface_line_counts(repo_root: Path) -> list[Finding]:
                             (
                                 f"{path} is a test file (excluded from the "
                                 "production module inventory); reword the freeze "
-                                "entry to drop its line count."
+                                "entry to remove the test-file path."
                             ),
                             line_no,
                         )
@@ -422,7 +406,7 @@ def check_change_surface_line_counts(repo_root: Path) -> list[Finding]:
                             "error",
                             rel_doc,
                             (
-                                f"{path} is frozen with a line count but is "
+                                f"{path} is frozen but is "
                                 + (
                                     "not a production module in "
                                     "docs/generated/module-inventory.md"
