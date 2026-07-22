@@ -129,6 +129,7 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                                     &rollout_path,
                                     observed_at,
                                 );
+                                let expected = inflight::InflightTurnIdentity::from_state(&inflight);
                                 let mut repaired = inflight;
                                 repaired.output_path =
                                     rollout_path.to_str().map(ToString::to_string);
@@ -139,6 +140,7 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                                 repaired.set_relay_owner_kind(RelayOwnerKind::None);
                                 let outcome = inflight::save_inflight_state_if_identity_matches_allow_output_restamp(
                                     &repaired,
+                                    &expected,
                                     "codex_idle_rollout_repair",
                                 );
                                 if !matches!(outcome, inflight::GuardedSaveOutcome::Saved) {

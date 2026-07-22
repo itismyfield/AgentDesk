@@ -289,6 +289,7 @@ pub(super) async fn claim_tui_direct_synthetic_turn(
         && existing.turn_source == TurnSource::ExternalInput
         && existing.user_msg_id == anchor_message_id.get()
     {
+        let expected = super::super::inflight::InflightTurnIdentity::from_state(&existing);
         let mut existing = existing;
         existing.turn_nonce = active_turn_nonce.clone();
         existing.set_relay_owner_kind(relay_owner_kind);
@@ -306,6 +307,7 @@ pub(super) async fn claim_tui_direct_synthetic_turn(
         let outcome =
             super::super::inflight::save_inflight_state_if_identity_matches_allow_output_restamp(
                 &existing,
+                &expected,
                 "tui_direct_synthetic_refresh",
             );
         if !matches!(outcome, super::super::inflight::GuardedSaveOutcome::Saved) {

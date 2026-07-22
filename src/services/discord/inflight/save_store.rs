@@ -500,6 +500,7 @@ mod tests {
         let mut state = state_with_full_response(44_090, "seeded", "AgentDesk-codex-restamp-4259");
         save_inflight_state_in_root(temp.path(), &state).expect("seed intake-path row");
 
+        let expected = InflightTurnIdentity::from_state(&state);
         let seeded_output_path = state.output_path.clone();
         state.output_path = Some("/tmp/legacy/AgentDesk-codex-restamp-4259.jsonl".to_string());
         state.last_offset = 4096;
@@ -520,6 +521,7 @@ mod tests {
             save_inflight_state_if_identity_matches_allow_output_restamp_in_root(
                 temp.path(),
                 &state,
+                &expected,
                 "test::output_restamp_saves",
             ),
             GuardedSaveOutcome::Saved
@@ -552,11 +554,13 @@ mod tests {
         let mut stale =
             state_with_full_response(44_091, "stale snapshot", "AgentDesk-codex-restamp-own-4259");
         stale.user_msg_id = 77_010;
+        let expected = InflightTurnIdentity::from_state(&stale);
         stale.output_path = Some("/tmp/legacy/AgentDesk-codex-restamp-own-4259.jsonl".to_string());
         assert_eq!(
             save_inflight_state_if_identity_matches_allow_output_restamp_in_root(
                 temp.path(),
                 &stale,
+                &expected,
                 "test::output_restamp_identity_mismatch_skips",
             ),
             GuardedSaveOutcome::IdentityMismatch

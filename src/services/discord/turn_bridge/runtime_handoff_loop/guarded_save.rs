@@ -27,10 +27,15 @@ pub(super) fn guarded_runtime_handoff_save(
     caller: &'static str,
 ) -> crate::services::discord::inflight::GuardedSaveOutcome {
     use crate::services::discord::inflight::{
-        GuardedSaveOutcome, save_inflight_state_if_identity_matches_allow_output_restamp,
+        GuardedSaveOutcome, InflightTurnIdentity,
+        save_inflight_state_if_identity_matches_allow_output_restamp,
     };
-    let outcome =
-        save_inflight_state_if_identity_matches_allow_output_restamp(inflight_state, caller);
+    let expected = InflightTurnIdentity::from_state(inflight_state);
+    let outcome = save_inflight_state_if_identity_matches_allow_output_restamp(
+        inflight_state,
+        &expected,
+        caller,
+    );
     if matches!(
         outcome,
         GuardedSaveOutcome::Missing | GuardedSaveOutcome::IdentityMismatch
