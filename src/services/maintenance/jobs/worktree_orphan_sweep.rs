@@ -35,11 +35,6 @@
 //! so every ownership keep-set source misses it by construction. It is KEPT
 //! unconditionally, before any owner check.
 //!
-//! For each orphan:
-//!   1. Attempt `git worktree remove --force <path>` (from the parent repo).
-//!      This is a no-op if the dir isn't actually a registered worktree.
-//!   2. If the directory still exists, `std::fs::remove_dir_all` it.
-//!
 //! Fail-closed by design — it would rather leak an orphan than risk deleting a
 //! live worktree:
 //!   * when Postgres is not wired up it returns `Ok(())` (no DB keep-set, no
@@ -121,14 +116,18 @@ pub async fn run(config: Config, pg_pool: Option<PgPool>) -> Result<()> {
     Ok(())
 }
 
-async fn run_blocking_directory_walk<T, F>(walk: F) -> Result<T>
+async fn run_blocking_filesystem<T, F>(operation: F) -> Result<T>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    tokio::task::spawn_blocking(walk)
-        .await
-        .map_err(|error| anyhow::anyhow!("worktree directory walk task failed: {error}"))
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        observe_blocking_call_site();
+        operation()
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("worktree filesystem task failed: {error}"))
 }
 
 fn collect_child_directories(root: &Path) -> Vec<PathBuf> {
@@ -147,10 +146,38 @@ fn collect_child_directories(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+#[cfg(test)]
+static BLOCKING_CALL_SITE_OBSERVER: std::sync::Mutex<
+    Option<std::sync::mpsc::Sender<std::thread::ThreadId>>,
+> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+static BLOCKING_CALL_SITE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+fn observe_blocking_call_site() {
+    if let Some(observer) = BLOCKING_CALL_SITE_OBSERVER
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+    {
+        let _ = observer.send(std::thread::current().id());
+    }
+}
+
+async fn collect_child_directories_off_runtime(root: PathBuf) -> Result<Vec<PathBuf>> {
+    run_blocking_filesystem(move || collect_child_directories(&root)).await
+}
+
+async fn is_managed_root_child_off_runtime(dir: PathBuf) -> Result<bool> {
+    run_blocking_filesystem(move || is_managed_root_child(&dir)).await
+}
+
 pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<SweepReport> {
     let mut report = SweepReport::default();
 
-    if !config.worktrees_root.exists() {
+    let worktrees_root = config.worktrees_root.clone();
+    if !run_blocking_filesystem(move || worktrees_root.exists()).await? {
         return Ok(report);
     }
 
@@ -245,7 +272,7 @@ pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<Sweep
     // transiently missing. So when the tmux query FAILS we cannot prove any
     // worktree is unowned — skip ALL deletions for this run. Only a SUCCESSFUL
     // query (even one returning zero panes) lets deletion proceed.
-    let Some(live_tmux_paths) = collect_live_tmux_pane_paths() else {
+    let Some(live_tmux_paths) = run_blocking_filesystem(collect_live_tmux_pane_paths).await? else {
         tracing::warn!(
             target: "maintenance",
             job = "storage.worktree_orphan_sweep",
@@ -256,10 +283,8 @@ pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<Sweep
 
     // Directory enumeration and metadata probes are blocking filesystem calls.
     // Keep them off Tokio's runtime worker so a large worktree population cannot
-    // stall the runtime watchdog while readdir waits on the filesystem allocator.
-    let worktrees_root = config.worktrees_root.clone();
-    let directories =
-        run_blocking_directory_walk(move || collect_child_directories(&worktrees_root)).await?;
+    // consume a runtime worker while readdir waits on the filesystem.
+    let directories = collect_child_directories_off_runtime(config.worktrees_root.clone()).await?;
 
     for dir_path in directories {
         report.scanned_dirs = report.scanned_dirs.saturating_add(1);
@@ -268,8 +293,7 @@ pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<Sweep
         // per-channel worktree itself — its CHILDREN are the dispatch/automation
         // worktrees. Recurse one level into it (the flat 1-depth scan misses
         // them) and skip the directory itself from the flat-root A decision.
-        let managed_root_path = dir_path.clone();
-        if run_blocking_directory_walk(move || is_managed_root_child(&managed_root_path)).await? {
+        if is_managed_root_child_off_runtime(dir_path.clone()).await? {
             sweep_managed_root(
                 &dir_path,
                 &active_cwds,
@@ -350,27 +374,22 @@ async fn sweep_managed_root(
     config: &Config,
     report: &mut SweepReport,
 ) -> Result<()> {
-    let repo_root_dir = repo_root_dir.to_path_buf();
-    let children =
-        run_blocking_directory_walk(move || collect_child_directories(&repo_root_dir)).await?;
+    let children = collect_child_directories_off_runtime(repo_root_dir.to_path_buf()).await?;
     for wt_path in children {
         report.managed_scanned = report.managed_scanned.saturating_add(1);
         if !should_sweep_worktree(&wt_path, active_cwds, Some(live_tmux_paths)) {
             continue;
         }
 
-        // #3231 (codex re-review, TOCTOU): the keep-set snapshot was built once at
-        // the start of `run_inner`, but dispatch creation provisions a managed
-        // worktree BEFORE it commits the owning `task_dispatches` row (see
-        // `crate::dispatch::dispatch_create`). If the snapshot was taken inside that
-        // create→insert window, a just-provisioned clean/merged worktree is in no
-        // keep-set source and has no live tmux owner yet — so the checks above
-        // would (wrongly) select it for deletion. A creation-age floor closes the
-        // window: a worktree younger than `MANAGED_FRESH_PROVISION_MIN_AGE` is
-        // protected regardless of owner, because its row may simply not have landed
-        // yet. The far cancel-leak backstop below still applies to genuinely old
-        // leftovers. Fail-closed toward KEEP. See [`is_freshly_provisioned`].
-        if is_freshly_provisioned(&wt_path, MANAGED_FRESH_PROVISION_MIN_AGE) {
+        // #3231 TOCTOU: protect a newly provisioned worktree until its owning
+        // dispatch row lands; otherwise an early keep-set snapshot could delete
+        // an unowned-looking clean worktree. Fail closed toward KEEP.
+        let age_path = wt_path.clone();
+        if run_blocking_filesystem(move || {
+            is_freshly_provisioned(&age_path, MANAGED_FRESH_PROVISION_MIN_AGE)
+        })
+        .await?
+        {
             report.protected_fresh = report.protected_fresh.saturating_add(1);
             continue;
         }
@@ -381,83 +400,68 @@ async fn sweep_managed_root(
             continue;
         }
 
-        // Resolve the parent repo from the worktree's `.git` gitdir pointer so
-        // `cleanup_managed_worktree` can run its dirty/unmerged guards + the
-        // managed-path check against the real repo.
-        let Some(repo_root) = infer_repo_root_from_worktree(&wt_path) else {
-            // #3231 (codex #3): the `.git` pointer could not be resolved. We MUST
-            // NOT fall back to the force/plain-delete path (`remove_orphan_worktree`)
-            // here — that bypasses `cleanup_managed_worktree`'s dirty/unmerged
-            // guards, so a registered worktree whose `.git` we merely failed to read
-            // (transient FS error) — possibly holding uncommitted work — could be
-            // blown away. Distinguish the two cases by the `.git` entry itself:
-            //   * `.git` EXISTS but is unreadable/malformed → a registered worktree
-            //     with an unresolvable pointer → SKIP (never delete; preserve any
-            //     dirty/unmerged work for human review);
-            //   * `.git` is genuinely ABSENT → not a git worktree, just a leftover
-            //     directory with no tracked/uncommitted git state to lose → eligible
-            //     for a plain `remove_dir_all` ONLY when age-backstopped (a
-            //     cancel-leak), so a freshly-provisioned dir is never touched.
-            match git_pointer_state(&wt_path) {
-                GitPointerState::Missing => {
-                    if is_old_enough(&wt_path, MANAGED_CANCEL_LEAK_BACKSTOP) {
-                        match remove_dir_all_plain(&wt_path) {
-                            Ok(()) => {
-                                report.managed_removed = report.managed_removed.saturating_add(1)
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    target: "maintenance",
-                                    path = %wt_path.display(),
-                                    error = %error,
-                                    "worktree_orphan_sweep: failed to remove age-backstopped managed leftover (no .git)"
-                                );
-                                report.errors = report.errors.saturating_add(1);
-                            }
-                        }
-                    }
-                }
-                GitPointerState::PresentUnreadable => {
-                    tracing::warn!(
-                        target: "maintenance",
-                        path = %wt_path.display(),
-                        "worktree_orphan_sweep: managed worktree has an unreadable/unresolvable .git pointer — skipping (fail-closed; never force-removed)"
-                    );
-                }
-            }
-            continue;
-        };
+        // Keep managed cleanup (including .git probes and recursive deletion) off Tokio.
+        let cleanup_path = wt_path.clone();
+        let cleanup = cleanup_managed_candidate_off_runtime(cleanup_path).await;
 
-        let repo_dir = repo_root.to_string_lossy().to_string();
-        let wt_str = wt_path.to_string_lossy().to_string();
-        let cleanup = tokio::task::spawn_blocking(move || {
-            crate::services::git::cleanup_managed_worktree(&repo_dir, &wt_str)
-        })
-        .await;
-
-        match cleanup {
-            Ok(result) if result.removed > 0 => {
-                report.managed_removed = report.managed_removed.saturating_add(1);
-            }
-            Ok(_) => {
-                // skipped_dirty / skipped_unmerged / skipped_unmanaged / failed —
-                // preserved by design. Age backstop: a cancel-leak (dispatch
-                // cancelled but worktree clean+merged yet not terminal-cleaned)
-                // already removes above; a dirty/unmerged tree is intentionally
-                // left for human review regardless of age.
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "maintenance",
-                    path = %wt_path.display(),
-                    error = %error,
-                    "worktree_orphan_sweep: cleanup_managed_worktree task panicked"
-                );
-                report.errors = report.errors.saturating_add(1);
-            }
-        }
+        record_cleanup_outcome(report, &wt_path, cleanup);
     }
     Ok(())
+}
+
+type CleanupOutcome = (usize, usize);
+
+fn record_cleanup_outcome(
+    report: &mut SweepReport,
+    path: &Path,
+    cleanup: Result<Option<CleanupOutcome>>,
+) {
+    match cleanup {
+        Ok(Some((_, failed))) if failed > 0 => {
+            tracing::warn!(target: "maintenance", path = %path.display(), failed,
+                "worktree_orphan_sweep: managed cleanup failed");
+            report.errors = report.errors.saturating_add(failed as u64);
+        }
+        Ok(Some((removed, _))) if removed > 0 => {
+            report.managed_removed = report.managed_removed.saturating_add(removed as u64);
+        }
+        Ok(Some(_)) => {}
+        Ok(None) => tracing::warn!(target: "maintenance", path = %path.display(),
+            "worktree_orphan_sweep: managed worktree has an unreadable/unresolvable .git pointer — skipping (fail-closed; never force-removed)"),
+        Err(error) => {
+            tracing::warn!(target: "maintenance", path = %path.display(), error = %error,
+                "worktree_orphan_sweep: managed cleanup failed");
+            report.errors = report.errors.saturating_add(1);
+        }
+    }
+}
+
+async fn cleanup_managed_candidate_off_runtime(path: PathBuf) -> Result<Option<CleanupOutcome>> {
+    run_blocking_filesystem(move || cleanup_managed_candidate(&path)).await?
+}
+
+fn cleanup_managed_candidate(path: &Path) -> Result<Option<CleanupOutcome>> {
+    let Some(repo_root) = infer_repo_root_from_worktree(path) else {
+        return match git_pointer_state(path) {
+            GitPointerState::Missing if is_old_enough(path, MANAGED_CANCEL_LEAK_BACKSTOP) => {
+                remove_dir_all_plain(path)
+                    .map(|()| Some((1, 0)))
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "age-backstop plain removal of managed worktree {} failed: {error}",
+                            path.display()
+                        )
+                    })
+            }
+            GitPointerState::Missing => Ok(Some((0, 0))),
+            GitPointerState::PresentUnreadable => Ok(None),
+        };
+    };
+    let result = crate::services::git::cleanup_managed_worktree(
+        &repo_root.to_string_lossy(),
+        &path.to_string_lossy(),
+    );
+    Ok(Some((result.removed, result.failed)))
 }
 
 /// Returns the set of `sessions.cwd` values where the session is tied to an
@@ -906,19 +910,20 @@ fn fold_pane_paths(
 
 #[allow(clippy::result_large_err)]
 pub(crate) async fn remove_orphan_worktree(path: &Path) -> Result<()> {
+    let path = path.to_path_buf();
+    run_blocking_filesystem(move || remove_orphan_worktree_blocking(&path)).await?
+}
+
+fn remove_orphan_worktree_blocking(path: &Path) -> Result<()> {
     // Try `git worktree remove --force <path>` first. This requires running
     // from the parent repo, which we infer by reading the .git file inside
     // the worktree (format: `gitdir: /abs/path/.git/worktrees/<name>`).
     if let Some(repo_root) = infer_repo_root_from_worktree(path) {
-        let worktree_path = path.to_path_buf();
-        let _ = tokio::task::spawn_blocking(move || {
-            GitCommand::new()
-                .repo(&repo_root)
-                .args(["worktree", "remove", "--force"])
-                .arg(worktree_path)
-                .run_output()
-        })
-        .await;
+        let _ = GitCommand::new()
+            .repo(&repo_root)
+            .args(["worktree", "remove", "--force"])
+            .arg(path)
+            .run_output();
     }
 
     if path.exists() {
@@ -1616,19 +1621,120 @@ mod active_dispatch_worktree_keep_set_tests {
 
 #[cfg(test)]
 mod blocking_directory_walk_tests {
-    use super::run_blocking_directory_walk;
+    use super::{
+        BLOCKING_CALL_SITE_OBSERVER, BLOCKING_CALL_SITE_TEST_LOCK, SweepReport,
+        cleanup_managed_candidate_off_runtime, collect_child_directories_off_runtime,
+        is_managed_root_child_off_runtime, record_cleanup_outcome, remove_orphan_worktree,
+    };
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn install_observer() -> mpsc::Receiver<std::thread::ThreadId> {
+        let (sender, receiver) = mpsc::channel();
+        *BLOCKING_CALL_SITE_OBSERVER
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(sender);
+        receiver
+    }
+
+    fn observed_thread(receiver: mpsc::Receiver<std::thread::ThreadId>) -> std::thread::ThreadId {
+        let observed = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("call-site observer must run");
+        *BLOCKING_CALL_SITE_OBSERVER
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        observed
+    }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn directory_walk_runs_off_the_runtime_thread() {
+    async fn root_enumerator_call_site_runs_off_the_runtime_thread() {
+        let _test_guard = BLOCKING_CALL_SITE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let runtime_thread = std::thread::current().id();
-        let walk_thread = run_blocking_directory_walk(|| std::thread::current().id())
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("child")).unwrap();
+        let observer = install_observer();
+
+        let directories = collect_child_directories_off_runtime(temp.path().to_path_buf())
             .await
             .unwrap();
 
-        assert_ne!(
-            walk_thread, runtime_thread,
-            "blocking filesystem enumeration must not execute on the Tokio runtime thread"
+        assert_eq!(directories, vec![temp.path().join("child")]);
+        assert_ne!(observed_thread(observer), runtime_thread);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn managed_root_classifier_call_site_runs_off_the_runtime_thread() {
+        let _test_guard = BLOCKING_CALL_SITE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let runtime_thread = std::thread::current().id();
+        let temp = tempfile::tempdir().unwrap();
+        let managed_root = temp.path().join("repo");
+        let child = managed_root.join("worktree");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join(".git"), b"gitdir: /repo/.git/worktrees/wt").unwrap();
+        let observer = install_observer();
+
+        assert!(
+            is_managed_root_child_off_runtime(managed_root)
+                .await
+                .unwrap()
         );
+        assert_ne!(observed_thread(observer), runtime_thread);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn managed_cleanup_call_site_runs_off_the_runtime_thread() {
+        let _test_guard = BLOCKING_CALL_SITE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let runtime_thread = std::thread::current().id();
+        let temp = tempfile::tempdir().unwrap();
+        let candidate = temp.path().join("candidate");
+        std::fs::create_dir(&candidate).unwrap();
+        let observer = install_observer();
+
+        assert_eq!(
+            cleanup_managed_candidate_off_runtime(candidate)
+                .await
+                .unwrap(),
+            Some((0, 0))
+        );
+        assert_ne!(observed_thread(observer), runtime_thread);
+    }
+
+    #[test]
+    fn managed_cleanup_failure_increments_error_count() {
+        let mut report = SweepReport::default();
+        record_cleanup_outcome(
+            &mut report,
+            std::path::Path::new("/managed/worktree"),
+            Ok(Some((0, 1))),
+        );
+
+        assert_eq!(report.managed_removed, 0);
+        assert_eq!(
+            report.errors, 1,
+            "managed cleanup failures must be reported"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn orphan_removal_call_site_runs_off_the_runtime_thread() {
+        let _test_guard = BLOCKING_CALL_SITE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let runtime_thread = std::thread::current().id();
+        let temp = tempfile::tempdir().unwrap();
+        let observer = install_observer();
+
+        remove_orphan_worktree(&temp.path().join("missing"))
+            .await
+            .unwrap();
+        assert_ne!(observed_thread(observer), runtime_thread);
     }
 }
 
