@@ -643,12 +643,11 @@ mod thread_role_inheritance_tests {
         std::fs::create_dir(&repo).unwrap();
 
         let git = |args: &[&str]| {
-            let status = std::process::Command::new("git")
+            crate::services::git::GitCommand::new()
+                .repo(&repo)
                 .args(args)
-                .current_dir(&repo)
-                .status()
+                .run_output()
                 .unwrap();
-            assert!(status.success(), "git command failed: {args:?}");
         };
         git(&["init", "-b", "main"]);
         git(&["config", "user.email", "provider-isolation@test.invalid"]);
