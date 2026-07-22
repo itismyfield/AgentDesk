@@ -8,6 +8,7 @@ use super::*;
 
 mod adk_thread;
 mod claim_bootstrap;
+pub(crate) mod inflight_create_log;
 mod race_loss;
 mod stale_dispatch_guard;
 mod steering_hook;
@@ -2387,27 +2388,13 @@ pub(super) async fn handle_text_message(
     if is_voice_announcement {
         inflight_state.source = crate::dispatch::Source::Voice;
     }
-    // Persist identifiers for long-turn diagnostics (#130)
     inflight_state.session_key = adk_session_key.clone();
     inflight_state.dispatch_id = dispatch_id.clone();
-    match super::super::super::inflight::save_inflight_state_create_new(&inflight_state) {
-        Ok(()) => {}
-        Err(super::super::super::inflight::CreateNewInflightError::AlreadyExists) => {
-            tracing::warn!(
-                channel_id = channel_id.get(),
-                user_msg_id = inflight_state.user_msg_id,
-                "inflight create skipped because a durable row already exists; continuing fail-closed"
-            );
-        }
-        Err(super::super::super::inflight::CreateNewInflightError::Internal(error)) => {
-            tracing::warn!(
-                channel_id = channel_id.get(),
-                user_msg_id = inflight_state.user_msg_id,
-                %error,
-                "inflight create failed internally; continuing without durable row"
-            );
-        }
-    }
+    inflight_create_log::log_create_new_inflight_outcome(
+        super::super::super::inflight::save_inflight_state_create_new(&inflight_state),
+        &provider,
+        &inflight_state,
+    );
 
     // Create channel for streaming
     let (tx, rx) = mpsc::channel();

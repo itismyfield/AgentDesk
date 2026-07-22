@@ -528,6 +528,7 @@ src/
 │   │   │   ├── save_store/
 │   │   │   │   ├── identity_gate/
 │   │   │   │   │   └── claude_e_stamp.rs
+│   │   │   │   ├── delivery_rewind.rs
 │   │   │   │   ├── identity_gate.rs
 │   │   │   │   ├── post_loop_identity_guard_tests.rs
 │   │   │   │   └── rebind_adoption.rs
@@ -659,6 +660,7 @@ src/
 │   │   │   │   │   │   └── mailbox_reaction_tests.rs
 │   │   │   │   │   ├── adk_thread.rs
 │   │   │   │   │   ├── claim_bootstrap.rs
+│   │   │   │   │   ├── inflight_create_log.rs
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── stale_dispatch_guard.rs
 │   │   │   │   │   ├── steering_hook.rs
