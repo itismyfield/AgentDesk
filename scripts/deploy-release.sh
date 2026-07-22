@@ -1,6 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# --- macOS: always run detached (decouple from the invoking shell/session) ---
+# On macOS the deploy restarts the release dcserver mid-run. When invoked from a
+# tmux/agent session's shell, that restart can perturb the caller and, worse,
+# tie the deploy's lifetime to a session that is itself being restarted. Re-exec
+# under nohup, detached from the controlling terminal and job table, so the
+# deploy always runs to completion independently of the caller. Opt out with
+# AGENTDESK_DEPLOY_NO_DETACH=1 (e.g. to stream logs in the foreground).
+if [[ "$(uname)" == "Darwin" \
+      && "${AGENTDESK_DEPLOY_DETACHED:-0}" != "1" \
+      && "${AGENTDESK_DEPLOY_NO_DETACH:-0}" != "1" ]]; then
+    _adk_deploy_log="${AGENTDESK_DEPLOY_LOG:-$HOME/.adk/release/logs/deploy-release.$$.log}"
+    mkdir -p "$(dirname "$_adk_deploy_log")" 2>/dev/null || true
+    AGENTDESK_DEPLOY_DETACHED=1 nohup "$0" "$@" >"$_adk_deploy_log" 2>&1 </dev/null &
+    _adk_deploy_pid=$!
+    disown "$_adk_deploy_pid" 2>/dev/null || true
+    echo "▸ [detach] macOS deploy re-launched detached (pid ${_adk_deploy_pid})"
+    echo "▸ [detach] log: ${_adk_deploy_log}"
+    exit 0
+fi
+
 # ENV (operator-overridable; defaults preserve current behavior):
 #   AGENTDESK_BUNDLE_ID         codesign --identifier value (default: com.itismyfield.agentdesk)
 #   AGENTDESK_DCSERVER_LABEL    release launchd plist Label / file basename.
