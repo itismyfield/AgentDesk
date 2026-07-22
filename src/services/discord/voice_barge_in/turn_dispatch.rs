@@ -1,5 +1,13 @@
 use super::*;
 
+pub(super) fn voice_background_handoff_ack(language: &str) -> &'static str {
+    if language.trim().to_ascii_lowercase().starts_with("en") {
+        "I will hand that to the background agent."
+    } else {
+        "백그라운드 에이전트로 넘길게요."
+    }
+}
+
 impl VoiceBargeInRuntime {
     pub(in crate::services::discord) async fn try_handle_voice_transcript_announcement(
         self: &Arc<Self>,

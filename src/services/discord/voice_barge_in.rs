@@ -89,6 +89,7 @@ mod turn_dispatch;
 mod utility;
 #[path = "voice_barge_in/utterance_pipeline.rs"]
 mod utterance_pipeline;
+use turn_dispatch::voice_background_handoff_ack;
 pub(in crate::services::discord) use utility::{
     INTERNAL_VOICE_MESSAGE_ID_START, is_synthetic_voice_message_id,
 };
@@ -497,14 +498,6 @@ async fn generate_foreground_ack_text(
     Some(parse_voice_foreground_decision(
         &text, transcript, language, max_chars,
     ))
-}
-
-fn voice_background_handoff_ack(language: &str) -> &'static str {
-    if language.trim().to_ascii_lowercase().starts_with("en") {
-        "I will hand that to the background agent."
-    } else {
-        "백그라운드 에이전트로 넘길게요."
-    }
 }
 
 fn build_voice_background_handoff_prompt(
