@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::discord::session_runtime::{is_linked_worktree, is_managed_worktree_path};
 
 pub(super) fn metadata_parent_channel_id(
     metadata: Option<&serde_json::Value>,
@@ -471,6 +472,10 @@ pub(super) struct ProviderWorktreeIsolationOutcome {
     stale_session_id: Option<String>,
 }
 
+fn should_skip_provider_worktree_isolation(already_isolated: bool, canonical: &str) -> bool {
+    already_isolated || (is_managed_worktree_path(canonical) && is_linked_worktree(canonical))
+}
+
 pub(super) async fn ensure_provider_worktree_isolation(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
@@ -516,7 +521,7 @@ pub(super) async fn ensure_provider_worktree_isolation(
         let conflict = detect_worktree_conflict(&data.sessions, &canonical, channel_id);
         (already_isolated, session_channel_name, conflict)
     };
-    if already_isolated {
+    if should_skip_provider_worktree_isolation(already_isolated, &canonical) {
         return ProviderWorktreeIsolationOutcome::default();
     }
 
@@ -605,6 +610,45 @@ pub(super) async fn reset_provider_session_after_worktree_isolation(
 #[cfg(test)]
 mod thread_role_inheritance_tests {
     use super::*;
+
+    #[test]
+    fn managed_linked_worktree_skips_provider_reisolation_without_session_state() {
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let repo = root.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git command failed: {args:?}");
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "provider-isolation@test.invalid"]);
+        git(&["config", "user.name", "Provider Isolation Test"]);
+        std::fs::write(repo.join("README"), "test").unwrap();
+        git(&["add", "README"]);
+        git(&["commit", "-m", "initial"]);
+
+        let (worktree_path, _) = create_git_worktree(
+            repo.to_str().unwrap(),
+            "restart-reisolation",
+            "test-provider",
+        )
+        .unwrap();
+
+        assert!(is_managed_worktree_path(&worktree_path));
+        assert!(is_linked_worktree(&worktree_path));
+        assert!(should_skip_provider_worktree_isolation(
+            false,
+            &worktree_path
+        ));
+        assert!(!ProviderWorktreeIsolationOutcome::default().applied);
+    }
+
     fn bind_parent(
         root: &std::path::Path,
         id: ChannelId,

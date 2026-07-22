@@ -24,11 +24,9 @@ pub(super) use self::restore_cwd::{
 };
 pub(super) use self::worktree::{
     WorktreeInfo, cleanup_git_worktree, create_git_worktree, detect_worktree_conflict,
-    resolve_reusable_worktree,
+    is_linked_worktree, is_managed_worktree_path, resolve_reusable_worktree,
 };
-use self::worktree::{
-    is_managed_worktree_path, reconstruct_managed_worktree_metadata, sync_inflight_worktree_context,
-};
+use self::worktree::{reconstruct_managed_worktree_metadata, sync_inflight_worktree_context};
 
 /// Per-channel session state
 #[derive(Clone)]
