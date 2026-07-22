@@ -367,6 +367,10 @@ fi
 
 mkdir -p "$TMP_RUNTIME3/consumed-without-ack"
 touch "$TMP_RUNTIME3/consumed-without-ack/restart_pending"
+# The rm() spy defined later (Test 6) is not yet in effect here; this is a
+# real removal. shellcheck 0.9.x still reports SC2218 for the later stub even
+# with a `command` prefix, so silence it explicitly.
+# shellcheck disable=SC2218
 command rm -f "$TMP_RUNTIME3/consumed-without-ack/restart_pending"
 set +e
 wait_for_restart_persistence_or_fail \
