@@ -1164,10 +1164,11 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     inflight_state.delivery_bot = metadata_delivery_bot(metadata.as_ref());
     inflight_state.silent_turn = metadata_silent_flag(metadata.as_ref());
     inflight_state.source = metadata_turn_source(source, metadata.as_ref());
-    if let Err(error) = save_inflight_state(&inflight_state) {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!("  [{ts}]   ⚠ inflight state save failed: {error}");
-    }
+    super::intake_turn::inflight_create_log::log_create_new_inflight_outcome(
+        crate::services::discord::inflight::save_inflight_state_create_new(&inflight_state),
+        &provider,
+        &inflight_state,
+    );
 
     let _ = attach_paused_turn_watcher_for_inflight(
         shared,

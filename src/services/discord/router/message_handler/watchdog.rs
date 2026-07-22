@@ -822,11 +822,18 @@ pub(super) fn attach_paused_turn_watcher_for_inflight(
         initial_offset,
         source,
     );
-    if inflight_state.set_watcher_owner_channel_id(owner_channel_id.get())
-        && let Err(error) = save_inflight_state(inflight_state)
-    {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!("  [{ts}]   ⚠ inflight owner-channel save failed: {error}");
+    if inflight_state.set_watcher_owner_channel_id(owner_channel_id.get()) {
+        let outcome = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
+            inflight_state,
+            "attach_paused_turn_watcher_for_inflight",
+        );
+        if !matches!(
+            outcome,
+            crate::services::discord::inflight::GuardedSaveOutcome::Saved
+        ) {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!("  [{ts}]   ⚠ inflight owner-channel save skipped: {outcome:?}");
+        }
     }
     owner_channel_id
 }

@@ -60,7 +60,7 @@ from pathlib import Path
 #   turn_bridge/stream_loop.rs .......... 2
 #   turn_bridge/post_loop_finalize.rs ... 0  (#4259 post-loop slice converted 4)
 #   turn_bridge/mod.rs (hotfile, solo) .. 1
-#   external (router/session/tui) ....... 8
+#   external (router/session/tui) ....... 0  (#4259 slice 1 converted 8)
 #     (headless_turn, intake_turn, provider_isolation, watchdog,
 #      session_runtime/worktree, tui_prompt_relay/synthetic_start x2,
 #      tui_prompt_relay/codex_idle_rollout)
@@ -78,7 +78,7 @@ from pathlib import Path
 # helper) still (re)write identity-pinned `tmux_session_name`, beyond what the
 # output-restamp variant tolerates, so each needs per-flow session-name-stability
 # verification or an adoption-aware variant before converting.
-BASELINE = 21
+BASELINE = 13
 
 SCAN_ROOT = Path("src") / "services" / "discord"
 

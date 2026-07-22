@@ -553,7 +553,10 @@ pub(super) async fn ensure_provider_worktree_isolation(
             Some(branch_name.clone()),
             base_commit,
         );
-        let _ = super::super::super::inflight::save_inflight_state(&inflight);
+        let _ = super::super::super::inflight::save_inflight_state_if_identity_unchanged(
+            &inflight,
+            "provider_worktree_isolation",
+        );
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");

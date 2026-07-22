@@ -289,6 +289,7 @@ pub(super) async fn claim_tui_direct_synthetic_turn(
         && existing.turn_source == TurnSource::ExternalInput
         && existing.user_msg_id == anchor_message_id.get()
     {
+        let expected = super::super::inflight::InflightTurnIdentity::from_state(&existing);
         let mut existing = existing;
         existing.turn_nonce = active_turn_nonce.clone();
         existing.set_relay_owner_kind(relay_owner_kind);
@@ -303,13 +304,19 @@ pub(super) async fn claim_tui_direct_synthetic_turn(
         // pinned so completion cleanup never reads a later injection's overwrite of
         // the shared prompt-anchor slot.
         existing.injected_prompt_message_id = Some(anchor_message_id.get());
-        if let Err(error) = super::super::inflight::save_inflight_state(&existing) {
+        let outcome =
+            super::super::inflight::save_inflight_state_if_identity_matches_allow_output_restamp(
+                &existing,
+                &expected,
+                "tui_direct_synthetic_refresh",
+            );
+        if !matches!(outcome, super::super::inflight::GuardedSaveOutcome::Saved) {
             tracing::warn!(
                 provider = %provider.as_str(),
                 channel_id = channel_id.get(),
                 tmux_session_name = %tmux_session_name,
-                error = %error,
-                "failed to refresh TUI-direct synthetic inflight ownership"
+                ?outcome,
+                "skipped TUI-direct synthetic inflight ownership refresh"
             );
             if mailbox_activation_occurred {
                 finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id).await;
@@ -351,22 +358,41 @@ pub(super) async fn claim_tui_direct_synthetic_turn(
     // keep it relay-ownership-only so watcher completion Path B skips it.
     inflight_state.relay_ownership_only =
         classify_injected_prompt(prompt_text).suppresses_user_turn_lifecycle();
-    if let Err(error) = super::super::inflight::save_inflight_state(&inflight_state) {
-        tracing::warn!(
-            provider = %provider.as_str(),
-            channel_id = channel_id.get(),
-            tmux_session_name = %tmux_session_name,
-            error = %error,
-            "failed to save TUI-direct synthetic inflight"
-        );
-        if mailbox_activation_occurred {
-            finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id).await;
+    match super::super::inflight::save_inflight_state_if_absent(&inflight_state) {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id = channel_id.get(),
+                tmux_session_name = %tmux_session_name,
+                "skipped TUI-direct synthetic inflight because a durable row already exists"
+            );
+            if mailbox_activation_occurred {
+                finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id).await;
+            }
+            return TuiDirectSyntheticTurnClaim {
+                relay_owner,
+                claimed: false,
+                turn_start_offset: start_offset,
+            };
         }
-        return TuiDirectSyntheticTurnClaim {
-            relay_owner,
-            claimed: false,
-            turn_start_offset: start_offset,
-        };
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id = channel_id.get(),
+                tmux_session_name = %tmux_session_name,
+                error = %error,
+                "failed to save TUI-direct synthetic inflight"
+            );
+            if mailbox_activation_occurred {
+                finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id).await;
+            }
+            return TuiDirectSyntheticTurnClaim {
+                relay_owner,
+                claimed: false,
+                turn_start_offset: start_offset,
+            };
+        }
     }
 
     if mailbox_activation_occurred {

@@ -8,6 +8,7 @@ use super::*;
 
 mod adk_thread;
 mod claim_bootstrap;
+pub(crate) mod inflight_create_log;
 mod race_loss;
 mod stale_dispatch_guard;
 mod steering_hook;
@@ -2387,13 +2388,13 @@ pub(super) async fn handle_text_message(
     if is_voice_announcement {
         inflight_state.source = crate::dispatch::Source::Voice;
     }
-    // Persist identifiers for long-turn diagnostics (#130)
     inflight_state.session_key = adk_session_key.clone();
     inflight_state.dispatch_id = dispatch_id.clone();
-    if let Err(e) = save_inflight_state(&inflight_state) {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!("  [{ts}]   ⚠ inflight state save failed: {e}");
-    }
+    inflight_create_log::log_create_new_inflight_outcome(
+        super::super::super::inflight::save_inflight_state_create_new(&inflight_state),
+        &provider,
+        &inflight_state,
+    );
 
     // Create channel for streaming
     let (tx, rx) = mpsc::channel();
