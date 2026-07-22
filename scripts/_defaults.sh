@@ -780,11 +780,13 @@ clear_restart_drain_mode() {
   if [ -f "$marker" ]; then
     nonce=$(grep '^nonce=' "$marker" 2>/dev/null | cut -d= -f2- | tr -d '\n')
   fi
-  rm -f "$marker"
+  # Publish cancellation before removing the request. A poller dropped in
+  # this handoff then still finds its nonce-bound cancellation marker and
+  # rolls its admission fence back instead of leaving restart state stranded.
   {
     [ -n "$nonce" ] && printf 'nonce=%s\n' "$nonce"
     printf 'cancelled_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-  } >"$cancel_tmp" && mv "$cancel_tmp" "$cancel"
+  } >"$cancel_tmp" && mv "$cancel_tmp" "$cancel" && rm -f "$marker"
 }
 
 _health_origin_header() {

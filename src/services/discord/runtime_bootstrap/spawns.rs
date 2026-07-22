@@ -227,6 +227,13 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                     tracing::info!(
                         "  [{ts}] 🔄 restart_pending detected — quick exit after persisting {queue_count} queued item(s)"
                     );
+                    // The final cancellation check is immediately before the
+                    // durable sentinel commit. Once `restart_persisted` is
+                    // published, that commit is intentionally irreversible:
+                    // later cancellation must not split persistence from exit.
+                    if cancellation_guard.cancelled() {
+                        continue;
+                    }
                     if finish_deferred_restart(&shared_for_deferred, shutdown_permit) {
                         let ack = root.join("restart_persisted");
                         let ack_tmp =
@@ -505,12 +512,14 @@ mod tests {
             root.path().to_path_buf(),
             nonce.to_owned(),
         );
-        std::fs::remove_file(root.path().join("restart_pending")).expect("remove request");
+        // Cancellation publication precedes request removal, so Drop can
+        // always distinguish the cancellation handoff from a new request.
         std::fs::write(
             root.path().join("restart_cancelled"),
             format!("nonce={nonce}\n"),
         )
         .expect("publish cancellation during persistence await");
+        std::fs::remove_file(root.path().join("restart_pending")).expect("remove request");
         drop(guard);
 
         assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 2);
@@ -518,6 +527,103 @@ mod tests {
         assert!(!shared.restart.shutting_down.load(Ordering::Acquire));
         assert!(!shared.restart.restart_pending.load(Ordering::Acquire));
         assert!(!shared.restart.shutdown_counted.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_prepare_drain_drops_guard_and_restores_admission() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let root = tempfile::tempdir().expect("runtime root");
+        let nonce = "prepare-await-race";
+        std::fs::write(
+            root.path().join("restart_pending"),
+            format!("nonce={nonce}\n"),
+        )
+        .expect("restart request");
+        let tick = shared
+            .restart
+            .intake_worker_lifecycle
+            .try_begin_tick()
+            .expect("admitted tick");
+        let shared_for_prepare = shared.clone();
+        let root_for_prepare = root.path().to_path_buf();
+        let prepare = tokio::spawn(async move {
+            prepare_deferred_restart(&shared_for_prepare, &root_for_prepare, nonce.to_owned()).await
+        });
+        while !shared.restart.shutting_down.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+
+        // Mirror the timeout helper's safe handoff while prepare is awaiting
+        // its active tick drain: cancellation publishes before marker removal.
+        std::fs::write(
+            root.path().join("restart_cancelled"),
+            format!("nonce={nonce}\n"),
+        )
+        .expect("publish cancellation");
+        std::fs::remove_file(root.path().join("restart_pending")).expect("remove request");
+        drop(tick);
+        assert!(prepare.await.expect("prepare join").is_none());
+        assert!(!shared.restart.intake_worker_lifecycle.admission_is_fenced());
+        assert!(!shared.restart.shutting_down.load(Ordering::Acquire));
+        assert!(!shared.restart.restart_pending.load(Ordering::Acquire));
+        assert!(!shared.restart.shutdown_counted.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn cancellation_before_durable_commit_rolls_back_but_after_commit_stays_committed() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        shared.restart.shutdown_remaining.store(1, Ordering::SeqCst);
+        let root = tempfile::tempdir().expect("runtime root");
+        let nonce = "commit-boundary";
+        std::fs::write(
+            root.path().join("restart_pending"),
+            format!("nonce={nonce}\n"),
+        )
+        .expect("restart request");
+
+        let permit = begin_deferred_restart(&shared).expect("restart permit");
+        let guard = DeferredRestartCancellationGuard::new(
+            shared.clone(),
+            root.path().to_path_buf(),
+            nonce.to_owned(),
+        );
+        std::fs::write(
+            root.path().join("restart_cancelled"),
+            format!("nonce={nonce}\n"),
+        )
+        .expect("cancel before commit");
+        assert!(
+            guard.cancelled(),
+            "commit boundary rejects pre-commit cancellation"
+        );
+        drop(guard);
+        assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 1);
+        assert!(!shared.restart.intake_worker_lifecycle.admission_is_fenced());
+        drop(permit);
+
+        std::fs::remove_file(root.path().join("restart_cancelled")).expect("clear cancellation");
+        let permit = begin_deferred_restart(&shared).expect("new restart permit");
+        let mut guard = DeferredRestartCancellationGuard::new(
+            shared.clone(),
+            root.path().to_path_buf(),
+            nonce.to_owned(),
+        );
+        assert!(finish_deferred_restart(&shared, permit));
+        std::fs::write(
+            root.path().join("restart_persisted"),
+            format!("nonce={nonce}\n"),
+        )
+        .expect("durable sentinel");
+        guard.disarm();
+        std::fs::write(
+            root.path().join("restart_cancelled"),
+            format!("nonce={nonce}\n"),
+        )
+        .expect("late cancellation");
+        drop(guard);
+        assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 0);
+        assert!(shared.restart.intake_worker_lifecycle.admission_is_fenced());
+        assert!(shared.restart.shutting_down.load(Ordering::Acquire));
     }
 
     #[tokio::test]
