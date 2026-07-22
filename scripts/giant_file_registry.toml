@@ -703,14 +703,6 @@ deadline = "2026-10-31"
 decompose_issue = "#4712"
 
 [[entry]]
-# Highest prod-LoC voice surface; flagship decomposition target from #3036.
-file = "src/services/discord/voice_barge_in.rs"
-owner = "voice-runtime"
-deadline = "2026-08-31"
-decompose_issue = "#4713"
-
-
-[[entry]]
 # Crossed the 1000-prod-LoC threshold when #3017 re-landed the single
 # output-offset relay-dedup authority: the idle-JSONL relay loop now consults
 # `committed_relay_offset` (read-only) with generation-aware watermark resets to

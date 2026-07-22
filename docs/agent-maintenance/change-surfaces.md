@@ -1573,53 +1573,8 @@
     `audit_maintainability_config.toml`; the root is no longer a prod giant and
     was removed from `giant_file_registry.toml`; #3038 S5 locked the final
     root ratchet at 274 production lines).
-  - `src/services/discord/voice_barge_in.rs` (2878 lines after #3906 added the
-    deterministic voice intake feedback (P1 Phase-1 intake chime emitted right
-    before `start_voice_turn` plus removal of the redundant foreground-start
-    chime, and the P4 `DONE_CHIME_FILE_NAME` const; the bulky
-    `ensure_done_chime_file` descending-tone generator + `play_done_chime` were
-    kept in the `progress_playback.rs` submodule to hold the giant flat); #3914
-    added the
-    `FOREGROUND_MODEL_TIMEOUT_SLACK` const that de-duplicated the triplicated
-    250ms timeout slack; #3038
-    VoiceBargeInRuntime S1 moved the STT method cluster to
-    `src/services/discord/voice_barge_in/stt.rs` (314 production lines) and
-    S2 moved the progress playback method cluster to
-    `src/services/discord/voice_barge_in/progress_playback.rs` (423 production
-    lines), and S3 moved the final-result playback cluster to
-    `src/services/discord/voice_barge_in/final_result_playback.rs` (243
-    production lines), and S4 moved the routing-resolution cluster to
-    `src/services/discord/voice_barge_in/routing.rs` (383 production lines),
-    and S5 moved the live-cut playback cluster to
-    `src/services/discord/voice_barge_in/live_cut_playback.rs` (120 production
-    lines), and S6 moved the TTS pipeline cluster to
-    `src/services/discord/voice_barge_in/tts_pipeline.rs` (86 production
-    lines), and S7 folded the agent-voice routing helper block into
-    `src/services/discord/voice_barge_in/routing.rs` (now 500 production
-    lines), and S8 moved the foreground decision/parser cluster to
-    `src/services/discord/voice_barge_in/foreground_decision.rs` (214
-    production lines), and #3801 moved the real receive/barge-in hook into
-    `src/services/discord/voice_barge_in/receive_hook.rs` (114 production
-    lines) while adding deterministic PCM harness coverage through the real
-    receive/barge-in path, and #3911 added the shared
-    `InflightForegroundCancelGuard` drop guard (+19 prod lines) so an aborted
-    foreground `generate().await` unregisters its CancelToken instead of
-    leaking it (a leak left `has_inflight_foreground` permanently true and the
-    channel misclassified the next fresh utterance as a barge-in), and #3910
-    gated the File-mode streaming feed-task hook behind a synchronous
-    `streaming_stt_enabled` atomic mirror and made `unregister_voice_guild` async
-    so voice-channel teardown reaps per-channel feed-task buckets
-    (`StreamingSttSessions::remove_channel`) AND discards the matching inner
-    `WhisperStream` sessions (`VoiceSttRuntime::discard_stream_session`, with the
-    stt read guard hoisted to a local so it is not held across the discard
-    awaits) (+93 prod lines), closing a default-deployment memory/CPU leak where
-    every ~20ms File-mode speaking tick spawned an immediately-returning feed
-    task whose `JoinHandle` was never drained, plus a Stream-mode inner-session
-    leak on mid-utterance channel leave;
-    voice STT/TTS, lobby routing, progress mirroring, and barge-in
-    orchestration surface; tracked decompose target — see
-    `giant-file-registry.md` (owner `voice-runtime`, deadline 2026-08-31,
-    #3036)).
+  - `src/services/discord/voice_barge_in.rs` was decomposed in #4713: the root retains the public facade, shared runtime state, and test harness, while `runtime_lifecycle.rs`, `turn_dispatch.rs`, `utterance_pipeline.rs`, and `utility.rs` own cohesive method/helper clusters; every production module is below the giant threshold.
+    voice STT/TTS, lobby routing, progress mirroring, and barge-in orchestration surface.
   - `src/voice/receiver.rs` was decomposed in #4713: the root retains the
     receiver state machine and timers, while `receiver/recording.rs` owns WAV
     recording lifecycle and cleanup helpers. Both modules remain below the
