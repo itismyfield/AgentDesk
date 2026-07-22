@@ -50,6 +50,7 @@ echo "== Test 1: _defaults.sh defines required helpers =="
 
 for fn in \
   request_restart_drain_mode_or_fail \
+  wait_for_restart_persistence_or_fail \
   wait_for_live_turns_to_drain_or_fail \
   clear_restart_drain_mode \
   assert_restart_helpers_loaded; do
@@ -334,6 +335,31 @@ if [ ! -e "$TMP_RUNTIME2/restart_pending" ]; then
 else
   fail "marker removed when job is not running (no flap on next boot)"
 fi
+
+echo "== Test 5g: restart persistence waits for runtime marker consumption =="
+TMP_RUNTIME3=$(mktemp -d)
+trap 'rm -rf "$TMP_FIXTURE_DIR" "$TMP_RUNTIME" "$TMPDIR_TEST" "$TMP_RUNTIME2" "$TMP_RUNTIME3"' EXIT
+touch "$TMP_RUNTIME3/restart_pending"
+( sleep 1; rm -f "$TMP_RUNTIME3/restart_pending" ) &
+BG_PID=$!
+set +e
+wait_for_restart_persistence_or_fail "release" "$TMP_RUNTIME3" 5 \
+  >/dev/null 2>&1
+rc=$?
+set -e
+wait "$BG_PID" 2>/dev/null || true
+assert_eq "persistence helper succeeds only after marker consumption" "0" "$rc"
+
+mkdir -p "$TMP_RUNTIME3/still-pending"
+touch "$TMP_RUNTIME3/still-pending/restart_pending"
+_launchd_job_state() { echo "running"; }
+set +e
+wait_for_restart_persistence_or_fail \
+  "release" "$TMP_RUNTIME3/still-pending" 1 >/dev/null 2>&1
+rc=$?
+set -e
+unset -f _launchd_job_state
+assert_eq "persistence helper refuses bootout while marker remains" "1" "$rc"
 
 echo "== Test 6: clear_restart_drain_mode removes marker file =="
 touch "$TMPDIR_TEST/restart_pending"

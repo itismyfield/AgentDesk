@@ -2051,18 +2051,33 @@ _migrate_pg_tunnel_before_release_stop() {
 
 _migrate_pg_tunnel_before_release_stop
 
-# #4381: a deploy restarts dcserver, so a short relay gap is EXPECTED here.
-# Touch the marker the out-of-band relay watchdog checks; while it is fresh
-# (deploy_quiet_secs) the watchdog logs instead of alerting.
-touch "$ADK_REL/logs/relay-watchdog.deploy-marker" 2>/dev/null || true
-
-# Stop release — wait for process to actually die (flock release)
-echo "▸ Stopping release..."
+# Fence new relay admissions and let dcserver atomically persist each in-flight
+# delivery frontier before launchd is allowed to stop it. The runtime consumes
+# restart_pending only after queue/checkpoint state and DrainRestart markers are
+# durable; the replacement watcher then resumes from those committed offsets.
 LOCK_FILE="$ADK_REL/runtime/dcserver.lock"
 OLD_PID=""
 if [ -f "$LOCK_FILE" ]; then
     OLD_PID=$(cat "$LOCK_FILE" 2>/dev/null || true)
 fi
+if ! AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS=1 \
+    request_restart_drain_mode_or_fail \
+        "release" "$PLIST_REL" "$REL_PORT" "$ADK_REL/runtime" "deploy-release"; then
+    exit 1
+fi
+if ! wait_for_restart_persistence_or_fail \
+    "release" "$ADK_REL/runtime" 30; then
+    exit 1
+fi
+
+# A planned restart no longer suppresses transcript gaps: the watchdog's durable
+# pre-restart authority must remain observable until Discord delivery catches up.
+# Remove a marker left by an older deploy so its quiet window cannot mask this
+# restart boundary after the runtime has proved its replay frontier durable.
+rm -f "$ADK_REL/logs/relay-watchdog.deploy-marker" 2>/dev/null || true
+
+# Stop release only after the durable persistence acknowledgement.
+echo "▸ Stopping release..."
 LAUNCHD_DOMAIN="$(_launchd_domain)"
 launchctl bootout "$LAUNCHD_DOMAIN/$PLIST_REL" 2>/dev/null || true
 if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
@@ -3041,6 +3056,10 @@ WATCHDOG_LABEL="com.agentdesk.relay-watchdog"
 WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/$WATCHDOG_LABEL.plist"
 WATCHDOG_BIN="$ADK_REL/bin/relay-watchdog.py"
 WATCHDOG_CONFIG="$ADK_REL/config/relay-watchdog.json"
+WATCHDOG_SCRIPT_CHANGED=1
+if [ -f "$WATCHDOG_BIN" ] && cmp -s "$REPO/scripts/relay_watchdog.py" "$WATCHDOG_BIN"; then
+    WATCHDOG_SCRIPT_CHANGED=0
+fi
 echo "▸ Installing out-of-band relay watchdog (#4381)..."
 if install -m 0755 "$REPO/scripts/relay_watchdog.py" "$WATCHDOG_BIN"; then
     if [ -f "$WATCHDOG_CONFIG" ]; then
@@ -3105,43 +3124,64 @@ PLIST_EOF
             echo "⚠ Relay watchdog requires python3 >= 3.10 (MIN_PYTHON in relay_watchdog.py);"
             echo "  resolved runner: $WATCHDOG_PYTHON — NOT armed (arming would KeepAlive-crash-loop)."
             echo "  Install a newer python3 (e.g. brew install python) and redeploy."
-        elif _install_relay_watchdog_plist; then
-            xattr -d com.apple.quarantine "$WATCHDOG_PLIST_PATH" 2>/dev/null || true
-            # bootout+bootstrap (not kickstart) so a script/plist change is picked up.
-            # #4726: bootout is async — an immediate bootstrap races the still-running
-            # teardown and hits "5: Input/output error", leaving the watchdog unarmed
-            # and the relay unwatched on every deploy. Poll until the label is actually
-            # gone (max ~6s), then bootstrap with retry/backoff before declaring failure.
-            launchctl bootout "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" 2>/dev/null || true
-            _wd_bootout_polls=0
-            while launchctl print "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" >/dev/null 2>&1; do
-                if [ "$_wd_bootout_polls" -ge 12 ]; then
-                    echo "⚠ Relay watchdog still unloading ~6s after bootout — bootstrapping anyway"
-                    break
-                fi
-                sleep 0.5
-                _wd_bootout_polls=$((_wd_bootout_polls + 1))
-            done
-            _wd_armed=0
-            for _wd_attempt in 1 2 3; do
-                if launchctl bootstrap "$LAUNCHD_DOMAIN" "$WATCHDOG_PLIST_PATH"; then
-                    _wd_armed=1
-                    break
-                fi
-                if [ "$_wd_attempt" -lt 3 ]; then
-                    echo "⚠ Relay watchdog bootstrap attempt $_wd_attempt failed — retrying in 2s"
-                    sleep 2
-                fi
-            done
-            if [ "$_wd_armed" = "1" ]; then
-                echo "✓ Relay watchdog armed ($WATCHDOG_LABEL)"
-            else
-                echo "⚠ Relay watchdog bootstrap FAILED after 3 attempts — relay gaps will go unwatched"
-            fi
         else
-            rm -f "$WATCHDOG_PLIST_PATH.tmp" 2>/dev/null || true
-            echo "⚠ Relay watchdog plist write FAILED ($WATCHDOG_PLIST_PATH) — not armed"
-            echo "  Deploy continues (fail-open): fix permissions/disk space and redeploy."
+            WATCHDOG_PLIST_BEFORE="$WATCHDOG_PLIST_PATH.deploy-prev.$$"
+            rm -f "$WATCHDOG_PLIST_BEFORE" 2>/dev/null || true
+            if [ -f "$WATCHDOG_PLIST_PATH" ]; then
+                cp -p "$WATCHDOG_PLIST_PATH" "$WATCHDOG_PLIST_BEFORE" 2>/dev/null || true
+            fi
+            if _install_relay_watchdog_plist; then
+                WATCHDOG_PLIST_CHANGED=1
+                if [ -f "$WATCHDOG_PLIST_BEFORE" ] \
+                  && cmp -s "$WATCHDOG_PLIST_BEFORE" "$WATCHDOG_PLIST_PATH"; then
+                    WATCHDOG_PLIST_CHANGED=0
+                fi
+                rm -f "$WATCHDOG_PLIST_BEFORE" 2>/dev/null || true
+                xattr -d com.apple.quarantine "$WATCHDOG_PLIST_PATH" 2>/dev/null || true
+                _wd_loaded=0
+                if launchctl print "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" >/dev/null 2>&1; then
+                    _wd_loaded=1
+                fi
+                if [ "$WATCHDOG_SCRIPT_CHANGED" = "0" ] \
+                  && [ "$WATCHDOG_PLIST_CHANGED" = "0" ] \
+                  && [ "$_wd_loaded" = "1" ]; then
+                    echo "✓ Relay watchdog retained ($WATCHDOG_LABEL; durable authority uninterrupted)"
+                else
+                    # Restart only when deployment material changed or the job is absent.
+                    # The watermark lives in the atomic state file, so replacement loads
+                    # the same pre-restart transcript authority before its first tick.
+                    launchctl bootout "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" 2>/dev/null || true
+                    _wd_bootout_polls=0
+                    while launchctl print "$LAUNCHD_DOMAIN/$WATCHDOG_LABEL" >/dev/null 2>&1; do
+                        if [ "$_wd_bootout_polls" -ge 12 ]; then
+                            echo "⚠ Relay watchdog still unloading ~6s after bootout — bootstrapping anyway"
+                            break
+                        fi
+                        sleep 0.5
+                        _wd_bootout_polls=$((_wd_bootout_polls + 1))
+                    done
+                    _wd_armed=0
+                    for _wd_attempt in 1 2 3; do
+                        if launchctl bootstrap "$LAUNCHD_DOMAIN" "$WATCHDOG_PLIST_PATH"; then
+                            _wd_armed=1
+                            break
+                        fi
+                        if [ "$_wd_attempt" -lt 3 ]; then
+                            echo "⚠ Relay watchdog bootstrap attempt $_wd_attempt failed — retrying in 2s"
+                            sleep 2
+                        fi
+                    done
+                    if [ "$_wd_armed" = "1" ]; then
+                        echo "✓ Relay watchdog armed ($WATCHDOG_LABEL)"
+                    else
+                        echo "⚠ Relay watchdog bootstrap FAILED after 3 attempts — relay gaps will go unwatched"
+                    fi
+                fi
+            else
+                rm -f "$WATCHDOG_PLIST_PATH.tmp" "$WATCHDOG_PLIST_BEFORE" 2>/dev/null || true
+                echo "⚠ Relay watchdog plist write FAILED ($WATCHDOG_PLIST_PATH) — not armed"
+                echo "  Deploy continues (fail-open): fix permissions/disk space and redeploy."
+            fi
         fi
     else
         echo "⚠ Relay watchdog config missing: $WATCHDOG_CONFIG"

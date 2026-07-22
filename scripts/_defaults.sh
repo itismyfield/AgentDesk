@@ -752,6 +752,7 @@ assert_restart_helpers_loaded() {
   local fn
   for fn in \
     request_restart_drain_mode_or_fail \
+    wait_for_restart_persistence_or_fail \
     wait_for_live_turns_to_drain_or_fail \
     clear_restart_drain_mode; do
     if ! declare -F "$fn" >/dev/null 2>&1; then
@@ -784,6 +785,12 @@ _health_origin_header() {
   printf 'Origin: http://%s' "${ADK_DEFAULT_LOOPBACK}"
 }
 
+_restart_pending_snapshot() {
+  local port="$1"
+  curl -s --max-time 3 -H "$(_health_origin_header)" \
+    "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/health/detail" 2>/dev/null
+}
+
 _restart_pending_acknowledged() {
   local port="$1"
   local detail_json
@@ -792,8 +799,7 @@ _restart_pending_acknowledged() {
   # `unhealthy` for restart-pending — see src/services/discord/health.rs), and
   # `-f` would drop the body and report failure exactly when we need to read
   # the body to confirm the gate is armed (#1447 review P1, iteration 2).
-  detail_json=$(curl -s --max-time 3 -H "$(_health_origin_header)" \
-    "http://${ADK_DEFAULT_LOOPBACK}:${port}/api/health/detail" 2>/dev/null) || return 1
+  detail_json=$(_restart_pending_snapshot "$port") || return 1
   [ -n "$detail_json" ] || return 1
 
   # restart_pending is per-provider. Require EVERY provider that exposes
@@ -815,6 +821,32 @@ _restart_pending_acknowledged() {
     return 1
   fi
   printf '%s' "$detail_json" | grep -q '"restart_pending":true'
+}
+
+wait_for_restart_persistence_or_fail() {
+  local scope="$1"
+  local runtime_root="$2"
+  local max_wait="${3:-30}"
+  local waited=0
+  local marker="$runtime_root/restart_pending"
+
+  if [ -z "$runtime_root" ]; then
+    echo "✗ [gate] ${scope} runtime root is required for restart persistence" >&2
+    return 1
+  fi
+
+  while [ "$waited" -lt "$max_wait" ]; do
+    if [ ! -e "$marker" ]; then
+      echo "✓ [gate] ${scope} restart persistence committed; runtime consumed marker"
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  echo "✗ [gate] ${scope} restart persistence was not committed within ${max_wait}s" >&2
+  echo "  Refusing bootout: the in-flight delivery frontier is not yet durable." >&2
+  return 1
 }
 
 _foreign_active_turns_or_empty() {

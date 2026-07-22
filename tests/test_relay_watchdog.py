@@ -6036,9 +6036,17 @@ class DeploymentWiringTests(unittest.TestCase):
         # — never abort a healthy deploy or skip manifest/peer propagation.
         self.assertIn("_install_relay_watchdog_plist", deploy)
         self.assertIn("Relay watchdog plist write FAILED", deploy)
-        # Deploy-window suppression contract: deploy must touch the marker the
-        # watchdog checks before restarting dcserver.
-        self.assertIn("relay-watchdog.deploy-marker", deploy)
+        # Planned restarts must not hide real transcript gaps. Deploy first
+        # obtains the runtime's durable frontier acknowledgement, and it retains
+        # an unchanged watchdog process instead of resetting observation state.
+        self.assertIn("request_restart_drain_mode_or_fail", deploy)
+        self.assertIn("wait_for_restart_persistence_or_fail", deploy)
+        self.assertNotIn(
+            'touch "$ADK_REL/logs/relay-watchdog.deploy-marker"', deploy
+        )
+        self.assertIn("WATCHDOG_SCRIPT_CHANGED", deploy)
+        self.assertIn("WATCHDOG_PLIST_CHANGED", deploy)
+        self.assertIn("durable authority uninterrupted", deploy)
 
     def test_watchdog_is_portable_path_linted(self):
         checker = (REPO_ROOT / "scripts" / "check-portable-paths.py").read_text(
