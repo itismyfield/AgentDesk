@@ -11,6 +11,7 @@ use crate::services::provider::ProviderKind;
 pub(crate) enum QueuedAdmissionDisposition {
     Admitted(AdmittedQueuedIntake),
     Deferred,
+    RejectedNonPortableAttachment,
 }
 
 pub(crate) struct AdmittedQueuedIntake {
@@ -58,6 +59,24 @@ pub(crate) async fn admit_queued_intake(
     let local_permit = match admission {
         IntakeAdmission::Local(permit) => Some(permit),
         IntakeAdmission::Forwarded { .. } | IntakeAdmission::SkippedDuplicate => None,
+        IntakeAdmission::Blocked {
+            reason:
+                reason @ (crate::services::cluster::intake_router_hook::IntakeBlockedReason::NonPortableAttachmentForeignOwner { .. }
+                | crate::services::cluster::intake_router_hook::IntakeBlockedReason::NonPortableAttachmentRoutedTarget { .. }),
+        } => {
+            // A queued local-path upload can never become portable through
+            // retry. Notify once and consume it instead of front-requeueing it
+            // forever without user-visible recovery guidance.
+            super::notice::notify_blocked_intake(deps, &submission, &reason).await;
+            super::super::super::mailbox_abandon_pending_dispatch(
+                deps.shared,
+                &submission.provider,
+                channel_id,
+                intervention.message_id,
+            )
+            .await;
+            return QueuedAdmissionDisposition::RejectedNonPortableAttachment;
+        }
         IntakeAdmission::DeferredOpenRoute { .. } | IntakeAdmission::Blocked { .. } => {
             // `requeue_front` also consumes the actor's pending-dispatch
             // reservation, matching the existing hosted-TUI pre-drain defer.

@@ -26,8 +26,13 @@ pub(crate) enum IntakeOrigin {
 }
 
 impl IntakeOrigin {
-    fn should_notify_blocked(self) -> bool {
+    fn should_notify_blocked(self, reason: &IntakeBlockedReason) -> bool {
         !matches!(self, Self::QueuedDrain)
+            || matches!(
+                reason,
+                IntakeBlockedReason::NonPortableAttachmentForeignOwner { .. }
+                    | IntakeBlockedReason::NonPortableAttachmentRoutedTarget { .. }
+            )
     }
 }
 
@@ -166,7 +171,9 @@ pub(crate) async fn dispatch_text_intake(
         IntakeAdmission::DeferredOpenRoute { .. } => {
             defer_live_submission(deps, submission).await;
         }
-        IntakeAdmission::Blocked { ref reason } if submission.origin.should_notify_blocked() => {
+        IntakeAdmission::Blocked { ref reason }
+            if submission.origin.should_notify_blocked(reason) =>
+        {
             notify_blocked_intake(deps, &submission, reason).await;
         }
         IntakeAdmission::Forwarded { .. }

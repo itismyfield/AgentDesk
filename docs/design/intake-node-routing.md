@@ -774,8 +774,9 @@ Decision tree (evaluation order is important):
    carry gateway-local filesystem paths, not portable references. Any decision
    that would route to a foreign live owner, explicit `/node` target, or
    preferred-label worker blocks before an outbox insert. A local live owner
-   may handle an upload locally; the routed pilot never creates a new local
-   fallback session for an upload.
+   may handle an upload locally. If no foreign route is selected (for example,
+   no eligible worker or no preference), normal local intake behavior remains
+   unchanged; this pilot does not make attachments portable across nodes.
 6. **Explicit `/node`**: only after owner lookup proves `NoOwner`.
    An unavailable explicit target blocks rather than silently falling
    through. `/node` does not migrate an existing tmux session.
@@ -951,12 +952,13 @@ worker.**
 
 The routed pilot is explicitly text-only. A local live owner may handle
 uploads locally. When a foreign owner, explicit `/node`, or preferred-label
-placement would route the request, `NonPortableAttachment` blocks before the
-outbox insert and the live notice says: “현재 mac-mini routed session은 파일
-첨부를 지원하지 않습니다.” The one-minute per-channel notice throttle prevents
-retry spam. Queued drains retain the original Intervention, but create neither
-an outbox row nor a local fallback session. Stale/conflicting owner blocks take
-precedence. No local absolute upload path is written to `intake_outbox`.
+placement would route the request, either `NonPortableAttachmentForeignOwner`
+or `NonPortableAttachmentRoutedTarget` blocks before the outbox insert and the
+live notice says: “현재 mac-mini routed session은 파일 첨부를 지원하지
+않습니다.” The one-minute per-channel notice throttle prevents retry spam. Queued
+drains notify and consume a nonportable attachment instead of requeueing it
+forever. Stale/conflicting owner blocks take precedence. No local absolute upload
+path is written to `intake_outbox`.
 
 Full attachment portability remains out of scope: either stage bytes through a
 durable object/payload store or let the worker securely re-download the Discord

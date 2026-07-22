@@ -251,12 +251,11 @@ pub(crate) enum IntakeBlockedReason {
     ConflictingLiveSessionOwners { instance_ids: Vec<String> },
     OwnerProtocolIncompatible { instance_id: String },
     OverrideUnavailable { target_instance_id: String },
-    NonPortableAttachment { owner_instance_id: String },
+    NonPortableAttachmentForeignOwner { owner_instance_id: String },
+    NonPortableAttachmentRoutedTarget { target_instance_id: String },
     RoutingDependencyFailed { detail: String },
 }
 
-/// Diagnostic enum for `RanLocal` — keeps the metric surface and
-/// operator-log telemetry stable across the three "no-op" code paths.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RanLocalReason {
     /// Mode is `Disabled` (Phase 1-4 default).
@@ -420,7 +419,7 @@ pub(crate) async fn try_route_intake(
             return apply_observe_mode(
                 ctx.mode,
                 IntakeRouterDecision::Blocked {
-                    reason: IntakeBlockedReason::NonPortableAttachment {
+                    reason: IntakeBlockedReason::NonPortableAttachmentForeignOwner {
                         owner_instance_id: instance_id.clone(),
                     },
                 },
@@ -634,14 +633,12 @@ async fn route_by_preferred_labels(
         }
     };
 
-    // The text-only routed pilot has no attachment staging contract: upload
-    // records contain gateway-local paths and must not enter the outbox.
     if ctx.has_nonportable_uploads {
         return apply_observe_mode(
             ctx.mode,
             IntakeRouterDecision::Blocked {
-                reason: IntakeBlockedReason::NonPortableAttachment {
-                    owner_instance_id: target,
+                reason: IntakeBlockedReason::NonPortableAttachmentRoutedTarget {
+                    target_instance_id: target,
                 },
             },
         );
@@ -690,14 +687,12 @@ async fn route_node_override_without_owner(
         );
     }
 
-    // The text-only routed pilot has no attachment staging contract: upload
-    // records contain gateway-local paths and must not enter the outbox.
     if ctx.has_nonportable_uploads {
         return apply_observe_mode(
             ctx.mode,
             IntakeRouterDecision::Blocked {
-                reason: IntakeBlockedReason::NonPortableAttachment {
-                    owner_instance_id: target.to_string(),
+                reason: IntakeBlockedReason::NonPortableAttachmentRoutedTarget {
+                    target_instance_id: target.to_string(),
                 },
             },
         );
@@ -1420,7 +1415,7 @@ mod pg_tests {
             decision,
             IntakeRouterDecision::Observed {
                 outcome: ObservedIntakeOutcome::WouldBlock {
-                    reason: IntakeBlockedReason::NonPortableAttachment {
+                    reason: IntakeBlockedReason::NonPortableAttachmentForeignOwner {
                         owner_instance_id: "worker-owner".to_string()
                     }
                 }
@@ -2149,7 +2144,7 @@ mod pg_tests {
         assert_eq!(
             decision,
             IntakeRouterDecision::Blocked {
-                reason: IntakeBlockedReason::NonPortableAttachment {
+                reason: IntakeBlockedReason::NonPortableAttachmentForeignOwner {
                     owner_instance_id: "worker-upload-owner".to_string()
                 }
             }
@@ -2179,7 +2174,7 @@ mod pg_tests {
         assert_eq!(
             try_route_intake(&pool, &ctx).await,
             IntakeRouterDecision::Blocked {
-                reason: IntakeBlockedReason::NonPortableAttachment {
+                reason: IntakeBlockedReason::NonPortableAttachmentForeignOwner {
                     owner_instance_id: "worker-upload-owner".to_string()
                 }
             },
@@ -2220,8 +2215,8 @@ mod pg_tests {
         assert_eq!(
             try_route_intake(&pool, &ctx).await,
             IntakeRouterDecision::Blocked {
-                reason: IntakeBlockedReason::NonPortableAttachment {
-                    owner_instance_id: "worker-mac-mini".to_string()
+                reason: IntakeBlockedReason::NonPortableAttachmentRoutedTarget {
+                    target_instance_id: "worker-mac-mini".to_string()
                 }
             }
         );
@@ -2396,6 +2391,44 @@ mod pg_tests {
                 .await
                 .expect("count");
         assert_eq!(count, 0, "disabled /node override must not insert");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn node_override_attachment_is_blocked_before_outbox_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_worker_node(
+            &pool,
+            "worker-selected",
+            serde_json::json!(["mac-mini"]),
+            "online",
+        )
+        .await;
+
+        let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, "ch-node-upload");
+        ctx.node_override_instance_id = Some("worker-selected");
+        ctx.has_nonportable_uploads = true;
+        assert_eq!(
+            try_route_intake(&pool, &ctx).await,
+            IntakeRouterDecision::Blocked {
+                reason: IntakeBlockedReason::NonPortableAttachmentRoutedTarget {
+                    target_instance_id: "worker-selected".to_string()
+                }
+            }
+        );
+        let outbox_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = 'ch-node-upload'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count outbox rows");
+        assert_eq!(
+            outbox_count, 0,
+            "attachment must be blocked before /node outbox insert"
+        );
 
         pool.close().await;
         pg_db.drop().await;
