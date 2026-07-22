@@ -21,7 +21,6 @@
 //! inflight reconciliation, or any of the watcher's leader-only state
 //! machinery.
 //!
-//! Leader path is unchanged.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -86,10 +85,6 @@ impl StandbyRelayTurnBinding {
     }
 }
 
-/// Spawned per-turn on cluster-standby nodes. Returns when:
-/// - `cancel` or `shared.restart.shutting_down` flips to true,
-/// - the JSONL emits a terminal result or the completed TUI assistant response,
-/// - or `timeout` elapses.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_standby_relay(
     http: Arc<serenity::http::Http>,
@@ -107,8 +102,6 @@ pub(super) async fn run_standby_relay(
     let deadline = Instant::now() + timeout;
     let mut current_offset = start_offset;
     let mut last_inflight_heartbeat = Instant::now();
-    // Buffer raw bytes for incomplete trailing lines across reads. Decoding
-    // only complete JSONL lines avoids replacing split UTF-8 scalars.
     let mut tail_buf: Vec<u8> = Vec::new();
     let mut tail_start_offset = start_offset;
     let mut pending_result_text: Option<String> = None;
@@ -148,21 +141,15 @@ pub(super) async fn run_standby_relay(
             completed_signal_drain_until,
             Instant::now(),
         ) {
-            if let Some((result_offset, result_text)) =
-                result_from_unread_complete_lines(&output_path, current_offset)
-            {
-                pending_result_retry_offset = Some(result_offset);
-                pending_result_text = Some(result_text);
-                completed_signal_drain_until = None;
-                continue;
-            }
-            if let Some(assistant_text) = completed_drain_fallback_response(
+            if let Some((result_offset, response)) = resolve_standby_delivery(
+                result_from_unread_complete_lines(&output_path, current_offset),
                 pending_result_text.as_deref(),
                 true,
                 &output_path,
                 start_offset,
             ) {
-                pending_result_text = Some(assistant_text);
+                pending_result_retry_offset = Some(result_offset);
+                pending_result_text = Some(response);
                 completed_signal_drain_until = None;
                 continue;
             }
@@ -202,14 +189,6 @@ pub(super) async fn run_standby_relay(
                 Ok(_) => continue, // other channels — ignore
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Lagged(_)) => {
-                    // Codex review HIGH: a bursty publisher can saturate the
-                    // 256-slot broadcast and Lag us before we observe our
-                    // own `Completed`. The previous `break` here meant we
-                    // silently fell through to the 1800s backstop — the
-                    // exact regression #2448 was meant to close. Recheck
-                    // the on-disk inflight authoritatively: if terminal
-                    // (file gone or pointing at a different output), the
-                    // turn already completed and we should exit now.
                     if pending_result_text.is_none()
                         && super::inflight::load_inflight_state(&provider, channel_id.get())
                             .map(|state| {
@@ -337,6 +316,24 @@ fn result_from_unread_complete_lines(output_path: &str, offset: u64) -> Option<(
     None
 }
 
+fn resolve_standby_delivery(
+    result: Option<(u64, String)>,
+    pending_result_text: Option<&str>,
+    fallback_allowed: bool,
+    output_path: &str,
+    start_offset: u64,
+) -> Option<(u64, String)> {
+    result.or_else(|| {
+        completed_drain_fallback_response(
+            pending_result_text,
+            fallback_allowed,
+            output_path,
+            start_offset,
+        )
+        .map(|response| (start_offset, response))
+    })
+}
+
 fn standby_response_after_poll_scan(
     decoded_lines: &StandbyDecodedLines,
     pending_result_text: Option<&str>,
@@ -345,21 +342,23 @@ fn standby_response_after_poll_scan(
     output_path: &str,
     start_offset: u64,
 ) -> Option<(u64, String)> {
-    for (line_start, line) in &decoded_lines.lines {
-        let line_offset = decoded_lines
-            .stitched_start_offset
-            .saturating_add(*line_start as u64);
-        if let Some(result_text) = extract_result_text(line) {
-            return Some((line_offset, result_text));
-        }
-    }
-    completed_drain_fallback_response(
+    let result = decoded_lines.lines.iter().find_map(|(line_start, line)| {
+        extract_result_text(line).map(|text| {
+            (
+                decoded_lines
+                    .stitched_start_offset
+                    .saturating_add(*line_start as u64),
+                text,
+            )
+        })
+    });
+    resolve_standby_delivery(
+        result,
         pending_result_text,
         completed_drain_until.is_some_and(|until| now >= until),
         output_path,
         start_offset,
     )
-    .map(|response| (start_offset, response))
 }
 
 fn completed_drain_fallback_response(
@@ -1041,9 +1040,15 @@ mod tests {
         let result = "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"RESULT_FINAL\"}\n";
         std::fs::write(&transcript, format!("{prefix}{result}")).expect("write transcript");
 
-        let response = result_from_unread_complete_lines(
+        let response = resolve_standby_delivery(
+            result_from_unread_complete_lines(
+                transcript.to_str().expect("UTF-8 transcript path"),
+                prefix.len() as u64,
+            ),
+            None,
+            true,
             transcript.to_str().expect("UTF-8 transcript path"),
-            prefix.len() as u64,
+            0,
         );
         assert_eq!(
             response,
