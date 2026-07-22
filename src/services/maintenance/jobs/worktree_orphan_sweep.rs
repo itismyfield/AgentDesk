@@ -121,6 +121,32 @@ pub async fn run(config: Config, pg_pool: Option<PgPool>) -> Result<()> {
     Ok(())
 }
 
+async fn run_blocking_directory_walk<T, F>(walk: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(walk)
+        .await
+        .map_err(|error| anyhow::anyhow!("worktree directory walk task failed: {error}"))
+}
+
+fn collect_child_directories(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            entry
+                .metadata()
+                .ok()
+                .filter(|metadata| metadata.is_dir())
+                .map(|_| entry.path())
+        })
+        .collect()
+}
+
 pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<SweepReport> {
     let mut report = SweepReport::default();
 
@@ -228,26 +254,22 @@ pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<Sweep
         return Ok(report);
     };
 
-    let Ok(entries) = std::fs::read_dir(&config.worktrees_root) else {
-        return Ok(report);
-    };
+    // Directory enumeration and metadata probes are blocking filesystem calls.
+    // Keep them off Tokio's runtime worker so a large worktree population cannot
+    // stall the runtime watchdog while readdir waits on the filesystem allocator.
+    let worktrees_root = config.worktrees_root.clone();
+    let directories =
+        run_blocking_directory_walk(move || collect_child_directories(&worktrees_root)).await?;
 
-    for entry in entries.flatten() {
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-        if !metadata.is_dir() {
-            continue;
-        }
+    for dir_path in directories {
         report.scanned_dirs = report.scanned_dirs.saturating_add(1);
-
-        let dir_path = entry.path();
 
         // #3231 (B): a managed-root child (`worktrees/<repo_name>/`) is not a
         // per-channel worktree itself — its CHILDREN are the dispatch/automation
         // worktrees. Recurse one level into it (the flat 1-depth scan misses
         // them) and skip the directory itself from the flat-root A decision.
-        if is_managed_root_child(&dir_path) {
+        let managed_root_path = dir_path.clone();
+        if run_blocking_directory_walk(move || is_managed_root_child(&managed_root_path)).await? {
             sweep_managed_root(
                 &dir_path,
                 &active_cwds,
@@ -255,7 +277,7 @@ pub async fn run_inner(config: &Config, pg_pool: Option<PgPool>) -> Result<Sweep
                 config,
                 &mut report,
             )
-            .await;
+            .await?;
             continue;
         }
 
@@ -327,20 +349,12 @@ async fn sweep_managed_root(
     live_tmux_paths: &HashSet<String>,
     config: &Config,
     report: &mut SweepReport,
-) {
-    let Ok(children) = std::fs::read_dir(repo_root_dir) else {
-        return;
-    };
-    for child in children.flatten() {
-        let Ok(metadata) = child.metadata() else {
-            continue;
-        };
-        if !metadata.is_dir() {
-            continue;
-        }
+) -> Result<()> {
+    let repo_root_dir = repo_root_dir.to_path_buf();
+    let children =
+        run_blocking_directory_walk(move || collect_child_directories(&repo_root_dir)).await?;
+    for wt_path in children {
         report.managed_scanned = report.managed_scanned.saturating_add(1);
-
-        let wt_path = child.path();
         if !should_sweep_worktree(&wt_path, active_cwds, Some(live_tmux_paths)) {
             continue;
         }
@@ -443,6 +457,7 @@ async fn sweep_managed_root(
             }
         }
     }
+    Ok(())
 }
 
 /// Returns the set of `sessions.cwd` values where the session is tied to an
@@ -1600,6 +1615,24 @@ mod active_dispatch_worktree_keep_set_tests {
 }
 
 #[cfg(test)]
+mod blocking_directory_walk_tests {
+    use super::run_blocking_directory_walk;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn directory_walk_runs_off_the_runtime_thread() {
+        let runtime_thread = std::thread::current().id();
+        let walk_thread = run_blocking_directory_walk(|| std::thread::current().id())
+            .await
+            .unwrap();
+
+        assert_ne!(
+            walk_thread, runtime_thread,
+            "blocking filesystem enumeration must not execute on the Tokio runtime thread"
+        );
+    }
+}
+
+#[cfg(test)]
 mod managed_root_recursion_tests {
     //! #3231 (B): the managed dispatch/automation worktrees live one level deeper
     //! under `worktrees/<repo_name>/` — the flat 1-depth scan never reached them.
@@ -1956,7 +1989,9 @@ mod fresh_provision_toctou_tests {
         };
         let mut report = SweepReport::default();
 
-        sweep_managed_root(&managed_root, &kept, &live, &config, &mut report).await;
+        sweep_managed_root(&managed_root, &kept, &live, &config, &mut report)
+            .await
+            .unwrap();
 
         assert_eq!(
             report.protected_fresh, 1,
