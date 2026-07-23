@@ -7,9 +7,8 @@ use super::{
 
 pub(super) struct IdleQueueRetentionGuard {
     queue_dir: PathBuf,
-    last_activity: Option<SystemTime>,
+    lock_files_existed: bool,
     _worker_lock: RelayQueueFileLock,
-    _producer_lock: RelayQueueFileLock,
 }
 
 impl IdleQueueRetentionGuard {
@@ -18,27 +17,33 @@ impl IdleQueueRetentionGuard {
         let producer_lock_path = queue_dir.join("producer.lock");
         let lock_files_existed = worker_lock_path.exists() && producer_lock_path.exists();
         let worker_lock = lock_relay_queue_file(&worker_lock_path, true).ok()??;
-        let producer_lock =
-            lock_relay_queue_file_with_mode(&producer_lock_path, true, true).ok()??;
-        let last_activity = if lock_files_existed {
-            latest_queue_activity(queue_dir).ok().flatten()
-        } else {
-            None
-        };
         Some(Self {
             queue_dir: queue_dir.to_path_buf(),
-            last_activity,
+            lock_files_existed,
             _worker_lock: worker_lock,
-            _producer_lock: producer_lock,
         })
     }
 
     pub(super) fn remove_if_stale_and_idle(&self, retention: Duration) {
-        if self
-            .last_activity
-            .is_some_and(|activity| activity.elapsed().is_ok_and(|age| age >= retention))
-            && queue_contains_only_idle_state(&self.queue_dir)
-        {
+        if !self.lock_files_existed {
+            return;
+        }
+        let Some(last_activity) = latest_queue_activity(&self.queue_dir).ok().flatten() else {
+            return;
+        };
+        if !last_activity.elapsed().is_ok_and(|age| age >= retention) {
+            return;
+        }
+        let producer_lock_path = self.queue_dir.join("producer.lock");
+        let Ok(Some(_producer_lock)) =
+            lock_relay_queue_file_with_mode(&producer_lock_path, true, true)
+        else {
+            return;
+        };
+        // Producers may publish while artifact pruning runs. The exclusive producer lock is
+        // acquired only for this final revalidation and removal, so a stale pre-lock scan can
+        // never authorize deletion and hook-boundary blocking excludes unbounded pruning work.
+        if queue_contains_only_idle_state(&self.queue_dir) {
             remove_idle_queue_dir(&self.queue_dir);
         }
     }

@@ -1157,6 +1157,48 @@ mod tests {
     }
 
     #[test]
+    fn artifact_pruning_does_not_hold_the_producer_lock() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let queue_dir = temp_dir.path().join("pruning");
+        let quarantine_dir = queue_dir.join("quarantine");
+        std::fs::create_dir_all(&quarantine_dir).unwrap();
+        std::fs::write(queue_dir.join("worker.lock"), b"").unwrap();
+        std::fs::write(queue_dir.join("producer.lock"), b"").unwrap();
+        for index in 0..2_000 {
+            std::fs::write(
+                quarantine_dir.join(format!("{index:04}.artifact")),
+                b"artifact",
+            )
+            .unwrap();
+        }
+        age_queue_tree(&queue_dir, LEDGER_RETENTION + Duration::from_secs(1));
+        let retention_guard = IdleQueueRetentionGuard::acquire(&queue_dir).unwrap();
+        let pruning = std::thread::spawn({
+            let quarantine_dir = quarantine_dir.clone();
+            move || {
+                for _ in 0..20 {
+                    prune_artifact_dir(&quarantine_dir, 0, Duration::ZERO);
+                }
+                drop(retention_guard);
+            }
+        });
+
+        let started = Instant::now();
+        let producer_lock =
+            lock_relay_queue_file_with_mode(&queue_dir.join("producer.lock"), false, false)
+                .unwrap()
+                .expect("producer shared lock");
+        let elapsed = started.elapsed();
+        drop(producer_lock);
+        pruning.join().unwrap();
+
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "artifact pruning blocked the producer for {elapsed:?}"
+        );
+    }
+
+    #[test]
     fn corrupt_counter_recovers_without_reusing_completed_high_water() {
         let temp_dir = tempfile::tempdir().unwrap();
         let _root = crate::config::set_agentdesk_root_for_test(temp_dir.path());
@@ -1354,7 +1396,7 @@ mod tests {
     fn producer_waits_for_retention_lock_and_preserves_event() {
         let temp_dir = tempfile::tempdir().unwrap();
         let _root = crate::config::set_agentdesk_root_for_test(temp_dir.path());
-        let (endpoint, requests, receiver) = spawn_test_receiver(2);
+        let (endpoint, requests, receiver) = spawn_test_receiver(1);
         let session_id = "producer-lock-contention";
         let queue_dir = relay_queue_dir("claude", session_id).unwrap();
         std::fs::create_dir_all(&queue_dir).unwrap();
