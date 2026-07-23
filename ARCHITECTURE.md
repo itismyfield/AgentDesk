@@ -390,7 +390,8 @@ src/
 │   │   └── spawn_queue.rs
 │   ├── claude_tui/
 │   │   ├── hook_relay/
-│   │   │   └── ordered_queue.rs
+│   │   │   ├── ordered_queue.rs
+│   │   │   └── queue_retention.rs
 │   │   ├── hook_server/
 │   │   │   └── relay_receipts.rs
 │   │   ├── hosting/
