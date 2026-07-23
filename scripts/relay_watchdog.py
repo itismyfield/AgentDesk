@@ -1423,6 +1423,15 @@ class CoverageActivityProbe:
 
 
 @dataclass(frozen=True)
+class CoverageTranscriptProbe:
+    """Independent selected-transcript evidence for a desync judgment."""
+
+    growing: bool
+    blocks: int = 0
+    lost: int = 0
+
+
+@dataclass(frozen=True)
 class SelectorVerdict:
     state: str
     reason: str
@@ -2653,6 +2662,7 @@ def tick_coverage(
     ch: ChannelConfig,
     chs: dict[str, Any],
     now: float,
+    transcript_probe: CoverageTranscriptProbe | None = None,
 ) -> None:
     """Observe I2 only; never repair, return early from, or suppress gap checks."""
     expected_name = expected_tmux_session_name(ch)
@@ -2721,10 +2731,45 @@ def tick_coverage(
     # persistence before this alarms on its own. detached / watcher_state_404
     # keep the 2-tick behavior (different reason strings).
     if verdict.reason == "attached_but_desynced":
-        delivery_gap_active = bool(chs.get("gap_since") or chs.get("alerting"))
+        activity = probe.relay_activity
+        relay_ts = activity.last_relay_ts_ms if activity is not None else None
+        recent_relay = False
+        if (
+            activity is not None
+            and not activity.malformed
+            and isinstance(relay_ts, int)
+            and not isinstance(relay_ts, bool)
+            and relay_ts > 0
+        ):
+            relay_age_ms = int(now * 1000) - relay_ts
+            recent_relay = (
+                0 <= relay_age_ms < COVERAGE_ACTIVITY_FRESH_SECS * 1000
+            )
+        growing_without_loss = (
+            transcript_probe is not None
+            and transcript_probe.growing
+            and transcript_probe.blocks > 0
+            and transcript_probe.lost == 0
+        )
+        transcript_loss_active = bool(
+            transcript_probe is not None and transcript_probe.lost > 0
+        )
+        growing_relay_stall = bool(growing_without_loss and not recent_relay)
+        delivery_gap_active = bool(
+            chs.get("gap_since")
+            or chs.get("alerting")
+            or transcript_loss_active
+            or growing_relay_stall
+        )
         desync_for = (
             max(0.0, now - desync_since) if desync_since is not None else 0.0
         )
+        if not delivery_gap_active and growing_without_loss and recent_relay:
+            rt.log(
+                f"[{cid}] coverage desync classified as growth lag "
+                f"blocks={transcript_probe.blocks} lost=0 — not alarming"
+            )
+            return
         if (
             not delivery_gap_active
             and desync_for < COVERAGE_DESYNC_CONFIRM_SECS
@@ -2996,13 +3041,13 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     cid = ch.channel_id
     chs: dict[str, Any] = state.setdefault(cid, {})
 
-    # I2 is intentionally parallel to gap evaluation (#4424): this helper has
-    # no return value that can short-circuit the existing transcript/haystack
-    # verdict path and it owns a separate alert cooldown key.
-    try:
-        tick_coverage(rt, ch, chs, now)
-    except Exception as e:  # noqa: BLE001 — coverage must never suppress gap checks
-        rt.log(f"[{cid}] coverage tick error: {type(e).__name__}: {e}")
+    def observe_coverage(
+        transcript_probe: CoverageTranscriptProbe | None = None,
+    ) -> None:
+        try:
+            tick_coverage(rt, ch, chs, now, transcript_probe)
+        except Exception as e:  # noqa: BLE001 — coverage must never suppress gap checks
+            rt.log(f"[{cid}] coverage tick error: {type(e).__name__}: {e}")
 
     pattern = main_channel_project_re(ch.worktree_root, ch.worktree_prefix)
     project_root = projects_root()
@@ -3482,10 +3527,12 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             _clear_gap_alert_without_recovery(
                 rt, chs, cid, retired_pending_paths
             )
+        observe_coverage()
         return
 
     hay = rt.discord_haystack(cid)
     if hay is None:
+        observe_coverage()
         # A blind prober is itself a signal: persistent read failure means we
         # cannot vouch for the relay at all. Alert after N consecutive misses.
         fails = int(chs.get("read_failures", 0)) + 1
@@ -3637,6 +3684,7 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             _clear_gap_alert_without_recovery(
                 rt, chs, cid, retired_pending_paths
             )
+        observe_coverage()
         return
 
     # A cleared/restarted provider session creates a new transcript. Retire an
@@ -3730,6 +3778,24 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         ),
     )
     verdict_path = str(verdict_candidate.path)
+    selected_coverage = next(
+        (
+            verdict
+            for candidate, verdict in evaluated
+            if selected is not None and candidate.path == selected.path
+        ),
+        None,
+    )
+    coverage_transcript_probe = (
+        CoverageTranscriptProbe(
+            growing=f_growing,
+            blocks=selected_coverage.blocks,
+            lost=sum(verdict.lost for _, verdict in evaluated),
+        )
+        if selected_coverage is not None
+        else None
+    )
+    observe_coverage(coverage_transcript_probe)
     previous_gap_owners = _validated_gap_owner_transcripts(chs)
     evaluated_paths = {str(candidate.path) for candidate, _ in evaluated}
     incident_open = bool(
