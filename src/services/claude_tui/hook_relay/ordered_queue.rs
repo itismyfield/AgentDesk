@@ -749,7 +749,21 @@ impl Drop for OrderedHookRelayRecoveryOwner {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            let join_started = Instant::now();
+            tracing::info!(
+                thread_finished = thread.is_finished(),
+                "ordered hook relay recovery owner join begin"
+            );
+            match thread.join() {
+                Ok(()) => tracing::info!(
+                    join_latency_ms = join_started.elapsed().as_millis(),
+                    "ordered hook relay recovery owner join end"
+                ),
+                Err(_) => tracing::warn!(
+                    join_latency_ms = join_started.elapsed().as_millis(),
+                    "ordered hook relay recovery owner join end after thread panic"
+                ),
+            }
         }
     }
 }
@@ -766,8 +780,19 @@ pub(crate) fn start_ordered_hook_relay_recovery_owner() -> Option<OrderedHookRel
         .name("hook-relay-recovery".to_string())
         .spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
-                if let Err(error) = scan_ordered_hook_relay_queues_once(&runtime_root) {
-                    tracing::warn!(error, "ordered hook relay recovery scan failed");
+                let scan_started = Instant::now();
+                match scan_ordered_hook_relay_queues_once(&runtime_root) {
+                    Ok(stats) => tracing::debug!(
+                        scan_latency_ms = scan_started.elapsed().as_millis(),
+                        queue_count = stats.queue_count,
+                        active_queue_count = stats.active_queue_count,
+                        "ordered hook relay recovery scan completed"
+                    ),
+                    Err(error) => tracing::warn!(
+                        scan_latency_ms = scan_started.elapsed().as_millis(),
+                        error,
+                        "ordered hook relay recovery scan failed"
+                    ),
                 }
                 let deadline = Instant::now() + RELAY_RECOVERY_SCAN_INTERVAL;
                 while !thread_stop.load(Ordering::Acquire) && Instant::now() < deadline {
@@ -782,7 +807,16 @@ pub(crate) fn start_ordered_hook_relay_recovery_owner() -> Option<OrderedHookRel
     })
 }
 
-fn scan_ordered_hook_relay_queues_once(runtime_root: &Path) -> Result<(), String> {
+#[derive(Debug, Default, PartialEq, Eq)]
+struct OrderedHookRelayScanStats {
+    queue_count: usize,
+    active_queue_count: usize,
+}
+
+fn scan_ordered_hook_relay_queues_once(
+    runtime_root: &Path,
+) -> Result<OrderedHookRelayScanStats, String> {
+    let mut stats = OrderedHookRelayScanStats::default();
     for provider in ["claude", "codex"] {
         let provider_root = runtime_root.join(relay_queue_subdir(provider));
         if std::fs::symlink_metadata(&provider_root)
@@ -810,9 +844,13 @@ fn scan_ordered_hook_relay_queues_once(runtime_root: &Path) -> Result<(), String
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
                 continue;
             }
+            stats.queue_count += 1;
             gc_ordered_hook_relay_queue(&queue_dir);
             let has_work = queue_ingress_paths(&queue_dir).is_ok_and(|paths| !paths.is_empty())
                 || queue_request_paths(&queue_dir).is_ok_and(|paths| !paths.is_empty());
+            if has_work {
+                stats.active_queue_count += 1;
+            }
             if has_work && let Err(error) = start_ordered_hook_relay_worker(&queue_dir) {
                 tracing::warn!(
                     queue_dir = %queue_dir.display(),
@@ -822,7 +860,7 @@ fn scan_ordered_hook_relay_queues_once(runtime_root: &Path) -> Result<(), String
             }
         }
     }
-    Ok(())
+    Ok(stats)
 }
 
 fn gc_ordered_hook_relay_queue(queue_dir: &Path) {
@@ -1255,6 +1293,32 @@ mod tests {
         assert!(
             recursively_contains(&queue_dir, &corrupt_name),
             "quarantine evidence must identify the corrupt request"
+        );
+    }
+
+    #[test]
+    fn recovery_scan_reports_idle_queue_cardinality_with_bounded_latency() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let provider_root = temp_dir.path().join(relay_queue_subdir("claude"));
+        std::fs::create_dir_all(&provider_root).unwrap();
+        for queue_index in 0..1_000 {
+            std::fs::create_dir(provider_root.join(format!("queue-{queue_index:04}"))).unwrap();
+        }
+
+        let started = Instant::now();
+        let stats = scan_ordered_hook_relay_queues_once(temp_dir.path()).unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            stats,
+            OrderedHookRelayScanStats {
+                queue_count: 1_000,
+                active_queue_count: 0,
+            }
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "1,000 idle queue scan exceeded the bounded-time budget: {elapsed:?}"
         );
     }
 
