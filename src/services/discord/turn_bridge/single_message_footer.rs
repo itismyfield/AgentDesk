@@ -779,12 +779,12 @@ mod tests {
         // assistant turn ALONE — no chrome, no merge, no truncation; while a
         // Discord-origin turn (block present) still carries the footer.
         let prose = "#3955 머지 완료 — 다음 작업 대기.";
-        let chrome_block = "Context   📦 526.3k / 1.0M tokens (52%) · auto-compact 60%\n\nTasks\n└ TaskUpdate 4 · 머지 완료\n\nSubagents\n└ general-purpose Investigate #3658 — Agent \"Implement #3886\"";
+        let chrome_block = "📦 526.3k / 1.0M (52%) · auto-compact 60%\n\nTasks\n└ TaskUpdate 4 · 머지 완료\n\nSubagents\n└ general-purpose Investigate #3658 — Agent \"Implement #3886\"";
 
         let discord_origin =
             super::single_message_panel::compose_completion_footer_text(prose, Some(chrome_block));
         assert!(discord_origin.starts_with(prose));
-        assert!(discord_origin.contains("Context   📦"));
+        assert!(discord_origin.contains("📦"));
         assert!(discord_origin.contains("Tasks"));
         assert!(discord_origin.contains("Subagents"));
 

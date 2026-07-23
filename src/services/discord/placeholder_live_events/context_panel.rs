@@ -60,7 +60,7 @@ pub(super) fn render_context_panel_line(
     let used = format_token_count(context.display_used_tokens(provider));
     let window = format_token_count(context.context_window_tokens);
     let mut line = format!(
-        "Context   {icon} {used} / {window} tokens ({usage_percent}%) · auto-compact {}%",
+        "{icon} {used} / {window} ({usage_percent}%) · auto-compact {}%",
         context.compact_percent
     );
     if usage_percent >= 85 {

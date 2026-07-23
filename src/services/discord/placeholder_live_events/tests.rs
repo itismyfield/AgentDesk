@@ -2129,7 +2129,7 @@ fn status_panel_renders_context_usage_severity_levels() {
     assert!(events.set_context_panel_usage(normal_channel_id, None, 740, 0, 0, 1000, 90));
     let normal =
         events.render_status_panel(normal_channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(normal.contains("Context   📦 740 / 1.0k tokens (74%) · auto-compact 90%"));
+    assert!(normal.contains("📦 740 / 1.0k (74%) · auto-compact 90%"));
     assert!(!normal.contains("임박"));
     assert!(!normal.contains("자동 압축 직전"));
 
@@ -2137,16 +2137,13 @@ fn status_panel_renders_context_usage_severity_levels() {
     events.set_context_panel_usage(approaching_channel_id, None, 700, 40, 10, 1000, 90);
     let approaching =
         events.render_status_panel(approaching_channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(approaching.contains("Context   📦 750 / 1.0k tokens (75%) · auto-compact 90% (임박)"));
+    assert!(approaching.contains("📦 750 / 1.0k (75%) · auto-compact 90% (임박)"));
 
     let critical_channel_id = ChannelId::new(184);
     events.set_context_panel_usage(critical_channel_id, None, 700, 100, 50, 1000, 90);
     let critical =
         events.render_status_panel(critical_channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(
-        critical
-            .contains("Context   ⚠️ 850 / 1.0k tokens (85%) · auto-compact 90% — 자동 압축 직전")
-    );
+    assert!(critical.contains("⚠️ 850 / 1.0k (85%) · auto-compact 90% — 자동 압축 직전"));
 }
 
 #[test]
@@ -2157,7 +2154,7 @@ fn status_panel_caps_context_usage_display_at_100_percent() {
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
 
-    assert!(rendered.contains("Context   ⚠️ 4.1k / 1.0k tokens (100%) · auto-compact 60%"));
+    assert!(rendered.contains("⚠️ 4.1k / 1.0k (100%) · auto-compact 60%"));
     assert!(!rendered.contains("(409%)"));
 }
 
@@ -2169,7 +2166,7 @@ fn status_panel_clamps_codex_context_usage_display_to_window() {
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Codex, 1_700_000_000);
 
-    assert!(rendered.contains("Context   ⚠️ 272.0k / 272.0k tokens (100%) · auto-compact 60%"));
+    assert!(rendered.contains("⚠️ 272.0k / 272.0k (100%) · auto-compact 60%"));
     assert!(!rendered.contains("2.3M"));
 }
 
@@ -2182,7 +2179,7 @@ fn completion_footer_context_only_has_no_spinner_and_stops_scheduling() {
     let rendered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
     let block = rendered.block.expect("context line should render");
 
-    assert!(block.contains("Context   📦 154.6k / 1.0M tokens (15%) · auto-compact 60%"));
+    assert!(block.contains("📦 154.6k / 1.0M (15%) · auto-compact 60%"));
     assert!(!block.contains('⠸'));
     assert!(!rendered.has_unfinished_entries);
 }
@@ -2212,6 +2209,43 @@ fn completion_footer_keeps_background_agent_pending_payload_open() {
     assert!(rendered.has_unfinished_entries);
     assert!(block.contains("Background agents"));
     assert!(block.contains("Waiting for background agents ⠸"));
+}
+
+#[test]
+fn completion_footer_prefers_detailed_background_entry_over_generic_waiting_line_4846() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(1902);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({
+                "subagent_type": "reviewer",
+                "description": "Review footer",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_bg_detailed"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result_with_id(Some("Task"), false, Some("toolu_bg_detailed")),
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::TurnCompleted {
+            background: false,
+            background_agent_pending: true,
+        },
+    );
+
+    let rendered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = rendered.block.expect("detailed background entry");
+
+    assert!(rendered.has_unfinished_entries);
+    assert!(block.contains("reviewer Review footer ⠸"));
+    assert!(!block.contains("Waiting for background agents"));
 }
 
 #[test]
@@ -3559,7 +3593,7 @@ fn completion_footer_budget_clamps_task_section_but_keeps_context_line() {
         .map(|(_, task_section)| task_section)
         .expect("context and task sections should be separated");
 
-    assert!(block.contains("Context   📦 154.6k / 1.0M tokens (15%) · auto-compact 60%"));
+    assert!(block.contains("📦 154.6k / 1.0M (15%) · auto-compact 60%"));
     assert!(task_section.len() <= crate::services::discord::single_message_panel::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES);
     assert!(task_section.ends_with('…'));
     assert!(rendered.has_unfinished_entries);

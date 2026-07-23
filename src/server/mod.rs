@@ -1443,45 +1443,90 @@ async fn fetch_claude_oauth_usage(token: &str) -> Result<Vec<serde_json::Value>,
     }
 
     let data: serde_json::Value = resp.json().await?;
+    Ok(parse_claude_oauth_usage_buckets(&data))
+}
+
+fn push_claude_oauth_usage_bucket(
+    buckets: &mut Vec<serde_json::Value>,
+    bucket: &serde_json::Value,
+    label: &str,
+    utilization_field: &str,
+) {
+    let utilization = bucket
+        .get(utilization_field)
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.0);
+    let resets_at = bucket
+        .get("resets_at")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    // Convert utilization (0-100 float) to used/limit format for
+    // consistency, but keep the precise value so the dispatch gate does
+    // not round 99.5% into a false 100% saturation.
+    let limit = 100i64;
+    let used = utilization.floor().clamp(0.0, 100.0) as i64;
+    let reset_ts = chrono::DateTime::parse_from_rfc3339(resets_at)
+        .map(|dt| dt.timestamp())
+        .unwrap_or(0);
+
+    buckets.push(serde_json::json!({
+        "name": label,
+        "limit": limit,
+        "used": used,
+        "remaining": limit - used,
+        "utilization": utilization,
+        "reset": reset_ts,
+    }));
+}
+
+fn parse_claude_oauth_usage_buckets(data: &serde_json::Value) -> Vec<serde_json::Value> {
     let mut buckets = Vec::new();
-
-    for key in &["five_hour", "seven_day", "seven_day_sonnet"] {
+    for (key, label) in [("five_hour", "5h"), ("seven_day", "7d")] {
         if let Some(bucket) = data.get(key) {
-            let utilization = bucket
-                .get("utilization")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
-            let resets_at = bucket
-                .get("resets_at")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let label = match *key {
-                "five_hour" => "5h",
-                "seven_day" => "7d",
-                "seven_day_sonnet" => "7d Sonnet",
-                _ => key,
-            };
-            // Convert utilization (0-100 float) to used/limit format for
-            // consistency, but keep the precise value so the dispatch gate does
-            // not round 99.5% into a false 100% saturation.
-            let limit = 100i64;
-            let used = utilization.floor().clamp(0.0, 100.0) as i64;
-            let reset_ts = chrono::DateTime::parse_from_rfc3339(resets_at)
-                .map(|dt| dt.timestamp())
-                .unwrap_or(0);
-
-            buckets.push(serde_json::json!({
-                "name": label,
-                "limit": limit,
-                "used": used,
-                "remaining": limit - used,
-                "utilization": utilization,
-                "reset": reset_ts,
-            }));
+            push_claude_oauth_usage_bucket(&mut buckets, bucket, label, "utilization");
         }
     }
+    if let Some(bucket) = data
+        .get("limits")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|limits| {
+            limits.iter().find(|bucket| {
+                bucket.get("kind").and_then(serde_json::Value::as_str) == Some("weekly_scoped")
+                    && bucket
+                        .pointer("/scope/model/display_name")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("Fable")
+            })
+        })
+    {
+        push_claude_oauth_usage_bucket(&mut buckets, bucket, "7d Fable", "percent");
+    }
+    buckets
+}
 
-    Ok(buckets)
+#[cfg(test)]
+mod claude_oauth_usage_tests {
+    use super::parse_claude_oauth_usage_buckets;
+
+    #[test]
+    fn maps_fable_weekly_scoped_limit_without_synthesizing_missing_sonnet() {
+        let data = serde_json::json!({
+            "five_hour": {"utilization": 5.0, "resets_at": "2026-07-24T00:00:00Z"},
+            "seven_day": {"utilization": 58.0, "resets_at": "2026-07-28T00:00:00Z"},
+            "seven_day_sonnet": null,
+            "limits": [{
+                "kind": "weekly_scoped",
+                "percent": 55.0,
+                "resets_at": "2026-07-28T00:00:00Z",
+                "scope": {"model": {"display_name": "Fable"}}
+            }]
+        });
+
+        let buckets = parse_claude_oauth_usage_buckets(&data);
+        assert_eq!(buckets.len(), 3);
+        assert_eq!(buckets[2]["name"], "7d Fable");
+        assert_eq!(buckets[2]["used"], 55);
+    }
 }
 
 /// Fetch Codex usage via chatgpt.com backend API (subscription-based, no API key needed).

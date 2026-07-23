@@ -12,7 +12,7 @@ use super::status_panel::{StatusPanelState, SubagentSlot};
 use super::subagent_panel::render_subagent_slot;
 use super::task_panel::{
     TaskToolSlot, render_task_panel_line, render_task_tool_slot, task_tool_slot_identity,
-    task_tool_slot_is_terminal, task_tool_terminal_marker,
+    task_tool_slot_is_terminal, task_tool_slot_is_unfinished_background, task_tool_terminal_marker,
 };
 
 /// #3391: stable per-slot handle (NOT the rendered line). `ToolUseId`/`TaskId`
@@ -220,7 +220,15 @@ pub(super) fn render_completion_footer(
     let mut emitted: Vec<EmittedLine> = Vec::new();
     let mut has_unfinished_entries = false;
 
-    if snapshot.background_agent_pending {
+    let has_detailed_background_entries = snapshot
+        .tasks
+        .iter()
+        .any(task_tool_slot_is_unfinished_background)
+        || snapshot
+            .subagents
+            .iter()
+            .any(SubagentSlot::is_unfinished_background);
+    if snapshot.background_agent_pending && !has_detailed_background_entries {
         emitted.push(EmittedLine::header("Background agents"));
         emitted.push(EmittedLine {
             text: format!("Waiting for background agents {indicator}"),
@@ -301,7 +309,7 @@ pub(super) fn render_completion_footer(
     }
 
     if !emitted.is_empty() {
-        // #3089 completion footer: keep the Context line outside the S3 budget
+        // #3089 completion footer: keep the context-usage line outside the S3 budget
         // so usage never disappears because a task section is noisy. The same
         // 600-byte cap applies to the combined task/subagent section.
         let section = emitted

@@ -703,7 +703,7 @@ pub(super) fn truncate_status_panel_sections(mut sections: Vec<String>) -> Strin
 }
 
 impl SubagentSlot {
-    fn is_unfinished_background(&self) -> bool {
+    pub(super) fn is_unfinished_background(&self) -> bool {
         self.background && self.finished.is_none()
     }
 

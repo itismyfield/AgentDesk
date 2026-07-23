@@ -46,6 +46,10 @@ pub(crate) fn format_usage_status(
     render_usage_parts(rendered, context)
 }
 
+pub(crate) fn format_quota_status(cache_json: Option<&str>, now_unix: i64) -> Option<String> {
+    format_usage_status(cache_json, now_unix, None)
+}
+
 pub(crate) fn format_usage_status_segments<'a>(
     segments: impl IntoIterator<Item = &'a str>,
     context: Option<ContextWindowUsage>,
@@ -106,7 +110,7 @@ fn render_bucket(bucket: &Value, now_unix: i64) -> Option<RenderedBucket> {
     let (order, name) = match raw_name {
         "5h" => (0, "5h"),
         "7d" => (1, "7d"),
-        "7d Sonnet" | "7d-F" => (2, "7d-F"),
+        "7d Fable" | "7d-F" => (2, "7d-F"),
         _ => return None,
     };
     let used = bucket
@@ -176,7 +180,7 @@ mod tests {
     #[test]
     fn renders_usage_reset_fast_tier_and_context_window_4822() {
         let data = r#"{"buckets":[
-            {"name":"7d Sonnet","used":34,"reset":1800417600},
+            {"name":"7d Fable","used":34,"reset":1800417600},
             {"name":"5h","remaining":97,"reset":1800016740},
             {"name":"7d","utilization":47.8,"reset":1800417600}
         ]}"#;
@@ -192,6 +196,26 @@ mod tests {
             .as_deref(),
             Some("5h: 3% (4h39m) │ 7d: 47% (4d20h) │ 7d-F: 34% (4d20h) │ ctw: 26% (265K/1.0M)")
         );
+    }
+
+    #[test]
+    fn quota_only_formatter_omits_context_window_4846() {
+        let data = r#"{"buckets":[
+            {"name":"7d Fable","used":34,"reset":1800417600},
+            {"name":"5h","used":3,"reset":1800016740},
+            {"name":"7d","used":47,"reset":1800417600}
+        ]}"#;
+
+        assert_eq!(
+            format_quota_status(Some(data), 1_800_000_000).as_deref(),
+            Some("5h: 3% (4h39m) │ 7d: 47% (4d20h) │ 7d-F: 34% (4d20h)")
+        );
+    }
+
+    #[test]
+    fn legacy_sonnet_bucket_is_not_relabeled_as_fable_4846() {
+        let data = r#"{"buckets":[{"name":"7d Sonnet","used":0,"reset":0}]}"#;
+        assert_eq!(format_quota_status(Some(data), 1_800_000_000), None);
     }
 
     #[test]
