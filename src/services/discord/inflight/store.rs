@@ -27,7 +27,7 @@ pub(super) fn inflight_provider_dir(root: &Path, provider: &ProviderKind) -> Pat
     root.join(provider.as_str())
 }
 
-pub(in crate::services::discord::inflight) fn inflight_state_path(
+pub(in crate::services::discord) fn inflight_state_path(
     root: &Path,
     provider: &ProviderKind,
     channel_id: u64,

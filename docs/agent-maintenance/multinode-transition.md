@@ -655,6 +655,18 @@
   fire-and-forget session banner (`session_banner.rs`) is untouched. Delete
   failures fall back to the existing durable status-panel orphan store (also
   worker-local). OFF path is byte-identical.
+- #4488 two-message restart recovery + E2E: the restart inflight scan delegates
+  panel repair to `recovery_engine/two_message_panel.rs` before watcher/bridge
+  reattachment. The helper treats Discord message existence and snowflake order
+  only as repair evidence, then authorizes the replacement exclusively through
+  the existing full `InflightTurnIdentity` CAS and in-lock generation bump. A
+  just-sent panel is pre-registered in the worker-local orphan store, a bind loser
+  deletes or queues only its own duplicate, and an old live panel is retired only
+  after the same episode durably owns the replacement. The #4830 process-local
+  cache invalidation epoch is intentionally not copied across restart or panel
+  identities; the new panel starts uncached, while terminal reconcile remains
+  keyed to the rebound panel generation. No PG lease, leader gate, schema field,
+  or cross-node authority is added. The default-OFF flag remains unchanged.
 - #3038 (b) early TUI completion gate extraction: `turn_bridge/mod.rs` moved the
   #2293/#2780 early TUI quiescence gate (the eligibility filter + bounded
   `run_tui_completion_gate` probe + timed-out warning that compute

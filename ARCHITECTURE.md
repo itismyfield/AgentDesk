@@ -644,7 +644,9 @@ src/
 │   │   │   ├── status_panel.rs
 │   │   │   ├── status_panel_completion_producer.rs
 │   │   │   ├── terminal_text_idempotency.rs
-│   │   │   └── terminal_watcher.rs
+│   │   │   ├── terminal_watcher.rs
+│   │   │   ├── tmux_probe.rs
+│   │   │   └── two_message_panel.rs
 │   │   ├── recovery_paths/
 │   │   │   ├── controller_cutover.rs
 │   │   │   ├── mod.rs

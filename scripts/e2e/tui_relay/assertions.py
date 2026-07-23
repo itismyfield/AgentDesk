@@ -444,6 +444,54 @@ def chrome_count(
         )
 
 
+def status_panel_after_body(
+    window: Window,
+    *,
+    body_marker: str,
+    panel_regex: str = r"Processing\.\.\.|진행 중|응답 완료|^🟢|^✅|^🔴|^📦",
+) -> None:
+    body_messages = [
+        message
+        for message in _raw_assertion_messages(window)
+        if body_marker in (message.get("content") or "")
+    ]
+    if not body_messages:
+        raise AssertionError(f"body marker {body_marker!r} not found in raw window")
+    newest_body = max(body_messages, key=_message_order_key)
+    panel_messages = [
+        message
+        for message in _raw_assertion_messages(window)
+        if re.search(panel_regex, message.get("content") or "")
+    ]
+    if not panel_messages:
+        raise AssertionError(
+            f"status panel matching {panel_regex!r} not found after body {body_marker!r}"
+        )
+    newest_panel = max(panel_messages, key=_message_order_key)
+    if _message_order_key(newest_panel) <= _message_order_key(newest_body):
+        raise AssertionError(
+            "status panel was not anchored below the newest answer body: "
+            f"panel={newest_panel.get('id')} body={newest_body.get('id')}"
+        )
+
+
+def single_status_panel(
+    window: Window,
+    *,
+    panel_regex: str = r"Processing\.\.\.|진행 중|응답 완료|^🟢|^✅|^🔴|^📦",
+) -> None:
+    panels = [
+        message
+        for message in _raw_assertion_messages(window)
+        if re.search(panel_regex, message.get("content") or "")
+    ]
+    if len(panels) != 1:
+        raise AssertionError(
+            f"expected exactly one status panel matching {panel_regex!r}, got "
+            f"{len(panels)}: {[(m.get('id'), (m.get('content') or '')[:80]) for m in panels]}"
+        )
+
+
 def completion_chrome_after_body(
     window: Window, *, body_marker: str, required: bool = False
 ) -> None:
