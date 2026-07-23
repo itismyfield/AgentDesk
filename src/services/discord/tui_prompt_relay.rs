@@ -44,7 +44,7 @@ use self::observed_prompt_decision::{
 mod idle_transcript_scan;
 use self::idle_transcript_scan::{
     ClaudeIdleTranscriptScan, CodexIdleRolloutScan, claude_idle_compaction_reanchor,
-    claude_idle_prompt_observation_should_tail_response,
+    claude_idle_prompt_observation_should_tail_response, claude_idle_safe_reanchor_offset,
     codex_idle_prompt_observation_should_tail_response,
     scan_claude_idle_transcript_for_last_prompt, scan_claude_idle_transcript_for_prompt,
     scan_codex_idle_rollout_for_latest_prompt_matching, scan_codex_idle_rollout_for_prompt,

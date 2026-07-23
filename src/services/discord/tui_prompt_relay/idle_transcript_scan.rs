@@ -7,6 +7,8 @@
 //! sibling module; the scan-result enums and the helpers are re-imported by the
 //! parent so the stateful idle-relay call sites stay byte-identical.
 
+use std::io::Read;
+
 use super::*;
 
 pub(super) fn codex_idle_prompt_observation_should_tail_response(
@@ -72,24 +74,70 @@ pub(super) enum ClaudeIdleTranscriptScan {
 pub(super) fn claude_idle_compaction_reanchor(
     path_changed: bool,
     binding_offset: u64,
-    current_eof: u64,
+    reanchor_offset: u64,
     durable_frontier_exceeds_eof: bool,
 ) -> Option<ClaudeIdleTranscriptScan> {
     // A real Claude session rotation changes the UUID/path and is handled by the
-    // bounded newest-prompt lookback. On an unchanged path, cursor beyond EOF is
-    // direct shrink evidence. After restart, rehydration pins that cursor exactly
-    // at the compacted EOF, so the same-generation durable regression corroborates
-    // that equality case. Requiring equality is important: the durable frontier
-    // remains above EOF until later growth catches up, and must not swallow a new
-    // append whose EOF has advanced beyond the rehydrated cursor.
-    let cursor_regressed = binding_offset > current_eof;
+    // bounded newest-prompt lookback. On an unchanged path, cursor beyond the safe
+    // completed-line boundary is direct shrink evidence. After restart, rehydration
+    // pins the cursor at the physical EOF; durable regression corroborates that
+    // equality case even when a partial line makes the safe boundary smaller.
+    let cursor_regressed = binding_offset > reanchor_offset;
     let restart_rehydrated_regression =
-        binding_offset == current_eof && durable_frontier_exceeds_eof;
+        binding_offset == reanchor_offset && durable_frontier_exceeds_eof;
     (!path_changed && (cursor_regressed || restart_rehydrated_regression)).then_some(
         ClaudeIdleTranscriptScan::CompactionReanchor {
-            offset: current_eof,
+            offset: reanchor_offset,
         },
     )
+}
+
+pub(super) fn claude_idle_safe_reanchor_offset(
+    transcript_path: &Path,
+    current_eof: u64,
+) -> Result<u64, String> {
+    if current_eof == 0 {
+        return Ok(0);
+    }
+    let mut file = std::fs::File::open(transcript_path).map_err(|error| {
+        format!(
+            "open Claude transcript {} for reanchor: {error}",
+            transcript_path.display()
+        )
+    })?;
+    const BACKWARD_CHUNK_BYTES: u64 = 8 * 1024;
+    let mut search_end = current_eof;
+    let mut chunk = Vec::new();
+    while search_end > 0 {
+        let search_start = search_end.saturating_sub(BACKWARD_CHUNK_BYTES);
+        let chunk_len = usize::try_from(search_end - search_start).map_err(|error| {
+            format!(
+                "size Claude transcript {} reanchor chunk: {error}",
+                transcript_path.display()
+            )
+        })?;
+        chunk.resize(chunk_len, 0);
+        file.seek(SeekFrom::Start(search_start)).map_err(|error| {
+            format!(
+                "seek Claude transcript {} for reanchor: {error}",
+                transcript_path.display()
+            )
+        })?;
+        file.read_exact(&mut chunk).map_err(|error| {
+            format!(
+                "read Claude transcript {} reanchor chunk: {error}",
+                transcript_path.display()
+            )
+        })?;
+        if chunk.last() == Some(&b'\n') {
+            return Ok(current_eof);
+        }
+        if let Some(index) = chunk.iter().rposition(|byte| *byte == b'\n') {
+            return Ok(search_start + index as u64 + 1);
+        }
+        search_end = search_start;
+    }
+    Ok(0)
 }
 
 pub(super) fn scan_claude_idle_transcript_for_prompt(

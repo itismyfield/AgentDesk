@@ -4077,6 +4077,48 @@ fn claude_idle_transcript_scan_reanchors_after_restart_rehydrates_cursor_at_eof(
 }
 
 #[test]
+fn claude_idle_transcript_scan_replays_full_prompt_after_mid_line_shrink() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let transcript = dir.path().join("transcript.jsonl");
+    let compact = "{\"type\":\"system\",\"subtype\":\"compact\",\"sessionId\":\"s1\"}\n";
+    let prompt = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"prompt crossing reanchor\"}]},\"sessionId\":\"s1\"}\n";
+    let split = prompt.len() / 2;
+    std::fs::write(&transcript, format!("{compact}{}", &prompt[..split]))
+        .expect("write compacted transcript with partial prompt");
+    let mid_line_eof = std::fs::metadata(&transcript).unwrap().len();
+    let safe_offset = claude_idle_safe_reanchor_offset(&transcript, mid_line_eof)
+        .expect("resolve safe reanchor boundary");
+    assert_eq!(
+        safe_offset,
+        compact.len() as u64,
+        "partial JSONL must re-read from its own line start"
+    );
+    let anchored = match claude_idle_compaction_reanchor(false, 99_999, safe_offset, true) {
+        Some(ClaudeIdleTranscriptScan::CompactionReanchor { offset }) => offset,
+        other => panic!("expected compaction anchor, got {other:?}"),
+    };
+
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .expect("open partial transcript")
+        .write_all(prompt[split..].as_bytes())
+        .expect("finish prompt line");
+
+    assert_eq!(
+        scan_claude_idle_transcript_for_prompt(&transcript, anchored)
+            .expect("scan completed prompt from safe boundary"),
+        ClaudeIdleTranscriptScan::Prompt {
+            prompt: "prompt crossing reanchor".to_string(),
+            prompt_start_offset: compact.len() as u64,
+            line_end_offset: (compact.len() + prompt.len()) as u64,
+            entry_id: None,
+        }
+    );
+}
+
+#[test]
 fn claude_idle_transcript_scan_relays_prompt_appended_after_compaction_anchor() {
     let dir = tempfile::tempdir().expect("temp dir");
     let transcript = dir.path().join("transcript.jsonl");

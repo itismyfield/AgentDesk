@@ -853,6 +853,51 @@ pub(in crate::services::discord) fn delivered_frontier_exceeds_current_eof(
     )
 }
 
+fn reanchor_current_generation_frontier_at(
+    path: &Path,
+    current_gen_mtime: i64,
+    reanchor_offset: u64,
+) -> Result<bool, String> {
+    let _lock = lock_record_path(path)?;
+    let Some(mut record) = read_record_at(path) else {
+        return Ok(false);
+    };
+    let Some(frontier) = record.delivered_frontier.as_mut() else {
+        return Ok(false);
+    };
+    if !durable_frontier_generation_current(frontier.generation_mtime_ns, current_gen_mtime)
+        || frontier.range.1 <= reanchor_offset
+    {
+        return Ok(false);
+    }
+    frontier.range.1 = reanchor_offset;
+    if frontier.range.0 > reanchor_offset {
+        frontier.range.0 = reanchor_offset;
+    }
+    write_record_at(path, &record)?;
+    Ok(true)
+}
+
+/// #4841: converge a stale same-generation durable frontier after an in-place
+/// `/compact`. This is a correction of already-confirmed coordinate space, not a
+/// new delivery: it preserves the record's generation/attempt/anchor identity and
+/// only lowers the END after the caller proved the current transcript boundary.
+pub(in crate::services::discord) fn reanchor_current_generation_frontier(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    tmux_session_name: &str,
+    reanchor_offset: u64,
+) -> Result<bool, String> {
+    let Some(path) = delivery_record_path(provider, channel.get()) else {
+        return Ok(false);
+    };
+    reanchor_current_generation_frontier_at(
+        &path,
+        current_generation_mtime_ns(tmux_session_name),
+        reanchor_offset,
+    )
+}
+
 /// #3089 B2b: the effective "already-committed" offset the dedup/skip gates read.
 /// Flag OFF (default) → the legacy in-memory `committed_relay_offset` verbatim
 /// (no record read → deploy no-op). Flag ON → `max(delivered_frontier.end,
@@ -2271,6 +2316,60 @@ mod tests {
         assert!(current_generation_frontier_exceeds_eof_at(&path, 700, 250));
         assert!(!current_generation_frontier_exceeds_eof_at(&path, 701, 250));
         assert!(!current_generation_frontier_exceeds_eof_at(&path, 700, 900));
+    }
+
+    #[test]
+    fn same_generation_frontier_reanchor_converges_once_4841() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 4841);
+        write_delivered_frontier_at(
+            &path,
+            DeliveredCommit {
+                range: (80, 900),
+                generation_mtime_ns: 700,
+                attempts: 3,
+                panel_msg_id: Some(42),
+                panel_channel_id: Some(84),
+            },
+        )
+        .unwrap();
+
+        assert!(reanchor_current_generation_frontier_at(&path, 700, 250).unwrap());
+        let rewritten = read_record_at(&path).unwrap().delivered_frontier.unwrap();
+        assert_eq!(rewritten.range, (80, 250));
+        assert_eq!(rewritten.generation_mtime_ns, 700);
+        assert_eq!(rewritten.attempts, 3);
+        assert_eq!(rewritten.panel_msg_id, Some(42));
+        assert_eq!(rewritten.panel_channel_id, Some(84));
+        assert!(!current_generation_frontier_exceeds_eof_at(&path, 700, 250));
+        assert!(!reanchor_current_generation_frontier_at(&path, 700, 250).unwrap());
+    }
+
+    #[test]
+    fn frontier_reanchor_rejects_stale_generation_4841() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 48_412);
+        write_delivered_frontier_at(
+            &path,
+            DeliveredCommit {
+                range: (0, 900),
+                generation_mtime_ns: 700,
+                attempts: 1,
+                panel_msg_id: None,
+                panel_channel_id: None,
+            },
+        )
+        .unwrap();
+
+        assert!(!reanchor_current_generation_frontier_at(&path, 701, 250).unwrap());
+        assert_eq!(
+            read_record_at(&path)
+                .unwrap()
+                .delivered_frontier
+                .unwrap()
+                .range,
+            (0, 900)
+        );
     }
 
     /// I3 conservatism: an absent or malformed record yields no durable floor
