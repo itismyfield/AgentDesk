@@ -757,6 +757,7 @@ src/
 │   │   │   ├── completion_gate_tests.rs
 │   │   │   ├── completion_producer.rs
 │   │   │   ├── controller_heartbeat.rs
+│   │   │   ├── discrete_trigger_marker.rs
 │   │   │   ├── entry.rs
 │   │   │   ├── jsonl_rotation.rs
 │   │   │   ├── liveness.rs

@@ -105,7 +105,6 @@ pub(super) async fn resolve_gate(
             );
             return None;
         }
-        enqueue_footer_only_background_marker(shared, channel_id, event);
         clear_observed_external_turn_lease_if_current(prompt, channel_id, lease);
         return None;
     }
@@ -188,25 +187,6 @@ pub(super) async fn resolve_gate(
         notify_http: http,
         card_anchor: Some(MessageId::new(outcome.message_id)),
     })
-}
-
-/// Persist one discrete lifecycle marker for a footer-owned background
-/// completion. The event scope is the outbox idempotency key, so duplicate
-/// transcript observations coalesce without restoring the suppressed card body.
-fn enqueue_footer_only_background_marker(
-    shared: &Arc<SharedData>,
-    channel_id: ChannelId,
-    event: &super::super::task_notification_delivery::TaskCardEvent,
-) {
-    let target = format!("channel:{}", channel_id.get());
-    let session_key = format!("footer_background:{}", event.event_key());
-    let _ = crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
-        shared.pg_pool.as_ref(),
-        target.as_str(),
-        Some(session_key.as_str()),
-        "lifecycle.background_task_complete",
-        "⚙️ Background complete",
-    );
 }
 
 async fn legacy_notify_gate(

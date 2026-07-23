@@ -671,10 +671,11 @@ pub(super) fn suppressed_task_notification_marker(
     tmux_session_name: &str,
     data_start_offset: u64,
     kind: TaskNotificationKind,
+    footer_only_event_key: Option<&str>,
     event_count: usize,
     monitor_entry_keys: &[String],
-) -> (String, &'static str, String) {
-    match kind {
+) -> Option<(String, &'static str, String)> {
+    Some(match kind {
         TaskNotificationKind::MonitorAutoTurn => {
             let session_key = monitor_auto_turn_session_key(channel_id, data_start_offset);
             let label = monitor_auto_turn_label(tmux_session_name);
@@ -686,23 +687,17 @@ pub(super) fn suppressed_task_notification_marker(
         }
         TaskNotificationKind::Background => (
             format!(
-                "background_task_notification:ch:{}:off:{}",
+                "footer_background:ch:{}:{}",
                 channel_id.get(),
-                data_start_offset
+                footer_only_event_key?
             ),
             "lifecycle.background_task_complete",
             "⚙️ Background complete".to_string(),
         ),
-        TaskNotificationKind::Subagent => (
-            format!(
-                "subagent_notification:ch:{}:off:{}",
-                channel_id.get(),
-                data_start_offset
-            ),
-            "lifecycle.agent_message_arrived",
-            "🤖 Agent message arrived".to_string(),
-        ),
-    }
+        // Subagent completions are durable-card owned, so a suppressed watcher
+        // terminal must not add a duplicate discrete marker.
+        TaskNotificationKind::Subagent => return None,
+    })
 }
 
 pub(super) fn enqueue_suppressed_task_notification(
@@ -711,18 +706,22 @@ pub(super) fn enqueue_suppressed_task_notification(
     tmux_session_name: &str,
     data_start_offset: u64,
     kind: TaskNotificationKind,
+    footer_only_event_key: Option<&str>,
     event_count: usize,
     monitor_entry_keys: &[String],
 ) -> bool {
     let target = format!("channel:{}", channel_id.get());
-    let (session_key, reason_code, content) = suppressed_task_notification_marker(
+    let Some((session_key, reason_code, content)) = suppressed_task_notification_marker(
         channel_id,
         tmux_session_name,
         data_start_offset,
         kind,
+        footer_only_event_key,
         event_count,
         monitor_entry_keys,
-    );
+    ) else {
+        return false;
+    };
     enqueue_lifecycle_notification_best_effort(
         pg_pool,
         target.as_str(),
@@ -1541,34 +1540,46 @@ mod suppressed_task_notification_marker_tests {
     use poise::serenity_prelude::ChannelId;
 
     #[test]
-    fn background_and_subagent_markers_are_discrete_and_offset_deduped() {
+    fn background_marker_uses_event_identity_and_subagent_marker_is_skipped() {
         let channel_id = ChannelId::new(4_799);
         let (background_key, background_reason, background) = suppressed_task_notification_marker(
             channel_id,
             "AgentDesk-claude-4799",
             44,
             TaskNotificationKind::Background,
+            Some("event-identity"),
             1,
             &[],
-        );
-        assert_eq!(
-            background_key,
-            "background_task_notification:ch:4799:off:44"
-        );
+        )
+        .expect("footer-owned background completion gets a marker");
+        assert_eq!(background_key, "footer_background:ch:4799:event-identity");
         assert_eq!(background_reason, "lifecycle.background_task_complete");
         assert_eq!(background, "⚙️ Background complete");
 
-        let (subagent_key, subagent_reason, subagent) = suppressed_task_notification_marker(
+        let replay_at_new_offset = suppressed_task_notification_marker(
             channel_id,
             "AgentDesk-claude-4799",
-            45,
-            TaskNotificationKind::Subagent,
+            99,
+            TaskNotificationKind::Background,
+            Some("event-identity"),
             1,
             &[],
+        )
+        .expect("same footer event remains marker eligible");
+        assert_eq!(replay_at_new_offset.0, background_key);
+        assert!(
+            suppressed_task_notification_marker(
+                channel_id,
+                "AgentDesk-claude-4799",
+                45,
+                TaskNotificationKind::Subagent,
+                Some("subagent-event"),
+                1,
+                &[],
+            )
+            .is_none(),
+            "card-owned subagent completion must not duplicate its durable card"
         );
-        assert_eq!(subagent_key, "subagent_notification:ch:4799:off:45");
-        assert_eq!(subagent_reason, "lifecycle.agent_message_arrived");
-        assert_eq!(subagent, "🤖 Agent message arrived");
     }
 }
 

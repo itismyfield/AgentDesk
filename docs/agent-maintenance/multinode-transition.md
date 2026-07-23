@@ -446,6 +446,7 @@
   before merging.
 
 ### Audited touches
+- #4799 discrete machine-trigger markers: the watcher converts only footer-owned background terminal notifications into an idempotent lifecycle outbox marker keyed by channel plus semantic event identity; card-owned subagent notifications remain card-only, and monitor notices retain their existing offset-scoped aggregation. This adds no lease, owner, schema, or cross-node routing authority.
 - #4779 target preflight: added a pure fail-closed readiness report and transfer guard over worker-node capability evidence; owner mutation remains delegated to the generation-fenced handoff interface.
 
 - #4800 PostgreSQL pool-starvation fix: the existing `policy-tick` and
