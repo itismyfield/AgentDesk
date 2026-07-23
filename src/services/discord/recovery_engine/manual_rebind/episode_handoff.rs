@@ -68,7 +68,7 @@ pub(super) async fn commit_episode_side_effects(
             category_name: None,
             last_active: tokio::time::Instant::now(),
             worktree: None,
-            born_generation: super::runtime_store::load_generation(),
+            born_generation: super::runtime_store::process_generation(),
         });
     session.channel_id = Some(channel_id);
     session.last_active = tokio::time::Instant::now();

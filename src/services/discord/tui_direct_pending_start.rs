@@ -76,6 +76,10 @@ pub(super) const PENDING_START_CLAIM_RETRY_BACKOFF: Duration = Duration::from_mi
 /// that still looks FOREIGN-live but has stopped advancing.
 pub(super) const STALE_FOREIGN_INFLIGHT_MIN_AGE_SECS: i64 = 120;
 
+/// A committed row must remain byte-for-byte frozen for this long after crossing
+/// a process generation before pane readiness can replace missing terminal JSONL.
+pub(super) const RESTART_ORPHAN_COMMITTED_GRACE_SECS: i64 = 10 * 60;
+
 /// Lifecycle state of a durable pending-start record. Kept tiny and
 /// string-serialized so a forward/backward dcserver swap reads it tolerantly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -715,6 +719,69 @@ fn committed_foreign_inflight_is_finalize_clearable(
         && state.terminal_delivery_committed
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RestartOrphanEvidence {
+    generation_crossed: bool,
+    committed_frozen_past_grace: bool,
+    pane_ready_for_input: bool,
+}
+
+impl RestartOrphanEvidence {
+    fn permits_finalize_clear(self) -> bool {
+        self.generation_crossed && self.committed_frozen_past_grace && self.pane_ready_for_input
+    }
+}
+
+fn inflight_generation_precedes_current(
+    state: &super::inflight::InflightTurnState,
+    current_generation: u64,
+) -> bool {
+    state.born_generation != 0 && state.born_generation != current_generation
+        || state
+            .restart_generation
+            .is_some_and(|generation| generation != current_generation)
+}
+
+fn restart_orphan_evidence_at(
+    state: &super::inflight::InflightTurnState,
+    current_generation: u64,
+    now_unix_secs: i64,
+    pane_ready_for_input: bool,
+) -> RestartOrphanEvidence {
+    let committed_frozen_past_grace = super::inflight::parse_updated_at_unix(&state.updated_at)
+        .is_some_and(|updated_at| {
+            now_unix_secs.saturating_sub(updated_at) >= RESTART_ORPHAN_COMMITTED_GRACE_SECS
+        });
+    RestartOrphanEvidence {
+        generation_crossed: inflight_generation_precedes_current(state, current_generation),
+        committed_frozen_past_grace,
+        pane_ready_for_input,
+    }
+}
+
+fn restart_orphan_pane_ready_for_input(
+    provider: &crate::services::provider::ProviderKind,
+    state: &super::inflight::InflightTurnState,
+    tmux_session_name: &str,
+) -> bool {
+    let output_path = state
+        .output_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(std::path::Path::new);
+    matches!(
+        crate::services::tmux_turn_liveness::independent_tmux_readiness(
+            tmux_session_name,
+            provider,
+            state.runtime_kind,
+            output_path,
+            Some(state.last_offset),
+        ),
+        crate::services::tmux_turn_liveness::IndependentTmuxReadiness::ReadyForInput
+    )
+}
+
 async fn submit_stale_foreign_inflight_cancel(
     shared: &Arc<SharedData>,
     provider: &crate::services::provider::ProviderKind,
@@ -806,6 +873,7 @@ async fn submit_committed_foreign_inflight_complete(
     provider: &crate::services::provider::ProviderKind,
     channel_id: poise::serenity_prelude::ChannelId,
     probe: &super::destructive_cancel_gate::DestructiveCancelProbeSnapshot,
+    restart_orphan_evidence: bool,
 ) -> bool {
     let finalizer_turn_id = probe.pin.finalizer_turn_id;
     if finalizer_turn_id == 0 {
@@ -824,8 +892,10 @@ async fn submit_committed_foreign_inflight_complete(
         .await
         .active_user_message_id
         .map(|id| id.get());
+    let terminal_envelope_present =
+        super::destructive_cancel_gate::terminal_envelope_present(provider, probe);
     if !current.terminal_delivery_committed
-        || !super::destructive_cancel_gate::terminal_envelope_present(provider, probe)
+        || (!terminal_envelope_present && !restart_orphan_evidence)
         || !probe.pin.matches_state(&current)
         || mailbox_active_user_msg_id != probe.pin.mailbox_active_user_msg_id
         || current.updated_at != probe.updated_at
@@ -851,6 +921,26 @@ async fn submit_committed_foreign_inflight_complete(
     }
 
     let committed_identity = super::inflight::InflightTurnIdentity::from_state(&current);
+    if restart_orphan_evidence {
+        let archive_outcome =
+            super::inflight::archive_inflight_state_if_matches_identity_generation(
+                provider,
+                channel_id.get(),
+                &committed_identity,
+                &probe.updated_at,
+                probe.save_generation,
+                "stuck-restart-orphan",
+            );
+        if archive_outcome != super::inflight::GuardedClearOutcome::Cleared {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id = channel_id.get(),
+                ?archive_outcome,
+                "tui_direct_pending_start: restart-orphan archive failed; preserving committed FOREIGN inflight"
+            );
+            return false;
+        }
+    }
     let outcome = shared
         .turn_finalizer
         .submit_terminal(
@@ -878,7 +968,8 @@ async fn submit_committed_foreign_inflight_complete(
         finalizer_turn_id,
         finalize_outcome = ?std::mem::discriminant(&outcome),
         gone_or_changed,
-        "tui_direct_pending_start: committed FOREIGN inflight cleared via finalizer Complete under terminal-envelope gate"
+        restart_orphan_evidence,
+        "tui_direct_pending_start: committed FOREIGN inflight cleared via finalizer Complete under terminal or restart-orphan evidence"
     );
     gone_or_changed
 }
@@ -907,7 +998,17 @@ pub(in crate::services::discord) async fn demote_stale_foreign_inflight_if_curre
             channel,
         );
         let relay_frontier = probe.relay_frontier;
-        if !super::destructive_cancel_gate::terminal_envelope_present(&provider, &probe) {
+        let terminal_envelope_present =
+            super::destructive_cancel_gate::terminal_envelope_present(&provider, &probe);
+        let pane_ready_for_input = !terminal_envelope_present
+            && restart_orphan_pane_ready_for_input(&provider, &state, &record.tmux_session_name);
+        let restart_evidence = restart_orphan_evidence_at(
+            &state,
+            shared.restart.current_generation,
+            chrono::Utc::now().timestamp(),
+            pane_ready_for_input,
+        );
+        if !terminal_envelope_present && !restart_evidence.permits_finalize_clear() {
             tracing::warn!(
                 provider = %record.provider,
                 channel_id = record.channel_id,
@@ -918,12 +1019,21 @@ pub(in crate::services::discord) async fn demote_stale_foreign_inflight_if_curre
                 committed_updated_at = %state.updated_at,
                 relay_frontier = ?relay_frontier,
                 capture_offset = ?capture_offset,
-                "tui_direct_pending_start: skipped committed FOREIGN finalize-clear; terminal envelope evidence missing"
+                generation_crossed = restart_evidence.generation_crossed,
+                committed_frozen_past_grace = restart_evidence.committed_frozen_past_grace,
+                pane_ready_for_input = restart_evidence.pane_ready_for_input,
+                "tui_direct_pending_start: skipped committed FOREIGN finalize-clear; terminal envelope and restart-orphan evidence missing"
             );
             return false;
         }
-        let cleared =
-            submit_committed_foreign_inflight_complete(shared, &provider, channel, &probe).await;
+        let cleared = submit_committed_foreign_inflight_complete(
+            shared,
+            &provider,
+            channel,
+            &probe,
+            !terminal_envelope_present,
+        )
+        .await;
         if cleared {
             tracing::warn!(
                 provider = %record.provider,
@@ -935,7 +1045,8 @@ pub(in crate::services::discord) async fn demote_stale_foreign_inflight_if_curre
                 committed_updated_at = %state.updated_at,
                 relay_frontier = ?relay_frontier,
                 capture_offset = ?capture_offset,
-                "tui_direct_pending_start: cleared committed FOREIGN inflight with terminal envelope via finalizer Complete; re-evaluating before claiming (#4035)"
+                restart_orphan_evidence = !terminal_envelope_present,
+                "tui_direct_pending_start: cleared committed FOREIGN inflight via finalizer Complete; re-evaluating before claiming (#4805)"
             );
         }
         return cleared;
@@ -1854,6 +1965,178 @@ mod tests {
         state.last_offset = std::fs::metadata(output_path)
             .expect("ready output metadata")
             .len();
+    }
+
+    fn restart_orphan_state(
+        current_generation: u64,
+        committed_age_secs: i64,
+    ) -> super::super::inflight::InflightTurnState {
+        let mut state = super::super::inflight::InflightTurnState::new(
+            crate::services::provider::ProviderKind::Claude,
+            4_805_001,
+            None,
+            1,
+            4_805_101,
+            4_805_102,
+            "committed restart orphan".to_string(),
+            None,
+            Some("tmux-4805".to_string()),
+            None,
+            None,
+            0,
+        );
+        state.terminal_delivery_committed = true;
+        state.born_generation = current_generation.saturating_sub(1);
+        state.updated_at = local_timestamp_age_secs(committed_age_secs);
+        state
+    }
+
+    #[test]
+    fn restart_orphan_requires_generation_boundary() {
+        let current_generation = 17;
+        let mut state =
+            restart_orphan_state(current_generation, RESTART_ORPHAN_COMMITTED_GRACE_SECS + 1);
+        state.born_generation = current_generation;
+        let evidence = restart_orphan_evidence_at(
+            &state,
+            current_generation,
+            chrono::Utc::now().timestamp(),
+            true,
+        );
+        assert!(!evidence.permits_finalize_clear());
+        assert!(!evidence.generation_crossed);
+    }
+
+    #[test]
+    fn restart_orphan_requires_frozen_committed_grace() {
+        let current_generation = 17;
+        let state =
+            restart_orphan_state(current_generation, RESTART_ORPHAN_COMMITTED_GRACE_SECS - 1);
+        let evidence = restart_orphan_evidence_at(
+            &state,
+            current_generation,
+            chrono::Utc::now().timestamp(),
+            true,
+        );
+        assert!(!evidence.permits_finalize_clear());
+        assert!(!evidence.committed_frozen_past_grace);
+    }
+
+    #[test]
+    fn restart_orphan_requires_ready_for_input() {
+        let current_generation = 17;
+        let state =
+            restart_orphan_state(current_generation, RESTART_ORPHAN_COMMITTED_GRACE_SECS + 1);
+        let evidence = restart_orphan_evidence_at(
+            &state,
+            current_generation,
+            chrono::Utc::now().timestamp(),
+            false,
+        );
+        assert!(!evidence.permits_finalize_clear());
+        assert!(!evidence.pane_ready_for_input);
+    }
+
+    #[test]
+    fn restart_orphan_all_evidence_permits_finalize_clear() {
+        let current_generation = 17;
+        let state =
+            restart_orphan_state(current_generation, RESTART_ORPHAN_COMMITTED_GRACE_SECS + 1);
+        let evidence = restart_orphan_evidence_at(
+            &state,
+            current_generation,
+            chrono::Utc::now().timestamp(),
+            true,
+        );
+        assert!(evidence.permits_finalize_clear());
+    }
+
+    #[test]
+    fn restart_request_window_sidecar_keeps_old_process_epoch() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+
+        let old_process_generation = super::super::runtime_store::allocate_process_generation();
+        assert_eq!(old_process_generation, 1);
+        super::super::runtime_store::set_process_generation_for_tests(Some(old_process_generation));
+        let previewed_replacement_generation =
+            super::super::runtime_store::next_process_generation();
+        assert_eq!(previewed_replacement_generation, 2);
+        assert_eq!(
+            super::super::runtime_store::process_generation(),
+            old_process_generation,
+            "restart request preview must not advance the durable counter during quiesce"
+        );
+
+        let state = super::super::inflight::InflightTurnState::new(
+            crate::services::provider::ProviderKind::Claude,
+            4_805_003,
+            None,
+            1,
+            4_805_103,
+            4_805_104,
+            "born while restart request is quiescing".to_string(),
+            None,
+            Some("tmux-4805-request-window".to_string()),
+            None,
+            None,
+            0,
+        );
+        assert_eq!(state.born_generation, old_process_generation);
+        assert!(inflight_generation_precedes_current(
+            &state,
+            previewed_replacement_generation
+        ));
+        super::super::runtime_store::set_process_generation_for_tests(None);
+    }
+
+    #[test]
+    fn restart_orphan_archive_moves_sidecar_under_archive_root() {
+        let _guard = worker_test_lock();
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+        let provider = crate::services::provider::ProviderKind::Claude;
+        let mut state = restart_orphan_state(17, RESTART_ORPHAN_COMMITTED_GRACE_SECS + 1);
+        state.channel_id = 4_805_002;
+        state.save_generation = 41;
+        write_inflight_fixture(root.path(), &provider, &state);
+        let current = super::super::inflight::load_inflight_state(&provider, state.channel_id)
+            .expect("fixture inflight");
+        let identity = super::super::inflight::InflightTurnIdentity::from_state(&current);
+
+        assert_eq!(
+            super::super::inflight::archive_inflight_state_if_matches_identity_generation(
+                &provider,
+                current.channel_id,
+                &identity,
+                &current.updated_at,
+                current.save_generation,
+                "stuck-restart-orphan",
+            ),
+            super::super::inflight::GuardedClearOutcome::Cleared
+        );
+        assert!(
+            super::super::inflight::load_inflight_state(&provider, current.channel_id).is_none()
+        );
+        let archive = root.path().join("runtime/discord_inflight/archive");
+        let archived_names: Vec<_> = std::fs::read_dir(archive)
+            .expect("archive dir")
+            .map(|entry| entry.expect("archive entry").file_name())
+            .collect();
+        assert_eq!(archived_names.len(), 1);
+        assert!(
+            archived_names[0]
+                .to_string_lossy()
+                .starts_with("4805002.json.stuck-restart-orphan-")
+        );
     }
 
     #[test]

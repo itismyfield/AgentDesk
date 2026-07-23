@@ -534,6 +534,9 @@ async fn live_long_chunk_delivery_fingerprint_uses_raw_body_4081() {
             _intervention: &'a crate::services::discord::Intervention,
             _origin: &'a str,
             _include_history: bool,
+            _dispatch_lease: Option<
+                std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>,
+            >,
         ) -> GatewayFuture<'a, Result<(), String>> {
             panic!("long-chunk pin must not dispatch queued turns")
         }

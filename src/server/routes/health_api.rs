@@ -301,12 +301,12 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         json["startup_degraded_reasons"] =
             startup_doctor_count_reasons(doctor_failed, doctor_warned);
 
-        // #2049 Finding 3: now that every worsen check has run, lift status
-        // only for the legacy empty-registry standby case. A registered standby
-        // worker keeps its provider classification; restart safety reads the
-        // explicit counters/mailboxes even when status remains degraded.
-        if cluster_standby_without_gateway && degraded_reasons.is_empty() {
-            status = health::HealthStatus::Healthy;
+        // A standby without a gateway is operationally degraded even when its
+        // HTTP server and worker heartbeat remain live. Keep this explicit so
+        // health checks cannot report a relay-dead node as healthy.
+        if cluster_standby_without_gateway {
+            status = status.worsen(health::HealthStatus::Degraded);
+            degraded_reasons.push(serde_json::json!("gateway_standby"));
         }
 
         let snapshot_fully_recovered = json["fully_recovered"].as_bool().unwrap_or(false);
@@ -2625,11 +2625,15 @@ mod tests {
             "dashboard": true,
             "server_up": true,
             "intake_routing": {
+                "enabled": true,
                 "mode": "observe",
                 "source": "yaml",
+                "owner_authority_allowlist_size": 2,
+                "recent_decision_count": 17,
                 "yaml": {
                     "enabled": true,
                     "mode": "observe",
+                    "owner_authority_allowlist_size": 2,
                     "forward_pre_claim_timeout_secs": 12,
                     "stale_claim_recovery_secs": 60
                 },
@@ -2638,8 +2642,14 @@ mod tests {
                 "configuration_warnings": []
             }
         }));
+        assert_eq!(public["intake_routing"]["enabled"], json!(true));
         assert_eq!(public["intake_routing"]["mode"], json!("observe"));
         assert_eq!(public["intake_routing"]["source"], json!("yaml"));
+        assert_eq!(
+            public["intake_routing"]["owner_authority_allowlist_size"],
+            json!(2)
+        );
+        assert_eq!(public["intake_routing"]["recent_decision_count"], json!(17));
         assert_eq!(public["intake_routing"]["warning_count"], json!(0));
         assert_eq!(public["ok"], json!(true));
     }

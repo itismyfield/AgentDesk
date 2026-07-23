@@ -5,6 +5,9 @@ const DISCORD_GATEWAY_LOCK_PREFIX: u64 = 0x0443_0000_0000_0000;
 /// How often a yielding node re-checks whether the preferred gateway node has
 /// taken the lease, and how often the preferred node retries acquiring it.
 const GATEWAY_PREFERENCE_POLL_INTERVAL: Duration = Duration::from_secs(5);
+use super::gateway_lease_recovery::{
+    gateway_lease_application_name, reap_orphaned_gateway_lease_once,
+};
 
 /// #4351: resolved view of `cluster.gateway_preferred_instance_id` for this node.
 struct GatewayPreference {
@@ -215,7 +218,12 @@ async fn acquire_as_preferred_gateway(
 
     let mut attempts: u64 = 0;
     loop {
-        match try_acquire_discord_gateway_lease(pool, token_hash, provider).await {
+        let acquired = if attempts == 0 {
+            try_acquire_with_startup_orphan_reap(pool, token_hash, provider).await
+        } else {
+            try_acquire_discord_gateway_lease(pool, token_hash, provider).await
+        };
+        match acquired {
             // Keep the waiter signal registered: we now hold the gateway, and a
             // peer that sees it will not try to take it from us anyway.
             Ok(Some(lease)) => return Ok(Some(lease)),
@@ -268,17 +276,35 @@ fn discord_gateway_lock_id(token_hash: &str) -> i64 {
     (DISCORD_GATEWAY_LOCK_PREFIX | suffix) as i64
 }
 
-async fn try_acquire_discord_gateway_lease(
+pub(super) async fn try_acquire_discord_gateway_lease(
     pool: &sqlx::PgPool,
     token_hash: &str,
     provider: &ProviderKind,
 ) -> Result<Option<crate::db::postgres::AdvisoryLockLease>, String> {
-    crate::db::postgres::AdvisoryLockLease::try_acquire(
+    crate::db::postgres::AdvisoryLockLease::try_acquire_named(
         pool,
         discord_gateway_lock_id(token_hash),
         format!("discord gateway {}", provider.as_str()),
+        gateway_lease_application_name(provider),
     )
     .await
+}
+
+async fn try_acquire_with_startup_orphan_reap(
+    pool: &sqlx::PgPool,
+    token_hash: &str,
+    provider: &ProviderKind,
+) -> Result<Option<crate::db::postgres::AdvisoryLockLease>, String> {
+    let first = try_acquire_discord_gateway_lease(pool, token_hash, provider).await?;
+    if first.is_some() {
+        return Ok(first);
+    }
+    if reap_orphaned_gateway_lease_once(pool, discord_gateway_lock_id(token_hash), provider).await?
+    {
+        try_acquire_discord_gateway_lease(pool, token_hash, provider).await
+    } else {
+        Ok(None)
+    }
 }
 
 /// Outcome of the gateway singleton-lease acquisition phase.
@@ -328,9 +354,9 @@ pub(super) async fn run_bot_acquire_gateway_lease(
                 }
                 Some(pref) => {
                     yield_to_preferred_gateway(pool, pref, provider, shared).await;
-                    try_acquire_discord_gateway_lease(pool, token_hash, provider).await
+                    try_acquire_with_startup_orphan_reap(pool, token_hash, provider).await
                 }
-                None => try_acquire_discord_gateway_lease(pool, token_hash, provider).await,
+                None => try_acquire_with_startup_orphan_reap(pool, token_hash, provider).await,
             };
             match acquired {
                 Ok(Some(lease)) => {

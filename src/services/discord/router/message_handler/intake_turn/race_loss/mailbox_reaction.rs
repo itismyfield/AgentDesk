@@ -18,7 +18,7 @@ pub(super) async fn clear_rejected_attempt_pending(
     .await;
 }
 
-pub(in crate::services::discord::router::message_handler::intake_turn) async fn note_busy_tui_pre_submit_queue_pending(
+pub(in crate::services::discord::router::message_handler) async fn note_busy_tui_pre_submit_queue_pending(
     shared: &Arc<SharedData>,
     http: &Arc<serenity::http::Http>,
     channel_id: ChannelId,

@@ -43,6 +43,7 @@ use std::future::Future;
 use std::sync::Arc;
 use url::Url;
 mod attachments;
+mod busy_retry;
 mod control;
 mod goal_lifecycle;
 mod headless_turn;

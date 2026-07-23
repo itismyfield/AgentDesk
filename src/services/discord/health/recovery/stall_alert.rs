@@ -449,7 +449,7 @@ mod tests {
                             category_name: None,
                             last_active: tokio::time::Instant::now(),
                             worktree: None,
-                            born_generation: discord::runtime_store::load_generation(),
+                            born_generation: discord::runtime_store::process_generation(),
                         },
                     );
                 }

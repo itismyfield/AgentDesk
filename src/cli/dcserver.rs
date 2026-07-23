@@ -609,9 +609,10 @@ pub fn handle_restart_dcserver(
         );
     }
 
-    // Increment generation counter — every restart request gets a unique generation,
-    // even for same-version deployments (e.g. code-only changes without version bump).
-    let new_generation = services::discord::runtime_store::increment_generation();
+    // Preview the epoch the replacement process will allocate at boot. The old
+    // process keeps its immutable epoch throughout the quiesce window so turns
+    // born after this request remain distinguishable from the replacement.
+    let new_generation = services::discord::runtime_store::next_process_generation();
 
     // Show version transition if available
     if let Some(root) = agentdesk_runtime_root() {
@@ -659,33 +660,40 @@ pub fn handle_restart_dcserver(
     // turns survive and are rehydrated by the new process.
     const DEFERRED_TIMEOUT: Duration = Duration::from_secs(30);
     if let Some(root) = agentdesk_runtime_root() {
-        let marker = root.join("restart_pending");
-        if let Err(e) = fs::write(&marker, VERSION) {
-            eprintln!(
-                "   ⚠ Failed to write restart marker {}: {e} — falling back to force-kill",
-                marker.display()
-            );
-            kill_existing_dcserver_processes();
-            return;
-        }
+        let marker = match super::dcserver_restart_marker::create_quick_restart_marker(
+            &root, VERSION,
+        ) {
+            Ok(marker) => marker,
+            Err(super::dcserver_restart_marker::RestartMarkerCreateError::AlreadyOwned(owner)) => {
+                eprintln!(
+                    "   ⚠ restart already owned ({owner}); preserving the existing restart and refusing force-kill"
+                );
+                return;
+            }
+            Err(e) => {
+                eprintln!(
+                    "   ⚠ Failed to write restart marker {}: {e} — falling back to force-kill",
+                    root.join("restart_pending").display()
+                );
+                kill_existing_dcserver_processes();
+                return;
+            }
+        };
         println!(
             "   ⏳ Restart requested — waiting for dcserver quick-exit (max {}s)",
             DEFERRED_TIMEOUT.as_secs()
         );
 
         let start = Instant::now();
-        loop {
-            // If marker file is gone, dcserver consumed it and exited
-            if !marker.exists() {
+        let ownership = loop {
+            if !marker.path().exists() {
                 println!("   ✓ dcserver acknowledged restart marker");
-                break;
+                return;
             }
-            // Check if dcserver process is still running
             let pid_file = root.join("runtime").join("dcserver.pid");
             if let Ok(pid_str) = fs::read_to_string(&pid_file)
                 && let Ok(pid) = pid_str.trim().parse::<u32>()
             {
-                // Check if process still exists
                 let process_alive = {
                     #[cfg(unix)]
                     {
@@ -706,20 +714,39 @@ pub fn handle_restart_dcserver(
                 };
                 if !process_alive {
                     println!("   ✓ dcserver process exited gracefully");
-                    let _ = fs::remove_file(&marker);
-                    break;
+                    return;
                 }
             }
             if start.elapsed() >= DEFERRED_TIMEOUT {
-                eprintln!("   ⚠ Deferred restart timeout — falling back to force kill");
-                let _ = fs::remove_file(&marker);
-                break;
+                break match marker.resolve_ownership(kill_existing_dcserver_processes) {
+                    Ok(ownership) => ownership,
+                    Err(error) => {
+                        eprintln!(
+                            "   ⚠ Failed to resolve restart marker ownership: {error}; refusing force-kill"
+                        );
+                        return;
+                    }
+                };
             }
             std::thread::sleep(Duration::from_millis(500));
+        };
+
+        match ownership {
+            super::dcserver_restart_marker::MarkerOwnership::RemovedOwned => {
+                eprintln!("   ⚠ Deferred restart timeout — force-kill fallback completed");
+            }
+            super::dcserver_restart_marker::MarkerOwnership::MissingCommitted => {
+                println!("   ✓ dcserver acknowledged restart marker");
+            }
+            super::dcserver_restart_marker::MarkerOwnership::Replaced(owner) => {
+                eprintln!(
+                    "   ⚠ restart already owned ({owner}); preserving the replacement and refusing force-kill"
+                );
+            }
         }
+        return;
     }
 
-    // Kill remaining dcserver processes (either timeout fallback or normal cleanup)
     kill_existing_dcserver_processes();
 
     let launchd_label = current_dcserver_launchd_label();
@@ -1535,7 +1562,9 @@ pub fn handle_dcserver(token: Option<String>) {
                     eprintln!(
                         "  ▸ Cluster standby : Discord gateway lease unavailable; keeping HTTP and worker heartbeat online"
                     );
-                    std::future::pending::<()>().await;
+                    loop {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                    }
                 }
             }
             None => {
@@ -1638,7 +1667,9 @@ pub fn handle_dcserver(token: Option<String>) {
                     eprintln!(
                         "  ▸ Cluster standby : Discord gateway leases unavailable; keeping HTTP and worker heartbeat online"
                     );
-                    std::future::pending::<()>().await;
+                    loop {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                    }
                 }
             }
         }

@@ -254,6 +254,68 @@ fn cancellation_before_durable_commit_rolls_back_but_after_commit_stays_committe
     assert!(shared.restart.shutting_down.load(Ordering::Acquire));
 }
 
+#[test]
+fn superseded_owner_releases_slot_but_preserves_fence_for_next_nonce() {
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    shared.restart.shutdown_remaining.store(2, Ordering::SeqCst);
+    let permit = begin_deferred_restart(&shared).expect("A owns provider bookkeeping");
+    assert!(!finish_deferred_restart(&shared, permit));
+    assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 1);
+
+    handoff_superseded_restart(&shared);
+
+    assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 2);
+    assert!(!shared.restart.shutdown_counted.load(Ordering::Acquire));
+    assert!(
+        !shared
+            .restart
+            .shutdown_slot_consumed
+            .load(Ordering::Acquire)
+    );
+    assert!(shared.restart.intake_worker_lifecycle.admission_is_fenced());
+    assert!(shared.restart.shutting_down.load(Ordering::Acquire));
+    shared
+        .restart
+        .restart_pending
+        .store(true, Ordering::Release);
+    assert!(shared.restart.restart_pending.load(Ordering::Acquire));
+    assert!(
+        begin_deferred_restart(&shared).is_some(),
+        "B must be able to acquire provider bookkeeping after A supersedes"
+    );
+}
+
+#[test]
+fn stale_nonce_cannot_commit_persistence_or_remove_newer_marker() {
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let root = tempfile::tempdir().expect("runtime root");
+    std::fs::write(
+        root.path().join("restart_pending"),
+        "nonce=deploy-b\nsource=deploy\n",
+    )
+    .expect("new owner marker");
+    let guard = DeferredRestartCancellationGuard::new(
+        shared,
+        root.path().to_path_buf(),
+        "promotion-a".to_string(),
+    );
+
+    assert!(
+        !commit_deferred_restart_sentinel(
+            root.path(),
+            &ProviderKind::Codex,
+            "promotion-a",
+            &guard,
+        )
+        .expect("stale commit check")
+    );
+    assert!(!root.path().join("restart_persisted").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("restart_pending")).expect("new marker survives"),
+        "nonce=deploy-b\nsource=deploy\n"
+    );
+}
+
 #[tokio::test]
 async fn cancellation_restores_admission_health_and_consumed_barrier_slot() {
     let shared = crate::services::discord::make_shared_data_for_tests();

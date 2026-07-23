@@ -2,6 +2,9 @@ use super::*;
 
 mod framework_setup;
 mod gateway_lease;
+mod gateway_lease_recovery;
+#[cfg(test)]
+mod gateway_lease_recovery_tests;
 mod gateway_runtime;
 mod intake;
 mod orphan_recovery;
@@ -18,6 +21,9 @@ mod voice;
 use self::framework_setup::{run_bot_build_slash_commands, run_bot_framework_setup};
 use self::gateway_lease::{
     GatewayLeaseOutcome, run_bot_acquire_gateway_lease, run_bot_spawn_gateway_lease_keepalive,
+};
+use self::gateway_lease_recovery::{
+    record_restart_artifact_boot_instant, spawn_standby_gateway_retry,
 };
 use self::gateway_runtime::run_bot_start_gateway_runtime;
 use self::intake::run_bot_maybe_spawn_intake_worker;
@@ -241,6 +247,12 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         return;
     }
 
+    // Record the process lifetime boundary before any deferred-restart poller
+    // or standby lease-retry task can inspect persisted/cancelled evidence. The
+    // files remain owned by the external persistence barrier and are never
+    // deleted by the respawned binary.
+    record_restart_artifact_boot_instant();
+
     let gateway_lease = match gateway_outcome {
         GatewayLeaseOutcome::Proceed(lease) => lease,
         GatewayLeaseOutcome::Standby => {
@@ -256,6 +268,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             // marker fence and acknowledgement path as a gateway runtime.
             spawns::run_bot_spawn_deferred_restart_poller(&shared, &provider);
             run_bot_maybe_spawn_intake_worker(&shared, token, &provider);
+            spawn_standby_gateway_retry(shared.clone(), token_hash.clone(), provider.clone()).await;
             // Keep this provider's shutdown-barrier slot: the marker poller
             // consumes it exactly once after fencing and persisting state.
             return;

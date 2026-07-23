@@ -152,15 +152,27 @@ impl TurnGateway for TuiDirectBridgeGateway {
         intervention: &'a Intervention,
         _request_owner_name: &'a str,
         has_more_queued_turns: bool,
+        dispatch_lease: Option<std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>>,
     ) -> GatewayFuture<'a, Result<(), String>> {
         Box::pin(async move {
-            mailbox_requeue_intervention_front(
+            let restored = super::super::mailbox_restore_dequeued_head(
                 &self.shared,
                 &self.provider,
                 channel_id,
                 intervention.clone(),
+                dispatch_lease
+                    .ok_or_else(|| "queued bridge dispatch is missing its lease".to_string())?,
             )
             .await;
+            if !restored.enqueued {
+                return Err(format!(
+                    "queued bridge restore rejected: {}",
+                    restored
+                        .refusal_reason
+                        .map(|reason| reason.as_str())
+                        .unwrap_or("persistence_error")
+                ));
+            }
             schedule_deferred_idle_queue_kickoff(
                 self.shared.clone(),
                 self.provider.clone(),

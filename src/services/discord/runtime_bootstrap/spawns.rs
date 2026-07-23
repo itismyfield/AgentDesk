@@ -1,8 +1,8 @@
 use super::*;
 
-struct DeferredRestartPermit;
+pub(super) struct DeferredRestartPermit;
 
-fn restart_request_matches(root: &std::path::Path, name: &str, nonce: &str) -> bool {
+pub(super) fn restart_request_matches(root: &std::path::Path, name: &str, nonce: &str) -> bool {
     std::fs::read_to_string(root.join(name))
         .ok()
         .and_then(|request| {
@@ -58,7 +58,7 @@ impl Drop for DeferredRestartCancellationGuard {
 /// Publish the admission fence before health can acknowledge the marker. The
 /// per-provider CAS gives exactly one poller permission to wait, persist, and
 /// consume that provider's shutdown-barrier slot.
-fn begin_deferred_restart(shared: &SharedData) -> Option<DeferredRestartPermit> {
+pub(super) fn begin_deferred_restart(shared: &SharedData) -> Option<DeferredRestartPermit> {
     shared.restart.intake_worker_lifecycle.fence_admission();
     shared.restart.shutting_down.store(true, Ordering::SeqCst);
     shared
@@ -90,7 +90,7 @@ async fn prepare_deferred_restart(
     Some((permit, guard))
 }
 
-fn finish_deferred_restart(shared: &SharedData, _permit: DeferredRestartPermit) -> bool {
+pub(super) fn finish_deferred_restart(shared: &SharedData, _permit: DeferredRestartPermit) -> bool {
     let is_final = shared
         .restart
         .shutdown_remaining
@@ -107,7 +107,7 @@ fn finish_deferred_restart(shared: &SharedData, _permit: DeferredRestartPermit) 
 /// the closest practical point before the atomic rename. A successful rename
 /// is the point of no return: cancellation observed afterwards is intentionally
 /// ignored so persistence and process exit remain a single durable outcome.
-fn commit_deferred_restart_sentinel(
+pub(super) fn commit_deferred_restart_sentinel(
     root: &std::path::Path,
     provider: &ProviderKind,
     nonce: &str,
@@ -121,21 +121,24 @@ fn commit_deferred_restart_sentinel(
         chrono::Utc::now().to_rfc3339()
     );
     std::fs::write(&ack_tmp, ack_body)?;
-    if guard.cancelled() {
+    if guard.cancelled() || !restart_request_matches(root, "restart_pending", nonce) {
         let _ = std::fs::remove_file(&ack_tmp);
         return Ok(false);
     }
-    std::fs::rename(ack_tmp, ack)?;
+    std::fs::rename(&ack_tmp, &ack)?;
+    // Compare-and-act again after the atomic acknowledgement publish. A newer
+    // request may have replaced the marker between the pre-rename check and the
+    // rename; never let a stale poller claim or remove that newer request.
+    if !restart_request_matches(root, "restart_pending", nonce) {
+        if restart_request_matches(root, "restart_persisted", nonce) {
+            let _ = std::fs::remove_file(&ack);
+        }
+        return Ok(false);
+    }
     Ok(true)
 }
 
-fn rollback_deferred_restart(shared: &SharedData) {
-    shared.restart.intake_worker_lifecycle.unfence_admission();
-    shared.restart.shutting_down.store(false, Ordering::SeqCst);
-    shared
-        .restart
-        .restart_pending
-        .store(false, Ordering::SeqCst);
+fn release_deferred_restart_ownership(shared: &SharedData) {
     shared
         .restart
         .shutdown_counted
@@ -150,6 +153,28 @@ fn rollback_deferred_restart(shared: &SharedData) {
             .shutdown_remaining
             .fetch_add(1, Ordering::AcqRel);
     }
+}
+
+fn rollback_deferred_restart(shared: &SharedData) {
+    shared.restart.intake_worker_lifecycle.unfence_admission();
+    shared.restart.shutting_down.store(false, Ordering::SeqCst);
+    shared
+        .restart
+        .restart_pending
+        .store(false, Ordering::SeqCst);
+    release_deferred_restart_ownership(shared);
+}
+
+/// Release only the stale poller's per-provider barrier ownership. A newer
+/// restart nonce inherits the process-wide admission fence and restart flags;
+/// clearing those here would reopen intake underneath the new owner.
+pub(super) fn handoff_superseded_restart(shared: &SharedData) {
+    release_deferred_restart_ownership(shared);
+}
+
+fn restart_request_is_superseded(root: &std::path::Path, nonce: &str) -> bool {
+    let marker = root.join("restart_pending");
+    marker.exists() && !restart_request_matches(root, "restart_pending", nonce)
 }
 
 /// Background: poll for the deferred restart marker for gateway and standby
@@ -260,7 +285,13 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                             &nonce,
                             &cancellation_guard,
                         ) {
-                            Ok(false) => continue,
+                            Ok(false) => {
+                                if restart_request_is_superseded(&root, &nonce) {
+                                    handoff_superseded_restart(&shared_for_deferred);
+                                    cancellation_guard.disarm();
+                                }
+                                continue;
+                            }
                             Err(error) => {
                                 tracing::error!(
                                     error = %error,
@@ -269,6 +300,16 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                                 continue;
                             }
                             Ok(true) => {}
+                        }
+                        if !restart_request_matches(&root, "restart_pending", &nonce) {
+                            // A newer nonce owns the marker. Preserve its shared
+                            // fence, release A's barrier slot, and keep this poller
+                            // alive so it can service B on the next iteration.
+                            if restart_request_is_superseded(&root, &nonce) {
+                                handoff_superseded_restart(&shared_for_deferred);
+                            }
+                            cancellation_guard.disarm();
+                            continue;
                         }
                         cancellation_guard.disarm();
                         let _ = std::fs::remove_file(&marker);
@@ -284,8 +325,11 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                             break;
                         }
                         if !restart_request_matches(&root, "restart_pending", &nonce) {
+                            if restart_request_is_superseded(&root, &nonce) {
+                                handoff_superseded_restart(&shared_for_deferred);
+                            }
                             cancellation_guard.disarm();
-                            return;
+                            break;
                         }
                     }
                     continue;

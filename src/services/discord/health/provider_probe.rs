@@ -141,6 +141,9 @@ fn classify_provider(
     if role.requires_gateway_connection() && !signals.connected {
         status = status.worsen(HealthStatus::Unhealthy);
         degraded_reasons.push(format!("provider:{provider_name}:disconnected"));
+    } else if role == ProviderRuntimeRole::Standby {
+        status = status.worsen(HealthStatus::Degraded);
+        degraded_reasons.push(format!("provider:{provider_name}:gateway_standby"));
     }
     if signals.restart_pending {
         status = status.worsen(HealthStatus::Unhealthy);
@@ -263,20 +266,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registered_idle_standby_is_healthy_and_http_ready() {
+    async fn registered_idle_standby_is_degraded_but_http_ready() {
         let registry = HealthRegistry::new();
         let shared = crate::services::discord::make_shared_data_for_tests();
         registry.register_standby("codex".to_string(), shared).await;
 
         let snapshot = build_health_snapshot(&registry).await;
 
-        assert_eq!(snapshot.status(), HealthStatus::Healthy);
+        assert_eq!(snapshot.status(), HealthStatus::Degraded);
         assert!(snapshot.status().is_http_ready());
         assert!(registry.all_providers_are_standby().await);
         let json = serde_json::to_value(snapshot).expect("serialize standby health");
         assert_eq!(json["providers"][0]["connected"], false);
         assert_eq!(json["providers"][0]["runtime_state_complete"], true);
-        assert_eq!(json["degraded_reasons"], serde_json::json!([]));
+        assert_eq!(
+            json["degraded_reasons"],
+            serde_json::json!(["provider:codex:gateway_standby"])
+        );
     }
 
     #[tokio::test]
@@ -350,6 +356,7 @@ mod tests {
         assert_eq!(
             result.degraded_reasons,
             [
+                "provider:codex:gateway_standby",
                 "provider:codex:restart_pending",
                 "provider:codex:reconcile_in_progress",
                 "provider:codex:deferred_hooks_backlog:2",

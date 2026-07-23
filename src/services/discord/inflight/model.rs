@@ -947,7 +947,7 @@ impl InflightTurnState {
     ) -> Self {
         let now = now_string();
         let provider_name = provider.as_str().to_string();
-        let born_generation = super::super::runtime_store::load_generation();
+        let born_generation = super::super::runtime_store::process_generation();
         let finalizer_turn_id = if user_msg_id != 0 {
             user_msg_id
         } else {
@@ -1177,7 +1177,7 @@ impl InflightTurnState {
 
     pub fn set_restart_mode(&mut self, restart_mode: InflightRestartMode) {
         self.restart_mode = Some(restart_mode);
-        self.restart_generation = Some(super::super::runtime_store::load_generation());
+        self.restart_generation = Some(super::super::runtime_store::process_generation());
     }
 
     pub fn clear_restart_mode(&mut self) {
