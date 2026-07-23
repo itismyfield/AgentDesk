@@ -533,7 +533,8 @@ src/
 │   │   │   │   └── mod.rs
 │   │   │   ├── save_store/
 │   │   │   │   ├── identity_gate/
-│   │   │   │   │   └── claude_e_stamp.rs
+│   │   │   │   │   ├── claude_e_stamp.rs
+│   │   │   │   │   └── heartbeat.rs
 │   │   │   │   ├── delivery_rewind.rs
 │   │   │   │   ├── identity_gate.rs
 │   │   │   │   ├── post_loop_identity_guard_tests.rs
@@ -850,8 +851,11 @@ src/
 │   │   │   │   │   ├── tui_error_classification.rs
 │   │   │   │   │   └── types.rs
 │   │   │   │   ├── content_arms.rs
+│   │   │   │   ├── expected_identity_tests.rs
 │   │   │   │   ├── message_conversion.rs
 │   │   │   │   └── tool_arms.rs
+│   │   │   ├── stream_tick/
+│   │   │   │   └── guarded_persist.rs
 │   │   │   ├── terminal_outcome_delivery/
 │   │   │   │   ├── empty_response_recovery/
 │   │   │   │   │   ├── guidance.rs

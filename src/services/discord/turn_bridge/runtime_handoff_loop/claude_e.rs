@@ -16,7 +16,7 @@ pub(super) fn stamp_process_evidence(
     last_offset: u64,
     pid: u32,
     state_dirty: bool,
-) -> bool {
+) -> (bool, crate::services::discord::inflight::GuardedSaveOutcome) {
     let expected_identity =
         crate::services::discord::inflight::InflightTurnIdentity::from_state(inflight_state);
     inflight_state.runtime_kind =
@@ -30,7 +30,10 @@ pub(super) fn stamp_process_evidence(
         inflight_state,
         &expected_identity,
     );
-    super::guarded_save::tmux_ready_state_dirty_after_guarded_save(state_dirty, Some(outcome))
+    (
+        super::guarded_save::tmux_ready_state_dirty_after_guarded_save(state_dirty, Some(outcome)),
+        outcome,
+    )
 }
 
 #[cfg(test)]

@@ -78,7 +78,7 @@ from pathlib import Path
 # helper) still (re)write identity-pinned `tmux_session_name`, beyond what the
 # output-restamp variant tolerates, so each needs per-flow session-name-stability
 # verification or an adoption-aware variant before converting.
-BASELINE = 13
+BASELINE = 8
 
 SCAN_ROOT = Path("src") / "services" / "discord"
 
