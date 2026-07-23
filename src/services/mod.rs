@@ -124,6 +124,7 @@ pub mod slo;
 pub(crate) mod stale_turn_reconciler;
 // #3034: 1 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during termination_audit dead-code cleanup.
+pub(crate) mod terminal_status_formatting;
 #[allow(dead_code)]
 pub mod termination_audit;
 pub mod tmux_common;

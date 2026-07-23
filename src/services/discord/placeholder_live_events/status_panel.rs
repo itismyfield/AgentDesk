@@ -617,11 +617,17 @@ pub(super) fn render_status_panel(
     // the request anchor when present, then the start/update TIME fields. Keep the
     // entire header in one section so each field occupies the immediately following
     // physical line and section-wise truncation preserves the header atomically.
-    let mut header_lines = vec![super::freshness::render_activity_line(&header_status)];
-    if let Some(trigger) = turn_trigger_line.filter(|line| !line.trim().is_empty()) {
-        header_lines.push(trigger);
+    let activity_line = super::freshness::render_activity_line(&header_status);
+    let time_lines = time_line.lines().collect::<Vec<_>>();
+    let mut header_lines = std::iter::once(activity_line.as_str())
+        .chain(time_lines)
+        .collect::<Vec<_>>();
+    let trigger = turn_trigger_line.filter(|line| !line.trim().is_empty());
+    if let Some(trigger) = trigger.as_deref() {
+        header_lines.insert(1, trigger);
     }
-    header_lines.push(time_line);
+    let header_lines =
+        crate::services::terminal_status_formatting::format_subtext_lines(header_lines);
     let mut sections = vec![header_lines.join("\n")];
 
     // #3983 item4: the session line is NO LONGER rendered in the every-tick

@@ -215,12 +215,15 @@ fn merged_footer_header_line(indicator: &str, header_line: &str) -> Option<Strin
     if header.is_empty() {
         None
     } else {
-        Some(format!("{indicator} {header}"))
+        Some(format!("-# {indicator} {header}"))
     }
 }
 
 fn strip_panel_header_status_marker(header_line: &str) -> Option<&str> {
-    let header_line = header_line.trim();
+    let header_line = header_line
+        .trim()
+        .strip_prefix("-# ")
+        .unwrap_or_else(|| header_line.trim());
     if header_line.is_empty() {
         return None;
     }
@@ -875,6 +878,7 @@ fn legacy_merged_status_prefix(status: &str) -> bool {
 fn strip_footer_braille_spinner_prefix(line: &str) -> Option<&str> {
     const BRAILLE_SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+    let line = strip_subtext_prefix(line.trim());
     let mut chars = line.chars();
     let first = chars.next()?;
     if !BRAILLE_SPINNER_FRAMES.contains(&first) || !chars.next().is_some_and(char::is_whitespace) {
@@ -1007,7 +1011,7 @@ mod tests {
         let panel = "🟢 진행 중 — Claude (<t:1700000000:R>)\n\nSubagents\n└ review inspect";
         let block = super::compose_footer_status_block("⠸", panel);
 
-        assert!(block.starts_with("⠸ 진행 중 — Claude (<t:1700000000:R>)"));
+        assert!(block.starts_with("-# ⠸ 진행 중 — Claude (<t:1700000000:R>)"));
         assert!(!footer_header(&block).contains('🟢'));
         assert!(!block.contains("계속 처리 중"));
         assert!(block.contains("\n\nSubagents\n└ review inspect"));
@@ -1030,7 +1034,7 @@ mod tests {
         let panel = "Header\n\nTools\n└ cargo test";
         let block = super::compose_footer_status_block("⠸", panel);
 
-        assert_eq!(block, "⠸ Header\n\nTools\n└ cargo test");
+        assert_eq!(block, "-# ⠸ Header\n\nTools\n└ cargo test");
         assert!(!panel_portion(&block).ends_with("\n…"));
     }
 
@@ -1047,7 +1051,7 @@ mod tests {
             .split_once('\n')
             .expect("over-budget panel should keep merged header and panel body");
 
-        assert_eq!(header, "⠸ 진행 중 — Claude (<t:1700000000:R>)");
+        assert_eq!(header, "-# ⠸ 진행 중 — Claude (<t:1700000000:R>)");
         assert!(panel.len() <= super::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES);
         assert!(panel.ends_with("\n…") || panel == "…");
         assert!(block.len() > super::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES);
@@ -1377,7 +1381,7 @@ mod tests {
                 .expect("body should roll over after reserving the footer");
         let seed = super::super::formatting::build_streaming_placeholder_text("", &status_block);
 
-        assert!(seed.starts_with("⠸ 진행 중 — Claude (<t:1700000000:R>)"));
+        assert!(seed.starts_with("-# ⠸ 진행 중 — Claude (<t:1700000000:R>)"));
         assert!(seed.contains("Tools\n└ cargo test --lib single_message_panel"));
         assert!(!plan.frozen_chunk.contains("진행 중 — Claude"));
         assert!(!plan.frozen_chunk.contains("Tools\n└ cargo test"));
@@ -1500,7 +1504,7 @@ mod tests {
         )
         .expect("streaming footer should be replaced by completion block");
 
-        assert_eq!(finalized, format!("Final answer\n\n{completion}"));
+        assert_eq!(finalized, format!("Final answer\n\n-# {completion}"));
         assert!(!finalized.contains("진행 중 — Claude"));
         assert!(!finalized.contains("Subagents"));
     }
@@ -1606,8 +1610,8 @@ mod tests {
 
         assert_eq!(supersede.message_id, MessageId::new(3_089_121));
         assert!(supersede.remove_after_edit);
-        assert!(supersede.text.starts_with("Old answer\n\nContext   "));
-        assert!(supersede.text.contains("Subagents\n└ "));
+        assert!(supersede.text.starts_with("Old answer\n\n-# Context   "));
+        assert!(supersede.text.contains("-# Subagents\n-# └ "));
         assert!(supersede.text.contains('…'));
         assert!(!supersede.text.contains('⠸'));
         assert!(!supersede.text.contains('⠼'));
@@ -2080,7 +2084,10 @@ mod tests {
 
         assert_eq!(edit.message_id, MessageId::new(3_089_123));
         assert!(edit.remove_after_edit);
-        assert!(edit.text.contains("Tasks\n└ Bash Run background codex …"));
+        assert!(
+            edit.text
+                .contains("-# Tasks\n-# └ Bash Run background codex …")
+        );
         assert!(!edit.text.contains('⠼'));
         assert!(!edit.text.contains('✓'));
         footer_registry::completion_footer_record_edit_result_for_edit(
@@ -2119,7 +2126,7 @@ mod tests {
         .expect("expired unfinished footer should render one freeze edit");
 
         assert!(edit.remove_after_edit);
-        assert!(edit.text.contains("Subagents\n└ "));
+        assert!(edit.text.contains("-# Subagents\n-# └"));
         assert!(edit.text.contains('…'));
         assert!(!edit.text.contains('⠸'));
         assert!(!edit.text.contains('✓'));
@@ -2159,7 +2166,10 @@ mod tests {
         .expect("expired unfinished background Bash footer should render one freeze edit");
 
         assert!(edit.remove_after_edit);
-        assert!(edit.text.contains("Tasks\n└ Bash Run background codex"));
+        assert!(
+            edit.text
+                .contains("-# Tasks\n-# └ Bash Run background codex")
+        );
         assert!(edit.text.contains('…'));
         assert!(!edit.text.contains('⠸'));
         assert!(!edit.text.contains('✓'));
@@ -2199,7 +2209,7 @@ mod tests {
         .expect("non-expired unfinished footer should render an animated edit");
 
         assert!(!edit.remove_after_edit);
-        assert!(edit.text.contains("Subagents\n└ "));
+        assert!(edit.text.contains("-# Subagents\n-# └"));
         assert!(edit.text.contains('⠸'));
 
         footer_registry::completion_footer_record_edit_result(

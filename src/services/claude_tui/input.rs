@@ -392,6 +392,10 @@ fn prompt_readiness_snapshot_from_capture(
     pane: Option<&str>,
     tmux_pane_alive: bool,
 ) -> PromptReadinessSnapshot {
+    let normalized_pane = pane.map(
+        crate::services::claude_tui::prompt_readiness::normalize_prompt_readiness_panel_in_capture,
+    );
+    let pane = normalized_pane.as_deref();
     let prompt_marker_detected = pane.is_some_and(pane_looks_ready_for_prompt);
     let prompt_draft_detected = pane
         .is_some_and(crate::services::tmux_common::tmux_capture_indicates_claude_tui_prompt_draft);

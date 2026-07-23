@@ -95,6 +95,26 @@ pub(in crate::services::discord) async fn deliver_long_chunks_via_controller<
     outcome
 }
 
+pub(super) fn remember_ordered_long_chunks_footer_target(
+    enabled: bool,
+    target: &mut Option<super::WatcherCompletionFooterTerminalTarget>,
+    tail_message_id: Option<MessageId>,
+    relay_text: &str,
+) {
+    let Some(tail_message_id) = tail_message_id else {
+        return;
+    };
+    let tail = crate::services::discord::formatting::split_message(relay_text)
+        .pop()
+        .unwrap_or_else(|| relay_text.to_string());
+    super::remember_watcher_completion_footer_terminal_target(
+        enabled,
+        target,
+        tail_message_id,
+        &tail,
+    );
+}
+
 pub(in crate::services::discord) struct WatcherLongChunksLocals<'a> {
     pub(in crate::services::discord) relay_ok: &'a mut bool,
     pub(in crate::services::discord) direct_send_delivered: &'a mut bool,
@@ -103,6 +123,9 @@ pub(in crate::services::discord) struct WatcherLongChunksLocals<'a> {
     pub(in crate::services::discord) placeholder_msg_id: &'a mut Option<MessageId>,
     pub(in crate::services::discord) placeholder_from_restored_inflight: &'a mut bool,
     pub(in crate::services::discord) last_edit_text: &'a mut String,
+    pub(in crate::services::discord) single_message_panel_footer_mode: bool,
+    pub(in crate::services::discord) completion_footer_terminal_target:
+        &'a mut Option<super::WatcherCompletionFooterTerminalTarget>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -156,6 +179,7 @@ pub(in crate::services::discord) async fn apply_watcher_long_chunks_controller(
         channel_id,
         tmux_session_name,
         msg_id,
+        relay_text,
         session_bound_fallback_uses_full_body,
         frozen_rollover_msg_ids,
         inflight_before_relay,
@@ -190,6 +214,12 @@ pub(in crate::services::discord) async fn apply_watcher_long_chunks_legacy(
             *locals.external_input_lease_consumed_by_relay =
                 super::watcher_inflight_represents_external_input(inflight_before_relay);
             *watcher_long_chunk_anchor_msg_id = message_ids.last().copied();
+            remember_ordered_long_chunks_footer_target(
+                locals.single_message_panel_footer_mode,
+                locals.completion_footer_terminal_target,
+                *watcher_long_chunk_anchor_msg_id,
+                relay_text,
+            );
             let cleanup = super::delete_terminal_placeholder(
                 http,
                 channel_id,
@@ -246,6 +276,7 @@ pub(in crate::services::discord) async fn apply_watcher_long_chunks_result(
     channel_id: ChannelId,
     tmux_session_name: &str,
     msg_id: MessageId,
+    relay_text: &str,
     session_bound_fallback_uses_full_body: bool,
     frozen_rollover_msg_ids: &mut Vec<MessageId>,
     inflight_before_relay: Option<&crate::services::discord::InflightTurnState>,
@@ -260,6 +291,12 @@ pub(in crate::services::discord) async fn apply_watcher_long_chunks_result(
             *locals.tui_direct_anchor_terminal_body_visible = true;
             *locals.external_input_lease_consumed_by_relay =
                 super::watcher_inflight_represents_external_input(inflight_before_relay);
+            remember_ordered_long_chunks_footer_target(
+                locals.single_message_panel_footer_mode,
+                locals.completion_footer_terminal_target,
+                chunks.tail_message_id,
+                relay_text,
+            );
             let cleanup_outcome = match chunks.anchor_delete_error {
                 Some(error) => {
                     crate::services::discord::placeholder_cleanup::classify_delete_error(&error)

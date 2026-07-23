@@ -1,4 +1,102 @@
+use crate::services::terminal_status_formatting::{
+    ContextWindowUsage, format_usage_status_segments,
+};
 use crate::services::tui_turn_state::TuiTurnState;
+
+pub(crate) fn render_prompt_readiness_panel_line(
+    model_label: &str,
+    progress_bar: &str,
+    usage: Option<String>,
+) -> Option<String> {
+    usage.map(|usage| format!("  {model_label} │ {progress_bar} │ {usage}"))
+}
+
+fn normalize_prompt_readiness_panel_line(line: &str) -> Option<String> {
+    let raw_segments = line.trim().split(" │ ").collect::<Vec<_>>();
+    let segments = raw_segments
+        .iter()
+        .map(|segment| segment.trim())
+        .collect::<Vec<_>>();
+    let model_label = *segments.first()?;
+    let model_name = model_label.strip_prefix("🤖 ")?;
+    if model_name.is_empty() {
+        return None;
+    }
+    let progress_bar = *segments.get(1)?;
+    if progress_bar.is_empty()
+        || !progress_bar
+            .chars()
+            .all(|character| matches!(character, '█' | '░'))
+    {
+        return None;
+    }
+    let context_percent = segments.get(2)?.strip_suffix('%')?.parse::<u64>().ok()?;
+    let tokens = *raw_segments.get(3)?;
+    let (used_lexeme, window_lexeme) = tokens.split_once('/')?;
+    let context = ContextWindowUsage {
+        used_tokens: parse_compact_tokens(used_lexeme)?,
+        window_tokens: parse_compact_tokens(window_lexeme)?,
+    };
+    if context.window_tokens == 0 {
+        return None;
+    }
+    let rendered_percent = ((u128::from(context.used_tokens.min(context.window_tokens)) * 100)
+        / u128::from(context.window_tokens)) as u64;
+    if rendered_percent != context_percent
+        || !segments.iter().skip(4).all(|segment| {
+            ["5h:", "7d:", "7d-F:"]
+                .iter()
+                .any(|prefix| segment.starts_with(prefix))
+        })
+    {
+        return None;
+    }
+
+    let context_usage = format!("ctw: {context_percent}% ({used_lexeme}/{window_lexeme})");
+    let usage = format_usage_status_segments(segments.iter().skip(4).copied(), None)
+        .map(|quota_usage| format!("{quota_usage} │ {context_usage}"))
+        .unwrap_or(context_usage);
+    render_prompt_readiness_panel_line(model_label, progress_bar, Some(usage))
+}
+
+fn parse_compact_tokens(value: &str) -> Option<u64> {
+    const U64_UPPER_EXCLUSIVE: f64 = 18_446_744_073_709_551_616.0;
+
+    let (number, multiplier) = if let Some(value) = value.strip_suffix('K') {
+        (value, 1_000.0)
+    } else if let Some(value) = value.strip_suffix('M') {
+        (value, 1_000_000.0)
+    } else {
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        return value.parse().ok();
+    };
+    let (integer, fraction) = number
+        .split_once('.')
+        .map_or((number, None), |(integer, fraction)| {
+            (integer, Some(fraction))
+        });
+    if integer.is_empty()
+        || !integer.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.is_some_and(|fraction| {
+            fraction.is_empty() || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    {
+        return None;
+    }
+    let number = number.parse::<f64>().ok()?;
+    let scaled = number * multiplier;
+    (number.is_finite() && scaled.is_finite() && scaled < U64_UPPER_EXCLUSIVE)
+        .then_some(scaled as u64)
+}
+
+pub(crate) fn normalize_prompt_readiness_panel_in_capture(pane: &str) -> String {
+    pane.lines()
+        .map(|line| normalize_prompt_readiness_panel_line(line).unwrap_or_else(|| line.to_string()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 /// Return line indexes occupied by authenticated Claude TUI background-agent
 /// chrome. The three shapes deliberately include their TUI-only placement:
@@ -170,6 +268,89 @@ mod tests {
   ◯ implementer    Updating tests                      3m 52s";
 
     #[test]
+    fn production_capture_normalizes_context_panel_through_shared_formatter_4822() {
+        let pane = "answer\n────────────────\n❯\n────────────────\n  🤖 Opus(H) │ ███░░░░░░░ │ 26% │ 265K/1.0M │ 5h: 8% (3h0m) │ 7d: 55% (1d23h)";
+        let normalized = normalize_prompt_readiness_panel_in_capture(pane);
+
+        assert_eq!(
+            normalized,
+            "answer\n────────────────\n❯\n────────────────\n  🤖 Opus(H) │ ███░░░░░░░ │ 5h: 8% (3h0m) │ 7d: 55% (1d23h) │ ctw: 26% (265K/1.0M)"
+        );
+    }
+
+    #[test]
+    fn normalization_preserves_untrusted_lookalikes_and_invalid_context_tokens_4822() {
+        for line in [
+            "text │ text │ 0% │ 0/0",
+            "  🤖 Opus(H) │ ███░░░░░░░ │ 0% │ 0/0",
+            "  🤖 Opus(H) │ ███░░░░░░░ │ 0% │ NaN/1.0M",
+            "  🤖 Opus(H) │ ███░░░░░░░ │ 0% │ inf/1.0M",
+            "  🤖 Opus(H) │ ███░░░░░░░ │ 0% │ -1K/1.0M",
+            "  🤖 Opus(H) │ not-a-bar │ 26% │ 265K/1.0M",
+        ] {
+            assert_eq!(normalize_prompt_readiness_panel_in_capture(line), line);
+        }
+    }
+
+    #[test]
+    fn normalization_preserves_compact_token_lexemes_4822() {
+        for (line, expected) in [
+            (
+                "  🤖 Opus(H) │ ░░░░░░░░░░ │ 4% │ 49K/1.0M",
+                "  🤖 Opus(H) │ ░░░░░░░░░░ │ ctw: 4% (49K/1.0M)",
+            ),
+            (
+                "  🤖 Opus(H) │ ██░░░░░░░░ │ 15% │ 154.6K/1.0M",
+                "  🤖 Opus(H) │ ██░░░░░░░░ │ ctw: 15% (154.6K/1.0M)",
+            ),
+            (
+                "  🤖 Opus(H) │ █░░░░░░░░░ │ 10% │ 1.04M/10.0M",
+                "  🤖 Opus(H) │ █░░░░░░░░░ │ ctw: 10% (1.04M/10.0M)",
+            ),
+            (
+                "  🤖 Opus(H) │ ███░░░░░░░ │ 26% │ 265K/1.0M",
+                "  🤖 Opus(H) │ ███░░░░░░░ │ ctw: 26% (265K/1.0M)",
+            ),
+        ] {
+            assert_eq!(normalize_prompt_readiness_panel_in_capture(line), expected);
+        }
+    }
+
+    #[test]
+    fn normalization_preserves_malformed_compact_token_lexemes_4822() {
+        for line in [
+            "  🤖 Opus(H) │ ██████████ │ 100% │ 1e3K/1.0M",
+            "  🤖 Opus(H) │ ░░░░░░░░░░ │ 0% │ +1K/1.0M",
+            "  🤖 Opus(H) │ ░░░░░░░░░░ │ 0% │ +1/1000000",
+            "  🤖 Opus(H) │ █████░░░░░ │ 49% │ 49K / 1.0M",
+            "  🤖 Opus(H) │ █░░░░░░░░░ │ 15% │ 1..5K/10K",
+        ] {
+            assert_eq!(normalize_prompt_readiness_panel_in_capture(line), line);
+        }
+    }
+
+    #[test]
+    fn normalization_preserves_unknown_status_suffix_4822() {
+        let line = "  🤖 Opus(H) │ ███░░░░░░░ │ 26% │ 265K/1.0M │ MCP: 2";
+        assert_eq!(normalize_prompt_readiness_panel_in_capture(line), line);
+    }
+
+    #[test]
+    fn compact_token_parser_rejects_non_finite_negative_and_overflow_values_4822() {
+        for value in [
+            "NaN",
+            "NaNK",
+            "infM",
+            "-1",
+            "-1K",
+            "18446744073709551616",
+            "18446744073709552K",
+        ] {
+            assert_eq!(parse_compact_tokens(value), None, "accepted {value}");
+        }
+    }
+
+    #[test]
     fn background_agent_chrome_requires_composer_adjacency() {
         assert_eq!(
             claude_tui_background_agent_status_line_indexes(BACKGROUND_WAITING_PANE),
@@ -208,21 +389,24 @@ mod tests {
 
     #[test]
     fn captured_background_agent_frame_with_draft_composer_is_detected() {
-        let pane = "\
-원하는 대로 할게:
-  어느 쪽?
-
-✻ Waiting for 5 background agents to finish
-
-─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-❯ a로 확정짓고 4:22 타임라인 떠서 처리해
-─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  🤖 Opus(H) │ ███░░░░░░░ │ 26% │ 265K/1.0M │ 5h: 8% (3h0m) │ 7d: 55% (1d23h)
-  ⏺ main                                                                                        ↑/↓ to select · Enter to view
-  ◯ general-purpose  Fix #3207 turn-stop + resume                                                    16m 5s · ↓ 159.5k tokens
-  ◯ general-purpose  Implement #3154 A converged design                                             10m 53s · ↓ 110.5k tokens";
+        let usage = format_usage_status_segments(
+            ["5h: 8% (3h0m)", "7d: 55% (1d23h)", "7d-F: 34% (4d20h)"],
+            Some(ContextWindowUsage {
+                used_tokens: 265_000,
+                window_tokens: 1_000_000,
+            }),
+        );
+        let panel_line = render_prompt_readiness_panel_line("🤖 Opus(H)", "███░░░░░░░", usage)
+            .expect("usage panel line");
         assert_eq!(
-            claude_tui_background_agent_status_line_indexes(pane),
+            panel_line,
+            "  🤖 Opus(H) │ ███░░░░░░░ │ 5h: 8% (3h0m) │ 7d: 55% (1d23h) │ 7d-F: 34% (4d20h) │ ctw: 26% (265K/1.0M)"
+        );
+        let pane = format!(
+            "원하는 대로 할게:\n  어느 쪽?\n\n✻ Waiting for 5 background agents to finish\n\n─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ a로 확정짓고 4:22 타임라인 떠서 처리해\n─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n{panel_line}\n  ⏺ main                                                                                        ↑/↓ to select · Enter to view\n  ◯ general-purpose  Fix #3207 turn-stop + resume                                                    16m 5s · ↓ 159.5k tokens\n  ◯ general-purpose  Implement #3154 A converged design                                             10m 53s · ↓ 110.5k tokens"
+        );
+        assert_eq!(
+            claude_tui_background_agent_status_line_indexes(&pane),
             vec![3, 10, 11],
         );
     }

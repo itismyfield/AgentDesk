@@ -225,6 +225,9 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                                 placeholder_from_restored_inflight:
                                     &mut *placeholder_from_restored_inflight,
                                 last_edit_text: &mut *last_edit_text,
+                                single_message_panel_footer_mode,
+                                completion_footer_terminal_target:
+                                    &mut *completion_footer_terminal_target,
                             },
                         )
                         .await;
@@ -253,6 +256,9 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                                 placeholder_from_restored_inflight:
                                     &mut *placeholder_from_restored_inflight,
                                 last_edit_text: &mut *last_edit_text,
+                                single_message_panel_footer_mode,
+                                completion_footer_terminal_target:
+                                    &mut *completion_footer_terminal_target,
                             },
                         )
                         .await;
@@ -372,7 +378,7 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                         }
                         Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
                             edit_error,
-                            ..
+                            replacement_anchor,
                         }) => {
                             direct_send_delivered = true;
                             *tui_direct_anchor_terminal_body_visible = true;
@@ -380,6 +386,19 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                                 watcher_inflight_represents_external_input(
                                     inflight_before_relay.as_ref(),
                                 );
+                            if let Some(replacement_anchor) = replacement_anchor {
+                                let tail = crate::services::discord::formatting::split_message(
+                                    &relay_text,
+                                )
+                                .pop()
+                                .unwrap_or_else(|| relay_text.clone());
+                                remember_watcher_completion_footer_terminal_target(
+                                    single_message_panel_footer_mode,
+                                    &mut *completion_footer_terminal_target,
+                                    replacement_anchor,
+                                    &tail,
+                                );
+                            }
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::info!(
                                 "  [{ts}] 👁 ✓ relayed terminal response (fallback send after edit failure) channel {} msg {} ({} chars, edit_error={edit_error})",
@@ -572,12 +591,25 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                         )
                         .await
                         {
-                            Ok(_) => {
+                            Ok(message_ids) => {
                                 *tui_direct_anchor_or_lease_present_for_lifecycle |=
                                     prompt_anchor.is_some();
                                 external_input_lease_consumed_by_relay =
                                     external_input_lease_before_relay || prompt_anchor.is_some();
                                 direct_send_delivered = true;
+                                if let Some(msg_id) = message_ids.last().copied() {
+                                    let tail = crate::services::discord::formatting::split_message(
+                                        &relay_text,
+                                    )
+                                    .pop()
+                                    .unwrap_or_else(|| relay_text.clone());
+                                    remember_watcher_completion_footer_terminal_target(
+                                        single_message_panel_footer_mode,
+                                        &mut *completion_footer_terminal_target,
+                                        msg_id,
+                                        &tail,
+                                    );
+                                }
                                 *tui_direct_anchor_terminal_body_visible = true;
                                 let ts = chrono::Local::now().format("%H:%M:%S");
                                 tracing::info!(
