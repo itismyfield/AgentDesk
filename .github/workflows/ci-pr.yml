@@ -354,8 +354,15 @@ jobs:
       - name: Policy JS unit tests
         run: npm run test:policies
 
-      - name: just check
-        run: just check
+      # `lint` already runs the exact `fmt-check` + `lint` recipes in parallel
+      # and has its own required mirror. Repeating them through `just check`
+      # added 4-5 minutes to this critical-path job without adding coverage.
+      # Keep the compile check and every non-PG test here; branch protection
+      # still requires both this result and the independent Lint result.
+      - name: cargo check + non-PG tests
+        run: |
+          just cargo-check
+          just test-non-pg
         env:
           # Cold `cargo test --all-targets` on the 16GB ubuntu runner peaks over
           # RAM during codegen+link (SIGTERM/143). Two step-scoped levers keep
@@ -714,7 +721,9 @@ jobs:
   lint:
     name: Lint
     needs: changes
-    if: needs.changes.outputs.rust_or_policy == 'true'
+    # Match check_fast's composite gate so relay-contract-only changes retain
+    # fmt/clippy coverage after duplicate linting was removed from that job.
+    if: needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -767,8 +776,8 @@ jobs:
       - name: Mirror lint result for branch protection
         env:
           CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
-          FILTER_NAME: rust_or_policy
-          FILTER_OUTPUT: ${{ needs.changes.outputs.rust_or_policy }}
+          FILTER_NAME: rust_or_policy_or_relay_contract
+          FILTER_OUTPUT: ${{ needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true' }}
           UPSTREAM_JOB_NAME: lint
           UPSTREAM_RESULT: ${{ needs.lint.result }}
         run: ./scripts/required-check-mirror.sh
