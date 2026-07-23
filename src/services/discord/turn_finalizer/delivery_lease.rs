@@ -149,12 +149,6 @@ mod tests {
         let disambiguated =
             DeliveryLeaseKey::new_for_site(ch, 0, 0, Some("2026-07-03 06:00:00"), Some(10), "test");
 
-        // The dormant finalizer handlers receive keys pre-built by their relay
-        // owner; they never reconstruct an observed range. Preserve the legacy
-        // mixed-partial collapse here so a stale actor commit/release cannot change
-        // identity merely because one old caller happened to retain only one field.
-        // #4277's live watcher/sink fallback applies only when both persisted
-        // disambiguators are absent and both owners share the canonical range start.
         assert_eq!(
             missing_offset, missing_started_at,
             "all residual id-0 keys without full disambiguators collapse to the legacy degenerate identity"
