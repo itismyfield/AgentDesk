@@ -249,8 +249,14 @@ pub(super) fn pinned_delivery_lease_key(
             channel_id, generation, state, "watcher",
         )
     } else {
-        crate::services::discord::DeliveryLeaseKey::new_for_site(
-            channel_id, generation, 0, None, None, "watcher",
+        crate::services::discord::DeliveryLeaseKey::new_for_site_with_fallback_offset(
+            channel_id,
+            generation,
+            0,
+            None,
+            None,
+            Some(current_offset),
+            "watcher",
         )
     }
 }
@@ -328,24 +334,17 @@ pub(super) fn degenerate_duplicate_refuses_delivery(
 pub(super) fn watcher_direct_terminal_response_decision(
     provider: &ProviderKind,
     channel_id: ChannelId,
-    generation: u64,
+    _generation: u64,
     tmux_session_name: &str,
     inflight_before_relay: Option<&crate::services::discord::inflight::InflightTurnState>,
-    current_offset: u64,
+    _current_offset: u64,
     fresh_assistant_text_in_observed_range: bool,
     response: &str,
 ) -> WatcherDirectTerminalResponseDecision {
     if response.trim().is_empty() {
         return WatcherDirectTerminalResponseDecision::Empty;
     }
-    let key = pinned_delivery_lease_key(
-        channel_id,
-        generation,
-        inflight_before_relay,
-        tmux_session_name,
-        current_offset,
-    );
-    let duplicate = key.is_degenerate_legacy()
+    let duplicate = inflight_before_relay.is_none()
         && crate::services::discord::outbound::delivery_record::recent_delivered_content_matches(
             provider,
             channel_id,
@@ -378,7 +377,7 @@ pub(super) fn watcher_direct_terminal_response_decision(
             response_len = response.len(),
             fresh_assistant_text_in_observed_range,
             pending_user_boundary,
-            "watcher: suppressed degenerate-key duplicate terminal response by content fingerprint"
+            "watcher: suppressed inflight-less duplicate terminal response by content fingerprint"
         );
         return WatcherDirectTerminalResponseDecision::RefusedDegenerateDuplicate;
     }

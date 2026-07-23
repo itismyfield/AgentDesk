@@ -259,6 +259,36 @@ fn pinned_delivery_lease_key_id0_without_offset_acquires_and_commits_delivery() 
 }
 
 #[test]
+fn no_inflight_offset_key_still_refuses_append_edit_tail_duplicate_4277() {
+    let temp = tempfile::TempDir::new().expect("temp runtime root");
+    let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
+
+    let provider = ProviderKind::Claude;
+    let session = "AgentDesk-claude-adk-cc-4277";
+    let channel_id = poise::serenity_prelude::ChannelId::new(7_4277);
+    let body = "already edited prose tail";
+    let gen_path = crate::services::tmux_common::session_temp_path(session, "generation");
+    std::fs::create_dir_all(std::path::Path::new(&gen_path).parent().unwrap()).unwrap();
+    std::fs::write(&gen_path, b"1").unwrap();
+    crate::services::discord::outbound::delivery_record::record_delivered_content_fingerprint(
+        &provider, channel_id, session, body,
+    );
+
+    let key = pinned_delivery_lease_key(channel_id, 33, None, session, 2_484_989);
+    assert!(
+        !key.is_degenerate_legacy(),
+        "the observed range must promote the lease out of the channel-only legacy class"
+    );
+    assert_eq!(
+        watcher_direct_terminal_response_decision(
+            &provider, channel_id, 33, session, None, 2_484_989, false, body,
+        ),
+        WatcherDirectTerminalResponseDecision::RefusedDegenerateDuplicate,
+        "promoting the lease identity must not disable the content guard that blocks an append-edit tail reattachment"
+    );
+}
+
+#[test]
 fn degenerate_key_content_guard_requires_no_fresh_output_4081() {
     let temp = tempfile::TempDir::new().expect("temp runtime root");
     let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
