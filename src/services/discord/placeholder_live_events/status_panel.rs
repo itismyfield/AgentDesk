@@ -459,13 +459,13 @@ impl StatusPanelState {
                 tool_use_id,
                 success,
             } => {
-                let slot_matched =
-                    finish_background_task_tool_slot(&mut self.tasks, &tool_use_id, success);
+                finish_background_task_tool_slot(&mut self.tasks, &tool_use_id, success);
                 // A footer-only background completion has no assistant body and
-                // therefore no ordinary TurnCompleted producer. Only a matching
-                // background slot can close its own busy display state; stale or
-                // cross-kind terminal events leave an active machine turn alone.
-                if slot_matched && self.machine_turn_busy_is_background() {
+                // therefore no ordinary TurnCompleted producer. A terminal
+                // background envelope closes its own busy display state even
+                // when no footer slot exists; the origin gate prevents it from
+                // affecting a subagent machine turn.
+                if self.machine_turn_busy_is_background() {
                     self.complete_background_machine_turn();
                 }
             }

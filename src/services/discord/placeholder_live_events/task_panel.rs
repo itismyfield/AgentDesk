@@ -203,19 +203,17 @@ pub(super) fn finish_background_task_tool_slot(
     slots: &mut [TaskToolSlot],
     tool_use_id: &str,
     success: bool,
-) -> bool {
+) {
     let Some(tool_use_id) = clean_task_tool_value(tool_use_id) else {
-        return false;
+        return;
     };
-    let Some(slot) = slots
+    if let Some(slot) = slots
         .iter_mut()
         .rev()
         .find(|slot| slot.background && slot.tool_use_id.as_deref() == Some(&tool_use_id))
-    else {
-        return false;
-    };
-    slot.status = Some(if success { "completed" } else { "failed" }.to_string());
-    true
+    {
+        slot.status = Some(if success { "completed" } else { "failed" }.to_string());
+    }
 }
 
 pub(super) fn render_task_tool_slot(slot: &TaskToolSlot) -> String {

@@ -437,23 +437,49 @@ fn background_task_terminal_event_clears_machine_turn_busy_footer_only() {
 }
 
 #[test]
-fn unmatched_background_task_end_cannot_clear_subagent_machine_turn_busy() {
+fn terminal_background_xml_closes_background_busy_without_matching_slot() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(4_783_003);
+    events.push_status_event(
+        channel_id,
+        StatusEvent::MachineTurnBusy {
+            reason: "background task 완료 알림".to_string(),
+        },
+    );
 
+    let raw_background = "<task-notification>\n\
+        <tool-use-id>unknown-background-id</tool-use-id>\n\
+        <status>completed</status>\n\
+        <summary>Background command \"unknown wait\" completed</summary>\n\
+        </task-notification>";
+    events.bridge_task_notification_xml(channel_id, raw_background);
+
+    assert_eq!(
+        status_for(&events, channel_id),
+        DerivedStatus::Completed {
+            kind: CompletedKind::Background
+        },
+        "id-bearing terminal background XML must not leave busy stuck without a footer slot"
+    );
+}
+
+#[test]
+fn terminal_background_xml_cannot_clear_subagent_machine_turn_busy() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_783_005);
     events.push_status_event(
         channel_id,
         StatusEvent::MachineTurnBusy {
             reason: "subagent 완료 알림".to_string(),
         },
     );
-    events.push_status_event(
-        channel_id,
-        StatusEvent::BackgroundTaskEnd {
-            tool_use_id: "stale-background-id".to_string(),
-            success: true,
-        },
-    );
+
+    let raw_background = "<task-notification>\n\
+        <tool-use-id>unknown-background-id</tool-use-id>\n\
+        <status>completed</status>\n\
+        <summary>Background command \"unknown wait\" completed</summary>\n\
+        </task-notification>";
+    events.bridge_task_notification_xml(channel_id, raw_background);
 
     assert!(matches!(
         status_for(&events, channel_id),
