@@ -387,7 +387,10 @@ pub(super) fn enqueue_ordered_hook_relay_request(
     let queue_dir = relay_queue_dir(provider, session_id)
         .ok_or_else(|| "runtime root is unavailable".to_string())?;
     let producer_lock = queue_dir.join("producer.lock");
-    let _producer_lock = lock_relay_queue_file_with_mode(&producer_lock, true, false)?;
+    let Some(_producer_lock) = lock_relay_queue_file_with_mode(&producer_lock, false, false)?
+    else {
+        return Err("ordered hook relay producer lock was unavailable".to_string());
+    };
     let request_id = uuid::Uuid::new_v4().to_string();
     let published_at = Utc::now();
     let delivery_timeout = response_timeout.unwrap_or(DELIVERY_TTL).min(DELIVERY_TTL);
@@ -1348,7 +1351,7 @@ mod tests {
     }
 
     #[test]
-    fn contended_producer_returns_bounded_and_earlier_ingress_is_not_overtaken() {
+    fn producer_waits_for_retention_lock_and_preserves_event() {
         let temp_dir = tempfile::tempdir().unwrap();
         let _root = crate::config::set_agentdesk_root_for_test(temp_dir.path());
         let (endpoint, requests, receiver) = spawn_test_receiver(2);
@@ -1373,48 +1376,39 @@ mod tests {
             .expect("spawn producer lock holder");
         wait_until(|| ready_path.exists(), "producer lock holder readiness");
 
-        let started = Instant::now();
-        enqueue_ordered_hook_relay_request(
-            &endpoint,
-            "claude",
-            "PostToolUse",
-            session_id,
-            json!({"ordinal": 1}),
-            None,
-        )
-        .expect("contended producer leaves a durable ingress handoff");
-        let elapsed = started.elapsed();
-        let ingress_was_durable = recursively_contains(&queue_dir, ".ingress.json");
+        let endpoint_for_post = endpoint.clone();
+        let post = std::thread::spawn(move || {
+            enqueue_ordered_hook_relay_request(
+                &endpoint_for_post,
+                "claude",
+                "PostToolUse",
+                session_id,
+                json!({"ordinal": 1}),
+                None,
+            )
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !post.is_finished(),
+            "producer must wait while retention owns the exclusive lock"
+        );
+
         std::fs::write(&release_path, b"release").unwrap();
         assert!(holder.wait().unwrap().success());
+        let (published_queue_dir, _) = post
+            .join()
+            .unwrap()
+            .expect("producer publishes after retention releases the lock");
+        assert_eq!(published_queue_dir, queue_dir);
+        assert!(
+            recursively_contains(&queue_dir, ".ingress.json"),
+            "the event must remain durable after lock handoff"
+        );
 
-        enqueue_ordered_hook_relay_request(
-            &endpoint,
-            "claude",
-            "PostToolUse",
-            session_id,
-            json!({"ordinal": 2}),
-            None,
-        )
-        .unwrap();
         start_ordered_hook_relay_worker(&queue_dir).unwrap();
-        let first = requests.recv_timeout(Duration::from_secs(3)).unwrap();
-        let second = requests.recv_timeout(Duration::from_secs(3)).unwrap();
-        assert_eq!(receiver.join().unwrap(), 2);
-
-        assert!(
-            elapsed < Duration::from_millis(750),
-            "producer flock blocked the hook boundary for {elapsed:?}"
-        );
-        assert!(
-            ingress_was_durable,
-            "lock contention must leave durable handoff/failure evidence before returning"
-        );
-        assert_eq!(
-            [first["ordinal"].as_u64(), second["ordinal"].as_u64()],
-            [Some(1), Some(2)],
-            "a fast-path sequence must not overtake an already-published ingress"
-        );
+        let delivered = requests.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(receiver.join().unwrap(), 1);
+        assert_eq!(delivered["ordinal"].as_u64(), Some(1));
     }
 
     #[test]
