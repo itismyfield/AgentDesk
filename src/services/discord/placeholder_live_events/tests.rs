@@ -2249,6 +2249,60 @@ fn completion_footer_prefers_detailed_background_entry_over_generic_waiting_line
 }
 
 #[test]
+fn completion_footer_falls_back_to_generic_waiting_when_details_are_clamped_4846() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(1903);
+    for index in 0..STATUS_PANEL_TASK_LIMIT {
+        events.push_status_event(
+            channel_id,
+            StatusEvent::BackgroundTaskStart {
+                name: "Bash".to_string(),
+                summary: format!("job-{index}-{}", "x".repeat(EVENT_LINE_MAX_CHARS)),
+                tool_use_id: format!("tool-{index}"),
+            },
+        );
+        events.push_status_event(
+            channel_id,
+            StatusEvent::BackgroundTaskEnd {
+                tool_use_id: format!("tool-{index}"),
+                success: true,
+            },
+        );
+    }
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({
+                "subagent_type": "reviewer",
+                "description": "Review footer",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu-bg-clamped"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result_with_id(Some("Task"), false, Some("toolu-bg-clamped")),
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::TurnCompleted {
+            background: false,
+            background_agent_pending: true,
+        },
+    );
+
+    let rendered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = rendered.block.expect("generic pending fallback");
+
+    assert!(rendered.has_unfinished_entries);
+    assert!(block.contains("Waiting for background agents ⠸"));
+    assert!(!block.contains("reviewer Review footer ⠸"));
+}
+
+#[test]
 fn completion_footer_running_background_subagent_animates_until_notification_done() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(191);

@@ -775,8 +775,9 @@ fn completion_footer_starts_after_body(footer: &str, body: &str) -> bool {
 
 fn completion_footer_context_line(line: &str) -> bool {
     let line = strip_subtext_prefix(line).trim_start();
-    (line.starts_with("📦 ") || line.starts_with("⚠️ ") || line.starts_with("⚠ "))
-        && line.contains("auto-compact")
+    line.starts_with("Context   ")
+        || ((line.starts_with("📦 ") || line.starts_with("⚠️ ") || line.starts_with("⚠ "))
+            && line.contains("auto-compact"))
 }
 
 fn completion_footer_section_header(line: &str) -> bool {
@@ -1509,6 +1510,16 @@ mod tests {
         assert_eq!(finalized, format!("Final answer\n\n-# {completion}"));
         assert!(!finalized.contains("진행 중 — Claude"));
         assert!(!finalized.contains("Subagents"));
+    }
+
+    #[test]
+    fn legacy_context_footer_is_stripped_during_format_transition_4846() {
+        let legacy = "Final answer\n\n-# Context   📦 154.6k / 1.0M tokens (15%) · auto-compact 60%\n\n-# Tasks\n-# └ Bash Done ✓";
+
+        assert_eq!(
+            super::strip_streaming_footer(legacy, &ProviderKind::Claude),
+            Some("Final answer".to_string())
+        );
     }
 
     #[test]

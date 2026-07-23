@@ -184,6 +184,7 @@ impl EvictedTerminalCounts {
 struct EmittedLine {
     text: String,
     terminal_id: Option<TerminalSlotId>,
+    unfinished_background: bool,
 }
 
 pub(super) fn render_completion_footer(
@@ -220,23 +221,6 @@ pub(super) fn render_completion_footer(
     let mut emitted: Vec<EmittedLine> = Vec::new();
     let mut has_unfinished_entries = false;
 
-    let has_detailed_background_entries = snapshot
-        .tasks
-        .iter()
-        .any(task_tool_slot_is_unfinished_background)
-        || snapshot
-            .subagents
-            .iter()
-            .any(SubagentSlot::is_unfinished_background);
-    if snapshot.background_agent_pending && !has_detailed_background_entries {
-        emitted.push(EmittedLine::header("Background agents"));
-        emitted.push(EmittedLine {
-            text: format!("Waiting for background agents {indicator}"),
-            terminal_id: None,
-        });
-        has_unfinished_entries = true;
-    }
-
     if !snapshot.tasks.is_empty() {
         if !emitted.is_empty() {
             emitted.push(EmittedLine::blank());
@@ -266,6 +250,7 @@ pub(super) fn render_completion_footer(
             emitted.push(EmittedLine {
                 text: line,
                 terminal_id,
+                unfinished_background: task_tool_slot_is_unfinished_background(slot),
             });
         }
         has_unfinished_entries |= task_unfinished;
@@ -303,9 +288,20 @@ pub(super) fn render_completion_footer(
             emitted.push(EmittedLine {
                 text: line,
                 terminal_id,
+                unfinished_background: slot.is_unfinished_background(),
             });
         }
         has_unfinished_entries |= subagent_unfinished;
+    }
+
+    if emitted.is_empty() && snapshot.background_agent_pending {
+        emitted.push(EmittedLine::header("Background agents"));
+        emitted.push(EmittedLine {
+            text: format!("Waiting for background agents {indicator}"),
+            terminal_id: None,
+            unfinished_background: false,
+        });
+        has_unfinished_entries = true;
     }
 
     if !emitted.is_empty() {
@@ -317,7 +313,20 @@ pub(super) fn render_completion_footer(
             .map(|line| line.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        let (clamped, kept_count) = clamp_completion_task_section(&section);
+        let (mut clamped, kept_count) = clamp_completion_task_section(&section);
+        let visible_detailed_background_entry = emitted
+            .iter()
+            .take(kept_count)
+            .any(|line| line.unfinished_background);
+        if snapshot.background_agent_pending && !visible_detailed_background_entry {
+            let waiting = format!("Background agents\nWaiting for background agents {indicator}");
+            clamped = if clamped.is_empty() {
+                waiting
+            } else {
+                format!("{waiting}\n\n{clamped}")
+            };
+            has_unfinished_entries = true;
+        }
         // #3391: a terminal mark counts as delivered iff its emitted line
         // survived the clamp by POSITION. `kept_count` is the number of leading
         // emitted lines retained (the rest are replaced by the `…` marker), so
@@ -347,6 +356,7 @@ impl EmittedLine {
         Self {
             text: name.to_string(),
             terminal_id: None,
+            unfinished_background: false,
         }
     }
 
@@ -354,6 +364,7 @@ impl EmittedLine {
         Self {
             text: String::new(),
             terminal_id: None,
+            unfinished_background: false,
         }
     }
 }
