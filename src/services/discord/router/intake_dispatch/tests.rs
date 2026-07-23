@@ -424,7 +424,10 @@ async fn queued_foreign_owner_forwards_without_local_body_pg() {
     .await
     {
         QueuedAdmissionDisposition::Admitted(admitted) => admitted,
-        QueuedAdmissionDisposition::Deferred => panic!("live foreign owner should forward"),
+        QueuedAdmissionDisposition::Deferred
+        | QueuedAdmissionDisposition::RejectedNonPortableAttachment => {
+            panic!("live foreign owner should forward")
+        }
     };
     super::finish_admitted_queued_intake(&deps, admitted, &intervention)
         .await
@@ -455,7 +458,7 @@ async fn queued_foreign_owner_forwards_without_local_body_pg() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn queued_foreign_attachment_requeues_and_arms_slow_backstop_pg() {
+async fn queued_foreign_attachment_is_rejected_without_requeue_pg() {
     let _env = ScopedIntakeTestEnv::enforce();
     let pg_db = TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
@@ -482,18 +485,13 @@ async fn queued_foreign_attachment_requeues_and_arms_slow_backstop_pg() {
             "owner_affinity_attachment_test",
         )
         .await,
-        QueuedAdmissionDisposition::Deferred
+        QueuedAdmissionDisposition::RejectedNonPortableAttachment
     ));
 
     let snapshot = shared.mailbox(channel_id).snapshot().await;
-    assert_eq!(snapshot.intervention_queue.len(), 1);
-    assert_eq!(
-        snapshot.intervention_queue[0].message_id,
-        intervention.message_id
-    );
-    assert_eq!(
-        snapshot.intervention_queue[0].pending_uploads,
-        vec![local_path]
+    assert!(
+        snapshot.intervention_queue.is_empty(),
+        "a nonportable queued attachment must be consumed, not requeued forever"
     );
     assert!(
         shared.core.lock().await.sessions.is_empty(),
@@ -511,8 +509,8 @@ async fn queued_foreign_attachment_requeues_and_arms_slow_backstop_pg() {
             .restart
             .deferred_hook_backlog
             .load(std::sync::atomic::Ordering::Relaxed),
-        1,
-        "blocked queued intake arms exactly one slow lost-wakeup backstop"
+        0,
+        "a rejected attachment must not arm a retry backstop"
     );
 
     pool.close().await;

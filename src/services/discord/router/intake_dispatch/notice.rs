@@ -38,31 +38,53 @@ pub(super) async fn notify_blocked_intake(
         return;
     }
 
-    let detail = match reason {
-        IntakeBlockedReason::NonPortableAttachment { owner_instance_id } => format!(
-            "기존 세션 owner `{owner_instance_id}`는 다른 노드에 있고 첨부파일 경로는 현재 노드 전용입니다."
+    let (detail, recovery) = match reason {
+        IntakeBlockedReason::NonPortableAttachmentForeignOwner { owner_instance_id } => (
+            format!(
+                "기존 세션 owner `{owner_instance_id}`는 다른 노드에 있고 첨부파일 경로는 현재 노드 전용입니다."
+            ),
+            "현재 mac-mini routed session은 파일 첨부를 지원하지 않습니다. text-only로 다시 보내세요.",
         ),
-        IntakeBlockedReason::StaleSessionOwners { instance_ids } => format!(
-            "기존 세션 owner 상태를 확인할 수 없습니다: `{}`.",
-            instance_ids.join(", ")
+        IntakeBlockedReason::NonPortableAttachmentRoutedTarget { target_instance_id } => (
+            format!(
+                "새 routed target `{target_instance_id}`는 현재 노드 전용 첨부파일 경로를 받을 수 없습니다."
+            ),
+            "현재 mac-mini routed session은 파일 첨부를 지원하지 않습니다. text-only로 다시 보내세요.",
         ),
-        IntakeBlockedReason::ConflictingLiveSessionOwners { instance_ids } => format!(
-            "여러 live 세션 owner가 충돌합니다: `{}`.",
-            instance_ids.join(", ")
+        IntakeBlockedReason::StaleSessionOwners { instance_ids } => (
+            format!(
+                "기존 세션 owner 상태를 확인할 수 없습니다: `{}`.",
+                instance_ids.join(", ")
+            ),
+            "기존 세션을 stop/clear한 뒤 다시 보내세요.",
         ),
-        IntakeBlockedReason::OwnerProtocolIncompatible { instance_id } => format!(
-            "기존 세션 owner `{instance_id}`가 이 turn의 intake protocol을 지원하지 않습니다."
+        IntakeBlockedReason::ConflictingLiveSessionOwners { instance_ids } => (
+            format!(
+                "여러 live 세션 owner가 충돌합니다: `{}`.",
+                instance_ids.join(", ")
+            ),
+            "기존 세션을 stop/clear한 뒤 다시 보내세요.",
         ),
-        IntakeBlockedReason::OverrideUnavailable { target_instance_id } => format!(
-            "선택한 `/node` 대상 `{target_instance_id}`가 현재 이 provider의 intake를 받을 수 없습니다."
+        IntakeBlockedReason::OwnerProtocolIncompatible { instance_id } => (
+            format!(
+                "기존 세션 owner `{instance_id}`가 이 turn의 intake protocol을 지원하지 않습니다."
+            ),
+            "기존 세션을 stop/clear한 뒤 다시 보내세요.",
+        ),
+        IntakeBlockedReason::OverrideUnavailable { target_instance_id } => (
+            format!(
+                "선택한 `/node` 대상 `{target_instance_id}`가 현재 이 provider의 intake를 받을 수 없습니다."
+            ),
+            "기존 세션을 stop/clear한 뒤 다시 보내세요.",
         ),
         IntakeBlockedReason::OwnerLookupFailed { .. }
-        | IntakeBlockedReason::RoutingDependencyFailed { .. } => {
-            "세션 owner를 안전하게 확인하지 못했습니다.".to_string()
-        }
+        | IntakeBlockedReason::RoutingDependencyFailed { .. } => (
+            "세션 owner를 안전하게 확인하지 못했습니다.".to_string(),
+            "기존 세션을 stop/clear한 뒤 다시 보내세요.",
+        ),
     };
     let content = format!(
-        "⛔ {detail} 잘못된 노드에 새 세션을 만들지 않도록 turn을 시작하지 않았습니다. 기존 세션을 stop/clear한 뒤 다시 보내거나, 첨부가 있었다면 text-only로 다시 보내세요."
+        "⛔ {detail} 잘못된 노드에 새 세션을 만들지 않도록 turn을 시작하지 않았습니다. {recovery}"
     );
     if let Err(error) = crate::services::discord::http::send_channel_message(
         deps.http.as_ref(),

@@ -743,7 +743,10 @@ impl TurnGateway for DiscordGateway {
             .await
             {
                 router::QueuedAdmissionDisposition::Admitted(admitted) => admitted,
-                router::QueuedAdmissionDisposition::Deferred => return Ok(()),
+                router::QueuedAdmissionDisposition::Deferred
+                | router::QueuedAdmissionDisposition::RejectedNonPortableAttachment => {
+                    return Ok(());
+                }
             };
 
             let source_message_generations = intervention.source_message_queued_generations();

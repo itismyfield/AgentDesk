@@ -447,6 +447,7 @@
 
 ### Audited touches
 
+- #4781 text-only routed attachment contract: leader-side `intake_router_hook.rs` rejects gateway-local attachment paths before a foreign-owner, `/node`, or preferred-label outbox insert. Queued nonportable uploads are notice-and-drop rather than indefinitely requeued; this changes no leader election, worker lease, or durable owner authority.
 - #4706 structural lint debt backfill: item-level Clippy annotations and their checked-in occurrence ratchet change no runtime ownership, leader election, PG lease, or multinode routing behavior.
 - #4515 worker-local recovery supervision: `src/server/worker_recovery.rs` owns
   bounded restart handling for the worker-local dispatch-outbox and session-discovery

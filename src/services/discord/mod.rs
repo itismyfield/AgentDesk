@@ -3684,7 +3684,7 @@ async fn mailbox_requeue_intervention_front(
     }
 }
 
-async fn mailbox_abandon_pending_dispatch(
+pub(in crate::services::discord) async fn mailbox_abandon_pending_dispatch(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -4216,7 +4216,8 @@ async fn kickoff_idle_queue_channel(
     .await
     {
         router::QueuedAdmissionDisposition::Admitted(admitted) => admitted,
-        router::QueuedAdmissionDisposition::Deferred => {
+        router::QueuedAdmissionDisposition::Deferred
+        | router::QueuedAdmissionDisposition::RejectedNonPortableAttachment => {
             drop(dispatch_lease);
             return IdleQueueKickoffChannelOutcome::default();
         }
