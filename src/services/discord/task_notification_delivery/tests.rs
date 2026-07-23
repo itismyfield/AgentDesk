@@ -24,6 +24,17 @@ fn terminal_task_card_includes_shared_completion_metadata_4806() {
 }
 
 #[test]
+fn footer_background_marker_key_is_stable_across_delivery_paths() {
+    assert_eq!(
+        footer_background_marker_session_key(
+            poise::serenity_prelude::ChannelId::new(4_799),
+            "event-identity",
+        ),
+        "footer_background:ch:4799:event-identity"
+    );
+}
+
+#[test]
 fn response_turn_key_is_stable_and_separates_offsets() {
     let first = response_turn_key(4055, "2026-07-11T01:37:00Z", Some(10));
     assert_eq!(first.len(), 64);
