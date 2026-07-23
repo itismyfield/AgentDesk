@@ -267,7 +267,7 @@ pub async fn resume_routine(
             "paused routine {routine_id} not found"
         )));
     }
-    let metadata = migrated_launchd_metadata_for_state(&state, &routine.script_ref)?;
+    let metadata = migrated_launchd_metadata_for_state(&state, &routine.script_ref).await?;
     let routine_script_dirs = state.config.routines.script_dirs();
     validate_migrated_launchd_activation(
         &routine.script_ref,
@@ -348,24 +348,33 @@ pub async fn run_routine_now(
         )));
     };
 
-    let loader = RoutineScriptLoader::new().map_err(|error| {
-        AppError::internal(format!("routine script loader init failed: {error}"))
-            .with_code(ErrorCode::Internal)
-    })?;
     let routine_script_dirs = state.config.routines.script_dirs();
-    loader.load_dirs(&routine_script_dirs).map_err(|error| {
-        AppError::internal(format!("routine script registry load failed: {error}"))
-            .with_code(ErrorCode::Config)
-    })?;
-    let metadata = if is_migrated_launchd_script_ref(&routine.script_ref) {
-        let Some(script) = loader.get_script(&routine.script_ref).map_err(|error| {
-            AppError::internal(format!("routine script lookup failed: {error}"))
-                .with_code(ErrorCode::Config)
-        })?
-        else {
+    let script_dirs_for_task = routine_script_dirs.clone();
+    let requested_script_ref = routine.script_ref.clone();
+    let script_ref_for_task = requested_script_ref.clone();
+    let (loader, script) = tokio::task::spawn_blocking(move || {
+        let loader = RoutineScriptLoader::new()
+            .map_err(|error| format!("routine script loader init failed: {error}"))?;
+        loader
+            .load_dirs(&script_dirs_for_task)
+            .map_err(|error| format!("routine script registry load failed: {error}"))?;
+        let script = loader
+            .get_script(&script_ref_for_task)
+            .map_err(|error| format!("routine script lookup failed: {error}"))?;
+        Ok::<_, String>((loader, script))
+    })
+    .await
+    .map_err(|error| {
+        AppError::internal(format!(
+            "routine script registry blocking task failed: {error}"
+        ))
+        .with_code(ErrorCode::Internal)
+    })?
+    .map_err(|error| AppError::internal(error).with_code(ErrorCode::Config))?;
+    let metadata = if is_migrated_launchd_script_ref(&requested_script_ref) {
+        let Some(script) = script else {
             return Err(AppError::conflict(format!(
-                "migrated routine {} is invalid: routine script not loaded",
-                routine.script_ref
+                "migrated routine {requested_script_ref} is invalid: routine script not loaded"
             )));
         };
         Some(script.metadata)

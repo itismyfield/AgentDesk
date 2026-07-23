@@ -32,29 +32,37 @@ pub(super) fn ensure_routine_runtime_runnable(
     Ok(())
 }
 
-pub(super) fn migrated_launchd_metadata_for_state(
+pub(super) async fn migrated_launchd_metadata_for_state(
     state: &AppState,
     script_ref: &str,
 ) -> AppResult<Option<Value>> {
     if !is_migrated_launchd_script_ref(script_ref) {
         return Ok(None);
     }
-    let loader = RoutineScriptLoader::new().map_err(|error| {
-        AppError::internal(format!("routine script loader init failed: {error}"))
-            .with_code(ErrorCode::Internal)
-    })?;
     let routine_script_dirs = state.config.routines.script_dirs();
-    loader.load_dirs(&routine_script_dirs).map_err(|error| {
-        AppError::internal(format!("routine script registry load failed: {error}"))
-            .with_code(ErrorCode::Config)
-    })?;
-    let Some(script) = loader.get_script(script_ref).map_err(|error| {
-        AppError::internal(format!("routine script lookup failed: {error}"))
-            .with_code(ErrorCode::Config)
+    let requested_script_ref = script_ref.to_string();
+    let script_ref_for_task = requested_script_ref.clone();
+    let script = tokio::task::spawn_blocking(move || {
+        let loader = RoutineScriptLoader::new()
+            .map_err(|error| format!("routine script loader init failed: {error}"))?;
+        loader
+            .load_dirs(&routine_script_dirs)
+            .map_err(|error| format!("routine script registry load failed: {error}"))?;
+        loader
+            .get_script(&script_ref_for_task)
+            .map_err(|error| format!("routine script lookup failed: {error}"))
+    })
+    .await
+    .map_err(|error| {
+        AppError::internal(format!(
+            "routine script registry blocking task failed: {error}"
+        ))
+        .with_code(ErrorCode::Internal)
     })?
-    else {
+    .map_err(|error| AppError::internal(error).with_code(ErrorCode::Config))?;
+    let Some(script) = script else {
         return Err(AppError::conflict(format!(
-            "migrated routine {script_ref} is invalid: routine script not loaded"
+            "migrated routine {requested_script_ref} is invalid: routine script not loaded"
         )));
     };
     Ok(Some(script.metadata))

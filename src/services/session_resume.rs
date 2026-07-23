@@ -92,6 +92,7 @@ pub(crate) enum ResumeRebindError {
     /// Auto-selection is only wired for Claude transcripts.
     AutoUnsupportedProvider(String),
     Database(String),
+    Filesystem(String),
 }
 
 impl ResumeRebindError {
@@ -131,7 +132,7 @@ impl ResumeRebindError {
                     )
                 })),
             ),
-            ResumeRebindError::Database(error) => (
+            ResumeRebindError::Database(error) | ResumeRebindError::Filesystem(error) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": error})),
             ),
@@ -356,12 +357,13 @@ pub(crate) async fn perform_resume_rebind(
             let live_bound = dispatched_sessions_db::load_live_bound_session_ids_pg(pool)
                 .await
                 .map_err(ResumeRebindError::Database)?;
-            let candidate = discover_previous_claude_session_scoped(
-                current_cwd.as_deref(),
-                current_session_id.as_deref(),
-                &live_bound,
+            let candidate = discover_previous_claude_session_off_runtime(
+                current_cwd.clone(),
+                current_session_id.clone(),
+                live_bound,
                 None,
             )
+            .await?
             .ok_or(ResumeRebindError::NoPreviousSession)?;
             (candidate.session_id, candidate.cwd, true)
         }
@@ -486,6 +488,26 @@ fn worktree_lineage_stem(dir_name: &str) -> &str {
 /// `claude_home` is injectable for tests; production passes `None`.
 ///
 /// Returns `None` when no distinct, unbound prior transcript exists in-lineage.
+async fn discover_previous_claude_session_off_runtime(
+    current_cwd: Option<String>,
+    current_session_id: Option<String>,
+    live_bound: std::collections::HashSet<String>,
+    claude_home: Option<std::path::PathBuf>,
+) -> Result<Option<PreviousSessionCandidate>, ResumeRebindError> {
+    tokio::task::spawn_blocking(move || {
+        discover_previous_claude_session_scoped(
+            current_cwd.as_deref(),
+            current_session_id.as_deref(),
+            &live_bound,
+            claude_home.as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| {
+        ResumeRebindError::Filesystem(format!("previous-session discovery task failed: {error}"))
+    })
+}
+
 pub(crate) fn discover_previous_claude_session_scoped(
     current_cwd: Option<&str>,
     current_session_id: Option<&str>,
@@ -564,6 +586,42 @@ pub(crate) fn discover_previous_claude_session_scoped(
 mod tests {
     use super::*;
     use filetime::{FileTime, set_file_mtime};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn off_runtime_discovery_preserves_selection_and_runtime_progress() {
+        let tmp = unique_tmp("off-runtime");
+        let claude_home = tmp.join(".claude");
+        let parent = tmp.join("worktrees");
+        let cwd = parent.join("claude-adk-cc-20260101-000001");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let prior = "22222222-2222-2222-2222-222222222222";
+        write_transcript(&claude_home, &cwd, prior, 2_000);
+
+        let expected = discover_previous_claude_session_scoped(
+            Some(cwd.to_str().unwrap()),
+            None,
+            &no_live_bound(),
+            Some(&claude_home),
+        );
+        let selected = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            discover_previous_claude_session_off_runtime(
+                Some(cwd.to_string_lossy().to_string()),
+                None,
+                no_live_bound(),
+                Some(claude_home),
+            ),
+        )
+        .await
+        .expect("blocking discovery must complete")
+        .expect("blocking task must not fail")
+        .expect("prior session must be selected");
+
+        assert_eq!(Some(selected.clone()), expected);
+        assert_eq!(selected.session_id, prior);
+        assert_eq!(selected.cwd, cwd.to_string_lossy());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn discover_returns_none_without_current_cwd() {

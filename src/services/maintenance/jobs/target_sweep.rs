@@ -98,7 +98,22 @@ pub async fn run(config: Config) -> Result<()> {
 /// Split out for unit-testability — returns the structured report.
 pub async fn collect_and_sweep(config: Config) -> Result<SweepReport> {
     let target_dir = config.workspace_root.join("target");
-    let target_exists = target_dir.exists();
+    let disk_threshold_bytes = config.disk_threshold_bytes;
+    let dry_run = config.dry_run;
+    let (target_exists, disk_usage_bytes, cargo_sweep_available) =
+        tokio::task::spawn_blocking(move || {
+            let target_exists = target_dir.exists();
+            let disk_usage_bytes = target_exists
+                .then(|| measure_dir_size(&target_dir).unwrap_or(0))
+                .unwrap_or(0);
+            (
+                target_exists,
+                disk_usage_bytes,
+                which::which("cargo-sweep").is_ok(),
+            )
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("target sweep filesystem task failed: {error}"))?;
 
     if !target_exists {
         return Ok(SweepReport {
@@ -107,12 +122,9 @@ pub async fn collect_and_sweep(config: Config) -> Result<SweepReport> {
         });
     }
 
-    let disk_usage_bytes = measure_dir_size(&target_dir).unwrap_or(0);
-    let threshold_triggered = disk_usage_bytes >= config.disk_threshold_bytes;
+    let threshold_triggered = disk_usage_bytes >= disk_threshold_bytes;
 
-    let cargo_sweep_available = which::which("cargo-sweep").is_ok();
-
-    if config.dry_run || !cargo_sweep_available {
+    if dry_run || !cargo_sweep_available {
         return Ok(SweepReport {
             target_exists: true,
             disk_usage_bytes,
@@ -152,7 +164,20 @@ pub async fn collect_and_sweep(config: Config) -> Result<SweepReport> {
 /// Recursively sum file sizes under `dir`. Best-effort: fs errors are swallowed
 /// per-entry (we don't want a single permission-denied to abort the whole
 /// maintenance tick).
+#[cfg(test)]
+static MEASURE_THREAD_OBSERVER: std::sync::Mutex<
+    Option<std::sync::mpsc::Sender<std::thread::ThreadId>>,
+> = std::sync::Mutex::new(None);
+
 fn measure_dir_size(dir: &Path) -> Result<u64> {
+    #[cfg(test)]
+    if let Some(observer) = MEASURE_THREAD_OBSERVER
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+    {
+        let _ = observer.send(std::thread::current().id());
+    }
     let mut total = 0u64;
     let mut stack: Vec<PathBuf> = vec![dir.to_path_buf()];
     while let Some(path) = stack.pop() {
@@ -197,4 +222,42 @@ fn parse_cargo_sweep_output(stdout: &str) -> (u64, u64) {
         }
     }
     (removed_files, removed_bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn target_walk_runs_off_runtime_and_preserves_report() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        std::fs::create_dir_all(target.join("nested")).unwrap();
+        std::fs::write(target.join("nested/artifact"), vec![0u8; 17]).unwrap();
+        let runtime_thread = std::thread::current().id();
+        let (sender, receiver) = mpsc::channel();
+        *MEASURE_THREAD_OBSERVER
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(sender);
+
+        let report = collect_and_sweep(Config {
+            workspace_root: root.path().to_path_buf(),
+            sweep_time_days: 30,
+            disk_threshold_bytes: 10,
+            dry_run: true,
+        })
+        .await
+        .unwrap();
+        let walk_thread = receiver.recv().unwrap();
+        *MEASURE_THREAD_OBSERVER
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+
+        assert_ne!(walk_thread, runtime_thread);
+        assert!(report.target_exists);
+        assert_eq!(report.disk_usage_bytes, 17);
+        assert!(report.threshold_triggered);
+        assert!(!report.invoked_sweep);
+    }
 }
