@@ -407,13 +407,10 @@ fn extract_local_command_stdout_body(prompt: &str) -> Option<String> {
     (!body.is_empty()).then_some(body)
 }
 
-pub(super) fn format_system_continuation_note(tmux_session_name: &str, prompt: &str) -> String {
-    let prompt = strip_terminal_controls(prompt);
-    let omitted_chars = format_count_with_commas(prompt.trim().chars().count());
+pub(super) fn format_system_continuation_note(tmux_session_name: &str, _prompt: &str) -> String {
     format!(
-        "🧩 세션 컨텍스트 이어가기 (tmux : `{}`) — 시스템 주입 (활성 턴 아님) (요약 {}자 생략 — 채널 기록과 동일 내용)",
+        "🧩 Session continued (compact/resume) · tmux: `{}`",
         sanitize_inline_code(tmux_session_name),
-        omitted_chars,
     )
 }
 

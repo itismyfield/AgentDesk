@@ -80,6 +80,9 @@ mod terminal_direct_fallback;
 #[path = "tmux_watcher/task_response_authority.rs"]
 mod task_response_authority;
 
+#[path = "tmux_watcher/discrete_trigger_marker.rs"]
+mod discrete_trigger_marker;
+
 // #3479 item-2: the watcher-direct orphan status-panel cleanup/completion/refresh
 // cluster extracted to a sibling submodule (pure move, zero logic change). Items
 // are `pub(super)` there and re-imported below so the watcher loop's call sites —
@@ -2149,37 +2152,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             )
             .await
         } else if relay_decision.suppressed {
-            let monitor_event_count = tool_state.transcript_events.len();
-            // #1009: Snapshot the channel's MonitoringStore entry keys ONCE so
-            // the lifecycle notify-outbox row uses a stable monitor summary for
-            // this suppressed terminal task-notification.
-            let monitor_entry_keys: Vec<String> = if matches!(
+            discrete_trigger_marker::enqueue_suppressed_machine_trigger_marker(
+                &shared,
+                channel_id,
+                &tmux_session_name,
+                data_start_offset,
                 task_notification_kind,
-                Some(TaskNotificationKind::MonitorAutoTurn)
-            ) {
-                let store_arc = crate::services::monitoring_store::global_monitoring_store();
-                let store = store_arc.lock().await;
-                store
-                    .list(channel_id.get())
-                    .into_iter()
-                    .map(|entry| entry.key)
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            if matches!(
-                task_notification_kind,
-                Some(TaskNotificationKind::MonitorAutoTurn)
-            ) {
-                let _ = enqueue_monitor_auto_turn_suppressed_notification(
-                    shared.pg_pool.as_ref(),
-                    channel_id,
-                    &tmux_session_name,
-                    data_start_offset,
-                    monitor_event_count,
-                    &monitor_entry_keys,
-                );
-            }
+                task_notification_context.as_ref(),
+                tool_state.transcript_events.len(),
+            )
+            .await;
             let task_notification_detail = format!(
                 "{} kind={} offset={}",
                 tmux_session_name,

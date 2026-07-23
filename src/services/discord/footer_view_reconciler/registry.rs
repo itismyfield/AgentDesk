@@ -4,7 +4,8 @@ use std::sync::{Mutex, OnceLock};
 use poise::serenity_prelude::{ChannelId, MessageId};
 
 use crate::services::discord::{
-    ProviderKind, SharedData, placeholder_live_events::TerminalSlotId, single_message_panel as smp,
+    ProviderKind, SharedData, completion_footer_metadata, placeholder_live_events::TerminalSlotId,
+    single_message_panel as smp,
 };
 
 #[derive(Debug, Clone)]
@@ -372,7 +373,12 @@ pub(in crate::services::discord) fn completion_footer_edit_for_registered_target
         &target.provider,
         render_indicator,
     );
-    let completion_block = rendered.block;
+    let metadata = completion_footer_metadata::completion_footer_metadata_from_block(
+        target.last_completion_block.as_deref(),
+    );
+    let completion_block = rendered.block.map(|block| {
+        completion_footer_metadata::append_completion_footer_metadata(block, &metadata)
+    });
     let text = smp::compose_completion_footer_text(&target.base_body, completion_block.as_deref());
     let remove_after_edit = idle_expired || !rendered.has_unfinished_entries;
     if text.trim().is_empty() {

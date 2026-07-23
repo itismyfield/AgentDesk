@@ -35,6 +35,7 @@ use super::settings::{
     channel_supports_provider, load_last_session_path, resolve_role_binding,
     validate_bot_channel_routing_with_provider_channel,
 };
+use super::task_notification_delivery::footer_background_marker_session_key;
 use super::tmux_error_detect::{
     detect_provider_overload_message, is_auth_error_message, is_prompt_too_long_message,
 };
@@ -666,23 +667,63 @@ pub(super) fn consume_monitor_auto_turn_preamble_once(injected: &mut bool) -> Op
     }
 }
 
-fn enqueue_monitor_auto_turn_suppressed_notification(
+pub(super) fn suppressed_task_notification_marker(
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    data_start_offset: u64,
+    kind: TaskNotificationKind,
+    footer_only_event_key: Option<&str>,
+    event_count: usize,
+    monitor_entry_keys: &[String],
+) -> Option<(String, &'static str, String)> {
+    Some(match kind {
+        TaskNotificationKind::MonitorAutoTurn => {
+            let session_key = monitor_auto_turn_session_key(channel_id, data_start_offset);
+            let label = monitor_auto_turn_label(tmux_session_name);
+            (
+                session_key,
+                MONITOR_AUTO_TURN_REASON_CODE,
+                monitor_auto_turn_completion_notice(&label, event_count, monitor_entry_keys),
+            )
+        }
+        TaskNotificationKind::Background => (
+            footer_background_marker_session_key(channel_id, footer_only_event_key?),
+            "lifecycle.background_task_complete",
+            "⚙️ Background complete".to_string(),
+        ),
+        // Subagent completions are durable-card owned, so a suppressed watcher
+        // terminal must not add a duplicate discrete marker.
+        TaskNotificationKind::Subagent => return None,
+    })
+}
+
+pub(super) fn enqueue_suppressed_task_notification(
     pg_pool: Option<&sqlx::PgPool>,
     channel_id: ChannelId,
     tmux_session_name: &str,
     data_start_offset: u64,
+    kind: TaskNotificationKind,
+    footer_only_event_key: Option<&str>,
     event_count: usize,
-    entry_keys: &[String],
+    monitor_entry_keys: &[String],
 ) -> bool {
     let target = format!("channel:{}", channel_id.get());
-    let session_key = monitor_auto_turn_session_key(channel_id, data_start_offset);
-    let label = monitor_auto_turn_label(tmux_session_name);
-    let content = monitor_auto_turn_completion_notice(&label, event_count, entry_keys);
+    let Some((session_key, reason_code, content)) = suppressed_task_notification_marker(
+        channel_id,
+        tmux_session_name,
+        data_start_offset,
+        kind,
+        footer_only_event_key,
+        event_count,
+        monitor_entry_keys,
+    ) else {
+        return false;
+    };
     enqueue_lifecycle_notification_best_effort(
         pg_pool,
         target.as_str(),
         Some(session_key.as_str()),
-        MONITOR_AUTO_TURN_REASON_CODE,
+        reason_code,
         content.as_str(),
     )
 }
@@ -1486,6 +1527,61 @@ mod monitor_auto_turn_signal_tests {
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
         let snapshot = shared.mailbox(channel_id).snapshot().await;
         assert_eq!(snapshot.active_user_message_id, None);
+    }
+}
+
+#[cfg(test)]
+mod suppressed_task_notification_marker_tests {
+    use super::{footer_background_marker_session_key, suppressed_task_notification_marker};
+    use crate::services::agent_protocol::TaskNotificationKind;
+    use poise::serenity_prelude::ChannelId;
+
+    #[test]
+    fn background_marker_uses_event_identity_and_subagent_marker_is_skipped() {
+        let channel_id = ChannelId::new(4_799);
+        let (background_key, background_reason, background) = suppressed_task_notification_marker(
+            channel_id,
+            "AgentDesk-claude-4799",
+            44,
+            TaskNotificationKind::Background,
+            Some("event-identity"),
+            1,
+            &[],
+        )
+        .expect("footer-owned background completion gets a marker");
+        assert_eq!(background_key, "footer_background:ch:4799:event-identity");
+        assert_eq!(background_reason, "lifecycle.background_task_complete");
+        assert_eq!(background, "⚙️ Background complete");
+
+        let replay_at_new_offset = suppressed_task_notification_marker(
+            channel_id,
+            "AgentDesk-claude-4799",
+            99,
+            TaskNotificationKind::Background,
+            Some("event-identity"),
+            1,
+            &[],
+        )
+        .expect("same footer event remains marker eligible");
+        assert_eq!(replay_at_new_offset.0, background_key);
+        assert_eq!(
+            footer_background_marker_session_key(channel_id, "event-identity"),
+            background_key,
+            "prompt and watcher paths must share one outbox identity"
+        );
+        assert!(
+            suppressed_task_notification_marker(
+                channel_id,
+                "AgentDesk-claude-4799",
+                45,
+                TaskNotificationKind::Subagent,
+                Some("subagent-event"),
+                1,
+                &[],
+            )
+            .is_none(),
+            "card-owned subagent completion must not duplicate its durable card"
+        );
     }
 }
 

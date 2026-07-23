@@ -2207,13 +2207,12 @@ fn system_continuation_note_is_neutral_not_active_turn() {
     let prompt = "This session is being continued from a previous conversation. Summary: ...";
     let note = format_system_continuation_note("AgentDesk-claude-adk-cc", prompt);
     assert!(!note.contains("터미널에 직접 주입된 입력"));
-    assert!(note.contains("세션 컨텍스트 이어가기"));
-    assert!(note.contains("활성 턴 아님"));
-    assert!(note.contains("(tmux : `AgentDesk-claude-adk-cc`)"));
+    assert_eq!(
+        note,
+        "🧩 Session continued (compact/resume) · tmux: `AgentDesk-claude-adk-cc`"
+    );
     assert!(!note.contains("```text"));
     assert!(!note.contains("Summary:"));
-    assert!(note.contains(&format!("요약 {}자 생략", prompt.chars().count())));
-    assert!(note.contains("채널 기록과 동일 내용"));
 }
 
 #[cfg(unix)]

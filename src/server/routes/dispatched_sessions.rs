@@ -5,7 +5,7 @@ use axum::{
 };
 
 use super::AppState;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult, ErrorCode};
 
 pub(crate) use crate::services::dispatched_sessions::force_kill_session_impl_with_reason;
 pub use crate::services::dispatched_sessions::{
@@ -136,6 +136,47 @@ pub async fn kill_tmux_session(
         Json(body),
     )
     .await
+}
+
+/// POST /api/sessions/{session_key}/reconcile-stale-turn
+pub async fn reconcile_stale_turn(
+    State(state): State<AppState>,
+    Path(session_key): Path<String>,
+) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let pool = state.pg_pool.as_ref().ok_or_else(|| {
+        AppError::internal("Postgres pool unavailable").with_code(ErrorCode::Database)
+    })?;
+    let outcome =
+        crate::services::stale_turn_reconciler::reconcile_stale_turn_by_key_pg(pool, &session_key)
+            .await
+            .map_err(|error| {
+                AppError::internal(format!("reconcile stale turn: {error}"))
+                    .with_code(ErrorCode::Database)
+            })?;
+
+    match outcome {
+        crate::services::stale_turn_reconciler::SessionReconcileOutcome::Reconciled => Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true,
+                "session_key": session_key,
+                "reconciled": true,
+                "status": "idle",
+            })),
+        )),
+        crate::services::stale_turn_reconciler::SessionReconcileOutcome::Unchanged => Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true,
+                "session_key": session_key,
+                "reconciled": false,
+                "reason": "session is live or does not meet the stale-turn guard",
+            })),
+        )),
+        crate::services::stale_turn_reconciler::SessionReconcileOutcome::NotFound => {
+            Err(AppError::not_found("session not found"))
+        }
+    }
 }
 
 /// POST /api/sessions/{session_key}/resume-previous

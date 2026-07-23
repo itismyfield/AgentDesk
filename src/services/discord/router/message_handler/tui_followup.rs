@@ -32,27 +32,6 @@ pub(super) fn claude_tui_busy_followup_refusal_notice(
     }
 }
 
-// #3813 Phase 3 (§4 / AC#6): compact operational status shown on the intake
-// placeholder while the hosted-TUI busy preflight readiness wait blocks
-// (up to ~45s). Transient — replaced by dispatch streaming on success or by the
-// queued-card / delete / refusal-notice paths on the busy branch.
-#[cfg(unix)]
-pub(super) const HOSTED_TUI_READINESS_WAIT_NOTICE: &str =
-    "⏳ TUI 준비 대기 중… 이전 터미널 턴이 끝나면 이어서 처리합니다.";
-
-#[cfg(unix)]
-pub(super) fn readiness_wait_compact_status(
-    wait: &HostedTuiBusyPreflightReadinessWait,
-) -> &'static str {
-    match wait {
-        HostedTuiBusyPreflightReadinessWait::Codex
-        | HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly
-        | HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOrIdleTranscript(_) => {
-            HOSTED_TUI_READINESS_WAIT_NOTICE
-        }
-    }
-}
-
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ClaudeTuiBusyFollowupDiagnostic {
@@ -1082,37 +1061,6 @@ pub(super) fn recapture_inflight_offset_after_successful_busy_wait(
         .and_then(|path| std::fs::metadata(path).ok())
         .map(|metadata| metadata.len())
         .unwrap_or(previous_offset)
-}
-
-// #3813 Phase 3 (AC#7 "readiness-wait status rendering"): the compact status a
-// hosted-TUI busy preflight readiness wait surfaces on the intake placeholder is
-// non-empty, user-facing ("준비 대기"), and identical across every detection
-// variant (the internal strategy difference is meaningless to the user).
-#[cfg(all(test, unix))]
-mod readiness_wait_status_tests {
-    use super::HOSTED_TUI_READINESS_WAIT_NOTICE;
-    use super::HostedTuiBusyPreflightReadinessWait;
-    use super::readiness_wait_compact_status;
-    use std::path::PathBuf;
-
-    #[test]
-    fn every_variant_renders_the_nonempty_readiness_label() {
-        for wait in [
-            HostedTuiBusyPreflightReadinessWait::Codex,
-            HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOnly,
-            HostedTuiBusyPreflightReadinessWait::ClaudePromptMarkerOrIdleTranscript(PathBuf::from(
-                "/tmp/transcript.jsonl",
-            )),
-        ] {
-            let status = readiness_wait_compact_status(&wait);
-            assert!(!status.is_empty(), "readiness status must be non-empty");
-            assert!(
-                status.contains("준비 대기"),
-                "readiness status must surface the waiting state: {status}"
-            );
-            assert_eq!(status, HOSTED_TUI_READINESS_WAIT_NOTICE);
-        }
-    }
 }
 
 /// #4139: the enqueue-refusal branch restores the taken recovery context and

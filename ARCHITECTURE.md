@@ -407,6 +407,7 @@ src/
 │   │   ├── input.rs
 │   │   ├── memento_feedback.rs
 │   │   ├── mod.rs
+│   │   ├── prompt_readiness.rs
 │   │   ├── session.rs
 │   │   ├── startup_dialog.rs
 │   │   ├── transcript_tail.rs
@@ -736,6 +737,7 @@ src/
 │   │   │   │   ├── retention.rs
 │   │   │   │   └── terminal_footer.rs
 │   │   │   ├── card_post.rs
+│   │   │   ├── card_render.rs
 │   │   │   ├── gateway.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── response_chunks.rs
@@ -758,6 +760,7 @@ src/
 │   │   │   ├── completion_gate_tests.rs
 │   │   │   ├── completion_producer.rs
 │   │   │   ├── controller_heartbeat.rs
+│   │   │   ├── discrete_trigger_marker.rs
 │   │   │   ├── entry.rs
 │   │   │   ├── jsonl_rotation.rs
 │   │   │   ├── liveness.rs
@@ -947,6 +950,7 @@ src/
 │   │   ├── bot_role.rs
 │   │   ├── catch_up.rs
 │   │   ├── compact_turn_authority.rs
+│   │   ├── completion_footer_metadata.rs
 │   │   ├── delivery_lease_key.rs
 │   │   ├── destructive_cancel_capture.rs
 │   │   ├── destructive_cancel_gate.rs
@@ -1265,6 +1269,7 @@ src/
 │   ├── session_selector_validity.rs
 │   ├── settings.rs
 │   ├── shell_guard.rs
+│   ├── stale_turn_reconciler.rs
 │   ├── termination_audit.rs
 │   ├── tmux_common.rs
 │   ├── tmux_diagnostics.rs
