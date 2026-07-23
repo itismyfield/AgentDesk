@@ -11,6 +11,19 @@ use super::response_chunks::{
 use super::*;
 
 #[test]
+fn terminal_task_card_includes_shared_completion_metadata_4806() {
+    let metadata =
+        super::super::completion_footer_metadata::tests::metadata_fixture_for_task_card_4806();
+    let rendered = event("metadata-card")
+        .payload
+        .render_with_completion_metadata(1, &metadata);
+
+    assert!(rendered.contains("-# ⏱ 2m 34s"));
+    assert!(rendered.contains("-# ⏳ 5h 80% · 7d 60%"));
+    assert!(rendered.contains("-# 🖥️ node-a"));
+}
+
+#[test]
 fn response_turn_key_is_stable_and_separates_offsets() {
     let first = response_turn_key(4055, "2026-07-11T01:37:00Z", Some(10));
     assert_eq!(first.len(), 64);

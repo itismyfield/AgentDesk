@@ -145,8 +145,8 @@ pub(super) async fn resolve_gate(
     );
     let transport =
         super::super::task_notification_delivery::DiscordTaskCardTransport::new(shared.clone());
-    let outcome = match super::super::task_notification_delivery::ensure_card(
-        shared.pg_pool.as_ref(),
+    let outcome = match super::super::task_notification_delivery::ensure_card_with_shared(
+        shared.as_ref(),
         &clients,
         &transport,
         event,

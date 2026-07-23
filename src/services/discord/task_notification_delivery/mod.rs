@@ -5,6 +5,7 @@
 //! module may create, edit, or replace its completion card.
 
 mod card_post;
+mod card_render;
 mod gateway;
 mod response_chunks;
 mod store;
@@ -246,20 +247,6 @@ pub(super) fn provider_bot_key(provider: &str) -> String {
 enum TaskCardPayload {
     Task(super::tui_task_card::TaskNotification),
     Subagent(String),
-}
-
-impl TaskCardPayload {
-    fn render(&self, update_count: u64) -> String {
-        match self {
-            Self::Task(note) => {
-                super::tui_task_card::format_task_notification_card(note, update_count)
-            }
-            Self::Subagent(card) if update_count > 1 => {
-                format!("{card}\n\n-# {update_count} updates")
-            }
-            Self::Subagent(card) => card.clone(),
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -677,10 +664,60 @@ pub(super) async fn ensure_card<T: TaskCardTransport>(
     event: &TaskCardEvent,
     intent: EnsureIntent,
 ) -> Result<CardEnsureOutcome, CardEnsureError> {
+    ensure_card_with_metadata(pool, clients, transport, event, intent, None).await
+}
+
+pub(in crate::services::discord) async fn ensure_card_with_shared(
+    shared: &super::SharedData,
+    clients: &CardDeliveryClients,
+    transport: &impl TaskCardTransport,
+    event: &TaskCardEvent,
+    intent: EnsureIntent,
+) -> Result<CardEnsureOutcome, CardEnsureError> {
+    let provider = crate::services::provider::ProviderKind::from_str(&event.scope.provider);
+    let inflight = provider.as_ref().and_then(|provider| {
+        super::inflight::load_inflight_state(provider, event.scope.channel_id)
+            .filter(|state| state.tmux_session_name.as_deref() == Some(&event.scope.session_key))
+    });
+    let metadata = if let Some(provider) = provider.as_ref() {
+        Some(
+            super::completion_footer_metadata::load_completion_footer_metadata(
+                shared,
+                provider,
+                0,
+                inflight.as_ref().map(|state| state.started_at.as_str()),
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    ensure_card_with_metadata(
+        shared.pg_pool.as_ref(),
+        clients,
+        transport,
+        event,
+        intent,
+        metadata.as_ref(),
+    )
+    .await
+}
+
+async fn ensure_card_with_metadata<T: TaskCardTransport>(
+    pool: Option<&PgPool>,
+    clients: &CardDeliveryClients,
+    transport: &T,
+    event: &TaskCardEvent,
+    intent: EnsureIntent,
+    metadata: Option<&super::completion_footer_metadata::CompletionFooterMetadata>,
+) -> Result<CardEnsureOutcome, CardEnsureError> {
     let preferred = clients.preferred().ok_or_else(|| {
         CardEnsureError::Transient("no notify/provider Discord bot is available".to_string())
     })?;
-    let seed_content = event.payload.render(1);
+    let seed_content = metadata.map_or_else(
+        || event.payload.render(1),
+        |metadata| event.payload.render_with_completion_metadata(1, metadata),
+    );
     for attempt in 0..20 {
         let claim = store::claim_card(
             pool,
@@ -707,7 +744,8 @@ pub(super) async fn ensure_card<T: TaskCardTransport>(
                 });
             }
             CardClaim::Owned(claimed) => {
-                return deliver_claim(pool, clients, transport, event, intent, claimed).await;
+                return deliver_claim(pool, clients, transport, event, intent, claimed, metadata)
+                    .await;
             }
             CardClaim::Busy { .. } if attempt < 19 => {
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -791,6 +829,7 @@ async fn deliver_claim<T: TaskCardTransport>(
     event: &TaskCardEvent,
     _intent: EnsureIntent,
     claimed: ClaimedCard,
+    metadata: Option<&super::completion_footer_metadata::CompletionFooterMetadata>,
 ) -> Result<CardEnsureOutcome, CardEnsureError> {
     let Some(bot) = clients.by_key(&claimed.bot_key) else {
         let error = format!("the card's pinned bot {} is unavailable", claimed.bot_key);
@@ -807,7 +846,14 @@ async fn deliver_claim<T: TaskCardTransport>(
         store::ClaimAction::Post if !claimed.rendered_content.is_empty() => {
             claimed.rendered_content.clone()
         }
-        _ => event.payload.render(claimed.update_count),
+        _ => metadata.map_or_else(
+            || event.payload.render(claimed.update_count),
+            |metadata| {
+                event
+                    .payload
+                    .render_with_completion_metadata(claimed.update_count, metadata)
+            },
+        ),
     };
     let hash = content_hash(&content);
 

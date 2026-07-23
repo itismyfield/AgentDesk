@@ -735,6 +735,7 @@ src/
 │   │   │   │   ├── retention.rs
 │   │   │   │   └── terminal_footer.rs
 │   │   │   ├── card_post.rs
+│   │   │   ├── card_render.rs
 │   │   │   ├── gateway.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── response_chunks.rs
@@ -947,6 +948,7 @@ src/
 │   │   ├── bot_role.rs
 │   │   ├── catch_up.rs
 │   │   ├── compact_turn_authority.rs
+│   │   ├── completion_footer_metadata.rs
 │   │   ├── delivery_lease_key.rs
 │   │   ├── destructive_cancel_capture.rs
 │   │   ├── destructive_cancel_gate.rs

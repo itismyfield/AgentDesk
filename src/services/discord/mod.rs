@@ -8,6 +8,7 @@ pub(crate) mod bot_role;
 mod catch_up;
 mod commands;
 mod compact_turn_authority;
+mod completion_footer_metadata;
 mod delivery_lease_key;
 mod destructive_cancel_gate;
 mod discord_io;
@@ -157,10 +158,9 @@ pub(crate) use router::{
 };
 #[cfg(unix)]
 pub(crate) use session_relay_sink::run_session_bound_discord_relay_supervisor;
-// #3038 S4: re-export the live-placeholder cluster type so `SharedData`
-// declarations/constructors keep the S1/S2/S3 unqualified surface.
-pub(in crate::services::discord) use shared_state::{PlaceholderState, PolicyRuntime};
-pub(in crate::services::discord) use shared_state::{QueuedPlaceholderState, RuntimeHttpCache};
+pub(in crate::services::discord) use shared_state::{
+    PlaceholderState, PolicyRuntime, QueuedPlaceholderState, RuntimeHttpCache,
+};
 // #3038 S2: the cluster-D members were `pub(super)` on `SharedData` (visible up
 // to `crate::services`), so the group type is re-exported with that same scope.
 pub(in crate::services) use shared_state::SessionOverrideState;
