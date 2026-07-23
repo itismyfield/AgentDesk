@@ -2623,27 +2623,29 @@ mod tui_busy_pre_submit_queue_reaction_tests {
             .find("claude_tui follow-up queued because hosted TUI is busy before prompt submission")
             .expect("hosted-TUI busy pre-submit queue branch exists");
         let busy_branch = &module_src[..busy_branch_pos];
-        let enqueue_pos = busy_branch
-            .rfind("enqueue_busy_tui_followup_for_retry(")
-            .expect("busy pre-submit branch enqueues the follow-up");
-        let accepted_guard_pos = busy_branch[enqueue_pos..]
-            .find("if enqueue_outcome.enqueued {")
-            .map(|offset| enqueue_pos + offset)
+        assert!(
+            busy_branch.contains("busy_retry::finalize_enqueue("),
+            "busy pre-submit branch must route enqueue finalization through the shared helper"
+        );
+
+        let helper_src = include_str!("busy_retry.rs");
+        let accepted_guard_pos = helper_src
+            .find("if outcome.enqueued {")
             .expect("busy pre-submit reaction must be gated on accepted enqueue");
         let accepted_helper = "note_busy_tui_pre_submit_queue_pending(";
-        let refusal_guard = "} else {\n            apply_tui_busy_enqueue_refusal(";
-        let accepted_clear =
-            "tv_clear_current(shared, http, channel_id, user_msg_id, \"intake_busy_queue\")";
-        let refusal_guard_pos = busy_branch[accepted_guard_pos..]
+        let refusal_guard =
+            "} else {\n        super::tui_followup::apply_tui_busy_enqueue_refusal(";
+        let accepted_clear = "note_intake_turn_cleared_current(";
+        let refusal_guard_pos = helper_src[accepted_guard_pos..]
             .find(refusal_guard)
             .map(|offset| accepted_guard_pos + offset)
             .expect("busy pre-submit enqueue refusal branch exists");
-        let reaction_call_pos = busy_branch[accepted_guard_pos..refusal_guard_pos]
+        let reaction_call_pos = helper_src[accepted_guard_pos..refusal_guard_pos]
             .find(accepted_helper)
             .map(|offset| accepted_guard_pos + offset)
             .expect("accepted busy pre-submit enqueue must apply a queue-pending reaction");
-        let accepted_branch = &busy_branch[accepted_guard_pos..refusal_guard_pos];
-        let refusal_branch = &busy_branch[refusal_guard_pos..];
+        let accepted_branch = &helper_src[accepted_guard_pos..refusal_guard_pos];
+        let refusal_branch = &helper_src[refusal_guard_pos..];
 
         assert!(
             accepted_guard_pos < reaction_call_pos,
@@ -2770,9 +2772,9 @@ mod recovery_context_take_order_tests {
         // The refusal else-branch must route through the sibling helper, which
         // puts the taken recovery context back BEFORE rewriting the refusal
         // notice (put-back-then-notice ordering pinned in tui_followup.rs).
-        let module_src = include_str!("intake_turn.rs");
-        module_src
-            .find("} else {\n            apply_tui_busy_enqueue_refusal(")
+        let finalize_src = include_str!("busy_retry.rs");
+        finalize_src
+            .find("} else {\n        super::tui_followup::apply_tui_busy_enqueue_refusal(")
             .expect("TUI-busy enqueue refusal routes through the put-back helper");
 
         let helper_src = include_str!("tui_followup.rs");
@@ -2851,15 +2853,13 @@ mod feedback_reminder_take_order_tests {
         // The refusal branch forwards the taken reminder to the sibling helper,
         // which puts it back BEFORE rewriting the refusal notice (mirroring the
         // recovery-context put-back-then-notice ordering).
-        let module_src = include_str!("intake_turn.rs");
+        let finalize_src = include_str!("busy_retry.rs");
         // The `\n` escape resolves to a real newline, which only the production
         // call site contains — this test's own copy of the snippet stores it as
         // the two characters `\n`, so the search does not self-match (same trick
         // the recovery-context refusal test relies on).
         assert!(
-            module_src.contains(
-                "session_retry_context.as_ref(),\n                feedback_reminder.as_deref(),"
-            ),
+            finalize_src.contains("session_retry_context,\n            feedback_reminder,"),
             "refusal call site must forward the taken reminder for put-back, right after the recovery context"
         );
 

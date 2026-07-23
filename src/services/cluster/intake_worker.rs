@@ -550,15 +550,12 @@ mod tests {
 
     #[test]
     fn worker_executor_forwards_restored_preservation_instead_of_literal_false() {
-        let executor_source = include_str!("../discord/router/message_handler/intake_turn.rs");
+        let executor_source =
+            include_str!("../discord/router/message_handler/intake_turn/worker_entry.rs");
         let start = executor_source
             .find("pub(crate) async fn execute_intake_turn_core(")
             .expect("worker executor exists");
-        let end = executor_source[start..]
-            .find("pub(super) async fn handle_text_message(")
-            .map(|offset| start + offset)
-            .expect("worker executor has a bounded body");
-        let executor = &executor_source[start..end];
+        let executor = &executor_source[start..];
 
         assert!(
             executor.contains("request.preserve_on_cancel,"),
