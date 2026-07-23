@@ -418,6 +418,7 @@ src/
 │   │   ├── stream_relay/
 │   │   │   └── identity.rs
 │   │   ├── capability_routing.rs
+│   │   ├── intake_preflight.rs
 │   │   ├── intake_router_hook.rs
 │   │   ├── intake_routing.rs
 │   │   ├── intake_worker.rs
