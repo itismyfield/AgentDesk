@@ -237,7 +237,10 @@
     `TmuxDeathLifecycleDecision` plumbing; +25 from #4455 adding the explicit
     force-replace claim action used only when Codex rebind proves that a live
     same-output watcher still belongs to an earlier provider turn).
-  - `src/services/discord/tmux.rs` (frozen giant surface; test-only #4104 pins
+  - `src/services/discord/tmux.rs` (frozen giant surface; -9 from the #4804
+    Windows-compile hotfix moving `footer_background_marker_session_key` into
+    the cross-platform `task_notification_delivery::terminal_identity` (tmux.rs
+    keeps a `use` of the shared helper; key format unchanged); test-only #4104 pins
     watcher tool-hold progress persistence before both silent-render suppression
     and unchanged-render early returns; runtime wiring lives in the non-giant
     `tmux_watcher/streaming_status_tick.rs`; test-only #4253 wires the

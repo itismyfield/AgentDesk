@@ -12,6 +12,189 @@ fn lock_rollout_cache_test() -> std::sync::MutexGuard<'static, ()> {
     crate::services::codex_tui::rollout_index::lock_cache_for_tests()
 }
 
+#[tokio::test]
+async fn launch_runtime_refresh_preserves_pending_reset_when_path_is_stale() {
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let channel_id = serenity::ChannelId::new(4_794_003);
+    {
+        let mut data = shared.core.lock().await;
+        data.sessions.insert(
+            channel_id,
+            DiscordSession {
+                session_id: None,
+                memento_context_loaded: false,
+                memento_reflected: false,
+                current_path: Some("/missing/resume-worktree".to_string()),
+                history: Vec::new(),
+                pending_uploads: Vec::new(),
+                cleared: false,
+                remote_profile_name: None,
+                channel_id: Some(channel_id.get()),
+                channel_name: Some("resume-reset".to_string()),
+                category_name: None,
+                last_active: tokio::time::Instant::now(),
+                worktree: None,
+                born_generation: 0,
+            },
+        );
+    }
+
+    let current = (
+        "/previous/launch-path".to_string(),
+        Some("01234567-89ab-cdef-0123-456789abcdef".to_string()),
+        true,
+        "runtime_cached_provider_session",
+    );
+    let runtime =
+        resolve_channel_runtime_for_launch(&shared, &ProviderKind::Claude, channel_id, current)
+            .await;
+
+    assert_eq!(runtime.0, "/previous/launch-path");
+    assert_eq!(runtime.1, None);
+    assert!(!runtime.2);
+    assert_eq!(runtime.3, "explicit_provider_reset");
+}
+
+#[tokio::test]
+async fn launch_runtime_refresh_rejects_rebound_session_when_target_path_is_stale() {
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let channel_id = serenity::ChannelId::new(4_794_004);
+    let prior_session_id = "11111111-1111-1111-1111-111111111111";
+    let rebound_session_id = "22222222-2222-2222-2222-222222222222";
+    {
+        let mut data = shared.core.lock().await;
+        data.sessions.insert(
+            channel_id,
+            DiscordSession {
+                session_id: Some(rebound_session_id.to_string()),
+                memento_context_loaded: false,
+                memento_reflected: false,
+                current_path: Some("/removed/rebound-worktree".to_string()),
+                history: Vec::new(),
+                pending_uploads: Vec::new(),
+                cleared: false,
+                remote_profile_name: None,
+                channel_id: Some(channel_id.get()),
+                channel_name: Some("resume-stale-target".to_string()),
+                category_name: None,
+                last_active: tokio::time::Instant::now(),
+                worktree: None,
+                born_generation: 0,
+            },
+        );
+    }
+
+    let runtime = resolve_channel_runtime_for_launch(
+        &shared,
+        &ProviderKind::Claude,
+        channel_id,
+        (
+            "/prior/launch-path".to_string(),
+            Some(prior_session_id.to_string()),
+            true,
+            "runtime_cached_provider_session",
+        ),
+    )
+    .await;
+
+    assert_eq!(runtime.0, "/prior/launch-path");
+    assert_eq!(runtime.1.as_deref(), Some(prior_session_id));
+    assert_ne!(runtime.1.as_deref(), Some(rebound_session_id));
+}
+
+#[test]
+fn invalid_redirect_path_falls_back_without_pairing_redirect_session_id() {
+    let original_channel = serenity::ChannelId::new(4_794_005);
+    let redirect_channel = serenity::ChannelId::new(4_794_006);
+    let original_session_id = "33333333-3333-3333-3333-333333333333";
+    let redirect_session_id = "44444444-4444-4444-4444-444444444444";
+    let mut sessions = std::collections::HashMap::new();
+    sessions.insert(
+        redirect_channel,
+        DiscordSession {
+            session_id: Some(redirect_session_id.to_string()),
+            memento_context_loaded: false,
+            memento_reflected: false,
+            current_path: Some("/removed/redirect-worktree".to_string()),
+            history: Vec::new(),
+            pending_uploads: Vec::new(),
+            cleared: false,
+            remote_profile_name: None,
+            channel_id: Some(redirect_channel.get()),
+            channel_name: None,
+            category_name: None,
+            last_active: tokio::time::Instant::now(),
+            worktree: None,
+            born_generation: 0,
+        },
+    );
+    let original = (
+        Some(original_session_id.to_string()),
+        true,
+        "/prior/redirect-path".to_string(),
+    );
+
+    let resolved = session_runtime_state_after_redirect(
+        &mut sessions,
+        original_channel,
+        redirect_channel,
+        original.clone(),
+    );
+
+    assert_eq!(resolved, original);
+    assert_ne!(resolved.0.as_deref(), Some(redirect_session_id));
+}
+
+#[tokio::test]
+async fn claimed_runtime_refresh_adopts_late_resume_binding() {
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let channel_id = serenity::ChannelId::new(4_794_007);
+    let prior_cwd = tempfile::tempdir().expect("prior cwd");
+    let rebound_cwd = tempfile::tempdir().expect("rebound cwd");
+    let prior_session_id = "55555555-5555-5555-5555-555555555555";
+    let rebound_session_id = "66666666-6666-6666-6666-666666666666";
+    {
+        let mut data = shared.core.lock().await;
+        data.sessions.insert(
+            channel_id,
+            DiscordSession {
+                session_id: Some(rebound_session_id.to_string()),
+                memento_context_loaded: false,
+                memento_reflected: false,
+                current_path: Some(rebound_cwd.path().display().to_string()),
+                history: Vec::new(),
+                pending_uploads: Vec::new(),
+                cleared: false,
+                remote_profile_name: None,
+                channel_id: Some(channel_id.get()),
+                channel_name: Some("resume-late-binding".to_string()),
+                category_name: None,
+                last_active: tokio::time::Instant::now(),
+                worktree: None,
+                born_generation: 0,
+            },
+        );
+    }
+    let mut current_path = prior_cwd.path().display().to_string();
+    let mut session_id = Some(prior_session_id.to_string());
+    let mut loaded = true;
+    let mut reason = "runtime_cached_provider_session";
+
+    refresh_claimed_runtime_for_launch(
+        &shared,
+        &ProviderKind::Claude,
+        channel_id,
+        true,
+        (&mut current_path, &mut session_id, &mut loaded, &mut reason),
+    )
+    .await;
+
+    assert_eq!(current_path, rebound_cwd.path().display().to_string());
+    assert_eq!(session_id.as_deref(), Some(rebound_session_id));
+    assert!(!loaded);
+    assert_eq!(reason, "runtime_session_rebound");
+}
+
 #[test]
 fn session_strategy_lifecycle_event_records_fresh_and_resumed_details() {
     let fresh = session_strategy_lifecycle_event(None, "no_cached_provider_session", None);

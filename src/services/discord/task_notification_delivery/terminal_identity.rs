@@ -1,6 +1,17 @@
 //! Provider-entry identity for terminal task cards (#4295).
 
+use poise::serenity_prelude::ChannelId;
+
 use super::*;
+
+/// Stable outbox identity shared by prompt observation and watcher suppression
+/// for one footer-owned background completion.
+pub(in crate::services::discord) fn footer_background_marker_session_key(
+    channel_id: ChannelId,
+    event_key: &str,
+) -> String {
+    format!("footer_background:ch:{}:{event_key}", channel_id.get())
+}
 
 impl TaskCardEvent {
     pub(in crate::services::discord) fn from_task_prompt(

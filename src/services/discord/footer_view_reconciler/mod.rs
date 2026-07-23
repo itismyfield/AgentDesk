@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId};
-use sqlx::Row;
 
 use super::{ProviderKind, SharedData, single_message_panel as smp};
 use crate::services::agent_protocol::StatusEvent;
@@ -165,73 +164,6 @@ struct CompletedFooterPlan {
     terminal_edit: Option<CompletionFooterTerminalEdit>,
 }
 
-async fn append_terminal_relay_metadata(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    owner: CompletionFooterOwner,
-    mut block: String,
-) -> String {
-    if owner.started_at_unix > 0 {
-        let elapsed_secs = chrono::Utc::now()
-            .timestamp()
-            .saturating_sub(owner.started_at_unix);
-        if elapsed_secs > 0 {
-            block.push_str(&format!("\n\n⏱ {}", format_turn_duration(elapsed_secs)));
-        }
-    }
-
-    if let Some(rate_limit) = terminal_rate_limit_summary(shared, provider).await {
-        block.push_str(&format!("\n⏳ {rate_limit}"));
-    }
-
-    if crate::config_live_reload::current().is_some_and(|config| config.cluster.enabled) {
-        let node =
-            crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
-        if !node.trim().is_empty() {
-            block.push_str(&format!("\n🖥️ {node}"));
-        }
-    }
-
-    block
-}
-
-fn format_turn_duration(total_secs: i64) -> String {
-    let minutes = total_secs / 60;
-    let seconds = total_secs % 60;
-    if minutes > 0 {
-        format!("{minutes}m {seconds}s")
-    } else {
-        format!("{seconds}s")
-    }
-}
-
-async fn terminal_rate_limit_summary(
-    shared: &SharedData,
-    provider: &ProviderKind,
-) -> Option<String> {
-    let pool = shared.pg_pool.as_ref()?;
-    let provider = provider.as_str();
-    let row =
-        sqlx::query("SELECT data FROM rate_limit_cache WHERE lower(provider) = lower($1) LIMIT 1")
-            .bind(provider)
-            .fetch_optional(pool)
-            .await
-            .ok()??;
-    let data = row.try_get::<String, _>("data").ok()?;
-    let buckets = serde_json::from_str::<serde_json::Value>(&data)
-        .ok()?
-        .get("buckets")?
-        .as_array()?
-        .iter()
-        .filter_map(|bucket| {
-            let name = bucket.get("name")?.as_str()?;
-            let remaining = bucket.get("remaining")?.as_i64()?.clamp(0, 100);
-            matches!(name, "5h" | "7d").then(|| format!("{name} {remaining}%"))
-        })
-        .collect::<Vec<_>>();
-    (!buckets.is_empty()).then(|| buckets.join(" · "))
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn prepare_turn_completed_footer(
     shared: &SharedData,
@@ -260,8 +192,27 @@ async fn prepare_turn_completed_footer(
         rendered.block.unwrap_or_default(),
         wip_warning,
     );
-    let completion_block =
-        append_terminal_relay_metadata(shared, provider, owner, completion_block).await;
+    let inflight_started_at = super::inflight::load_inflight_state(provider, channel_id.get())
+        .filter(|state| {
+            if owner.user_msg_id != 0 {
+                state.user_msg_id == owner.user_msg_id
+            } else {
+                terminal_msg_id.is_some_and(|message_id| state.current_msg_id == message_id.get())
+                    && state.finalizer_turn_id != 0
+            }
+        })
+        .map(|state| state.started_at);
+    let metadata = super::completion_footer_metadata::load_completion_footer_metadata(
+        shared,
+        provider,
+        owner.started_at_unix,
+        inflight_started_at.as_deref(),
+    )
+    .await;
+    let completion_block = super::completion_footer_metadata::append_completion_footer_metadata(
+        completion_block,
+        &metadata,
+    );
     let completion_block = (!completion_block.trim().is_empty()).then_some(completion_block);
     let Some(msg_id) = terminal_msg_id else {
         return CompletedFooterPlan {
@@ -542,12 +493,6 @@ pub(in crate::services::discord) fn register_completion_footer_target_for_test(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn format_turn_duration_renders_seconds_and_minutes_4080() {
-        assert_eq!(format_turn_duration(34), "34s");
-        assert_eq!(format_turn_duration(154), "2m 34s");
-    }
 
     fn push_unfinished_subagent(channel_id: ChannelId) -> Arc<SharedData> {
         let shared = super::super::make_shared_data_for_tests();
