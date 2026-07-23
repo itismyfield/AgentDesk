@@ -185,16 +185,43 @@ pub(crate) fn create_quick_restart_marker(
     runtime_root: &Path,
     version: &str,
 ) -> Result<QuickRestartMarker, RestartMarkerCreateError> {
+    create_quick_restart_marker_inner(runtime_root, version, |file, body| {
+        file.write_all(body.as_bytes())?;
+        file.flush()
+    })
+}
+
+fn create_quick_restart_marker_inner(
+    runtime_root: &Path,
+    version: &str,
+    write_staging: impl FnOnce(&mut fs::File, &str) -> io::Result<()>,
+) -> Result<QuickRestartMarker, RestartMarkerCreateError> {
     let path = runtime_root.join("restart_pending");
+    let staging_path =
+        runtime_root.join(format!(".restart_pending.publish.{}", uuid::Uuid::new_v4()));
     let nonce = uuid::Uuid::new_v4();
     let body = format!(
         "nonce={nonce}\nsource={QUICK_RESTART_SOURCE}\nscope={QUICK_RESTART_SCOPE}\nversion={version}\nrequested_at={}\n",
         chrono::Utc::now().to_rfc3339()
     );
 
-    let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
-        Ok(file) => file,
+    let mut staging = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staging_path)
+        .map_err(RestartMarkerCreateError::Io)?;
+    if let Err(error) = write_staging(&mut staging, &body) {
+        let _ = fs::remove_file(&staging_path);
+        return Err(RestartMarkerCreateError::Io(error));
+    }
+    drop(staging);
+
+    match fs::hard_link(&staging_path, &path) {
+        Ok(()) => {
+            let _ = fs::remove_file(&staging_path);
+        }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let _ = fs::remove_file(&staging_path);
             let owner = RestartMarkerOwner::from_path(&path).unwrap_or(RestartMarkerOwner {
                 nonce: None,
                 source: None,
@@ -202,12 +229,10 @@ pub(crate) fn create_quick_restart_marker(
             });
             return Err(RestartMarkerCreateError::AlreadyOwned(owner));
         }
-        Err(error) => return Err(RestartMarkerCreateError::Io(error)),
-    };
-
-    if let Err(error) = file.write_all(body.as_bytes()) {
-        let _ = fs::remove_file(&path);
-        return Err(RestartMarkerCreateError::Io(error));
+        Err(error) => {
+            let _ = fs::remove_file(&staging_path);
+            return Err(RestartMarkerCreateError::Io(error));
+        }
     }
 
     Ok(QuickRestartMarker {
@@ -254,6 +279,52 @@ mod tests {
         fs::write(&path, existing).unwrap();
 
         let result = create_quick_restart_marker(root.path(), "9.9.9");
+
+        assert!(matches!(
+            result,
+            Err(RestartMarkerCreateError::AlreadyOwned(RestartMarkerOwner {
+                nonce: Some(ref nonce),
+                source: Some(ref source),
+                scope: Some(ref scope),
+            })) if nonce == "owner-nonce" && source == "deploy-release" && scope == "release"
+        ));
+        assert_eq!(fs::read_to_string(path).unwrap(), existing);
+    }
+
+    #[test]
+    fn staging_write_failure_never_touches_canonical_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("restart_pending");
+        let existing = "nonce=owner-nonce\nsource=deploy-release\nscope=release\n";
+        fs::write(&path, existing).unwrap();
+
+        let result = create_quick_restart_marker_inner(root.path(), "9.9.9", |file, body| {
+            file.write_all(&body.as_bytes()[..body.len() / 2])?;
+            Err(io::Error::other("injected staging write failure"))
+        });
+
+        assert!(matches!(result, Err(RestartMarkerCreateError::Io(_))));
+        assert_eq!(fs::read_to_string(path).unwrap(), existing);
+        assert!(fs::read_dir(root.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".restart_pending.publish.")
+        }));
+    }
+
+    #[test]
+    fn staging_publish_eexist_preserves_existing_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("restart_pending");
+        let existing = "nonce=owner-nonce\nsource=deploy-release\nscope=release\n";
+        fs::write(&path, existing).unwrap();
+
+        let result = create_quick_restart_marker_inner(root.path(), "9.9.9", |file, body| {
+            file.write_all(body.as_bytes())?;
+            file.flush()
+        });
 
         assert!(matches!(
             result,
