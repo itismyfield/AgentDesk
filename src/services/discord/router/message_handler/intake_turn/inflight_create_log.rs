@@ -1,5 +1,22 @@
+use poise::serenity_prelude as serenity;
+
 use crate::services::discord::inflight::{CreateNewInflightError, InflightTurnState};
 use crate::services::provider::ProviderKind;
+
+pub(crate) async fn record_turn_start_origin(
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    state: &InflightTurnState,
+) {
+    crate::services::discord::adk_session::record_turn_start_origin(
+        state.session_key.as_deref(),
+        provider,
+        channel_id,
+        state.turn_nonce.as_deref(),
+        state.dispatch_id.is_some(),
+    )
+    .await;
+}
 
 pub(crate) fn log_create_new_inflight_outcome(
     result: Result<(), CreateNewInflightError>,

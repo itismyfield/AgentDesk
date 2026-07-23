@@ -2390,6 +2390,7 @@ pub(super) async fn handle_text_message(
     }
     inflight_state.session_key = adk_session_key.clone();
     inflight_state.dispatch_id = dispatch_id.clone();
+    inflight_create_log::record_turn_start_origin(&provider, channel_id, &inflight_state).await;
     inflight_create_log::log_create_new_inflight_outcome(
         super::super::super::inflight::save_inflight_state_create_new(&inflight_state),
         &provider,

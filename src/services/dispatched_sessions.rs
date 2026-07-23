@@ -57,6 +57,11 @@ async fn hook_session_pg(
     // and similar callers used to zero this column on every metadata update).
     let tokens = body.tokens.map(|t| t as i64);
     let active_dispatch_id = normalize_hook_active_dispatch_id(status, body.dispatch_id.as_deref());
+    let turn_start_nonce = body
+        .turn_start_nonce
+        .as_deref()
+        .filter(|value| !value.is_empty());
+    let dispatched_origin = body.dispatched_origin.unwrap_or(false);
     let instance_id = body
         .instance_id
         .as_deref()
@@ -98,6 +103,8 @@ async fn hook_session_pg(
                 .or(thread_channel_id.as_deref()),
             claude_session_id,
             raw_provider_session_id,
+            turn_start_nonce,
+            dispatched_origin,
         },
     )
     .await;
@@ -256,6 +263,12 @@ pub struct HookSessionBody {
     /// satisfy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_id: Option<String>,
+    /// Durable turn-start identity. Present only for an authoritative new turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_start_nonce: Option<String>,
+    /// Whether the turn start was initiated by a dispatch. Paired with nonce.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatched_origin: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

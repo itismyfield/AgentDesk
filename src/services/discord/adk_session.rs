@@ -193,6 +193,45 @@ pub(super) fn derive_adk_session_info(
     "AgentDesk 작업 진행 중".to_string()
 }
 
+/// Persist the origin classification at turn start. Every started turn overwrites
+/// the previous marker, so an ordinary interactive turn can never inherit a
+/// dispatched-origin marker from an older turn.
+pub(super) async fn record_turn_start_origin(
+    session_key: Option<&str>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    turn_nonce: Option<&str>,
+    dispatched_origin: bool,
+) {
+    let (Some(session_key), Some(turn_nonce)) =
+        (session_key, turn_nonce.filter(|value| !value.is_empty()))
+    else {
+        return;
+    };
+    let body = crate::services::dispatched_sessions::HookSessionBody {
+        session_key: session_key.to_string(),
+        instance_id: None,
+        agent_id: None,
+        status: Some(crate::db::session_status::TURN_ACTIVE.to_string()),
+        provider: Some(provider.as_str().to_string()),
+        session_info: None,
+        name: None,
+        model: None,
+        tokens: None,
+        cwd: None,
+        dispatch_id: None,
+        thread_channel_id: None,
+        claude_session_id: None,
+        session_id: None,
+        channel_id: Some(channel_id.get().to_string()),
+        turn_start_nonce: Some(turn_nonce.to_string()),
+        dispatched_origin: Some(dispatched_origin),
+    };
+    if let Err(err) = super::internal_api::hook_session(body).await {
+        tracing::warn!(channel_id = channel_id.get(), error = %err, "failed to persist turn-start origin marker");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn post_adk_session_status(
     session_key: Option<&str>,
@@ -233,6 +272,8 @@ pub(super) async fn post_adk_session_status(
         claude_session_id: None,
         session_id: None,
         channel_id: channel_id.map(|id| id.get().to_string()),
+        turn_start_nonce: None,
+        dispatched_origin: None,
     };
 
     if let Err(err) = super::internal_api::hook_session(body).await {
@@ -295,6 +336,8 @@ pub(super) async fn save_provider_session_id(
         claude_session_id: Some(session_id.to_string()),
         session_id: raw_provider_session_id.map(str::to_string),
         channel_id: Some(channel_id.get().to_string()),
+        turn_start_nonce: None,
+        dispatched_origin: None,
     };
     if let Err(err) = super::internal_api::hook_session(body).await {
         let ts = chrono::Local::now().format("%H:%M:%S");
