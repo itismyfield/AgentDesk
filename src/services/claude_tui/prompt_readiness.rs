@@ -7,7 +7,10 @@ use crate::services::tui_turn_state::TuiTurnState;
 /// words or `◯` bullet, but it cannot satisfy these structural anchors.
 pub(crate) fn claude_tui_background_agent_status_line_indexes(pane: &str) -> Vec<usize> {
     let lines = pane.lines().collect::<Vec<_>>();
-    let Some(prompt_index) = lines.iter().rposition(|line| line.trim() == "❯") else {
+    let Some(prompt_index) = lines
+        .iter()
+        .rposition(|line| line.trim_start().starts_with('❯'))
+    else {
         return Vec::new();
     };
     // Claude's persistent chrome is painted around the active bottom composer.
@@ -16,11 +19,10 @@ pub(crate) fn claude_tui_background_agent_status_line_indexes(pane: &str) -> Vec
     // Require these adjacent structures so transcript text quoting exact chrome
     // cannot become a keep-alive signal.
     let mut statuses = Vec::new();
-    if prompt_index >= 2
-        && is_claude_tui_background_agent_footer(lines[prompt_index - 2])
-        && is_claude_tui_horizontal_separator(lines[prompt_index - 1])
+    if let Some(footer_index) =
+        claude_tui_background_agent_footer_before_composer(&lines, prompt_index)
     {
-        statuses.push(prompt_index - 2);
+        statuses.push(footer_index);
     }
     if prompt_index >= 2
         && is_claude_tui_background_agent_management_header(lines[prompt_index - 2])
@@ -31,18 +33,34 @@ pub(crate) fn claude_tui_background_agent_status_line_indexes(pane: &str) -> Vec
 
     let mut task_table_open = false;
     for (index, line) in lines.iter().enumerate().skip(prompt_index + 1) {
-        if line == &"  ⏺ main" {
+        if line.starts_with("  ⏺ main") {
             task_table_open = true;
             continue;
         }
-        if task_table_open && is_claude_tui_background_agent_task_row(line) {
-            statuses.push(index);
-            continue;
+        if task_table_open {
+            if is_claude_tui_background_agent_task_row(line) {
+                statuses.push(index);
+                continue;
+            }
+            break;
         }
-        task_table_open = false;
     }
 
     statuses
+}
+
+fn claude_tui_background_agent_footer_before_composer(
+    lines: &[&str],
+    prompt_index: usize,
+) -> Option<usize> {
+    let separator_index = prompt_index.checked_sub(1)?;
+    if !is_claude_tui_horizontal_separator(lines[separator_index]) {
+        return None;
+    }
+    let footer_index = lines[..separator_index]
+        .iter()
+        .rposition(|line| !line.trim().is_empty())?;
+    is_claude_tui_background_agent_footer(lines[footer_index]).then_some(footer_index)
 }
 
 fn is_claude_tui_horizontal_separator(line: &str) -> bool {
@@ -71,28 +89,17 @@ fn is_claude_tui_background_agent_management_line(line: &str) -> bool {
 }
 
 fn is_claude_tui_background_agent_task_row(line: &str) -> bool {
-    let Some(columns) = line.strip_prefix("  ◯ ") else {
-        return false;
-    };
-    let columns = columns
-        .split("  ")
-        .filter(|column| !column.trim().is_empty())
-        .collect::<Vec<_>>();
-    columns.len() == 3 && is_claude_tui_elapsed_duration(columns[2].trim())
-}
-
-fn is_claude_tui_elapsed_duration(value: &str) -> bool {
-    let components = value.split_whitespace().collect::<Vec<_>>();
-    !components.is_empty()
-        && components.iter().all(|component| {
-            let Some(unit) = component.chars().last() else {
+    line.strip_prefix("  ◯ ").is_some_and(|row| {
+        row.split_whitespace().any(|value| {
+            let Some(unit) = value.chars().last() else {
                 return false;
             };
             matches!(unit, 's' | 'm' | 'h')
-                && component.strip_suffix(unit).is_some_and(|digits| {
+                && value.strip_suffix(unit).is_some_and(|digits| {
                     !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
                 })
         })
+    })
 }
 
 /// Return foreground live-turn evidence from a Claude TUI pane.
@@ -190,6 +197,27 @@ mod tests {
         ] {
             assert!(claude_tui_background_agent_status_line_indexes(pane).is_empty());
         }
+    }
+
+    #[test]
+    fn captured_background_agent_frame_with_draft_composer_is_detected() {
+        let pane = "\
+원하는 대로 할게:
+  어느 쪽?
+
+✻ Waiting for 5 background agents to finish
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ a로 확정짓고 4:22 타임라인 떠서 처리해
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  🤖 Opus(H) │ ███░░░░░░░ │ 26% │ 265K/1.0M │ 5h: 8% (3h0m) │ 7d: 55% (1d23h)
+  ⏺ main                                                                                        ↑/↓ to select · Enter to view
+  ◯ general-purpose  Fix #3207 turn-stop + resume                                                    16m 5s · ↓ 159.5k tokens
+  ◯ general-purpose  Implement #3154 A converged design                                             10m 53s · ↓ 110.5k tokens";
+        assert_eq!(
+            claude_tui_background_agent_status_line_indexes(pane),
+            vec![3, 10, 11],
+        );
     }
 
     #[test]
