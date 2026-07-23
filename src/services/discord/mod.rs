@@ -214,6 +214,7 @@ use prompt_builder::{RecoveryContextManifestInput, build_system_prompt_with_mani
 pub(in crate::services::discord) use queue_dispatch::MailboxEnqueueOutcome;
 use queue_dispatch::{
     MailboxTakeNextSoftOutcome, mailbox_abandon_unclaimed_dispatch_after_success,
+    mailbox_requeue_intervention_front, mailbox_restore_dequeued_head,
 };
 use recovery_engine::restore_inflight_turns;
 use restart_report::flush_restart_reports;
@@ -2562,21 +2563,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
     })
 }
 
-fn queue_persistence_context(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-) -> QueuePersistenceContext {
-    QueuePersistenceContext::new(
-        provider,
-        &shared.token_hash,
-        shared
-            .dispatch
-            .role_overrides
-            .get(&channel_id)
-            .map(|override_id| override_id.value().get()),
-    )
-}
+use queue_dispatch::persistence_context as queue_persistence_context;
 
 async fn mailbox_snapshot(shared: &SharedData, channel_id: ChannelId) -> ChannelMailboxSnapshot {
     match shared.mailbox_peek(channel_id) {
@@ -3660,31 +3647,6 @@ async fn idle_queue_take_next_soft_if_ready(
     mailbox_take_next_soft_intervention(shared, provider, channel_id).await
 }
 
-async fn mailbox_requeue_intervention_front(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    intervention: Intervention,
-) -> RequeueInterventionResult {
-    let result: RequeueInterventionResult = shared
-        .mailbox(channel_id)
-        .requeue_front(
-            intervention,
-            queue_persistence_context(shared, provider, channel_id),
-        )
-        .await;
-    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
-    if let Some(error) = result.persistence_error.as_ref() {
-        tracing::warn!(
-            provider = provider.as_str(),
-            channel_id = channel_id.get(),
-            error = %error,
-            "mailbox requeue-front failed durable pending-queue persistence; pending dispatch marker remains the durable backstop"
-        );
-    }
-    result
-}
-
 pub(in crate::services::discord) async fn mailbox_abandon_pending_dispatch(
     shared: &SharedData,
     provider: &ProviderKind,
@@ -3715,14 +3677,8 @@ async fn mailbox_clear_pending_dispatch_reservation(
         .await;
 }
 
-/// Re-queue the inflight message that a claude TUI follow-up could not submit
-/// because the pane was busy at submit time. The follow-up busy-timeout is
-/// PRE-submit (the prompt was never delivered), so retrying cannot double-send.
-/// Enqueues to the BACK of the channel mailbox so the message is retried after
-/// the in-flight turn frees the pane rather than hot-looping. No-op for
-/// anchorless (recovery) turns or empty text. Unlike the dequeued-head sibling
-/// `enqueue_busy_tui_followup_for_retry` (front-requeues for FIFO, #4795), this
-/// inflight-rebuild path still tail-enqueues; FIFO parity tracked in #4797.
+/// Front-restore an inflight Claude TUI follow-up that failed before submission;
+/// it predates queued interventions, and the deferred kickoff prevents hot loops.
 pub(in crate::services::discord) async fn mailbox_requeue_inflight_for_followup_retry(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -3770,7 +3726,7 @@ pub(in crate::services::discord) async fn mailbox_requeue_inflight_for_followup_
         pending_uploads: inflight_state.followup_pending_uploads.clone(),
         voice_announcement: inflight_state.followup_voice_announcement.clone(),
     };
-    mailbox_enqueue_intervention(shared, provider, channel_id, intervention).await
+    mailbox_requeue_intervention_front(shared, provider, channel_id, intervention).await
 }
 
 #[cfg(test)]
@@ -3920,7 +3876,7 @@ mod followup_retry_requeue_tests {
     }
 
     #[test]
-    fn pre_submit_requeue_reports_duplicate_refusal_outcome() {
+    fn inflight_retry_restores_earlier_message_without_reversing_fifo_4797() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .expect("shared env lock poisoned");
@@ -3937,21 +3893,50 @@ mod followup_retry_requeue_tests {
         rt.block_on(async {
             let shared = make_shared_data_for_tests();
             let provider = ProviderKind::Claude;
-            let channel_id = ChannelId::new(3_752_002);
-            let user_msg_id = MessageId::new(3_752_102);
-            let state = followup_inflight(channel_id, user_msg_id, false);
+            let channel_id = ChannelId::new(4_797_001);
+            let first_id = MessageId::new(4_797_101);
+            let later_id = MessageId::new(4_797_102);
+            let state = followup_inflight(channel_id, first_id, false);
+            let later = Intervention {
+                author_id: UserId::new(43),
+                author_is_bot: true,
+                message_id: later_id,
+                queued_generation: shared.restart.current_generation,
+                source_message_ids: vec![later_id],
+                source_message_queued_generations: Vec::new(),
+                source_text_segments: Vec::new(),
+                text: "later bot B".to_string(),
+                mode: crate::services::turn_orchestrator::InterventionMode::Soft,
+                created_at: std::time::Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
+                pending_uploads: Vec::new(),
+                voice_announcement: None,
+            };
+            mailbox_enqueue_intervention(&shared, &provider, channel_id, later.clone()).await;
 
-            let first =
+            let retry =
                 mailbox_requeue_inflight_for_followup_retry(&shared, &provider, channel_id, &state)
                     .await;
-            let second =
+            assert!(retry.enqueued);
+
+            let snapshot = mailbox_snapshot(&shared, channel_id).await;
+            let order: Vec<_> = snapshot
+                .intervention_queue
+                .iter()
+                .map(|item| item.message_id)
+                .collect();
+            assert_eq!(order, vec![first_id, later_id]);
+            assert!(!snapshot.intervention_queue[0].author_is_bot);
+            assert!(snapshot.intervention_queue[1].author_is_bot);
+
+            let duplicate =
                 mailbox_requeue_inflight_for_followup_retry(&shared, &provider, channel_id, &state)
                     .await;
-
-            assert!(first.enqueued);
-            assert!(!second.enqueued);
+            assert!(!duplicate.enqueued);
             assert_eq!(
-                second.refusal_reason,
+                duplicate.refusal_reason,
                 Some(
                     crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued
                 )
@@ -3959,8 +3944,8 @@ mod followup_retry_requeue_tests {
             let snapshot = mailbox_snapshot(&shared, channel_id).await;
             assert_eq!(
                 snapshot.intervention_queue.len(),
-                1,
-                "duplicate pre-submit requeue must not create a second queued prompt"
+                2,
+                "duplicate inflight retry must not create a second queued prompt"
             );
         });
     }
@@ -4214,12 +4199,18 @@ async fn kickoff_idle_queue_channel(
         has_more,
         false,
         "intake_admission_pre_kickoff_defer",
+        dispatch_lease.clone(),
     )
     .await
     {
         router::QueuedAdmissionDisposition::Admitted(admitted) => admitted,
         router::QueuedAdmissionDisposition::Deferred
         | router::QueuedAdmissionDisposition::RejectedNonPortableAttachment => {
+            drop(dispatch_lease);
+            return IdleQueueKickoffChannelOutcome::default();
+        }
+        router::QueuedAdmissionDisposition::RejectedRestore => {
+            queue_dispatch::log_kickoff_rejected_restore(provider, channel_id);
             drop(dispatch_lease);
             return IdleQueueKickoffChannelOutcome::default();
         }
@@ -4257,7 +4248,29 @@ async fn kickoff_idle_queue_channel(
                 "  [{ts}]   ⚠ KICKOFF: failed to start turn for channel {}: {e}",
                 channel_id
             );
-            mailbox_requeue_intervention_front(shared, provider, channel_id, intervention).await;
+            let restored = mailbox_restore_dequeued_head(
+                shared,
+                provider,
+                channel_id,
+                intervention,
+                dispatch_lease
+                    .as_ref()
+                    .expect("dequeued kickoff intervention must carry its lease")
+                    .clone(),
+            )
+            .await;
+            if !restored.enqueued {
+                tracing::error!(
+                    provider = provider.as_str(),
+                    channel_id = channel_id.get(),
+                    refusal_reason = restored
+                        .refusal_reason
+                        .map(|reason| reason.as_str())
+                        .unwrap_or("none"),
+                    persistence_error = restored.persistence_error.as_deref().unwrap_or("none"),
+                    "KICKOFF: dequeued-head restore rejected after dispatch failure"
+                );
+            }
             drop(dispatch_lease);
             IdleQueueKickoffChannelOutcome { started: false }
         }
@@ -4267,6 +4280,10 @@ async fn kickoff_idle_queue_channel(
                 provider,
                 channel_id,
                 intervention.message_id,
+                dispatch_lease
+                    .as_ref()
+                    .expect("dequeued kickoff intervention must carry its lease")
+                    .clone(),
             )
             .await;
             drop(dispatch_lease);
@@ -5191,6 +5208,7 @@ mod idle_queue_background_supersede_tests {
                     &provider,
                     channel_id,
                     consumed.message_id,
+                    dispatch_lease.clone(),
                 )
                 .await;
 
@@ -5227,6 +5245,82 @@ mod idle_queue_background_supersede_tests {
                         .map(|(marker, _)| marker.message_id),
                     Some(next.message_id),
                     "next head receives the only remaining marker"
+                );
+            });
+    }
+
+    #[test]
+    fn stale_success_cleanup_cannot_abandon_same_identity_successor_lease() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let shared = make_shared_data_for_tests();
+                let provider = ProviderKind::Claude;
+                let channel_id = ChannelId::new(4_797_904);
+                let intervention = user_intervention(4_797_905, "same identity successor");
+                let persistence = queue_persistence_context(&shared, &provider, channel_id);
+                shared
+                    .mailbox(channel_id)
+                    .replace_queue(vec![intervention.clone()], persistence.clone())
+                    .await;
+
+                let first = shared
+                    .mailbox(channel_id)
+                    .take_next_soft(persistence.clone())
+                    .await;
+                let stale_lease = first
+                    .dispatch_lease
+                    .expect("first dequeue must carry lease L1");
+                let restored = shared
+                    .mailbox(channel_id)
+                    .restore_dequeued_head(
+                        first.intervention.expect("first dequeue must return head"),
+                        persistence.clone(),
+                        stale_lease.clone(),
+                    )
+                    .await;
+                assert!(restored.enqueued);
+
+                let second = shared.mailbox(channel_id).take_next_soft(persistence).await;
+                let successor_lease = second
+                    .dispatch_lease
+                    .expect("successor dequeue must carry lease L2");
+                assert_eq!(
+                    second.intervention.as_ref().map(|item| item.message_id),
+                    Some(intervention.message_id)
+                );
+
+                mailbox_abandon_unclaimed_dispatch_after_success(
+                    &shared,
+                    &provider,
+                    channel_id,
+                    intervention.message_id,
+                    stale_lease,
+                )
+                .await;
+
+                let snapshot = mailbox_snapshot(&shared, channel_id).await;
+                assert_eq!(
+                    snapshot.pending_user_dispatch,
+                    Some(intervention.message_id)
+                );
+                assert_eq!(
+                    load_channel_pending_dispatch_marker(&provider, &shared.token_hash, channel_id)
+                        .map(|(marker, _)| marker.message_id),
+                    Some(intervention.message_id),
+                    "stale L1 cleanup must preserve L2's durable marker"
+                );
+                assert_eq!(
+                    Arc::strong_count(&successor_lease),
+                    2,
+                    "stale L1 cleanup must preserve the actor-held L2 reservation"
                 );
             });
     }

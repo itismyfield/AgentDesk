@@ -181,6 +181,8 @@ mod tests {
 
     #[tokio::test]
     async fn stale_episode_cannot_release_pre_cutoff_same_id_successor() {
+        let tmp = tempfile::tempdir().expect("isolated persistence root");
+        let _root_guard = crate::config::set_agentdesk_root_for_test(tmp.path());
         let registry = ChannelMailboxRegistry::default();
         let handle = registry.handle(ChannelId::new(4_595_001));
         let user_msg_id = MessageId::new(9_595);

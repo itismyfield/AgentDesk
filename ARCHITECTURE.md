@@ -668,6 +668,7 @@ src/
 │   │   │   │   │   ├── turn_watchdog.rs
 │   │   │   │   │   └── voice_intake.rs
 │   │   │   │   ├── attachments.rs
+│   │   │   │   ├── busy_retry.rs
 │   │   │   │   ├── control.rs
 │   │   │   │   ├── goal_lifecycle.rs
 │   │   │   │   ├── headless_turn.rs
@@ -1191,8 +1192,10 @@ src/
 │   │   └── completion_scan.rs
 │   ├── turn_orchestrator/
 │   │   ├── active_source_dedup.rs
+│   │   ├── dispatch_cleanup.rs
 │   │   ├── dispatch_reservation.rs
 │   │   ├── episode_identity.rs
+│   │   ├── front_requeue.rs
 │   │   ├── overflow.rs
 │   │   ├── pending_queue_persistence.rs
 │   │   ├── queue_cancellation.rs

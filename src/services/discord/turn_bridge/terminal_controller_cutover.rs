@@ -1097,6 +1097,9 @@ mod tests {
                 _i: &'a crate::services::discord::Intervention,
                 _o: &'a str,
                 _h: bool,
+                _dispatch_lease: Option<
+                    std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>,
+                >,
             ) -> GatewayFuture<'a, Result<(), String>> {
                 panic!("unused on the short-replace path")
             }
@@ -1322,6 +1325,9 @@ mod tests {
                 _i: &'a crate::services::discord::Intervention,
                 _o: &'a str,
                 _h: bool,
+                _dispatch_lease: Option<
+                    std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>,
+                >,
             ) -> GatewayFuture<'a, Result<(), String>> {
                 panic!("unused on the long-chunk path")
             }

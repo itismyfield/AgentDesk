@@ -9,7 +9,7 @@ use super::*;
 mod adk_thread;
 mod claim_bootstrap;
 pub(crate) mod inflight_create_log;
-mod race_loss;
+pub(super) mod race_loss;
 mod stale_dispatch_guard;
 mod steering_hook;
 mod turn_watchdog;
@@ -2182,35 +2182,25 @@ pub(super) async fn handle_text_message(
                 .await
                 .intervention_queue
                 .len();
-        let queued_card_rendered = false;
-        if enqueue_outcome.enqueued {
-            race_loss::mailbox_reaction::note_busy_tui_pre_submit_queue_pending(
+        let retry_present_or_accepted = busy_retry::finalize_enqueue(
+            busy_retry::FinalizeEnqueueContext {
                 shared,
                 http,
+                provider: &provider,
                 channel_id,
                 user_msg_id,
-                enqueue_outcome.merged,
-                turn_start_attempt,
-            )
-            .await;
-            let _ = channel_id.delete_message(http, placeholder_msg_id).await;
-        } else {
-            apply_tui_busy_enqueue_refusal(
-                shared,
-                http,
-                &provider,
-                channel_id,
                 placeholder_msg_id,
-                session_retry_context.as_ref(),
-                feedback_reminder.as_deref(),
-                wip_warning.as_deref(),
-                enqueue_outcome.refusal_reason,
-            )
-            .await;
-            tv_clear_current(shared, http, channel_id, user_msg_id, "intake_busy_queue").await;
-        }
+                turn_start_attempt,
+                session_retry_context: session_retry_context.as_ref(),
+                feedback_reminder: feedback_reminder.as_deref(),
+                wip_warning: wip_warning.as_deref(),
+            },
+            &enqueue_outcome,
+        )
+        .await;
+        let queued_card_rendered = false;
         let queue_kickoff_scheduled =
-            queue_kickoff_scheduled_by_release || enqueue_outcome.enqueued;
+            queue_kickoff_scheduled_by_release || retry_present_or_accepted;
         let mut diagnostic_json = diagnostic.to_json();
         if let Some(object) = diagnostic_json.as_object_mut() {
             object.insert(

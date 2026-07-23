@@ -436,6 +436,9 @@ mod tests {
             _intervention: &'a super::super::Intervention,
             _request_owner_name: &'a str,
             _has_more_queued_turns: bool,
+            _dispatch_lease: Option<
+                std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>,
+            >,
         ) -> GatewayFuture<'a, Result<(), String>> {
             Box::pin(async { Ok(()) })
         }

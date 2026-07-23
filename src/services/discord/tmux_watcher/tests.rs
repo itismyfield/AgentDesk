@@ -4183,6 +4183,9 @@ mod watcher_short_replace_controller {
             _i: &'a crate::services::discord::Intervention,
             _o: &'a str,
             _h: bool,
+            _dispatch_lease: Option<
+                std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>,
+            >,
         ) -> GatewayFuture<'a, Result<(), String>> {
             panic!("unused on the short-replace path")
         }
@@ -4285,6 +4288,9 @@ mod watcher_short_replace_controller {
             _i: &'a crate::services::discord::Intervention,
             _o: &'a str,
             _h: bool,
+            _dispatch_lease: Option<
+                std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>,
+            >,
         ) -> GatewayFuture<'a, Result<(), String>> {
             panic!("unused on long chunks")
         }
@@ -4566,6 +4572,9 @@ mod watcher_short_replace_controller {
                 _i: &'a crate::services::discord::Intervention,
                 _o: &'a str,
                 _h: bool,
+                _dispatch_lease: Option<
+                    std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>,
+                >,
             ) -> GatewayFuture<'a, Result<(), String>> {
                 panic!("unused")
             }
