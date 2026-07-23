@@ -448,7 +448,7 @@ def status_panel_after_body(
     window: Window,
     *,
     body_marker: str,
-    panel_regex: str = r"Processing\.\.\.|진행 중|^🟢|^📦",
+    panel_regex: str = r"Processing\.\.\.|진행 중|응답 완료|^🟢|^✅|^🔴|^📦",
 ) -> None:
     body_messages = [
         message
@@ -478,7 +478,7 @@ def status_panel_after_body(
 def single_status_panel(
     window: Window,
     *,
-    panel_regex: str = r"Processing\.\.\.|진행 중|^🟢|^📦",
+    panel_regex: str = r"Processing\.\.\.|진행 중|응답 완료|^🟢|^✅|^🔴|^📦",
 ) -> None:
     panels = [
         message

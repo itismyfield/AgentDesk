@@ -3754,15 +3754,15 @@ def run_assertion(
             window,
             body_marker=str(params["body_marker"]),
             panel_regex=str(
-                params.get("panel_regex", r"Processing\.\.\.|진행 중|^🟢|^📦")
+                params.get("panel_regex", r"Processing\.\.\.|진행 중|응답 완료|^🟢|^✅|^🔴|^📦")
             ),
         )
     elif "single_status_panel" in spec:
         params = spec["single_status_panel"]
         panel_regex = (
-            params.get("panel_regex", r"Processing\.\.\.|진행 중|^🟢|^📦")
+            params.get("panel_regex", r"Processing\.\.\.|진행 중|응답 완료|^🟢|^✅|^🔴|^📦")
             if isinstance(params, dict)
-            else r"Processing\.\.\.|진행 중|^🟢|^📦"
+            else r"Processing\.\.\.|진행 중|응답 완료|^🟢|^✅|^🔴|^📦"
         )
         assertions.single_status_panel(window, panel_regex=str(panel_regex))
     elif "completion_chrome_after_body" in spec:
