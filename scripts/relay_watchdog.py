@@ -93,7 +93,6 @@ COVERAGE_CONFIRM_TICKS = 2
 # the load-transient false positives (seconds) this suppresses, and the
 # transcript-vs-Discord gap alarm independently catches real delivery loss at
 # gap_alert_secs (~15 min) regardless of this backstop.
-COVERAGE_DESYNC_CONFIRM_SECS = 600
 # A foreground turn must show an outbound/relay write inside this window before
 # a transient watcher-state desync can be treated as covered.  Ten minutes
 # matches the watchdog's calibrated delivery grace while still letting a
@@ -2726,10 +2725,10 @@ def tick_coverage(
             f"confirm={verdict.consecutive_uncovered}/{COVERAGE_CONFIRM_TICKS}"
         )
         return
-    # #4504: attached_but_desynced is a watcher-state desync, not proof of
-    # delivery loss. Require a corroborating real delivery gap OR much longer
-    # persistence before this alarms on its own. detached / watcher_state_404
-    # keep the 2-tick behavior (different reason strings).
+    # #4504/#4841: attached_but_desynced is a watcher-state desync, not proof
+    # of delivery loss. Alarm only with a corroborating real delivery gap;
+    # duration alone never upgrades an idle zero-loss session. detached /
+    # watcher_state_404 keep the 2-tick behavior (different reason strings).
     if verdict.reason == "attached_but_desynced":
         activity = probe.relay_activity
         relay_ts = activity.last_relay_ts_ms if activity is not None else None
@@ -2745,11 +2744,13 @@ def tick_coverage(
             recent_relay = (
                 0 <= relay_age_ms < COVERAGE_ACTIVITY_FRESH_SECS * 1000
             )
-        growing_without_loss = (
+        zero_loss_observed = bool(
             transcript_probe is not None
-            and transcript_probe.growing
             and transcript_probe.blocks > 0
             and transcript_probe.lost == 0
+        )
+        growing_without_loss = bool(
+            zero_loss_observed and transcript_probe is not None and transcript_probe.growing
         )
         transcript_loss_active = bool(
             transcript_probe is not None and transcript_probe.lost > 0
@@ -2761,23 +2762,20 @@ def tick_coverage(
             or transcript_loss_active
             or growing_relay_stall
         )
-        desync_for = (
-            max(0.0, now - desync_since) if desync_since is not None else 0.0
-        )
-        if not delivery_gap_active and growing_without_loss and recent_relay:
+        if not delivery_gap_active and zero_loss_observed and recent_relay:
             rt.log(
-                f"[{cid}] coverage desync classified as growth lag "
-                f"blocks={transcript_probe.blocks} lost=0 — not alarming"
+                f"[{cid}] coverage desync has zero loss and recent relay "
+                f"blocks={transcript_probe.blocks} growing={transcript_probe.growing} "
+                "— not alarming"
             )
             return
-        if (
-            not delivery_gap_active
-            and desync_for < COVERAGE_DESYNC_CONFIRM_SECS
-        ):
+        if not delivery_gap_active:
+            desync_for = (
+                max(0.0, now - desync_since) if desync_since is not None else 0.0
+            )
             rt.log(
                 f"[{cid}] coverage desync uncorroborated "
-                f"duration={int(desync_for)}s/"
-                f"{COVERAGE_DESYNC_CONFIRM_SECS}s — not alarming"
+                f"duration={int(desync_for)}s — not alarming"
             )
             return
     if rt.in_deploy_window(now):

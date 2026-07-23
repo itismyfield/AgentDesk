@@ -4056,15 +4056,93 @@ fn claude_rehydrate_start_offset_uses_current_eof() {
     );
 }
 
-// #4549: `/compact` rewrites the same transcript path to a shorter historical
-// snapshot. The durable EOF-regression signal must fast-forward to the new EOF
-// instead of restarting at zero, which would mirror an old direct prompt again.
+// #4549/#4841: `/compact` rewrites the same transcript path to a shorter
+// historical snapshot. Either direct cursor regression or its same-generation
+// durable evidence must fast-forward to the new EOF instead of restarting at
+// zero, which would mirror an old direct prompt again.
 #[test]
 fn claude_idle_transcript_scan_fast_forwards_when_compaction_shrinks_file() {
     assert_eq!(
-        claude_idle_compaction_reanchor(false, 99_999, 250, true),
+        claude_idle_compaction_reanchor(false, 99_999, 250, false),
         Some(ClaudeIdleTranscriptScan::CompactionReanchor { offset: 250 })
     );
+}
+
+#[test]
+fn claude_idle_transcript_scan_reanchors_after_restart_rehydrates_cursor_at_eof() {
+    assert_eq!(
+        claude_idle_compaction_reanchor(false, 250, 250, true),
+        Some(ClaudeIdleTranscriptScan::CompactionReanchor { offset: 250 })
+    );
+}
+
+#[test]
+fn claude_idle_transcript_scan_replays_full_prompt_after_mid_line_shrink() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let transcript = dir.path().join("transcript.jsonl");
+    let compact = "{\"type\":\"system\",\"subtype\":\"compact\",\"sessionId\":\"s1\"}\n";
+    let prompt = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"prompt crossing reanchor\"}]},\"sessionId\":\"s1\"}\n";
+    let split = prompt.len() / 2;
+    std::fs::write(&transcript, format!("{compact}{}", &prompt[..split]))
+        .expect("write compacted transcript with partial prompt");
+    let mid_line_eof = std::fs::metadata(&transcript).unwrap().len();
+    let safe_offset = claude_idle_safe_reanchor_offset(&transcript, mid_line_eof)
+        .expect("resolve safe reanchor boundary");
+    assert_eq!(
+        safe_offset,
+        compact.len() as u64,
+        "partial JSONL must re-read from its own line start"
+    );
+    let anchored = match claude_idle_compaction_reanchor(false, 99_999, safe_offset, true) {
+        Some(ClaudeIdleTranscriptScan::CompactionReanchor { offset }) => offset,
+        other => panic!("expected compaction anchor, got {other:?}"),
+    };
+
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .expect("open partial transcript")
+        .write_all(prompt[split..].as_bytes())
+        .expect("finish prompt line");
+
+    assert_eq!(
+        scan_claude_idle_transcript_for_prompt(&transcript, anchored)
+            .expect("scan completed prompt from safe boundary"),
+        ClaudeIdleTranscriptScan::Prompt {
+            prompt: "prompt crossing reanchor".to_string(),
+            prompt_start_offset: compact.len() as u64,
+            line_end_offset: (compact.len() + prompt.len()) as u64,
+            entry_id: None,
+        }
+    );
+}
+
+#[test]
+fn claude_idle_safe_reanchor_handles_exact_backward_chunk_boundaries() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let transcript = dir.path().join("chunk-boundary.jsonl");
+    const CHUNK: usize = 8 * 1024;
+
+    for (newline_at, current_eof, expected) in [
+        (CHUNK - 2, 2 * CHUNK, CHUNK - 1),
+        (CHUNK - 1, 2 * CHUNK, CHUNK),
+        (CHUNK, 2 * CHUNK, CHUNK + 1),
+        (CHUNK - 1, CHUNK, CHUNK),
+        (CHUNK - 1, 2 * CHUNK - 1, CHUNK),
+        (CHUNK - 1, 2 * CHUNK, CHUNK),
+        (CHUNK - 1, 2 * CHUNK + 1, CHUNK),
+    ] {
+        let mut bytes = vec![b'x'; current_eof];
+        bytes[newline_at] = b'\n';
+        std::fs::write(&transcript, bytes).expect("write boundary transcript");
+        assert_eq!(
+            claude_idle_safe_reanchor_offset(&transcript, current_eof as u64)
+                .expect("resolve chunk boundary"),
+            expected as u64,
+            "newline_at={newline_at}, current_eof={current_eof}"
+        );
+    }
 }
 
 #[test]
@@ -4107,6 +4185,16 @@ fn claude_idle_transcript_scan_preserves_normal_growth() {
     assert_eq!(
         claude_idle_compaction_reanchor(false, 100, 250, false),
         None
+    );
+    assert_eq!(
+        claude_idle_compaction_reanchor(false, 250, 400, false),
+        None,
+        "an append-only EOF advance must never re-anchor"
+    );
+    assert_eq!(
+        claude_idle_compaction_reanchor(false, 250, 400, true),
+        None,
+        "a stale-high durable frontier must not swallow bytes appended after rehydration"
     );
 
     let dir = tempfile::tempdir().expect("temp dir");
