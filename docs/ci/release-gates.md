@@ -10,7 +10,7 @@
 
 | Gate | ci-main.yml job | ci-pr.yml job | ci-nightly.yml 대응 | 실행 조건 |
 | --- | --- | --- | --- | --- |
-| **Full tests** | `full_non_pg` (line 56) | `check_fast` + `test_fast` (line 79, 115) | `full_run` | 항상 실행 (path filter 없음). PR lane은 targeted 서브셋으로 replace. |
+| **Full tests** | `full_non_pg` | `check_fast` (compile/policy only) + `test_fast` | `full_macos` + `full_windows` | main/nightly always run non-PG tests; the path-filtered PR lane is compile/policy only. |
 | **PostgreSQL tests** | `postgres` (line 94) | `test_fast` PG 서비스 (line 115) | `postgres` | 항상 실행. main job은 `_pg` / `pg_` / `postgres` 필터 3회 직렬 실행. |
 | **High-risk recovery** | `high-risk-recovery` (line 151) | `high-risk-recovery` (line 173) | `high_risk_recovery_full` | path filter hit 시에만 실행. nightly full job은 무조건. |
 

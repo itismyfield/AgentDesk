@@ -104,12 +104,13 @@ jobs:
       - name: Policy JS unit tests
         run: npm run test:policies
 
-      # `just check` wraps fmt, staged clippy, cargo check, and the same
-      # targeted non-PG subset that gates PRs in ci-pr.yml, with the same
-      # non-PG filters applied to every cargo test command since this lane has
-      # no Postgres service. PR #1306 (#1237) made production routes PG-only, so a
-      # `--all-targets` non-PG sweep panics in 169 SQLite-fixture tests
-      # that haven't been ported to PG fixtures yet. The PG migration is
+      # `just check` wraps fmt, staged clippy, cargo check, and the targeted
+      # non-PG subset. PR CI runs only the compile/policy portion to keep its
+      # critical path short; this main-push lane retains the test coverage.
+      # The same non-PG filters apply to every cargo test command since this
+      # lane has no Postgres service. PR #1306 (#1237) made production routes
+      # PG-only, so an `--all-targets` non-PG sweep panics in 169 SQLite-fixture
+      # tests that haven't been ported to PG fixtures yet. The PG migration is
       # tracked under #1238; once the bulk of the migration lands, this
       # lane can broaden again.
       - name: just check

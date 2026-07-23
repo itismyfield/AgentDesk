@@ -297,7 +297,7 @@ jobs:
       - name: dashboard build/test
         run: ./scripts/verify-dashboard.sh
 
-  # Ubuntu Rust lane: canonical fast check. Gated on the broad rust_or_policy
+  # Ubuntu Rust lane: canonical fast compile check. Gated on the broad rust_or_policy
   # filter so a `policies/*.js`, `scripts/*.sh`, `.github/workflows/**`, or
   # Node package change still gets a Rust check on Linux.
   #
@@ -306,7 +306,7 @@ jobs:
   # job compiles the `relay_state_contract_refs` blocks, which is the only proof
   # that each contract symbol still exists.
   check_fast:
-    name: Fast check + non-PG tests (${{ matrix.os }})
+    name: Fast compile check (${{ matrix.os }})
     needs: changes
     if: needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true'
     runs-on: ${{ matrix.os }}
@@ -354,31 +354,11 @@ jobs:
       - name: Policy JS unit tests
         run: npm run test:policies
 
-      # `lint` already runs the exact `fmt-check` + `lint` recipes in parallel
-      # and has its own required mirror. Repeating them through `just check`
-      # added 4-5 minutes to this critical-path job without adding coverage.
-      # Keep the compile check and every non-PG test here; branch protection
-      # still requires both this result and the independent Lint result.
-      - name: cargo check + non-PG tests
-        run: |
-          just cargo-check
-          just test-non-pg
-        env:
-          # Cold `cargo test --all-targets` on the 16GB ubuntu runner peaks over
-          # RAM during codegen+link (SIGTERM/143). Two step-scoped levers keep
-          # peak RSS under the ceiling; test semantics are unchanged (neither
-          # affects which tests run or their results). Step-scoped so no other
-          # Rust job's resource envelope is touched.
-          #   1. Cap parallel compile jobs at 2 (default = 4 vCPU) to bound
-          #      concurrent rustc/link.
-          CARGO_BUILD_JOBS: "2"
-          #   2. Drop debuginfo for the dev/test profiles. Linking many
-          #      `--all-targets` test binaries with full debuginfo is the
-          #      dominant peak-memory source; `-j2` alone still OOM'd on the
-          #      link phase, so strip it here. CI test failures still report
-          #      panics/asserts; only source-line debug data is omitted.
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
+      # `lint` owns fmt/clippy in its independent required mirror. Keep this
+      # required Ubuntu lane to compilation and policy tests; main and nightly
+      # retain the longer non-PG test coverage outside the PR critical path.
+      - name: cargo check
+        run: just cargo-check
 
       - name: sccache stats
         if: always()

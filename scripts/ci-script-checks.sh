@@ -111,6 +111,9 @@ echo "=== CI timeout wrapper tests (#4413) ==="
 echo "=== Relay recovery targeted-lane wiring contract (#4423) ==="
 "$PYTHON" -m unittest tests.test_relay_recovery_ci_wiring
 
+echo "=== Fast compile check PR/main/nightly split contract (#4747) ==="
+"$PYTHON" -m unittest tests.test_fast_check_ci_wiring
+
 echo "=== Scheduled-message PG path-filter wiring contract ==="
 "$PYTHON" -m unittest tests.test_scheduled_messages_ci_wiring
 
