@@ -848,7 +848,16 @@ pub(in crate::services::discord) async fn handle_event(
                         }
                     }
                 }
-                super::message_handler::handle_file_upload(ctx, new_message, &data.shared).await?
+                let attachments = super::message_handler::describe_attachments(new_message);
+                let permit = super::message_handler::LocalAttachmentPreparationPermit::preserving_existing_intake_order();
+                super::message_handler::prepare_admitted_local_attachment(
+                    ctx,
+                    channel_id,
+                    &attachments,
+                    &data.shared,
+                    &permit,
+                )
+                .await?
             } else {
                 Vec::new()
             };

@@ -35,6 +35,7 @@ use super::settings::{
     channel_supports_provider, load_last_session_path, resolve_role_binding,
     validate_bot_channel_routing_with_provider_channel,
 };
+use super::task_notification_delivery::footer_background_marker_session_key;
 use super::tmux_error_detect::{
     detect_provider_overload_message, is_auth_error_message, is_prompt_too_long_message,
 };
@@ -664,15 +665,6 @@ pub(super) fn consume_monitor_auto_turn_preamble_once(injected: &mut bool) -> Op
         *injected = true;
         Some(MONITOR_AUTO_TURN_PREAMBLE_HINT)
     }
-}
-
-/// Stable outbox identity shared by prompt observation and watcher suppression
-/// for one footer-owned background completion.
-pub(in crate::services::discord) fn footer_background_marker_session_key(
-    channel_id: ChannelId,
-    event_key: &str,
-) -> String {
-    format!("footer_background:ch:{}:{event_key}", channel_id.get())
 }
 
 pub(super) fn suppressed_task_notification_marker(
