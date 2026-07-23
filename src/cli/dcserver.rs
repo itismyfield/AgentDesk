@@ -659,15 +659,25 @@ pub fn handle_restart_dcserver(
     // turns survive and are rehydrated by the new process.
     const DEFERRED_TIMEOUT: Duration = Duration::from_secs(30);
     if let Some(root) = agentdesk_runtime_root() {
-        let marker = root.join("restart_pending");
-        if let Err(e) = fs::write(&marker, VERSION) {
-            eprintln!(
-                "   ⚠ Failed to write restart marker {}: {e} — falling back to force-kill",
-                marker.display()
-            );
-            kill_existing_dcserver_processes();
-            return;
-        }
+        let marker = match super::dcserver_restart_marker::create_quick_restart_marker(
+            &root, VERSION,
+        ) {
+            Ok(marker) => marker,
+            Err(super::dcserver_restart_marker::RestartMarkerCreateError::AlreadyOwned(owner)) => {
+                eprintln!(
+                    "   ⚠ restart already owned ({owner}); preserving the existing restart and refusing force-kill"
+                );
+                return;
+            }
+            Err(e) => {
+                eprintln!(
+                    "   ⚠ Failed to write restart marker {}: {e} — falling back to force-kill",
+                    root.join("restart_pending").display()
+                );
+                kill_existing_dcserver_processes();
+                return;
+            }
+        };
         println!(
             "   ⏳ Restart requested — waiting for dcserver quick-exit (max {}s)",
             DEFERRED_TIMEOUT.as_secs()
@@ -676,7 +686,7 @@ pub fn handle_restart_dcserver(
         let start = Instant::now();
         loop {
             // If marker file is gone, dcserver consumed it and exited
-            if !marker.exists() {
+            if !marker.path().exists() {
                 println!("   ✓ dcserver acknowledged restart marker");
                 break;
             }
@@ -706,13 +716,20 @@ pub fn handle_restart_dcserver(
                 };
                 if !process_alive {
                     println!("   ✓ dcserver process exited gracefully");
-                    let _ = fs::remove_file(&marker);
+                    marker.remove_if_owned();
                     break;
                 }
             }
             if start.elapsed() >= DEFERRED_TIMEOUT {
-                eprintln!("   ⚠ Deferred restart timeout — falling back to force kill");
-                let _ = fs::remove_file(&marker);
+                if marker.is_current_owner() {
+                    eprintln!("   ⚠ Deferred restart timeout — falling back to force kill");
+                    marker.remove_if_owned();
+                } else {
+                    eprintln!(
+                        "   ⚠ restart marker ownership changed while waiting; preserving the current owner and refusing force-kill"
+                    );
+                    return;
+                }
                 break;
             }
             std::thread::sleep(Duration::from_millis(500));
