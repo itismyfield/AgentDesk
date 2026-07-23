@@ -301,12 +301,12 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
         json["startup_degraded_reasons"] =
             startup_doctor_count_reasons(doctor_failed, doctor_warned);
 
-        // #2049 Finding 3: now that every worsen check has run, lift status
-        // only for the legacy empty-registry standby case. A registered standby
-        // worker keeps its provider classification; restart safety reads the
-        // explicit counters/mailboxes even when status remains degraded.
-        if cluster_standby_without_gateway && degraded_reasons.is_empty() {
-            status = health::HealthStatus::Healthy;
+        // A standby without a gateway is operationally degraded even when its
+        // HTTP server and worker heartbeat remain live. Keep this explicit so
+        // health checks cannot report a relay-dead node as healthy.
+        if cluster_standby_without_gateway {
+            status = status.worsen(health::HealthStatus::Degraded);
+            degraded_reasons.push(serde_json::json!("gateway_standby"));
         }
 
         let snapshot_fully_recovered = json["fully_recovered"].as_bool().unwrap_or(false);

@@ -161,8 +161,33 @@ impl AdvisoryLockLease {
         lock_id: i64,
         label: impl Into<String>,
     ) -> Result<Option<Self>, String> {
+        Self::try_acquire_with_application_name(pool, lock_id, label, None).await
+    }
+
+    /// Acquire a lease on a dedicated connection with an optional PostgreSQL
+    /// `application_name`. A stable owner identity lets recovery code distinguish
+    /// an abandoned AgentDesk lease from an unrelated or live backend.
+    pub async fn try_acquire_named(
+        pool: &PgPool,
+        lock_id: i64,
+        label: impl Into<String>,
+        application_name: impl Into<String>,
+    ) -> Result<Option<Self>, String> {
+        Self::try_acquire_with_application_name(pool, lock_id, label, Some(application_name.into()))
+            .await
+    }
+
+    async fn try_acquire_with_application_name(
+        pool: &PgPool,
+        lock_id: i64,
+        label: impl Into<String>,
+        application_name: Option<String>,
+    ) -> Result<Option<Self>, String> {
         let label = label.into();
-        let options = (*pool.connect_options()).clone();
+        let mut options = (*pool.connect_options()).clone();
+        if let Some(application_name) = application_name {
+            options = options.application_name(&application_name);
+        }
         let mut conn = PgConnection::connect_with(&options)
             .await
             .map_err(|error| format!("{label} acquire advisory lock connection: {error}"))?;

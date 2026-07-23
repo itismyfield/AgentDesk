@@ -3,8 +3,58 @@
 //! Split out of `gateway_lease.rs` (#4356): the file crossed the 700-LoC
 //! namespace cap once these gained coverage of self-id resolution.
 
+use super::super::gateway_lease_recovery::{
+    GatewayLeaseHolder, gateway_holder_is_reapable, standby_retry_delay,
+};
 use super::*;
 use serde_json::json;
+
+#[test]
+fn orphan_reap_requires_named_stale_matching_worker() {
+    let safe = GatewayLeaseHolder {
+        pid: 42,
+        application_name: "agentdesk:gateway:node-a:42:claude".to_string(),
+        instance_id: Some("node-a".to_string()),
+        node_status: Some("offline".to_string()),
+        heartbeat_recent: Some(false),
+        process_matches: Some(true),
+    };
+    assert!(gateway_holder_is_reapable(&safe));
+
+    for unsafe_holder in [
+        GatewayLeaseHolder {
+            application_name: "other-service".to_string(),
+            ..safe.clone()
+        },
+        GatewayLeaseHolder {
+            node_status: Some("online".to_string()),
+            ..safe.clone()
+        },
+        GatewayLeaseHolder {
+            heartbeat_recent: Some(true),
+            ..safe.clone()
+        },
+        GatewayLeaseHolder {
+            process_matches: Some(false),
+            ..safe.clone()
+        },
+        GatewayLeaseHolder {
+            instance_id: None,
+            ..safe.clone()
+        },
+    ] {
+        assert!(!gateway_holder_is_reapable(&unsafe_holder));
+    }
+}
+
+#[test]
+fn standby_retry_delay_stays_inside_thirty_to_sixty_seconds() {
+    for _ in 0..128 {
+        let delay = standby_retry_delay();
+        assert!(delay >= Duration::from_secs(30));
+        assert!(delay <= Duration::from_secs(60));
+    }
+}
 
 #[test]
 fn failed_lease_does_not_authorize_worker_or_poller_startup() {
