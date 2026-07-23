@@ -65,6 +65,12 @@ pub(crate) struct TargetProbeSnapshot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PreflightReasonCode {
+    SourceReleaseShaMissing,
+    SourceConfigSchemaMissing,
+    SourceProviderBinaryVersionMissing,
+    ExpectedWorkspaceHeadMissing,
+    ExpectedWorkspaceBranchMissing,
+    ProviderUnsupported,
     TargetOffline,
     ProviderIntakeUnavailable,
     WorkerPollerUnavailable,
@@ -93,10 +99,18 @@ pub(crate) struct PreflightFailure {
     pub detail: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PreflightVerdict {
+    Pass,
+    Fail,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct TargetPreflightReport {
     pub target_instance_id: String,
     pub provider: String,
+    pub verdict: PreflightVerdict,
     pub passed: bool,
     pub attachment_readiness: AttachmentReadiness,
     pub attachment_notice: Option<String>,
@@ -152,6 +166,13 @@ fn nonempty_equal(actual: &str, expected: &str) -> bool {
     !actual.trim().is_empty() && actual.trim() == expected.trim()
 }
 
+fn supported_provider(provider: &str) -> bool {
+    matches!(
+        provider.trim().to_ascii_lowercase().as_str(),
+        "claude" | "codex"
+    )
+}
+
 /// Evaluates the target node registry record and its latest `intake_preflight`
 /// capability snapshot. Missing or malformed evidence fails closed.
 pub(crate) fn evaluate_target_preflight(
@@ -170,6 +191,47 @@ pub(crate) fn evaluate_target_preflight(
         .unwrap_or_default();
     let mut failures = Vec::new();
 
+    push_failure(
+        &mut failures,
+        !policy.source_release_sha.trim().is_empty(),
+        PreflightReasonCode::SourceReleaseShaMissing,
+        || "source release SHA expectation is missing".to_string(),
+    );
+    push_failure(
+        &mut failures,
+        !policy.source_config_schema.trim().is_empty(),
+        PreflightReasonCode::SourceConfigSchemaMissing,
+        || "source config schema expectation is missing".to_string(),
+    );
+    push_failure(
+        &mut failures,
+        !policy.source_provider_binary_version.trim().is_empty(),
+        PreflightReasonCode::SourceProviderBinaryVersionMissing,
+        || "source provider binary version expectation is missing".to_string(),
+    );
+    push_failure(
+        &mut failures,
+        !policy.expected_workspace_head.trim().is_empty(),
+        PreflightReasonCode::ExpectedWorkspaceHeadMissing,
+        || "expected workspace HEAD is missing".to_string(),
+    );
+    push_failure(
+        &mut failures,
+        !policy.expected_workspace_branch.trim().is_empty(),
+        PreflightReasonCode::ExpectedWorkspaceBranchMissing,
+        || "expected workspace branch is missing".to_string(),
+    );
+    push_failure(
+        &mut failures,
+        supported_provider(&policy.provider),
+        PreflightReasonCode::ProviderUnsupported,
+        || {
+            format!(
+                "provider '{}' is outside the Claude/Codex preflight contract",
+                policy.provider
+            )
+        },
+    );
     push_failure(
         &mut failures,
         target_node.get("status").and_then(Value::as_str) == Some("online"),
@@ -357,10 +419,16 @@ pub(crate) fn evaluate_target_preflight(
         }
     };
 
+    let verdict = if failures.is_empty() {
+        PreflightVerdict::Pass
+    } else {
+        PreflightVerdict::Fail
+    };
     TargetPreflightReport {
         target_instance_id,
         provider: policy.provider.trim().to_ascii_lowercase(),
-        passed: failures.is_empty(),
+        verdict,
+        passed: verdict == PreflightVerdict::Pass,
         attachment_readiness: snapshot.attachments,
         attachment_notice,
         failures,
@@ -431,31 +499,40 @@ mod tests {
     }
 
     #[test]
-    fn each_required_failure_preserves_owner() {
-        let mutations: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
-            ("offline", Box::new(|n| n["status"] = json!("offline"))),
+    fn each_required_failure_preserves_owner_and_generation() {
+        let mutations: Vec<(&str, PreflightReasonCode, Box<dyn Fn(&mut Value)>)> = vec![
+            (
+                "offline",
+                PreflightReasonCode::TargetOffline,
+                Box::new(|n| n["status"] = json!("offline")),
+            ),
             (
                 "provider",
+                PreflightReasonCode::ProviderIntakeUnavailable,
                 Box::new(|n| n["capabilities"]["intake_worker"]["providers"] = json!(["codex"])),
             ),
             (
                 "poller",
+                PreflightReasonCode::WorkerPollerUnavailable,
                 Box::new(|n| {
                     n["capabilities"]["intake_preflight"]["worker_poller_ready"] = json!(false)
                 }),
             ),
             (
                 "sha",
+                PreflightReasonCode::ReleaseShaMismatch,
                 Box::new(|n| n["capabilities"]["intake_preflight"]["release_sha"] = json!("wrong")),
             ),
             (
                 "schema",
+                PreflightReasonCode::ConfigSchemaMismatch,
                 Box::new(|n| {
                     n["capabilities"]["intake_preflight"]["config_schema"] = json!("wrong")
                 }),
             ),
             (
                 "binary",
+                PreflightReasonCode::ProviderBinaryVersionMismatch,
                 Box::new(|n| {
                     n["capabilities"]["intake_preflight"]["provider_binary_version"] =
                         json!("wrong")
@@ -463,76 +540,89 @@ mod tests {
             ),
             (
                 "credentials",
+                PreflightReasonCode::ProviderCredentialsInvalid,
                 Box::new(|n| {
                     n["capabilities"]["intake_preflight"]["credentials_valid"] = json!(false)
                 }),
             ),
             (
                 "quota",
+                PreflightReasonCode::ProviderQuotaUnavailable,
                 Box::new(|n| {
                     n["capabilities"]["intake_preflight"]["quota_available"] = json!(false)
                 }),
             ),
             (
                 "access",
+                PreflightReasonCode::ProviderAccessProbeFailed,
                 Box::new(|n| {
                     n["capabilities"]["intake_preflight"]["token_rest_access"] = json!(false)
                 }),
             ),
             (
                 "workspace",
+                PreflightReasonCode::WorkspaceMissing,
                 Box::new(|n| {
                     n["capabilities"]["intake_preflight"]["workspace_exists"] = json!(false)
                 }),
             ),
             (
                 "head",
+                PreflightReasonCode::WorkspaceHeadMismatch,
                 Box::new(|n| {
                     n["capabilities"]["intake_preflight"]["workspace_head"] = json!("wrong")
                 }),
             ),
             (
                 "branch",
+                PreflightReasonCode::WorkspaceBranchMismatch,
                 Box::new(|n| {
                     n["capabilities"]["intake_preflight"]["workspace_branch"] = json!("wrong")
                 }),
             ),
             (
                 "dirty",
+                PreflightReasonCode::WorkspaceDirty,
                 Box::new(|n| {
                     n["capabilities"]["intake_preflight"]["workspace_clean"] = json!(false)
                 }),
             ),
             (
                 "disk",
+                PreflightReasonCode::InsufficientDisk,
                 Box::new(|n| n["capabilities"]["intake_preflight"]["disk_free_bytes"] = json!(99)),
             ),
             (
                 "memory",
+                PreflightReasonCode::InsufficientMemory,
                 Box::new(|n| {
                     n["capabilities"]["intake_preflight"]["memory_available_bytes"] = json!(199)
                 }),
             ),
             (
                 "db",
+                PreflightReasonCode::DbPoolErrorThresholdExceeded,
                 Box::new(|n| {
                     n["capabilities"]["intake_preflight"]["recent_db_pool_errors"] = json!(2)
                 }),
             ),
             (
                 "terminal_relay",
+                PreflightReasonCode::TerminalRelayUnavailable,
                 Box::new(|n| {
                     n["capabilities"]["intake_preflight"]["terminal_relay_ready"] = json!(false)
                 }),
             ),
             (
                 "standby_relay",
+                PreflightReasonCode::StandbyRelayUnavailable,
                 Box::new(|n| {
                     n["capabilities"]["intake_preflight"]["standby_relay_ready"] = json!(false)
                 }),
             ),
             (
                 "outbox",
+                PreflightReasonCode::IntakeOutboxOperatorUnavailable,
                 Box::new(|n| {
                     n["capabilities"]["intake_preflight"]["intake_outbox_operator_ready"] =
                         json!(false)
@@ -540,20 +630,87 @@ mod tests {
             ),
             (
                 "attachments",
+                PreflightReasonCode::AttachmentsUnsupported,
                 Box::new(|n| {
                     n["capabilities"]["intake_preflight"]["attachments"] = json!("unsupported")
                 }),
             ),
         ];
 
-        for (name, mutate) in mutations {
+        for (name, expected_reason, mutate) in mutations {
             let mut node = ready_node();
             mutate(&mut node);
             let report = evaluate_target_preflight(&node, &policy());
             let mut owner = "mac-book-release";
-            let result = transfer_if_target_ready(&report, || owner = "mac-mini-release");
+            let mut generation = 41_u64;
+            let result = transfer_if_target_ready(&report, || {
+                owner = "mac-mini-release";
+                generation += 1;
+            });
             assert!(result.is_err(), "{name} unexpectedly passed");
+            assert_eq!(
+                report.failures.len(),
+                1,
+                "{name} did not fail independently"
+            );
+            assert_eq!(report.failures[0].code, expected_reason, "{name} reason");
             assert_eq!(owner, "mac-book-release", "{name} mutated owner");
+            assert_eq!(generation, 41, "{name} mutated generation");
+        }
+    }
+
+    #[test]
+    fn missing_source_expectations_fail_closed() {
+        let cases: Vec<(
+            &str,
+            PreflightReasonCode,
+            Box<dyn Fn(&mut TargetPreflightPolicy)>,
+        )> = vec![
+            (
+                "release_sha",
+                PreflightReasonCode::SourceReleaseShaMissing,
+                Box::new(|policy| policy.source_release_sha.clear()),
+            ),
+            (
+                "config_schema",
+                PreflightReasonCode::SourceConfigSchemaMissing,
+                Box::new(|policy| policy.source_config_schema.clear()),
+            ),
+            (
+                "provider_binary",
+                PreflightReasonCode::SourceProviderBinaryVersionMissing,
+                Box::new(|policy| policy.source_provider_binary_version.clear()),
+            ),
+            (
+                "workspace_head",
+                PreflightReasonCode::ExpectedWorkspaceHeadMissing,
+                Box::new(|policy| policy.expected_workspace_head.clear()),
+            ),
+            (
+                "workspace_branch",
+                PreflightReasonCode::ExpectedWorkspaceBranchMissing,
+                Box::new(|policy| policy.expected_workspace_branch.clear()),
+            ),
+        ];
+
+        for (name, expected_reason, mutate) in cases {
+            let mut policy = policy();
+            mutate(&mut policy);
+            let report = evaluate_target_preflight(&ready_node(), &policy);
+            let mut owner = "mac-book-release";
+            let mut generation = 41_u64;
+
+            assert!(
+                transfer_if_target_ready(&report, || {
+                    owner = "mac-mini-release";
+                    generation += 1;
+                })
+                .is_err(),
+                "{name} unexpectedly passed"
+            );
+            assert_eq!(report.failures[0].code, expected_reason, "{name} reason");
+            assert_eq!(owner, "mac-book-release", "{name} mutated owner");
+            assert_eq!(generation, 41, "{name} mutated generation");
         }
     }
 
@@ -568,13 +725,47 @@ mod tests {
     }
 
     #[test]
-    fn structured_report_serializes_reason_codes() {
-        let mut node = ready_node();
-        node["capabilities"]["intake_preflight"]["release_sha"] = json!("wrong");
-        let report = evaluate_target_preflight(&node, &policy());
-        let encoded = serde_json::to_value(report).unwrap();
+    fn claude_and_codex_emit_structured_pass_and_fail_evidence() {
+        for provider in ["claude", "codex"] {
+            let mut policy = policy();
+            policy.provider = provider.to_string();
+            let mut node = ready_node();
+            node["capabilities"]["intake_worker"]["providers"] = json!([provider]);
 
-        assert_eq!(encoded["passed"], false);
-        assert_eq!(encoded["failures"][0]["code"], "release_sha_mismatch");
+            let passing = serde_json::to_value(evaluate_target_preflight(&node, &policy)).unwrap();
+            assert_eq!(passing["provider"], provider);
+            assert_eq!(passing["verdict"], "pass");
+            assert_eq!(passing["passed"], true);
+            assert_eq!(passing["failures"], json!([]));
+
+            node["capabilities"]["intake_preflight"]["credentials_valid"] = json!(false);
+            let failing = serde_json::to_value(evaluate_target_preflight(&node, &policy)).unwrap();
+            assert_eq!(failing["provider"], provider);
+            assert_eq!(failing["verdict"], "fail");
+            assert_eq!(failing["passed"], false);
+            assert_eq!(
+                failing["failures"][0]["code"],
+                "provider_credentials_invalid"
+            );
+            assert!(failing["failures"][0]["detail"].is_string());
+        }
+    }
+
+    #[test]
+    fn unsupported_provider_fails_closed() {
+        let mut policy = policy();
+        policy.provider = "gemini".to_string();
+        let mut node = ready_node();
+        node["capabilities"]["intake_worker"]["providers"] = json!(["gemini"]);
+        let report = evaluate_target_preflight(&node, &policy);
+        let mut owner = "mac-book-release";
+
+        assert_eq!(report.verdict, PreflightVerdict::Fail);
+        assert_eq!(
+            report.failures[0].code,
+            PreflightReasonCode::ProviderUnsupported
+        );
+        assert!(transfer_if_target_ready(&report, || owner = "mac-mini-release").is_err());
+        assert_eq!(owner, "mac-book-release");
     }
 }

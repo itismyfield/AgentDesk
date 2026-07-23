@@ -18,7 +18,8 @@
 Before a generation-fenced owner transfer, the coordinator evaluates the target
 `worker_nodes` record and its `capabilities.intake_preflight` probe snapshot with
 `services::cluster::intake_preflight::evaluate_target_preflight`. The structured
-report exposes stable reason codes for node/provider worker readiness, release
+report exposes an explicit `pass`/`fail` verdict and stable reason codes for
+Claude/Codex node/provider worker readiness, release
 SHA and config-schema parity, provider binary/credential/quota/access probes,
 workspace policy, disk/memory, recent DB-pool errors, terminal and standby relay,
 and the intake-outbox operator surface. Missing evidence fails closed.
