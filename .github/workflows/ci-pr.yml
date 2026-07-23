@@ -721,7 +721,9 @@ jobs:
   lint:
     name: Lint
     needs: changes
-    if: needs.changes.outputs.rust_or_policy == 'true'
+    # Match check_fast's composite gate so relay-contract-only changes retain
+    # fmt/clippy coverage after duplicate linting was removed from that job.
+    if: needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -774,8 +776,8 @@ jobs:
       - name: Mirror lint result for branch protection
         env:
           CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
-          FILTER_NAME: rust_or_policy
-          FILTER_OUTPUT: ${{ needs.changes.outputs.rust_or_policy }}
+          FILTER_NAME: rust_or_policy_or_relay_contract
+          FILTER_OUTPUT: ${{ needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true' }}
           UPSTREAM_JOB_NAME: lint
           UPSTREAM_RESULT: ${{ needs.lint.result }}
         run: ./scripts/required-check-mirror.sh
