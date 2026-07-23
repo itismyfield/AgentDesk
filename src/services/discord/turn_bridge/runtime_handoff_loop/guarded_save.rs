@@ -49,6 +49,35 @@ pub(super) fn guarded_runtime_handoff_save(
     outcome
 }
 
+/// Identity-guarded atomic stamp for runtime handoffs that may first-populate
+/// `tmux_session_name`. The store validates the pre-mutation durable identity
+/// and authority under the sidecar lock, then patches only runtime/session/
+/// output/owner evidence. `Missing` never creates a row: every bridge entry
+/// path seeds or adopts the durable row before a runtime handoff can arrive.
+pub(super) fn guarded_runtime_atomic_stamp(
+    inflight_state: &InflightTurnState,
+    expected: &crate::services::discord::inflight::InflightTurnIdentity,
+    channel_id: ChannelId,
+    caller: &'static str,
+) -> crate::services::discord::inflight::GuardedSaveOutcome {
+    use crate::services::discord::inflight::{
+        GuardedSaveOutcome, stamp_runtime_handoff_if_matches_identity,
+    };
+    let outcome = stamp_runtime_handoff_if_matches_identity(inflight_state, expected, caller);
+    if matches!(
+        outcome,
+        GuardedSaveOutcome::Missing | GuardedSaveOutcome::IdentityMismatch
+    ) {
+        tracing::warn!(
+            channel_id = channel_id.get(),
+            caller,
+            ?outcome,
+            "runtime-handoff atomic stamp skipped; durable row no longer owned by this turn"
+        );
+    }
+    outcome
+}
+
 /// #4259 PR-2a (codex r1): the `TmuxReady` arm's dirty marking, made
 /// conditional on the guarded-save outcome. The arm used to end with an
 /// unconditional `state_dirty = true`, which re-queued the arm's mutations for
