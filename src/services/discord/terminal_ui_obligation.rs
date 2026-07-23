@@ -110,7 +110,7 @@ pub(in crate::services::discord) fn terminal_ui_generation_mtime_for_inflight(
                 .map(read_tmux_generation_mtime_ns)
                 .filter(|generation| *generation != 0)
         })
-        .unwrap_or_else(|| runtime_store::load_generation() as i64)
+        .unwrap_or_else(|| runtime_store::process_generation() as i64)
 }
 
 #[allow(dead_code)] // #3607 public sidecar API; production currently sweeps via list_obligations.
@@ -399,7 +399,7 @@ fn terminal_ui_generation_mtime_for_tmux(tmux_session_name: &str) -> i64 {
     if generation_mtime_ns != 0 {
         generation_mtime_ns
     } else {
-        runtime_store::load_generation() as i64
+        runtime_store::process_generation() as i64
     }
 }
 

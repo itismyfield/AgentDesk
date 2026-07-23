@@ -591,18 +591,14 @@ pub(in crate::services::discord::inflight) fn persist_recovery_output_path_if_ma
 ///                          row. We do NOT clobber it.
 ///   - `IoError`          — filesystem / serialization failure.
 ///
-/// This is a NARROW single-field read-modify-write (like
+/// This is a NARROW read-modify-write (like
 /// [`persist_recovery_output_path_if_matches_identity_locked`]), deliberately NOT
-/// [`save_inflight_state_if_identity_unchanged`]. Re-adoption legitimately
-/// preserves a DrainRestart row's `restart_mode`, and the broad identity-refresh
-/// save REFUSES any row that still carries `restart_mode` (see
-/// `save_inflight_state_identity_gated_in_root`), so it would silently no-op on
-/// exactly the restart-resume rows this marker exists for. Here we re-read the
-/// on-disk row under the lock, verify it is still the SAME turn (identity match,
-/// and not a rebind-origin placeholder), flip ONLY the additive
-/// `readopted_from_inflight` bit, and persist — `restart_mode` and every other
-/// field are preserved. It never resurrects a concurrently-cleared row (closes
-/// the load-then-blind-save TOCTOU window, #4370 F1).
+/// [`save_inflight_state_if_identity_unchanged`]. The broad identity-refresh save
+/// refuses a DrainRestart row while it still carries `restart_mode`. Here we
+/// re-read under the lock, verify the SAME turn, stamp the additive readoption
+/// marker, and consume the restart marker because successful adoption transferred
+/// lifecycle authority to this process. It never resurrects a concurrently-cleared
+/// row (closes the load-then-blind-save TOCTOU window, #4370 F1).
 pub(in crate::services::discord) fn mark_readopted_from_inflight_if_identity_unchanged(
     provider: &ProviderKind,
     channel_id: u64,
@@ -642,7 +638,7 @@ pub(in crate::services::discord::inflight) fn mark_readopted_from_inflight_if_id
     // short-circuits `owner == TUI_DIRECT_SYNTHETIC_OWNER_USER_ID` to `Synthetic`
     // before reading this marker, and real re-adopted owners carry a non-zero
     // `user_msg_id`), but kept as defense-in-depth so this narrow patch stays as
-    // fail-closed as the broad save it deliberately preserves `restart_mode` past.
+    // fail-closed as the broad save it replaces for restart adoption.
     if expected.user_msg_id == 0 && expected.turn_start_offset.is_none() {
         tracing::info!(
             provider = %provider.as_str(),
@@ -656,15 +652,10 @@ pub(in crate::services::discord::inflight) fn mark_readopted_from_inflight_if_id
     if on_disk.rebind_origin || !expected.matches_state(&on_disk) {
         return GuardedSaveOutcome::IdentityMismatch;
     }
-    if on_disk.readopted_from_inflight {
-        return GuardedSaveOutcome::Saved;
-    }
-
-    on_disk.readopted_from_inflight = true;
-    match persist_under_lock(
+    match persist_readopted_under_lock(
         root,
         &path,
-        &on_disk,
+        &mut on_disk,
         "src/services/discord/inflight.rs:mark_readopted_from_inflight_if_identity_unchanged_in_root",
     ) {
         Ok(()) => GuardedSaveOutcome::Saved,
@@ -1030,10 +1021,10 @@ mod tests {
         assert_eq!(still_newer.user_msg_id, 99_999);
     }
 
-    // #4370 F1: the `readopted_from_inflight` marker is a NARROW single-field
-    // patch. It lands on a DrainRestart-preserved row (where the broad
-    // identity-refresh save deliberately refuses `restart_mode` rows), preserving
-    // `restart_mode`; it never resurrects a concurrently-cleared row (`Missing`);
+    // #4370 F1: the `readopted_from_inflight` marker is a narrow adoption patch.
+    // It lands on a DrainRestart row (where the broad identity-refresh save
+    // refuses `restart_mode` rows) and consumes the handoff marker; it never
+    // resurrects a concurrently-cleared row (`Missing`);
     // and it refuses to clobber a different turn's row (`IdentityMismatch`).
     #[test]
     fn readopted_marker_lands_on_restart_preserved_row_and_never_resurrects() {
@@ -1099,10 +1090,10 @@ mod tests {
             "the marker must land on the restart-preserved row"
         );
         assert_eq!(
-            persisted.restart_mode,
-            Some(InflightRestartMode::DrainRestart),
-            "restart_mode must be preserved by the single-field patch"
+            persisted.restart_mode, None,
+            "successful replacement-process adoption must consume restart_mode"
         );
+        assert_eq!(persisted.restart_generation, None);
 
         // (3) Idempotent: a re-mark of an already-marked row is a `Saved` no-op.
         assert_eq!(

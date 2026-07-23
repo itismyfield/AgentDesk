@@ -524,27 +524,26 @@ pub(super) async fn handle_text_message(
                             .unwrap_or_else(|| canonical.clone());
                         {
                             let mut data = shared.core.lock().await;
-                            let session =
-                                data.sessions
-                                    .entry(channel_id)
-                                    .or_insert_with(|| DiscordSession {
-                                        session_id: None,
-                                        memento_context_loaded: false,
-                                        memento_reflected: false,
-                                        current_path: None,
-                                        history: Vec::new(),
-                                        pending_uploads: Vec::new(),
-                                        cleared: false,
-                                        channel_name: None,
-                                        category_name: None,
-                                        remote_profile_name: None,
-                                        channel_id: Some(channel_id.get()),
-                                        last_active: tokio::time::Instant::now(),
-                                        worktree: None,
+                            let session = data.sessions.entry(channel_id).or_insert_with(|| {
+                                DiscordSession {
+                                    session_id: None,
+                                    memento_context_loaded: false,
+                                    memento_reflected: false,
+                                    current_path: None,
+                                    history: Vec::new(),
+                                    pending_uploads: Vec::new(),
+                                    cleared: false,
+                                    channel_name: None,
+                                    category_name: None,
+                                    remote_profile_name: None,
+                                    channel_id: Some(channel_id.get()),
+                                    last_active: tokio::time::Instant::now(),
+                                    worktree: None,
 
-                                        born_generation:
-                                            super::super::super::runtime_store::load_generation(),
-                                    });
+                                    born_generation:
+                                        super::super::super::runtime_store::process_generation(),
+                                }
+                            });
                             session.current_path = Some(eff_path.clone());
                             session.channel_name = ch_name;
                             session.category_name = cat_name;

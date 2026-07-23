@@ -118,7 +118,7 @@ pub(super) struct SoftInterventionSpec {
 
 impl SoftInterventionSpec {
     pub(super) fn into_intervention(self) -> Intervention {
-        let queued_generation = crate::services::discord::runtime_store::load_generation();
+        let queued_generation = crate::services::discord::runtime_store::process_generation();
         let source_generation = if self.author_is_bot || self.author_is_allowed_automation {
             SourceMessageQueuedGeneration::new(self.message_id, queued_generation)
         } else {

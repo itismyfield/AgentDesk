@@ -1292,7 +1292,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 continue;
             }
 
-            let queued_generation = crate::services::discord::runtime_store::load_generation();
+            let queued_generation = crate::services::discord::runtime_store::process_generation();
             let source_generation = catch_up_source_generation(
                 msg.id,
                 queued_generation,
@@ -1669,7 +1669,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
                 break;
             }
 
-            let queued_generation = crate::services::discord::runtime_store::load_generation();
+            let queued_generation = crate::services::discord::runtime_store::process_generation();
             let source_generation = catch_up_source_generation(
                 msg.id,
                 queued_generation,
@@ -2736,7 +2736,8 @@ mod catch_up_recovery_tests {
                     author_id: serenity::UserId::new(author_id),
                     author_is_bot: false,
                     message_id,
-                    queued_generation: crate::services::discord::runtime_store::load_generation(),
+                    queued_generation: crate::services::discord::runtime_store::process_generation(
+                    ),
                     source_message_ids: vec![message_id],
                     source_message_queued_generations: Vec::new(),
                     source_text_segments: Vec::new(),

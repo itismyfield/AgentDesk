@@ -128,6 +128,7 @@ pub(crate) mod stale_turn_reconciler;
 pub mod termination_audit;
 pub mod tmux_common;
 pub mod tmux_diagnostics;
+pub(crate) mod tmux_turn_liveness;
 #[cfg(unix)]
 pub mod tmux_wrapper;
 pub mod tool_output_guard;

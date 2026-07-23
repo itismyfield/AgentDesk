@@ -139,7 +139,7 @@ pub(in crate::services::discord) async fn cmd_start(
                 last_active: tokio::time::Instant::now(),
                 worktree: None,
 
-                born_generation: runtime_store::load_generation(),
+                born_generation: runtime_store::process_generation(),
             });
         session.channel_id = Some(channel_id.get());
         session.channel_name = ch_name;

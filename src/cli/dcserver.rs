@@ -609,9 +609,10 @@ pub fn handle_restart_dcserver(
         );
     }
 
-    // Increment generation counter — every restart request gets a unique generation,
-    // even for same-version deployments (e.g. code-only changes without version bump).
-    let new_generation = services::discord::runtime_store::increment_generation();
+    // Preview the epoch the replacement process will allocate at boot. The old
+    // process keeps its immutable epoch throughout the quiesce window so turns
+    // born after this request remain distinguishable from the replacement.
+    let new_generation = services::discord::runtime_store::next_process_generation();
 
     // Show version transition if available
     if let Some(root) = agentdesk_runtime_root() {

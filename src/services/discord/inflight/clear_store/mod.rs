@@ -157,6 +157,93 @@ pub(in crate::services::discord) fn clear_rebind_origin_inflight_state_if_matche
     )
 }
 
+pub(in crate::services::discord) fn archive_inflight_state_if_matches_identity_generation(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    expected_updated_at: &str,
+    expected_save_generation: u64,
+    reason: &str,
+) -> GuardedClearOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedClearOutcome::Missing;
+    };
+    archive_inflight_state_if_matches_identity_generation_in_root(
+        &root,
+        provider,
+        channel_id,
+        expected,
+        expected_updated_at,
+        expected_save_generation,
+        reason,
+    )
+}
+
+pub(super) fn archive_inflight_state_if_matches_identity_generation_in_root(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    expected_updated_at: &str,
+    expected_save_generation: u64,
+    reason: &str,
+) -> GuardedClearOutcome {
+    let path = inflight_state_path(root, provider, channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return GuardedClearOutcome::IoError;
+    };
+    let Ok(data) = fs::read_to_string(&path) else {
+        return GuardedClearOutcome::Missing;
+    };
+    let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
+        return GuardedClearOutcome::Missing;
+    };
+    if !expected.matches_state(&state)
+        || state.updated_at != expected_updated_at
+        || state.save_generation != expected_save_generation
+    {
+        return GuardedClearOutcome::UserMsgMismatch;
+    }
+
+    let archive_dir = root.join("archive");
+    if fs::create_dir_all(&archive_dir).is_err() {
+        return GuardedClearOutcome::IoError;
+    }
+    let safe_reason: String = reason
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S%3f");
+    let archive_path = archive_dir.join(format!("{channel_id}.json.{safe_reason}-{timestamp}"));
+    log_inflight_remove(
+        provider,
+        channel_id,
+        state.user_msg_id,
+        "archive_inflight_state_if_matches_identity_generation",
+        &path,
+    );
+    match fs::rename(&path, &archive_path) {
+        Ok(()) => GuardedClearOutcome::Cleared,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id,
+                archive_path = %archive_path.display(),
+                error = %error,
+                "inflight identity-guarded archive failed"
+            );
+            GuardedClearOutcome::IoError
+        }
+    }
+}
+
 pub(in crate::services::discord) fn clear_lifecycle_inflight_state_if_matches_identity_after_death_evidence(
     provider: &ProviderKind,
     channel_id: u64,

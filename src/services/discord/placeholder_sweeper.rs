@@ -353,7 +353,7 @@ async fn run_placeholder_sweep_pass(
             // keeps any live/adopted rebind untouched, and the locked helper
             // re-validates under the sidecar lock so a racing live intake/TUI claim
             // is never clobbered (codex TOCTOU). `age_secs` = file-mtime age.
-            let current_generation = super::runtime_store::load_generation();
+            let current_generation = super::runtime_store::process_generation();
             if should_reap_abandoned_rebind_origin(&state, age_secs, current_generation)
                 && reap_abandoned_rebind_origin_locked(provider, &state, current_generation)
             {

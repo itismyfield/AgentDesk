@@ -647,7 +647,7 @@ pub(in crate::services) struct RestartLifecycle {
     /// Number of turns currently in finalization phase (response sending + cleanup).
     /// Deferred restart must wait until this reaches 0 to avoid killing mid-send turns.
     pub(in crate::services) finalizing_turns: Arc<std::sync::atomic::AtomicUsize>,
-    /// Current restart generation — incremented on each --restart-dcserver.
+    /// Immutable process epoch allocated once when this dcserver boots.
     /// Used to distinguish old (pre-restart) sessions from fresh ones.
     pub(in crate::services) current_generation: u64,
     /// Set when a `restart_pending` marker is detected. While true, the router

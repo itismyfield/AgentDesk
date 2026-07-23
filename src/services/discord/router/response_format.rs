@@ -355,7 +355,7 @@ pub(super) fn build_race_requeued_intervention(
     // degrading to plain text.
     voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Intervention {
-    let queued_generation = crate::services::discord::runtime_store::load_generation();
+    let queued_generation = crate::services::discord::runtime_store::process_generation();
     let source_generation = if preserve_on_cancel {
         crate::services::turn_orchestrator::SourceMessageQueuedGeneration::user_instruction(
             user_msg_id,

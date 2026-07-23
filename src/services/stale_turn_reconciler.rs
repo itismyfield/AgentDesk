@@ -157,41 +157,25 @@ fn independent_tmux_liveness(session_key: &str, provider: &str) -> IndependentLi
         return IndependentLiveness::RemoteOrInvalid;
     }
 
-    match crate::services::platform::tmux::session_presence(&identity.tmux_name) {
-        crate::services::platform::tmux::SessionPresence::Missing => IndependentLiveness::NoPane,
-        crate::services::platform::tmux::SessionPresence::ProbeFailed => {
-            IndependentLiveness::LiveOrAmbiguous
+    let runtime_kind =
+        crate::services::tmux_common::resolve_tmux_runtime_kind_marker(&identity.tmux_name);
+    let output_path =
+        crate::services::tmux_common::resolve_session_temp_path(&identity.tmux_name, "jsonl");
+    match crate::services::tmux_turn_liveness::independent_tmux_readiness(
+        &identity.tmux_name,
+        &db_provider,
+        runtime_kind,
+        output_path.as_deref().map(std::path::Path::new),
+        None,
+    ) {
+        crate::services::tmux_turn_liveness::IndependentTmuxReadiness::Missing => {
+            IndependentLiveness::NoPane
         }
-        crate::services::platform::tmux::SessionPresence::Present => {
-            let runtime_kind =
-                crate::services::tmux_common::resolve_tmux_runtime_kind_marker(&identity.tmux_name);
-            let structured_ready = crate::services::tmux_common::resolve_session_temp_path(
-                &identity.tmux_name,
-                "jsonl",
-            )
-            .and_then(|output_path| {
-                crate::services::tui_turn_state::jsonl_ready_for_input(
-                    &db_provider,
-                    runtime_kind,
-                    std::path::Path::new(&output_path),
-                    None,
-                )
-            })
-            .map(crate::services::tui_turn_state::TuiReadyState::is_ready);
-
-            let ready = structured_ready.or_else(|| {
-                crate::services::provider::tmux_session_fallback_ready_for_input(
-                    &identity.tmux_name,
-                    &db_provider,
-                    runtime_kind,
-                )
-                .map(crate::services::pane_readiness::FallbackPaneReadiness::is_ready)
-            });
-            if ready == Some(true) {
-                IndependentLiveness::ReadyForInput
-            } else {
-                IndependentLiveness::LiveOrAmbiguous
-            }
+        crate::services::tmux_turn_liveness::IndependentTmuxReadiness::ReadyForInput => {
+            IndependentLiveness::ReadyForInput
+        }
+        crate::services::tmux_turn_liveness::IndependentTmuxReadiness::LiveOrAmbiguous => {
+            IndependentLiveness::LiveOrAmbiguous
         }
     }
 }

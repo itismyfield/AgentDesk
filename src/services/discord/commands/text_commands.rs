@@ -244,7 +244,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                         channel_id: Some(channel_id.get()),
                         last_active: tokio::time::Instant::now(),
                         worktree: None,
-                        born_generation: runtime_store::load_generation(),
+                        born_generation: runtime_store::process_generation(),
                     });
                 session.current_path = Some(effective_path.clone());
                 session.channel_name = ch_name;

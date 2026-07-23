@@ -196,18 +196,148 @@ pub fn load_generation() -> u64 {
         .unwrap_or(0)
 }
 
-/// Increment the generation counter and return the new value.
-pub fn increment_generation() -> u64 {
-    let current = load_generation();
-    let next = current + 1;
-    if let Some(path) = generation_path() {
-        best_effort_atomic_write_logged(
-            &path,
-            &next.to_string(),
-            AtomicWriteContext::new("runtime_generation"),
-        );
+#[cfg(not(test))]
+static PROCESS_GENERATION: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+#[cfg(test)]
+static TEST_PROCESS_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(u64::MAX);
+#[cfg(test)]
+static TEST_ALLOCATED_PROCESS_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(u64::MAX);
+#[cfg(test)]
+static TEST_PROCESS_GENERATION_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
+struct GenerationFileLock {
+    _file: fs::File,
+}
+
+impl Drop for GenerationFileLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let _ = unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
+        }
     }
-    next
+}
+
+fn lock_generation_path(path: &Path) -> Result<GenerationFileLock, String> {
+    let lock_path = path.with_extension("lock");
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(lock_path)
+        .map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+    }
+    Ok(GenerationFileLock { _file: file })
+}
+
+/// Allocate the immutable generation epoch for this dcserver process exactly
+/// once. Every concurrent provider task joins the same OnceLock initializer, so
+/// only one durable flock/read/increment/atomic-write transaction can run.
+pub fn allocate_process_generation() -> u64 {
+    #[cfg(not(test))]
+    {
+        *PROCESS_GENERATION.get_or_init(allocate_durable_generation)
+    }
+    #[cfg(test)]
+    {
+        let overridden = TEST_PROCESS_GENERATION.load(std::sync::atomic::Ordering::Acquire);
+        if overridden != u64::MAX {
+            return overridden;
+        }
+        let allocated =
+            TEST_ALLOCATED_PROCESS_GENERATION.load(std::sync::atomic::Ordering::Acquire);
+        if allocated != u64::MAX {
+            return allocated;
+        }
+        let _lock = TEST_PROCESS_GENERATION_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let allocated =
+            TEST_ALLOCATED_PROCESS_GENERATION.load(std::sync::atomic::Ordering::Acquire);
+        if allocated != u64::MAX {
+            return allocated;
+        }
+        let allocated = allocate_durable_generation();
+        TEST_ALLOCATED_PROCESS_GENERATION.store(allocated, std::sync::atomic::Ordering::Release);
+        allocated
+    }
+}
+
+fn allocate_durable_generation() -> u64 {
+    let Some(path) = generation_path() else {
+        return 0;
+    };
+    let Ok(_lock) = lock_generation_path(&path) else {
+        tracing::error!(path = %path.display(), "failed to lock runtime generation counter");
+        return load_generation();
+    };
+    let current = fs::read_to_string(&path)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    let next = current.saturating_add(1);
+    match atomic_write(&path, &next.to_string()) {
+        Ok(()) => next,
+        Err(error) => {
+            tracing::error!(
+                path = %path.display(),
+                current,
+                next,
+                error = %error,
+                "failed to allocate runtime process generation"
+            );
+            current
+        }
+    }
+}
+
+/// Return the immutable generation allocated to this process. Before the
+/// SharedData boot path allocates it, tests and constructor-only tooling fall
+/// back to the durable counter for compatibility.
+pub fn process_generation() -> u64 {
+    #[cfg(not(test))]
+    if let Some(generation) = PROCESS_GENERATION.get() {
+        return *generation;
+    }
+    #[cfg(test)]
+    {
+        let generation = TEST_PROCESS_GENERATION.load(std::sync::atomic::Ordering::Acquire);
+        if generation != u64::MAX {
+            return generation;
+        }
+    }
+    load_generation()
+}
+
+/// Preview the epoch that the replacement process will allocate without
+/// mutating the durable counter while the old process is still quiescing.
+pub fn next_process_generation() -> u64 {
+    load_generation().saturating_add(1)
+}
+
+#[cfg(test)]
+pub fn set_process_generation_for_tests(generation: Option<u64>) {
+    TEST_PROCESS_GENERATION.store(
+        generation.unwrap_or(u64::MAX),
+        std::sync::atomic::Ordering::Release,
+    );
+    if generation.is_none() {
+        TEST_ALLOCATED_PROCESS_GENERATION.store(u64::MAX, std::sync::atomic::Ordering::Release);
+    }
 }
 
 pub(super) fn last_message_root() -> Option<PathBuf> {
@@ -477,6 +607,54 @@ mod runtime_root_tests {
 
         assert_ne!(resolved, live_release_root);
         assert!(resolved.exists(), "fallback tempdir must remain alive");
+    }
+
+    #[test]
+    fn process_generation_allocation_is_monotonic_and_request_preview_is_read_only() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+
+        assert_eq!(allocate_process_generation(), 1);
+        assert_eq!(next_process_generation(), 2);
+        assert_eq!(load_generation(), 1);
+        assert_eq!(allocate_process_generation(), 1);
+        assert_eq!(load_generation(), 1);
+        set_process_generation_for_tests(None);
+    }
+
+    #[test]
+    fn concurrent_provider_allocations_share_one_epoch() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut threads = Vec::new();
+        for _ in 0..8 {
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                allocate_process_generation()
+            }));
+        }
+        let generations: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().expect("allocator thread"))
+            .collect();
+        assert!(generations.iter().all(|generation| *generation == 1));
+        assert_eq!(load_generation(), 1);
+        set_process_generation_for_tests(None);
+    }
+
+    #[test]
+    fn process_epoch_does_not_follow_overlapping_process_counter_advance() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+        set_process_generation_for_tests(Some(7));
+        let path = generation_path().expect("generation path");
+        std::fs::create_dir_all(path.parent().expect("generation parent")).unwrap();
+        atomic_write(&path, "8").unwrap();
+        assert_eq!(load_generation(), 8);
+        assert_eq!(process_generation(), 7);
+        set_process_generation_for_tests(None);
     }
 }
 

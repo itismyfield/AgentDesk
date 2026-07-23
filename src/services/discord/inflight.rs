@@ -68,7 +68,6 @@ use self::rebind_reap::{
     reap_dead_watcher_rebind_origin_locked, reap_dead_watcher_rebind_origin_locked_in_root,
     reap_orphan_inflight_locks_in_root, should_reap_dead_watcher_rebind_origin,
 };
-
 mod removal;
 pub(crate) use self::removal::invalidate_stale_generation;
 use self::removal::load_inflight_states_from_root;
@@ -128,8 +127,9 @@ mod save_store;
 // `super::persist_under_lock_preserving_updated_at` and the CAS children resolve
 // `validate_inflight_state_for_save` (via `use super::*`) unchanged.
 use self::store::{
-    load_inflight_state_unlocked, persist_under_lock, persist_under_lock_preserving_updated_at,
-    validate_inflight_state_for_save, validate_inflight_state_for_save_with_delivery_rewind_reason,
+    load_inflight_state_unlocked, persist_readopted_under_lock, persist_under_lock,
+    persist_under_lock_preserving_updated_at, validate_inflight_state_for_save,
+    validate_inflight_state_for_save_with_delivery_rewind_reason,
 };
 
 // Save cluster re-exports (original visibility mirrored). The save child declares
@@ -169,6 +169,7 @@ pub(crate) use self::clear_store::{
     request_inflight_abandon_if_matches_zero_owned,
 };
 pub(in crate::services::discord) use self::clear_store::{
+    archive_inflight_state_if_matches_identity_generation,
     clear_inflight_state_if_matches_identity,
     clear_inflight_state_if_matches_identity_after_delivery,
     clear_inflight_state_if_matches_identity_generation,
@@ -4529,7 +4530,7 @@ mod wave_a_cleanup_tests {
         // With the root isolated to `temp` (no generation file → 0), the load
         // path's `stale_removal_reason` planned-restart branch hits its
         // generation-match arm and does not auto-evict.
-        let current_runtime_gen = super::super::runtime_store::load_generation();
+        let current_runtime_gen = super::super::runtime_store::process_generation();
 
         let mut planned = make_state(601, 33);
         planned.set_restart_mode(InflightRestartMode::DrainRestart);
