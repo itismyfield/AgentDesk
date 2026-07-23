@@ -78,12 +78,13 @@ impl QuickRestartMarker {
         &self,
         on_removed_owned: impl FnOnce(),
     ) -> io::Result<MarkerOwnership> {
-        self.resolve_ownership_inner(|| {}, on_removed_owned)
+        self.resolve_ownership_inner(|| {}, || {}, on_removed_owned)
     }
 
     fn resolve_ownership_inner(
         &self,
         after_claim: impl FnOnce(),
+        after_reservation: impl FnOnce(),
         on_removed_owned: impl FnOnce(),
     ) -> io::Result<MarkerOwnership> {
         let claimed_path = self
@@ -110,14 +111,36 @@ impl QuickRestartMarker {
             return Ok(MarkerOwnership::Replaced(claimed_owner));
         }
 
-        if self.path.exists() {
-            let replacement = RestartMarkerOwner::from_path(&self.path)?;
-            fs::remove_file(claimed_path)?;
-            return Ok(MarkerOwnership::Replaced(replacement));
+        match fs::hard_link(&claimed_path, &self.path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let replacement =
+                    RestartMarkerOwner::from_path(&self.path).unwrap_or(RestartMarkerOwner {
+                        nonce: None,
+                        source: None,
+                        scope: None,
+                    });
+                fs::remove_file(claimed_path)?;
+                return Ok(MarkerOwnership::Replaced(replacement));
+            }
+            Err(error) => {
+                restore_claimed_marker(&claimed_path, &self.path);
+                return Err(error);
+            }
         }
 
-        fs::remove_file(claimed_path)?;
+        if let Err(error) = append_force_kill_phase(&claimed_path) {
+            let _ = fs::remove_file(&self.path);
+            restore_claimed_marker(&claimed_path, &self.path);
+            return Err(error);
+        }
+        after_reservation();
+        // Keep the canonical hard link occupied through the destructive callback.
+        // If this process dies during force-kill, the nonce-bound marker remains
+        // for the next runtime to consume, so the interrupted fallback converges.
         on_removed_owned();
+        fs::remove_file(&self.path)?;
+        fs::remove_file(claimed_path)?;
         Ok(MarkerOwnership::RemovedOwned)
     }
 }
@@ -126,6 +149,11 @@ fn restore_claimed_marker(claimed_path: &Path, marker_path: &Path) {
     if fs::hard_link(claimed_path, marker_path).is_ok() {
         let _ = fs::remove_file(claimed_path);
     }
+}
+
+fn append_force_kill_phase(path: &Path) -> io::Result<()> {
+    let mut file = OpenOptions::new().append(true).open(path)?;
+    file.write_all(b"phase=force_kill\n")
 }
 
 pub(crate) fn create_quick_restart_marker(
@@ -225,12 +253,64 @@ mod tests {
                 || {
                     fs::write(marker.path(), replacement).unwrap();
                 },
+                || {},
                 || force_kill_called.set(true),
             )
             .unwrap();
 
         assert!(matches!(outcome, MarkerOwnership::Replaced(_)));
         assert!(!outcome.permits_force_kill());
+        assert!(!force_kill_called.get());
+        assert_eq!(fs::read_to_string(marker.path()).unwrap(), replacement);
+    }
+
+    #[test]
+    fn reservation_blocks_new_exclusive_writer_during_force_kill() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = create_quick_restart_marker(root.path(), "1.2.3").unwrap();
+        let writer_blocked = std::cell::Cell::new(false);
+        let phase_visible = std::cell::Cell::new(false);
+
+        let outcome = marker
+            .resolve_ownership_inner(
+                || {},
+                || {
+                    phase_visible.set(
+                        fs::read_to_string(marker.path())
+                            .unwrap()
+                            .lines()
+                            .any(|line| line == "phase=force_kill"),
+                    );
+                    writer_blocked.set(matches!(
+                        create_quick_restart_marker(root.path(), "2.0.0"),
+                        Err(RestartMarkerCreateError::AlreadyOwned(_))
+                    ));
+                },
+                || {},
+            )
+            .unwrap();
+
+        assert_eq!(outcome, MarkerOwnership::RemovedOwned);
+        assert!(phase_visible.get());
+        assert!(writer_blocked.get());
+    }
+
+    #[test]
+    fn reservation_race_returns_replaced_without_force_kill() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = create_quick_restart_marker(root.path(), "1.2.3").unwrap();
+        let replacement = "nonce=replacement-owner\nsource=deploy-release\nscope=release\n";
+        let force_kill_called = std::cell::Cell::new(false);
+
+        let outcome = marker
+            .resolve_ownership_inner(
+                || fs::write(marker.path(), replacement).unwrap(),
+                || {},
+                || force_kill_called.set(true),
+            )
+            .unwrap();
+
+        assert!(matches!(outcome, MarkerOwnership::Replaced(_)));
         assert!(!force_kill_called.get());
         assert_eq!(fs::read_to_string(marker.path()).unwrap(), replacement);
     }
