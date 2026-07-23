@@ -3,10 +3,65 @@ use std::str::FromStr;
 use sqlx::Connection;
 
 use super::gateway_lease_recovery::{
-    GATEWAY_LEASE_APPLICATION_PREFIX, GatewayLeaseHolder, gateway_holder_is_reapable,
-    gateway_lease_application_name_for, reap_orphaned_gateway_lease_for_instance_with_min_age,
+    GATEWAY_LEASE_APPLICATION_PREFIX, GatewayLeaseHolder, PromotionHandoffOutcome,
+    STANDBY_PROMOTION_IN_PROGRESS, gateway_holder_is_reapable, gateway_lease_application_name_for,
+    reap_orphaned_gateway_lease_for_instance_with_min_age, recover_cancelled_promotion,
+    wait_for_promotion_handoff,
 };
 use crate::services::discord::ProviderKind;
+
+#[tokio::test]
+async fn promotion_owner_recovers_all_runtimes_when_cancel_precedes_first_poll_tick() {
+    STANDBY_PROMOTION_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
+    let runtime_a = crate::services::discord::make_shared_data_for_tests();
+    let runtime_b = crate::services::discord::make_shared_data_for_tests();
+    let runtimes = vec![runtime_a.clone(), runtime_b.clone()];
+    for runtime in &runtimes {
+        runtime.restart.intake_worker_lifecycle.fence_admission();
+        runtime
+            .restart
+            .restart_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    let root = tempfile::tempdir().expect("runtime root");
+    let nonce = "promotion-missed-by-pollers";
+    std::fs::write(
+        root.path().join("restart_pending"),
+        format!("nonce={nonce}\nreason=gateway_standby_promotion\n"),
+    )
+    .expect("promotion marker");
+    // clear_restart_drain_mode publishes cancellation then removes the marker;
+    // model that entire handoff before a provider poller gets its first tick.
+    std::fs::write(
+        root.path().join("restart_cancelled"),
+        format!("nonce={nonce}\n"),
+    )
+    .expect("promotion cancellation");
+    std::fs::remove_file(root.path().join("restart_pending")).expect("remove marker");
+
+    assert_eq!(
+        wait_for_promotion_handoff(root.path(), nonce).await,
+        PromotionHandoffOutcome::Cancelled
+    );
+    recover_cancelled_promotion(&runtimes);
+
+    for runtime in runtimes {
+        assert!(
+            !runtime
+                .restart
+                .intake_worker_lifecycle
+                .admission_is_fenced()
+        );
+        assert!(
+            !runtime
+                .restart
+                .restart_pending
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+    }
+    assert!(!STANDBY_PROMOTION_IN_PROGRESS.load(std::sync::atomic::Ordering::Acquire));
+}
 
 #[test]
 fn orphan_reap_requires_named_stale_matching_worker() {

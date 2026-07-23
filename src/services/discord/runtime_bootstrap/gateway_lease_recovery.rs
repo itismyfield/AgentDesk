@@ -1,6 +1,6 @@
 use super::*;
 
-static STANDBY_PROMOTION_IN_PROGRESS: std::sync::atomic::AtomicBool =
+pub(super) static STANDBY_PROMOTION_IN_PROGRESS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 pub(super) const GATEWAY_STANDBY_RETRY_MIN_SECS: u64 = 30;
@@ -213,6 +213,49 @@ fn unfence_runtimes(runtimes: &[Arc<SharedData>]) {
     }
 }
 
+fn restart_file_matches(root: &std::path::Path, name: &str, nonce: &str) -> bool {
+    std::fs::read_to_string(root.join(name))
+        .ok()
+        .and_then(|request| {
+            request
+                .lines()
+                .find_map(|line| line.strip_prefix("nonce="))
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some(nonce)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PromotionHandoffOutcome {
+    Committed,
+    Cancelled,
+}
+
+pub(super) async fn wait_for_promotion_handoff(
+    root: &std::path::Path,
+    nonce: &str,
+) -> PromotionHandoffOutcome {
+    loop {
+        // A matching persisted acknowledgement is the point of no return. Check
+        // it before cancellation because clear may arrive after durable commit.
+        if restart_file_matches(root, "restart_persisted", nonce) {
+            return PromotionHandoffOutcome::Committed;
+        }
+        if restart_file_matches(root, "restart_cancelled", nonce)
+            || !restart_file_matches(root, "restart_pending", nonce)
+        {
+            return PromotionHandoffOutcome::Cancelled;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+pub(super) fn recover_cancelled_promotion(runtimes: &[Arc<SharedData>]) {
+    unfence_runtimes(runtimes);
+    STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
+}
+
 async fn attempt_clean_standby_promotion(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -288,10 +331,16 @@ async fn attempt_clean_standby_promotion(
         STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
         return false;
     }
-    // The marker poller now owns the graceful restart. Keep every runtime's
-    // admission fence and restart_pending state closed until that poller exits
-    // the process; reopening here would reintroduce the preflight TOCTOU window.
-    true
+    // Keep every runtime fenced while the process-wide owner watches the nonce.
+    // A cancellation may remove the marker before any 10s provider poller sees
+    // it; this owner still restores every runtime and permits lease retries.
+    match wait_for_promotion_handoff(&root, &nonce).await {
+        PromotionHandoffOutcome::Committed => true,
+        PromotionHandoffOutcome::Cancelled => {
+            recover_cancelled_promotion(&runtimes);
+            false
+        }
+    }
 }
 
 /// Retry a confirmed standby lease until it becomes available. The provider's
