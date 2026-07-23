@@ -142,7 +142,9 @@ async fn resolve_channel_tmux_names(
     (channel_name, tmux_session_name)
 }
 
-pub(super) use self::attachments::handle_file_upload;
+pub(super) use self::attachments::{
+    LocalAttachmentPreparationPermit, describe_attachments, prepare_admitted_local_attachment,
+};
 pub(super) use self::control::{handle_shell_command_raw, handle_text_command};
 #[allow(unused_imports)]
 pub(in crate::services::discord) use self::headless_turn::{
