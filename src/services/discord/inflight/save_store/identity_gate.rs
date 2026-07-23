@@ -1,7 +1,10 @@
 use super::*;
 #[path = "identity_gate/claude_e_stamp.rs"]
 mod claude_e_stamp;
+#[path = "identity_gate/heartbeat.rs"]
+mod heartbeat;
 pub(in crate::services::discord) use claude_e_stamp::stamp_claude_e_process_if_matches_identity;
+pub(in crate::services::discord) use heartbeat::touch_inflight_state_if_matches_identity;
 
 pub(in crate::services::discord) fn save_inflight_state_if_identity_unchanged(
     state: &InflightTurnState,

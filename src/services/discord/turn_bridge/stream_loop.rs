@@ -249,6 +249,12 @@ pub(super) async fn run_stream_loop(
 
     let mut pending_long_running_open_after_state_save = None;
     let mut pending_long_running_retarget_after_state_save = None;
+    // The periodic flush must remain bound to the owner that entered this
+    // stream loop. Runtime handoff may mutate identity-bearing cursor fields
+    // before a later tick, so deriving expected identity inside the tick would
+    // authorize a mutated stale snapshot rather than the original owner.
+    let stream_tick_expected_identity =
+        crate::services::discord::inflight::InflightTurnIdentity::from_state(&inflight_state);
 
     'outer: while !done
         || terminal_control_drain_until.is_some_and(|deadline| std::time::Instant::now() < deadline)
@@ -818,6 +824,7 @@ pub(super) async fn run_stream_loop(
                 channel_id,
                 provider: &provider,
                 turn_id: turn_id.as_str(),
+                expected_identity: &stream_tick_expected_identity,
                 status_interval,
                 single_message_panel_footer_mode,
                 footer_owner,
