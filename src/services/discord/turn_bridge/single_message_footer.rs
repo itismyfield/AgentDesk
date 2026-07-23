@@ -581,7 +581,7 @@ mod tests {
             &ProviderKind::Claude,
         );
 
-        assert!(rendered.starts_with("Bridge body\n\n⠸ 진행 중 — Claude"));
+        assert!(rendered.starts_with("Bridge body\n\n-# ⠸ 진행 중 — Claude"));
         assert!(!rendered.contains("계속 처리 중"));
         assert!(!rendered.contains('🟢'));
         assert!(rendered.contains("Subagents\n└ review inspect"));
