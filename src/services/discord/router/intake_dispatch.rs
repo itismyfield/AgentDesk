@@ -1,7 +1,6 @@
 use super::message_handler::{self, IntakeDeps, IntakeRequest};
 use crate::services::cluster::intake_router_hook::{
-    IntakeBlockedReason, IntakeRouterContext, IntakeRouterDecision, effective_intake_routing_mode,
-    try_route_intake,
+    IntakeBlockedReason, IntakeRouterContext, IntakeRouterDecision, try_route_intake,
 };
 use crate::services::provider::ProviderKind;
 
@@ -69,26 +68,55 @@ pub(crate) async fn admit_text_intake(
     deps: &IntakeDeps<'_>,
     submission: &IntakeSubmission,
 ) -> IntakeAdmission {
-    let mode = effective_intake_routing_mode();
+    let effective_config =
+        crate::services::cluster::intake_router_hook::effective_intake_routing_config();
+    let mode = effective_config.mode;
+    let channel_id = submission.request.channel_id.get().to_string();
+    let user_msg_id = submission.request.user_msg_id.get().to_string();
+    let authority_channel_opted_in = effective_config.owner_authority_channel_opted_in(&channel_id);
     let Some(pool) = deps.shared.pg_pool.as_ref() else {
-        if matches!(
+        let decision = if matches!(
             mode,
             crate::services::cluster::intake_router_hook::IntakeRoutingMode::Enforce
         ) {
-            return IntakeAdmission::Blocked {
+            IntakeRouterDecision::Blocked {
                 reason: IntakeBlockedReason::RoutingDependencyFailed {
                     detail: "Postgres pool unavailable for owner lookup".to_string(),
                 },
-            };
-        }
-        return IntakeAdmission::Local(LocalAdmissionPermit(()));
+            }
+        } else {
+            IntakeRouterDecision::RanLocal {
+                reason: if matches!(
+                    mode,
+                    crate::services::cluster::intake_router_hook::IntakeRoutingMode::Disabled
+                ) {
+                    crate::services::cluster::intake_router_hook::RanLocalReason::HookDisabled
+                } else {
+                    crate::services::cluster::intake_router_hook::RanLocalReason::DbErrorFellBackToLocal {
+                        detail: "Postgres pool unavailable for owner-aware planning".to_string(),
+                    }
+                },
+            }
+        };
+        crate::services::cluster::intake_routing_telemetry::record_decision(
+            mode,
+            &channel_id,
+            &user_msg_id,
+            authority_channel_opted_in,
+            &decision,
+        );
+        return match decision {
+            IntakeRouterDecision::Blocked { reason } => IntakeAdmission::Blocked { reason },
+            IntakeRouterDecision::RanLocal { .. } => {
+                IntakeAdmission::Local(LocalAdmissionPermit(()))
+            }
+            _ => unreachable!("dependency-free admission creates only blocked or local decisions"),
+        };
     };
 
     let request = &submission.request;
     let leader_instance_id =
         crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
-    let channel_id = request.channel_id.get().to_string();
-    let user_msg_id = request.user_msg_id.get().to_string();
     let request_owner_id = request.request_owner.get().to_string();
     let node_override =
         super::super::commands::channel_node_override(deps.shared, request.channel_id);
@@ -120,36 +148,29 @@ pub(crate) async fn admit_text_intake(
     };
 
     let decision = try_route_intake(pool, &ctx).await;
+    crate::services::cluster::intake_routing_telemetry::record_decision(
+        mode,
+        &channel_id,
+        &user_msg_id,
+        authority_channel_opted_in,
+        &decision,
+    );
     let admission = match decision {
-        IntakeRouterDecision::RanLocal { reason } => {
-            tracing::debug!(
-                ?reason,
-                channel_id,
-                user_msg_id,
-                "[intake_dispatch] admitted local"
-            );
-            IntakeAdmission::Local(LocalAdmissionPermit(()))
-        }
-        IntakeRouterDecision::Observed { outcome } => {
-            tracing::info!(
-                ?outcome,
-                channel_id,
-                user_msg_id,
-                "[intake_dispatch] owner-aware observe route admitted local"
-            );
+        IntakeRouterDecision::RanLocal { .. } | IntakeRouterDecision::Observed { .. } => {
             IntakeAdmission::Local(LocalAdmissionPermit(()))
         }
         IntakeRouterDecision::Forwarded {
             target_instance_id,
             outbox_id,
+            ..
         } => IntakeAdmission::Forwarded {
             target_instance_id,
             outbox_id,
         },
-        IntakeRouterDecision::SkippedDuplicate => IntakeAdmission::SkippedDuplicate,
-        IntakeRouterDecision::DeferredOpenRoute { target_instance_id } => {
-            IntakeAdmission::DeferredOpenRoute { target_instance_id }
-        }
+        IntakeRouterDecision::SkippedDuplicate { .. } => IntakeAdmission::SkippedDuplicate,
+        IntakeRouterDecision::DeferredOpenRoute {
+            target_instance_id, ..
+        } => IntakeAdmission::DeferredOpenRoute { target_instance_id },
         IntakeRouterDecision::Blocked { reason } => IntakeAdmission::Blocked { reason },
     };
     log_nonlocal_admission(&admission, &channel_id, &user_msg_id);
