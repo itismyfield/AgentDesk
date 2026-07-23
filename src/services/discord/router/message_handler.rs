@@ -122,16 +122,30 @@ fn stale_busy_context<'a>(
     (session_names[0], provider, session_names[1])
 }
 
-async fn resolve_channel_tmux_names(
+async fn resolve_channel_runtime_for_launch(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
-) -> (Option<String>, Option<String>) {
-    let data = shared.core.lock().await;
+    mut current: (String, Option<String>, bool, &'static str),
+) -> (
+    String,
+    Option<String>,
+    bool,
+    &'static str,
+    Option<String>,
+    Option<String>,
+) {
+    let mut data = shared.core.lock().await;
     let channel_name = data
         .sessions
         .get(&channel_id)
         .and_then(|session| session.channel_name.clone());
+    if let Some((session_id, loaded, path)) =
+        load_session_runtime_state(&mut data.sessions, channel_id)
+        && (path != current.0 || session_id != current.1)
+    {
+        current = (path, session_id, loaded, "runtime_session_rebound");
+    }
     let tmux_session_name = if provider.uses_managed_tmux_backend() {
         channel_name
             .as_ref()
@@ -139,7 +153,14 @@ async fn resolve_channel_tmux_names(
     } else {
         None
     };
-    (channel_name, tmux_session_name)
+    (
+        current.0,
+        current.1,
+        current.2,
+        current.3,
+        channel_name,
+        tmux_session_name,
+    )
 }
 
 pub(super) use self::attachments::handle_file_upload;
