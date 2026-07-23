@@ -358,7 +358,7 @@ mod placeholder_suppression_tests {
             "🟢 진행 중\n턴 트리거: https://discord.com/channels/1/2/3\n턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)\n마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>)\n\nTools\n└ cargo test --lib tmux\nSubagents\n└ review inspect\n{long_tail}"
         );
         let status_block = discord::single_message_panel::compose_footer_status_block("⠋", &panel);
-        assert!(status_block.starts_with("⠋ 진행 중"));
+        assert!(status_block.starts_with("-# ⠋ 진행 중"));
         assert!(status_block.contains("마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>)"));
         assert!(status_block.contains("Tools"));
         assert!(status_block.contains("Subagents"));
