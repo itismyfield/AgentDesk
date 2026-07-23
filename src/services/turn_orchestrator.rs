@@ -681,9 +681,9 @@ pub(crate) struct TakeNextSoftResult {
 
 pub(crate) struct RequeueInterventionResult {
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
-    // Uniform queue-mutation persistence-result surface; no consumer yet.
-    // See `FinishTurnResult`.
-    #[allow(dead_code)]
+    // Uniform queue-mutation persistence-result surface, consumed by
+    // `enqueue_busy_tui_followup_for_retry` (#4795) to build its
+    // MailboxEnqueueOutcome. See `FinishTurnResult`.
     pub(crate) persistence_error: Option<String>,
 }
 
