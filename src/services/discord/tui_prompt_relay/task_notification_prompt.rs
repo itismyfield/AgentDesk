@@ -145,8 +145,8 @@ pub(super) async fn resolve_gate(
     );
     let transport =
         super::super::task_notification_delivery::DiscordTaskCardTransport::new(shared.clone());
-    let outcome = match super::super::task_notification_delivery::ensure_card(
-        shared.pg_pool.as_ref(),
+    let outcome = match super::super::task_notification_delivery::ensure_card_with_shared(
+        shared.as_ref(),
         &clients,
         &transport,
         event,
@@ -200,7 +200,10 @@ fn enqueue_footer_only_background_marker(
 ) {
     let target = format!("channel:{}", channel_id.get());
     let session_key =
-        super::super::tmux::footer_background_marker_session_key(channel_id, event.event_key());
+        super::super::task_notification_delivery::footer_background_marker_session_key(
+            channel_id,
+            event.event_key(),
+        );
     let _ = crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
         shared.pg_pool.as_ref(),
         target.as_str(),
