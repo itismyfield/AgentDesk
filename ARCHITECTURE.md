@@ -1262,6 +1262,7 @@ src/
 │   ├── session_selector_validity.rs
 │   ├── settings.rs
 │   ├── shell_guard.rs
+│   ├── stale_turn_reconciler.rs
 │   ├── termination_audit.rs
 │   ├── tmux_common.rs
 │   ├── tmux_diagnostics.rs
