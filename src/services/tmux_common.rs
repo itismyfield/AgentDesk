@@ -367,11 +367,11 @@ pub(crate) fn tmux_capture_indicates_claude_tui_background_agent_pending(capture
         return false;
     }
     let start = non_empty.len().saturating_sub(CLAUDE_TUI_ACTIVE_SCAN_LINES);
-    non_empty[start..].iter().any(|line| {
-        let lower = line.to_ascii_lowercase();
-        (lower.contains("waiting for") && lower.contains("background agent"))
-            || lower.contains("backgrounded agent")
-    })
+    let recent = non_empty[start..].join("\n");
+    !crate::services::claude_tui::prompt_readiness::claude_tui_background_agent_status_line_indexes(
+        &recent,
+    )
+    .is_empty()
 }
 
 /// Shared producer for the Claude TUI background-agent pending bit.
@@ -2158,7 +2158,7 @@ another line of prior output";
         // foreground-idle panes and assistant prose merely mentioning a background
         // agent are NOT (no false keep-alive → no stuck turn).
         assert!(tmux_capture_indicates_claude_tui_background_agent_pending(
-            "⏺ reading docs\n✻ Waiting for 1 background agent to finish\n❯ "
+            "⏺ reading docs\n✻ Waiting for 1 background agent to finish\n────────────────────────────────────────────────────\n❯ "
         ));
         assert!(tmux_capture_indicates_claude_tui_background_agent_pending(
             "⏺ Agent(read story)\n  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)\n❯ "
@@ -2168,6 +2168,11 @@ another line of prior output";
         ));
         assert!(!tmux_capture_indicates_claude_tui_background_agent_pending(
             "I will hand that to the background agent.\n❯ "
+        ));
+        assert!(!tmux_capture_indicates_claude_tui_background_agent_pending(
+            "◯ reviewer       Watching CI                         6m 13s\n\
+             ◯ quoted agent status                         3m 52s\n\
+             I am waiting for 3 background agents to finish."
         ));
     }
 
