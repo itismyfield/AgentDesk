@@ -7,10 +7,19 @@ use crate::services::tui_turn_state::TuiTurnState;
 /// words or `◯` bullet, but it cannot satisfy these structural anchors.
 pub(crate) fn claude_tui_background_agent_status_line_indexes(pane: &str) -> Vec<usize> {
     let lines = pane.lines().collect::<Vec<_>>();
+    let Some(prompt_index) = lines.iter().rposition(|line| line.trim() == "❯") else {
+        return Vec::new();
+    };
+    // Claude's persistent chrome is painted around the active bottom composer:
+    // its waiting/management footer is immediately above the separator and
+    // composer, while its task table is below it. Restrict matching to that
+    // bottom zone so identical lines in the assistant transcript are never
+    // promoted to live status.
+    let chrome_start = prompt_index.saturating_sub(2);
     let mut statuses = Vec::new();
     let mut task_table_open = false;
 
-    for (index, line) in lines.iter().enumerate() {
+    for (index, line) in lines.iter().enumerate().skip(chrome_start) {
         if is_claude_tui_background_agent_footer(line)
             || is_claude_tui_background_agent_management_line(line)
         {
@@ -36,7 +45,6 @@ pub(crate) fn claude_tui_background_agent_status_line_indexes(pane: &str) -> Vec
 }
 
 fn is_claude_tui_background_agent_footer(line: &str) -> bool {
-    let line = line.trim();
     let Some(count) = line.strip_prefix("✻ Waiting for ") else {
         return false;
     };
@@ -139,17 +147,42 @@ mod tests {
   ◯ implementer    Updating tests                      3m 52s";
 
     #[test]
-    fn task_list_background_agent_rows_require_main_header_and_columns() {
+    fn background_agent_chrome_requires_bottom_prompt_zone() {
         assert_eq!(
             claude_tui_background_agent_status_line_indexes(BACKGROUND_WAITING_PANE),
             vec![1, 9, 10],
         );
-        let assistant_body = "\
-◯ reviewer       Watching CI                         6m 13s
-◯ implementer    Updating tests                      3m 52s
-I am waiting for 3 background agents to finish.
-⎿ Backgrounded agent (↓ to manage · ctrl+o to expand)";
-        assert!(claude_tui_background_agent_status_line_indexes(assistant_body).is_empty());
+        assert_eq!(
+            claude_tui_background_agent_status_line_indexes(
+                "⏺ Agent(read story)\n  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)\n❯"
+            ),
+            vec![1],
+        );
+
+        let quoted_assistant_output = "\
+```text
+✻ Waiting for 3 background agents to finish
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+  ⏺ main
+  ◯ reviewer       Watching CI                         6m 13s
+```
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  ◆ Opus(M) │ Tools: 224 done";
+        assert!(
+            claude_tui_background_agent_status_line_indexes(quoted_assistant_output).is_empty()
+        );
+    }
+
+    #[test]
+    fn background_agent_footer_rejects_indented_assistant_text() {
+        let pane = "  ✻ Waiting for 3 background agents to finish\n\
+────────────────────────────────────────────────────\n\
+❯\n\
+────────────────────────────────────────────────────\n\
+  ◆ Opus(M) │ Tools: 224 done";
+        assert!(claude_tui_background_agent_status_line_indexes(pane).is_empty());
     }
 
     #[test]
