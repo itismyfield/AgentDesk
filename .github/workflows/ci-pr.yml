@@ -354,8 +354,15 @@ jobs:
       - name: Policy JS unit tests
         run: npm run test:policies
 
-      - name: just check
-        run: just check
+      # `lint` already runs the exact `fmt-check` + `lint` recipes in parallel
+      # and has its own required mirror. Repeating them through `just check`
+      # added 4-5 minutes to this critical-path job without adding coverage.
+      # Keep the compile check and every non-PG test here; branch protection
+      # still requires both this result and the independent Lint result.
+      - name: cargo check + non-PG tests
+        run: |
+          just cargo-check
+          just test-non-pg
         env:
           # Cold `cargo test --all-targets` on the 16GB ubuntu runner peaks over
           # RAM during codegen+link (SIGTERM/143). Two step-scoped levers keep
