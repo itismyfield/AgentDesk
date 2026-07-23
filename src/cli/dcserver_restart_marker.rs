@@ -78,13 +78,14 @@ impl QuickRestartMarker {
         &self,
         on_removed_owned: impl FnOnce(),
     ) -> io::Result<MarkerOwnership> {
-        self.resolve_ownership_inner(|| {}, || {}, on_removed_owned)
+        self.resolve_ownership_inner(|| {}, || {}, append_force_kill_phase, on_removed_owned)
     }
 
     fn resolve_ownership_inner(
         &self,
         after_claim: impl FnOnce(),
         after_reservation: impl FnOnce(),
+        append_phase: impl FnOnce(&Path) -> io::Result<()>,
         on_removed_owned: impl FnOnce(),
     ) -> io::Result<MarkerOwnership> {
         let claimed_path = self
@@ -129,8 +130,8 @@ impl QuickRestartMarker {
             }
         }
 
-        if let Err(error) = append_force_kill_phase(&claimed_path) {
-            let _ = fs::remove_file(&self.path);
+        if let Err(error) = append_phase(&claimed_path) {
+            identity_safe_remove(&self.path, &self.nonce)?;
             restore_claimed_marker(&claimed_path, &self.path);
             return Err(error);
         }
@@ -139,7 +140,7 @@ impl QuickRestartMarker {
         // If this process dies during force-kill, the nonce-bound marker remains
         // for the next runtime to consume, so the interrupted fallback converges.
         on_removed_owned();
-        fs::remove_file(&self.path)?;
+        identity_safe_remove(&self.path, &self.nonce)?;
         fs::remove_file(claimed_path)?;
         Ok(MarkerOwnership::RemovedOwned)
     }
@@ -149,6 +150,30 @@ fn restore_claimed_marker(claimed_path: &Path, marker_path: &Path) {
     if fs::hard_link(claimed_path, marker_path).is_ok() {
         let _ = fs::remove_file(claimed_path);
     }
+}
+
+fn identity_safe_remove(marker_path: &Path, expected_nonce: &str) -> io::Result<()> {
+    let cleanup_path =
+        marker_path.with_file_name(format!(".restart_pending.cleanup.{}", uuid::Uuid::new_v4()));
+    match fs::rename(marker_path, &cleanup_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+
+    let owner = match RestartMarkerOwner::from_path(&cleanup_path) {
+        Ok(owner) => owner,
+        Err(error) => {
+            restore_claimed_marker(&cleanup_path, marker_path);
+            return Err(error);
+        }
+    };
+    if owner.nonce.as_deref() == Some(expected_nonce) {
+        return fs::remove_file(cleanup_path);
+    }
+
+    restore_claimed_marker(&cleanup_path, marker_path);
+    Ok(())
 }
 
 fn append_force_kill_phase(path: &Path) -> io::Result<()> {
@@ -254,6 +279,7 @@ mod tests {
                     fs::write(marker.path(), replacement).unwrap();
                 },
                 || {},
+                append_force_kill_phase,
                 || force_kill_called.set(true),
             )
             .unwrap();
@@ -286,6 +312,7 @@ mod tests {
                         Err(RestartMarkerCreateError::AlreadyOwned(_))
                     ));
                 },
+                append_force_kill_phase,
                 || {},
             )
             .unwrap();
@@ -306,11 +333,61 @@ mod tests {
             .resolve_ownership_inner(
                 || fs::write(marker.path(), replacement).unwrap(),
                 || {},
+                append_force_kill_phase,
                 || force_kill_called.set(true),
             )
             .unwrap();
 
         assert!(matches!(outcome, MarkerOwnership::Replaced(_)));
+        assert!(!force_kill_called.get());
+        assert_eq!(fs::read_to_string(marker.path()).unwrap(), replacement);
+    }
+
+    #[test]
+    fn cleanup_preserves_replacement_after_runtime_consumes_reservation() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = create_quick_restart_marker(root.path(), "1.2.3").unwrap();
+        let replacement = "nonce=replacement-owner\nsource=deploy-release\nscope=release\n";
+        let force_kill_called = std::cell::Cell::new(false);
+
+        let outcome = marker
+            .resolve_ownership_inner(
+                || {},
+                || {
+                    fs::remove_file(marker.path()).unwrap();
+                    fs::write(marker.path(), replacement).unwrap();
+                },
+                append_force_kill_phase,
+                || force_kill_called.set(true),
+            )
+            .unwrap();
+
+        assert_eq!(outcome, MarkerOwnership::RemovedOwned);
+        assert!(force_kill_called.get());
+        assert_eq!(fs::read_to_string(marker.path()).unwrap(), replacement);
+    }
+
+    #[test]
+    fn append_failure_rollback_preserves_replacement_after_runtime_consumes_reservation() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = create_quick_restart_marker(root.path(), "1.2.3").unwrap();
+        let replacement = "nonce=replacement-owner\nsource=deploy-release\nscope=release\n";
+        let force_kill_called = std::cell::Cell::new(false);
+
+        let error = marker
+            .resolve_ownership_inner(
+                || {},
+                || {},
+                |_| {
+                    fs::remove_file(marker.path()).unwrap();
+                    fs::write(marker.path(), replacement).unwrap();
+                    Err(io::Error::other("injected append failure"))
+                },
+                || force_kill_called.set(true),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
         assert!(!force_kill_called.get());
         assert_eq!(fs::read_to_string(marker.path()).unwrap(), replacement);
     }
