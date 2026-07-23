@@ -2,6 +2,9 @@ use anyhow::{Result, anyhow};
 use sqlx::PgPool;
 use std::time::Duration;
 
+use crate::services::discord::session_identity::SessionIdentity;
+use crate::services::provider::ProviderKind;
+
 /// A live turn refreshes its heartbeat roughly once per minute. Five minutes
 /// leaves enough margin for transient database or scheduler delays while still
 /// bounding how long a stale busy state can block mailbox injection.
@@ -14,23 +17,40 @@ pub(crate) enum SessionReconcileOutcome {
     NotFound,
 }
 
-/// Reconcile every provably stale busy session.
-///
-/// The update is intentionally guarded by all three pieces of negative liveness
-/// evidence in one SQL statement: a busy status, no dispatch id, and a stale
-/// heartbeat. A live turn with either a dispatch id or a fresh heartbeat cannot
-/// match, including if either changes concurrently before the row is locked.
-pub(crate) async fn reconcile_stale_turns_pg(pool: &PgPool) -> Result<usize> {
-    reconcile_stale_turns_matching_pg(pool, None).await
+#[derive(Debug, sqlx::FromRow)]
+struct StaleTurnCandidate {
+    session_key: String,
+    provider: String,
 }
 
-/// Reconcile one session for the operator API without weakening the same atomic
-/// liveness guard used by startup and periodic sweeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndependentLiveness {
+    NoPane,
+    ReadyForInput,
+    LiveOrAmbiguous,
+    RemoteOrInvalid,
+}
+
+/// Reconcile every stale busy session that independent tmux evidence confirms
+/// is no longer running a turn.
+///
+/// A stale database heartbeat is only a candidate signal: it can also mean the
+/// database was unavailable while a preserved tmux turn kept running. Each
+/// candidate is therefore checked against the local tmux pane before the final
+/// guarded update. A live or ambiguous pane fails closed and remains busy.
+pub(crate) async fn reconcile_stale_turns_pg(pool: &PgPool) -> Result<usize> {
+    reconcile_stale_turns_matching_pg(pool, None, independent_tmux_liveness).await
+}
+
+/// Reconcile one session for the operator API without weakening the liveness
+/// gates used by startup and periodic sweeps.
 pub(crate) async fn reconcile_stale_turn_by_key_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> Result<SessionReconcileOutcome> {
-    let reconciled = reconcile_stale_turns_matching_pg(pool, Some(session_key)).await?;
+    let reconciled =
+        reconcile_stale_turns_matching_pg(pool, Some(session_key), independent_tmux_liveness)
+            .await?;
     if reconciled > 0 {
         return Ok(SessionReconcileOutcome::Reconciled);
     }
@@ -50,15 +70,59 @@ pub(crate) async fn reconcile_stale_turn_by_key_pg(
     })
 }
 
-async fn reconcile_stale_turns_matching_pg(
+async fn reconcile_stale_turns_matching_pg<F>(
     pool: &PgPool,
     session_key: Option<&str>,
-) -> Result<usize> {
-    let result = sqlx::query(
-        "UPDATE sessions
-            SET session_info = 'reconciled stale ' || status ||
-                               ' (no dispatch, stale heartbeat)',
-                status = 'idle'
+    probe: F,
+) -> Result<usize>
+where
+    F: Fn(&str, &str) -> IndependentLiveness + Copy + Send + 'static,
+{
+    let candidates = load_stale_turn_candidates_pg(pool, session_key).await?;
+    let mut reconciled = 0;
+
+    for candidate in candidates {
+        let key = candidate.session_key.clone();
+        let provider = candidate.provider.clone();
+        let liveness = tokio::task::spawn_blocking(move || probe(&key, &provider))
+            .await
+            .unwrap_or(IndependentLiveness::LiveOrAmbiguous);
+
+        if !matches!(
+            liveness,
+            IndependentLiveness::NoPane | IndependentLiveness::ReadyForInput
+        ) {
+            tracing::info!(
+                target: "reconcile",
+                session_key = %candidate.session_key,
+                ?liveness,
+                "preserved stale busy session because independent liveness was not terminal"
+            );
+            continue;
+        }
+
+        reconciled += reconcile_candidate_pg(pool, &candidate.session_key).await?;
+    }
+
+    if reconciled > 0 {
+        tracing::warn!(
+            target: "reconcile",
+            reconciled,
+            session_key = session_key.unwrap_or("*"),
+            grace_seconds = STALE_TURN_GRACE.as_secs(),
+            "reconciled stale busy sessions with terminal tmux evidence"
+        );
+    }
+    Ok(reconciled)
+}
+
+async fn load_stale_turn_candidates_pg(
+    pool: &PgPool,
+    session_key: Option<&str>,
+) -> Result<Vec<StaleTurnCandidate>> {
+    sqlx::query_as::<_, StaleTurnCandidate>(
+        "SELECT session_key, COALESCE(provider, 'claude') AS provider
+           FROM sessions
           WHERE status IN ('turn_active', 'working')
             AND COALESCE(BTRIM(active_dispatch_id), '') = ''
             AND last_heartbeat < NOW() - ($1::BIGINT * INTERVAL '1 second')
@@ -66,21 +130,54 @@ async fn reconcile_stale_turns_matching_pg(
     )
     .bind(STALE_TURN_GRACE.as_secs() as i64)
     .bind(session_key)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| anyhow!("load stale busy session candidates: {error}"))
+}
+
+fn independent_tmux_liveness(session_key: &str, provider: &str) -> IndependentLiveness {
+    let Some(identity) = SessionIdentity::parse(session_key) else {
+        return IndependentLiveness::RemoteOrInvalid;
+    };
+    if identity.host != crate::services::platform::hostname_short() {
+        return IndependentLiveness::RemoteOrInvalid;
+    }
+    if !crate::services::platform::tmux::has_session(&identity.tmux_name) {
+        return IndependentLiveness::NoPane;
+    }
+
+    let Some(capture) = crate::services::platform::tmux::capture_pane(&identity.tmux_name, -160)
+    else {
+        return IndependentLiveness::LiveOrAmbiguous;
+    };
+    let Some(provider) = ProviderKind::from_str(provider) else {
+        return IndependentLiveness::LiveOrAmbiguous;
+    };
+
+    if crate::services::provider::tmux_capture_indicates_ready_for_input(&capture, &provider) {
+        IndependentLiveness::ReadyForInput
+    } else {
+        IndependentLiveness::LiveOrAmbiguous
+    }
+}
+
+async fn reconcile_candidate_pg(pool: &PgPool, session_key: &str) -> Result<usize> {
+    sqlx::query(
+        "UPDATE sessions
+            SET session_info = 'reconciled stale ' || status ||
+                               ' (no dispatch, stale heartbeat, terminal tmux)',
+                status = 'idle'
+          WHERE session_key = $2
+            AND status IN ('turn_active', 'working')
+            AND COALESCE(BTRIM(active_dispatch_id), '') = ''
+            AND last_heartbeat < NOW() - ($1::BIGINT * INTERVAL '1 second')",
+    )
+    .bind(STALE_TURN_GRACE.as_secs() as i64)
+    .bind(session_key)
     .execute(pool)
     .await
-    .map_err(|error| anyhow!("reconcile stale busy sessions: {error}"))?;
-
-    let reconciled = result.rows_affected() as usize;
-    if reconciled > 0 {
-        tracing::warn!(
-            target: "reconcile",
-            reconciled,
-            session_key = session_key.unwrap_or("*"),
-            grace_seconds = STALE_TURN_GRACE.as_secs(),
-            "reconciled stale busy sessions with no dispatch and stale heartbeat"
-        );
-    }
-    Ok(reconciled)
+    .map(|result| result.rows_affected() as usize)
+    .map_err(|error| anyhow!("reconcile stale busy session {session_key}: {error}"))
 }
 
 #[cfg(test)]
@@ -89,8 +186,6 @@ mod tests {
     use sqlx::Row;
 
     async fn allow_legacy_working_status(pool: &PgPool) {
-        // The deployed release can contain the legacy `working` value even
-        // though a fresh test schema's status check no longer accepts it.
         sqlx::query("ALTER TABLE sessions DROP CONSTRAINT sessions_status_known_check")
             .execute(pool)
             .await
@@ -106,9 +201,9 @@ mod tests {
     ) {
         sqlx::query(
             "INSERT INTO sessions (
-                session_key, status, active_dispatch_id, last_heartbeat, session_info
+                session_key, provider, status, active_dispatch_id, last_heartbeat, session_info
              ) VALUES (
-                $1, $2, $3,
+                $1, 'claude', $2, $3,
                 NOW() - ($4::BIGINT * INTERVAL '1 second'), 'original'
              )",
         )
@@ -134,45 +229,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_busy_sessions_are_reconciled_but_live_turns_are_unchanged_pg() {
+    async fn stale_busy_candidates_reconcile_only_after_terminal_liveness_pg() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         allow_legacy_working_status(&pool).await;
         let stale_age = STALE_TURN_GRACE.as_secs() as i64 + 60;
 
-        seed_session(&pool, "stale-turn", "turn_active", None, stale_age).await;
-        seed_session(&pool, "stale-working", "working", Some("  "), stale_age).await;
+        seed_session(&pool, "host:stale-turn", "turn_active", None, stale_age).await;
         seed_session(
             &pool,
-            "live-dispatch",
+            "host:stale-working",
+            "working",
+            Some("  "),
+            stale_age,
+        )
+        .await;
+        seed_session(
+            &pool,
+            "host:live-dispatch",
             "turn_active",
             Some("dispatch-live"),
             stale_age,
         )
         .await;
-        seed_session(&pool, "live-heartbeat", "turn_active", None, 30).await;
+        seed_session(&pool, "host:live-heartbeat", "turn_active", None, 30).await;
 
-        assert_eq!(reconcile_stale_turns_pg(&pool).await.unwrap(), 2);
         assert_eq!(
-            load_state(&pool, "stale-turn").await,
+            reconcile_stale_turns_matching_pg(&pool, None, |_, _| { IndependentLiveness::NoPane })
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            load_state(&pool, "host:stale-working").await,
             (
                 "idle".to_string(),
-                Some("reconciled stale turn_active (no dispatch, stale heartbeat)".to_string())
+                Some(
+                    "reconciled stale working (no dispatch, stale heartbeat, terminal tmux)"
+                        .to_string()
+                )
             )
         );
         assert_eq!(
-            load_state(&pool, "stale-working").await,
-            (
-                "idle".to_string(),
-                Some("reconciled stale working (no dispatch, stale heartbeat)".to_string())
-            )
-        );
-        assert_eq!(
-            load_state(&pool, "live-dispatch").await,
+            load_state(&pool, "host:live-dispatch").await,
             ("turn_active".to_string(), Some("original".to_string()))
         );
         assert_eq!(
-            load_state(&pool, "live-heartbeat").await,
+            load_state(&pool, "host:live-heartbeat").await,
             ("turn_active".to_string(), Some("original".to_string()))
         );
 
@@ -181,26 +284,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn keyed_reconcile_uses_the_same_guard_pg() {
+    async fn preserved_live_tmux_evidence_keeps_stale_row_busy_pg() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
-        allow_legacy_working_status(&pool).await;
         let stale_age = STALE_TURN_GRACE.as_secs() as i64 + 60;
-
-        seed_session(&pool, "keyed-stale", "turn_active", None, stale_age).await;
-        seed_session(&pool, "keyed-live", "working", None, 30).await;
+        seed_session(&pool, "host:preserved-live", "turn_active", None, stale_age).await;
 
         assert_eq!(
-            reconcile_stale_turn_by_key_pg(&pool, "keyed-stale")
-                .await
-                .unwrap(),
-            SessionReconcileOutcome::Reconciled
+            reconcile_stale_turns_matching_pg(&pool, None, |_, _| {
+                IndependentLiveness::LiveOrAmbiguous
+            })
+            .await
+            .unwrap(),
+            0
         );
         assert_eq!(
-            reconcile_stale_turn_by_key_pg(&pool, "keyed-live")
+            load_state(&pool, "host:preserved-live").await,
+            ("turn_active".to_string(), Some("original".to_string()))
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn keyed_unchanged_outcome_keeps_live_row_turn_active_pg() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let stale_age = STALE_TURN_GRACE.as_secs() as i64 + 60;
+        seed_session(
+            &pool,
+            "remote-host:live-turn",
+            "turn_active",
+            None,
+            stale_age,
+        )
+        .await;
+
+        assert_eq!(
+            reconcile_stale_turn_by_key_pg(&pool, "remote-host:live-turn")
                 .await
                 .unwrap(),
             SessionReconcileOutcome::Unchanged
+        );
+        assert_eq!(
+            load_state(&pool, "remote-host:live-turn").await,
+            ("turn_active".to_string(), Some("original".to_string()))
         );
         assert_eq!(
             reconcile_stale_turn_by_key_pg(&pool, "missing")
