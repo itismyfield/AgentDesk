@@ -444,6 +444,41 @@ fn drain_ownership(
     }
 }
 
+fn current_drain_ownership(
+    provider: &ProviderKind,
+    channel_id: u64,
+    record: &AbandonRecord,
+) -> DrainOwnership {
+    drain_ownership(
+        super::inflight::load_inflight_state(provider, channel_id).as_ref(),
+        record,
+    )
+}
+
+fn clear_record_for_live_owner_race(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    record: &AbandonRecord,
+    after_edit: bool,
+) {
+    remove_record(provider, token_hash, channel_id, record);
+    if after_edit {
+        // Discord offers no compare-and-swap edit. If ownership changed during the
+        // HTTP await, the stale terminal card can be visible only until the live
+        // owner's periodic bridge/watcher status tick edits this same panel again.
+        tracing::warn!(
+            target: "agentdesk::discord::live_panel",
+            provider = provider.as_str(),
+            channel_id,
+            message_id = record.msg_id,
+            record_user_msg_id = record.episode.user_msg_id,
+            record_status_panel_generation = record.episode.status_panel_generation,
+            "abandon drain edit committed after live ownership appeared during the HTTP await; removed the stale record and awaiting the live owner's periodic panel refresh"
+        );
+    }
+}
+
 /// Finalize every pending stranded placeholder once. `StillPlaceholder` → edit to
 /// the "중단됨" card (committed → drop the record; transient edit failure → keep
 /// for the next drain). `AlreadyDelivered` / `MessageGone` → consume the record
@@ -464,16 +499,13 @@ pub(in crate::services::discord) async fn drain(
         if !is_record_queued(provider, token_hash, channel_id, &record) {
             continue;
         }
-        match drain_ownership(
-            super::inflight::load_inflight_state(provider, channel_id).as_ref(),
-            &record,
-        ) {
+        match current_drain_ownership(provider, channel_id, &record) {
             DrainOwnership::Editable => {}
             DrainOwnership::DeferSameRevision | DrainOwnership::DeferSameEpisodeNewRevision => {
                 continue;
             }
             DrainOwnership::DropForNewerOwner => {
-                remove_record(provider, token_hash, channel_id, &record);
+                clear_record_for_live_owner_race(provider, token_hash, channel_id, &record, false);
                 cleared += 1;
                 continue;
             }
@@ -483,25 +515,28 @@ pub(in crate::services::discord) async fn drain(
             PlaceholderProbe::StillPlaceholder => {
                 // Close the probe→edit ownership window. The probe establishes
                 // shape only; this second fence establishes the owning episode.
+                let text = build_terminal_card(&record);
+                let channel = serenity::ChannelId::new(channel_id);
+                let message = serenity::MessageId::new(record.msg_id);
                 if !is_record_queued(provider, token_hash, channel_id, &record) {
                     continue;
                 }
-                match drain_ownership(
-                    super::inflight::load_inflight_state(provider, channel_id).as_ref(),
-                    &record,
-                ) {
+                // Keep the final owner check adjacent to the outbound call. The
+                // gateway can still await its rate lane, so Discord cannot provide a
+                // zero-width ownership window; the post-edit fence below detects and
+                // bounds any race that commits during that await.
+                match current_drain_ownership(provider, channel_id, &record) {
                     DrainOwnership::Editable => {}
                     DrainOwnership::DeferSameRevision
                     | DrainOwnership::DeferSameEpisodeNewRevision => continue,
                     DrainOwnership::DropForNewerOwner => {
-                        remove_record(provider, token_hash, channel_id, &record);
+                        clear_record_for_live_owner_race(
+                            provider, token_hash, channel_id, &record, false,
+                        );
                         cleared += 1;
                         continue;
                     }
                 }
-                let text = build_terminal_card(&record);
-                let channel = serenity::ChannelId::new(channel_id);
-                let message = serenity::MessageId::new(record.msg_id);
                 match super::gateway::edit_outbound_message(
                     http.clone(),
                     shared.clone(),
@@ -512,7 +547,17 @@ pub(in crate::services::discord) async fn drain(
                 .await
                 {
                     Ok(_) => {
-                        remove_record(provider, token_hash, channel_id, &record);
+                        let live_owner_raced = !matches!(
+                            current_drain_ownership(provider, channel_id, &record),
+                            DrainOwnership::Editable
+                        );
+                        if live_owner_raced {
+                            clear_record_for_live_owner_race(
+                                provider, token_hash, channel_id, &record, true,
+                            );
+                        } else {
+                            remove_record(provider, token_hash, channel_id, &record);
+                        }
                         cleared += 1;
                         tracing::info!(
                             "[abandon_request_store] finalized stranded placeholder {}/{} → 중단됨",
@@ -676,6 +721,31 @@ mod tests {
         same_episode_new_revision.save_generation += 1;
         assert_eq!(
             drain_ownership(Some(&same_episode_new_revision), &newer),
+            DrainOwnership::DeferSameEpisodeNewRevision
+        );
+    }
+
+    #[test]
+    fn post_edit_fence_detects_every_live_anchor_for_self_heal() {
+        let old = rec_for_episode(5001, 7001, "2026-05-17 10:00:00");
+
+        let newer = rec_for_episode(5001, 7002, "2026-05-17 10:01:00");
+        let newer_inflight = inflight_for_record(&newer);
+        assert_eq!(
+            drain_ownership(Some(&newer_inflight), &old),
+            DrainOwnership::DropForNewerOwner
+        );
+
+        let same_revision = inflight_for_record(&old);
+        assert_eq!(
+            drain_ownership(Some(&same_revision), &old),
+            DrainOwnership::DeferSameRevision
+        );
+
+        let mut same_episode_new_revision = same_revision.clone();
+        same_episode_new_revision.save_generation += 1;
+        assert_eq!(
+            drain_ownership(Some(&same_episode_new_revision), &old),
             DrainOwnership::DeferSameEpisodeNewRevision
         );
     }

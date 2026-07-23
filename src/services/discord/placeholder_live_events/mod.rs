@@ -46,10 +46,7 @@ pub(in crate::services::discord) fn rendered_activity_lines_for_panel_shape_test
 -> Vec<(String, bool)> {
     DerivedStatus::panel_shape_test_variants()
         .into_iter()
-        .map(|status| {
-            let terminal = matches!(status, DerivedStatus::Completed { .. });
-            (freshness::render_activity_line(&status), terminal)
-        })
+        .map(|(status, terminal)| (freshness::render_activity_line(&status), terminal))
         .collect()
 }
 pub(in crate::services::discord) use task_panel::TaskPanelInfo;
