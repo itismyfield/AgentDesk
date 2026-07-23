@@ -1110,6 +1110,10 @@ pub struct ClusterIntakeRoutingConfig {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "ClusterIntakeRoutingMode::is_default")]
     pub mode: ClusterIntakeRoutingMode,
+    /// Raw top-level Discord channel IDs opted into owner-authority planning.
+    /// PR-1 records this scope in telemetry only; it does not change enforcement.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owner_authority_channel_ids: Vec<String>,
     #[serde(default = "default_intake_forward_pre_claim_timeout_secs")]
     pub forward_pre_claim_timeout_secs: u64,
     #[serde(default = "default_intake_stale_claim_recovery_secs")]
@@ -1121,6 +1125,7 @@ impl Default for ClusterIntakeRoutingConfig {
         Self {
             enabled: false,
             mode: ClusterIntakeRoutingMode::default(),
+            owner_authority_channel_ids: Vec::new(),
             forward_pre_claim_timeout_secs: default_intake_forward_pre_claim_timeout_secs(),
             stale_claim_recovery_secs: default_intake_stale_claim_recovery_secs(),
         }
@@ -1300,6 +1305,12 @@ dispatch_routing:
             12
         );
         assert_eq!(default_config.intake_routing.stale_claim_recovery_secs, 60);
+        assert!(
+            default_config
+                .intake_routing
+                .owner_authority_channel_ids
+                .is_empty()
+        );
 
         let config: ClusterConfig = serde_yaml::from_str(
             r#"
@@ -1307,6 +1318,9 @@ enabled: true
 intake_routing:
   enabled: true
   mode: enforce
+  owner_authority_channel_ids:
+    - "123456789012345678"
+    - "223456789012345678"
   forward_pre_claim_timeout_secs: 13
   stale_claim_recovery_secs: 61
 "#,
@@ -1317,6 +1331,10 @@ intake_routing:
         assert_eq!(
             config.intake_routing.mode,
             ClusterIntakeRoutingMode::Enforce
+        );
+        assert_eq!(
+            config.intake_routing.owner_authority_channel_ids,
+            ["123456789012345678", "223456789012345678"]
         );
         assert_eq!(config.intake_routing.forward_pre_claim_timeout_secs, 13);
         assert_eq!(config.intake_routing.stale_claim_recovery_secs, 61);

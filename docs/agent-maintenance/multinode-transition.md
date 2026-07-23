@@ -446,6 +446,13 @@
   before merging.
 
 ### Audited touches
+- #4777 PR-1 channel owner-authority rollout scope: `owner_authority_channel_ids`
+  is a live-read, raw top-level Discord channel allowlist used only to tag the
+  leader-owned intake planner's structured telemetry. It does not activate the
+  dormant owner-record authority, mutate PG ownership, alter worker placement,
+  or change Observe/Enforce admission behavior; later rollout PRs own those
+  authority changes. The environment mode override cannot populate or bypass
+  this YAML-only channel scope.
 - #4799 discrete machine-trigger markers: the watcher converts only footer-owned background terminal notifications into an idempotent lifecycle outbox marker keyed by channel plus semantic event identity; card-owned subagent notifications remain card-only, and monitor notices retain their existing offset-scoped aggregation. This adds no lease, owner, schema, or cross-node routing authority.
 - #4779 target preflight: added a pure fail-closed readiness report and transfer guard over worker-node capability evidence; owner mutation remains delegated to the generation-fenced handoff interface.
 

@@ -2625,11 +2625,15 @@ mod tests {
             "dashboard": true,
             "server_up": true,
             "intake_routing": {
+                "enabled": true,
                 "mode": "observe",
                 "source": "yaml",
+                "owner_authority_allowlist_size": 2,
+                "recent_decision_count": 17,
                 "yaml": {
                     "enabled": true,
                     "mode": "observe",
+                    "owner_authority_allowlist_size": 2,
                     "forward_pre_claim_timeout_secs": 12,
                     "stale_claim_recovery_secs": 60
                 },
@@ -2638,8 +2642,14 @@ mod tests {
                 "configuration_warnings": []
             }
         }));
+        assert_eq!(public["intake_routing"]["enabled"], json!(true));
         assert_eq!(public["intake_routing"]["mode"], json!("observe"));
         assert_eq!(public["intake_routing"]["source"], json!("yaml"));
+        assert_eq!(
+            public["intake_routing"]["owner_authority_allowlist_size"],
+            json!(2)
+        );
+        assert_eq!(public["intake_routing"]["recent_decision_count"], json!(17));
         assert_eq!(public["intake_routing"]["warning_count"], json!(0));
         assert_eq!(public["ok"], json!(true));
     }
