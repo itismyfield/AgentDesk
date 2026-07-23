@@ -116,15 +116,16 @@ jobs:
           brew install opus pkg-config
           echo "PKG_CONFIG_PATH=$(brew --prefix opus)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
-      - name: Cache cargo registry & git
-        uses: actions/cache@v4
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-git-v1-
+          # rust-cache derives the final key from OS/arch/toolchain and the
+          # dependency-only Cargo.lock/Cargo.toml hash. Keep target artifacts
+          # under sccache instead of duplicating multi-GB target directories.
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: false
 
       - name: cargo check
         run: cargo check --all-targets
@@ -239,15 +240,8 @@ jobs:
           brew install opus pkg-config
           echo "PKG_CONFIG_PATH=$(brew --prefix opus)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
-      - name: Cache cargo registry & git
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-git-v1-
+      # Do not attach GitHub cache actions to the persistent self-hosted path:
+      # local sccache is size-capped and runner cleanup owns disk pressure.
 
       # `nice -n 10` (lower scheduling priority) on the CPU-heavy cargo steps so
       # the co-located production Postgres preempts CI under contention (#3658,

@@ -14,6 +14,7 @@ env:
   RUSTC_WRAPPER: sccache
   SCCACHE_CACHE_SIZE: 10G
   SCCACHE_GHA_ENABLED: "true"
+  SCCACHE_GHA_RW_MODE: READ_WRITE
   POSTGRES_SERVICE_IMAGE: ${{ vars.AGENTDESK_POSTGRES_SERVICE_IMAGE }}
 
 jobs:
@@ -103,20 +104,18 @@ jobs:
 
       - name: Setup sccache
         if: runner.os != 'macOS'
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       # `target/` is intentionally NOT cached — see docs/ci/sccache-setup.md
       # §4.2. sccache GHA backend handles compiled rustc output; caching
       # `target/` here starved the 10GB quota and collapsed the Rust hit rate.
-      - name: Cache cargo registry & git
-        uses: actions/cache@v4
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-git-v1-
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: cargo test (non-PG)
         run: cargo test --all-targets -- --skip _pg_ --skip postgres_
@@ -139,18 +138,16 @@ jobs:
           toolchain: "1.94.1"
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       # See `full_macos` for rationale.
-      - name: Cache cargo registry & git
-        uses: actions/cache@v4
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-git-v1-
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: cargo test (non-PG)
         run: cargo test --all-targets -- --skip _pg_ --skip postgres_
@@ -186,18 +183,16 @@ jobs:
           toolchain: "1.94.1"
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       # See `full_macos` for rationale.
-      - name: Cache cargo registry & git
-        uses: actions/cache@v4
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-git-v1-
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: cargo test (postgres bootstrap)
         timeout-minutes: 15
@@ -244,18 +239,16 @@ jobs:
           node-version: "22"
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       # See `full_macos` for rationale.
-      - name: Cache cargo registry & git
-        uses: actions/cache@v4
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-git-v1-
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Rust multinode invariants
         timeout-minutes: 15
@@ -296,18 +289,16 @@ jobs:
           toolchain: "1.94.1"
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       # See `full_macos` for rationale.
-      - name: Cache cargo registry & git
-        uses: actions/cache@v4
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-git-v1-
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: High-risk recovery lane
         run: "cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1"
@@ -410,18 +401,16 @@ jobs:
           toolchain: "1.94.1"
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       # See `full_macos` for rationale.
-      - name: Cache cargo registry & git
-        uses: actions/cache@v4
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-git-v1-
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: CLI smoke test (agentdesk --help)
         run: cargo run --quiet -- --help

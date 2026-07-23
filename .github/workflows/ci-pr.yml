@@ -31,6 +31,9 @@ env:
   RUSTC_WRAPPER: sccache
   SCCACHE_CACHE_SIZE: 10G
   SCCACHE_GHA_ENABLED: "true"
+  # Pull requests may restore default-branch sccache entries but never write
+  # branch-local shards into the repository-wide 10GB cache budget.
+  SCCACHE_GHA_RW_MODE: ${{ github.event_name == 'pull_request' && 'READ_ONLY' || 'READ_WRITE' }}
   POSTGRES_SERVICE_IMAGE: ${{ vars.AGENTDESK_POSTGRES_SERVICE_IMAGE }}
 
 jobs:
@@ -329,22 +332,20 @@ jobs:
           tool: just@1.51.0
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       # `target/` is intentionally NOT cached — sccache (GHA-backed) handles
       # compiled rustc output, and caching multi-GB `target/` directories
       # starves the 10GB GHA cache quota, evicting sccache shards (observed
       # Rust hit-rate collapse: 99.80% → 0.00% within hours of merges). See
       # docs/ci/sccache-setup.md §4.2.
-      - name: Cache cargo registry & git
-        uses: actions/cache@v4
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-git-v1-
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -423,22 +424,20 @@ jobs:
 
       - name: Setup sccache
         if: runner.os != 'macOS'
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       # `target/` is intentionally NOT cached — sccache (GHA-backed) handles
       # compiled rustc output, and caching multi-GB `target/` directories
       # starves the 10GB GHA cache quota, evicting sccache shards (observed
       # Rust hit-rate collapse: 99.80% → 0.00% within hours of merges). See
       # docs/ci/sccache-setup.md §4.2.
-      - name: Cache cargo registry & git
-        uses: actions/cache@v4
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-git-v1-
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Stage 1 keeps Windows inline and default-feature-only instead of
       # `just check`: this lane's job is cross-OS compile and targeted test
@@ -598,19 +597,17 @@ jobs:
           tool: just@1.51.0
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       # See `check_fast` for rationale: `target/` excluded to protect sccache
       # GHA cache quota.
-      - name: Cache cargo registry & git
-        uses: actions/cache@v4
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-git-v1-
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: just test-postgres
         timeout-minutes: 20
@@ -655,18 +652,16 @@ jobs:
           toolchain: "1.94.1"
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       # See `check_fast` for rationale.
-      - name: Cache cargo registry & git
-        uses: actions/cache@v4
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-git-v1-
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: High-risk recovery lane
         run: "cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1"
@@ -720,18 +715,16 @@ jobs:
           tool: just@1.51.0
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       # See `check_fast` for rationale.
-      - name: Cache cargo registry & git
-        uses: actions/cache@v4
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-git-v1-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-git-v1-
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: just fmt-check
         run: just fmt-check
