@@ -589,17 +589,26 @@ mod tests {
         let messages: Vec<_> = rx.iter().collect();
 
         assert_eq!(outcome.lines_read, 6);
-        assert_eq!(messages.len(), 3);
+        assert_eq!(messages.len(), 4);
+        assert!(matches!(
+            &messages[0],
+            StreamMessage::ActiveUsageSnapshot {
+                model,
+                input_tokens: 6,
+                cache_create_tokens: 21795,
+                cache_read_tokens: 17347,
+            } if model.as_deref() == Some("claude-opus-4-7")
+        ));
         assert!(
-            matches!(&messages[0], StreamMessage::Text { content } if content == "ADK_TUI_SMOKE_OK")
+            matches!(&messages[1], StreamMessage::Text { content } if content == "ADK_TUI_SMOKE_OK")
         );
         assert!(matches!(
-            &messages[1],
+            &messages[2],
             StreamMessage::Done { session_id, .. }
                 if session_id.as_deref() == Some("sess-tui")
         ));
         assert!(matches!(
-            &messages[2],
+            &messages[3],
             StreamMessage::StatusUpdate {
                 model,
                 duration_ms: Some(3606),
