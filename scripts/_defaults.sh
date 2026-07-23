@@ -1011,23 +1011,19 @@ request_restart_drain_mode_or_fail() {
   }
 
   marker="$runtime_root/restart_pending"
-  tmp_marker="${marker}.$$"
   nonce="$(date -u '+%Y%m%dT%H%M%S')-$$-${RANDOM:-0}"
-  {
+  # O_EXCL ownership: never overwrite another restart nonce. The marker is the
+  # process-wide restart lease, shared with standby promotion.
+  if ! ( set -o noclobber; {
     printf 'nonce=%s\n' "$nonce"
     printf 'source=%s\n' "$source"
     printf 'scope=%s\n' "$scope"
     printf 'label=%s\n' "$label"
     date -u '+requested_at=%Y-%m-%dT%H:%M:%SZ'
-  } >"$tmp_marker" || {
-    echo "✗ [gate] failed to write restart drain marker: $tmp_marker" >&2
+  } >"$marker" ) 2>/dev/null; then
+    echo "✗ [gate] restart drain marker already owned: $marker" >&2
     return 1
-  }
-  mv "$tmp_marker" "$marker" || {
-    rm -f "$tmp_marker"
-    echo "✗ [gate] failed to publish restart drain marker: $marker" >&2
-    return 1
-  }
+  fi
 
   while [ "$waited" -lt "$ack_wait" ]; do
     if _restart_pending_acknowledged "$port"; then

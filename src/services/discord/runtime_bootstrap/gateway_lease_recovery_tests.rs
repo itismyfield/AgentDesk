@@ -63,6 +63,49 @@ async fn promotion_owner_recovers_all_runtimes_when_cancel_precedes_first_poll_t
     assert!(!STANDBY_PROMOTION_IN_PROGRESS.load(std::sync::atomic::Ordering::Acquire));
 }
 
+#[tokio::test]
+async fn superseded_promotion_preserves_new_owner_fence_and_flags() {
+    STANDBY_PROMOTION_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
+    let runtime_a = crate::services::discord::make_shared_data_for_tests();
+    let runtime_b = crate::services::discord::make_shared_data_for_tests();
+    let runtimes = vec![runtime_a.clone(), runtime_b.clone()];
+    for runtime in &runtimes {
+        runtime.restart.intake_worker_lifecycle.fence_admission();
+        runtime
+            .restart
+            .restart_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    let root = tempfile::tempdir().expect("runtime root");
+    std::fs::write(
+        root.path().join("restart_pending"),
+        "nonce=deploy-b\nsource=deploy\n",
+    )
+    .expect("new owner marker");
+
+    assert_eq!(
+        wait_for_promotion_handoff(root.path(), "promotion-a").await,
+        PromotionHandoffOutcome::Superseded
+    );
+    STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
+
+    for runtime in runtimes {
+        assert!(
+            runtime
+                .restart
+                .intake_worker_lifecycle
+                .admission_is_fenced()
+        );
+        assert!(
+            runtime
+                .restart
+                .restart_pending
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+    }
+    assert!(root.path().join("restart_pending").exists());
+}
+
 #[test]
 fn orphan_reap_requires_named_stale_matching_worker() {
     let safe = GatewayLeaseHolder {

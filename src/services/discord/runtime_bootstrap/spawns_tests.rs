@@ -254,6 +254,37 @@ fn cancellation_before_durable_commit_rolls_back_but_after_commit_stays_committe
     assert!(shared.restart.shutting_down.load(Ordering::Acquire));
 }
 
+#[test]
+fn stale_nonce_cannot_commit_persistence_or_remove_newer_marker() {
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let root = tempfile::tempdir().expect("runtime root");
+    std::fs::write(
+        root.path().join("restart_pending"),
+        "nonce=deploy-b\nsource=deploy\n",
+    )
+    .expect("new owner marker");
+    let guard = DeferredRestartCancellationGuard::new(
+        shared,
+        root.path().to_path_buf(),
+        "promotion-a".to_string(),
+    );
+
+    assert!(
+        !commit_deferred_restart_sentinel(
+            root.path(),
+            &ProviderKind::Codex,
+            "promotion-a",
+            &guard,
+        )
+        .expect("stale commit check")
+    );
+    assert!(!root.path().join("restart_persisted").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("restart_pending")).expect("new marker survives"),
+        "nonce=deploy-b\nsource=deploy\n"
+    );
+}
+
 #[tokio::test]
 async fn cancellation_restores_admission_health_and_consumed_barrier_slot() {
     let shared = crate::services::discord::make_shared_data_for_tests();

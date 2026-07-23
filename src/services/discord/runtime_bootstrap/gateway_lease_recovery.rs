@@ -226,10 +226,32 @@ fn restart_file_matches(root: &std::path::Path, name: &str, nonce: &str) -> bool
         == Some(nonce)
 }
 
+fn try_create_restart_marker(marker: &std::path::Path, request: &str) -> std::io::Result<bool> {
+    use std::io::Write;
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(marker)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if let Err(error) = file
+        .write_all(request.as_bytes())
+        .and_then(|_| file.sync_all())
+    {
+        let _ = std::fs::remove_file(marker);
+        return Err(error);
+    }
+    Ok(true)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PromotionHandoffOutcome {
     Committed,
     Cancelled,
+    Superseded,
 }
 
 pub(super) async fn wait_for_promotion_handoff(
@@ -242,10 +264,16 @@ pub(super) async fn wait_for_promotion_handoff(
         if restart_file_matches(root, "restart_persisted", nonce) {
             return PromotionHandoffOutcome::Committed;
         }
-        if restart_file_matches(root, "restart_cancelled", nonce)
-            || !restart_file_matches(root, "restart_pending", nonce)
-        {
+        if restart_file_matches(root, "restart_cancelled", nonce) {
             return PromotionHandoffOutcome::Cancelled;
+        }
+        match std::fs::read_to_string(root.join("restart_pending")) {
+            Ok(request) if request.lines().any(|line| line == format!("nonce={nonce}")) => {}
+            Ok(_) => return PromotionHandoffOutcome::Superseded,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return PromotionHandoffOutcome::Cancelled;
+            }
+            Err(_) => {}
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -325,11 +353,21 @@ async fn attempt_clean_standby_promotion(
         "nonce={nonce}\nreason=gateway_standby_promotion\nprovider={}\n",
         provider.as_str()
     );
-    if let Err(error) = std::fs::write(&marker, request) {
-        tracing::error!(%error, "GATEWAY-LEASE: failed to publish standby promotion restart marker");
-        unfence_runtimes(&runtimes);
-        STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
-        return false;
+    match try_create_restart_marker(&marker, &request) {
+        Ok(true) => {}
+        Ok(false) => {
+            // A deploy/restart request already owns the process-wide marker.
+            // Leave the shared fence intact for that owner and release only the
+            // promotion-local CAS so future standby retries are not wedged.
+            STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
+            return true;
+        }
+        Err(error) => {
+            tracing::error!(%error, "GATEWAY-LEASE: failed to publish standby promotion restart marker");
+            unfence_runtimes(&runtimes);
+            STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
+            return false;
+        }
     }
     // Keep every runtime fenced while the process-wide owner watches the nonce.
     // A cancellation may remove the marker before any 10s provider poller sees
@@ -339,6 +377,13 @@ async fn attempt_clean_standby_promotion(
         PromotionHandoffOutcome::Cancelled => {
             recover_cancelled_promotion(&runtimes);
             false
+        }
+        PromotionHandoffOutcome::Superseded => {
+            // Another restart request owns the same process-wide fence now. Do
+            // not unfence or clear provider flags; the newer nonce continues the
+            // graceful restart. Release only promotion-local ownership.
+            STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
+            true
         }
     }
 }

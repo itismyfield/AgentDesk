@@ -2,7 +2,7 @@ use super::*;
 
 struct DeferredRestartPermit;
 
-fn restart_request_matches(root: &std::path::Path, name: &str, nonce: &str) -> bool {
+pub(super) fn restart_request_matches(root: &std::path::Path, name: &str, nonce: &str) -> bool {
     std::fs::read_to_string(root.join(name))
         .ok()
         .and_then(|request| {
@@ -107,7 +107,7 @@ fn finish_deferred_restart(shared: &SharedData, _permit: DeferredRestartPermit) 
 /// the closest practical point before the atomic rename. A successful rename
 /// is the point of no return: cancellation observed afterwards is intentionally
 /// ignored so persistence and process exit remain a single durable outcome.
-fn commit_deferred_restart_sentinel(
+pub(super) fn commit_deferred_restart_sentinel(
     root: &std::path::Path,
     provider: &ProviderKind,
     nonce: &str,
@@ -121,11 +121,20 @@ fn commit_deferred_restart_sentinel(
         chrono::Utc::now().to_rfc3339()
     );
     std::fs::write(&ack_tmp, ack_body)?;
-    if guard.cancelled() {
+    if guard.cancelled() || !restart_request_matches(root, "restart_pending", nonce) {
         let _ = std::fs::remove_file(&ack_tmp);
         return Ok(false);
     }
-    std::fs::rename(ack_tmp, ack)?;
+    std::fs::rename(&ack_tmp, &ack)?;
+    // Compare-and-act again after the atomic acknowledgement publish. A newer
+    // request may have replaced the marker between the pre-rename check and the
+    // rename; never let a stale poller claim or remove that newer request.
+    if !restart_request_matches(root, "restart_pending", nonce) {
+        if restart_request_matches(root, "restart_persisted", nonce) {
+            let _ = std::fs::remove_file(&ack);
+        }
+        return Ok(false);
+    }
     Ok(true)
 }
 
@@ -269,6 +278,12 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                                 continue;
                             }
                             Ok(true) => {}
+                        }
+                        if !restart_request_matches(&root, "restart_pending", &nonce) {
+                            // A newer nonce owns the marker. Leave its request and
+                            // shared fence intact; this stale poller is a no-op.
+                            cancellation_guard.disarm();
+                            continue;
                         }
                         cancellation_guard.disarm();
                         let _ = std::fs::remove_file(&marker);
