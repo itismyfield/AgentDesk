@@ -303,10 +303,7 @@ pub(super) async fn handle_stream_content_message(
                                         "turn_bridge::stream_loop::done_pending_placeholder_clear",
                                     );
                             }
-                            // #1255: turn finished while a long-running placeholder
-                            // is still Active — close it now so the user does not
-                            // stare at a stale 🔄 card. Idempotent if a prior
-                            // ToolResult already fired Completed.
+                            // #1255: close an Active long-run card at turn finish; idempotent after ToolResult completion.
                             if let Some((key, snapshot, close_trigger, ack_consumed)) =
                                 long_running_placeholder_active.take()
                             {
@@ -331,12 +328,7 @@ pub(super) async fn handle_stream_content_message(
                                         .placeholder_controller
                                         .transition(gateway.as_ref(), key.clone(), target)
                                         .await;
-                                    // codex round-10/11 P2/P3: on `EditFailed`,
-                                    // re-stash the tuple so subsequent
-                                    // streaming/sweeper paths can retry the
-                                    // terminal edit. Only clear the persisted
-                                    // flag on a committed (or already-terminal)
-                                    // transition.
+                                    // Re-stash `EditFailed` for streaming/sweeper retry; clear the flag only after a committed/already-terminal transition.
                                     use super::super::super::placeholder_controller::PlaceholderControllerOutcome::*;
                                     if matches!(outcome, Edited | Coalesced | AlreadyTerminal) {
                                         inflight_state.long_running_placeholder_active = false;

@@ -240,16 +240,8 @@ pub(super) async fn run_stream_loop(
     let mut stream_tick_expected_identity =
         crate::services::discord::inflight::InflightTurnIdentity::from_state(&inflight_state);
 
-    // #2289 cancel finalization helper. Both the pre-`try_recv` guard
-    // and the post-`try_recv` re-sample funnel through this so the
-    // cancellation bookkeeping (inflight sync, `cancelled = true`,
-    // background-child abort) stays in lock step and cannot drift.
-    // Implemented as a macro so it can mutate locals owned by the
-    // surrounding `while` body without moving them into a closure that
-    // would conflict with `&mut` borrows held elsewhere. The macro
-    // performs the bookkeeping; callers must follow with `break 'outer`
-    // (or be in a position where falling through hits the outer loop
-    // boundary) so the loop exits to the cancel post-processing path.
+    // #2289: both cancel guards share this macro to keep inflight sync, cancellation, and child abort atomic without closure borrow conflicts.
+    // Callers must then exit `'outer` (explicitly or by fallthrough) into cancel post-processing.
     macro_rules! finalize_cancel_inner {
         () => {{
             let previous_restart_mode = inflight_state.restart_mode;
