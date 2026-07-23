@@ -5,13 +5,14 @@ use std::sync::OnceLock;
 /// larger `SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES` below.
 pub(in crate::services::discord) const SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES: usize = 600;
 /// #3497: byte budget for the LIVE single-message footer panel BODY (Recent +
-/// Tasks/Subagents/context usage; excludes the spinner/status header). Normal Recent
-/// output is compact after #3806, but the footer clamp still handles legacy or
+/// Tasks/Subagents/context usage; excludes the spinner/status header). The 1400-byte
+/// cap includes Discord's per-line subtext prefixes. Normal Recent output is compact
+/// after #3806, but the footer clamp still handles legacy or
 /// debug-shaped fenced Recent sections as whole blocks. The relay body auto-uses
 /// the remaining message space (`DISCORD_MSG_LIMIT − footer_len − margin`) and
 /// rolls over when longer, so commentary is preserved across messages rather
 /// than starving the terminal panel.
-pub(in crate::services::discord) const SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES: usize = 1200;
+pub(in crate::services::discord) const SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES: usize = 1400;
 pub(in crate::services::discord) const SINGLE_MESSAGE_PANEL_SPINNER_FRAMES: &[&str] =
     &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 // Residual background agents can legitimately run for about an hour, but a
@@ -202,7 +203,8 @@ pub(in crate::services::discord) fn completion_footer_base_body(
 fn compose_merged_footer_status_block(indicator: &str, panel_text: &str) -> Option<String> {
     let (header_line, panel_body) = panel_text.split_once('\n').unwrap_or((panel_text, ""));
     let header = merged_footer_header_line(indicator, header_line)?;
-    let panel_body = clamp_footer_panel_text(panel_body);
+    let panel_body = completion_footer_subtext(panel_body);
+    let panel_body = clamp_footer_panel_text(&panel_body);
     if panel_body.trim().is_empty() {
         Some(header)
     } else {
@@ -284,7 +286,7 @@ fn clamp_footer_panel_text(panel_text: &str) -> String {
         while kept > 0
             && lines
                 .get(kept)
-                .is_some_and(|line| line.trim_start().starts_with("```"))
+                .is_some_and(|line| strip_subtext_prefix(line.trim_start()).starts_with("```"))
         {
             kept -= 1;
         }
@@ -1017,7 +1019,7 @@ mod tests {
         assert!(block.starts_with("-# ⠸ 진행 중 — Claude (<t:1700000000:R>)"));
         assert!(!footer_header(&block).contains('🟢'));
         assert!(!block.contains("계속 처리 중"));
-        assert!(block.contains("\n\nSubagents\n└ review inspect"));
+        assert!(block.contains("\n\n-# Subagents\n-# └ review inspect"));
     }
 
     #[test]
@@ -1037,7 +1039,7 @@ mod tests {
         let panel = "Header\n\nTools\n└ cargo test";
         let block = super::compose_footer_status_block("⠸", panel);
 
-        assert_eq!(block, "-# ⠸ Header\n\nTools\n└ cargo test");
+        assert_eq!(block, "-# ⠸ Header\n\n-# Tools\n-# └ cargo test");
         assert!(!panel_portion(&block).ends_with("\n…"));
     }
 
@@ -1057,7 +1059,7 @@ mod tests {
         assert_eq!(header, "-# ⠸ 진행 중 — Claude (<t:1700000000:R>)");
         assert!(panel.len() <= super::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES);
         assert!(panel.ends_with("\n…") || panel == "…");
-        assert!(block.len() > super::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES);
+        assert!(block.len() > panel.len());
     }
 
     #[test]
@@ -1159,7 +1161,7 @@ mod tests {
         );
     }
 
-    /// #3497: the raised 1200B panel budget renders a full ~1000B 🖥️ Recent
+    /// #3497: the raised live-panel budget renders a full ~1000B 🖥️ Recent
     /// terminal block that the prior 600B budget would have truncated/dropped.
     #[test]
     fn footer_panel_budget_shows_recent_block_over_legacy_600_3497() {
@@ -1169,15 +1171,15 @@ mod tests {
             "🟢 진행 중 — Claude (<t:1700000000:R>)\n🖥️ Recent (host)\n```text\n{recent_body}```"
         );
         let block = super::compose_footer_status_block("⠸", &panel);
-        // The full fenced block survives (not severed by the clamp) under 1200B,
+        // The full fenced block survives (not severed by the clamp) under the live-panel budget,
         // whereas a 600B budget would have dropped the whole Recent section (#3495).
         assert!(
             block.contains("🖥️ Recent"),
-            "Recent header dropped under 1200B budget: {block}"
+            "Recent header dropped under live-panel budget: {block}"
         );
         assert!(
             block.contains("L cargo build output line"),
-            "Recent terminal body truncated under 1200B budget: {block}"
+            "Recent terminal body truncated under live-panel budget: {block}"
         );
         assert_eq!(
             block.matches("```").count() % 2,
@@ -1316,9 +1318,11 @@ mod tests {
         let block = super::compose_footer_status_block("⠸", &panel);
         let truncated_lines: Vec<&str> = panel_portion(&block).lines().collect();
 
+        let expected_second = format!("-# {second}");
+        let expected_third = format!("-# {third}");
         assert_eq!(
             truncated_lines,
-            vec!["", second.as_str(), third.as_str(), "…"]
+            vec!["", expected_second.as_str(), expected_third.as_str(), "…"]
         );
         assert!(!panel_portion(&block).contains(fourth.as_str()));
         assert!(panel_portion(&block).len() <= super::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES);
@@ -1385,9 +1389,9 @@ mod tests {
         let seed = super::super::formatting::build_streaming_placeholder_text("", &status_block);
 
         assert!(seed.starts_with("-# ⠸ 진행 중 — Claude (<t:1700000000:R>)"));
-        assert!(seed.contains("Tools\n└ cargo test --lib single_message_panel"));
+        assert!(seed.contains("-# Tools\n-# └ cargo test --lib single_message_panel"));
         assert!(!plan.frozen_chunk.contains("진행 중 — Claude"));
-        assert!(!plan.frozen_chunk.contains("Tools\n└ cargo test"));
+        assert!(!plan.frozen_chunk.contains("-# Tools\n-# └ cargo test"));
         assert!(
             plan.display_snapshot
                 .ends_with(&format!("\n\n{status_block}"))
