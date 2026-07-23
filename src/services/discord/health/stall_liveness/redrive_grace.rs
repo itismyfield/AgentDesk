@@ -16,10 +16,12 @@
 //! liveness observations in the parent module, and are updated under the
 //! DashMap entry lock so concurrent watchdog passes for the same key serialize.
 //!
-//! The production clock uses OS boottime, which remains monotonic across a
-//! dcserver restart. The current episode baseline is stored outside inflight and
-//! restored only when provider/channel/turn/frontier identity matches, so a
-//! restart neither re-arms grace nor imports a stale episode.
+//! The production clock uses the OS `CLOCK_MONOTONIC` domain, which remains
+//! comparable across a dcserver restart within one machine boot (and excludes
+//! suspend time). The current episode baseline is stored outside inflight and
+//! restored only when boot/provider/channel/turn/frontier identity matches, so a
+//! process restart neither re-arms grace nor imports a stale episode or prior-boot
+//! timestamp.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -53,12 +55,12 @@ trait RedriveClock {
     }
 }
 
-/// Process-start `Instant` fallback for platforms without an OS boottime clock.
-/// It remains wall-clock independent but cannot carry an elapsed baseline across
+/// Process-start `Instant` fallback when `CLOCK_MONOTONIC` is unavailable. It
+/// remains wall-clock independent but cannot carry an elapsed baseline across a
 /// process restart, so durable restore fails closed to a fresh grace there.
 static MONO_ANCHOR: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
 
-/// Production monotonic clock. Grace and persistence use OS boottime when
+/// Production monotonic clock. Grace and persistence use `CLOCK_MONOTONIC` when
 /// available; `mono_secs` stays as the injected/tested in-process reader.
 struct MonotonicRedriveClock;
 
@@ -86,7 +88,7 @@ impl RedriveClock for MonotonicRedriveClock {
         if let Some(secs) = TEST_DURABLE_CLOCK_OVERRIDE.with(|cell| cell.get()) {
             return Some(secs);
         }
-        process_boottime_secs()
+        os_monotonic_secs()
     }
 }
 
@@ -159,18 +161,20 @@ const REDRIVE_BASELINES_DIR: &str = "discord_redrive_baselines";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct DurableNoProgressBaseline {
+    boot_id: String,
     offset: u64,
     reset_incarnation: u64,
     tmux_session: Option<String>,
     user_msg_id: Option<u64>,
     started_at: Option<String>,
-    unchanged_since_boottime_secs: i64,
-    last_seen_boottime_secs: i64,
+    unchanged_since_monotonic_secs: i64,
+    last_seen_monotonic_secs: i64,
 }
 
 impl DurableNoProgressBaseline {
-    fn matches(&self, key: &StallLivenessKey, token: RelayFrontierToken) -> bool {
-        self.offset == token.committed_offset
+    fn matches(&self, key: &StallLivenessKey, token: RelayFrontierToken, boot_id: &str) -> bool {
+        self.boot_id == boot_id
+            && self.offset == token.committed_offset
             && self.reset_incarnation == token.reset_incarnation
             && self.tmux_session == key.tmux_session
             && self.user_msg_id == key.user_msg_id
@@ -180,7 +184,7 @@ impl DurableNoProgressBaseline {
     fn observation(&self, mono_now: i64) -> NoProgressObservation {
         NoProgressObservation {
             offset: self.offset,
-            unchanged_since_mono_secs: self.unchanged_since_boottime_secs.min(mono_now),
+            unchanged_since_mono_secs: self.unchanged_since_monotonic_secs.min(mono_now),
             last_seen_mono_secs: mono_now,
         }
     }
@@ -224,7 +228,7 @@ fn remove_durable_baseline_at(path: &Path) {
     }
 }
 
-fn process_boottime_secs() -> Option<i64> {
+fn os_monotonic_secs() -> Option<i64> {
     #[cfg(unix)]
     {
         let mut value = libc::timespec {
@@ -235,6 +239,56 @@ fn process_boottime_secs() -> Option<i64> {
             return Some(value.tv_sec);
         }
     }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn boot_id() -> Option<String> {
+    let mut size = 0usize;
+    let name = c"kern.bootsessionuuid";
+    if unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+        || size <= 1
+    {
+        return None;
+    }
+    let mut buffer = vec![0u8; size];
+    if unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return None;
+    }
+    let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(size);
+    std::str::from_utf8(&buffer[..end])
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg(target_os = "linux")]
+fn boot_id() -> Option<String> {
+    fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn boot_id() -> Option<String> {
     None
 }
 
@@ -290,6 +344,9 @@ fn relay_offset_stalled_past_grace_durable(
     let Some(path) = durable_baseline_path(provider.as_str(), channel_id) else {
         return relay_offset_stalled_past_grace(key, token, mono_now);
     };
+    let Some(boot_id) = boot_id() else {
+        return relay_offset_stalled_past_grace(key, token, mono_now);
+    };
     let map_key = (key.clone(), token.reset_incarnation);
     match NO_PROGRESS_OBSERVATIONS.entry(map_key) {
         Entry::Occupied(mut occupied) => {
@@ -302,7 +359,7 @@ fn relay_offset_stalled_past_grace_durable(
         }
         Entry::Vacant(vacant) => {
             let observation = load_durable_baseline_at(&path)
-                .filter(|baseline| baseline.matches(key, token))
+                .filter(|baseline| baseline.matches(key, token, &boot_id))
                 .map(|baseline| baseline.observation(mono_now))
                 .unwrap_or(NoProgressObservation {
                     offset: token.committed_offset,
@@ -322,13 +379,14 @@ fn relay_offset_stalled_past_grace_durable(
     persist_durable_baseline_at(
         &path,
         &DurableNoProgressBaseline {
+            boot_id,
             offset: observation.offset,
             reset_incarnation: token.reset_incarnation,
             tmux_session: key.tmux_session.clone(),
             user_msg_id: key.user_msg_id,
             started_at: key.started_at.clone(),
-            unchanged_since_boottime_secs: observation.unchanged_since_mono_secs,
-            last_seen_boottime_secs: observation.last_seen_mono_secs,
+            unchanged_since_monotonic_secs: observation.unchanged_since_mono_secs,
+            last_seen_monotonic_secs: observation.last_seen_mono_secs,
         },
     );
     stalled
@@ -435,6 +493,21 @@ mod tests {
     use crate::services::provider::ProviderKind;
 
     use super::*;
+
+    #[must_use]
+    fn isolated_runtime_root() -> (
+        crate::config::TestEnvVarGuard,
+        tempfile::TempDir,
+        crate::config::test_env_lock::SharedTestEnvLockGuard,
+    ) {
+        let lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let dir = tempfile::tempdir().expect("temp runtime root");
+        let env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            dir.path(),
+        );
+        (env, dir, lock)
+    }
 
     /// Deterministic monotonic clock for tests, injected through the same
     /// `RedriveClock` trait the production `MonotonicRedriveClock` implements —
@@ -566,6 +639,7 @@ mod tests {
     /// frozen, or comparing against a different clock) flips step (2) or (3).
     #[test]
     fn redrive_no_progress_grace_is_monotonic_4181() {
+        let _runtime = isolated_runtime_root();
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(4_181_002);
         let tmux_session = "AgentDesk-codex-4181-mono-grace";
@@ -622,6 +696,7 @@ mod tests {
     /// comparison so it evicts inside the TTL flips the "survives" assertion.
     #[test]
     fn redrive_ttl_gc_is_monotonic_and_survives_wall_jumps_4181() {
+        let _runtime = isolated_runtime_root();
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(4_181_003);
         let tmux_session = "AgentDesk-codex-4181-mono-gc";
@@ -676,6 +751,7 @@ mod tests {
     /// measure ~1s of freeze and return `false`, failing.
     #[test]
     fn redrive_rejects_stale_lower_offset_4181() {
+        let _runtime = isolated_runtime_root();
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(4_181_004);
         let tmux_session = "AgentDesk-codex-4181-stale-offset";
@@ -729,6 +805,7 @@ mod tests {
     /// the final assertion fails.
     #[test]
     fn redrive_rotation_reset_rearms_grace_4181() {
+        let _runtime = isolated_runtime_root();
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(4_181_006);
         let tmux_session = "AgentDesk-codex-4181-rotation";
@@ -786,6 +863,7 @@ mod tests {
     /// anchor from the durable sidecar, so restart does not grant another grace.
     #[test]
     fn redrive_durable_baseline_survives_process_restart_4181() {
+        let _runtime = isolated_runtime_root();
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(4_181_007);
         let tmux_session = "AgentDesk-codex-4181-durable-baseline";
@@ -800,13 +878,14 @@ mod tests {
         let root = tempfile::tempdir().expect("temp runtime root");
         let path = root.path().join("baseline.json");
         let baseline = DurableNoProgressBaseline {
+            boot_id: "boot-a".to_string(),
             offset: token.committed_offset,
             reset_incarnation: token.reset_incarnation,
             tmux_session: key.tmux_session.clone(),
             user_msg_id: key.user_msg_id,
             started_at: key.started_at.clone(),
-            unchanged_since_boottime_secs: clock.mono.get(),
-            last_seen_boottime_secs: clock.mono.get(),
+            unchanged_since_monotonic_secs: clock.mono.get(),
+            last_seen_monotonic_secs: clock.mono.get(),
         };
         persist_durable_baseline_at(&path, &baseline);
         assert_eq!(load_durable_baseline_at(&path), Some(baseline));
@@ -814,7 +893,11 @@ mod tests {
         NO_PROGRESS_OBSERVATIONS.clear();
         clock.mono.set(10_000 + grace);
         let restored = load_durable_baseline_at(&path).expect("durable baseline");
-        assert!(restored.matches(&key, token));
+        assert!(restored.matches(&key, token, "boot-a"));
+        assert!(
+            !restored.matches(&key, token, "boot-b"),
+            "a machine reboot must reject the prior boot's monotonic baseline"
+        );
         NO_PROGRESS_OBSERVATIONS.insert(
             (key.clone(), token.reset_incarnation),
             restored.observation(clock.mono.get()),
@@ -836,6 +919,7 @@ mod tests {
     /// shorten grace for a successor turn on the same provider/channel.
     #[test]
     fn redrive_durable_baseline_rejects_successor_episode_4181() {
+        let _runtime = isolated_runtime_root();
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(4_181_008);
         let old = frozen_backlog_snapshot(
@@ -857,22 +941,24 @@ mod tests {
         let old_key = StallLivenessKey::from_snapshot(&provider, channel, &old);
         let new_key = StallLivenessKey::from_snapshot(&provider, channel, &new);
         let baseline = DurableNoProgressBaseline {
+            boot_id: "boot-a".to_string(),
             offset: token.committed_offset,
             reset_incarnation: token.reset_incarnation,
             tmux_session: old_key.tmux_session,
             user_msg_id: old_key.user_msg_id,
             started_at: old_key.started_at,
-            unchanged_since_boottime_secs: 20_000,
-            last_seen_boottime_secs: 20_000,
+            unchanged_since_monotonic_secs: 20_000,
+            last_seen_monotonic_secs: 20_000,
         };
 
-        assert!(!baseline.matches(&new_key, token));
+        assert!(!baseline.matches(&new_key, token, "boot-a"));
         assert!(!relay_offset_stalled_past_grace(&new_key, token, 20_180));
         NO_PROGRESS_OBSERVATIONS.remove(&(new_key, token.reset_incarnation));
     }
 
     #[test]
     fn scoped_test_clock_restores_nested_and_panicking_overrides_4181() {
+        let _runtime = isolated_runtime_root();
         clear_redrive_grace_test_clock();
         let outer = set_redrive_grace_test_clock(11);
         assert_eq!(MonotonicRedriveClock.mono_secs(), 11);
@@ -900,6 +986,7 @@ mod tests {
     /// not past the grace regardless of the clock's absolute value.
     #[test]
     fn redrive_production_monotonic_clock_path_runs_4181() {
+        let _runtime = isolated_runtime_root();
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(4_181_005);
         let tmux_session = "AgentDesk-codex-4181-prod-clock";
