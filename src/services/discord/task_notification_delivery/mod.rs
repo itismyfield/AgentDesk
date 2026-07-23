@@ -21,6 +21,7 @@ use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::session_backend::{StreamLineState, classify_task_notification_kind};
 
 use self::card_post::deliver_card_post_claim;
+pub(in crate::services::discord) use self::terminal_identity::footer_background_marker_session_key;
 pub(super) use gateway::{
     CardBot, CardDeliveryClients, CardPostReconcile, DiscordTaskCardTransport, TaskCardTransport,
     TaskCardTransportError,
