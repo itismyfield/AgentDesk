@@ -5,9 +5,9 @@ use axum::{
 
 use super::super::{
     ApiRouter, AppState, auto_queue, cluster, cron_api, dispatched_sessions, dispatches, docs,
-    health_api, idle_recap, maintenance, message_outbox, messages, monitoring, pipeline,
-    prompt_manifest_retention, protected_api_domain, provider_cli_api, queue_api, routines,
-    scheduled_messages, skills_api, termination_events,
+    e2e_control, health_api, idle_recap, maintenance, message_outbox, messages, monitoring,
+    pipeline, prompt_manifest_retention, protected_api_domain, provider_cli_api, queue_api,
+    routines, scheduled_messages, skills_api, termination_events,
 };
 
 // Category: dispatches, queue, and ops
@@ -42,6 +42,15 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route(
                 "/discord/bot-tokens/reload",
                 post(health_api::reload_discord_bot_tokens_handler),
+            )
+            .route(
+                "/e2e/discord/channels/{channel_id}/messages/{message_id}",
+                delete(e2e_control::delete_discord_message),
+            )
+            .route(
+                "/e2e/discord/failures",
+                post(e2e_control::inject_discord_failure)
+                    .delete(e2e_control::clear_discord_failure),
             )
             .route(
                 "/discord/send-to-agent",

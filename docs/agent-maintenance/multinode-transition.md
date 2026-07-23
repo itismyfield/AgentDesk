@@ -446,6 +446,7 @@
   before merging.
 
 ### Audited touches
+- #4488 PR-F destructive E2E controls are worker-local and opt-in: exact-message deletion and one-shot send/delete failure injection resolve the provider runtime registered on the receiving dcserver and remain disabled unless `AGENTDESK_E2E_CONTROL=1`. They add no PostgreSQL authority, leader election, lease, worker placement, or cross-node routing rule; the harness targets the node-local loopback control plane for the owning E2E cell.
 - #4756 blocking filesystem isolation: routine script reload scans remain inside the existing worker-local routine runtime and per-request validation paths, while startup dashboard provisioning and session-resume discovery retain their existing node-local paths. Moving those synchronous directory walks to Tokio's blocking pool changes no leader election, PG lease, worker placement, durable ownership, or cross-node routing authority.
 - #4340 r3 finalizer-panel ownership fencing remains worker-local: watchdog clear now returns the row removed under the existing per-channel inflight flock, and durable terminal-card records bind message IDs to turn episode plus panel/save revisions. No PostgreSQL schema, lease, leader election, cross-node routing, or owner placement authority changes.
 - #4777 PR-1 channel owner-authority rollout scope: `owner_authority_channel_ids`

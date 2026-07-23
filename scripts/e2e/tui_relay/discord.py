@@ -66,6 +66,86 @@ class DiscordClient:
             return {}
         return json.loads(payload)
 
+    def delete_message(
+        self,
+        channel_id: int | str,
+        message_id: int | str,
+        *,
+        provider: str,
+    ) -> dict[str, Any]:
+        body = json.dumps({"provider": provider}).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.base_url}/api/e2e/discord/channels/{channel_id}/messages/{message_id}",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="DELETE",
+        )
+        return self._read_json(request, operation="delete_message")
+
+    def inject_failure(
+        self,
+        channel_id: int | str,
+        *,
+        provider: str,
+        operation: str,
+        count: int = 1,
+    ) -> dict[str, Any]:
+        body = json.dumps(
+            {
+                "provider": provider,
+                "channel_id": str(channel_id),
+                "operation": operation,
+                "count": count,
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.base_url}/api/e2e/discord/failures",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        return self._read_json(request, operation="inject_failure")
+
+    def clear_failure(
+        self,
+        channel_id: int | str,
+        *,
+        provider: str,
+        operation: str,
+    ) -> dict[str, Any]:
+        body = json.dumps(
+            {
+                "provider": provider,
+                "channel_id": str(channel_id),
+                "operation": operation,
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.base_url}/api/e2e/discord/failures",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="DELETE",
+        )
+        return self._read_json(request, operation="clear_failure")
+
+    def _read_json(
+        self, request: urllib.request.Request, *, operation: str
+    ) -> dict[str, Any]:
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+                payload = response.read().decode("utf-8")
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode("utf-8", "replace")
+            raise RuntimeError(f"{operation} HTTP {error.code}: {detail}") from error
+        except urllib.error.URLError as error:
+            raise RuntimeError(f"{operation} URL error: {error}") from error
+        if not payload:
+            return {}
+        parsed = json.loads(payload)
+        if not isinstance(parsed, dict):
+            raise RuntimeError(f"{operation} returned non-object JSON: {parsed!r}")
+        return parsed
+
     def send_prompt(
         self,
         channel_id: int | str,

@@ -1,0 +1,36 @@
+id: E-33
+title: deleted live two-message panel is recreated below the answer after restart
+agent_mode: real_live
+coverage_class: live
+cells: [claude-pipe, claude-tui, codex-pipe, codex-tui]
+isolation: required
+destructive: true
+requires_features: [two_message_panel, e2e_discord_control]
+notes: |
+  #4488 PR-F destructive recovery coverage. A timed provider command keeps the
+  turn live while the harness deletes the exact observed status-panel message.
+  Restart recovery must probe the persisted handle as missing, create a new
+  panel below the answer, and finish with no duplicate panel.
+steps:
+  - send_timed_response_prompt:
+      before_marker: "[E2E:E33:BEFORE]"
+      after_marker: "[E2E:E33:AFTER]"
+      hold_seconds: 45
+  - wait_for_discord_text: "[E2E:E33:BEFORE]"
+    timeout_s: 180
+  - wait_for_raw_discord_text: "진행 중"
+    timeout_s: 60
+  - delete_status_panel: {}
+  - restart_dcserver: {}
+  - wait_for_discord_text: "[E2E:E33:AFTER]"
+    timeout_s: 300
+  - wait_idle_s: 5
+assertions:
+  - ordered_text_present:
+      - "[E2E:E33:BEFORE]"
+      - "[E2E:E33:AFTER]"
+  - no_duplicate_marker: "[E2E:E33:BEFORE]"
+  - no_duplicate_marker: "[E2E:E33:AFTER]"
+  - status_panel_after_body:
+      body_marker: "[E2E:E33:AFTER]"
+  - single_status_panel: true

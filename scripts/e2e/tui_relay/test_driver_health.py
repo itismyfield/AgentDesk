@@ -247,6 +247,45 @@ assertions: []
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["failure_attribution"]["source"], "agent_mode_gate")
 
+    def test_required_feature_gate_skips_destructive_scenario_by_default(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+        args = Namespace(
+            cell="claude-tui",
+            channel_id="42",
+            thread_channel_id=None,
+            reset_before_each=False,
+            dry_run=False,
+            queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+            hard_reset_session_each=False,
+            allow_destructive=True,
+            required_agent_mode=None,
+            required_coverage_class=None,
+        )
+        scenario = {
+            "id": "E-33",
+            "agent_mode": "real_live",
+            "coverage_class": "live",
+            "destructive": True,
+            "requires_features": ["two_message_panel", "e2e_discord_control"],
+            "steps": [{"send_prompt": "never"}],
+            "assertions": [],
+        }
+
+        with patch.dict("run_tui_relay.os.environ", {}, clear=True):
+            result = driver.run_scenario(
+                scenario,
+                args=args,
+                run_id="run-1",
+                client=FakeClient(),  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["failure_attribution"]["source"], "feature_gate")
+        self.assertIn("e2e_discord_control", result["reason"])
+        self.assertIn("two_message_panel", result["reason"])
+
     def test_required_coverage_class_gate_fails_fixture_scenario(self):
         class FakeClient:
             base_url = "http://agentdesk.test"
@@ -404,6 +443,37 @@ assertions: []
         self.assertEqual(record["controlled_harness_evidence"], ["assert_health"])
         self.assertFalse(record["real_provider_contacted"])
         self.assertTrue(record["agent_mode_contract"]["satisfied"])
+
+
+class DiscordE2eControlClient(unittest.TestCase):
+    def test_delete_and_inject_use_e2e_control_endpoints(self):
+        captured: list[tuple[str, str, dict]] = []
+
+        def fake_urlopen(request, timeout=0):  # noqa: ANN001, ARG001
+            captured.append(
+                (
+                    request.get_method(),
+                    request.full_url,
+                    json.loads(request.data.decode("utf-8")),
+                )
+            )
+            return FakeResponse(200, {"ok": True})
+
+        from tui_relay.discord import DiscordClient  # noqa: PLC0415
+
+        client = DiscordClient("http://agentdesk.test")
+        with patch("tui_relay.discord.urllib.request.urlopen", fake_urlopen):
+            client.delete_message("42", "99", provider="claude")
+            client.inject_failure("42", provider="claude", operation="send", count=2)
+            client.clear_failure("42", provider="claude", operation="send")
+
+        self.assertEqual(captured[0][0], "DELETE")
+        self.assertTrue(captured[0][1].endswith("/api/e2e/discord/channels/42/messages/99"))
+        self.assertEqual(captured[0][2], {"provider": "claude"})
+        self.assertEqual(captured[1][0], "POST")
+        self.assertTrue(captured[1][1].endswith("/api/e2e/discord/failures"))
+        self.assertEqual(captured[1][2]["count"], 2)
+        self.assertEqual(captured[2][0], "DELETE")
 
 
 class HealthWait(unittest.TestCase):
@@ -1198,6 +1268,20 @@ class ScenarioHealthProbe(unittest.TestCase):
 
 
 class ControlFlowPrimitives(unittest.TestCase):
+    def test_timed_response_prompt_builds_control_window(self):
+        prompt = driver.build_timed_response_prompt(
+            {
+                "before_marker": "[E2E:E33:BEFORE]",
+                "after_marker": "[E2E:E33:AFTER]",
+                "hold_seconds": 30,
+            },
+            scenario_id="E-33",
+        )
+
+        self.assertIn("[E2E:E33:BEFORE]", prompt)
+        self.assertIn("[E2E:E33:AFTER]", prompt)
+        self.assertIn("time.sleep(30)", prompt)
+
     def test_send_provider_hold_prompt_builds_cancel_fixture(self):
         prompt = driver.build_provider_hold_prompt(
             {

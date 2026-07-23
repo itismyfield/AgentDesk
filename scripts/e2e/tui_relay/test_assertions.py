@@ -287,6 +287,13 @@ class RawChromeAndEditAssertions(unittest.TestCase):
     def test_single_status_panel(self):
         good = _window(_raw_bot_msg(10, "Processing..."))
         assertions.single_status_panel(good)
+        self.assertEqual(assertions.latest_status_panel(good)["id"], "10")
+
+        ordered = _window(
+            _raw_bot_msg(10, "Processing..."),
+            _raw_bot_msg(20, "✅ 응답 완료"),
+        )
+        self.assertEqual(assertions.latest_status_panel(ordered)["id"], "20")
 
         duplicate = _window(
             _raw_bot_msg(10, "Processing..."),

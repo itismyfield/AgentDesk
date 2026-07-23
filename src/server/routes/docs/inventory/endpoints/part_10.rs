@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use super::super::{EndpointDoc, body_param, ep, query_param};
+use super::super::{EndpointDoc, body_param, ep, path_param, query_param};
 
 pub(super) fn endpoints() -> Vec<EndpointDoc> {
     vec![
@@ -96,5 +96,39 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             json!({"ok": false, "code": "source_not_allowed", "id": 13651, "error": "message_outbox row 13651 source `unknown` is not registered for LoopbackInternal"}),
         )
         .with_curl("curl -X POST http://localhost:8787/api/message-outbox/failed/redrive -H 'Content-Type: application/json' -d '{\"ids\":[13651,13652,13653],\"idempotency_key\":\"issue-4424-catchup-notices-v1\",\"reason\":\"recover verified P0 incident rows\"}'"),
+        ep(
+            "DELETE",
+            "/api/e2e/discord/channels/{channel_id}/messages/{message_id}",
+            "health",
+            "Delete one exact Discord message through its provider bot for an explicitly enabled destructive E2E run. Returns 404 while AGENTDESK_E2E_CONTROL is disabled.",
+        )
+        .with_params([
+            ("channel_id", path_param("Positive Discord channel or thread snowflake.")),
+            ("message_id", path_param("Positive Discord message snowflake to delete.")),
+            ("provider", body_param("string", true, "Provider bot that owns the message: claude or codex.")),
+        ]),
+        ep(
+            "POST",
+            "/api/e2e/discord/failures",
+            "health",
+            "Arm a durable, TTL-bounded send or delete failure for one provider/channel recovery operation. Returns 404 while AGENTDESK_E2E_CONTROL is disabled.",
+        )
+        .with_params([
+            ("provider", body_param("string", true, "Provider bot: claude or codex.")),
+            ("channel_id", body_param("string", true, "Positive Discord channel snowflake.")),
+            ("operation", body_param("string", true, "Failure operation: send or delete.")),
+            ("count", body_param("integer", false, "Number of matching operations to fail, from 1 to 10; defaults to 1.")),
+        ]),
+        ep(
+            "DELETE",
+            "/api/e2e/discord/failures",
+            "health",
+            "Clear one provider/channel/operation destructive E2E failure injection. Returns 404 while AGENTDESK_E2E_CONTROL is disabled.",
+        )
+        .with_params([
+            ("provider", body_param("string", true, "Provider bot: claude or codex.")),
+            ("channel_id", body_param("string", true, "Positive Discord channel snowflake.")),
+            ("operation", body_param("string", true, "Failure operation: send or delete.")),
+        ]),
     ]
 }
