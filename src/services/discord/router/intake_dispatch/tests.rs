@@ -57,15 +57,25 @@ fn intake_dispatch_invariant_direct_execution_body_has_no_external_producer_call
 
 #[test]
 fn intake_dispatch_invariant_worker_post_claim_is_the_only_router_bypass() {
-    let worker_boundary = include_str!("../message_handler/intake_turn.rs");
-    assert!(!worker_boundary.contains("dispatch_text_intake("));
-    assert!(!worker_boundary.contains("admit_text_intake("));
-    assert!(!worker_boundary.contains("try_route_intake("));
-    assert!(!worker_boundary.contains("IntakeSubmission {"));
+    // The worker boundary spans the intake body module plus its extracted
+    // worker entry seam (intake_turn/worker_entry.rs, split out in #4743).
+    let worker_body = include_str!("../message_handler/intake_turn.rs");
+    let worker_entry = include_str!("../message_handler/intake_turn/worker_entry.rs");
+    for source in [worker_body, worker_entry] {
+        assert!(!source.contains("dispatch_text_intake("));
+        assert!(!source.contains("admit_text_intake("));
+        assert!(!source.contains("try_route_intake("));
+        assert!(!source.contains("IntakeSubmission {"));
+    }
     assert_eq!(
-        worker_boundary.matches("handle_text_message(").count(),
-        2,
-        "the worker boundary must contain only its direct call plus the body definition"
+        worker_body.matches("handle_text_message(").count(),
+        1,
+        "the worker body module must contain only the body definition"
+    );
+    assert_eq!(
+        worker_entry.matches("handle_text_message(").count(),
+        1,
+        "the extracted worker entry must contain only its direct post-claim call"
     );
     assert_eq!(
         include_str!("../message_handler.rs")
