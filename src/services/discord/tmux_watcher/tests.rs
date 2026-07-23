@@ -4098,7 +4098,7 @@ mod delivery_lease_heartbeat {
 mod watcher_short_replace_controller {
     use super::super::terminal_long_chunks::{
         WatcherLongChunksLocals, apply_watcher_long_chunks_result,
-        deliver_long_chunks_via_controller,
+        deliver_long_chunks_via_controller, remember_ordered_long_chunks_footer_target,
     };
     use super::super::terminal_send::{
         WatcherShortReplaceLocals, WatcherShortReplaceResult, apply_watcher_short_replace_result,
@@ -4953,6 +4953,83 @@ mod watcher_short_replace_controller {
     }
 
     #[test]
+    fn ordered_long_chunks_footer_target_uses_tail_message_and_text_4822() {
+        let mut footer_target = None;
+        let relay_text = format!("{}tail", "a".repeat(2_000));
+        let expected_tail = crate::services::discord::formatting::split_message(&relay_text)
+            .pop()
+            .expect("long response has a tail chunk");
+
+        remember_ordered_long_chunks_footer_target(
+            true,
+            &mut footer_target,
+            Some(MessageId::new(9101)),
+            &relay_text,
+        );
+
+        let target = footer_target.expect("ordered chunks must register footer tail");
+        assert_eq!(target.msg_id, MessageId::new(9101));
+        assert_eq!(target.text, expected_tail);
+        assert!(target.text.ends_with("tail"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn watcher_long_chunks_controller_registers_tail_footer_target_4822() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let http = Arc::new(Http::new("test-token"));
+        let mut relay_ok = true;
+        let mut direct = false;
+        let mut visible = false;
+        let mut external = false;
+        let mut placeholder = Some(MessageId::new(MSG));
+        let mut restored = true;
+        let mut last_edit = String::from("streamed");
+        let mut frozen = Vec::new();
+        let mut footer_target = None;
+        let relay_text = format!("{}tail", "a".repeat(2_000));
+        let outcome = toc::DeliveryOutcome::Delivered {
+            committed_to: END,
+            replace_kind: None,
+            new_chunks: Some(toc::NewChunksDelivery {
+                first_message_id: Some(MessageId::new(9100)),
+                tail_message_id: Some(MessageId::new(9101)),
+                anchor_delete_error: None,
+            }),
+        };
+
+        apply_watcher_long_chunks_result(
+            outcome,
+            &http,
+            &shared,
+            &ProviderKind::Claude,
+            ch(),
+            "AgentDesk-claude-8141",
+            MessageId::new(MSG),
+            &relay_text,
+            true,
+            &mut frozen,
+            None,
+            WatcherLongChunksLocals {
+                relay_ok: &mut relay_ok,
+                direct_send_delivered: &mut direct,
+                tui_direct_anchor_terminal_body_visible: &mut visible,
+                external_input_lease_consumed_by_relay: &mut external,
+                placeholder_msg_id: &mut placeholder,
+                placeholder_from_restored_inflight: &mut restored,
+                last_edit_text: &mut last_edit,
+                single_message_panel_footer_mode: true,
+                completion_footer_terminal_target: &mut footer_target,
+            },
+        )
+        .await;
+
+        assert!(
+            footer_target.is_some(),
+            "ordered chunks must register footer tail"
+        );
+    }
+
+    #[test]
     fn watcher_long_chunks_delete_failure_still_delivers() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
@@ -5015,6 +5092,7 @@ mod watcher_short_replace_controller {
             ch(),
             "AgentDesk-claude-8141",
             MessageId::new(MSG),
+            "ordered response",
             true,
             &mut frozen,
             None,
@@ -5026,6 +5104,8 @@ mod watcher_short_replace_controller {
                 placeholder_msg_id: &mut placeholder,
                 placeholder_from_restored_inflight: &mut restored,
                 last_edit_text: &mut last_edit,
+                single_message_panel_footer_mode: false,
+                completion_footer_terminal_target: &mut None,
             },
         )
         .await;

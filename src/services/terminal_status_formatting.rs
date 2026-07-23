@@ -32,17 +32,35 @@ pub(crate) fn format_elapsed_status(total_secs: i64) -> Option<String> {
 }
 
 pub(crate) fn format_usage_status(
-    cache_json: &str,
+    cache_json: Option<&str>,
     now_unix: i64,
     context: Option<ContextWindowUsage>,
 ) -> Option<String> {
-    let value = serde_json::from_str::<Value>(cache_json).ok()?;
-    let mut rendered = value
-        .get("buckets")?
-        .as_array()?
+    let rendered = cache_json
+        .and_then(|cache_json| serde_json::from_str::<Value>(cache_json).ok())
+        .and_then(|value| value.get("buckets").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
         .iter()
         .filter_map(|bucket| render_bucket(bucket, now_unix))
         .collect::<Vec<_>>();
+    render_usage_parts(rendered, context)
+}
+
+pub(crate) fn format_usage_status_segments<'a>(
+    segments: impl IntoIterator<Item = &'a str>,
+    context: Option<ContextWindowUsage>,
+) -> Option<String> {
+    let rendered = segments
+        .into_iter()
+        .filter_map(parse_rendered_bucket)
+        .collect::<Vec<_>>();
+    render_usage_parts(rendered, context)
+}
+
+fn render_usage_parts(
+    mut rendered: Vec<RenderedBucket>,
+    context: Option<ContextWindowUsage>,
+) -> Option<String> {
     rendered.sort_by_key(|bucket| bucket.order);
     let mut parts = rendered
         .into_iter()
@@ -64,6 +82,23 @@ pub(crate) fn format_usage_status(
 struct RenderedBucket {
     order: u8,
     text: String,
+}
+
+fn parse_rendered_bucket(segment: &str) -> Option<RenderedBucket> {
+    let segment = segment.trim();
+    let (order, prefix) = if segment.starts_with("5h:") {
+        (0, "5h:")
+    } else if segment.starts_with("7d-F:") {
+        (2, "7d-F:")
+    } else if segment.starts_with("7d:") {
+        (1, "7d:")
+    } else {
+        return None;
+    };
+    Some(RenderedBucket {
+        order,
+        text: format!("{prefix} {}", segment.strip_prefix(prefix)?.trim_start()),
+    })
 }
 
 fn render_bucket(bucket: &Value, now_unix: i64) -> Option<RenderedBucket> {
@@ -147,7 +182,7 @@ mod tests {
         ]}"#;
         assert_eq!(
             format_usage_status(
-                data,
+                Some(data),
                 1_800_000_000,
                 Some(ContextWindowUsage {
                     used_tokens: 265_000,
@@ -156,6 +191,34 @@ mod tests {
             )
             .as_deref(),
             Some("5h: 3% (4h39m) │ 7d: 47% (4d20h) │ 7d-F: 34% (4d20h) │ ctw: 26% (265K/1.0M)")
+        );
+    }
+
+    #[test]
+    fn renders_context_window_when_quota_is_unavailable_4822() {
+        assert_eq!(
+            format_usage_status(
+                None,
+                1_800_000_000,
+                Some(ContextWindowUsage {
+                    used_tokens: 265_000,
+                    window_tokens: 1_000_000,
+                })
+            )
+            .as_deref(),
+            Some("ctw: 26% (265K/1.0M)")
+        );
+        assert_eq!(
+            format_usage_status(
+                Some("not-json"),
+                1_800_000_000,
+                Some(ContextWindowUsage {
+                    used_tokens: 265_000,
+                    window_tokens: 1_000_000,
+                })
+            )
+            .as_deref(),
+            Some("ctw: 26% (265K/1.0M)")
         );
     }
 

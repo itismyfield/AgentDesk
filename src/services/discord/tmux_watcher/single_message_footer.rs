@@ -171,8 +171,8 @@ impl Default for WatcherCompletionFooterIdleState {
 
 #[derive(Clone)]
 pub(super) struct WatcherCompletionFooterTerminalTarget {
-    msg_id: serenity::MessageId,
-    text: String,
+    pub(super) msg_id: serenity::MessageId,
+    pub(super) text: String,
 }
 
 pub(super) fn remember_watcher_completion_footer_terminal_target(

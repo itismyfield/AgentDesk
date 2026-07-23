@@ -168,16 +168,19 @@ async fn terminal_rate_limit_summary(
     provider: &ProviderKind,
     context: Option<ContextWindowUsage>,
 ) -> Option<String> {
-    let pool = shared.pg_pool.as_ref()?;
-    let provider = provider.as_str();
-    let row =
+    let data = if let Some(pool) = shared.pg_pool.as_ref() {
+        let provider = provider.as_str();
         sqlx::query("SELECT data FROM rate_limit_cache WHERE lower(provider) = lower($1) LIMIT 1")
             .bind(provider)
             .fetch_optional(pool)
             .await
-            .ok()??;
-    let data = row.try_get::<String, _>("data").ok()?;
-    format_usage_status(&data, chrono::Utc::now().timestamp(), context)
+            .ok()
+            .flatten()
+            .and_then(|row| row.try_get::<String, _>("data").ok())
+    } else {
+        None
+    };
+    format_usage_status(data.as_deref(), chrono::Utc::now().timestamp(), context)
 }
 
 #[cfg(test)]
@@ -230,6 +233,34 @@ pub(in crate::services::discord) mod tests {
             Some("5h 80% · 7d 60%".to_string()),
             Some("node-a".to_string()),
         )
+    }
+
+    #[tokio::test]
+    async fn metadata_load_keeps_context_when_quota_cache_is_unavailable_4822() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_822);
+        shared.ui.placeholder_live_events.set_context_panel_usage(
+            channel_id,
+            Some("session-4822"),
+            265_000,
+            0,
+            0,
+            1_000_000,
+            80,
+        );
+
+        let metadata = load_completion_footer_metadata(
+            &shared,
+            channel_id,
+            &ProviderKind::Claude,
+            1_800_000_000,
+            None,
+        )
+        .await;
+        let block = append_completion_footer_metadata("Context".to_string(), &metadata);
+
+        assert!(block.contains("⏳ ctw: 26% (265K/1.0M)"));
+        assert!(!block.contains("5h:"));
     }
 
     #[test]

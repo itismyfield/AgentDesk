@@ -225,6 +225,9 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                                 placeholder_from_restored_inflight:
                                     &mut *placeholder_from_restored_inflight,
                                 last_edit_text: &mut *last_edit_text,
+                                single_message_panel_footer_mode,
+                                completion_footer_terminal_target:
+                                    &mut *completion_footer_terminal_target,
                             },
                         )
                         .await;
@@ -253,6 +256,9 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                                 placeholder_from_restored_inflight:
                                     &mut *placeholder_from_restored_inflight,
                                 last_edit_text: &mut *last_edit_text,
+                                single_message_panel_footer_mode,
+                                completion_footer_terminal_target:
+                                    &mut *completion_footer_terminal_target,
                             },
                         )
                         .await;

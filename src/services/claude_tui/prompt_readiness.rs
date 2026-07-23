@@ -1,17 +1,58 @@
-#[cfg(test)]
-use crate::services::terminal_status_formatting::{ContextWindowUsage, format_usage_status};
+use crate::services::terminal_status_formatting::{
+    ContextWindowUsage, format_usage_status_segments,
+};
 use crate::services::tui_turn_state::TuiTurnState;
 
-#[cfg(test)]
-fn render_prompt_readiness_panel_line(
+pub(crate) fn render_prompt_readiness_panel_line(
     model_label: &str,
     progress_bar: &str,
-    rate_limit_json: &str,
-    now_unix: i64,
-    context: ContextWindowUsage,
+    usage: Option<String>,
 ) -> Option<String> {
-    format_usage_status(rate_limit_json, now_unix, Some(context))
-        .map(|usage| format!("  {model_label} │ {progress_bar} │ {usage}"))
+    usage.map(|usage| format!("  {model_label} │ {progress_bar} │ {usage}"))
+}
+
+fn normalize_prompt_readiness_panel_line(line: &str) -> Option<String> {
+    let segments = line.trim().split(" │ ").map(str::trim).collect::<Vec<_>>();
+    let model_label = *segments.first()?;
+    let progress_bar = *segments.get(1)?;
+    let context_percent = segments.get(2)?.strip_suffix('%')?.parse::<u64>().ok()?;
+    let tokens = *segments.get(3)?;
+    let (used_tokens, window_tokens) = tokens.split_once('/')?;
+    let context = ContextWindowUsage {
+        used_tokens: parse_compact_tokens(used_tokens)?,
+        window_tokens: parse_compact_tokens(window_tokens)?,
+    };
+    let rendered_percent = ((u128::from(context.used_tokens.min(context.window_tokens)) * 100)
+        / u128::from(context.window_tokens)) as u64;
+    if rendered_percent != context_percent {
+        return None;
+    }
+    let usage = format_usage_status_segments(segments.iter().skip(4).copied(), Some(context));
+    render_prompt_readiness_panel_line(model_label, progress_bar, usage)
+}
+
+fn parse_compact_tokens(value: &str) -> Option<u64> {
+    let value = value.trim();
+    if let Some(value) = value.strip_suffix('K') {
+        value
+            .parse::<f64>()
+            .ok()
+            .map(|value| (value * 1_000.0) as u64)
+    } else if let Some(value) = value.strip_suffix('M') {
+        value
+            .parse::<f64>()
+            .ok()
+            .map(|value| (value * 1_000_000.0) as u64)
+    } else {
+        value.parse().ok()
+    }
+}
+
+pub(crate) fn normalize_prompt_readiness_panel_in_capture(pane: &str) -> String {
+    pane.lines()
+        .map(|line| normalize_prompt_readiness_panel_line(line).unwrap_or_else(|| line.to_string()))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Return line indexes occupied by authenticated Claude TUI background-agent
@@ -184,6 +225,17 @@ mod tests {
   ◯ implementer    Updating tests                      3m 52s";
 
     #[test]
+    fn production_capture_normalizes_context_panel_through_shared_formatter_4822() {
+        let pane = "answer\n────────────────\n❯\n────────────────\n  🤖 Opus(H) │ ███░░░░░░░ │ 26% │ 265K/1.0M │ 5h: 8% (3h0m) │ 7d: 55% (1d23h)";
+        let normalized = normalize_prompt_readiness_panel_in_capture(pane);
+
+        assert_eq!(
+            normalized,
+            "answer\n────────────────\n❯\n────────────────\n  🤖 Opus(H) │ ███░░░░░░░ │ 5h: 8% (3h0m) │ 7d: 55% (1d23h) │ ctw: 26% (265K/1.0M)"
+        );
+    }
+
+    #[test]
     fn background_agent_chrome_requires_composer_adjacency() {
         assert_eq!(
             claude_tui_background_agent_status_line_indexes(BACKGROUND_WAITING_PANE),
@@ -222,22 +274,15 @@ mod tests {
 
     #[test]
     fn captured_background_agent_frame_with_draft_composer_is_detected() {
-        let usage = r#"{"buckets":[
-            {"name":"5h","used":8,"reset":1800010800},
-            {"name":"7d","used":55,"reset":1800169200},
-            {"name":"7d Sonnet","used":34,"reset":1800417600}
-        ]}"#;
-        let panel_line = render_prompt_readiness_panel_line(
-            "🤖 Opus(H)",
-            "███░░░░░░░",
-            usage,
-            1_800_000_000,
-            ContextWindowUsage {
+        let usage = format_usage_status_segments(
+            ["5h: 8% (3h0m)", "7d: 55% (1d23h)", "7d-F: 34% (4d20h)"],
+            Some(ContextWindowUsage {
                 used_tokens: 265_000,
                 window_tokens: 1_000_000,
-            },
-        )
-        .expect("usage panel line");
+            }),
+        );
+        let panel_line = render_prompt_readiness_panel_line("🤖 Opus(H)", "███░░░░░░░", usage)
+            .expect("usage panel line");
         assert_eq!(
             panel_line,
             "  🤖 Opus(H) │ ███░░░░░░░ │ 5h: 8% (3h0m) │ 7d: 55% (1d23h) │ 7d-F: 34% (4d20h) │ ctw: 26% (265K/1.0M)"
