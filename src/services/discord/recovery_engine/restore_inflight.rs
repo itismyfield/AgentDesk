@@ -10,47 +10,7 @@
 use super::terminal_watcher::restart_report_watcher_start;
 use super::*;
 
-/// Retry-aware tmux session check for recovery after dcserver restart.
-/// The first check can false-negative if tmux CLI hasn't fully initialized yet.
-pub(super) fn tmux_session_alive_with_retry(name: &str) -> bool {
-    if tmux_session_has_live_pane(name) {
-        return true;
-    }
-    // #2428 H5: retry up to 2 more times with exponential backoff + jitter
-    // (was a fixed 1s gap; see `recovery_retry_backoff`).
-    for attempt in 1..=2u32 {
-        std::thread::sleep(recovery_retry_backoff(attempt));
-        if tmux_session_has_live_pane(name) {
-            tracing::info!(
-                "  [recovery] tmux pane alive on retry {} for {}",
-                attempt,
-                name
-            );
-            return true;
-        }
-    }
-    false
-}
-
-/// Retry-aware tmux has_session check.
-fn tmux_has_session_with_retry(name: &str) -> bool {
-    if crate::services::platform::tmux::has_session(name) {
-        return true;
-    }
-    // #2428 H5: see `recovery_retry_backoff`.
-    for attempt in 1..=2u32 {
-        std::thread::sleep(recovery_retry_backoff(attempt));
-        if crate::services::platform::tmux::has_session(name) {
-            tracing::info!(
-                "  [recovery] tmux session found on retry {} for {}",
-                attempt,
-                name
-            );
-            return true;
-        }
-    }
-    false
-}
+use super::tmux_probe::{tmux_has_session_with_retry, tmux_session_alive_with_retry};
 
 #[cfg(not(unix))]
 fn build_tmux_death_diagnostic(_name: &str, _output_path: Option<&str>) -> Option<String> {
@@ -155,7 +115,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
 
     let settings_snapshot = shared.settings.read().await.clone();
 
-    for state in states {
+    for mut state in states {
         // #897 round-4 High: rebind_origin inflights are synthetic
         // placeholders owned by `/api/inflight/rebind` and do NOT carry
         // a real user message, dispatch context, or placeholder Discord
@@ -734,6 +694,10 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     restore_recovered_session_worktree(session, &state);
                 }
 
+                super::recovery_two_message_panel::recover_two_message_panel(
+                    http, shared, provider, &mut state,
+                )
+                .await;
                 let finish_mailbox_on_completion =
                     reregister_active_turn_from_inflight(shared, &state).await;
 
@@ -1771,6 +1735,10 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             recovery_phase_after_tmux_probe(true, Some(pane_alive)),
             RecoveryPhase::WatcherReattach
         ) {
+            super::recovery_two_message_panel::recover_two_message_panel(
+                http, shared, provider, &mut state,
+            )
+            .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ↻ inflight recovery: pane alive for channel {}, spawning watcher immediately",
@@ -1894,6 +1862,10 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 restore_recovered_session_worktree(session, &state);
             }
 
+            super::recovery_two_message_panel::recover_two_message_panel(
+                http, shared, provider, &mut state,
+            )
+            .await;
             let finish_mailbox_on_completion =
                 reregister_active_turn_from_inflight(shared, &state).await;
 

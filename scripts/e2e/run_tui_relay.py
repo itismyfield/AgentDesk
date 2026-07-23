@@ -3744,6 +3744,27 @@ def run_assertion(
             ),
             include_our_send=bool(params.get("include_our_send", False)),
         )
+    elif "status_panel_after_body" in spec:
+        params = spec["status_panel_after_body"]
+        if not isinstance(params, dict) or "body_marker" not in params:
+            raise assertions.AssertionError(
+                f"status_panel_after_body requires body_marker: {spec!r}"
+            )
+        assertions.status_panel_after_body(
+            window,
+            body_marker=str(params["body_marker"]),
+            panel_regex=str(
+                params.get("panel_regex", r"Processing\.\.\.|진행 중|^🟢|^📦")
+            ),
+        )
+    elif "single_status_panel" in spec:
+        params = spec["single_status_panel"]
+        panel_regex = (
+            params.get("panel_regex", r"Processing\.\.\.|진행 중|^🟢|^📦")
+            if isinstance(params, dict)
+            else r"Processing\.\.\.|진행 중|^🟢|^📦"
+        )
+        assertions.single_status_panel(window, panel_regex=str(panel_regex))
     elif "completion_chrome_after_body" in spec:
         params = spec["completion_chrome_after_body"]
         body_marker = params.get("body_marker") if isinstance(params, dict) else params

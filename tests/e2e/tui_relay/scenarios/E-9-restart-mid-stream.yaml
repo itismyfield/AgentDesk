@@ -42,3 +42,9 @@ assertions:
   # (byte-identical only) does not catch. The sentinel must appear in exactly
   # one relay message across the whole window, pre- and post-restart.
   - no_duplicate_marker: "[E2E:E9:STREAM_OK]"
+  # #4488 PR-F: with the two-message rollout enabled, restart recovery must
+  # leave the live panel below the latest answer chunk instead of reusing a
+  # stranded pre-restart panel above it.
+  - status_panel_after_body:
+      body_marker: "[E2E:E9:END]"
+  - single_status_panel: true
