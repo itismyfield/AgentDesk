@@ -4219,8 +4219,16 @@ async fn kickoff_idle_queue_channel(
     {
         router::QueuedAdmissionDisposition::Admitted(admitted) => admitted,
         router::QueuedAdmissionDisposition::Deferred
-        | router::QueuedAdmissionDisposition::RejectedNonPortableAttachment
-        | router::QueuedAdmissionDisposition::RejectedRestore => {
+        | router::QueuedAdmissionDisposition::RejectedNonPortableAttachment => {
+            drop(dispatch_lease);
+            return IdleQueueKickoffChannelOutcome::default();
+        }
+        router::QueuedAdmissionDisposition::RejectedRestore => {
+            tracing::error!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                "KICKOFF: queued admission failed to restore dequeued head"
+            );
             drop(dispatch_lease);
             return IdleQueueKickoffChannelOutcome::default();
         }
@@ -4290,6 +4298,10 @@ async fn kickoff_idle_queue_channel(
                 provider,
                 channel_id,
                 intervention.message_id,
+                dispatch_lease
+                    .as_ref()
+                    .expect("dequeued kickoff intervention must carry its lease")
+                    .clone(),
             )
             .await;
             drop(dispatch_lease);
@@ -5214,6 +5226,7 @@ mod idle_queue_background_supersede_tests {
                     &provider,
                     channel_id,
                     consumed.message_id,
+                    dispatch_lease.clone(),
                 )
                 .await;
 
@@ -5250,6 +5263,82 @@ mod idle_queue_background_supersede_tests {
                         .map(|(marker, _)| marker.message_id),
                     Some(next.message_id),
                     "next head receives the only remaining marker"
+                );
+            });
+    }
+
+    #[test]
+    fn stale_success_cleanup_cannot_abandon_same_identity_successor_lease() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let shared = make_shared_data_for_tests();
+                let provider = ProviderKind::Claude;
+                let channel_id = ChannelId::new(4_797_904);
+                let intervention = user_intervention(4_797_905, "same identity successor");
+                let persistence = queue_persistence_context(&shared, &provider, channel_id);
+                shared
+                    .mailbox(channel_id)
+                    .replace_queue(vec![intervention.clone()], persistence.clone())
+                    .await;
+
+                let first = shared
+                    .mailbox(channel_id)
+                    .take_next_soft(persistence.clone())
+                    .await;
+                let stale_lease = first
+                    .dispatch_lease
+                    .expect("first dequeue must carry lease L1");
+                let restored = shared
+                    .mailbox(channel_id)
+                    .restore_dequeued_head(
+                        first.intervention.expect("first dequeue must return head"),
+                        persistence.clone(),
+                        stale_lease.clone(),
+                    )
+                    .await;
+                assert!(restored.enqueued);
+
+                let second = shared.mailbox(channel_id).take_next_soft(persistence).await;
+                let successor_lease = second
+                    .dispatch_lease
+                    .expect("successor dequeue must carry lease L2");
+                assert_eq!(
+                    second.intervention.as_ref().map(|item| item.message_id),
+                    Some(intervention.message_id)
+                );
+
+                mailbox_abandon_unclaimed_dispatch_after_success(
+                    &shared,
+                    &provider,
+                    channel_id,
+                    intervention.message_id,
+                    stale_lease,
+                )
+                .await;
+
+                let snapshot = mailbox_snapshot(&shared, channel_id).await;
+                assert_eq!(
+                    snapshot.pending_user_dispatch,
+                    Some(intervention.message_id)
+                );
+                assert_eq!(
+                    load_channel_pending_dispatch_marker(&provider, &shared.token_hash, channel_id)
+                        .map(|(marker, _)| marker.message_id),
+                    Some(intervention.message_id),
+                    "stale L1 cleanup must preserve L2's durable marker"
+                );
+                assert_eq!(
+                    Arc::strong_count(&successor_lease),
+                    2,
+                    "stale L1 cleanup must preserve the actor-held L2 reservation"
                 );
             });
     }

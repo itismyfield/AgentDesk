@@ -143,6 +143,10 @@ pub(super) async fn finalize_and_drain_queued_turns(
                                 &bot_owner_provider,
                                 channel_id,
                                 intervention.message_id,
+                                dispatch_lease
+                                    .as_ref()
+                                    .expect("dequeued intervention must carry its dispatch lease")
+                                    .clone(),
                             )
                             .await;
                         }

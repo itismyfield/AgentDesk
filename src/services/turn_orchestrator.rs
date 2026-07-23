@@ -1136,13 +1136,33 @@ impl ChannelMailboxHandle {
             .request(
                 |reply| ChannelMailboxMsg::AbandonPendingDispatch {
                     user_message_id,
+                    dispatch_lease: None,
                     persistence,
                     consume_marker: true,
                     reply,
                 },
-                (),
+                false,
             )
             .await;
+    }
+
+    pub(crate) async fn abandon_pending_dispatch_if_lease_matches(
+        &self,
+        user_message_id: MessageId,
+        dispatch_lease: Arc<DispatchLease>,
+        persistence: QueuePersistenceContext,
+    ) -> bool {
+        self.request(
+            |reply| ChannelMailboxMsg::AbandonPendingDispatch {
+                user_message_id,
+                dispatch_lease: Some(dispatch_lease),
+                persistence,
+                consume_marker: true,
+                reply,
+            },
+            false,
+        )
+        .await
     }
 
     pub(crate) async fn clear_pending_dispatch_reservation(
@@ -1154,11 +1174,12 @@ impl ChannelMailboxHandle {
             .request(
                 |reply| ChannelMailboxMsg::AbandonPendingDispatch {
                     user_message_id,
+                    dispatch_lease: None,
                     persistence,
                     consume_marker: false,
                     reply,
                 },
-                (),
+                false,
             )
             .await;
     }
@@ -1774,9 +1795,10 @@ enum ChannelMailboxMsg {
     },
     AbandonPendingDispatch {
         user_message_id: MessageId,
+        dispatch_lease: Option<Arc<DispatchLease>>,
         persistence: QueuePersistenceContext,
         consume_marker: bool,
-        reply: oneshot::Sender<()>,
+        reply: oneshot::Sender<bool>,
     },
     CancelQueuedMessage {
         message_id: MessageId,
@@ -2814,23 +2836,35 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 }
                 ChannelMailboxMsg::AbandonPendingDispatch {
                     user_message_id,
+                    dispatch_lease,
                     persistence,
                     consume_marker,
                     reply,
                 } => {
                     state.last_persistence = Some(persistence);
-                    abandon_pending_dispatch_reservation(
-                        &mut state,
-                        channel_id,
-                        user_message_id,
-                        consume_marker,
-                        if consume_marker {
-                            "abandon_pending_dispatch"
-                        } else {
-                            "clear_pending_dispatch_reservation"
-                        },
-                    );
-                    let _ = reply.send(());
+                    let authorized = dispatch_lease.as_ref().is_none_or(|lease| {
+                        state.pending_user_dispatch == Some(user_message_id)
+                            && state
+                                .pending_user_dispatch_lease
+                                .as_ref()
+                                .is_some_and(|stored| Arc::ptr_eq(lease, stored))
+                    });
+                    if authorized {
+                        abandon_pending_dispatch_reservation(
+                            &mut state,
+                            channel_id,
+                            user_message_id,
+                            consume_marker,
+                            if dispatch_lease.is_some() {
+                                "abandon_pending_dispatch_if_lease_matches"
+                            } else if consume_marker {
+                                "abandon_pending_dispatch"
+                            } else {
+                                "clear_pending_dispatch_reservation"
+                            },
+                        );
+                    }
+                    let _ = reply.send(authorized);
                 }
                 ChannelMailboxMsg::CancelQueuedMessage {
                     message_id,

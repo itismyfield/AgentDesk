@@ -103,12 +103,14 @@ pub(super) async fn mailbox_abandon_unclaimed_dispatch_after_success(
     provider: &ProviderKind,
     channel_id: ChannelId,
     user_message_id: MessageId,
+    dispatch_lease: DispatchLeaseHandle,
 ) {
-    let snapshot = super::mailbox_snapshot(shared, channel_id).await;
-    let active_identity_matches =
-        snapshot.cancel_token.is_some() && snapshot.active_user_message_id == Some(user_message_id);
-    if snapshot.pending_user_dispatch == Some(user_message_id) && !active_identity_matches {
-        super::mailbox_abandon_pending_dispatch(shared, provider, channel_id, user_message_id)
-            .await;
-    }
+    shared
+        .mailbox(channel_id)
+        .abandon_pending_dispatch_if_lease_matches(
+            user_message_id,
+            dispatch_lease,
+            super::queue_persistence_context(shared, provider, channel_id),
+        )
+        .await;
 }

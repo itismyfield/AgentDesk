@@ -750,9 +750,11 @@ impl TurnGateway for DiscordGateway {
             {
                 router::QueuedAdmissionDisposition::Admitted(admitted) => admitted,
                 router::QueuedAdmissionDisposition::Deferred
-                | router::QueuedAdmissionDisposition::RejectedNonPortableAttachment
-                | router::QueuedAdmissionDisposition::RejectedRestore => {
+                | router::QueuedAdmissionDisposition::RejectedNonPortableAttachment => {
                     return Ok(());
+                }
+                router::QueuedAdmissionDisposition::RejectedRestore => {
+                    return Err("queued admission failed to restore dequeued head".to_string());
                 }
             };
 
