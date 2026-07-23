@@ -40,6 +40,39 @@ use session_panel::SessionPanelSnapshot;
 #[cfg(test)]
 use status_panel::{CompletedKind, DerivedStatus};
 use status_panel::{StatusPanelState, render_status_panel};
+
+#[cfg(test)]
+pub(in crate::services::discord) fn rendered_activity_lines_for_panel_shape_tests()
+-> Vec<(String, bool)> {
+    [
+        DerivedStatus::Running,
+        DerivedStatus::MonitorWait,
+        DerivedStatus::ScheduleWakeup(Some(30)),
+        DerivedStatus::ScheduleWakeup(None),
+        DerivedStatus::Completed {
+            kind: CompletedKind::Background,
+        },
+        DerivedStatus::Completed {
+            kind: CompletedKind::Foreground,
+        },
+        DerivedStatus::ToolRunning {
+            name: "Bash".to_string(),
+            summary: None,
+        },
+        DerivedStatus::SubagentRunning {
+            desc: "review".to_string(),
+        },
+        DerivedStatus::WorkflowRunning {
+            label: "CI".to_string(),
+        },
+    ]
+    .into_iter()
+    .map(|status| {
+        let terminal = matches!(status, DerivedStatus::Completed { .. });
+        (freshness::render_activity_line(&status), terminal)
+    })
+    .collect()
+}
 pub(in crate::services::discord) use task_panel::TaskPanelInfo;
 use task_panel::{TaskPanelSnapshot, clean_task_panel_value};
 
