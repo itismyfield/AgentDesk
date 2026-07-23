@@ -53,3 +53,42 @@ impl PanelCacheInvalidations {
             .retain(|(entry_channel, _), _| *entry_channel != channel_id);
     }
 }
+
+impl super::PlaceholderLiveEvents {
+    pub(in crate::services::discord) fn invalidate_panel_cache(
+        &self,
+        channel_id: ChannelId,
+        message_id: u64,
+    ) {
+        self.panel_cache_invalidations
+            .invalidate(channel_id, message_id);
+    }
+
+    pub(in crate::services::discord) fn panel_cache_invalidation_pending(
+        &self,
+        channel_id: ChannelId,
+        message_id: u64,
+    ) -> bool {
+        self.panel_cache_invalidations
+            .is_pending(channel_id, message_id)
+    }
+
+    pub(in crate::services::discord) fn panel_cache_invalidation_epoch(
+        &self,
+        channel_id: ChannelId,
+        message_id: u64,
+    ) -> Option<u64> {
+        self.panel_cache_invalidations
+            .current_epoch(channel_id, message_id)
+    }
+
+    pub(in crate::services::discord) fn clear_panel_cache_invalidation_if_epoch(
+        &self,
+        channel_id: ChannelId,
+        message_id: u64,
+        epoch: u64,
+    ) -> bool {
+        self.panel_cache_invalidations
+            .clear_if_epoch(channel_id, message_id, epoch)
+    }
+}

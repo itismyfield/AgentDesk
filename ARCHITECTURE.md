@@ -583,6 +583,8 @@ src/
 │   │   │   ├── transport.rs
 │   │   │   └── turn_output_controller.rs
 │   │   ├── placeholder_live_events/
+│   │   │   ├── status_panel/
+│   │   │   │   └── derived_status.rs
 │   │   │   ├── background_task_events.rs
 │   │   │   ├── common.rs
 │   │   │   ├── completion_footer.rs
@@ -851,6 +853,8 @@ src/
 │   │   │   │   ├── claude_e.rs
 │   │   │   │   ├── guarded_save.rs
 │   │   │   │   └── tests.rs
+│   │   │   ├── status_panel/
+│   │   │   │   └── purge.rs
 │   │   │   ├── stream_loop/
 │   │   │   │   ├── content_arms/
 │   │   │   │   │   ├── provider_error_presentation.rs
