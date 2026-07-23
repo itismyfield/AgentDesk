@@ -160,6 +160,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertIn(
             '"$PYTHON" -m unittest tests.test_fast_check_ci_wiring', script
         )
+        self.assertIn('"$PYTHON" scripts/check_test_lane_coverage.py', script)
+        self.assertIn(
+            '"$PYTHON" -m unittest tests.test_test_lane_coverage', script
+        )
 
 
 if __name__ == "__main__":
