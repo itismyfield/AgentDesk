@@ -12,6 +12,49 @@ fn lock_rollout_cache_test() -> std::sync::MutexGuard<'static, ()> {
     crate::services::codex_tui::rollout_index::lock_cache_for_tests()
 }
 
+#[tokio::test]
+async fn launch_runtime_refresh_preserves_pending_reset_when_path_is_stale() {
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let channel_id = serenity::ChannelId::new(4_794_003);
+    {
+        let mut data = shared.core.lock().await;
+        data.sessions.insert(
+            channel_id,
+            DiscordSession {
+                session_id: None,
+                memento_context_loaded: false,
+                memento_reflected: false,
+                current_path: Some("/missing/resume-worktree".to_string()),
+                history: Vec::new(),
+                pending_uploads: Vec::new(),
+                cleared: false,
+                remote_profile_name: None,
+                channel_id: Some(channel_id.get()),
+                channel_name: Some("resume-reset".to_string()),
+                category_name: None,
+                last_active: tokio::time::Instant::now(),
+                worktree: None,
+                born_generation: 0,
+            },
+        );
+    }
+
+    let current = (
+        "/previous/launch-path".to_string(),
+        Some("01234567-89ab-cdef-0123-456789abcdef".to_string()),
+        true,
+        "runtime_cached_provider_session",
+    );
+    let runtime =
+        resolve_channel_runtime_for_launch(&shared, &ProviderKind::Claude, channel_id, current)
+            .await;
+
+    assert_eq!(runtime.0, "/previous/launch-path");
+    assert_eq!(runtime.1, None);
+    assert!(!runtime.2);
+    assert_eq!(runtime.3, "explicit_provider_reset");
+}
+
 #[test]
 fn session_strategy_lifecycle_event_records_fresh_and_resumed_details() {
     let fresh = session_strategy_lifecycle_event(None, "no_cached_provider_session", None);

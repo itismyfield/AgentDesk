@@ -140,11 +140,23 @@ async fn resolve_channel_runtime_for_launch(
         .sessions
         .get(&channel_id)
         .and_then(|session| session.channel_name.clone());
-    if let Some((session_id, loaded, path)) =
-        load_session_runtime_state(&mut data.sessions, channel_id)
-        && (path != current.0 || session_id != current.1)
-    {
-        current = (path, session_id, loaded, "runtime_session_rebound");
+    if let Some(session) = data.sessions.get_mut(&channel_id) {
+        let refreshed_path = session.validated_path(channel_id);
+        let session_changed = session.session_id != current.1;
+        let loaded_changed = session.memento_context_loaded != current.2;
+        let path_changed = refreshed_path
+            .as_deref()
+            .is_some_and(|path| path != current.0);
+        if session_changed || loaded_changed || path_changed {
+            current.0 = refreshed_path.unwrap_or(current.0);
+            current.3 = if current.1.is_some() && session.session_id.is_none() {
+                "explicit_provider_reset"
+            } else {
+                "runtime_session_rebound"
+            };
+            current.1 = session.session_id.clone();
+            current.2 = session.memento_context_loaded;
+        }
     }
     let tmux_session_name = if provider.uses_managed_tmux_backend() {
         channel_name
