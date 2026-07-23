@@ -34,8 +34,8 @@ halves, each by the tool that can actually prove its half:
 - **Existence is proven by the compiler.** Every `sym:` anchor here has a
   matching real reference in a `#[cfg(test)] mod relay_state_contract_refs`
   block (in `inflight/store.rs`, `turn_bridge/terminal_delivery.rs`,
-  `tmux_watcher/liveness.rs`, and `router/message_handler/watchdog.rs` — split
-  by module visibility). A reference is a `use <path> as _;` (functions/items),
+  `tmux_watcher/liveness.rs`, `router/message_handler/watchdog.rs`,
+  `mailbox_finish.rs`, and `session_relay_sink.rs` — split by module visibility). A reference is a `use <path> as _;` (functions/items),
   a `let _ = <Type>::<assoc_fn>;` (associated functions), or a
   `let _ = |x: &<Type>| { let _ = &x.<field>; };` (fields — `use` cannot name a
   field). Each fails to **compile** if its symbol is renamed, moved, or removed,
@@ -251,7 +251,27 @@ plan.
 
 ---
 
-## I7. mailbox turn cleanup is guarded by durable episode identity (#4595)
+## I7. session-bound parser hands off completed turn state before delivery
+
+- Definition: the session-local parser owns `buffer`, `full_response`, tool state,
+  and task-notification context only until it recognizes the current turn's
+  terminal record (`sym:session_relay_sink::turn_parser::SessionRelayParser::ingest_frame`).
+- Producer: `SessionRelayParser::ingest_frame` moves the completed response and
+  context into `SessionRelayDelivery`, then resets all turn-local fields before
+  returning the delivery to the asynchronous Discord transport.
+- Consumer: the next `StreamFrame` for the same tmux session may be ingested as
+  soon as the current delivery has been handed off; it must start from empty
+  turn-local state while preserving any unprocessed next-turn bytes in `buffer`.
+- Invariant: completed prose belongs exclusively to the emitted delivery. It may
+  not remain parser-owned until POST/edit success, failure, or ACK resolution.
+- Violation surface: a delayed or desynchronized transport lets the next turn
+  append to the completed `full_response`, re-publishing the previous turn as a
+  byte-identical prefix or merging several turns into one Discord message (#4365).
+- Invariant key: `session_parser_turn_handoff` (enforced by parser ownership and
+  regression tests; an observability producer can be added if this boundary
+  becomes fallible).
+
+## I8. mailbox turn cleanup is guarded by durable episode identity (#4595)
 
 - Definition:
   - every modern `CancelToken` carries one immutable durable nonce

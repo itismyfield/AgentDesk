@@ -107,6 +107,7 @@ REFERENCE_SOURCE_MODULES: dict[str, tuple[str, ...]] = {
     "tmux_watcher/liveness.rs": ("tmux_watcher", "liveness"),
     "router/message_handler/watchdog.rs": ("router", "message_handler", "watchdog"),
     "mailbox_finish.rs": ("mailbox_finish",),
+    "session_relay_sink.rs": ("session_relay_sink",),
 }
 
 DEFAULT_REFERENCE_SOURCES: tuple[Path, ...] = tuple(

@@ -21,14 +21,13 @@ use super::outbound::delivery_record as dr;
 use super::outbound::turn_output_controller as toc;
 use super::placeholder_controller::{PlaceholderKey, PlaceholderLifecycle};
 use super::replace_outcome_policy::edit_fail_fallback_disposition;
-use super::tmux::{WatcherToolState, process_watcher_lines};
+#[cfg(test)]
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::stream_relay::{
     RelaySink, RelaySinkError, RelaySinkOutcome, StreamFrame,
 };
 use crate::services::cluster::watcher_supervisor::{SupervisorConfig, run_watcher_supervisor_loop};
 use crate::services::provider::ProviderKind;
-use crate::services::session_backend::StreamLineState;
 use tracing::Instrument;
 
 mod delivery_outcome_classify;
@@ -37,6 +36,7 @@ mod idle_jsonl;
 mod orphan_reclaim;
 mod relay_format;
 mod task_notification_context;
+mod turn_parser;
 use self::idle_jsonl::{
     IdleJsonlSessionInitRearm, IdleRelayRangeAction, idle_jsonl_apply_active_inflight_gate,
     idle_jsonl_clear_session_init_on_generation_signature_change, idle_jsonl_consume_offset,
@@ -46,7 +46,8 @@ use self::idle_jsonl::{
     idle_jsonl_should_retry_without_dedup_shared, idle_relay_range_action,
     prune_idle_jsonl_session_state, read_jsonl_range,
 };
-use self::task_notification_context::{ensure_card_and_route, merge_task_notification_kind};
+use self::task_notification_context::ensure_card_and_route;
+use self::turn_parser::{SessionRelayDelivery, SessionRelayParser};
 use super::task_notification_delivery::{ResponseDeliveryClaim, ResponseDeliveryClaimOutcome};
 
 static SESSION_BOUND_DISCORD_DELIVERY_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -499,15 +500,6 @@ impl SessionBoundDiscordRelaySink {
             .entry(frame.session_name.clone())
             .or_default()
             .ingest_frame(frame)
-    }
-
-    fn finish_terminal_candidate(&self, session_name: &str) {
-        let Ok(mut sessions) = self.by_session.lock() else {
-            return;
-        };
-        if let Some(parser) = sessions.get_mut(session_name) {
-            parser.reset_turn();
-        }
     }
 
     /// #3041 P1-3 (Part a, B1 — FRAME-CARRIED commit fence): the post-POST wrapper around
@@ -1178,26 +1170,19 @@ impl RelaySink for SessionBoundDiscordRelaySink {
         let mut terminal_delivered = false;
         let mut terminal_not_delivered = false;
         for delivery in deliveries {
-            let session_name = delivery.session_name.clone();
             match self.deliver_response(delivery).await {
                 Ok(SessionRelayDeliveryOutcome::Delivered) => {
                     // #3041 P1-3 (B1 CLOSED): the offset advance is owned INLINE by
                     // `deliver_response` — see `advance_after_confirmed_post`.
                     terminal_delivered = true;
-                    self.finish_terminal_candidate(&session_name);
                 }
                 Ok(SessionRelayDeliveryOutcome::SentButUncommitted) => {
-                    self.finish_terminal_candidate(&session_name);
                     return Ok(RelaySinkOutcome::TerminalUnknown);
                 }
                 Ok(SessionRelayDeliveryOutcome::NotDelivered) => {
                     terminal_not_delivered = true;
-                    self.finish_terminal_candidate(&session_name);
                 }
-                Err(error) => {
-                    self.finish_terminal_candidate(&session_name);
-                    return Err(error);
-                }
+                Err(error) => return Err(error),
             }
         }
         // #3041 P1-3 R5: surface the outcome on THIS frame's sequence (the watcher
@@ -1530,139 +1515,12 @@ async fn run_idle_jsonl_relay_loop(
     }
 }
 
-struct SessionRelayParser {
-    buffer: String,
-    stream_state: StreamLineState,
-    full_response: String,
-    tool_state: WatcherToolState,
-    task_notification_kind: Option<TaskNotificationKind>,
-    task_notification_context: Option<super::task_notification_delivery::TaskNotificationContext>,
-    assistant_text_seen: bool,
-    frames_observed: u64,
-    last_sequence: u64,
-}
-
-impl Default for SessionRelayParser {
-    fn default() -> Self {
-        Self {
-            buffer: String::new(),
-            stream_state: StreamLineState::new(),
-            full_response: String::new(),
-            tool_state: WatcherToolState::new(),
-            task_notification_kind: None,
-            task_notification_context: None,
-            assistant_text_seen: false,
-            frames_observed: 0,
-            last_sequence: 0,
-        }
+#[cfg(test)]
+mod relay_state_contract_refs {
+    #[test]
+    fn relay_state_contract_symbol_references_compile() {
+        let _ = super::turn_parser::SessionRelayParser::ingest_frame;
     }
-}
-
-impl SessionRelayParser {
-    fn ingest_frame(&mut self, frame: &StreamFrame) -> Vec<SessionRelayDelivery> {
-        self.frames_observed = self.frames_observed.saturating_add(1);
-        self.last_sequence = frame.sequence;
-        self.buffer.push_str(&frame.payload);
-
-        let channel_id = match frame.binding.channel_id.parse::<u64>() {
-            Ok(channel_id) => channel_id,
-            Err(error) => {
-                tracing::warn!(
-                    channel_id = %frame.binding.channel_id,
-                    error = %error,
-                    "session-bound relay sink skipped frame with invalid channel id"
-                );
-                return Vec::new();
-            }
-        };
-
-        let mut deliveries = Vec::new();
-        loop {
-            let outcome = process_watcher_lines(
-                &mut self.buffer,
-                &mut self.stream_state,
-                &mut self.full_response,
-                &mut self.tool_state,
-            );
-            if let Some(kind) = outcome.task_notification_kind {
-                self.task_notification_kind =
-                    merge_task_notification_kind(self.task_notification_kind, kind);
-            }
-            if let Some(context) = outcome.task_notification_context {
-                self.task_notification_context = super::task_notification_delivery::merge_context(
-                    self.task_notification_context.take(),
-                    context,
-                );
-            }
-            self.assistant_text_seen |= outcome.assistant_text_seen;
-            if !outcome.found_result {
-                break;
-            }
-
-            let task_kind_allows_delivery = task_notification_context::allows_delivery(
-                self.task_notification_kind,
-                self.assistant_text_seen,
-            );
-            let has_user_visible_response =
-                !self.full_response.trim().is_empty() && task_kind_allows_delivery;
-            if has_user_visible_response {
-                deliveries.push(SessionRelayDelivery {
-                    provider: frame.binding.provider.clone(),
-                    channel_id,
-                    session_name: frame.session_name.clone(),
-                    response_text: self.full_response.clone(),
-                    task_notification_kind: self.task_notification_kind,
-                    task_notification_context: self.task_notification_context.clone(),
-                    // #3041 P1-3 (Part a, B1): the RESULT frame carries the commit fence;
-                    // copying it onto the delivery keeps the POST and the identity-gated
-                    // advance atomic per-frame.
-                    terminal_consumed_end: frame.terminal_consumed_end,
-                    frame_turn_user_msg_id: frame.turn_user_msg_id,
-                    frame_turn_started_at: frame.turn_started_at.clone(),
-                    frame_turn_start_offset: frame.turn_start_offset,
-                });
-                break;
-            } else {
-                self.reset_turn();
-            }
-            if self.buffer.trim().is_empty() {
-                break;
-            }
-        }
-
-        deliveries
-    }
-
-    fn reset_turn(&mut self) {
-        self.stream_state = StreamLineState::new();
-        self.full_response.clear();
-        self.tool_state = WatcherToolState::new();
-        self.task_notification_kind = None;
-        self.task_notification_context = None;
-        self.assistant_text_seen = false;
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SessionRelayDelivery {
-    provider: ProviderKind,
-    channel_id: u64,
-    session_name: String,
-    response_text: String,
-    task_notification_kind: Option<TaskNotificationKind>,
-    task_notification_context: Option<super::task_notification_delivery::TaskNotificationContext>,
-    /// #3041 P1-3 (Part a, B1 — frame-carried commit fence): the producer's authoritative
-    /// consumed END on this RESULT frame (`None` = no delegate). A CONFIRMED delivery
-    /// advances `confirmed_end_offset` to it, gated by the carried turn identity.
-    terminal_consumed_end: Option<u64>,
-    /// Pinned turn identity (`user_msg_id`, `started_at`) the IDENTITY GATE compares to
-    /// the current inflight before advancing — a delayed/wrong-turn frame is ignored.
-    frame_turn_user_msg_id: u64,
-    frame_turn_started_at: String,
-    /// #3041 P1-3 (codex P1-3 issue 2): the pinned `turn_start_offset`, a REQUIRED gate
-    /// part — two `user_msg_id == 0` turns in the same second share `(0, started_at)`; the
-    /// monotonic offset disambiguates. `None` on legacy/non-fence frames.
-    frame_turn_start_offset: Option<u64>,
 }
 
 fn delivery_lease_key_for_frame(
@@ -4119,6 +3977,82 @@ mod tests {
             Some(100),
             "turn B commits with B's own identity (turn_start_offset), not A's"
         );
+    }
+
+    #[test]
+    fn parser_terminal_handoff_clears_previous_prose_before_next_turn() {
+        let binding = matched("4365");
+        let mut parser = SessionRelayParser::default();
+        let turn_a = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"previous turn prose\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"previous turn prose\"}\n"
+        );
+        let turn_b = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"next turn only\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"next turn only\"}\n"
+        );
+
+        let first = parser.ingest_frame(&terminal_frame_offset(
+            &binding,
+            turn_a,
+            1,
+            100,
+            0,
+            "2026-07-24T00:00:00Z",
+            Some(0),
+        ));
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].response_text, "previous turn prose");
+
+        // Do not call `finish_terminal_candidate`: the parser must relinquish the
+        // completed turn at parse time, before asynchronous delivery can finish.
+        let second = parser.ingest_frame(&terminal_frame_offset(
+            &binding,
+            turn_b,
+            2,
+            220,
+            0,
+            "2026-07-24T00:00:01Z",
+            Some(100),
+        ));
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].response_text, "next turn only");
+        assert!(!second[0].response_text.contains("previous turn prose"));
+    }
+
+    #[test]
+    fn parser_terminal_handoff_preserves_following_turn_tail() {
+        let binding = matched("4366");
+        let mut parser = SessionRelayParser::default();
+        let combined = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"turn A\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"turn A\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"turn B\"}]}}\n"
+        );
+
+        let first = parser.ingest_frame(&terminal_frame_offset(
+            &binding,
+            combined,
+            1,
+            100,
+            0,
+            "2026-07-24T00:00:00Z",
+            Some(0),
+        ));
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].response_text, "turn A");
+
+        let second = parser.ingest_frame(&terminal_frame_offset(
+            &binding,
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"turn B\"}\n",
+            2,
+            220,
+            0,
+            "2026-07-24T00:00:01Z",
+            Some(100),
+        ));
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].response_text, "turn B");
     }
 
     #[test]
