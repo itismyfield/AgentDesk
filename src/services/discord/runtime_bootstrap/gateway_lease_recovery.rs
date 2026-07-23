@@ -2,7 +2,8 @@ use super::*;
 
 pub(super) static STANDBY_PROMOTION_IN_PROGRESS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-static STALE_RESTART_ARTIFACT_CLEANUP: std::sync::Once = std::sync::Once::new();
+static RESTART_ARTIFACT_BOOT_INSTANT: std::sync::OnceLock<std::time::SystemTime> =
+    std::sync::OnceLock::new();
 
 pub(super) const GATEWAY_STANDBY_RETRY_MIN_SECS: u64 = 30;
 pub(super) const GATEWAY_STANDBY_RETRY_JITTER_SECS: u64 = 30;
@@ -183,30 +184,26 @@ pub(super) async fn reap_orphaned_gateway_lease_for_instance_with_min_age(
     Ok(terminated)
 }
 
-pub(super) fn cleanup_stale_restart_artifacts() {
-    STALE_RESTART_ARTIFACT_CLEANUP.call_once(|| {
-        let Some(root) = crate::agentdesk_runtime_root() else {
-            return;
-        };
-        for name in ["restart_persisted", "restart_cancelled"] {
-            match std::fs::remove_file(root.join(name)) {
-                Ok(()) => tracing::info!(artifact = name, "removed stale restart artifact at boot"),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => tracing::warn!(artifact = name, %error, "failed to remove stale restart artifact at boot"),
-            }
-        }
-    });
+pub(super) fn record_restart_artifact_boot_instant() {
+    let _ = RESTART_ARTIFACT_BOOT_INSTANT.set(std::time::SystemTime::now());
 }
 
-pub(super) fn cleanup_stale_restart_artifacts_in(root: &std::path::Path) -> std::io::Result<()> {
-    for name in ["restart_persisted", "restart_cancelled"] {
-        match std::fs::remove_file(root.join(name)) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(())
+fn restart_artifact_boot_instant() -> std::time::SystemTime {
+    *RESTART_ARTIFACT_BOOT_INSTANT.get_or_init(std::time::SystemTime::now)
+}
+
+pub(super) fn restart_artifact_is_current_lifetime(root: &std::path::Path, name: &str) -> bool {
+    restart_artifact_is_newer_than(root, name, restart_artifact_boot_instant())
+}
+
+pub(super) fn restart_artifact_is_newer_than(
+    root: &std::path::Path,
+    name: &str,
+    boot_instant: std::time::SystemTime,
+) -> bool {
+    std::fs::metadata(root.join(name))
+        .and_then(|metadata| metadata.modified())
+        .is_ok_and(|modified| modified >= boot_instant)
 }
 
 pub(super) fn standby_retry_delay() -> Duration {
@@ -293,10 +290,14 @@ pub(super) async fn wait_for_promotion_handoff(
     loop {
         // A matching persisted acknowledgement is the point of no return. Check
         // it before cancellation because clear may arrive after durable commit.
-        if restart_file_matches(root, "restart_persisted", nonce) {
+        if restart_file_matches(root, "restart_persisted", nonce)
+            && restart_artifact_is_current_lifetime(root, "restart_persisted")
+        {
             return PromotionHandoffOutcome::Committed;
         }
-        if restart_file_matches(root, "restart_cancelled", nonce) {
+        if restart_file_matches(root, "restart_cancelled", nonce)
+            && restart_artifact_is_current_lifetime(root, "restart_cancelled")
+        {
             return PromotionHandoffOutcome::Cancelled;
         }
         match std::fs::read_to_string(root.join("restart_pending")) {
@@ -329,7 +330,7 @@ pub(super) async fn follow_promotion_handoff_chain(
                     nonce = next_nonce;
                     continue;
                 }
-                if std::fs::metadata(root.join("restart_persisted")).is_ok() {
+                if restart_artifact_is_current_lifetime(root, "restart_persisted") {
                     return PromotionHandoffOutcome::Committed;
                 }
                 return PromotionHandoffOutcome::Cancelled;
@@ -424,7 +425,7 @@ async fn attempt_clean_standby_promotion(
                 // The committer publishes restart_persisted before removing the
                 // pending marker. Presence of any persisted acknowledgement is
                 // therefore sufficient proof that this marker was committed.
-                if std::fs::metadata(root.join("restart_persisted")).is_ok() {
+                if restart_artifact_is_current_lifetime(&root, "restart_persisted") {
                     STANDBY_PROMOTION_IN_PROGRESS
                         .store(false, std::sync::atomic::Ordering::Release);
                     return true;

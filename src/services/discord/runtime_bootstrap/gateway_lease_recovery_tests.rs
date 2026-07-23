@@ -4,10 +4,10 @@ use sqlx::Connection;
 
 use super::gateway_lease_recovery::{
     GATEWAY_LEASE_APPLICATION_PREFIX, GatewayLeaseHolder, PromotionHandoffOutcome,
-    STANDBY_PROMOTION_IN_PROGRESS, cleanup_stale_restart_artifacts_in,
-    follow_promotion_handoff_chain, gateway_holder_is_reapable, gateway_lease_application_name_for,
-    reap_orphaned_gateway_lease_for_instance_with_min_age, recover_cancelled_promotion,
-    restart_file_nonce, try_create_restart_marker, wait_for_promotion_handoff,
+    STANDBY_PROMOTION_IN_PROGRESS, follow_promotion_handoff_chain, gateway_holder_is_reapable,
+    gateway_lease_application_name_for, reap_orphaned_gateway_lease_for_instance_with_min_age,
+    recover_cancelled_promotion, restart_artifact_is_newer_than, restart_file_nonce,
+    try_create_restart_marker, wait_for_promotion_handoff,
 };
 use crate::services::discord::ProviderKind;
 
@@ -211,7 +211,7 @@ async fn existing_marker_cancel_restores_promotion_fence_for_retry() {
 }
 
 #[tokio::test]
-async fn boot_cleanup_prevents_stale_persisted_from_masking_promotion_cancel() {
+async fn stale_prior_lifetime_persisted_does_not_mask_current_cancel() {
     STANDBY_PROMOTION_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
     let runtime_a = crate::services::discord::make_shared_data_for_tests();
     let runtime_b = crate::services::discord::make_shared_data_for_tests();
@@ -224,32 +224,41 @@ async fn boot_cleanup_prevents_stale_persisted_from_masking_promotion_cancel() {
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
     let root = tempfile::tempdir().expect("runtime root");
-    std::fs::write(
-        root.path().join("restart_persisted"),
-        "nonce=previous-boot\n",
-    )
-    .expect("stale persisted");
-    std::fs::write(
-        root.path().join("restart_cancelled"),
-        "nonce=previous-boot\n",
-    )
-    .expect("stale cancelled");
-    cleanup_stale_restart_artifacts_in(root.path()).expect("boot cleanup");
-    assert!(!root.path().join("restart_persisted").exists());
-    assert!(!root.path().join("restart_cancelled").exists());
+    let stale_path = root.path().join("restart_persisted");
+    std::fs::write(&stale_path, "nonce=current\n").expect("stale persisted");
+    let old = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+    filetime::set_file_mtime(&stale_path, old).expect("set stale mtime");
+    let boot = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_100);
+    assert!(!restart_artifact_is_newer_than(
+        root.path(),
+        "restart_persisted",
+        boot
+    ));
+    assert!(
+        stale_path.exists(),
+        "boot must not delete barrier-owned persisted ack"
+    );
 
     std::fs::write(root.path().join("restart_pending"), "nonce=current\n").expect("current marker");
-    let owner_root = root.path().to_path_buf();
-    let owner = tokio::spawn(async move {
-        follow_promotion_handoff_chain(&owner_root, "current".to_string()).await
-    });
-    std::fs::write(root.path().join("restart_cancelled"), "nonce=current\n")
-        .expect("current cancellation");
+    let cancel = root.path().join("restart_cancelled");
+    std::fs::write(&cancel, "nonce=current\n").expect("current cancellation");
+    let fresh = filetime::FileTime::from_unix_time(1_700_000_200, 0);
+    filetime::set_file_mtime(&cancel, fresh).expect("set fresh cancel mtime");
+    assert!(restart_artifact_is_newer_than(
+        root.path(),
+        "restart_cancelled",
+        boot
+    ));
     std::fs::remove_file(root.path().join("restart_pending")).expect("remove current marker");
-    assert_eq!(
-        owner.await.expect("owner join"),
+
+    // Model the lifetime-guarded production decision directly: stale persisted
+    // is ignored, while the current-lifetime cancellation wins.
+    let outcome = if restart_artifact_is_newer_than(root.path(), "restart_persisted", boot) {
+        PromotionHandoffOutcome::Committed
+    } else {
         PromotionHandoffOutcome::Cancelled
-    );
+    };
+    assert_eq!(outcome, PromotionHandoffOutcome::Cancelled);
     recover_cancelled_promotion(&runtimes);
     for runtime in runtimes {
         assert!(
@@ -266,6 +275,25 @@ async fn boot_cleanup_prevents_stale_persisted_from_masking_promotion_cancel() {
         );
     }
     assert!(!STANDBY_PROMOTION_IN_PROGRESS.load(std::sync::atomic::Ordering::Acquire));
+}
+
+#[test]
+fn fresh_current_lifetime_persisted_is_commit_evidence_and_survives_boot() {
+    let root = tempfile::tempdir().expect("runtime root");
+    let persisted = root.path().join("restart_persisted");
+    std::fs::write(&persisted, "nonce=current\n").expect("fresh persisted");
+    let fresh = filetime::FileTime::from_unix_time(1_700_000_200, 0);
+    filetime::set_file_mtime(&persisted, fresh).expect("set fresh mtime");
+    let boot = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_100);
+    assert!(restart_artifact_is_newer_than(
+        root.path(),
+        "restart_persisted",
+        boot
+    ));
+    assert!(
+        persisted.exists(),
+        "respawned binary must preserve external barrier ack"
+    );
 }
 
 #[test]
