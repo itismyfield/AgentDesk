@@ -142,22 +142,57 @@ fn independent_tmux_liveness(session_key: &str, provider: &str) -> IndependentLi
     if identity.host != crate::services::platform::hostname_short() {
         return IndependentLiveness::RemoteOrInvalid;
     }
-    if !crate::services::platform::tmux::has_session(&identity.tmux_name) {
-        return IndependentLiveness::NoPane;
+    let Some(db_provider) = ProviderKind::from_str(provider) else {
+        return IndependentLiveness::RemoteOrInvalid;
+    };
+    let Some((tmux_provider, _)) = identity.provider_and_channel() else {
+        return IndependentLiveness::RemoteOrInvalid;
+    };
+    if tmux_provider != db_provider
+        || identity
+            .provider_from_key
+            .as_deref()
+            .is_some_and(|key_provider| key_provider != db_provider.as_str())
+    {
+        return IndependentLiveness::RemoteOrInvalid;
     }
 
-    let Some(capture) = crate::services::platform::tmux::capture_pane(&identity.tmux_name, -160)
-    else {
-        return IndependentLiveness::LiveOrAmbiguous;
-    };
-    let Some(provider) = ProviderKind::from_str(provider) else {
-        return IndependentLiveness::LiveOrAmbiguous;
-    };
+    match crate::services::platform::tmux::session_presence(&identity.tmux_name) {
+        crate::services::platform::tmux::SessionPresence::Missing => IndependentLiveness::NoPane,
+        crate::services::platform::tmux::SessionPresence::ProbeFailed => {
+            IndependentLiveness::LiveOrAmbiguous
+        }
+        crate::services::platform::tmux::SessionPresence::Present => {
+            let runtime_kind =
+                crate::services::tmux_common::resolve_tmux_runtime_kind_marker(&identity.tmux_name);
+            let structured_ready = crate::services::tmux_common::resolve_session_temp_path(
+                &identity.tmux_name,
+                "jsonl",
+            )
+            .and_then(|output_path| {
+                crate::services::tui_turn_state::jsonl_ready_for_input(
+                    &db_provider,
+                    runtime_kind,
+                    std::path::Path::new(&output_path),
+                    None,
+                )
+            })
+            .map(crate::services::tui_turn_state::TuiReadyState::is_ready);
 
-    if crate::services::provider::tmux_capture_indicates_ready_for_input(&capture, &provider) {
-        IndependentLiveness::ReadyForInput
-    } else {
-        IndependentLiveness::LiveOrAmbiguous
+            let ready = structured_ready.or_else(|| {
+                crate::services::provider::tmux_session_fallback_ready_for_input(
+                    &identity.tmux_name,
+                    &db_provider,
+                    runtime_kind,
+                )
+                .map(crate::services::pane_readiness::FallbackPaneReadiness::is_ready)
+            });
+            if ready == Some(true) {
+                IndependentLiveness::ReadyForInput
+            } else {
+                IndependentLiveness::LiveOrAmbiguous
+            }
+        }
     }
 }
 
@@ -305,6 +340,79 @@ mod tests {
 
         pool.close().await;
         pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn probe_failure_spinner_and_provider_mismatch_preserve_rows_pg() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let stale_age = STALE_TURN_GRACE.as_secs() as i64 + 60;
+        for key in [
+            "host:probe-failed",
+            "host:spinner",
+            "host:provider-mismatch",
+        ] {
+            seed_session(&pool, key, "turn_active", None, stale_age).await;
+        }
+
+        assert_eq!(
+            reconcile_stale_turns_matching_pg(&pool, Some("host:probe-failed"), |_, _| {
+                IndependentLiveness::LiveOrAmbiguous
+            })
+            .await
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            reconcile_stale_turns_matching_pg(&pool, Some("host:spinner"), |_, _| {
+                IndependentLiveness::LiveOrAmbiguous
+            })
+            .await
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            reconcile_stale_turns_matching_pg(&pool, Some("host:provider-mismatch"), |_, _| {
+                IndependentLiveness::RemoteOrInvalid
+            },)
+            .await
+            .unwrap(),
+            0
+        );
+        for key in [
+            "host:probe-failed",
+            "host:spinner",
+            "host:provider-mismatch",
+        ] {
+            assert_eq!(
+                load_state(&pool, key).await,
+                ("turn_active".to_string(), Some("original".to_string()))
+            );
+        }
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[test]
+    fn tmux_identity_rejects_provider_mismatch_and_spinner_is_busy() {
+        let identity =
+            SessionIdentity::parse("claude/hash/mac-mini:AgentDesk-codex-channel").unwrap();
+        let db_provider = ProviderKind::Claude;
+        let (tmux_provider, _) = identity.provider_and_channel().unwrap();
+        assert_ne!(tmux_provider, db_provider);
+
+        let spinner = "─────────────────────────────────────────\n❯ \n✻ Thinking… (12s · ↑ 1.2k tokens · esc to interrupt)";
+        assert!(crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(spinner));
+        assert_eq!(
+            crate::services::provider::fallback_capture_ready_for_input(
+                spinner,
+                &ProviderKind::Claude,
+                Some(crate::services::agent_protocol::RuntimeHandoffKind::LegacyTmuxWrapper),
+            )
+            .map(crate::services::pane_readiness::FallbackPaneReadiness::is_ready),
+            Some(false)
+        );
     }
 
     #[tokio::test]
