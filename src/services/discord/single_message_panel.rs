@@ -100,6 +100,7 @@ pub(in crate::services::discord) fn compose_footer_status_block(
 pub(in crate::services::discord) fn completion_footer_subtext(block: &str) -> String {
     block
         .lines()
+        .filter(|line| line.trim() != "\u{2063}")
         .map(|line| {
             if line.trim().is_empty() {
                 String::new()
