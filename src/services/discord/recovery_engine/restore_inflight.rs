@@ -2144,18 +2144,13 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         )
         .await;
 
-        // The generic reader feeds RuntimeReady into turn_bridge, just like the
-        // immediate watcher-reattach branches below. Consume the outgoing
-        // process's planned-restart authority through the same identity-guarded
-        // readoption helper before the reader can publish that handoff. A failed
-        // adoption stays fail-closed: runtime_stamp will continue refusing the
-        // reserved durable row rather than writing through restart authority.
+        // Consume outgoing planned-restart authority (identity-guarded readoption)
+        // before the reader publishes RuntimeReady; failed adoption stays fail-closed.
         if super::runtime::readopt_marker_eligible_real_user(&state) {
             let _ = super::runtime::mark_readopted_from_inflight(
                 shared, provider, channel_id, &state, true,
             );
         }
-
         let adk_session_key = build_adk_session_key(shared, channel_id, provider, None).await;
         let adk_session_name = channel_name.clone();
         let adk_session_info = derive_adk_session_info(
