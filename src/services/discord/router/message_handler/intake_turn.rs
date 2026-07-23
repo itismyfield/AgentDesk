@@ -1136,20 +1136,20 @@ pub(super) async fn handle_text_message(
         fast_mode_channel_id,
     )
     .await;
-    refresh_session_strategy_after_pending_reset(
-        shared,
-        channel_id,
-        &mut session_id,
-        &mut memento_context_loaded,
-        &mut session_strategy_reason,
-    )
-    .await;
     let prompt_prep_started = std::time::Instant::now();
 
-    // Resolve channel/tmux session name from current session state. We need the
-    // persisted provider session_id before recall so external memory can scope by run_id.
-    let (channel_name, tmux_session_name) =
-        resolve_channel_tmux_names(shared, &provider, channel_id).await;
+    let state = (
+        current_path,
+        session_id,
+        memento_context_loaded,
+        session_strategy_reason,
+    );
+    let runtime = resolve_channel_runtime_for_launch(shared, &provider, channel_id, state).await;
+    current_path = runtime.0;
+    session_id = runtime.1;
+    memento_context_loaded = runtime.2;
+    session_strategy_reason = runtime.3;
+    let (channel_name, tmux_session_name) = (runtime.4, runtime.5);
     let adk_session_key = build_adk_session_key(shared, channel_id, &provider, None).await;
     let turn_goal_kind = if !dispatch_reset_provider_state && !dispatch_recreate_tmux {
         classify_codex_goal_command_for_provider(
@@ -1284,9 +1284,14 @@ pub(super) async fn handle_text_message(
         cancel_token.clone(),
         request_owner,
         user_msg_id,
-        stale_busy_context(
+        intake_claim_context(
+            adk_session_key.as_deref(),
             &provider,
-            [adk_session_key.as_deref(), tmux_session_name.as_deref()],
+            tmux_session_name.as_deref(),
+            &mut current_path,
+            &mut session_id,
+            &mut memento_context_loaded,
+            &mut session_strategy_reason,
         ),
     )
     .await;
@@ -1806,14 +1811,7 @@ pub(super) async fn handle_text_message(
     // #3813 Phase 1a: prompt prep complete — this mark sits INSIDE the
     // `[prompt-prep]` window below (overlaps it; do not sum — see latency_spans.rs).
     intake_latency.mark_prep_done();
-    let provider_label = match &provider {
-        ProviderKind::Claude => "claude",
-        ProviderKind::Codex => "codex",
-        ProviderKind::Gemini => "gemini",
-        ProviderKind::OpenCode => "opencode",
-        ProviderKind::Qwen => "qwen",
-        ProviderKind::Unsupported(_) => "unsupported",
-    };
+    let provider_label = provider.as_str();
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
         "  [{ts}] [prompt-prep] channel={} provider={} dispatch={} memory_backend={} reused_session={} duration_ms={}",
