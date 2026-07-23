@@ -284,6 +284,34 @@ pub(super) async fn wait_for_promotion_handoff(
     }
 }
 
+pub(super) async fn follow_promotion_handoff_chain(
+    root: &std::path::Path,
+    initial_nonce: String,
+) -> PromotionHandoffOutcome {
+    let mut nonce = initial_nonce;
+    loop {
+        match wait_for_promotion_handoff(root, &nonce).await {
+            PromotionHandoffOutcome::Superseded => {
+                // The process-wide cancellation owner transfers to the current
+                // pending nonce. Keep following until the chain commits or is
+                // cancelled; no provider poller is assumed to have observed it.
+                if restart_file_nonce(root, "restart_pending").as_deref() == Some(nonce.as_str()) {
+                    continue;
+                }
+                if let Some(next_nonce) = restart_file_nonce(root, "restart_pending") {
+                    nonce = next_nonce;
+                    continue;
+                }
+                if std::fs::metadata(root.join("restart_persisted")).is_ok() {
+                    return PromotionHandoffOutcome::Committed;
+                }
+                return PromotionHandoffOutcome::Cancelled;
+            }
+            terminal => return terminal,
+        }
+    }
+}
+
 pub(super) fn recover_cancelled_promotion(runtimes: &[Arc<SharedData>]) {
     unfence_runtimes(runtimes);
     STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
@@ -366,10 +394,18 @@ async fn attempt_clean_standby_promotion(
             // fence stays closed; if it is cancelled/removed before commit, this
             // promotion must restore its preflight fence and resume lease retry.
             let Some(existing_nonce) = restart_file_nonce(&root, "restart_pending") else {
+                // The committer publishes restart_persisted before removing the
+                // pending marker. Presence of any persisted acknowledgement is
+                // therefore sufficient proof that this marker was committed.
+                if std::fs::metadata(root.join("restart_persisted")).is_ok() {
+                    STANDBY_PROMOTION_IN_PROGRESS
+                        .store(false, std::sync::atomic::Ordering::Release);
+                    return true;
+                }
                 recover_cancelled_promotion(&runtimes);
                 return false;
             };
-            return match wait_for_promotion_handoff(&root, &existing_nonce).await {
+            return match follow_promotion_handoff_chain(&root, existing_nonce).await {
                 PromotionHandoffOutcome::Committed => {
                     STANDBY_PROMOTION_IN_PROGRESS
                         .store(false, std::sync::atomic::Ordering::Release);
@@ -380,11 +416,7 @@ async fn attempt_clean_standby_promotion(
                     false
                 }
                 PromotionHandoffOutcome::Superseded => {
-                    // Ownership moved again; keep the inherited fence closed for
-                    // the newest request and release only promotion-local state.
-                    STANDBY_PROMOTION_IN_PROGRESS
-                        .store(false, std::sync::atomic::Ordering::Release);
-                    true
+                    unreachable!("handoff chain resolves supersession internally")
                 }
             };
         }
@@ -398,18 +430,14 @@ async fn attempt_clean_standby_promotion(
     // Keep every runtime fenced while the process-wide owner watches the nonce.
     // A cancellation may remove the marker before any 10s provider poller sees
     // it; this owner still restores every runtime and permits lease retries.
-    match wait_for_promotion_handoff(&root, &nonce).await {
+    match follow_promotion_handoff_chain(&root, nonce).await {
         PromotionHandoffOutcome::Committed => true,
         PromotionHandoffOutcome::Cancelled => {
             recover_cancelled_promotion(&runtimes);
             false
         }
         PromotionHandoffOutcome::Superseded => {
-            // Another restart request owns the same process-wide fence now. Do
-            // not unfence or clear provider flags; the newer nonce continues the
-            // graceful restart. Release only promotion-local ownership.
-            STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
-            true
+            unreachable!("handoff chain resolves supersession internally")
         }
     }
 }

@@ -4,9 +4,10 @@ use sqlx::Connection;
 
 use super::gateway_lease_recovery::{
     GATEWAY_LEASE_APPLICATION_PREFIX, GatewayLeaseHolder, PromotionHandoffOutcome,
-    STANDBY_PROMOTION_IN_PROGRESS, gateway_holder_is_reapable, gateway_lease_application_name_for,
-    reap_orphaned_gateway_lease_for_instance_with_min_age, recover_cancelled_promotion,
-    restart_file_nonce, try_create_restart_marker, wait_for_promotion_handoff,
+    STANDBY_PROMOTION_IN_PROGRESS, follow_promotion_handoff_chain, gateway_holder_is_reapable,
+    gateway_lease_application_name_for, reap_orphaned_gateway_lease_for_instance_with_min_age,
+    recover_cancelled_promotion, restart_file_nonce, try_create_restart_marker,
+    wait_for_promotion_handoff,
 };
 use crate::services::discord::ProviderKind;
 
@@ -107,6 +108,59 @@ async fn superseded_promotion_preserves_new_owner_fence_and_flags() {
 }
 
 #[tokio::test]
+async fn supersession_chain_keeps_owner_until_final_cancel_and_recovers_all_runtimes() {
+    STANDBY_PROMOTION_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
+    let runtime_a = crate::services::discord::make_shared_data_for_tests();
+    let runtime_b = crate::services::discord::make_shared_data_for_tests();
+    let runtimes = vec![runtime_a.clone(), runtime_b.clone()];
+    for runtime in &runtimes {
+        runtime.restart.intake_worker_lifecycle.fence_admission();
+        runtime
+            .restart
+            .restart_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    let root = tempfile::tempdir().expect("runtime root");
+    std::fs::write(root.path().join("restart_pending"), "nonce=a\n").expect("A marker");
+    let root_for_owner = root.path().to_path_buf();
+    let owner = tokio::spawn(async move {
+        follow_promotion_handoff_chain(&root_for_owner, "a".to_string()).await
+    });
+    tokio::task::yield_now().await;
+    std::fs::write(root.path().join("restart_pending"), "nonce=b\n").expect("B supersedes A");
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(
+        !owner.is_finished(),
+        "process-wide owner must follow B rather than terminate on supersession"
+    );
+    std::fs::write(root.path().join("restart_pending"), "nonce=c\n").expect("C supersedes B");
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(!owner.is_finished(), "owner must follow the whole chain");
+    std::fs::write(root.path().join("restart_cancelled"), "nonce=c\n").expect("cancel C");
+    std::fs::remove_file(root.path().join("restart_pending")).expect("remove C marker");
+    assert_eq!(
+        owner.await.expect("owner join"),
+        PromotionHandoffOutcome::Cancelled
+    );
+    recover_cancelled_promotion(&runtimes);
+    for runtime in runtimes {
+        assert!(
+            !runtime
+                .restart
+                .intake_worker_lifecycle
+                .admission_is_fenced()
+        );
+        assert!(
+            !runtime
+                .restart
+                .restart_pending
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+    }
+    assert!(!STANDBY_PROMOTION_IN_PROGRESS.load(std::sync::atomic::Ordering::Acquire));
+}
+
+#[tokio::test]
 async fn existing_marker_cancel_restores_promotion_fence_for_retry() {
     STANDBY_PROMOTION_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
     let runtime_a = crate::services::discord::make_shared_data_for_tests();
@@ -154,6 +208,45 @@ async fn existing_marker_cancel_restores_promotion_fence_for_retry() {
         );
     }
     assert!(!STANDBY_PROMOTION_IN_PROGRESS.load(std::sync::atomic::Ordering::Acquire));
+}
+
+#[test]
+fn committed_existing_marker_gap_preserves_promotion_fence() {
+    STANDBY_PROMOTION_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
+    let runtime_a = crate::services::discord::make_shared_data_for_tests();
+    let runtime_b = crate::services::discord::make_shared_data_for_tests();
+    let runtimes = vec![runtime_a.clone(), runtime_b.clone()];
+    for runtime in &runtimes {
+        runtime.restart.intake_worker_lifecycle.fence_admission();
+        runtime
+            .restart
+            .restart_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    let root = tempfile::tempdir().expect("runtime root");
+    std::fs::write(root.path().join("restart_persisted"), "nonce=deploy-b\n")
+        .expect("durable commit");
+    assert!(restart_file_nonce(root.path(), "restart_pending").is_none());
+
+    // AlreadyExists was observed just before the committer removed pending. The
+    // persisted acknowledgement must win over the subsequent missing marker.
+    let committed = root.path().join("restart_persisted").exists();
+    assert!(committed);
+    STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
+    for runtime in runtimes {
+        assert!(
+            runtime
+                .restart
+                .intake_worker_lifecycle
+                .admission_is_fenced()
+        );
+        assert!(
+            runtime
+                .restart
+                .restart_pending
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+    }
 }
 
 #[test]
