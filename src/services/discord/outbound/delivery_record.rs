@@ -818,17 +818,18 @@ pub(in crate::services::discord) fn delivered_frontier_end_current_generation(
         .unwrap_or(0)
 }
 
-fn current_generation_frontier_exceeds_eof_at(
+fn current_generation_frontier_exceeding_eof_at(
     path: &Path,
     current_gen_mtime: i64,
     current_transcript_eof: u64,
-) -> bool {
+) -> Option<u64> {
     read_record_at(path)
         .and_then(|record| record.delivered_frontier)
-        .is_some_and(|frontier| {
+        .filter(|frontier| {
             durable_frontier_generation_current(frontier.generation_mtime_ns, current_gen_mtime)
                 && frontier.range.1 > current_transcript_eof
         })
+        .map(|frontier| frontier.range.1)
 }
 
 /// #4549: detect the exact same-generation frontier/EOF regression that the
@@ -837,16 +838,14 @@ fn current_generation_frontier_exceeds_eof_at(
 /// an in-place `/compact` rewrite. A rotated UUID/path bypasses this predicate and
 /// keeps the fresh-transcript lookback path, so replacement-file prompts are not
 /// lost.
-pub(in crate::services::discord) fn delivered_frontier_exceeds_current_eof(
+pub(in crate::services::discord) fn delivered_frontier_exceeding_current_eof(
     provider: &ProviderKind,
     channel: ChannelId,
     tmux_session_name: &str,
     current_transcript_eof: u64,
-) -> bool {
-    let Some(path) = delivery_record_path(provider, channel.get()) else {
-        return false;
-    };
-    current_generation_frontier_exceeds_eof_at(
+) -> Option<u64> {
+    let path = delivery_record_path(provider, channel.get())?;
+    current_generation_frontier_exceeding_eof_at(
         &path,
         current_generation_mtime_ns(tmux_session_name),
         current_transcript_eof,
@@ -856,6 +855,7 @@ pub(in crate::services::discord) fn delivered_frontier_exceeds_current_eof(
 fn reanchor_current_generation_frontier_at(
     path: &Path,
     current_gen_mtime: i64,
+    expected_frontier_end: u64,
     reanchor_offset: u64,
 ) -> Result<bool, String> {
     let _lock = lock_record_path(path)?;
@@ -866,6 +866,7 @@ fn reanchor_current_generation_frontier_at(
         return Ok(false);
     };
     if !durable_frontier_generation_current(frontier.generation_mtime_ns, current_gen_mtime)
+        || frontier.range.1 != expected_frontier_end
         || frontier.range.1 <= reanchor_offset
     {
         return Ok(false);
@@ -886,6 +887,7 @@ pub(in crate::services::discord) fn reanchor_current_generation_frontier(
     provider: &ProviderKind,
     channel: ChannelId,
     tmux_session_name: &str,
+    expected_frontier_end: u64,
     reanchor_offset: u64,
 ) -> Result<bool, String> {
     let Some(path) = delivery_record_path(provider, channel.get()) else {
@@ -894,6 +896,7 @@ pub(in crate::services::discord) fn reanchor_current_generation_frontier(
     reanchor_current_generation_frontier_at(
         &path,
         current_generation_mtime_ns(tmux_session_name),
+        expected_frontier_end,
         reanchor_offset,
     )
 }
@@ -2313,9 +2316,18 @@ mod tests {
         )
         .unwrap();
 
-        assert!(current_generation_frontier_exceeds_eof_at(&path, 700, 250));
-        assert!(!current_generation_frontier_exceeds_eof_at(&path, 701, 250));
-        assert!(!current_generation_frontier_exceeds_eof_at(&path, 700, 900));
+        assert_eq!(
+            current_generation_frontier_exceeding_eof_at(&path, 700, 250),
+            Some(900)
+        );
+        assert_eq!(
+            current_generation_frontier_exceeding_eof_at(&path, 701, 250),
+            None
+        );
+        assert_eq!(
+            current_generation_frontier_exceeding_eof_at(&path, 700, 900),
+            None
+        );
     }
 
     #[test]
@@ -2334,15 +2346,57 @@ mod tests {
         )
         .unwrap();
 
-        assert!(reanchor_current_generation_frontier_at(&path, 700, 250).unwrap());
+        assert!(reanchor_current_generation_frontier_at(&path, 700, 900, 250).unwrap());
         let rewritten = read_record_at(&path).unwrap().delivered_frontier.unwrap();
         assert_eq!(rewritten.range, (80, 250));
         assert_eq!(rewritten.generation_mtime_ns, 700);
         assert_eq!(rewritten.attempts, 3);
         assert_eq!(rewritten.panel_msg_id, Some(42));
         assert_eq!(rewritten.panel_channel_id, Some(84));
-        assert!(!current_generation_frontier_exceeds_eof_at(&path, 700, 250));
-        assert!(!reanchor_current_generation_frontier_at(&path, 700, 250).unwrap());
+        assert_eq!(
+            current_generation_frontier_exceeding_eof_at(&path, 700, 250),
+            None
+        );
+        assert!(!reanchor_current_generation_frontier_at(&path, 700, 900, 250).unwrap());
+    }
+
+    #[test]
+    fn frontier_reanchor_defers_when_concurrent_commit_wins_lock_4841() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 48_411);
+        write_delivered_frontier_at(
+            &path,
+            DeliveredCommit {
+                range: (0, 900),
+                generation_mtime_ns: 700,
+                attempts: 1,
+                panel_msg_id: None,
+                panel_channel_id: None,
+            },
+        )
+        .unwrap();
+        let observed_frontier =
+            current_generation_frontier_exceeding_eof_at(&path, 700, 250).unwrap();
+
+        write_delivered_frontier_at(
+            &path,
+            DeliveredCommit {
+                range: (250, 400),
+                generation_mtime_ns: 700,
+                attempts: 2,
+                panel_msg_id: Some(42),
+                panel_channel_id: Some(84),
+            },
+        )
+        .unwrap();
+
+        assert!(
+            !reanchor_current_generation_frontier_at(&path, 700, observed_frontier, 250).unwrap()
+        );
+        let winner = read_record_at(&path).unwrap().delivered_frontier.unwrap();
+        assert_eq!(winner.range, (250, 400));
+        assert_eq!(winner.attempts, 2);
+        assert_eq!(winner.panel_msg_id, Some(42));
     }
 
     #[test]
@@ -2361,7 +2415,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!reanchor_current_generation_frontier_at(&path, 701, 250).unwrap());
+        assert!(!reanchor_current_generation_frontier_at(&path, 701, 900, 250).unwrap());
         assert_eq!(
             read_record_at(&path)
                 .unwrap()

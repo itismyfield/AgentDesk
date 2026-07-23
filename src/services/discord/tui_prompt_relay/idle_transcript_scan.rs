@@ -130,7 +130,7 @@ pub(super) fn claude_idle_safe_reanchor_offset(
             )
         })?;
         if chunk.last() == Some(&b'\n') {
-            return Ok(current_eof);
+            return Ok(search_end);
         }
         if let Some(index) = chunk.iter().rposition(|byte| *byte == b'\n') {
             return Ok(search_start + index as u64 + 1);

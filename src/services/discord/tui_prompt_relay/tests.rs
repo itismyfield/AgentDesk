@@ -4119,6 +4119,33 @@ fn claude_idle_transcript_scan_replays_full_prompt_after_mid_line_shrink() {
 }
 
 #[test]
+fn claude_idle_safe_reanchor_handles_exact_backward_chunk_boundaries() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let transcript = dir.path().join("chunk-boundary.jsonl");
+    const CHUNK: usize = 8 * 1024;
+
+    for (newline_at, current_eof, expected) in [
+        (CHUNK - 2, 2 * CHUNK, CHUNK - 1),
+        (CHUNK - 1, 2 * CHUNK, CHUNK),
+        (CHUNK, 2 * CHUNK, CHUNK + 1),
+        (CHUNK - 1, CHUNK, CHUNK),
+        (CHUNK - 1, 2 * CHUNK - 1, CHUNK),
+        (CHUNK - 1, 2 * CHUNK, CHUNK),
+        (CHUNK - 1, 2 * CHUNK + 1, CHUNK),
+    ] {
+        let mut bytes = vec![b'x'; current_eof];
+        bytes[newline_at] = b'\n';
+        std::fs::write(&transcript, bytes).expect("write boundary transcript");
+        assert_eq!(
+            claude_idle_safe_reanchor_offset(&transcript, current_eof as u64)
+                .expect("resolve chunk boundary"),
+            expected as u64,
+            "newline_at={newline_at}, current_eof={current_eof}"
+        );
+    }
+}
+
+#[test]
 fn claude_idle_transcript_scan_relays_prompt_appended_after_compaction_anchor() {
     let dir = tempfile::tempdir().expect("temp dir");
     let transcript = dir.path().join("transcript.jsonl");
