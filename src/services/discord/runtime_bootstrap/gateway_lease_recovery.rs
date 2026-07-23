@@ -213,7 +213,7 @@ fn unfence_runtimes(runtimes: &[Arc<SharedData>]) {
     }
 }
 
-fn restart_file_matches(root: &std::path::Path, name: &str, nonce: &str) -> bool {
+pub(super) fn restart_file_nonce(root: &std::path::Path, name: &str) -> Option<String> {
     std::fs::read_to_string(root.join(name))
         .ok()
         .and_then(|request| {
@@ -222,11 +222,16 @@ fn restart_file_matches(root: &std::path::Path, name: &str, nonce: &str) -> bool
                 .find_map(|line| line.strip_prefix("nonce="))
                 .map(str::to_owned)
         })
-        .as_deref()
-        == Some(nonce)
 }
 
-fn try_create_restart_marker(marker: &std::path::Path, request: &str) -> std::io::Result<bool> {
+fn restart_file_matches(root: &std::path::Path, name: &str, nonce: &str) -> bool {
+    restart_file_nonce(root, name).as_deref() == Some(nonce)
+}
+
+pub(super) fn try_create_restart_marker(
+    marker: &std::path::Path,
+    request: &str,
+) -> std::io::Result<bool> {
     use std::io::Write;
     let mut file = match std::fs::OpenOptions::new()
         .write(true)
@@ -356,11 +361,32 @@ async fn attempt_clean_standby_promotion(
     match try_create_restart_marker(&marker, &request) {
         Ok(true) => {}
         Ok(false) => {
-            // A deploy/restart request already owns the process-wide marker.
-            // Leave the shared fence intact for that owner and release only the
-            // promotion-local CAS so future standby retries are not wedged.
-            STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
-            return true;
+            // A deploy/restart request already owns the marker. Monitor that
+            // nonce as the process-wide handoff owner: if it commits, the shared
+            // fence stays closed; if it is cancelled/removed before commit, this
+            // promotion must restore its preflight fence and resume lease retry.
+            let Some(existing_nonce) = restart_file_nonce(&root, "restart_pending") else {
+                recover_cancelled_promotion(&runtimes);
+                return false;
+            };
+            return match wait_for_promotion_handoff(&root, &existing_nonce).await {
+                PromotionHandoffOutcome::Committed => {
+                    STANDBY_PROMOTION_IN_PROGRESS
+                        .store(false, std::sync::atomic::Ordering::Release);
+                    true
+                }
+                PromotionHandoffOutcome::Cancelled => {
+                    recover_cancelled_promotion(&runtimes);
+                    false
+                }
+                PromotionHandoffOutcome::Superseded => {
+                    // Ownership moved again; keep the inherited fence closed for
+                    // the newest request and release only promotion-local state.
+                    STANDBY_PROMOTION_IN_PROGRESS
+                        .store(false, std::sync::atomic::Ordering::Release);
+                    true
+                }
+            };
         }
         Err(error) => {
             tracing::error!(%error, "GATEWAY-LEASE: failed to publish standby promotion restart marker");

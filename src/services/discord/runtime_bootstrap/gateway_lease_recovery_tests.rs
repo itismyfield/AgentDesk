@@ -6,7 +6,7 @@ use super::gateway_lease_recovery::{
     GATEWAY_LEASE_APPLICATION_PREFIX, GatewayLeaseHolder, PromotionHandoffOutcome,
     STANDBY_PROMOTION_IN_PROGRESS, gateway_holder_is_reapable, gateway_lease_application_name_for,
     reap_orphaned_gateway_lease_for_instance_with_min_age, recover_cancelled_promotion,
-    wait_for_promotion_handoff,
+    restart_file_nonce, try_create_restart_marker, wait_for_promotion_handoff,
 };
 use crate::services::discord::ProviderKind;
 
@@ -104,6 +104,56 @@ async fn superseded_promotion_preserves_new_owner_fence_and_flags() {
         );
     }
     assert!(root.path().join("restart_pending").exists());
+}
+
+#[tokio::test]
+async fn existing_marker_cancel_restores_promotion_fence_for_retry() {
+    STANDBY_PROMOTION_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
+    let runtime_a = crate::services::discord::make_shared_data_for_tests();
+    let runtime_b = crate::services::discord::make_shared_data_for_tests();
+    let runtimes = vec![runtime_a.clone(), runtime_b.clone()];
+    for runtime in &runtimes {
+        runtime.restart.intake_worker_lifecycle.fence_admission();
+        runtime
+            .restart
+            .restart_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    let root = tempfile::tempdir().expect("runtime root");
+    let marker = root.path().join("restart_pending");
+    std::fs::write(&marker, "nonce=deploy-b\nsource=deploy\n").expect("existing marker");
+    assert!(!try_create_restart_marker(&marker, "nonce=promotion-a\n").expect("exclusive create"));
+    let existing_nonce =
+        restart_file_nonce(root.path(), "restart_pending").expect("existing nonce");
+    let root_for_owner = root.path().to_path_buf();
+    let owner =
+        tokio::spawn(
+            async move { wait_for_promotion_handoff(&root_for_owner, &existing_nonce).await },
+        );
+    std::fs::write(root.path().join("restart_cancelled"), "nonce=deploy-b\n")
+        .expect("cancel existing owner");
+    std::fs::remove_file(&marker).expect("remove existing marker");
+    assert_eq!(
+        owner.await.expect("owner join"),
+        PromotionHandoffOutcome::Cancelled
+    );
+    recover_cancelled_promotion(&runtimes);
+
+    for runtime in runtimes {
+        assert!(
+            !runtime
+                .restart
+                .intake_worker_lifecycle
+                .admission_is_fenced()
+        );
+        assert!(
+            !runtime
+                .restart
+                .restart_pending
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+    }
+    assert!(!STANDBY_PROMOTION_IN_PROGRESS.load(std::sync::atomic::Ordering::Acquire));
 }
 
 #[test]
