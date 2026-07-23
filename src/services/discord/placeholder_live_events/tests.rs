@@ -399,6 +399,95 @@ fn status_panel_machine_turn_busy_replaces_idle_activity_label() {
 }
 
 #[test]
+fn background_task_terminal_event_clears_machine_turn_busy_footer_only() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_783_001);
+    let tool_use_id = "background-bash-1";
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Bash",
+            &json!({"command": "sleep 1", "run_in_background": true}).to_string(),
+            Some(tool_use_id),
+        ),
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::MachineTurnBusy {
+            reason: "background task 완료 알림".to_string(),
+        },
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification_with_tool_use_id(
+            "background",
+            "completed",
+            "Background command finished",
+            Some(tool_use_id),
+        ),
+    );
+
+    assert_eq!(
+        status_for(&events, channel_id),
+        DerivedStatus::Completed {
+            kind: CompletedKind::Background
+        },
+        "footer-only background completion must clear the machine busy label"
+    );
+}
+
+#[test]
+fn subagent_terminal_event_keeps_machine_turn_busy_until_turn_completed() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_783_002);
+    let tool_use_id = "subagent-1";
+
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({"description": "Review changes"}).to_string(),
+            Some(tool_use_id),
+        ),
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::MachineTurnBusy {
+            reason: "subagent 완료 알림".to_string(),
+        },
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification_with_tool_use_id(
+            "subagent",
+            "completed",
+            "Agent \"Review changes\" completed",
+            Some(tool_use_id),
+        ),
+    );
+
+    assert!(matches!(
+        status_for(&events, channel_id),
+        DerivedStatus::MachineTurnBusy { .. }
+    ));
+
+    events.push_status_event(
+        channel_id,
+        StatusEvent::TurnCompleted {
+            background: false,
+            background_agent_pending: false,
+        },
+    );
+    assert_eq!(
+        status_for(&events, channel_id),
+        DerivedStatus::Completed {
+            kind: CompletedKind::Foreground
+        }
+    );
+}
+
+#[test]
 fn status_panel_absorbs_stale_and_final_into_the_activity_emoji() {
     // #3983 items 2 + B: the separate 신뢰도 line is retired; the freshness class is
     // absorbed into the activity emoji, and the following fields carry stable times.

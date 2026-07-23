@@ -418,7 +418,14 @@ impl StatusPanelState {
                         slot.summary = Some(summary);
                     }
                 }
-                self.status = DerivedStatus::Running;
+                // A terminal subagent notification can arrive while its
+                // machine-only parent turn is still running. Preserve the
+                // read-only busy label until the parent emits TurnCompleted;
+                // otherwise this terminal slot update is the normal return to
+                // the live running state.
+                if !matches!(self.status, DerivedStatus::MachineTurnBusy { .. }) {
+                    self.status = DerivedStatus::Running;
+                }
             }
             StatusEvent::TaskToolUpdate {
                 name,
@@ -453,6 +460,18 @@ impl StatusPanelState {
                 success,
             } => {
                 finish_background_task_tool_slot(&mut self.tasks, &tool_use_id, success);
+                // A footer-only background completion has no assistant body and
+                // therefore no ordinary TurnCompleted producer. Its terminal
+                // event is the machine turn's final observable lifecycle edge.
+                // Clear only the derived display status; task slots and all
+                // ownership/injection state remain untouched.
+                if matches!(self.status, DerivedStatus::MachineTurnBusy { .. }) {
+                    self.status = DerivedStatus::Completed {
+                        kind: CompletedKind::Background,
+                    };
+                    self.background_agent_pending = false;
+                    self.completed_at = Some(std::time::Instant::now());
+                }
             }
             StatusEvent::TodoUpdate { items } => {
                 self.todos = items
