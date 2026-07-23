@@ -2,6 +2,30 @@ use super::*;
 
 type DispatchLeaseHandle = Arc<crate::services::turn_orchestrator::DispatchLease>;
 
+pub(super) fn persistence_context(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> crate::services::turn_orchestrator::QueuePersistenceContext {
+    crate::services::turn_orchestrator::QueuePersistenceContext::new(
+        provider,
+        &shared.token_hash,
+        shared
+            .dispatch
+            .role_overrides
+            .get(&channel_id)
+            .map(|override_id| override_id.value().get()),
+    )
+}
+
+pub(super) fn log_kickoff_rejected_restore(provider: &ProviderKind, channel_id: ChannelId) {
+    tracing::error!(
+        provider = provider.as_str(),
+        channel_id = channel_id.get(),
+        "KICKOFF: queued admission failed to restore dequeued head"
+    );
+}
+
 /// Outcome of `mailbox_enqueue_intervention`: exposes both the enqueue
 /// success and whether the incoming intervention was merged into the previous
 /// queue entry, so callers can pick a different reaction emoji for merged

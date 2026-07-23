@@ -12,6 +12,7 @@ use crate::services::provider::{CancelToken, ProviderKind};
 
 // #3293: non-creating registry lookup + operator-gated idle-entry purge.
 mod active_source_dedup;
+mod dispatch_cleanup;
 mod dispatch_reservation;
 mod episode_identity;
 mod front_requeue;
@@ -1125,63 +1126,6 @@ impl ChannelMailboxHandle {
             },
         )
         .await
-    }
-
-    pub(crate) async fn abandon_pending_dispatch(
-        &self,
-        user_message_id: MessageId,
-        persistence: QueuePersistenceContext,
-    ) {
-        let _ = self
-            .request(
-                |reply| ChannelMailboxMsg::AbandonPendingDispatch {
-                    user_message_id,
-                    dispatch_lease: None,
-                    persistence,
-                    consume_marker: true,
-                    reply,
-                },
-                false,
-            )
-            .await;
-    }
-
-    pub(crate) async fn abandon_pending_dispatch_if_lease_matches(
-        &self,
-        user_message_id: MessageId,
-        dispatch_lease: Arc<DispatchLease>,
-        persistence: QueuePersistenceContext,
-    ) -> bool {
-        self.request(
-            |reply| ChannelMailboxMsg::AbandonPendingDispatch {
-                user_message_id,
-                dispatch_lease: Some(dispatch_lease),
-                persistence,
-                consume_marker: true,
-                reply,
-            },
-            false,
-        )
-        .await
-    }
-
-    pub(crate) async fn clear_pending_dispatch_reservation(
-        &self,
-        user_message_id: MessageId,
-        persistence: QueuePersistenceContext,
-    ) {
-        let _ = self
-            .request(
-                |reply| ChannelMailboxMsg::AbandonPendingDispatch {
-                    user_message_id,
-                    dispatch_lease: None,
-                    persistence,
-                    consume_marker: false,
-                    reply,
-                },
-                false,
-            )
-            .await;
     }
 
     pub(crate) async fn cancel_queued_message(

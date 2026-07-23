@@ -549,18 +549,31 @@ async fn distinct_open_route_requeues_queued_successor_pg() {
     .expect("predecessor forwards");
 
     let successor = queued_intervention(4_350_412, Vec::new());
+    let persistence = crate::services::discord::queue_persistence_context(
+        &shared,
+        &ProviderKind::Claude,
+        channel_id,
+    );
+    shared
+        .mailbox(channel_id)
+        .replace_queue(vec![successor.clone()], persistence.clone())
+        .await;
+    let dequeued = shared.mailbox(channel_id).take_next_soft(persistence).await;
+    let intervention = dequeued
+        .intervention
+        .expect("queued successor must be dequeued before admission");
     assert!(matches!(
         admit_queued_intake(
             &deps,
             ProviderKind::Claude,
             channel_id,
-            &successor,
-            successor.author_id,
+            &intervention,
+            intervention.author_id,
             "successor-owner".to_string(),
             false,
             false,
             "owner_affinity_open_route_test",
-            None,
+            dequeued.dispatch_lease,
         )
         .await,
         QueuedAdmissionDisposition::Deferred

@@ -2563,21 +2563,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
     })
 }
 
-fn queue_persistence_context(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-) -> QueuePersistenceContext {
-    QueuePersistenceContext::new(
-        provider,
-        &shared.token_hash,
-        shared
-            .dispatch
-            .role_overrides
-            .get(&channel_id)
-            .map(|override_id| override_id.value().get()),
-    )
-}
+use queue_dispatch::persistence_context as queue_persistence_context;
 
 async fn mailbox_snapshot(shared: &SharedData, channel_id: ChannelId) -> ChannelMailboxSnapshot {
     match shared.mailbox_peek(channel_id) {
@@ -4224,11 +4210,7 @@ async fn kickoff_idle_queue_channel(
             return IdleQueueKickoffChannelOutcome::default();
         }
         router::QueuedAdmissionDisposition::RejectedRestore => {
-            tracing::error!(
-                provider = provider.as_str(),
-                channel_id = channel_id.get(),
-                "KICKOFF: queued admission failed to restore dequeued head"
-            );
+            queue_dispatch::log_kickoff_rejected_restore(provider, channel_id);
             drop(dispatch_lease);
             return IdleQueueKickoffChannelOutcome::default();
         }

@@ -2186,16 +2186,18 @@ pub(super) async fn handle_text_message(
                 .intervention_queue
                 .len();
         let retry_present_or_accepted = busy_retry::finalize_enqueue(
-            shared,
-            http,
-            &provider,
-            channel_id,
-            user_msg_id,
-            placeholder_msg_id,
-            turn_start_attempt,
-            session_retry_context.as_ref(),
-            feedback_reminder.as_deref(),
-            wip_warning.as_deref(),
+            busy_retry::FinalizeEnqueueContext {
+                shared,
+                http,
+                provider: &provider,
+                channel_id,
+                user_msg_id,
+                placeholder_msg_id,
+                turn_start_attempt,
+                session_retry_context: session_retry_context.as_ref(),
+                feedback_reminder: feedback_reminder.as_deref(),
+                wip_warning: wip_warning.as_deref(),
+            },
             &enqueue_outcome,
         )
         .await;

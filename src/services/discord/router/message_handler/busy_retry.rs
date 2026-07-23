@@ -11,22 +11,37 @@ pub(super) fn present_or_accepted(outcome: &MailboxEnqueueOutcome) -> bool {
         )
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(super) struct FinalizeEnqueueContext<'a> {
+    pub(super) shared: &'a Arc<SharedData>,
+    pub(super) http: &'a Arc<serenity::http::Http>,
+    pub(super) provider: &'a crate::services::provider::ProviderKind,
+    pub(super) channel_id: ChannelId,
+    pub(super) user_msg_id: MessageId,
+    pub(super) placeholder_msg_id: MessageId,
+    pub(super) turn_start_attempt:
+        Option<crate::services::discord::turn_view_reconciler::TurnStartAttempt>,
+    pub(super) session_retry_context:
+        Option<&'a crate::services::discord::router::turn_start::FormattedSessionRetryContext>,
+    pub(super) feedback_reminder: Option<&'a str>,
+    pub(super) wip_warning: Option<&'a str>,
+}
+
 pub(super) async fn finalize_enqueue(
-    shared: &Arc<SharedData>,
-    http: &Arc<serenity::http::Http>,
-    provider: &crate::services::provider::ProviderKind,
-    channel_id: ChannelId,
-    user_msg_id: MessageId,
-    placeholder_msg_id: MessageId,
-    turn_start_attempt: Option<crate::services::discord::turn_view_reconciler::TurnStartAttempt>,
-    session_retry_context: Option<
-        &crate::services::discord::router::turn_start::FormattedSessionRetryContext,
-    >,
-    feedback_reminder: Option<&str>,
-    wip_warning: Option<&str>,
+    context: FinalizeEnqueueContext<'_>,
     outcome: &MailboxEnqueueOutcome,
 ) -> bool {
+    let FinalizeEnqueueContext {
+        shared,
+        http,
+        provider,
+        channel_id,
+        user_msg_id,
+        placeholder_msg_id,
+        turn_start_attempt,
+        session_retry_context,
+        feedback_reminder,
+        wip_warning,
+    } = context;
     let accepted = present_or_accepted(outcome);
     if outcome.enqueued {
         super::intake_turn::race_loss::mailbox_reaction::note_busy_tui_pre_submit_queue_pending(
