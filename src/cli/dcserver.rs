@@ -684,18 +684,15 @@ pub fn handle_restart_dcserver(
         );
 
         let start = Instant::now();
-        loop {
-            // If marker file is gone, dcserver consumed it and exited
+        let ownership = loop {
             if !marker.path().exists() {
                 println!("   ✓ dcserver acknowledged restart marker");
-                break;
+                return;
             }
-            // Check if dcserver process is still running
             let pid_file = root.join("runtime").join("dcserver.pid");
             if let Ok(pid_str) = fs::read_to_string(&pid_file)
                 && let Ok(pid) = pid_str.trim().parse::<u32>()
             {
-                // Check if process still exists
                 let process_alive = {
                     #[cfg(unix)]
                     {
@@ -716,27 +713,39 @@ pub fn handle_restart_dcserver(
                 };
                 if !process_alive {
                     println!("   ✓ dcserver process exited gracefully");
-                    marker.remove_if_owned();
-                    break;
+                    return;
                 }
             }
             if start.elapsed() >= DEFERRED_TIMEOUT {
-                if marker.is_current_owner() {
-                    eprintln!("   ⚠ Deferred restart timeout — falling back to force kill");
-                    marker.remove_if_owned();
-                } else {
-                    eprintln!(
-                        "   ⚠ restart marker ownership changed while waiting; preserving the current owner and refusing force-kill"
-                    );
-                    return;
-                }
-                break;
+                break match marker.resolve_ownership(kill_existing_dcserver_processes) {
+                    Ok(ownership) => ownership,
+                    Err(error) => {
+                        eprintln!(
+                            "   ⚠ Failed to resolve restart marker ownership: {error}; refusing force-kill"
+                        );
+                        return;
+                    }
+                };
             }
             std::thread::sleep(Duration::from_millis(500));
+        };
+
+        match ownership {
+            super::dcserver_restart_marker::MarkerOwnership::RemovedOwned => {
+                eprintln!("   ⚠ Deferred restart timeout — force-kill fallback completed");
+            }
+            super::dcserver_restart_marker::MarkerOwnership::MissingCommitted => {
+                println!("   ✓ dcserver acknowledged restart marker");
+            }
+            super::dcserver_restart_marker::MarkerOwnership::Replaced(owner) => {
+                eprintln!(
+                    "   ⚠ restart already owned ({owner}); preserving the replacement and refusing force-kill"
+                );
+            }
         }
+        return;
     }
 
-    // Kill remaining dcserver processes (either timeout fallback or normal cleanup)
     kill_existing_dcserver_processes();
 
     let launchd_label = current_dcserver_launchd_label();

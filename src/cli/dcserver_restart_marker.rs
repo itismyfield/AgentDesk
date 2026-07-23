@@ -14,13 +14,16 @@ pub(crate) struct RestartMarkerOwner {
 }
 
 impl RestartMarkerOwner {
-    fn from_path(path: &Path) -> Self {
-        let content = fs::read_to_string(path).unwrap_or_default();
+    fn from_content(content: &str) -> Self {
         Self {
-            nonce: marker_field(&content, "nonce"),
-            source: marker_field(&content, "source"),
-            scope: marker_field(&content, "scope"),
+            nonce: marker_field(content, "nonce"),
+            source: marker_field(content, "source"),
+            scope: marker_field(content, "scope"),
         }
+    }
+
+    fn from_path(path: &Path) -> io::Result<Self> {
+        fs::read_to_string(path).map(|content| Self::from_content(&content))
     }
 }
 
@@ -48,6 +51,19 @@ impl fmt::Display for RestartMarkerCreateError {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MarkerOwnership {
+    RemovedOwned,
+    MissingCommitted,
+    Replaced(RestartMarkerOwner),
+}
+
+impl MarkerOwnership {
+    pub(crate) fn permits_force_kill(&self) -> bool {
+        matches!(self, Self::RemovedOwned)
+    }
+}
+
 pub(crate) struct QuickRestartMarker {
     path: PathBuf,
     nonce: String,
@@ -58,14 +74,57 @@ impl QuickRestartMarker {
         &self.path
     }
 
-    pub(crate) fn is_current_owner(&self) -> bool {
-        RestartMarkerOwner::from_path(&self.path).nonce.as_deref() == Some(self.nonce.as_str())
+    pub(crate) fn resolve_ownership(
+        &self,
+        on_removed_owned: impl FnOnce(),
+    ) -> io::Result<MarkerOwnership> {
+        self.resolve_ownership_inner(|| {}, on_removed_owned)
     }
 
-    pub(crate) fn remove_if_owned(&self) {
-        if self.is_current_owner() {
-            let _ = fs::remove_file(&self.path);
+    fn resolve_ownership_inner(
+        &self,
+        after_claim: impl FnOnce(),
+        on_removed_owned: impl FnOnce(),
+    ) -> io::Result<MarkerOwnership> {
+        let claimed_path = self
+            .path
+            .with_file_name(format!(".restart_pending.resolve.{}", uuid::Uuid::new_v4()));
+        match fs::rename(&self.path, &claimed_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(MarkerOwnership::MissingCommitted);
+            }
+            Err(error) => return Err(error),
         }
+
+        after_claim();
+        let claimed_owner = match RestartMarkerOwner::from_path(&claimed_path) {
+            Ok(owner) => owner,
+            Err(error) => {
+                restore_claimed_marker(&claimed_path, &self.path);
+                return Err(error);
+            }
+        };
+        if claimed_owner.nonce.as_deref() != Some(self.nonce.as_str()) {
+            restore_claimed_marker(&claimed_path, &self.path);
+            return Ok(MarkerOwnership::Replaced(claimed_owner));
+        }
+
+        if self.path.exists() {
+            let replacement = RestartMarkerOwner::from_path(&self.path)?;
+            fs::remove_file(claimed_path)?;
+            return Ok(MarkerOwnership::Replaced(replacement));
+        }
+
+        fs::remove_file(claimed_path)?;
+        on_removed_owned();
+        Ok(MarkerOwnership::RemovedOwned)
+    }
+}
+
+fn restore_claimed_marker(claimed_path: &Path, marker_path: &Path) {
+    if fs::hard_link(claimed_path, marker_path).is_ok() {
+        let _ = fs::remove_file(claimed_path);
     }
 }
 
@@ -83,9 +142,12 @@ pub(crate) fn create_quick_restart_marker(
     let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            return Err(RestartMarkerCreateError::AlreadyOwned(
-                RestartMarkerOwner::from_path(&path),
-            ));
+            let owner = RestartMarkerOwner::from_path(&path).unwrap_or(RestartMarkerOwner {
+                nonce: None,
+                source: None,
+                scope: None,
+            });
+            return Err(RestartMarkerCreateError::AlreadyOwned(owner));
         }
         Err(error) => return Err(RestartMarkerCreateError::Io(error)),
     };
@@ -152,14 +214,69 @@ mod tests {
     }
 
     #[test]
-    fn quick_restart_cleanup_does_not_remove_replacement_owner() {
+    fn ownership_resolution_preserves_replacement_between_check_and_claim() {
         let root = tempfile::tempdir().unwrap();
         let marker = create_quick_restart_marker(root.path(), "1.2.3").unwrap();
         let replacement = "nonce=replacement-owner\nsource=deploy-release\nscope=release\n";
-        fs::write(marker.path(), replacement).unwrap();
 
-        marker.remove_if_owned();
+        let force_kill_called = std::cell::Cell::new(false);
+        let outcome = marker
+            .resolve_ownership_inner(
+                || {
+                    fs::write(marker.path(), replacement).unwrap();
+                },
+                || force_kill_called.set(true),
+            )
+            .unwrap();
 
+        assert!(matches!(outcome, MarkerOwnership::Replaced(_)));
+        assert!(!outcome.permits_force_kill());
+        assert!(!force_kill_called.get());
         assert_eq!(fs::read_to_string(marker.path()).unwrap(), replacement);
+    }
+
+    #[test]
+    fn only_removed_owned_permits_force_kill() {
+        let replacement = MarkerOwnership::Replaced(RestartMarkerOwner {
+            nonce: Some("other".to_string()),
+            source: None,
+            scope: None,
+        });
+
+        assert!(MarkerOwnership::RemovedOwned.permits_force_kill());
+        assert!(!MarkerOwnership::MissingCommitted.permits_force_kill());
+        assert!(!replacement.permits_force_kill());
+    }
+
+    #[test]
+    fn normal_owned_timeout_resolution_removes_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = create_quick_restart_marker(root.path(), "1.2.3").unwrap();
+
+        let force_kill_called = std::cell::Cell::new(false);
+        let outcome = marker
+            .resolve_ownership(|| force_kill_called.set(true))
+            .unwrap();
+
+        assert_eq!(outcome, MarkerOwnership::RemovedOwned);
+        assert!(outcome.permits_force_kill());
+        assert!(force_kill_called.get());
+        assert!(!marker.path().exists());
+    }
+
+    #[test]
+    fn normal_ack_resolution_reports_missing_committed() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = create_quick_restart_marker(root.path(), "1.2.3").unwrap();
+        fs::remove_file(marker.path()).unwrap();
+
+        let force_kill_called = std::cell::Cell::new(false);
+        let outcome = marker
+            .resolve_ownership(|| force_kill_called.set(true))
+            .unwrap();
+
+        assert_eq!(outcome, MarkerOwnership::MissingCommitted);
+        assert!(!outcome.permits_force_kill());
+        assert!(!force_kill_called.get());
     }
 }
