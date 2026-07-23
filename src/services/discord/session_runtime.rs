@@ -138,7 +138,7 @@ pub(in crate::services::discord) async fn rebind_channel_session(
             remote_profile_name: None,
             last_active: tokio::time::Instant::now(),
             worktree: None,
-            born_generation: runtime_store::load_generation(),
+            born_generation: runtime_store::process_generation(),
         });
     let previous_path = session.current_path.clone();
     let previous_session_id = session.session_id.clone();
@@ -394,7 +394,7 @@ pub(super) async fn auto_restore_session_force(
                 remote_profile_name: None,
                 last_active: tokio::time::Instant::now(),
                 worktree: None,
-                born_generation: runtime_store::load_generation(),
+                born_generation: runtime_store::process_generation(),
             });
         session.channel_id = Some(channel_id.get());
         session.last_active = tokio::time::Instant::now();
@@ -457,7 +457,7 @@ pub(super) async fn bootstrap_thread_session(
             remote_profile_name: None,
             last_active: tokio::time::Instant::now(),
             worktree: None,
-            born_generation: runtime_store::load_generation(),
+            born_generation: runtime_store::process_generation(),
         });
     // Prefer restoring the worktree persisted for this thread session across a
     // dcserver restart. The in-memory `sessions` map is cleared on restart, so

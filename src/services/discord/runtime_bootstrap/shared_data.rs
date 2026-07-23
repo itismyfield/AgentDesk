@@ -46,7 +46,7 @@ pub(super) struct RestoredSessionState<'a> {
 
 /// Build all owned `SharedData` fields and wrap in an `Arc`. Side-effecting
 /// initializers (`TurnFinalizer::spawn`,
-/// `runtime_store::load_generation`, `load_queue_exit_placeholder_clears`,
+/// `runtime_store::allocate_process_generation`, `load_queue_exit_placeholder_clears`,
 /// the `inflight_signals` and `turn_completion_events` broadcast channels) run here in the exact same order
 /// as the original inline struct literal. `bot_settings`, `services.initial_skills`,
 /// `counters.global_active`, `counters.global_finalizing`, `services.pg_pool`, and
@@ -90,6 +90,7 @@ pub(super) fn run_bot_build_shared_data(
         codex_goals_channels: restored_codex_goals_channels,
         codex_goals_reset_channels: restored_codex_goals_reset_channels,
     } = restored;
+    let process_generation = runtime_store::allocate_process_generation();
     Arc::new(SharedData {
         core: Mutex::new(CoreState {
             sessions: HashMap::new(),
@@ -144,7 +145,7 @@ pub(super) fn run_bot_build_shared_data(
         // calls, but all three are side-effect-free initializers (parameter
         // move, `Arc::clone`, const constructor), so the relative order of
         // every side-effecting initializer
-        // (`load_queue_exit_placeholder_clears` ↔ `load_generation` ↔
+        // (`load_queue_exit_placeholder_clears` ↔ `process_generation` ↔
         // `Instant::now` ↔ `TurnFinalizer::spawn` ↔ `broadcast::channel`) is
         // preserved.
         restart: RestartLifecycle {
@@ -153,7 +154,7 @@ pub(super) fn run_bot_build_shared_data(
             intake_worker_lifecycle:
                 crate::services::cluster::intake_worker::IntakeWorkerLifecycle::default(),
             finalizing_turns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            current_generation: runtime_store::load_generation(),
+            current_generation: process_generation,
             restart_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reconcile_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             deferred_hook_backlog: std::sync::atomic::AtomicUsize::new(0),

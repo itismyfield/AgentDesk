@@ -335,6 +335,24 @@ pub(super) fn persist_under_lock(
     persist_under_lock_inner(root, path, state, caller, true)
 }
 
+/// Complete a successful restart readoption while the caller owns the canonical
+/// sidecar flock. The readoption bit is idempotent, but an outgoing-process
+/// restart marker is always consumed before the row can be cleared normally.
+pub(super) fn persist_readopted_under_lock(
+    root: &Path,
+    path: &Path,
+    state: &mut InflightTurnState,
+    caller: &'static str,
+) -> Result<(), String> {
+    let needs_persist = !state.readopted_from_inflight || state.restart_mode.is_some();
+    if !needs_persist {
+        return Ok(());
+    }
+    state.readopted_from_inflight = true;
+    state.clear_restart_mode();
+    persist_under_lock(root, path, state, caller)
+}
+
 /// Like [`persist_under_lock`] but preserves the row's existing `updated_at`
 /// instead of bumping it to now. Used by the #3982 orphan downgrade: the owner
 /// correction of a confirmed-dead orphan is not new lifecycle activity, so its

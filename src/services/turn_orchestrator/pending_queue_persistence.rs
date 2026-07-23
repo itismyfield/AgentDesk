@@ -566,7 +566,7 @@ fn pending_queue_item_to_intervention(
         source_message_ids.push(MessageId::new(item.message_id));
     }
     let queued_generation = if item.queued_generation == 0 {
-        crate::services::discord::runtime_store::load_generation()
+        crate::services::discord::runtime_store::process_generation()
     } else {
         item.queued_generation
     };
