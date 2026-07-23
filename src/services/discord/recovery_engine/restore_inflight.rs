@@ -2144,6 +2144,18 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         )
         .await;
 
+        // The generic reader feeds RuntimeReady into turn_bridge, just like the
+        // immediate watcher-reattach branches below. Consume the outgoing
+        // process's planned-restart authority through the same identity-guarded
+        // readoption helper before the reader can publish that handoff. A failed
+        // adoption stays fail-closed: runtime_stamp will continue refusing the
+        // reserved durable row rather than writing through restart authority.
+        if super::runtime::readopt_marker_eligible_real_user(&state) {
+            let _ = super::runtime::mark_readopted_from_inflight(
+                shared, provider, channel_id, &state, true,
+            );
+        }
+
         let adk_session_key = build_adk_session_key(shared, channel_id, provider, None).await;
         let adk_session_name = channel_name.clone();
         let adk_session_info = derive_adk_session_info(
@@ -2328,10 +2340,126 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
 
 #[cfg(test)]
 mod tests {
+    use crate::services::agent_protocol::{RuntimeHandoffKind, StreamMessage};
+    use crate::services::discord::InflightRestartMode;
     use crate::services::discord::inflight::{
         self, GuardedSaveOutcome, InflightTurnIdentity, InflightTurnState, RelayOwnerKind,
     };
     use crate::services::provider::ProviderKind;
+
+    fn generic_recovery_runtime_ready(
+        shared: &std::sync::Arc<super::SharedData>,
+        provider: &ProviderKind,
+        state: &InflightTurnState,
+        runtime_state: &InflightTurnState,
+        tx: &std::sync::mpsc::Sender<StreamMessage>,
+    ) -> GuardedSaveOutcome {
+        assert!(super::super::runtime::readopt_marker_eligible_real_user(
+            state
+        ));
+        let outcome = super::super::runtime::mark_readopted_from_inflight(
+            shared,
+            provider,
+            serenity::model::id::ChannelId::new(state.channel_id),
+            state,
+            true,
+        );
+        tx.send(StreamMessage::RuntimeReady {
+            handoff: super::super::runtime_handoff_for_recovery(
+                runtime_state.runtime_kind.expect("runtime kind"),
+                runtime_state.output_path.clone().expect("output path"),
+                runtime_state.input_fifo_path.clone(),
+                runtime_state
+                    .tmux_session_name
+                    .clone()
+                    .expect("tmux session"),
+                runtime_state.session_id.clone(),
+                runtime_state.last_offset,
+            ),
+        })
+        .expect("publish RuntimeReady after readoption");
+        assert!(
+            inflight::load_inflight_state(provider, state.channel_id)
+                .expect("readopted durable row")
+                .restart_mode
+                .is_none(),
+            "the generic recovery handoff must observe consumed restart authority"
+        );
+        outcome
+    }
+
+    #[test]
+    fn generic_recovery_consumes_restart_before_runtime_ready_and_persists_runtime_stamp() {
+        let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let shared = super::super::make_shared_data_for_tests_with_storage(None);
+        let provider = ProviderKind::Claude;
+        let channel_id = 4_259_703;
+        let mut state = InflightTurnState::new(
+            provider.clone(),
+            channel_id,
+            Some("adk-4259-generic-recovery".to_string()),
+            343_742_347_365_974_026,
+            4_259_713,
+            4_259_714,
+            "generic recovery runtime handoff".to_string(),
+            Some("provider-session-before-recovery".to_string()),
+            Some("AgentDesk-claude-old-runtime".to_string()),
+            Some("/runtime/old-transcript.jsonl".to_string()),
+            None,
+            128,
+        );
+        state.set_restart_mode(InflightRestartMode::DrainRestart);
+        inflight::save_inflight_state(&state).expect("seed planned-restart row");
+        let expected = InflightTurnIdentity::from_state(&state);
+
+        let mut runtime_state = state.clone();
+        runtime_state.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        runtime_state.output_path = Some("/runtime/recovered-transcript.jsonl".to_string());
+        runtime_state.last_offset = 4_096;
+        runtime_state.watcher_owner_channel_id = Some(channel_id);
+        runtime_state.set_relay_owner_kind(RelayOwnerKind::Watcher);
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        assert_eq!(
+            generic_recovery_runtime_ready(&shared, &provider, &state, &runtime_state, &tx,),
+            GuardedSaveOutcome::Saved,
+        );
+        assert!(matches!(
+            rx.recv().expect("RuntimeReady published"),
+            StreamMessage::RuntimeReady { .. }
+        ));
+        assert_eq!(
+            inflight::stamp_runtime_handoff_if_matches_identity(
+                &runtime_state,
+                &expected,
+                "test::generic_recovery_runtime_ready",
+            ),
+            GuardedSaveOutcome::Saved,
+            "runtime stamp must succeed only after generic recovery consumes restart authority"
+        );
+
+        let persisted = inflight::load_inflight_state(&provider, channel_id)
+            .expect("runtime-stamped recovery row");
+        assert!(persisted.readopted_from_inflight);
+        assert_eq!(persisted.restart_mode, None);
+        assert_eq!(persisted.restart_generation, None);
+        assert_eq!(persisted.runtime_kind, Some(RuntimeHandoffKind::ClaudeTui));
+        assert_eq!(
+            persisted.output_path.as_deref(),
+            Some("/runtime/recovered-transcript.jsonl")
+        );
+        assert_eq!(persisted.last_offset, 4_096);
+        assert_eq!(persisted.watcher_owner_channel_id, Some(channel_id));
+        assert_eq!(
+            persisted.effective_relay_owner_kind(),
+            RelayOwnerKind::Watcher
+        );
+    }
 
     #[test]
     fn restore_rollout_output_path_patch_preserves_concurrent_relay_fields() {
