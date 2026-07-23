@@ -3665,7 +3665,7 @@ async fn mailbox_requeue_intervention_front(
     provider: &ProviderKind,
     channel_id: ChannelId,
     intervention: Intervention,
-) {
+) -> RequeueInterventionResult {
     let result: RequeueInterventionResult = shared
         .mailbox(channel_id)
         .requeue_front(
@@ -3682,6 +3682,7 @@ async fn mailbox_requeue_intervention_front(
             "mailbox requeue-front failed durable pending-queue persistence; pending dispatch marker remains the durable backstop"
         );
     }
+    result
 }
 
 pub(in crate::services::discord) async fn mailbox_abandon_pending_dispatch(
