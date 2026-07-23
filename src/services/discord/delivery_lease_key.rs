@@ -59,11 +59,12 @@ impl DeliveryLeaseKey {
         )
     }
 
-    /// Build a lease key while allowing an observed JSONL range start to stand
-    /// in for a missing persisted turn boundary. TUI-direct turns can lose their
-    /// inflight row before terminal delivery; the immutable range start still
-    /// distinguishes the turn and prevents two relay owners from sharing the
-    /// degenerate channel-only key.
+    /// Build a lease key while allowing the canonical relay-range start to stand
+    /// in for a missing persisted turn boundary. The fallback is authoritative
+    /// only when `started_at` is also absent; partially identified legacy callers
+    /// keep the historical all-degenerate collapse so their actor backstop keys do
+    /// not silently change. Watcher and sink owners pass the same `[start, end)`
+    /// delivery range start, so an inflight-less TUI-direct turn still converges.
     #[track_caller]
     pub(in crate::services::discord) fn new_for_site_with_fallback_offset(
         channel_id: ChannelId,
@@ -78,13 +79,24 @@ impl DeliveryLeaseKey {
             let started_at = turn_started_at
                 .map(str::trim)
                 .filter(|value| !value.is_empty());
-            let effective_start_offset = turn_start_offset.or(fallback_turn_start_offset);
-            if let Some(start_offset) = effective_start_offset {
+            if let (Some(started_at), Some(start_offset)) = (started_at, turn_start_offset) {
                 return Self {
                     channel_id,
                     generation,
                     user_msg_id,
-                    turn_started_at: started_at.map(str::to_string),
+                    turn_started_at: Some(started_at.to_string()),
+                    turn_start_offset: Some(start_offset),
+                };
+            }
+            if started_at.is_none()
+                && turn_start_offset.is_none()
+                && let Some(start_offset) = fallback_turn_start_offset
+            {
+                return Self {
+                    channel_id,
+                    generation,
+                    user_msg_id,
+                    turn_started_at: None,
                     turn_start_offset: Some(start_offset),
                 };
             }
@@ -101,24 +113,24 @@ impl DeliveryLeaseKey {
             // Residual legacy fallback: all sites derive id-0 disambiguators from
             // the same origin (inflight state / frame fence stamped from it), so a
             // same-turn miss degrades everywhere together and dedup still holds.
-            Self {
+            return Self {
                 channel_id,
                 generation,
                 user_msg_id,
                 turn_started_at: None,
                 turn_start_offset: None,
-            }
-        } else {
-            // Preserve the old non-zero TurnKey behavior: the Discord snowflake is
-            // already the turn discriminator, so auxiliary timestamps must not
-            // participate in equality for non-zero ids.
-            Self {
-                channel_id,
-                generation,
-                user_msg_id,
-                turn_started_at: None,
-                turn_start_offset: None,
-            }
+            };
+        }
+
+        // Preserve the old non-zero TurnKey behavior: the Discord snowflake is
+        // already the turn discriminator, so auxiliary timestamps must not
+        // participate in equality for non-zero ids.
+        Self {
+            channel_id,
+            generation,
+            user_msg_id,
+            turn_started_at: None,
+            turn_start_offset: None,
         }
     }
 

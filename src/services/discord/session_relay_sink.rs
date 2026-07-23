@@ -639,8 +639,12 @@ impl SessionBoundDiscordRelaySink {
             delivery.frame_turn_user_msg_id,
             shared.restart.current_generation,
         );
-        let sink_lease_key =
-            delivery_lease_key_for_frame(channel, shared.restart.current_generation, delivery);
+        let sink_lease_key = delivery_lease_key_for_frame(
+            channel,
+            shared.restart.current_generation,
+            delivery,
+            start,
+        );
         let cell = shared.delivery_lease(channel);
         // Self-heal (`SinkDeliveryLeaseGuard::acquire`): reclaim an EXPIRED prior holder before acquire (a stale dead lease must not force a markerless POST).
         cell.reclaim_if_expired(super::lease_now_ms());
@@ -909,6 +913,7 @@ impl SessionBoundDiscordRelaySink {
                     channel,
                     shared.restart.current_generation,
                     &delivery,
+                    start,
                 );
                 let cell = shared.delivery_lease(channel);
                 SinkDeliveryLeaseGuard::acquire(&cell, sink_lease_key, start, end)
@@ -1527,13 +1532,15 @@ fn delivery_lease_key_for_frame(
     channel: ChannelId,
     generation: u64,
     delivery: &SessionRelayDelivery,
+    relay_range_start: u64,
 ) -> super::DeliveryLeaseKey {
-    super::DeliveryLeaseKey::new_for_site(
+    super::DeliveryLeaseKey::new_for_site_with_fallback_offset(
         channel,
         generation,
         delivery.frame_turn_user_msg_id,
         Some(&delivery.frame_turn_started_at),
         delivery.frame_turn_start_offset,
+        Some(relay_range_start),
         "sink",
     )
 }
@@ -2702,6 +2709,38 @@ mod tests {
     }
 
     #[test]
+    fn inflightless_sink_and_watcher_converge_on_canonical_range_start_4277() {
+        let channel = ChannelId::new(4_277_002);
+        let generation = 23;
+        let canonical_range_start = 640;
+        let watcher_observed_current_offset = 1_024;
+        let delivery = delivery_with_fence_offset(
+            "AgentDesk-claude-4277-convergence",
+            Some(1_024),
+            0,
+            "",
+            None,
+        );
+
+        let sink_key =
+            delivery_lease_key_for_frame(channel, generation, &delivery, canonical_range_start);
+        let watcher_key = crate::services::discord::tmux::pinned_delivery_lease_key_for_test(
+            channel,
+            generation,
+            None,
+            &delivery.session_name,
+            watcher_observed_current_offset,
+            canonical_range_start,
+        );
+
+        assert_eq!(
+            sink_key, watcher_key,
+            "the sink frame may lack identity and the watcher current offset may differ, but both owners must key the same turn from the shared delivery-range start"
+        );
+        assert!(!sink_key.is_degenerate_legacy());
+    }
+
+    #[test]
     fn same_id0_turn_frame_and_inflight_derive_equal_delivery_lease_key() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
@@ -2738,7 +2777,7 @@ mod tests {
             Some(start_offset),
         );
 
-        let frame_key = delivery_lease_key_for_frame(channel, generation, &delivery);
+        let frame_key = delivery_lease_key_for_frame(channel, generation, &delivery, start_offset);
         let inflight_key =
             super::super::DeliveryLeaseKey::from_inflight_state(channel, generation, &inflight);
 

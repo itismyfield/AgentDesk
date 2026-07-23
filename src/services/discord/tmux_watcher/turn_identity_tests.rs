@@ -222,7 +222,7 @@ fn pinned_delivery_lease_key_id0_without_offset_acquires_and_commits_delivery() 
     let mut state = state_with_offsets(0, session, None, 0);
     state.started_at = "2026-07-03T06:00:00Z".to_string();
 
-    let key = pinned_delivery_lease_key(channel_id, 33, Some(&state), session, 50);
+    let key = pinned_delivery_lease_key(channel_id, 33, Some(&state), session, 50, 0);
     let cell = crate::services::discord::DeliveryLeaseCell::new(channel_id);
     let holder = crate::services::discord::LeaseHolder::Watcher { instance_id: 77 };
     let acquired = cell.try_acquire(
@@ -274,7 +274,7 @@ fn no_inflight_offset_key_still_refuses_append_edit_tail_duplicate_4277() {
         &provider, channel_id, session, body,
     );
 
-    let key = pinned_delivery_lease_key(channel_id, 33, None, session, 2_484_989);
+    let key = pinned_delivery_lease_key(channel_id, 33, None, session, 2_484_989, 2_484_000);
     assert!(
         !key.is_degenerate_legacy(),
         "the observed range must promote the lease out of the channel-only legacy class"
@@ -610,8 +610,14 @@ async fn live_long_chunk_delivery_fingerprint_uses_raw_body_4081() {
 
     let generation = 33;
     let cell = shared.delivery_lease(channel_id);
-    let lease_key =
-        pinned_delivery_lease_key(channel_id, generation, None, session, raw_body.len() as u64);
+    let lease_key = pinned_delivery_lease_key(
+        channel_id,
+        generation,
+        None,
+        session,
+        raw_body.len() as u64,
+        0,
+    );
     let turn = crate::services::discord::turn_finalizer::TurnKey::new(channel_id, 0, generation);
     let outcome = super::super::terminal_long_chunks::deliver_long_chunks_via_controller(
         &LongChunkGateway,

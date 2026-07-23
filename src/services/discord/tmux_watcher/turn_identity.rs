@@ -234,12 +234,13 @@ pub(super) fn pinned_finalizer_turn_id(
         .unwrap_or(0)
 }
 
-pub(super) fn pinned_delivery_lease_key(
+pub(in crate::services::discord) fn pinned_delivery_lease_key(
     channel_id: poise::serenity_prelude::ChannelId,
     generation: u64,
     inflight_before_relay: Option<&crate::services::discord::inflight::InflightTurnState>,
     tmux_session_name: &str,
     current_offset: u64,
+    relay_range_start: u64,
 ) -> crate::services::discord::DeliveryLeaseKey {
     if let Some(state) = inflight_before_relay.filter(|state| {
         state.tmux_session_name.as_deref().map(str::trim) == Some(tmux_session_name.trim())
@@ -255,7 +256,7 @@ pub(super) fn pinned_delivery_lease_key(
             0,
             None,
             None,
-            Some(current_offset),
+            Some(relay_range_start),
             "watcher",
         )
     }
@@ -391,6 +392,7 @@ pub(super) fn pinned_watcher_delivery_lease_identity(
     inflight_before_relay: Option<&crate::services::discord::inflight::InflightTurnState>,
     tmux_session_name: &str,
     current_offset: u64,
+    relay_range_start: u64,
 ) -> (
     crate::services::discord::turn_finalizer::TurnKey,
     crate::services::discord::DeliveryLeaseKey,
@@ -408,6 +410,7 @@ pub(super) fn pinned_watcher_delivery_lease_identity(
             inflight_before_relay,
             tmux_session_name,
             current_offset,
+            relay_range_start,
         ),
         crate::services::discord::LeaseHolder::Watcher {
             instance_id: watcher_instance_id,
