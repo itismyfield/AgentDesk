@@ -16,14 +16,18 @@
 //! liveness observations in the parent module, and are updated under the
 //! DashMap entry lock so concurrent watchdog passes for the same key serialize.
 //!
-//! The clock is process-local (does not survive restart), which is correct for
-//! an in-process elapsed measurement; a restart-surviving baseline (#4181
-//! item-3) is a separate concern needing durable absolute time.
+//! The production clock uses OS boottime, which remains monotonic across a
+//! dcserver restart. The current episode baseline is stored outside inflight and
+//! restored only when provider/channel/turn/frontier identity matches, so a
+//! restart neither re-arms grace nor imports a stale episode.
 
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use dashmap::mapref::entry::Entry;
 use poise::serenity_prelude::ChannelId;
+use serde::{Deserialize, Serialize};
 
 use crate::services::provider::ProviderKind;
 
@@ -32,7 +36,7 @@ use super::{
     STALL_LIVENESS_STATE_TTL_SECS, STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS, StallLivenessKey,
     live_undelivered_backlog,
 };
-use crate::services::discord::RelayFrontierToken;
+use crate::services::discord::{RelayFrontierToken, runtime_store};
 
 /// Monotonic seconds source for the redrive no-progress lifecycle (grace + TTL
 /// GC). Injected — rather than `#[cfg]`-splitting a free function — so the
@@ -43,14 +47,19 @@ trait RedriveClock {
     /// wall-clock/NTP steps. There is deliberately NO wall-clock accessor — the
     /// entire redrive no-progress lifecycle must be free of wall dependence.
     fn mono_secs(&self) -> i64;
+
+    fn durable_mono_secs(&self) -> Option<i64> {
+        None
+    }
 }
 
-/// Process-start `Instant` anchor. Monotonic and unaffected by wall-clock/NTP
-/// steps. Always compiled (never `#[cfg]`-gated) so the production reader below
-/// is a real test target, not code that only exists in release builds.
+/// Process-start `Instant` fallback for platforms without an OS boottime clock.
+/// It remains wall-clock independent but cannot carry an elapsed baseline across
+/// process restart, so durable restore fails closed to a fresh grace there.
 static MONO_ANCHOR: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
 
-/// Production monotonic clock: seconds since the process-start `Instant`.
+/// Production monotonic clock. Grace and persistence use OS boottime when
+/// available; `mono_secs` stays as the injected/tested in-process reader.
 struct MonotonicRedriveClock;
 
 impl RedriveClock for MonotonicRedriveClock {
@@ -71,22 +80,33 @@ impl RedriveClock for MonotonicRedriveClock {
         }
         MONO_ANCHOR.elapsed().as_secs() as i64
     }
+
+    fn durable_mono_secs(&self) -> Option<i64> {
+        #[cfg(test)]
+        if let Some(secs) = TEST_DURABLE_CLOCK_OVERRIDE.with(|cell| cell.get()) {
+            return Some(secs);
+        }
+        process_boottime_secs()
+    }
 }
 
 #[cfg(test)]
 thread_local! {
     static TEST_CLOCK_OVERRIDE: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+    static TEST_DURABLE_CLOCK_OVERRIDE: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
 pub(in crate::services::discord::health) struct RedriveGraceTestClockGuard {
     previous: Option<i64>,
+    previous_durable: Option<i64>,
 }
 
 #[cfg(test)]
 impl Drop for RedriveGraceTestClockGuard {
     fn drop(&mut self) {
         TEST_CLOCK_OVERRIDE.with(|cell| cell.set(self.previous));
+        TEST_DURABLE_CLOCK_OVERRIDE.with(|cell| cell.set(self.previous_durable));
     }
 }
 
@@ -97,7 +117,11 @@ pub(in crate::services::discord::health) fn set_redrive_grace_test_clock(
     mono_secs: i64,
 ) -> RedriveGraceTestClockGuard {
     let previous = TEST_CLOCK_OVERRIDE.with(|cell| cell.replace(Some(mono_secs)));
-    RedriveGraceTestClockGuard { previous }
+    let previous_durable = TEST_DURABLE_CLOCK_OVERRIDE.with(|cell| cell.replace(Some(mono_secs)));
+    RedriveGraceTestClockGuard {
+        previous,
+        previous_durable,
+    }
 }
 
 /// #4181 item-2 P3-2: clear the override so the production `Instant` reader runs.
@@ -107,6 +131,7 @@ pub(in crate::services::discord::health) fn set_redrive_grace_test_clock(
 #[cfg(test)]
 fn clear_redrive_grace_test_clock() {
     TEST_CLOCK_OVERRIDE.with(|cell| cell.set(None));
+    TEST_DURABLE_CLOCK_OVERRIDE.with(|cell| cell.set(None));
 }
 
 /// Dedicated no-progress tracker, kept separate from the wall-clock
@@ -130,6 +155,89 @@ static NO_PROGRESS_OBSERVATIONS: LazyLock<
     dashmap::DashMap<(StallLivenessKey, u64), NoProgressObservation>,
 > = LazyLock::new(dashmap::DashMap::new);
 
+const REDRIVE_BASELINES_DIR: &str = "discord_redrive_baselines";
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+struct DurableNoProgressBaseline {
+    offset: u64,
+    reset_incarnation: u64,
+    tmux_session: Option<String>,
+    user_msg_id: Option<u64>,
+    started_at: Option<String>,
+    unchanged_since_boottime_secs: i64,
+    last_seen_boottime_secs: i64,
+}
+
+impl DurableNoProgressBaseline {
+    fn matches(&self, key: &StallLivenessKey, token: RelayFrontierToken) -> bool {
+        self.offset == token.committed_offset
+            && self.reset_incarnation == token.reset_incarnation
+            && self.tmux_session == key.tmux_session
+            && self.user_msg_id == key.user_msg_id
+            && self.started_at == key.started_at
+    }
+
+    fn observation(&self, mono_now: i64) -> NoProgressObservation {
+        NoProgressObservation {
+            offset: self.offset,
+            unchanged_since_mono_secs: self.unchanged_since_boottime_secs.min(mono_now),
+            last_seen_mono_secs: mono_now,
+        }
+    }
+}
+
+fn durable_baseline_path(provider: &str, channel_id: ChannelId) -> Option<PathBuf> {
+    runtime_store::runtime_root().map(|root| {
+        root.join(REDRIVE_BASELINES_DIR)
+            .join(provider)
+            .join(format!("{}.json", channel_id.get()))
+    })
+}
+
+fn load_durable_baseline_at(path: &Path) -> Option<DurableNoProgressBaseline> {
+    let content = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+fn persist_durable_baseline_at(path: &Path, baseline: &DurableNoProgressBaseline) {
+    let result = serde_json::to_string(baseline)
+        .map_err(|error| error.to_string())
+        .and_then(|json| runtime_store::atomic_write(path, &json));
+    if let Err(error) = result {
+        tracing::warn!(
+            redrive_baseline_path = %path.display(),
+            error = %error,
+            "redrive no-progress baseline persistence failed; keeping process-local grace"
+        );
+    }
+}
+
+fn remove_durable_baseline_at(path: &Path) {
+    if let Err(error) = fs::remove_file(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            redrive_baseline_path = %path.display(),
+            error = %error,
+            "redrive no-progress baseline cleanup failed"
+        );
+    }
+}
+
+fn process_boottime_secs() -> Option<i64> {
+    #[cfg(unix)]
+    {
+        let mut value = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) } == 0 {
+            return Some(value.tv_sec);
+        }
+    }
+    None
+}
+
 /// Returns `true` iff the observed committed relay offset has stayed UNCHANGED
 /// for at least `STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS` of MONOTONIC time.
 ///
@@ -151,16 +259,12 @@ fn relay_offset_stalled_past_grace(
             let observation = occupied.get_mut();
             observation.last_seen_mono_secs = mono_now;
             if observed_offset > observation.offset {
-                // Relay advanced: reset the freeze anchor.
                 observation.offset = observed_offset;
                 observation.unchanged_since_mono_secs = mono_now;
                 false
             } else if observed_offset < observation.offset {
-                // A lower value under one reset incarnation is a stale snapshot;
-                // a legitimate reset always obtains a distinct incarnation key.
                 false
             } else {
-                // Frozen at the same offset: measure the monotonic freeze age.
                 mono_now.saturating_sub(observation.unchanged_since_mono_secs)
                     >= STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64
             }
@@ -171,10 +275,63 @@ fn relay_offset_stalled_past_grace(
                 unchanged_since_mono_secs: mono_now,
                 last_seen_mono_secs: mono_now,
             });
-            // The first observation can never be past the grace.
             false
         }
     }
+}
+
+fn relay_offset_stalled_past_grace_durable(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    key: &StallLivenessKey,
+    token: RelayFrontierToken,
+    mono_now: i64,
+) -> bool {
+    let Some(path) = durable_baseline_path(provider.as_str(), channel_id) else {
+        return relay_offset_stalled_past_grace(key, token, mono_now);
+    };
+    let map_key = (key.clone(), token.reset_incarnation);
+    match NO_PROGRESS_OBSERVATIONS.entry(map_key) {
+        Entry::Occupied(mut occupied) => {
+            let observation = occupied.get_mut();
+            observation.last_seen_mono_secs = mono_now;
+            if token.committed_offset > observation.offset {
+                observation.offset = token.committed_offset;
+                observation.unchanged_since_mono_secs = mono_now;
+            }
+        }
+        Entry::Vacant(vacant) => {
+            let observation = load_durable_baseline_at(&path)
+                .filter(|baseline| baseline.matches(key, token))
+                .map(|baseline| baseline.observation(mono_now))
+                .unwrap_or(NoProgressObservation {
+                    offset: token.committed_offset,
+                    unchanged_since_mono_secs: mono_now,
+                    last_seen_mono_secs: mono_now,
+                });
+            vacant.insert(observation);
+        }
+    }
+
+    let observation = NO_PROGRESS_OBSERVATIONS
+        .get(&(key.clone(), token.reset_incarnation))
+        .expect("redrive observation inserted under entry lock");
+    let stalled = token.committed_offset == observation.offset
+        && mono_now.saturating_sub(observation.unchanged_since_mono_secs)
+            >= STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64;
+    persist_durable_baseline_at(
+        &path,
+        &DurableNoProgressBaseline {
+            offset: observation.offset,
+            reset_incarnation: token.reset_incarnation,
+            tmux_session: key.tmux_session.clone(),
+            user_msg_id: key.user_msg_id,
+            started_at: key.started_at.clone(),
+            unchanged_since_boottime_secs: observation.unchanged_since_mono_secs,
+            last_seen_boottime_secs: observation.last_seen_mono_secs,
+        },
+    );
+    stalled
 }
 
 /// #4181 item-2: a live undelivered backlog whose committed relay offset has
@@ -211,7 +368,12 @@ fn stalled_undelivered_backlog_for_redrive_with_token_and_clock(
         return false;
     }
     let key = StallLivenessKey::from_snapshot(provider, channel_id, snapshot);
-    relay_offset_stalled_past_grace(&key, token, clock.mono_secs())
+    match clock.durable_mono_secs() {
+        Some(mono_now) => {
+            relay_offset_stalled_past_grace_durable(provider, channel_id, &key, token, mono_now)
+        }
+        None => relay_offset_stalled_past_grace(&key, token, clock.mono_secs()),
+    }
 }
 
 #[cfg(test)]
@@ -238,6 +400,9 @@ fn stalled_undelivered_backlog_for_redrive_with_clock(
 /// parent's `clear_stall_watchdog_liveness_state`.
 pub(super) fn clear_for_session(probe: &StallLivenessKey) {
     NO_PROGRESS_OBSERVATIONS.retain(|(key, _), _| !key.matches_session(probe));
+    if let Some(path) = durable_baseline_path(&probe.provider, ChannelId::new(probe.channel_id)) {
+        remove_durable_baseline_at(&path);
+    }
 }
 
 /// TTL-GC on the MONOTONIC freshness anchor (production clock). Called by the
@@ -249,7 +414,9 @@ pub(super) fn gc() {
 }
 
 fn gc_with_clock(clock: &dyn RedriveClock) {
-    let mono_now = clock.mono_secs();
+    let mono_now = clock
+        .durable_mono_secs()
+        .unwrap_or_else(|| clock.mono_secs());
     NO_PROGRESS_OBSERVATIONS.retain(|_, observation| {
         mono_now.saturating_sub(observation.last_seen_mono_secs)
             <= STALL_LIVENESS_STATE_TTL_SECS as i64
@@ -291,6 +458,28 @@ mod tests {
     impl RedriveClock for FakeClock {
         fn mono_secs(&self) -> i64 {
             self.mono.get()
+        }
+    }
+
+    struct FakeDurableClock {
+        mono: Cell<i64>,
+    }
+
+    impl FakeDurableClock {
+        fn new(mono: i64) -> Self {
+            Self {
+                mono: Cell::new(mono),
+            }
+        }
+    }
+
+    impl RedriveClock for FakeDurableClock {
+        fn mono_secs(&self) -> i64 {
+            self.mono.get()
+        }
+
+        fn durable_mono_secs(&self) -> Option<i64> {
+            Some(self.mono.get())
         }
     }
 
@@ -591,6 +780,95 @@ mod tests {
         );
 
         super::super::clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
+    }
+
+    /// #4181 item-3: a fresh process-local map restores the same episode's freeze
+    /// anchor from the durable sidecar, so restart does not grant another grace.
+    #[test]
+    fn redrive_durable_baseline_survives_process_restart_4181() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(4_181_007);
+        let tmux_session = "AgentDesk-codex-4181-durable-baseline";
+        let snap = frozen_backlog_snapshot(channel.get(), tmux_session, 10, 301_613);
+        let token = RelayFrontierToken {
+            reset_incarnation: 0,
+            committed_offset: 10,
+        };
+        let grace = STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64;
+        let clock = FakeDurableClock::new(10_000);
+        let key = StallLivenessKey::from_snapshot(&provider, channel, &snap);
+        let root = tempfile::tempdir().expect("temp runtime root");
+        let path = root.path().join("baseline.json");
+        let baseline = DurableNoProgressBaseline {
+            offset: token.committed_offset,
+            reset_incarnation: token.reset_incarnation,
+            tmux_session: key.tmux_session.clone(),
+            user_msg_id: key.user_msg_id,
+            started_at: key.started_at.clone(),
+            unchanged_since_boottime_secs: clock.mono.get(),
+            last_seen_boottime_secs: clock.mono.get(),
+        };
+        persist_durable_baseline_at(&path, &baseline);
+        assert_eq!(load_durable_baseline_at(&path), Some(baseline));
+
+        NO_PROGRESS_OBSERVATIONS.clear();
+        clock.mono.set(10_000 + grace);
+        let restored = load_durable_baseline_at(&path).expect("durable baseline");
+        assert!(restored.matches(&key, token));
+        NO_PROGRESS_OBSERVATIONS.insert(
+            (key.clone(), token.reset_incarnation),
+            restored.observation(clock.mono.get()),
+        );
+        assert!(relay_offset_stalled_past_grace(
+            &key,
+            token,
+            clock.mono.get(),
+        ));
+
+        remove_durable_baseline_at(&path);
+        assert!(
+            !path.exists(),
+            "session cleanup removes the durable baseline"
+        );
+    }
+
+    /// #4181 item-3 identity gate: a prior episode's durable baseline must not
+    /// shorten grace for a successor turn on the same provider/channel.
+    #[test]
+    fn redrive_durable_baseline_rejects_successor_episode_4181() {
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(4_181_008);
+        let old = frozen_backlog_snapshot(
+            channel.get(),
+            "AgentDesk-codex-4181-old-episode",
+            10,
+            301_613,
+        );
+        let new = frozen_backlog_snapshot(
+            channel.get(),
+            "AgentDesk-codex-4181-new-episode",
+            10,
+            301_613,
+        );
+        let token = RelayFrontierToken {
+            reset_incarnation: 0,
+            committed_offset: 10,
+        };
+        let old_key = StallLivenessKey::from_snapshot(&provider, channel, &old);
+        let new_key = StallLivenessKey::from_snapshot(&provider, channel, &new);
+        let baseline = DurableNoProgressBaseline {
+            offset: token.committed_offset,
+            reset_incarnation: token.reset_incarnation,
+            tmux_session: old_key.tmux_session,
+            user_msg_id: old_key.user_msg_id,
+            started_at: old_key.started_at,
+            unchanged_since_boottime_secs: 20_000,
+            last_seen_boottime_secs: 20_000,
+        };
+
+        assert!(!baseline.matches(&new_key, token));
+        assert!(!relay_offset_stalled_past_grace(&new_key, token, 20_180));
+        NO_PROGRESS_OBSERVATIONS.remove(&(new_key, token.reset_incarnation));
     }
 
     #[test]
