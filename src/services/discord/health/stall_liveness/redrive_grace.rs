@@ -25,7 +25,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use dashmap::mapref::entry::Entry;
 use poise::serenity_prelude::ChannelId;
@@ -96,12 +96,14 @@ impl RedriveClock for MonotonicRedriveClock {
 thread_local! {
     static TEST_CLOCK_OVERRIDE: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
     static TEST_DURABLE_CLOCK_OVERRIDE: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+    static TEST_CANONICAL_EPISODE_OVERRIDE: std::cell::RefCell<Option<crate::services::discord::inflight::InflightTurnIdentity>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
 pub(in crate::services::discord::health) struct RedriveGraceTestClockGuard {
     previous: Option<i64>,
     previous_durable: Option<i64>,
+    previous_episode: Option<crate::services::discord::inflight::InflightTurnIdentity>,
 }
 
 #[cfg(test)]
@@ -109,6 +111,8 @@ impl Drop for RedriveGraceTestClockGuard {
     fn drop(&mut self) {
         TEST_CLOCK_OVERRIDE.with(|cell| cell.set(self.previous));
         TEST_DURABLE_CLOCK_OVERRIDE.with(|cell| cell.set(self.previous_durable));
+        TEST_CANONICAL_EPISODE_OVERRIDE
+            .with(|episode| *episode.borrow_mut() = self.previous_episode.clone());
     }
 }
 
@@ -117,12 +121,16 @@ impl Drop for RedriveGraceTestClockGuard {
 #[cfg(test)]
 pub(in crate::services::discord::health) fn set_redrive_grace_test_clock(
     mono_secs: i64,
+    episode_identity: Option<crate::services::discord::inflight::InflightTurnIdentity>,
 ) -> RedriveGraceTestClockGuard {
     let previous = TEST_CLOCK_OVERRIDE.with(|cell| cell.replace(Some(mono_secs)));
     let previous_durable = TEST_DURABLE_CLOCK_OVERRIDE.with(|cell| cell.replace(Some(mono_secs)));
+    let previous_episode =
+        TEST_CANONICAL_EPISODE_OVERRIDE.with(|episode| episode.replace(episode_identity));
     RedriveGraceTestClockGuard {
         previous,
         previous_durable,
+        previous_episode,
     }
 }
 
@@ -134,6 +142,7 @@ pub(in crate::services::discord::health) fn set_redrive_grace_test_clock(
 fn clear_redrive_grace_test_clock() {
     TEST_CLOCK_OVERRIDE.with(|cell| cell.set(None));
     TEST_DURABLE_CLOCK_OVERRIDE.with(|cell| cell.set(None));
+    TEST_CANONICAL_EPISODE_OVERRIDE.with(|episode| *episode.borrow_mut() = None);
 }
 
 /// Dedicated no-progress tracker, kept separate from the wall-clock
@@ -141,6 +150,8 @@ fn clear_redrive_grace_test_clock() {
 /// monotonic: the redrive lifecycle has zero wall dependence (#4181 item-2).
 #[derive(Clone, Debug)]
 struct NoProgressObservation {
+    episode_identity: Option<crate::services::discord::inflight::InflightTurnIdentity>,
+    turn_nonce: Option<String>,
     /// Highest committed relay offset observed for this key. A later snapshot
     /// reporting a LOWER offset is treated as stale and rejected, so a stale
     /// concurrent watchdog pass cannot rewind the freeze anchor (#4181 P3).
@@ -156,7 +167,7 @@ struct NoProgressObservation {
 static NO_PROGRESS_OBSERVATIONS: LazyLock<
     dashmap::DashMap<(StallLivenessKey, u64), NoProgressObservation>,
 > = LazyLock::new(dashmap::DashMap::new);
-static DURABLE_BASELINE_LOCKS: LazyLock<dashmap::DashMap<(String, u64), Mutex<()>>> =
+static DURABLE_BASELINE_LOCKS: LazyLock<dashmap::DashMap<(String, u64), Arc<Mutex<()>>>> =
     LazyLock::new(dashmap::DashMap::new);
 
 const REDRIVE_BASELINES_DIR: &str = "discord_redrive_baselines";
@@ -189,6 +200,8 @@ impl DurableNoProgressBaseline {
 
     fn observation(&self, mono_now: i64) -> NoProgressObservation {
         NoProgressObservation {
+            episode_identity: self.identity.clone(),
+            turn_nonce: self.turn_nonce.clone(),
             offset: self.offset,
             unchanged_since_mono_secs: self.unchanged_since_monotonic_secs.min(mono_now),
             last_seen_mono_secs: mono_now,
@@ -231,6 +244,80 @@ fn remove_durable_baseline_at(path: &Path) {
             error = %error,
             "redrive no-progress baseline cleanup failed"
         );
+    }
+}
+
+fn durable_baseline_lock(provider: &str, channel_id: u64) -> Arc<Mutex<()>> {
+    DURABLE_BASELINE_LOCKS
+        .entry((provider.to_string(), channel_id))
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+fn load_canonical_episode(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> Option<crate::services::discord::inflight::InflightTurnIdentity> {
+    crate::services::discord::inflight::load_inflight_state_read_only(provider, channel_id.get())
+        .map(|state| crate::services::discord::inflight::InflightTurnIdentity::from_state(&state))
+}
+
+#[cfg(not(test))]
+fn canonical_episode(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> Option<crate::services::discord::inflight::InflightTurnIdentity> {
+    load_canonical_episode(provider, channel_id)
+}
+
+#[cfg(test)]
+fn canonical_episode(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> Option<crate::services::discord::inflight::InflightTurnIdentity> {
+    TEST_CANONICAL_EPISODE_OVERRIDE.with(|override_episode| {
+        override_episode
+            .borrow()
+            .clone()
+            .or_else(|| load_canonical_episode(provider, channel_id))
+    })
+}
+
+fn canonical_episode_matches(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    identity: &crate::services::discord::inflight::InflightTurnIdentity,
+) -> bool {
+    canonical_episode(provider, channel_id).as_ref() == Some(identity)
+}
+
+fn clear_for_session_at(
+    probe: &StallLivenessKey,
+    requested_identity: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
+    canonical: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
+    path: Option<&Path>,
+) {
+    NO_PROGRESS_OBSERVATIONS.retain(|(key, _), observation| {
+        if !key.matches_session(probe) {
+            return true;
+        }
+        canonical.is_some_and(|identity| observation.episode_identity.as_ref() == Some(identity))
+    });
+    let Some(path) = path else {
+        return;
+    };
+    let Some(baseline) = load_durable_baseline_at(path) else {
+        return;
+    };
+    let owned_by_canonical =
+        canonical.is_some_and(|identity| baseline.identity.as_ref() == Some(identity));
+    let matches_request =
+        requested_identity.is_none_or(|requested| baseline.identity.as_ref() == Some(requested));
+    let matches_requested_session = baseline.identity.as_ref().is_some_and(|identity| {
+        identity.tmux_session_name.as_deref() == probe.tmux_session.as_deref()
+    });
+    if matches_request && matches_requested_session && !owned_by_canonical {
+        remove_durable_baseline_at(path);
     }
 }
 
@@ -331,6 +418,8 @@ fn relay_offset_stalled_past_grace(
         }
         Entry::Vacant(vacant) => {
             vacant.insert(NoProgressObservation {
+                episode_identity: None,
+                turn_nonce: None,
                 offset: observed_offset,
                 unchanged_since_mono_secs: mono_now,
                 last_seen_mono_secs: mono_now,
@@ -354,60 +443,75 @@ fn relay_offset_stalled_past_grace_durable(
     let Some(boot_id) = boot_id() else {
         return relay_offset_stalled_past_grace(key, token, mono_now);
     };
-    let lock_key = (provider.as_str().to_string(), channel_id.get());
-    let channel_lock = DURABLE_BASELINE_LOCKS
-        .entry(lock_key)
-        .or_insert_with(|| Mutex::new(()));
+    let channel_lock = durable_baseline_lock(provider.as_str(), channel_id.get());
     let _guard = channel_lock
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    let identity = snapshot.inflight_identity.as_ref();
+    let Some(identity) = snapshot.inflight_identity.as_ref() else {
+        return relay_offset_stalled_past_grace(key, token, mono_now);
+    };
     let turn_nonce = snapshot.mailbox_active_turn_nonce.as_deref();
+    if !canonical_episode_matches(provider, channel_id, identity) {
+        return false;
+    }
     let map_key = (key.clone(), token.reset_incarnation);
     let (stalled, observation) = match NO_PROGRESS_OBSERVATIONS.entry(map_key) {
         Entry::Occupied(mut occupied) => {
             let observation = occupied.get_mut();
-            observation.last_seen_mono_secs = mono_now;
-            if token.committed_offset > observation.offset {
-                observation.offset = token.committed_offset;
-                observation.unchanged_since_mono_secs = mono_now;
+            if observation.episode_identity.as_ref() != Some(identity)
+                || observation.turn_nonce.as_deref() != turn_nonce
+            {
+                *observation = NoProgressObservation {
+                    episode_identity: Some(identity.clone()),
+                    turn_nonce: turn_nonce.map(str::to_string),
+                    offset: token.committed_offset,
+                    unchanged_since_mono_secs: mono_now,
+                    last_seen_mono_secs: mono_now,
+                };
+            } else {
+                observation.last_seen_mono_secs = mono_now;
+                if token.committed_offset > observation.offset {
+                    observation.offset = token.committed_offset;
+                    observation.unchanged_since_mono_secs = mono_now;
+                }
             }
             (
                 token.committed_offset == observation.offset
                     && mono_now.saturating_sub(observation.unchanged_since_mono_secs)
                         >= STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
-                NoProgressObservation {
-                    offset: observation.offset,
-                    unchanged_since_mono_secs: observation.unchanged_since_mono_secs,
-                    last_seen_mono_secs: observation.last_seen_mono_secs,
-                },
+                observation.clone(),
             )
         }
         Entry::Vacant(vacant) => {
             let observation = load_durable_baseline_at(&path)
-                .filter(|baseline| baseline.matches(identity, turn_nonce, token, &boot_id))
+                .filter(|baseline| baseline.matches(Some(identity), turn_nonce, token, &boot_id))
                 .map(|baseline| baseline.observation(mono_now))
                 .unwrap_or(NoProgressObservation {
+                    episode_identity: Some(identity.clone()),
+                    turn_nonce: turn_nonce.map(str::to_string),
                     offset: token.committed_offset,
                     unchanged_since_mono_secs: mono_now,
                     last_seen_mono_secs: mono_now,
                 });
             let stalled = mono_now.saturating_sub(observation.unchanged_since_mono_secs)
                 >= STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64;
-            vacant.insert(NoProgressObservation {
-                offset: observation.offset,
-                unchanged_since_mono_secs: observation.unchanged_since_mono_secs,
-                last_seen_mono_secs: observation.last_seen_mono_secs,
-            });
+            vacant.insert(observation.clone());
             (stalled, observation)
         }
     };
 
-    if load_durable_baseline_at(&path).is_some_and(|baseline| {
-        !baseline.matches(identity, turn_nonce, token, &boot_id)
-            && baseline.last_seen_monotonic_secs > observation.last_seen_mono_secs
-    }) {
-        return stalled;
+    if !canonical_episode_matches(provider, channel_id, identity) {
+        let map_key = (key.clone(), token.reset_incarnation);
+        if NO_PROGRESS_OBSERVATIONS
+            .get(&map_key)
+            .is_some_and(|current| {
+                current.episode_identity.as_ref() == Some(identity)
+                    && current.turn_nonce.as_deref() == turn_nonce
+            })
+        {
+            NO_PROGRESS_OBSERVATIONS.remove(&map_key);
+        }
+        return false;
     }
     persist_durable_baseline_at(
         &path,
@@ -415,7 +519,7 @@ fn relay_offset_stalled_past_grace_durable(
             boot_id,
             offset: observation.offset,
             reset_incarnation: token.reset_incarnation,
-            identity: identity.cloned(),
+            identity: Some(identity.clone()),
             turn_nonce: turn_nonce.map(str::to_string),
             unchanged_since_monotonic_secs: observation.unchanged_since_mono_secs,
             last_seen_monotonic_secs: observation.last_seen_mono_secs,
@@ -492,17 +596,17 @@ fn stalled_undelivered_backlog_for_redrive_with_clock(
 /// Drop redrive no-progress observations for a cleared session. Called by the
 /// parent's `clear_stall_watchdog_liveness_state`.
 pub(super) fn clear_for_session(probe: &StallLivenessKey) {
-    let lock_key = (probe.provider.clone(), probe.channel_id);
-    let channel_lock = DURABLE_BASELINE_LOCKS
-        .entry(lock_key)
-        .or_insert_with(|| Mutex::new(()));
+    let Some(provider) = ProviderKind::from_str(&probe.provider) else {
+        return;
+    };
+    let channel_id = ChannelId::new(probe.channel_id);
+    let channel_lock = durable_baseline_lock(&probe.provider, probe.channel_id);
     let _guard = channel_lock
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    NO_PROGRESS_OBSERVATIONS.retain(|(key, _), _| !key.matches_session(probe));
-    if let Some(path) = durable_baseline_path(&probe.provider, ChannelId::new(probe.channel_id)) {
-        remove_durable_baseline_at(&path);
-    }
+    let canonical = canonical_episode(&provider, channel_id);
+    let path = durable_baseline_path(&probe.provider, channel_id);
+    clear_for_session_at(probe, None, canonical.as_ref(), path.as_deref());
 }
 
 /// TTL-GC on the MONOTONIC freshness anchor (production clock). Called by the
@@ -535,11 +639,28 @@ fn gc_durable_baselines_at(root: &Path, boot_id: &str, mono_now: i64) {
         return;
     };
     for provider in providers.flatten() {
+        let Some(provider_name) = provider.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
         let Ok(files) = fs::read_dir(provider.path()) else {
             continue;
         };
         for file in files.flatten() {
             let path = file.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(channel_id) = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .and_then(|stem| stem.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            let channel_lock = durable_baseline_lock(&provider_name, channel_id);
+            let _guard = channel_lock
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             let keep = load_durable_baseline_at(&path).is_some_and(|baseline| {
                 baseline.boot_id == boot_id
                     && mono_now.saturating_sub(baseline.last_seen_monotonic_secs)
@@ -625,6 +746,37 @@ mod tests {
         fn durable_mono_secs(&self) -> Option<i64> {
             Some(self.mono.get())
         }
+    }
+
+    fn save_canonical_inflight(snapshot: &WatcherStateSnapshot, provider: &ProviderKind) {
+        let identity = snapshot
+            .inflight_identity
+            .as_ref()
+            .expect("snapshot identity");
+        let mut state = crate::services::discord::inflight::InflightTurnState::new(
+            provider.clone(),
+            snapshot.relay_health.channel_id,
+            None,
+            0,
+            identity.user_msg_id,
+            snapshot.inflight_current_msg_id.unwrap_or(0),
+            "redrive test".to_string(),
+            None,
+            identity.tmux_session_name.clone(),
+            snapshot.inflight_output_path.clone(),
+            None,
+            identity.turn_start_offset.unwrap_or(0),
+        );
+        state.started_at = identity.started_at.clone();
+        state.turn_start_offset = identity.turn_start_offset;
+        state.turn_nonce = snapshot.mailbox_active_turn_nonce.clone();
+        let root = runtime_store::runtime_root().expect("runtime root");
+        let path = root
+            .join("discord_inflight")
+            .join(provider.as_str())
+            .join(format!("{}.json", snapshot.relay_health.channel_id));
+        let json = serde_json::to_string_pretty(&state).expect("serialize canonical inflight");
+        runtime_store::atomic_write(&path, &json).expect("save canonical inflight");
     }
 
     /// A frozen, still-live undelivered backlog: unread bytes present, pane
@@ -1069,6 +1221,144 @@ mod tests {
     }
 
     #[test]
+    fn stale_clear_preserves_successor_episode_baseline_4181() {
+        let (_env, _root, _lock) = isolated_runtime_root();
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(4_181_010);
+        let old = frozen_backlog_snapshot(channel.get(), "AgentDesk-codex-4181-old-clear", 10, 20);
+        let mut successor =
+            frozen_backlog_snapshot(channel.get(), "AgentDesk-codex-4181-successor", 10, 20);
+        successor.inflight_identity.as_mut().unwrap().user_msg_id = 9003;
+        successor.mailbox_active_turn_nonce = Some("successor-nonce".to_string());
+        save_canonical_inflight(&successor, &provider);
+        let successor_identity = successor.inflight_identity.clone().unwrap();
+        let path = durable_baseline_path(provider.as_str(), channel).unwrap();
+        persist_durable_baseline_at(
+            &path,
+            &DurableNoProgressBaseline {
+                boot_id: "boot-a".to_string(),
+                offset: 10,
+                reset_incarnation: 0,
+                identity: Some(successor_identity.clone()),
+                turn_nonce: successor.mailbox_active_turn_nonce.clone(),
+                unchanged_since_monotonic_secs: 10,
+                last_seen_monotonic_secs: 10,
+            },
+        );
+        let successor_key = StallLivenessKey::from_snapshot(&provider, channel, &successor);
+        NO_PROGRESS_OBSERVATIONS.insert(
+            (successor_key.clone(), 0),
+            NoProgressObservation {
+                episode_identity: Some(successor_identity.clone()),
+                turn_nonce: successor.mailbox_active_turn_nonce.clone(),
+                offset: 10,
+                unchanged_since_mono_secs: 10,
+                last_seen_mono_secs: 10,
+            },
+        );
+
+        let stale_probe = StallLivenessKey::from_snapshot(&provider, channel, &old);
+        let channel_lock = durable_baseline_lock(provider.as_str(), channel.get());
+        let _guard = channel_lock
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let canonical = canonical_episode(&provider, channel);
+        clear_for_session_at(
+            &stale_probe,
+            old.inflight_identity.as_ref(),
+            canonical.as_ref(),
+            Some(&path),
+        );
+
+        assert_eq!(
+            load_durable_baseline_at(&path).and_then(|baseline| baseline.identity),
+            Some(successor_identity)
+        );
+        assert!(NO_PROGRESS_OBSERVATIONS.contains_key(&(successor_key, 0)));
+    }
+
+    #[test]
+    fn stale_identity_persist_cannot_overwrite_successor_baseline_4181() {
+        let (_env, _root, _lock) = isolated_runtime_root();
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(4_181_011);
+        let old = frozen_backlog_snapshot(channel.get(), "AgentDesk-codex-4181-shared", 10, 20);
+        let mut successor = old.clone();
+        successor.inflight_identity.as_mut().unwrap().user_msg_id = 9003;
+        successor
+            .inflight_identity
+            .as_mut()
+            .unwrap()
+            .turn_start_offset = Some(11);
+        successor.mailbox_active_turn_nonce = Some("successor-nonce".to_string());
+        save_canonical_inflight(&successor, &provider);
+        let token = RelayFrontierToken {
+            reset_incarnation: 0,
+            committed_offset: 10,
+        };
+        let path = durable_baseline_path(provider.as_str(), channel).unwrap();
+        let successor_baseline = DurableNoProgressBaseline {
+            boot_id: boot_id().expect("boot id"),
+            offset: 10,
+            reset_incarnation: 0,
+            identity: successor.inflight_identity.clone(),
+            turn_nonce: successor.mailbox_active_turn_nonce.clone(),
+            unchanged_since_monotonic_secs: 10,
+            last_seen_monotonic_secs: 10,
+        };
+        persist_durable_baseline_at(&path, &successor_baseline);
+
+        let old_key = StallLivenessKey::from_snapshot(&provider, channel, &old);
+        relay_offset_stalled_past_grace_durable(&provider, channel, &old_key, &old, token, 20);
+
+        assert_eq!(load_durable_baseline_at(&path), Some(successor_baseline));
+    }
+
+    #[test]
+    fn redrive_durable_gc_serializes_with_persist_and_ignores_staging_files_4181() {
+        let (_env, root, _lock) = isolated_runtime_root();
+        let records = root.path().join("records").join("codex");
+        fs::create_dir_all(&records).unwrap();
+        let channel_id = 4_181_012;
+        let path = records.join(format!("{channel_id}.json"));
+        let staging = records.join(format!(".{channel_id}.json.writer.tmp"));
+        fs::write(&staging, "staging").unwrap();
+        let stale = DurableNoProgressBaseline {
+            boot_id: "boot-b".to_string(),
+            offset: 10,
+            reset_incarnation: 0,
+            identity: None,
+            turn_nonce: None,
+            unchanged_since_monotonic_secs: 1,
+            last_seen_monotonic_secs: 1,
+        };
+        let fresh = DurableNoProgressBaseline {
+            boot_id: "boot-a".to_string(),
+            last_seen_monotonic_secs: 10_000,
+            unchanged_since_monotonic_secs: 10_000,
+            ..stale.clone()
+        };
+        persist_durable_baseline_at(&path, &stale);
+        let channel_lock = durable_baseline_lock("codex", channel_id);
+        let held = channel_lock
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let records_root = root.path().join("records");
+        let gc_thread =
+            std::thread::spawn(move || gc_durable_baselines_at(&records_root, "boot-a", 10_000));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        persist_durable_baseline_at(&path, &fresh);
+        drop(held);
+        gc_thread.join().unwrap();
+
+        assert_eq!(load_durable_baseline_at(&path), Some(fresh));
+        assert!(
+            staging.exists(),
+            "GC must not touch atomic-write staging files"
+        );
+    }
+
+    #[test]
     fn redrive_durable_gc_removes_invalid_boot_malformed_and_stale_4181() {
         let (_env, root, _lock) = isolated_runtime_root();
         let records = root.path().join("records").join("codex");
@@ -1082,33 +1372,33 @@ mod tests {
             unchanged_since_monotonic_secs: last_seen,
             last_seen_monotonic_secs: last_seen,
         };
-        persist_durable_baseline_at(&records.join("fresh.json"), &sample("boot-a", 9_000));
-        persist_durable_baseline_at(&records.join("old-boot.json"), &sample("boot-b", 9_000));
-        persist_durable_baseline_at(&records.join("stale.json"), &sample("boot-a", 1));
-        fs::write(records.join("malformed.json"), "{").unwrap();
+        persist_durable_baseline_at(&records.join("101.json"), &sample("boot-a", 9_000));
+        persist_durable_baseline_at(&records.join("102.json"), &sample("boot-b", 9_000));
+        persist_durable_baseline_at(&records.join("103.json"), &sample("boot-a", 1));
+        fs::write(records.join("104.json"), "{").unwrap();
 
         gc_durable_baselines_at(&root.path().join("records"), "boot-a", 10_000);
 
-        assert!(records.join("fresh.json").exists());
-        assert!(!records.join("old-boot.json").exists());
-        assert!(!records.join("stale.json").exists());
-        assert!(!records.join("malformed.json").exists());
+        assert!(records.join("101.json").exists());
+        assert!(!records.join("102.json").exists());
+        assert!(!records.join("103.json").exists());
+        assert!(!records.join("104.json").exists());
     }
 
     #[test]
     fn scoped_test_clock_restores_nested_and_panicking_overrides_4181() {
         let _runtime = isolated_runtime_root();
         clear_redrive_grace_test_clock();
-        let outer = set_redrive_grace_test_clock(11);
+        let outer = set_redrive_grace_test_clock(11, None);
         assert_eq!(MonotonicRedriveClock.mono_secs(), 11);
         {
-            let _inner = set_redrive_grace_test_clock(22);
+            let _inner = set_redrive_grace_test_clock(22, None);
             assert_eq!(MonotonicRedriveClock.mono_secs(), 22);
         }
         assert_eq!(MonotonicRedriveClock.mono_secs(), 11);
 
         let panic = std::panic::catch_unwind(|| {
-            let _panicking = set_redrive_grace_test_clock(33);
+            let _panicking = set_redrive_grace_test_clock(33, None);
             assert_eq!(MonotonicRedriveClock.mono_secs(), 33);
             panic!("exercise panic-safe clock restoration");
         });
