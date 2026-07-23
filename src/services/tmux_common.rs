@@ -2158,7 +2158,7 @@ another line of prior output";
         // foreground-idle panes and assistant prose merely mentioning a background
         // agent are NOT (no false keep-alive → no stuck turn).
         assert!(tmux_capture_indicates_claude_tui_background_agent_pending(
-            "⏺ reading docs\n✻ Waiting for 1 background agent to finish\n❯ "
+            "⏺ reading docs\n✻ Waiting for 1 background agent to finish\n────────────────────────────────────────────────────\n❯ "
         ));
         assert!(tmux_capture_indicates_claude_tui_background_agent_pending(
             "⏺ Agent(read story)\n  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)\n❯ "

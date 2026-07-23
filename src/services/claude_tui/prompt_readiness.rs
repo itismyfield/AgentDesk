@@ -10,38 +10,43 @@ pub(crate) fn claude_tui_background_agent_status_line_indexes(pane: &str) -> Vec
     let Some(prompt_index) = lines.iter().rposition(|line| line.trim() == "❯") else {
         return Vec::new();
     };
-    // Claude's persistent chrome is painted around the active bottom composer:
-    // its waiting/management footer is immediately above the separator and
-    // composer, while its task table is below it. Restrict matching to that
-    // bottom zone so identical lines in the assistant transcript are never
-    // promoted to live status.
-    let chrome_start = prompt_index.saturating_sub(2);
+    // Claude's persistent chrome is painted around the active bottom composer.
+    // A waiting footer has its own separator/composer block; a management
+    // affordance directly precedes the composer; and a task table is below it.
+    // Require these adjacent structures so transcript text quoting exact chrome
+    // cannot become a keep-alive signal.
     let mut statuses = Vec::new();
+    if prompt_index >= 2
+        && is_claude_tui_background_agent_footer(lines[prompt_index - 2])
+        && is_claude_tui_horizontal_separator(lines[prompt_index - 1])
+    {
+        statuses.push(prompt_index - 2);
+    }
+    if prompt_index >= 2
+        && is_claude_tui_background_agent_management_header(lines[prompt_index - 2])
+        && is_claude_tui_background_agent_management_line(lines[prompt_index - 1])
+    {
+        statuses.push(prompt_index - 1);
+    }
+
     let mut task_table_open = false;
-
-    for (index, line) in lines.iter().enumerate().skip(chrome_start) {
-        if is_claude_tui_background_agent_footer(line)
-            || is_claude_tui_background_agent_management_line(line)
-        {
-            statuses.push(index);
-            task_table_open = false;
-            continue;
-        }
-
+    for (index, line) in lines.iter().enumerate().skip(prompt_index + 1) {
         if line == &"  ⏺ main" {
             task_table_open = true;
             continue;
         }
-
         if task_table_open && is_claude_tui_background_agent_task_row(line) {
             statuses.push(index);
             continue;
         }
-
         task_table_open = false;
     }
 
     statuses
+}
+
+fn is_claude_tui_horizontal_separator(line: &str) -> bool {
+    line.chars().count() >= 8 && line.chars().all(|character| character == '─')
 }
 
 fn is_claude_tui_background_agent_footer(line: &str) -> bool {
@@ -52,6 +57,10 @@ fn is_claude_tui_background_agent_footer(line: &str) -> bool {
         .strip_suffix(" background agent to finish")
         .or_else(|| count.strip_suffix(" background agents to finish"));
     count.is_some_and(|count| !count.is_empty() && count.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn is_claude_tui_background_agent_management_header(line: &str) -> bool {
+    line.starts_with("⏺ Agent(") && line.ends_with(')')
 }
 
 fn is_claude_tui_background_agent_management_line(line: &str) -> bool {
@@ -147,7 +156,7 @@ mod tests {
   ◯ implementer    Updating tests                      3m 52s";
 
     #[test]
-    fn background_agent_chrome_requires_bottom_prompt_zone() {
+    fn background_agent_chrome_requires_composer_adjacency() {
         assert_eq!(
             claude_tui_background_agent_status_line_indexes(BACKGROUND_WAITING_PANE),
             vec![1, 9, 10],
@@ -173,6 +182,23 @@ mod tests {
         assert!(
             claude_tui_background_agent_status_line_indexes(quoted_assistant_output).is_empty()
         );
+
+        for pane in [
+            "❯\n✻ Waiting for 3 background agents to finish",
+            "❯\n  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)",
+            "✻ Waiting for 3 background agents to finish\n❯",
+        ] {
+            assert!(claude_tui_background_agent_status_line_indexes(pane).is_empty());
+        }
+    }
+
+    #[test]
+    fn background_agent_footer_requires_separator_before_composer() {
+        let pane = "\
+✻ Waiting for 3 background agents to finish
+not a Claude TUI separator
+❯";
+        assert!(claude_tui_background_agent_status_line_indexes(pane).is_empty());
     }
 
     #[test]
