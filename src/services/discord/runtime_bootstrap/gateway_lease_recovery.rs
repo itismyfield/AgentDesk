@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) static STANDBY_PROMOTION_IN_PROGRESS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static STALE_RESTART_ARTIFACT_CLEANUP: std::sync::Once = std::sync::Once::new();
 
 pub(super) const GATEWAY_STANDBY_RETRY_MIN_SECS: u64 = 30;
 pub(super) const GATEWAY_STANDBY_RETRY_JITTER_SECS: u64 = 30;
@@ -180,6 +181,32 @@ pub(super) async fn reap_orphaned_gateway_lease_for_instance_with_min_age(
         );
     }
     Ok(terminated)
+}
+
+pub(super) fn cleanup_stale_restart_artifacts() {
+    STALE_RESTART_ARTIFACT_CLEANUP.call_once(|| {
+        let Some(root) = crate::agentdesk_runtime_root() else {
+            return;
+        };
+        for name in ["restart_persisted", "restart_cancelled"] {
+            match std::fs::remove_file(root.join(name)) {
+                Ok(()) => tracing::info!(artifact = name, "removed stale restart artifact at boot"),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => tracing::warn!(artifact = name, %error, "failed to remove stale restart artifact at boot"),
+            }
+        }
+    });
+}
+
+pub(super) fn cleanup_stale_restart_artifacts_in(root: &std::path::Path) -> std::io::Result<()> {
+    for name in ["restart_persisted", "restart_cancelled"] {
+        match std::fs::remove_file(root.join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn standby_retry_delay() -> Duration {

@@ -22,7 +22,7 @@ use self::framework_setup::{run_bot_build_slash_commands, run_bot_framework_setu
 use self::gateway_lease::{
     GatewayLeaseOutcome, run_bot_acquire_gateway_lease, run_bot_spawn_gateway_lease_keepalive,
 };
-use self::gateway_lease_recovery::spawn_standby_gateway_retry;
+use self::gateway_lease_recovery::{cleanup_stale_restart_artifacts, spawn_standby_gateway_retry};
 use self::gateway_runtime::run_bot_start_gateway_runtime;
 use self::intake::run_bot_maybe_spawn_intake_worker;
 #[allow(unused_imports)]
@@ -244,6 +244,11 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         shutdown_remaining.fetch_sub(1, Ordering::AcqRel);
         return;
     }
+
+    // A launchd KeepAlive respawn starts the binary directly, bypassing the
+    // deploy wrapper cleanup. Remove prior-lifetime acknowledgements before any
+    // deferred-restart poller or standby lease-retry task can inspect them.
+    cleanup_stale_restart_artifacts();
 
     let gateway_lease = match gateway_outcome {
         GatewayLeaseOutcome::Proceed(lease) => lease,
