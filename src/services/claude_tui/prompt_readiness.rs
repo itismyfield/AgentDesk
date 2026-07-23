@@ -1,5 +1,83 @@
 use crate::services::tui_turn_state::TuiTurnState;
 
+/// Return line indexes occupied by authenticated Claude TUI background-agent
+/// chrome. The three shapes deliberately include their TUI-only placement:
+/// a spinner footer, an indented management affordance, or a contiguous task
+/// table headed by `⏺ main`. Text in an assistant response may use the same
+/// words or `◯` bullet, but it cannot satisfy these structural anchors.
+pub(crate) fn claude_tui_background_agent_status_line_indexes(pane: &str) -> Vec<usize> {
+    let lines = pane.lines().collect::<Vec<_>>();
+    let mut statuses = Vec::new();
+    let mut task_table_open = false;
+
+    for (index, line) in lines.iter().enumerate() {
+        if is_claude_tui_background_agent_footer(line)
+            || is_claude_tui_background_agent_management_line(line)
+        {
+            statuses.push(index);
+            task_table_open = false;
+            continue;
+        }
+
+        if line == &"  ⏺ main" {
+            task_table_open = true;
+            continue;
+        }
+
+        if task_table_open && is_claude_tui_background_agent_task_row(line) {
+            statuses.push(index);
+            continue;
+        }
+
+        task_table_open = false;
+    }
+
+    statuses
+}
+
+fn is_claude_tui_background_agent_footer(line: &str) -> bool {
+    let line = line.trim();
+    let Some(count) = line.strip_prefix("✻ Waiting for ") else {
+        return false;
+    };
+    let count = count
+        .strip_suffix(" background agent to finish")
+        .or_else(|| count.strip_suffix(" background agents to finish"));
+    count.is_some_and(|count| !count.is_empty() && count.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn is_claude_tui_background_agent_management_line(line: &str) -> bool {
+    let Some(affordance) = line.strip_prefix("  ⎿  Backgrounded agent (") else {
+        return false;
+    };
+    affordance.ends_with(')') && affordance.contains("↓ to manage · ctrl+o to expand")
+}
+
+fn is_claude_tui_background_agent_task_row(line: &str) -> bool {
+    let Some(columns) = line.strip_prefix("  ◯ ") else {
+        return false;
+    };
+    let columns = columns
+        .split("  ")
+        .filter(|column| !column.trim().is_empty())
+        .collect::<Vec<_>>();
+    columns.len() == 3 && is_claude_tui_elapsed_duration(columns[2].trim())
+}
+
+fn is_claude_tui_elapsed_duration(value: &str) -> bool {
+    let components = value.split_whitespace().collect::<Vec<_>>();
+    !components.is_empty()
+        && components.iter().all(|component| {
+            let Some(unit) = component.chars().last() else {
+                return false;
+            };
+            matches!(unit, 's' | 'm' | 'h')
+                && component.strip_suffix(unit).is_some_and(|digits| {
+                    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        })
+}
+
 /// Return foreground live-turn evidence from a Claude TUI pane.
 ///
 /// A completed foreground turn may leave detached background-agent chrome on
@@ -18,11 +96,11 @@ pub(super) fn pane_has_foreground_busy_evidence(
         return crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(pane);
     }
 
+    let background_status_lines = claude_tui_background_agent_status_line_indexes(pane);
     let foreground_only = pane
         .lines()
-        .filter(|line| {
-            !crate::services::tmux_common::tmux_line_is_claude_tui_background_agent_status(line)
-        })
+        .enumerate()
+        .filter_map(|(index, line)| (!background_status_lines.contains(&index)).then_some(line))
         .collect::<Vec<_>>()
         .join("\n");
     crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(&foreground_only)
@@ -59,6 +137,20 @@ mod tests {
   ⏺ main
   ◯ reviewer       Watching CI                         6m 13s
   ◯ implementer    Updating tests                      3m 52s";
+
+    #[test]
+    fn task_list_background_agent_rows_require_main_header_and_columns() {
+        assert_eq!(
+            claude_tui_background_agent_status_line_indexes(BACKGROUND_WAITING_PANE),
+            vec![1, 9, 10],
+        );
+        let assistant_body = "\
+◯ reviewer       Watching CI                         6m 13s
+◯ implementer    Updating tests                      3m 52s
+I am waiting for 3 background agents to finish.
+⎿ Backgrounded agent (↓ to manage · ctrl+o to expand)";
+        assert!(claude_tui_background_agent_status_line_indexes(assistant_body).is_empty());
+    }
 
     #[test]
     fn authoritative_idle_excludes_background_agent_status_from_busy_evidence() {

@@ -367,20 +367,11 @@ pub(crate) fn tmux_capture_indicates_claude_tui_background_agent_pending(capture
         return false;
     }
     let start = non_empty.len().saturating_sub(CLAUDE_TUI_ACTIVE_SCAN_LINES);
-    non_empty[start..]
-        .iter()
-        .any(|line| tmux_line_is_claude_tui_background_agent_status(line))
-}
-
-/// Identify background-agent-only TUI chrome, including task-list rows. This is
-/// shared by completion pending detection and foreground readiness filtering so
-/// the two consumers cannot drift onto different status-line shapes.
-pub(crate) fn tmux_line_is_claude_tui_background_agent_status(line: &str) -> bool {
-    let line = trim_prompt_line(line);
-    let lower = line.to_ascii_lowercase();
-    (lower.contains("waiting for") && lower.contains("background agent"))
-        || lower.contains("backgrounded agent")
-        || line.starts_with('◯')
+    let recent = non_empty[start..].join("\n");
+    !crate::services::claude_tui::prompt_readiness::claude_tui_background_agent_status_line_indexes(
+        &recent,
+    )
+    .is_empty()
 }
 
 /// Shared producer for the Claude TUI background-agent pending bit.
@@ -2177,6 +2168,11 @@ another line of prior output";
         ));
         assert!(!tmux_capture_indicates_claude_tui_background_agent_pending(
             "I will hand that to the background agent.\n❯ "
+        ));
+        assert!(!tmux_capture_indicates_claude_tui_background_agent_pending(
+            "◯ reviewer       Watching CI                         6m 13s\n\
+             ◯ quoted agent status                         3m 52s\n\
+             I am waiting for 3 background agents to finish."
         ));
     }
 
