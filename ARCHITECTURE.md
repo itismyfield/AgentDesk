@@ -39,6 +39,7 @@ src/
 │   ├── client.rs
 │   ├── dcserver.rs
 │   ├── dcserver_pg_bootstrap.rs
+│   ├── dcserver_restart_marker.rs
 │   ├── direct.rs
 │   ├── discord.rs
 │   ├── discord_thread_create.rs
