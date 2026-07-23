@@ -16,6 +16,7 @@ import sys
 import textwrap
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "generate_inventory_docs.py"
@@ -31,35 +32,107 @@ def _src(body: str) -> str:
     return textwrap.dedent(body).lstrip("\n")
 
 
+def _write(root: Path, rel: str, body: str) -> None:
+    target = root / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body, encoding="utf-8")
+
+
 class InventoryTrackingContractTest(unittest.TestCase):
-    def test_line_count_snapshots_remain_untracked(self) -> None:
-        snapshots = [
-            "docs/generated/module-inventory.md",
-            "docs/generated/giant-file-registry.md",
-        ]
-        for snapshot in snapshots:
-            tracked = subprocess.run(
-                ["git", "ls-files", "--error-unmatch", snapshot],
-                cwd=REPO_ROOT,
-                check=False,
-                capture_output=True,
-                text=True,
+    SNAPSHOTS = (
+        "docs/generated/module-inventory.md",
+        "docs/generated/giant-file-registry.md",
+    )
+
+    @staticmethod
+    def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    @classmethod
+    def _git_ok(cls, root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        result = cls._git(root, *args)
+        if result.returncode != 0:
+            raise AssertionError(
+                f"git {' '.join(args)} failed ({result.returncode}): "
+                f"{result.stderr or result.stdout}"
             )
+        return result
+
+    def test_line_count_snapshots_remain_untracked(self) -> None:
+        for snapshot in self.SNAPSHOTS:
+            tracked = self._git(REPO_ROOT, "ls-files", "--error-unmatch", snapshot)
             self.assertNotEqual(
                 tracked.returncode,
                 0,
                 f"{snapshot} must stay de-committed to prevent O(N^2) PR conflicts",
             )
-            ignored = subprocess.run(
-                ["git", "check-ignore", "--quiet", snapshot],
-                cwd=REPO_ROOT,
-                check=False,
-            )
+            ignored = self._git(REPO_ROOT, "check-ignore", "--quiet", snapshot)
             self.assertEqual(
                 ignored.returncode,
                 0,
                 f"{snapshot} must remain ignored after de-commit",
             )
+
+    def test_independent_module_branches_rebase_without_snapshot_conflict(self) -> None:
+        """Exercise the #4724 failure mode with two real branches and a rebase.
+
+        Both branches independently change production modules and regenerate their
+        checkout-local line-count snapshots. Before the snapshots were de-committed,
+        those generated edits collided during every rebase. Ignored outputs must not
+        enter either commit, and rebasing the second branch onto the first must stay
+        conflict-free while preserving both source changes.
+        """
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._git_ok(root, "init", "--initial-branch=main")
+            self._git_ok(root, "config", "user.name", "Inventory Test")
+            self._git_ok(root, "config", "user.email", "inventory@example.invalid")
+            _write(
+                root,
+                ".gitignore",
+                "docs/generated/module-inventory.md\n"
+                "docs/generated/giant-file-registry.md\n",
+            )
+            _write(root, "src/alpha.rs", "pub fn alpha() {}\n")
+            _write(root, "src/beta.rs", "pub fn beta() {}\n")
+            self._git_ok(root, "add", ".")
+            self._git_ok(root, "commit", "-m", "baseline")
+
+            self._git_ok(root, "switch", "-c", "alpha-change")
+            _write(root, "src/alpha.rs", "pub fn alpha() { println!(\"a\"); }\n")
+            for snapshot in self.SNAPSHOTS:
+                _write(root, snapshot, "generated after alpha change\n")
+            self._git_ok(root, "add", ".")
+            self._git_ok(root, "commit", "-m", "change alpha")
+            alpha_tip = self._git_ok(root, "rev-parse", "HEAD").stdout.strip()
+
+            self._git_ok(root, "switch", "main")
+            self._git_ok(root, "switch", "-c", "beta-change")
+            _write(root, "src/beta.rs", "pub fn beta() { println!(\"b\"); }\n")
+            for snapshot in self.SNAPSHOTS:
+                _write(root, snapshot, "generated after beta change\n")
+            self._git_ok(root, "add", ".")
+            self._git_ok(root, "commit", "-m", "change beta")
+
+            rebase = self._git(root, "rebase", alpha_tip)
+            self.assertEqual(
+                rebase.returncode,
+                0,
+                f"independent module changes must rebase without generated-doc "
+                f"conflicts: {rebase.stderr or rebase.stdout}",
+            )
+            self.assertEqual(self._git_ok(root, "status", "--porcelain").stdout, "")
+            tracked = set(self._git_ok(root, "ls-files").stdout.splitlines())
+            self.assertTrue(set(self.SNAPSHOTS).isdisjoint(tracked))
+            self.assertIn('println!("a")', (root / "src/alpha.rs").read_text())
+            self.assertIn('println!("b")', (root / "src/beta.rs").read_text())
 
 
 class ProdTestSplitTest(unittest.TestCase):
