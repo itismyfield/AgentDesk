@@ -3720,12 +3720,9 @@ async fn mailbox_clear_pending_dispatch_reservation(
 /// PRE-submit (the prompt was never delivered), so retrying cannot double-send.
 /// Enqueues to the BACK of the channel mailbox so the message is retried after
 /// the in-flight turn frees the pane rather than hot-looping. No-op for
-/// anchorless (recovery) turns or empty text.
-///
-/// NOTE: the dequeued-head sibling `enqueue_busy_tui_followup_for_retry`
-/// front-requeues to preserve FIFO (#4795); this inflight-rebuild path still
-/// tail-enqueues. Whether it should also preserve original position is tracked
-/// in #4797.
+/// anchorless (recovery) turns or empty text. Unlike the dequeued-head sibling
+/// `enqueue_busy_tui_followup_for_retry` (front-requeues for FIFO, #4795), this
+/// inflight-rebuild path still tail-enqueues; FIFO parity tracked in #4797.
 pub(in crate::services::discord) async fn mailbox_requeue_inflight_for_followup_retry(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
