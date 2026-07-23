@@ -495,7 +495,10 @@
 # #4807: remove the hosted-TUI readiness-wait placeholder edit (-10), then
 # lower the frozen baseline to the measured production LoC after current-main
 # drift (-2) so the deleted presentation path cannot silently regrow. 2708 -> 2706.
-"src/services/discord/router/message_handler/intake_turn.rs" = 2706
+# #4743: behavior-preserving decomposition moves the worker-facing IntakeRequest
+# and execute_intake_turn_core entry into `intake_turn/worker_entry.rs`; root source
+# assertions follow the already-extracted busy_retry helper. 2706 -> 2622.
+"src/services/discord/router/message_handler/intake_turn.rs" = 2622
 "src/services/discord/meeting_orchestrator.rs" = 3227
 # #3293: +3 for the `registry_purge` child-module declaration (peek +
 # operator-gated idle-entry purge live outside the frozen root); lowered

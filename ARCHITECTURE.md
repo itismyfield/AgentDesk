@@ -670,7 +670,8 @@ src/
 │   │   │   │   │   ├── stale_dispatch_guard.rs
 │   │   │   │   │   ├── steering_hook.rs
 │   │   │   │   │   ├── turn_watchdog.rs
-│   │   │   │   │   └── voice_intake.rs
+│   │   │   │   │   ├── voice_intake.rs
+│   │   │   │   │   └── worker_entry.rs
 │   │   │   │   ├── attachments.rs
 │   │   │   │   ├── busy_retry.rs
 │   │   │   │   ├── control.rs
