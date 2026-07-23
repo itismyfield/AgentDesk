@@ -3665,7 +3665,7 @@ async fn mailbox_requeue_intervention_front(
     provider: &ProviderKind,
     channel_id: ChannelId,
     intervention: Intervention,
-) -> RequeueInterventionResult {
+) -> MailboxEnqueueOutcome {
     let result: RequeueInterventionResult = shared
         .mailbox(channel_id)
         .requeue_front(
@@ -3682,7 +3682,12 @@ async fn mailbox_requeue_intervention_front(
             "mailbox requeue-front failed durable pending-queue persistence; pending dispatch marker remains the durable backstop"
         );
     }
-    result
+    MailboxEnqueueOutcome {
+        enqueued: result.enqueued && result.persistence_error.is_none(),
+        merged: false,
+        refusal_reason: result.refusal_reason,
+        persistence_error: result.persistence_error,
+    }
 }
 
 pub(in crate::services::discord) async fn mailbox_abandon_pending_dispatch(
@@ -3715,14 +3720,8 @@ async fn mailbox_clear_pending_dispatch_reservation(
         .await;
 }
 
-/// Re-queue the inflight message that a claude TUI follow-up could not submit
-/// because the pane was busy at submit time. The follow-up busy-timeout is
-/// PRE-submit (the prompt was never delivered), so retrying cannot double-send.
-/// Enqueues to the BACK of the channel mailbox so the message is retried after
-/// the in-flight turn frees the pane rather than hot-looping. No-op for
-/// anchorless (recovery) turns or empty text. Unlike the dequeued-head sibling
-/// `enqueue_busy_tui_followup_for_retry` (front-requeues for FIFO, #4795), this
-/// inflight-rebuild path still tail-enqueues; FIFO parity tracked in #4797.
+/// Front-restore an inflight Claude TUI follow-up that failed before submission;
+/// it predates queued interventions, and the deferred kickoff prevents hot loops.
 pub(in crate::services::discord) async fn mailbox_requeue_inflight_for_followup_retry(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -3770,7 +3769,7 @@ pub(in crate::services::discord) async fn mailbox_requeue_inflight_for_followup_
         pending_uploads: inflight_state.followup_pending_uploads.clone(),
         voice_announcement: inflight_state.followup_voice_announcement.clone(),
     };
-    mailbox_enqueue_intervention(shared, provider, channel_id, intervention).await
+    mailbox_requeue_intervention_front(shared, provider, channel_id, intervention).await
 }
 
 #[cfg(test)]
@@ -3920,7 +3919,7 @@ mod followup_retry_requeue_tests {
     }
 
     #[test]
-    fn pre_submit_requeue_reports_duplicate_refusal_outcome() {
+    fn inflight_retry_restores_earlier_message_without_reversing_fifo_4797() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .expect("shared env lock poisoned");
@@ -3937,21 +3936,50 @@ mod followup_retry_requeue_tests {
         rt.block_on(async {
             let shared = make_shared_data_for_tests();
             let provider = ProviderKind::Claude;
-            let channel_id = ChannelId::new(3_752_002);
-            let user_msg_id = MessageId::new(3_752_102);
-            let state = followup_inflight(channel_id, user_msg_id, false);
+            let channel_id = ChannelId::new(4_797_001);
+            let first_id = MessageId::new(4_797_101);
+            let later_id = MessageId::new(4_797_102);
+            let state = followup_inflight(channel_id, first_id, false);
+            let later = Intervention {
+                author_id: UserId::new(43),
+                author_is_bot: true,
+                message_id: later_id,
+                queued_generation: shared.restart.current_generation,
+                source_message_ids: vec![later_id],
+                source_message_queued_generations: Vec::new(),
+                source_text_segments: Vec::new(),
+                text: "later bot B".to_string(),
+                mode: crate::services::turn_orchestrator::InterventionMode::Soft,
+                created_at: std::time::Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
+                pending_uploads: Vec::new(),
+                voice_announcement: None,
+            };
+            mailbox_enqueue_intervention(&shared, &provider, channel_id, later.clone()).await;
 
-            let first =
+            let retry =
                 mailbox_requeue_inflight_for_followup_retry(&shared, &provider, channel_id, &state)
                     .await;
-            let second =
+            assert!(retry.enqueued);
+
+            let snapshot = mailbox_snapshot(&shared, channel_id).await;
+            let order: Vec<_> = snapshot
+                .intervention_queue
+                .iter()
+                .map(|item| item.message_id)
+                .collect();
+            assert_eq!(order, vec![first_id, later_id]);
+            assert!(!snapshot.intervention_queue[0].author_is_bot);
+            assert!(snapshot.intervention_queue[1].author_is_bot);
+
+            let duplicate =
                 mailbox_requeue_inflight_for_followup_retry(&shared, &provider, channel_id, &state)
                     .await;
-
-            assert!(first.enqueued);
-            assert!(!second.enqueued);
+            assert!(!duplicate.enqueued);
             assert_eq!(
-                second.refusal_reason,
+                duplicate.refusal_reason,
                 Some(
                     crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued
                 )
@@ -3959,8 +3987,8 @@ mod followup_retry_requeue_tests {
             let snapshot = mailbox_snapshot(&shared, channel_id).await;
             assert_eq!(
                 snapshot.intervention_queue.len(),
-                1,
-                "duplicate pre-submit requeue must not create a second queued prompt"
+                2,
+                "duplicate inflight retry must not create a second queued prompt"
             );
         });
     }

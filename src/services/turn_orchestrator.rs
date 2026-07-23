@@ -454,9 +454,22 @@ pub(crate) fn enqueue_intervention(
 
 pub(crate) fn requeue_intervention_front(
     queue: &mut Vec<Intervention>,
-    intervention: Intervention,
-) -> Vec<QueueExitEvent> {
+    mut intervention: Intervention,
+) -> EnqueueInterventionResult {
     let mut queue_exit_events = prune_interventions(queue);
+    ensure_source_message_ids(&mut intervention);
+    if queue
+        .iter()
+        .any(|item| item.source_message_ids.contains(&intervention.message_id))
+    {
+        return EnqueueInterventionResult {
+            enqueued: false,
+            merged: false,
+            refusal_reason: Some(EnqueueRefusalReason::SourceIdAlreadyQueued),
+            queue_exit_events,
+            persistence_error: None,
+        };
+    }
     queue.insert(0, intervention);
     if queue.len() > MAX_INTERVENTIONS_PER_CHANNEL {
         // #4260: the tail drain here is a capacity evict too — genuine loss.
@@ -466,7 +479,13 @@ pub(crate) fn requeue_intervention_front(
                 .map(|intervention| QueueExitEvent::new(intervention, QueueExitKind::Overflow)),
         );
     }
-    queue_exit_events
+    EnqueueInterventionResult {
+        enqueued: true,
+        merged: false,
+        refusal_reason: None,
+        queue_exit_events,
+        persistence_error: None,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -680,10 +699,9 @@ pub(crate) struct TakeNextSoftResult {
 }
 
 pub(crate) struct RequeueInterventionResult {
+    pub(crate) enqueued: bool,
+    pub(crate) refusal_reason: Option<EnqueueRefusalReason>,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
-    // Uniform queue-mutation persistence-result surface, consumed by
-    // `enqueue_busy_tui_followup_for_retry` (#4795) to build its
-    // MailboxEnqueueOutcome. See `FinishTurnResult`.
     pub(crate) persistence_error: Option<String>,
 }
 
@@ -1109,6 +1127,8 @@ impl ChannelMailboxHandle {
                 reply,
             },
             RequeueInterventionResult {
+                enqueued: false,
+                refusal_reason: None,
                 queue_exit_events: Vec::new(),
                 persistence_error: None,
             },
@@ -2754,7 +2774,14 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     let previous_queue = state.intervention_queue.clone();
                     let requeue_result =
                         requeue_intervention_front(&mut state.intervention_queue, intervention);
-                    let result = if let Err(error) = persist_queue_or_restore(
+                    let result = if !requeue_result.enqueued {
+                        RequeueInterventionResult {
+                            enqueued: false,
+                            refusal_reason: requeue_result.refusal_reason,
+                            queue_exit_events: requeue_result.queue_exit_events,
+                            persistence_error: None,
+                        }
+                    } else if let Err(error) = persist_queue_or_restore(
                         &mut state,
                         channel_id,
                         &persistence,
@@ -2765,6 +2792,8 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             clear_pending_user_dispatch(&mut state);
                         }
                         RequeueInterventionResult {
+                            enqueued: false,
+                            refusal_reason: None,
                             queue_exit_events: Vec::new(),
                             persistence_error: Some(error),
                         }
@@ -2779,7 +2808,9 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             clear_pending_user_dispatch(&mut state);
                         }
                         RequeueInterventionResult {
-                            queue_exit_events: requeue_result,
+                            enqueued: requeue_result.enqueued,
+                            refusal_reason: requeue_result.refusal_reason,
+                            queue_exit_events: requeue_result.queue_exit_events,
                             persistence_error: None,
                         }
                     };
@@ -5353,10 +5384,14 @@ mod no_ttl_evict_tests {
         let mut queue: Vec<Intervention> = (0..(MAX_INTERVENTIONS_PER_CHANNEL as u64))
             .map(|i| intervention_at(i + 2, now))
             .collect();
-        let exits = requeue_intervention_front(&mut queue, intervention_at(1, now));
-        assert_eq!(exits.len(), 1, "one tail entry must be evicted");
+        let result = requeue_intervention_front(&mut queue, intervention_at(1, now));
         assert_eq!(
-            exits[0].kind,
+            result.queue_exit_events.len(),
+            1,
+            "one tail entry must be evicted"
+        );
+        assert_eq!(
+            result.queue_exit_events[0].kind,
             QueueExitKind::Overflow,
             "requeue tail drain is a capacity evict — Overflow"
         );

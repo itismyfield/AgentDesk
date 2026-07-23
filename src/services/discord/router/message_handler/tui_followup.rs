@@ -875,7 +875,7 @@ pub(super) async fn enqueue_busy_tui_followup_for_retry(
     pending_uploads: Vec<String>,
     voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> MailboxEnqueueOutcome {
-    let result = super::super::super::mailbox_requeue_intervention_front(
+    super::super::super::mailbox_requeue_intervention_front(
         shared,
         provider,
         channel_id,
@@ -891,13 +891,7 @@ pub(super) async fn enqueue_busy_tui_followup_for_retry(
             voice_announcement,
         ),
     )
-    .await;
-    MailboxEnqueueOutcome {
-        enqueued: result.persistence_error.is_none(),
-        merged: false,
-        refusal_reason: None,
-        persistence_error: result.persistence_error,
-    }
+    .await
 }
 
 #[cfg(test)]
