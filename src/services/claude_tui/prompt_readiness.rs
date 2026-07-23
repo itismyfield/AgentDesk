@@ -14,38 +14,67 @@ pub(crate) fn render_prompt_readiness_panel_line(
 fn normalize_prompt_readiness_panel_line(line: &str) -> Option<String> {
     let segments = line.trim().split(" │ ").map(str::trim).collect::<Vec<_>>();
     let model_label = *segments.first()?;
-    let progress_bar = *segments.get(1)?;
-    let context_percent = segments.get(2)?.strip_suffix('%')?.parse::<u64>().ok()?;
-    let tokens = *segments.get(3)?;
-    let (used_tokens, window_tokens) = tokens.split_once('/')?;
-    let context = ContextWindowUsage {
-        used_tokens: parse_compact_tokens(used_tokens)?,
-        window_tokens: parse_compact_tokens(window_tokens)?,
-    };
-    let rendered_percent = ((u128::from(context.used_tokens.min(context.window_tokens)) * 100)
-        / u128::from(context.window_tokens)) as u64;
-    if rendered_percent != context_percent {
+    let model_name = model_label.strip_prefix("🤖 ")?;
+    if model_name.is_empty() {
         return None;
     }
-    let usage = format_usage_status_segments(segments.iter().skip(4).copied(), Some(context));
-    render_prompt_readiness_panel_line(model_label, progress_bar, usage)
+    let progress_bar = *segments.get(1)?;
+    if progress_bar.is_empty()
+        || !progress_bar
+            .chars()
+            .all(|character| matches!(character, '█' | '░'))
+    {
+        return None;
+    }
+    let context_percent = segments.get(2)?.strip_suffix('%')?.parse::<u64>().ok()?;
+    let tokens = *segments.get(3)?;
+    let (used_lexeme, window_lexeme) = tokens.split_once('/')?;
+    let used_lexeme = used_lexeme.trim();
+    let window_lexeme = window_lexeme.trim();
+    let context = ContextWindowUsage {
+        used_tokens: parse_compact_tokens(used_lexeme)?,
+        window_tokens: parse_compact_tokens(window_lexeme)?,
+    };
+    if context.window_tokens == 0 {
+        return None;
+    }
+    let rendered_percent = ((u128::from(context.used_tokens.min(context.window_tokens)) * 100)
+        / u128::from(context.window_tokens)) as u64;
+    if rendered_percent != context_percent
+        || !segments.iter().skip(4).all(|segment| {
+            ["5h:", "7d:", "7d-F:"]
+                .iter()
+                .any(|prefix| segment.starts_with(prefix))
+        })
+    {
+        return None;
+    }
+
+    let context_usage = format!("ctw: {context_percent}% ({used_lexeme}/{window_lexeme})");
+    let usage = format_usage_status_segments(segments.iter().skip(4).copied(), None)
+        .map(|quota_usage| format!("{quota_usage} │ {context_usage}"))
+        .unwrap_or(context_usage);
+    render_prompt_readiness_panel_line(model_label, progress_bar, Some(usage))
 }
 
 fn parse_compact_tokens(value: &str) -> Option<u64> {
+    const U64_UPPER_EXCLUSIVE: f64 = 18_446_744_073_709_551_616.0;
+
     let value = value.trim();
-    if let Some(value) = value.strip_suffix('K') {
-        value
-            .parse::<f64>()
-            .ok()
-            .map(|value| (value * 1_000.0) as u64)
+    let (number, multiplier) = if let Some(value) = value.strip_suffix('K') {
+        (value, 1_000.0)
     } else if let Some(value) = value.strip_suffix('M') {
-        value
-            .parse::<f64>()
-            .ok()
-            .map(|value| (value * 1_000_000.0) as u64)
+        (value, 1_000_000.0)
     } else {
-        value.parse().ok()
+        return value.parse().ok();
+    };
+    if number.starts_with('-') {
+        return None;
     }
+    let number = number.parse::<f64>().ok()?;
+    let scaled = number * multiplier;
+    (number.is_finite() && number >= 0.0 && scaled.is_finite() && scaled < U64_UPPER_EXCLUSIVE)
+        .then_some(scaled as u64)
 }
 
 pub(crate) fn normalize_prompt_readiness_panel_in_capture(pane: &str) -> String {
@@ -233,6 +262,57 @@ mod tests {
             normalized,
             "answer\n────────────────\n❯\n────────────────\n  🤖 Opus(H) │ ███░░░░░░░ │ 5h: 8% (3h0m) │ 7d: 55% (1d23h) │ ctw: 26% (265K/1.0M)"
         );
+    }
+
+    #[test]
+    fn normalization_preserves_untrusted_lookalikes_and_invalid_context_tokens_4822() {
+        for line in [
+            "text │ text │ 0% │ 0/0",
+            "  🤖 Opus(H) │ ███░░░░░░░ │ 0% │ 0/0",
+            "  🤖 Opus(H) │ ███░░░░░░░ │ 0% │ NaN/1.0M",
+            "  🤖 Opus(H) │ ███░░░░░░░ │ 0% │ inf/1.0M",
+            "  🤖 Opus(H) │ ███░░░░░░░ │ 0% │ -1K/1.0M",
+            "  🤖 Opus(H) │ not-a-bar │ 26% │ 265K/1.0M",
+        ] {
+            assert_eq!(normalize_prompt_readiness_panel_in_capture(line), line);
+        }
+    }
+
+    #[test]
+    fn normalization_preserves_compact_token_lexemes_4822() {
+        for (line, expected) in [
+            (
+                "  🤖 Opus(H) │ ██░░░░░░░░ │ 15% │ 154.6K/1.0M",
+                "  🤖 Opus(H) │ ██░░░░░░░░ │ ctw: 15% (154.6K/1.0M)",
+            ),
+            (
+                "  🤖 Opus(H) │ █░░░░░░░░░ │ 10% │ 1.04M/10.0M",
+                "  🤖 Opus(H) │ █░░░░░░░░░ │ ctw: 10% (1.04M/10.0M)",
+            ),
+        ] {
+            assert_eq!(normalize_prompt_readiness_panel_in_capture(line), expected);
+        }
+    }
+
+    #[test]
+    fn normalization_preserves_unknown_status_suffix_4822() {
+        let line = "  🤖 Opus(H) │ ███░░░░░░░ │ 26% │ 265K/1.0M │ MCP: 2";
+        assert_eq!(normalize_prompt_readiness_panel_in_capture(line), line);
+    }
+
+    #[test]
+    fn compact_token_parser_rejects_non_finite_negative_and_overflow_values_4822() {
+        for value in [
+            "NaN",
+            "NaNK",
+            "infM",
+            "-1",
+            "-1K",
+            "18446744073709551616",
+            "18446744073709552K",
+        ] {
+            assert_eq!(parse_compact_tokens(value), None, "accepted {value}");
+        }
     }
 
     #[test]
