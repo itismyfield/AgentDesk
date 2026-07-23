@@ -55,6 +55,13 @@ fn enqueue_abandon_request_for_row(
             msg_id: state.current_msg_id,
             started_at: state.started_at.clone(),
             current_tool_line: state.current_tool_line.clone(),
+            terminal_status: abandon_request_store::TerminalCardStatus::Aborted,
+            episode: abandon_request_store::AbandonEpisodeIdentity {
+                user_msg_id: state.user_msg_id,
+                started_at: state.started_at.clone(),
+                status_panel_generation: state.status_panel_generation,
+                save_generation: state.save_generation,
+            },
         },
     ) {
         Ok(()) => true,

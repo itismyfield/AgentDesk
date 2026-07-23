@@ -995,11 +995,12 @@ where
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct ExplicitBackgroundWatchdogClear {
     clear_outcome: discord::inflight::GuardedClearOutcome,
     pending_hourglass_user_msg_id: Option<u64>,
     finalizer_turn_id: u64,
+    claim_snapshot: Option<discord::turn_finalizer::SyntheticClaimSnapshot>,
 }
 
 fn revalidate_and_clear_explicit_background_inflight(
@@ -1013,6 +1014,7 @@ fn revalidate_and_clear_explicit_background_inflight(
             clear_outcome: discord::inflight::GuardedClearOutcome::Missing,
             pending_hourglass_user_msg_id: None,
             finalizer_turn_id: 0,
+            claim_snapshot: None,
         };
     };
     let finalizer_turn_id = snapshot_finalizer_turn_id.unwrap_or(snapshot_identity.user_msg_id);
@@ -1021,18 +1023,24 @@ fn revalidate_and_clear_explicit_background_inflight(
             clear_outcome: discord::inflight::GuardedClearOutcome::UserMsgMismatch,
             pending_hourglass_user_msg_id: None,
             finalizer_turn_id,
+            claim_snapshot: None,
         };
     }
-    let clear_outcome = discord::inflight::clear_inflight_state_if_matches_identity(
-        provider,
-        channel_id.get(),
-        snapshot_identity,
-    );
+    let (clear_outcome, removed_row) =
+        discord::inflight::clear_inflight_state_if_matches_identity_returning_row(
+            provider,
+            channel_id.get(),
+            snapshot_identity,
+        );
+    let claim_snapshot = removed_row
+        .as_ref()
+        .map(discord::turn_finalizer::SyntheticClaimSnapshot::from_row);
     ExplicitBackgroundWatchdogClear {
         clear_outcome,
         pending_hourglass_user_msg_id: (snapshot_identity.user_msg_id != 0)
             .then_some(snapshot_identity.user_msg_id),
         finalizer_turn_id,
+        claim_snapshot,
     }
 }
 
@@ -1822,6 +1830,7 @@ pub(crate) async fn run_stall_watchdog_pass(
             let generation = shared.restart.current_generation;
             let shared_for_submit = shared.clone();
             let provider_for_submit = provider.clone();
+            let claim_snapshot = revalidated.claim_snapshot.clone();
             let has_pending = cleanup_then_submit_explicit_background_watchdog_cancel(
                 &shared,
                 provider,
@@ -1831,7 +1840,7 @@ pub(crate) async fn run_stall_watchdog_pass(
                 move || async move {
                     shared_for_submit
                         .turn_finalizer
-                        .submit_terminal(
+                        .submit_terminal_with_claim_snapshot(
                             discord::turn_finalizer::TurnKey::new(
                                 channel_id,
                                 finalizer_turn_id,
@@ -1840,6 +1849,7 @@ pub(crate) async fn run_stall_watchdog_pass(
                             provider_for_submit,
                             discord::turn_finalizer::TerminalEvent::Cancel,
                             discord::turn_finalizer::FinalizeContext::monitor(),
+                            claim_snapshot,
                             shared_for_submit.clone(),
                         )
                         .await
@@ -3246,6 +3256,63 @@ mod stall_watchdog_pure_tests {
             .expect("newer row must survive mismatch");
         assert_eq!(persisted.started_at, "2099-01-01 00:00:00");
         assert_eq!(persisted.turn_start_offset, Some(99));
+    }
+
+    #[test]
+    fn explicit_background_watchdog_clear_returns_reanchored_removed_row_snapshot() {
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
+
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_340_101);
+        let mut state = InflightTurnState::new(
+            provider.clone(),
+            channel_id.get(),
+            None,
+            1,
+            4_340_102,
+            4_340_103,
+            "explicit background".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-claude-4340-watchdog".to_string()),
+            Some("/tmp/issue-4340-watchdog.jsonl".to_string()),
+            None,
+            10,
+        );
+        state.status_message_id = Some(4_340_104);
+        inflight::save_inflight_state(&state).expect("save watchdog row");
+        let identity = InflightTurnIdentity::from_state(&state);
+        let stale_snapshot = inflight::load_inflight_state(&provider, channel_id.get())
+            .map(|row| {
+                crate::services::discord::turn_finalizer::SyntheticClaimSnapshot::from_row(&row)
+            })
+            .expect("load pre-reanchor snapshot");
+        assert_eq!(stale_snapshot.status_message_id, Some(4_340_104));
+
+        state.status_message_id = Some(4_340_105);
+        state.status_panel_generation = 2;
+        inflight::save_inflight_state(&state).expect("re-anchor same identity before clear");
+
+        let outcome = revalidate_and_clear_explicit_background_inflight(
+            &provider,
+            channel_id,
+            Some(&identity),
+            Some(state.effective_finalizer_turn_id()),
+        );
+
+        assert_eq!(outcome.clear_outcome, GuardedClearOutcome::Cleared);
+        assert_eq!(
+            outcome
+                .claim_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.status_message_id),
+            Some(4_340_105)
+        );
+        assert!(inflight::load_inflight_state(&provider, channel_id.get()).is_none());
     }
 
     #[test]
@@ -5798,6 +5865,7 @@ mod explicit_background_watchdog_cleanup_tests {
             clear_outcome: GuardedClearOutcome::Cleared,
             pending_hourglass_user_msg_id: Some(4_019_402_901),
             finalizer_turn_id: 4_019_402_901,
+            claim_snapshot: None,
         };
         let order = Arc::new(Mutex::new(Vec::new()));
 

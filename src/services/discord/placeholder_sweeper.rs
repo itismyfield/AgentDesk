@@ -38,6 +38,7 @@ use super::inflight::{
 use crate::services::provider::ProviderKind;
 
 mod abandon_guard;
+mod panel_shape;
 use abandon_guard::{
     AbandonedTmuxCleanupDecision, abandoned_tmux_cleanup_decision_for,
     finalize_owner_dead_cleanup_if_same_turn,
@@ -297,6 +298,10 @@ pub(in crate::services::discord) fn is_message_still_placeholder(content: &str) 
         return true;
     }
 
+    if panel_shape::live_status_panel_shape(trimmed) {
+        return true;
+    }
+
     // #3031C — minimal legacy fallback for pre-marker cards still in flight.
     // Matches the card's structural scaffold only (the `> **시작**: <t:…:R>`
     // started-at blockquote + at least one other `> **…**:` field line), so it
@@ -304,30 +309,11 @@ pub(in crate::services::discord) fn is_message_still_placeholder(content: &str) 
     // lockstep with `formatting.rs`. First-line header matching is intentionally
     // gone (it caused #2877 false StillPlaceholder classifications).
     let lines = trimmed.lines().collect::<Vec<_>>();
-    if legacy_handoff_card_shape(&lines) {
+    if panel_shape::legacy_handoff_card_shape(&lines) {
         return true;
     }
 
     false
-}
-
-/// #3031C — locale-independent structural detector for legacy (pre-marker)
-/// handoff cards. Keys off the markdown blockquote scaffold the card always
-/// renders rather than any translatable header/footer prose.
-fn legacy_handoff_card_shape(lines: &[&str]) -> bool {
-    let has_started_at = lines
-        .iter()
-        .any(|line| line.trim().starts_with("> **") && line.contains(": <t:"));
-    // A second blockquote field (도구/사유/요약 in any locale) distinguishes the
-    // card scaffold from an arbitrary message that merely quotes a timestamp.
-    let blockquote_field_lines = lines
-        .iter()
-        .filter(|line| {
-            let line = line.trim();
-            line.starts_with("> **") && line.contains("**:")
-        })
-        .count();
-    has_started_at && blockquote_field_lines >= 2
 }
 
 /// Run a single sweep pass for the given provider. Public for testability —
@@ -1043,6 +1029,26 @@ mod is_message_still_placeholder_tests {
                 "frame {ch} not recognised"
             );
         }
+    }
+
+    #[test]
+    fn live_status_panel_headers_are_placeholder_but_completion_is_not() {
+        for content in [
+            "🟢 진행 중\n턴 시작 : 07-08 15:51:33",
+            "🔧 도구 실행 중 ([Bash])\n턴 시작 : 07-08 15:51:33",
+            "🧵 subagent 실행 중 (review)\n턴 시작 : 07-08 15:51:33",
+            "🧬 workflow 실행 중 (CI)\n턴 시작 : 07-08 15:51:33",
+            "💤 monitor 대기\n턴 시작 : 07-08 15:51:33",
+            "⏰ scheduled wakeup (30s 후)\n턴 시작 : 07-08 15:51:33",
+        ] {
+            assert!(is_message_still_placeholder(content), "content={content}");
+        }
+        assert!(!is_message_still_placeholder(
+            "✅ 완료\n턴 시작 : 07-08 15:51:33"
+        ));
+        assert!(!is_message_still_placeholder(
+            "🟢 진행 중인 프로젝트를 검토했습니다."
+        ));
     }
 
     #[test]

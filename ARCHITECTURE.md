@@ -530,6 +530,7 @@ src/
 │   │   ├── inflight/
 │   │   │   ├── clear_store/
 │   │   │   │   ├── abandon.rs
+│   │   │   │   ├── identity.rs
 │   │   │   │   └── mod.rs
 │   │   │   ├── save_store/
 │   │   │   │   ├── identity_gate/
@@ -582,12 +583,15 @@ src/
 │   │   │   ├── transport.rs
 │   │   │   └── turn_output_controller.rs
 │   │   ├── placeholder_live_events/
+│   │   │   ├── status_panel/
+│   │   │   │   └── derived_status.rs
 │   │   │   ├── background_task_events.rs
 │   │   │   ├── common.rs
 │   │   │   ├── completion_footer.rs
 │   │   │   ├── context_panel.rs
 │   │   │   ├── freshness.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── panel_cache_invalidation.rs
 │   │   │   ├── recent_events.rs
 │   │   │   ├── session_banner_claim.rs
 │   │   │   ├── session_panel.rs
@@ -602,7 +606,8 @@ src/
 │   │   │   ├── turn_anchor.rs
 │   │   │   └── workflow_panel.rs
 │   │   ├── placeholder_sweeper/
-│   │   │   └── abandon_guard.rs
+│   │   │   ├── abandon_guard.rs
+│   │   │   └── panel_shape.rs
 │   │   ├── prompt_builder/
 │   │   │   ├── channel_recent_context.rs
 │   │   │   ├── dispatch_contract.rs
@@ -848,6 +853,8 @@ src/
 │   │   │   │   ├── claude_e.rs
 │   │   │   │   ├── guarded_save.rs
 │   │   │   │   └── tests.rs
+│   │   │   ├── status_panel/
+│   │   │   │   └── purge.rs
 │   │   │   ├── stream_loop/
 │   │   │   │   ├── content_arms/
 │   │   │   │   │   ├── provider_error_presentation.rs

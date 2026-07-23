@@ -132,15 +132,10 @@ pub(super) async fn update_streaming_status_tick(
         }
 
         // @persist-order-guard-start #4104
-        // #4104: persist the parsed watcher snapshot on every throttled tick,
-        // independently of whether this tick needs a Discord edit. A provider can
-        // emit pre-tool text and then spend a long time inside a tool while the
-        // rendered placeholder remains unchanged; the old edit-committed-only
-        // persistence left the durable row at its initial empty snapshot for that
-        // entire hold. Silent turns suppress Discord rendering, not durable state.
-        // The helper reloads and validates the complete turn identity under the
-        // inflight sidecar lock, so a stale watcher cannot overwrite a replacement
-        // turn.
+        // Persist every throttled parsed snapshot, even without a Discord edit: a
+        // long tool hold must not leave the durable row at its initial empty state.
+        // Silent turns suppress rendering, not durable state; the helper validates
+        // complete turn identity under the sidecar lock to block stale overwrites.
         persist_watcher_stream_progress(
             &watcher_provider,
             channel_id,
@@ -196,7 +191,11 @@ pub(super) async fn update_streaming_status_tick(
                 &watcher_provider,
                 status_panel_started_at,
             );
-            if panel_text != last_status_panel_text {
+            let panel_cache_invalidation_epoch = shared
+                .ui
+                .placeholder_live_events
+                .panel_cache_invalidation_epoch(channel_id, status_msg_id.get());
+            if panel_cache_invalidation_epoch.is_some() || panel_text != last_status_panel_text {
                 rate_limit_wait(&shared, channel_id).await;
                 match crate::services::discord::http::edit_channel_message(
                     &http,
@@ -208,6 +207,16 @@ pub(super) async fn update_streaming_status_tick(
                 {
                     Ok(_) => {
                         last_status_panel_text = panel_text;
+                        if let Some(epoch) = panel_cache_invalidation_epoch {
+                            shared
+                                .ui
+                                .placeholder_live_events
+                                .clear_panel_cache_invalidation_if_epoch(
+                                    channel_id,
+                                    status_msg_id.get(),
+                                    epoch,
+                                );
+                        }
                     }
                     Err(error) => {
                         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -466,14 +475,10 @@ pub(super) async fn update_streaming_status_tick(
                 data_start_offset,
                 turn_identity_for_panel.as_ref(),
             ) {
-                // #3003 (codex P2 r18): do NOT create a panel for an already
-                // stopped/abandoned turn. A stop tombstone can be recorded
-                // before the inflight row is removed; without this guard the
-                // interval-top reclaim would delete the panel and this branch
-                // would immediately recreate one for the same stopped turn.
-                // Snapshot the turn identity *before* the await so a
-                // stop/cancel/next-turn during send cannot persist stale
-                // state onto a different turn (codex P2 r4).
+                // #3003 (codex P2 r18): do not recreate an already stopped turn's
+                // panel after interval-top reclaim; a tombstone can precede row removal.
+                // Snapshot identity before await so stop/cancel/next-turn during send
+                // cannot persist stale state onto another turn (codex P2 r4).
                 let pre_send_identity = inflight_for_panel
                     .as_ref()
                     .map(crate::services::discord::inflight::InflightTurnIdentity::from_state);
@@ -544,12 +549,9 @@ pub(super) async fn update_streaming_status_tick(
                                         ..Default::default()
                                     },
                                 );
-                            // #3077 (codex P1): the pre-send snapshot narrows but does
-                            // NOT close the race (an overlapping watcher can rebind
-                            // between our load and this atomic bind). The bind is the
-                            // single source of truth for whether THIS panel is recorded,
-                            // so the adopted handle MUST come from its return — adopting
-                            // `panel_msg.id` unconditionally leaks a sent-but-unrecorded panel.
+                            // #3077 (codex P1): pre-send snapshot does not close a rebind
+                            // race; the atomic bind alone proves this panel was recorded.
+                            // Adopt its returned handle, never an unrecorded `panel_msg.id`.
                             let decision = resolve_tui_status_panel_bind_decision(bind_outcome);
                             if decision.delete_sent_panel {
                                 // The inflight row did NOT record our panel:
@@ -600,13 +602,9 @@ pub(super) async fn update_streaming_status_tick(
                                         panel_msg.id,
                                     );
                                 }
-                                // Resolve the handle from the row's CURRENT owned id as
-                                // observed by the bind (`decision.owned_panel_id`), never
-                                // the just-sent duplicate nor the (possibly stale) pre-bind
-                                // `fresh_inflight` snapshot (#3077 codex P2 #2). It is
-                                // `None` for GuardMismatch/Missing/IoError (no panel we may
-                                // claim → handle unset). Adopt only for the SAME turn we
-                                // sent for; a replacement turn's panel belongs to it.
+                                // Use the bind-observed CURRENT owned id, not the duplicate or
+                                // stale pre-bind snapshot (#3077 P2 #2). GuardMismatch/Missing/
+                                // IoError own none; adopt only for the same turn, never a replacement.
                                 let resolved_handle = if identity_matches {
                                     decision.owned_panel_id.map(serenity::MessageId::new)
                                 } else {

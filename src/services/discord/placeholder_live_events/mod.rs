@@ -13,6 +13,7 @@ mod common;
 mod completion_footer;
 mod context_panel;
 mod freshness;
+mod panel_cache_invalidation;
 mod recent_events;
 mod session_banner_claim;
 mod session_panel;
@@ -40,6 +41,15 @@ use session_panel::SessionPanelSnapshot;
 #[cfg(test)]
 use status_panel::{CompletedKind, DerivedStatus};
 use status_panel::{StatusPanelState, render_status_panel};
+
+#[cfg(test)]
+pub(in crate::services::discord) fn rendered_activity_lines_for_panel_shape_tests()
+-> Vec<(String, bool)> {
+    DerivedStatus::panel_shape_test_variants()
+        .into_iter()
+        .map(|(status, terminal)| (freshness::render_activity_line(&status), terminal))
+        .collect()
+}
 pub(in crate::services::discord) use task_panel::TaskPanelInfo;
 use task_panel::{TaskPanelSnapshot, clean_task_panel_value};
 
@@ -92,6 +102,7 @@ pub(in crate::services::discord) struct PlaceholderLiveEvents {
     // age here, so the rendered text stays byte-identical across heartbeat ticks
     // (no needless re-edit) while Discord shows the localized live age client-side.
     last_recent_event_unix: dashmap::DashMap<ChannelId, i64>,
+    panel_cache_invalidations: panel_cache_invalidation::PanelCacheInvalidations,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +118,7 @@ impl PlaceholderLiveEvents {
         self.status_by_channel.remove(&channel_id);
         self.last_recent_event_at.remove(&channel_id);
         self.last_recent_event_unix.remove(&channel_id); // #3812: drop the freshness anchor too.
+        self.panel_cache_invalidations.clear_channel(channel_id);
     }
 
     pub(in crate::services::discord) fn clear_channel_preserving_footer_residuals(

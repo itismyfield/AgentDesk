@@ -175,6 +175,7 @@ pub(in crate::services::discord) use self::clear_store::{
     clear_inflight_state_if_matches_identity,
     clear_inflight_state_if_matches_identity_after_delivery,
     clear_inflight_state_if_matches_identity_generation,
+    clear_inflight_state_if_matches_identity_returning_row,
     clear_inflight_state_if_matches_identity_turn_nonce,
     clear_lifecycle_inflight_state_if_matches_identity_after_death_evidence,
     clear_rebind_origin_inflight_state_if_matches_identity,

@@ -191,6 +191,10 @@ pub(in crate::services::discord) struct SyntheticClaimSnapshot {
     pub(in crate::services::discord) injected_prompt_message_id: Option<u64>,
     pub(in crate::services::discord) tmux_session_name: Option<String>,
     pub(in crate::services::discord) started_at: String,
+    pub(in crate::services::discord) status_message_id: Option<u64>,
+    pub(in crate::services::discord) status_panel_generation: u64,
+    pub(in crate::services::discord) save_generation: u64,
+    pub(in crate::services::discord) current_tool_line: Option<String>,
     pub(in crate::services::discord) turn_start_offset: Option<u64>,
     pub(in crate::services::discord) relay_ownership_only: bool,
     pub(in crate::services::discord) relay_owner_kind: RelayOwnerKind,
@@ -208,10 +212,81 @@ impl SyntheticClaimSnapshot {
             injected_prompt_message_id: row.injected_prompt_message_id,
             tmux_session_name: row.tmux_session_name.clone(),
             started_at: row.started_at.clone(),
+            status_message_id: row.status_message_id,
+            status_panel_generation: row.status_panel_generation,
+            save_generation: row.save_generation,
+            current_tool_line: row.current_tool_line.clone(),
             turn_start_offset: row.turn_start_offset,
             relay_ownership_only: row.relay_ownership_only,
             relay_owner_kind: row.effective_relay_owner_kind(),
         }
+    }
+}
+
+pub(super) fn enqueue_terminal_status_panel_reconcile(
+    key: TurnKey,
+    provider: &ProviderKind,
+    event: &TerminalEvent,
+    submit_snapshot: Option<&SyntheticClaimSnapshot>,
+    shared: &SharedData,
+) {
+    let snapshot = match submit_snapshot {
+        Some(snapshot) if snapshot.user_msg_id == key.user_msg_id => snapshot.clone(),
+        _ => {
+            let Some(row) = crate::services::discord::inflight::load_inflight_state(
+                provider,
+                key.channel_id.get(),
+            ) else {
+                return;
+            };
+            if key.user_msg_id != 0 && !row.matches_finalizer_turn_id(key.user_msg_id) {
+                return;
+            }
+            SyntheticClaimSnapshot::from_row(&row)
+        }
+    };
+    let Some(panel_message_id) = snapshot.status_message_id else {
+        return;
+    };
+    if crate::services::discord::turn_bridge::normalize_status_panel_message_id(Some(
+        serenity::model::id::MessageId::new(panel_message_id),
+    ))
+    .is_none()
+    {
+        return;
+    }
+    let terminal_status = match event {
+        TerminalEvent::Complete => {
+            crate::services::discord::abandon_request_store::TerminalCardStatus::Completed
+        }
+        TerminalEvent::Cancel | TerminalEvent::GateTimeout { .. } | TerminalEvent::RelayMiss => {
+            crate::services::discord::abandon_request_store::TerminalCardStatus::Aborted
+        }
+    };
+    if let Err(error) = crate::services::discord::abandon_request_store::enqueue(
+        provider,
+        &shared.token_hash,
+        key.channel_id.get(),
+        crate::services::discord::abandon_request_store::AbandonRecord {
+            msg_id: panel_message_id,
+            started_at: snapshot.started_at.clone(),
+            current_tool_line: snapshot.current_tool_line,
+            terminal_status,
+            episode: crate::services::discord::abandon_request_store::AbandonEpisodeIdentity {
+                user_msg_id: snapshot.user_msg_id,
+                started_at: snapshot.started_at,
+                status_panel_generation: snapshot.status_panel_generation,
+                save_generation: snapshot.save_generation,
+            },
+        },
+    ) {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = key.channel_id.get(),
+            panel_message_id,
+            error = %error,
+            "failed to persist terminal status-panel reconcile request"
+        );
     }
 }
 
@@ -666,6 +741,96 @@ mod tests {
             .restore_active_turn(token.clone(), UserId::new(7), MessageId::new(user_msg_id))
             .await;
         token
+    }
+
+    #[test]
+    fn complete_finalize_snapshot_queues_status_panel_reconcile() {
+        with_isolated_runtime_root(|| {
+            let shared = super::super::super::make_shared_data_for_tests();
+            let provider = ProviderKind::Claude;
+            let channel_id = ChannelId::new(4_340_001);
+            let user_msg_id = 4_340_002;
+            let mut row = InflightTurnState::new(
+                provider.clone(),
+                channel_id.get(),
+                None,
+                7,
+                user_msg_id,
+                4_340_003,
+                "prompt".to_string(),
+                Some("session".to_string()),
+                Some("AgentDesk-claude-4340".to_string()),
+                Some("/tmp/issue-4340.jsonl".to_string()),
+                None,
+                0,
+            );
+            row.status_message_id = Some(4_340_004);
+            let snapshot = SyntheticClaimSnapshot::from_row(&row);
+
+            enqueue_terminal_status_panel_reconcile(
+                TurnKey::new(channel_id, user_msg_id, 0),
+                &provider,
+                &TerminalEvent::Complete,
+                Some(&snapshot),
+                shared.as_ref(),
+            );
+
+            let pending = crate::services::discord::abandon_request_store::load_pending(
+                &provider,
+                &shared.token_hash,
+            );
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].0, channel_id.get());
+            assert_eq!(pending[0].1.msg_id, 4_340_004);
+            assert_eq!(
+                pending[0].1.terminal_status,
+                crate::services::discord::abandon_request_store::TerminalCardStatus::Completed
+            );
+        });
+    }
+
+    #[test]
+    fn cancel_finalize_snapshot_queues_aborted_status_panel_reconcile() {
+        with_isolated_runtime_root(|| {
+            let shared = super::super::super::make_shared_data_for_tests();
+            let provider = ProviderKind::Codex;
+            let channel_id = ChannelId::new(4_340_011);
+            let user_msg_id = 4_340_012;
+            let mut row = InflightTurnState::new(
+                provider.clone(),
+                channel_id.get(),
+                None,
+                7,
+                user_msg_id,
+                4_340_013,
+                "prompt".to_string(),
+                Some("session".to_string()),
+                Some("AgentDesk-codex-4340".to_string()),
+                Some("/tmp/issue-4340-cancel.jsonl".to_string()),
+                None,
+                0,
+            );
+            row.status_message_id = Some(4_340_014);
+            let snapshot = SyntheticClaimSnapshot::from_row(&row);
+
+            enqueue_terminal_status_panel_reconcile(
+                TurnKey::new(channel_id, user_msg_id, 0),
+                &provider,
+                &TerminalEvent::Cancel,
+                Some(&snapshot),
+                shared.as_ref(),
+            );
+
+            let pending = crate::services::discord::abandon_request_store::load_pending(
+                &provider,
+                &shared.token_hash,
+            );
+            assert_eq!(pending.len(), 1);
+            assert_eq!(
+                pending[0].1.terminal_status,
+                crate::services::discord::abandon_request_store::TerminalCardStatus::Aborted
+            );
+        });
     }
 
     #[test]
