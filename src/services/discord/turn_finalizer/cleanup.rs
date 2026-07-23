@@ -192,6 +192,8 @@ pub(in crate::services::discord) struct SyntheticClaimSnapshot {
     pub(in crate::services::discord) tmux_session_name: Option<String>,
     pub(in crate::services::discord) started_at: String,
     pub(in crate::services::discord) status_message_id: Option<u64>,
+    pub(in crate::services::discord) status_panel_generation: u64,
+    pub(in crate::services::discord) save_generation: u64,
     pub(in crate::services::discord) current_tool_line: Option<String>,
     pub(in crate::services::discord) turn_start_offset: Option<u64>,
     pub(in crate::services::discord) relay_ownership_only: bool,
@@ -211,6 +213,8 @@ impl SyntheticClaimSnapshot {
             tmux_session_name: row.tmux_session_name.clone(),
             started_at: row.started_at.clone(),
             status_message_id: row.status_message_id,
+            status_panel_generation: row.status_panel_generation,
+            save_generation: row.save_generation,
             current_tool_line: row.current_tool_line.clone(),
             turn_start_offset: row.turn_start_offset,
             relay_ownership_only: row.relay_ownership_only,
@@ -265,9 +269,15 @@ pub(super) fn enqueue_terminal_status_panel_reconcile(
         key.channel_id.get(),
         crate::services::discord::abandon_request_store::AbandonRecord {
             msg_id: panel_message_id,
-            started_at: snapshot.started_at,
+            started_at: snapshot.started_at.clone(),
             current_tool_line: snapshot.current_tool_line,
             terminal_status,
+            episode: crate::services::discord::abandon_request_store::AbandonEpisodeIdentity {
+                user_msg_id: snapshot.user_msg_id,
+                started_at: snapshot.started_at,
+                status_panel_generation: snapshot.status_panel_generation,
+                save_generation: snapshot.save_generation,
+            },
         },
     ) {
         tracing::warn!(

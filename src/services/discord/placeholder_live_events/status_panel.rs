@@ -75,6 +75,52 @@ pub(super) enum DerivedStatus {
     },
 }
 
+#[cfg(test)]
+impl DerivedStatus {
+    /// Exhaustive constructor list for renderer/classifier contract tests. Adding
+    /// an enum variant makes this match fail to compile until its sample is added.
+    pub(super) fn panel_shape_test_variants() -> Vec<Self> {
+        fn sample(status: DerivedStatus) -> DerivedStatus {
+            match status {
+                DerivedStatus::Running => DerivedStatus::Running,
+                DerivedStatus::MonitorWait => DerivedStatus::MonitorWait,
+                DerivedStatus::ScheduleWakeup(eta_secs) => DerivedStatus::ScheduleWakeup(eta_secs),
+                DerivedStatus::Completed { kind } => DerivedStatus::Completed { kind },
+                DerivedStatus::ToolRunning { name, summary } => {
+                    DerivedStatus::ToolRunning { name, summary }
+                }
+                DerivedStatus::SubagentRunning { desc } => DerivedStatus::SubagentRunning { desc },
+                DerivedStatus::WorkflowRunning { label } => {
+                    DerivedStatus::WorkflowRunning { label }
+                }
+            }
+        }
+
+        vec![
+            sample(DerivedStatus::Running),
+            sample(DerivedStatus::MonitorWait),
+            sample(DerivedStatus::ScheduleWakeup(Some(30))),
+            sample(DerivedStatus::ScheduleWakeup(None)),
+            sample(DerivedStatus::Completed {
+                kind: CompletedKind::Background,
+            }),
+            sample(DerivedStatus::Completed {
+                kind: CompletedKind::Foreground,
+            }),
+            sample(DerivedStatus::ToolRunning {
+                name: "Bash".to_string(),
+                summary: None,
+            }),
+            sample(DerivedStatus::SubagentRunning {
+                desc: "review".to_string(),
+            }),
+            sample(DerivedStatus::WorkflowRunning {
+                label: "CI".to_string(),
+            }),
+        ]
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CompletedKind {
     Foreground,

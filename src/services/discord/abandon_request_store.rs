@@ -61,9 +61,39 @@ pub(in crate::services::discord) enum TerminalCardStatus {
     Aborted,
 }
 
-/// One stranded live card awaiting a terminal edit. `msg_id` is the dedup key
-/// within a channel; the remaining fields render the terminal card without an
-/// inflight row.
+/// Durable identity of the turn episode that owned a live card. All fields are
+/// additive defaults so records written before episode fencing remain readable.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(in crate::services::discord) struct AbandonEpisodeIdentity {
+    #[serde(default)]
+    pub user_msg_id: u64,
+    #[serde(default)]
+    pub started_at: String,
+    #[serde(default)]
+    pub status_panel_generation: u64,
+    #[serde(default)]
+    pub save_generation: u64,
+}
+
+impl AbandonEpisodeIdentity {
+    fn is_legacy(&self) -> bool {
+        self.user_msg_id == 0
+            && self.started_at.is_empty()
+            && self.status_panel_generation == 0
+            && self.save_generation == 0
+    }
+
+    fn same_episode(&self, other: &Self) -> bool {
+        !self.is_legacy()
+            && !other.is_legacy()
+            && self.user_msg_id == other.user_msg_id
+            && self.started_at == other.started_at
+    }
+}
+
+/// One stranded live card awaiting a terminal edit. `(msg_id, episode)` is the
+/// ownership key within a channel; the remaining fields render the terminal card
+/// without an inflight row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(in crate::services::discord) struct AbandonRecord {
     pub msg_id: u64,
@@ -73,6 +103,14 @@ pub(in crate::services::discord) struct AbandonRecord {
     pub current_tool_line: Option<String>,
     #[serde(default)]
     pub terminal_status: TerminalCardStatus,
+    #[serde(default)]
+    pub episode: AbandonEpisodeIdentity,
+}
+
+impl AbandonRecord {
+    fn same_queued_record(&self, other: &Self) -> bool {
+        self == other
+    }
 }
 
 /// Serializes the read-modify-write of `enqueue`/`remove` across the failure-path
@@ -147,32 +185,52 @@ fn enqueue_in_root(
     }
     let _guard = STORE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut records = load_channel_in_root(root, provider, token_hash, channel_id);
-    // Idempotent set semantics keyed by msg_id: a heartbeat sweeper that
-    // re-observes the same stranded placeholder must not grow the file.
+    // A reused message id belongs to exactly one episode. Status dominance is
+    // monotonic only inside that episode; a newer/different episode replaces the
+    // old record without inheriting its terminal status.
     if let Some(existing) = records.iter_mut().find(|r| r.msg_id == record.msg_id) {
-        if existing.terminal_status == TerminalCardStatus::Aborted
-            && record.terminal_status == TerminalCardStatus::Completed
-        {
-            *existing = record;
+        if existing.episode.same_episode(&record.episode) {
+            let dominant_status = if existing.terminal_status == TerminalCardStatus::Completed
+                || record.terminal_status == TerminalCardStatus::Completed
+            {
+                TerminalCardStatus::Completed
+            } else {
+                TerminalCardStatus::Aborted
+            };
+            let existing_revision = (
+                existing.episode.status_panel_generation,
+                existing.episode.save_generation,
+            );
+            let record_revision = (
+                record.episode.status_panel_generation,
+                record.episode.save_generation,
+            );
+            if record_revision >= existing_revision {
+                *existing = record;
+            }
+            if existing.terminal_status != dominant_status {
+                existing.terminal_status = dominant_status;
+            }
             return save_channel_in_root(root, provider, token_hash, channel_id, &records);
         }
-        return Ok(());
+        *existing = record;
+        return save_channel_in_root(root, provider, token_hash, channel_id, &records);
     }
     records.push(record);
     save_channel_in_root(root, provider, token_hash, channel_id, &records)
 }
 
-fn remove_in_root(
+fn remove_matching_in_root(
     root: &Path,
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: u64,
-    msg_id: u64,
+    matches: impl Fn(&AbandonRecord) -> bool,
 ) {
     let _guard = STORE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut records = load_channel_in_root(root, provider, token_hash, channel_id);
     let before = records.len();
-    records.retain(|r| r.msg_id != msg_id);
+    records.retain(|record| !matches(record));
     if records.len() != before {
         // Best-effort: a failed re-save leaves the record, which the next drain
         // re-processes idempotently (the card is already terminal → probe
@@ -182,16 +240,40 @@ fn remove_in_root(
     }
 }
 
-fn is_queued_in_root(
+fn remove_in_root(
     root: &Path,
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: u64,
     msg_id: u64,
+) {
+    remove_matching_in_root(root, provider, token_hash, channel_id, |record| {
+        record.msg_id == msg_id
+    });
+}
+
+fn remove_record_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    target: &AbandonRecord,
+) {
+    remove_matching_in_root(root, provider, token_hash, channel_id, |record| {
+        record.same_queued_record(target)
+    });
+}
+
+fn is_record_queued_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    target: &AbandonRecord,
 ) -> bool {
     load_channel_in_root(root, provider, token_hash, channel_id)
         .iter()
-        .any(|r| r.msg_id == msg_id)
+        .any(|record| record.same_queued_record(target))
 }
 
 fn load_pending_in_root(
@@ -221,7 +303,8 @@ fn load_pending_in_root(
 }
 
 /// Record a stranded placeholder for durable finalize. Idempotent (set semantics
-/// keyed by `(channel_id, msg_id)`). #3859 r5: returns `Err` when the durable
+/// keyed by `(channel_id, msg_id, episode)`, with a same-message replacement when
+/// a different episode takes ownership). #3859 r5: returns `Err` when the durable
 /// write failed (or no runtime root is resolvable) so the failure-path caller can
 /// PRESERVE the inflight row instead of deleting it without a record.
 pub(in crate::services::discord) fn enqueue(
@@ -261,18 +344,31 @@ pub(in crate::services::discord) fn remove(
     remove_in_root(&root, provider, token_hash, channel_id, msg_id);
 }
 
-/// Is this placeholder still queued? Used by [`drain`] to re-validate a record
-/// immediately before editing, so a record removed since the snapshot is skipped.
-pub(in crate::services::discord) fn is_queued(
+/// Is this exact episode record still queued? Used by [`drain`] to re-validate
+/// ownership immediately before editing, so a replacement record for the same
+/// message id cannot authorize a stale snapshot.
+fn is_record_queued(
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: u64,
-    msg_id: u64,
+    record: &AbandonRecord,
 ) -> bool {
     let Some(root) = runtime_store::discord_abandon_requests_root() else {
         return false;
     };
-    is_queued_in_root(&root, provider, token_hash, channel_id, msg_id)
+    is_record_queued_in_root(&root, provider, token_hash, channel_id, record)
+}
+
+fn remove_record(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    record: &AbandonRecord,
+) {
+    let Some(root) = runtime_store::discord_abandon_requests_root() else {
+        return;
+    };
+    remove_record_in_root(&root, provider, token_hash, channel_id, record);
 }
 
 /// Render the requested terminal card for a record (no inflight row).
@@ -299,6 +395,55 @@ fn abandon_drain_defers_for_live_anchor(current_msg_id: Option<u64>, msg_id: u64
     msg_id != 0 && current_msg_id == Some(msg_id)
 }
 
+fn inflight_matches_record_episode(
+    state: &super::inflight::InflightTurnState,
+    record: &AbandonRecord,
+) -> bool {
+    !record.episode.is_legacy()
+        && state.user_msg_id == record.episode.user_msg_id
+        && state.started_at == record.episode.started_at
+}
+
+fn inflight_matches_record_revision(
+    state: &super::inflight::InflightTurnState,
+    record: &AbandonRecord,
+) -> bool {
+    inflight_matches_record_episode(state, record)
+        && state.status_panel_generation == record.episode.status_panel_generation
+        && state.save_generation == record.episode.save_generation
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrainOwnership {
+    Editable,
+    DeferSameRevision,
+    DeferSameEpisodeNewRevision,
+    DropForNewerOwner,
+}
+
+fn drain_ownership(
+    inflight: Option<&super::inflight::InflightTurnState>,
+    record: &AbandonRecord,
+) -> DrainOwnership {
+    let Some(state) = inflight else {
+        return DrainOwnership::Editable;
+    };
+    let anchors_message =
+        state.current_msg_id == record.msg_id || state.status_message_id == Some(record.msg_id);
+    if !anchors_message {
+        return DrainOwnership::Editable;
+    }
+    if inflight_matches_record_revision(state, record) {
+        DrainOwnership::DeferSameRevision
+    } else if inflight_matches_record_episode(state, record) {
+        // A newer revision of the same episode still owns the surface. It blocks
+        // editing but keeps the durable terminal request for after the row clears.
+        DrainOwnership::DeferSameEpisodeNewRevision
+    } else {
+        DrainOwnership::DropForNewerOwner
+    }
+}
+
 /// Finalize every pending stranded placeholder once. `StillPlaceholder` → edit to
 /// the "중단됨" card (committed → drop the record; transient edit failure → keep
 /// for the next drain). `AlreadyDelivered` / `MessageGone` → consume the record
@@ -314,27 +459,46 @@ pub(in crate::services::discord) async fn drain(
     let pending = load_pending(provider, token_hash);
     let mut cleared = 0usize;
     for (channel_id, record) in pending {
-        // Re-validate against the live store: a record removed between the
-        // snapshot and here (e.g. a peer drain finalized it) must be skipped.
-        if !is_queued(provider, token_hash, channel_id, record.msg_id) {
+        // Re-validate the exact episode record: a same-message replacement must
+        // not let this stale snapshot pass the queue fence.
+        if !is_record_queued(provider, token_hash, channel_id, &record) {
             continue;
         }
-        // Defer while a live inflight row still anchors this exact message. The
-        // same durable store also carries separate status-panel reconciliation,
-        // so both assistant placeholders and status panels participate in this
-        // ownership fence.
-        let inflight = super::inflight::load_inflight_state(provider, channel_id);
-        let inflight_anchor = inflight.as_ref().map(|state| state.current_msg_id);
-        let live_status_panel_anchor =
-            inflight.as_ref().and_then(|state| state.status_message_id) == Some(record.msg_id);
-        if abandon_drain_defers_for_live_anchor(inflight_anchor, record.msg_id)
-            || live_status_panel_anchor
-        {
-            continue;
+        match drain_ownership(
+            super::inflight::load_inflight_state(provider, channel_id).as_ref(),
+            &record,
+        ) {
+            DrainOwnership::Editable => {}
+            DrainOwnership::DeferSameRevision | DrainOwnership::DeferSameEpisodeNewRevision => {
+                continue;
+            }
+            DrainOwnership::DropForNewerOwner => {
+                remove_record(provider, token_hash, channel_id, &record);
+                cleared += 1;
+                continue;
+            }
         }
         let probe = probe_placeholder_state(http, channel_id, record.msg_id).await;
         match probe {
             PlaceholderProbe::StillPlaceholder => {
+                // Close the probe→edit ownership window. The probe establishes
+                // shape only; this second fence establishes the owning episode.
+                if !is_record_queued(provider, token_hash, channel_id, &record) {
+                    continue;
+                }
+                match drain_ownership(
+                    super::inflight::load_inflight_state(provider, channel_id).as_ref(),
+                    &record,
+                ) {
+                    DrainOwnership::Editable => {}
+                    DrainOwnership::DeferSameRevision
+                    | DrainOwnership::DeferSameEpisodeNewRevision => continue,
+                    DrainOwnership::DropForNewerOwner => {
+                        remove_record(provider, token_hash, channel_id, &record);
+                        cleared += 1;
+                        continue;
+                    }
+                }
                 let text = build_terminal_card(&record);
                 let channel = serenity::ChannelId::new(channel_id);
                 let message = serenity::MessageId::new(record.msg_id);
@@ -348,7 +512,7 @@ pub(in crate::services::discord) async fn drain(
                 .await
                 {
                     Ok(_) => {
-                        remove(provider, token_hash, channel_id, record.msg_id);
+                        remove_record(provider, token_hash, channel_id, &record);
                         cleared += 1;
                         tracing::info!(
                             "[abandon_request_store] finalized stranded placeholder {}/{} → 중단됨",
@@ -368,7 +532,7 @@ pub(in crate::services::discord) async fn drain(
             PlaceholderProbe::AlreadyDelivered | PlaceholderProbe::MessageGone => {
                 // Real content already on screen, or the message is permanently
                 // gone — do NOT clobber; just consume the record.
-                remove(provider, token_hash, channel_id, record.msg_id);
+                remove_record(provider, token_hash, channel_id, &record);
                 cleared += 1;
             }
             PlaceholderProbe::ProbeFailed => {
@@ -383,13 +547,45 @@ pub(in crate::services::discord) async fn drain(
 mod tests {
     use super::*;
 
-    fn rec(msg_id: u64) -> AbandonRecord {
+    fn rec_for_episode(msg_id: u64, user_msg_id: u64, started_at: &str) -> AbandonRecord {
         AbandonRecord {
             msg_id,
-            started_at: "2026-05-17 10:00:00".to_string(),
+            started_at: started_at.to_string(),
             current_tool_line: None,
             terminal_status: TerminalCardStatus::Aborted,
+            episode: AbandonEpisodeIdentity {
+                user_msg_id,
+                started_at: started_at.to_string(),
+                status_panel_generation: 1,
+                save_generation: 1,
+            },
         }
+    }
+
+    fn rec(msg_id: u64) -> AbandonRecord {
+        rec_for_episode(msg_id, 7001, "2026-05-17 10:00:00")
+    }
+
+    fn inflight_for_record(record: &AbandonRecord) -> super::super::inflight::InflightTurnState {
+        let mut state = super::super::inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            100,
+            None,
+            1,
+            record.episode.user_msg_id,
+            record.msg_id,
+            "turn".to_string(),
+            Some("session".to_string()),
+            Some("tmux".to_string()),
+            Some("/tmp/abandon-episode.jsonl".to_string()),
+            None,
+            10,
+        );
+        state.started_at = record.episode.started_at.clone();
+        state.status_message_id = Some(record.msg_id);
+        state.status_panel_generation = record.episode.status_panel_generation;
+        state.save_generation = record.episode.save_generation;
+        state
     }
 
     #[test]
@@ -445,12 +641,53 @@ mod tests {
     }
 
     #[test]
-    fn legacy_record_defaults_to_aborted_terminal_status() {
+    fn reused_message_new_episode_does_not_inherit_completed_status() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let provider = ProviderKind::Claude;
+        let mut turn_a = rec_for_episode(5001, 7001, "2026-05-17 10:00:00");
+        turn_a.terminal_status = TerminalCardStatus::Completed;
+        enqueue_in_root(root.path(), &provider, "tok", 100, turn_a).expect("turn A enqueue");
+
+        let turn_b = rec_for_episode(5001, 7002, "2026-05-17 10:01:00");
+        enqueue_in_root(root.path(), &provider, "tok", 100, turn_b.clone())
+            .expect("turn B enqueue");
+
+        let pending = load_pending_in_root(root.path(), &provider, "tok");
+        assert_eq!(pending, vec![(100, turn_b)]);
+        assert_eq!(pending[0].1.terminal_status, TerminalCardStatus::Aborted);
+    }
+
+    #[test]
+    fn newer_live_owner_blocks_old_record_edit_and_consumes_it() {
+        let old = rec_for_episode(5001, 7001, "2026-05-17 10:00:00");
+        let newer = rec_for_episode(5001, 7002, "2026-05-17 10:01:00");
+        let newer_inflight = inflight_for_record(&newer);
+
+        assert_eq!(
+            drain_ownership(Some(&newer_inflight), &old),
+            DrainOwnership::DropForNewerOwner
+        );
+        assert_eq!(
+            drain_ownership(Some(&newer_inflight), &newer),
+            DrainOwnership::DeferSameRevision
+        );
+
+        let mut same_episode_new_revision = newer_inflight.clone();
+        same_episode_new_revision.save_generation += 1;
+        assert_eq!(
+            drain_ownership(Some(&same_episode_new_revision), &newer),
+            DrainOwnership::DeferSameEpisodeNewRevision
+        );
+    }
+
+    #[test]
+    fn legacy_record_defaults_to_aborted_terminal_status_and_identity() {
         let record: AbandonRecord = serde_json::from_str(
             r#"{"msg_id":7,"started_at":"2026-05-17 09:00:00","current_tool_line":null}"#,
         )
         .expect("legacy record");
         assert_eq!(record.terminal_status, TerminalCardStatus::Aborted);
+        assert!(record.episode.is_legacy());
     }
 
     /// #3859 r5: a failed durable write surfaces as `Err` (so the failure-path
@@ -509,6 +746,12 @@ mod tests {
                 started_at: "2026-05-17 09:00:00".to_string(),
                 current_tool_line: Some("⚙ Bash: cargo build".to_string()),
                 terminal_status: TerminalCardStatus::Aborted,
+                episode: AbandonEpisodeIdentity {
+                    user_msg_id: 8,
+                    started_at: "2026-05-17 09:00:00".to_string(),
+                    status_panel_generation: 2,
+                    save_generation: 3,
+                },
             },
         )
         .expect("enqueue");

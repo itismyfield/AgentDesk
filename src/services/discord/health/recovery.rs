@@ -1026,16 +1026,15 @@ fn revalidate_and_clear_explicit_background_inflight(
             claim_snapshot: None,
         };
     }
-    let claim_snapshot = discord::inflight::load_inflight_state(provider, channel_id.get())
-        .filter(|state| {
-            discord::inflight::InflightTurnIdentity::from_state(state) == *snapshot_identity
-        })
-        .map(|state| discord::turn_finalizer::SyntheticClaimSnapshot::from_row(&state));
-    let clear_outcome = discord::inflight::clear_inflight_state_if_matches_identity(
-        provider,
-        channel_id.get(),
-        snapshot_identity,
-    );
+    let (clear_outcome, removed_row) =
+        discord::inflight::clear_inflight_state_if_matches_identity_returning_row(
+            provider,
+            channel_id.get(),
+            snapshot_identity,
+        );
+    let claim_snapshot = removed_row
+        .as_ref()
+        .map(discord::turn_finalizer::SyntheticClaimSnapshot::from_row);
     ExplicitBackgroundWatchdogClear {
         clear_outcome,
         pending_hourglass_user_msg_id: (snapshot_identity.user_msg_id != 0)
@@ -3260,7 +3259,7 @@ mod stall_watchdog_pure_tests {
     }
 
     #[test]
-    fn explicit_background_watchdog_clear_carries_status_panel_snapshot() {
+    fn explicit_background_watchdog_clear_returns_reanchored_removed_row_snapshot() {
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let tempdir = tempfile::tempdir().expect("tempdir");
         let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -3287,6 +3286,16 @@ mod stall_watchdog_pure_tests {
         state.status_message_id = Some(4_340_104);
         inflight::save_inflight_state(&state).expect("save watchdog row");
         let identity = InflightTurnIdentity::from_state(&state);
+        let stale_snapshot = inflight::load_inflight_state(&provider, channel_id.get())
+            .map(|row| {
+                crate::services::discord::turn_finalizer::SyntheticClaimSnapshot::from_row(&row)
+            })
+            .expect("load pre-reanchor snapshot");
+        assert_eq!(stale_snapshot.status_message_id, Some(4_340_104));
+
+        state.status_message_id = Some(4_340_105);
+        state.status_panel_generation = 2;
+        inflight::save_inflight_state(&state).expect("re-anchor same identity before clear");
 
         let outcome = revalidate_and_clear_explicit_background_inflight(
             &provider,
@@ -3301,7 +3310,7 @@ mod stall_watchdog_pure_tests {
                 .claim_snapshot
                 .as_ref()
                 .and_then(|snapshot| snapshot.status_message_id),
-            Some(4_340_104)
+            Some(4_340_105)
         );
         assert!(inflight::load_inflight_state(&provider, channel_id.get()).is_none());
     }
