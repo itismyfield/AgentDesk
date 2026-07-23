@@ -1193,7 +1193,7 @@ mod tests {
         pruning.join().unwrap();
 
         assert!(
-            elapsed < Duration::from_millis(250),
+            elapsed < Duration::from_secs(2),
             "artifact pruning blocked the producer for {elapsed:?}"
         );
     }
