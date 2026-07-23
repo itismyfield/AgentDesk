@@ -98,25 +98,44 @@ pub(super) async fn finalize_and_drain_queued_turns(
                             &intervention,
                             &request_owner_name,
                             has_more_queued_turns,
+                            dispatch_lease.clone(),
                         )
                         .await;
                     match dispatch_result {
                         Err(e) => {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::info!("  [{ts}]   ⚠ queued command failed: {e}");
-                            super::super::mailbox_requeue_intervention_front(
+                            let requeue = super::super::mailbox_restore_dequeued_head(
                                 &shared_owned,
                                 &bot_owner_provider,
                                 channel_id,
                                 intervention,
+                                dispatch_lease
+                                    .as_ref()
+                                    .expect("dequeued intervention must carry its dispatch lease")
+                                    .clone(),
                             )
                             .await;
-                            super::super::schedule_deferred_idle_queue_kickoff(
-                                shared_owned.clone(),
-                                bot_owner_provider.clone(),
-                                channel_id,
-                                "requeue-front after dispatch failure (finalize epilogue)",
-                            );
+                            if requeue.enqueued {
+                                super::super::schedule_deferred_idle_queue_kickoff(
+                                    shared_owned.clone(),
+                                    bot_owner_provider.clone(),
+                                    channel_id,
+                                    "requeue-front after dispatch failure (finalize epilogue)",
+                                );
+                            } else {
+                                tracing::error!(
+                                    provider = bot_owner_provider.as_str(),
+                                    channel_id = channel_id.get(),
+                                    refusal_reason = requeue
+                                        .refusal_reason
+                                        .map(|reason| reason.as_str())
+                                        .unwrap_or("none"),
+                                    persistence_error =
+                                        requeue.persistence_error.as_deref().unwrap_or("none"),
+                                    "queued command dispatch failed and dequeued-head restore was rejected"
+                                );
+                            }
                         }
                         Ok(()) => {
                             super::super::mailbox_abandon_unclaimed_dispatch_after_success(
@@ -209,6 +228,9 @@ mod tests {
             _intervention: &'a Intervention,
             _request_owner_name: &'a str,
             _has_more_queued_turns: bool,
+            _dispatch_lease: Option<
+                std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>,
+            >,
         ) -> TestGatewayFuture<'a, Result<(), String>> {
             Box::pin(async { Err("forced dispatch failure".to_string()) })
         }

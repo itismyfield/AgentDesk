@@ -34,6 +34,70 @@ impl MailboxTakeNextSoftOutcome {
     }
 }
 
+pub(super) async fn mailbox_requeue_intervention_front(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    intervention: Intervention,
+) -> MailboxEnqueueOutcome {
+    mailbox_front_requeue_outcome(
+        shared,
+        provider,
+        channel_id,
+        shared.mailbox(channel_id).requeue_front(
+            intervention,
+            super::queue_persistence_context(shared, provider, channel_id),
+        ),
+    )
+    .await
+}
+
+pub(super) async fn mailbox_restore_dequeued_head(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    intervention: Intervention,
+    dispatch_lease: DispatchLeaseHandle,
+) -> MailboxEnqueueOutcome {
+    mailbox_front_requeue_outcome(
+        shared,
+        provider,
+        channel_id,
+        shared.mailbox(channel_id).restore_dequeued_head(
+            intervention,
+            super::queue_persistence_context(shared, provider, channel_id),
+            dispatch_lease,
+        ),
+    )
+    .await
+}
+
+async fn mailbox_front_requeue_outcome(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    request: impl std::future::Future<
+        Output = crate::services::turn_orchestrator::RequeueInterventionResult,
+    >,
+) -> MailboxEnqueueOutcome {
+    let result = request.await;
+    super::apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    if let Some(error) = result.persistence_error.as_ref() {
+        tracing::warn!(
+            provider = provider.as_str(),
+            channel_id = channel_id.get(),
+            error = %error,
+            "mailbox requeue-front failed durable pending-queue persistence; pending dispatch marker remains the durable backstop"
+        );
+    }
+    MailboxEnqueueOutcome {
+        enqueued: result.enqueued && result.persistence_error.is_none(),
+        merged: false,
+        refusal_reason: result.refusal_reason,
+        persistence_error: result.persistence_error,
+    }
+}
+
 pub(super) async fn mailbox_abandon_unclaimed_dispatch_after_success(
     shared: &SharedData,
     provider: &ProviderKind,

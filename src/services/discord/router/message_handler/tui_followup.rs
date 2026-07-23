@@ -829,17 +829,32 @@ pub(in crate::services::discord) async fn defer_promoted_dispatch_if_hosted_tui_
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     intervention: &crate::services::turn_orchestrator::Intervention,
+    dispatch_lease: Arc<crate::services::turn_orchestrator::DispatchLease>,
 ) -> bool {
     if !hosted_tui_promote_readiness_blocked(shared, provider, channel_id).await {
         return false;
     }
-    super::super::super::mailbox_requeue_intervention_front(
+    let restored = super::super::super::mailbox_restore_dequeued_head(
         shared,
         provider,
         channel_id,
         intervention.clone(),
+        dispatch_lease,
     )
     .await;
+    if !restored.enqueued {
+        tracing::error!(
+            provider = provider.as_str(),
+            channel_id = channel_id.get(),
+            refusal_reason = restored
+                .refusal_reason
+                .map(|reason| reason.as_str())
+                .unwrap_or("none"),
+            persistence_error = restored.persistence_error.as_deref().unwrap_or("none"),
+            "hosted TUI promote defer rejected dequeued-head restore"
+        );
+        return false;
+    }
     super::super::super::arm_slow_idle_queue_backstop_if_queue_nonempty(
         shared,
         provider,

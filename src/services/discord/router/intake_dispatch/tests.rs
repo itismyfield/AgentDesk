@@ -420,12 +420,14 @@ async fn queued_foreign_owner_forwards_without_local_body_pg() {
         false,
         false,
         "owner_affinity_queue_test",
+        None,
     )
     .await
     {
         QueuedAdmissionDisposition::Admitted(admitted) => admitted,
         QueuedAdmissionDisposition::Deferred
-        | QueuedAdmissionDisposition::RejectedNonPortableAttachment => {
+        | QueuedAdmissionDisposition::RejectedNonPortableAttachment
+        | QueuedAdmissionDisposition::RejectedRestore => {
             panic!("live foreign owner should forward")
         }
     };
@@ -483,6 +485,7 @@ async fn queued_foreign_attachment_is_rejected_without_requeue_pg() {
             false,
             false,
             "owner_affinity_attachment_test",
+            None,
         )
         .await,
         QueuedAdmissionDisposition::RejectedNonPortableAttachment
@@ -557,6 +560,7 @@ async fn distinct_open_route_requeues_queued_successor_pg() {
             false,
             false,
             "owner_affinity_open_route_test",
+            None,
         )
         .await,
         QueuedAdmissionDisposition::Deferred

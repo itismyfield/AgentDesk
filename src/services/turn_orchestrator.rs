@@ -14,6 +14,7 @@ use crate::services::provider::{CancelToken, ProviderKind};
 mod active_source_dedup;
 mod dispatch_reservation;
 mod episode_identity;
+mod front_requeue;
 mod overflow;
 mod pending_queue_persistence;
 mod queue_cancellation;
@@ -36,6 +37,7 @@ use dispatch_reservation::{
     record_valve_cleared_pending_dispatch, set_pending_user_dispatch,
 };
 use episode_identity::{TurnNonceGuard, turn_nonce_guard_matches};
+use front_requeue::requeue_intervention_front;
 pub(crate) use overflow::SoftInterventionProbe;
 use overflow::drain_head_overflow;
 #[cfg(test)]
@@ -443,53 +445,6 @@ pub(crate) fn enqueue_intervention(
 
     queue.push(intervention);
     queue_exit_events.extend(drain_head_overflow(queue));
-    EnqueueInterventionResult {
-        enqueued: true,
-        merged: false,
-        refusal_reason: None,
-        queue_exit_events,
-        persistence_error: None,
-    }
-}
-
-pub(crate) fn requeue_intervention_front(
-    queue: &mut Vec<Intervention>,
-    mut intervention: Intervention,
-    pending_user_dispatch: Option<MessageId>,
-    active_user_message_id: Option<MessageId>,
-) -> EnqueueInterventionResult {
-    let mut queue_exit_events = prune_interventions(queue);
-    ensure_source_message_ids(&mut intervention);
-    let source_id = intervention.message_id;
-    let refusal_reason =
-        if pending_user_dispatch == Some(source_id) || active_user_message_id == Some(source_id) {
-            Some(EnqueueRefusalReason::SourceIdPendingOrActive)
-        } else if queue
-            .iter()
-            .any(|item| item.source_message_ids.contains(&source_id))
-        {
-            Some(EnqueueRefusalReason::SourceIdAlreadyQueued)
-        } else {
-            None
-        };
-    if let Some(refusal_reason) = refusal_reason {
-        return EnqueueInterventionResult {
-            enqueued: false,
-            merged: false,
-            refusal_reason: Some(refusal_reason),
-            queue_exit_events,
-            persistence_error: None,
-        };
-    }
-    queue.insert(0, intervention);
-    if queue.len() > MAX_INTERVENTIONS_PER_CHANNEL {
-        // #4260: the tail drain here is a capacity evict too — genuine loss.
-        queue_exit_events.extend(
-            queue
-                .drain(MAX_INTERVENTIONS_PER_CHANNEL..)
-                .map(|intervention| QueueExitEvent::new(intervention, QueueExitKind::Overflow)),
-        );
-    }
     EnqueueInterventionResult {
         enqueued: true,
         merged: false,
@@ -1135,10 +1090,31 @@ impl ChannelMailboxHandle {
         intervention: Intervention,
         persistence: QueuePersistenceContext,
     ) -> RequeueInterventionResult {
+        self.requeue_front_inner(intervention, persistence, None)
+            .await
+    }
+
+    pub(crate) async fn restore_dequeued_head(
+        &self,
+        intervention: Intervention,
+        persistence: QueuePersistenceContext,
+        dispatch_lease: Arc<DispatchLease>,
+    ) -> RequeueInterventionResult {
+        self.requeue_front_inner(intervention, persistence, Some(dispatch_lease))
+            .await
+    }
+
+    async fn requeue_front_inner(
+        &self,
+        intervention: Intervention,
+        persistence: QueuePersistenceContext,
+        dispatch_lease: Option<Arc<DispatchLease>>,
+    ) -> RequeueInterventionResult {
         self.request(
             |reply| ChannelMailboxMsg::RequeueFront {
                 intervention,
                 persistence,
+                dispatch_lease,
                 reply,
             },
             RequeueInterventionResult {
@@ -1793,6 +1769,7 @@ enum ChannelMailboxMsg {
     RequeueFront {
         intervention: Intervention,
         persistence: QueuePersistenceContext,
+        dispatch_lease: Option<Arc<DispatchLease>>,
         reply: oneshot::Sender<RequeueInterventionResult>,
     },
     AbandonPendingDispatch {
@@ -2777,21 +2754,24 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 ChannelMailboxMsg::RequeueFront {
                     intervention,
                     persistence,
+                    dispatch_lease,
                     reply,
                 } => {
                     state.last_persistence = Some(persistence.clone());
-                    // #3167 BLOCKER-2 — a failed dispatch requeues the reserved
-                    // head: clear the dequeue→claim reservation so the now
-                    // non-empty queue (not the stale reservation) governs the
-                    // Background gate, and reset the safety-valve counter.
-                    let requeued_id = intervention.message_id;
-                    let requeued_reserved = state.pending_user_dispatch == Some(requeued_id);
+                    let identity_ids = front_requeue::intervention_identity_ids(&intervention);
+                    let authorized_pending_restore = dispatch_lease.as_ref().and_then(|lease| {
+                        let pending = state.pending_user_dispatch?;
+                        let stored = state.pending_user_dispatch_lease.as_ref()?;
+                        (identity_ids.contains(&pending) && Arc::ptr_eq(lease, stored))
+                            .then_some(pending)
+                    });
                     let previous_queue = state.intervention_queue.clone();
                     let requeue_result = requeue_intervention_front(
                         &mut state.intervention_queue,
                         intervention,
                         state.pending_user_dispatch,
                         state.active_user_message_id,
+                        authorized_pending_restore,
                     );
                     let result = if !requeue_result.enqueued {
                         RequeueInterventionResult {
@@ -2807,9 +2787,6 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         previous_queue,
                         "requeue_front",
                     ) {
-                        if requeued_reserved {
-                            clear_pending_user_dispatch(&mut state);
-                        }
                         RequeueInterventionResult {
                             enqueued: false,
                             refusal_reason: None,
@@ -2817,18 +2794,18 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             persistence_error: Some(error),
                         }
                     } else {
-                        if requeued_reserved {
+                        if let Some(pending) = authorized_pending_restore {
                             consume_pending_dispatch_marker_if_matches(
                                 &mut state,
                                 channel_id,
-                                requeued_id,
-                                "requeue_front",
+                                pending,
+                                "restore_dequeued_head",
                             );
                             clear_pending_user_dispatch(&mut state);
                         }
                         RequeueInterventionResult {
-                            enqueued: requeue_result.enqueued,
-                            refusal_reason: requeue_result.refusal_reason,
+                            enqueued: true,
+                            refusal_reason: None,
                             queue_exit_events: requeue_result.queue_exit_events,
                             persistence_error: None,
                         }
@@ -5403,7 +5380,8 @@ mod no_ttl_evict_tests {
         let mut queue: Vec<Intervention> = (0..(MAX_INTERVENTIONS_PER_CHANNEL as u64))
             .map(|i| intervention_at(i + 2, now))
             .collect();
-        let result = requeue_intervention_front(&mut queue, intervention_at(1, now), None, None);
+        let result =
+            requeue_intervention_front(&mut queue, intervention_at(1, now), None, None, None);
         assert_eq!(
             result.queue_exit_events.len(),
             1,
@@ -5609,7 +5587,9 @@ mod persistence_tests {
             let marker_path = marker_file_path(tmp.path(), &provider, token_hash, channel_id);
             assert!(marker_path.exists());
 
-            let requeue = handle.requeue_front(intervention, persistence).await;
+            let requeue = handle
+                .restore_dequeued_head(intervention, persistence, dispatch_lease.clone())
+                .await;
 
             assert!(requeue.persistence_error.is_none());
             assert_eq!(
@@ -6227,6 +6207,107 @@ mod persistence_tests {
             let snapshot = handle.snapshot().await;
             assert!(snapshot.intervention_queue.is_empty());
             assert_eq!(snapshot.active_user_message_id, Some(head.message_id));
+        });
+    }
+
+    fn merged_intervention(primary: u64, source: u64) -> Intervention {
+        let mut intervention = make_intervention(primary, "merged retry", None);
+        intervention.source_message_ids = vec![MessageId::new(source), MessageId::new(primary)];
+        intervention
+    }
+
+    #[test]
+    fn requeue_front_rejects_merged_source_pending_4797() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let channel_id = ChannelId::new(4_797_205);
+            let persistence = QueuePersistenceContext::new(&provider, "merged-pending", None);
+            let handle = ChannelMailboxRegistry::default().handle(channel_id);
+            let source = make_intervention(4_797_206, "source A", None);
+            handle
+                .replace_queue(vec![source.clone()], persistence.clone())
+                .await;
+            let _taken = handle.take_next_soft(persistence.clone()).await;
+
+            let result = handle
+                .requeue_front(
+                    merged_intervention(4_797_207, source.message_id.get()),
+                    persistence,
+                )
+                .await;
+
+            assert!(!result.enqueued);
+            assert_eq!(
+                result.refusal_reason,
+                Some(EnqueueRefusalReason::SourceIdPendingOrActive)
+            );
+            assert_eq!(
+                handle.snapshot().await.pending_user_dispatch,
+                Some(source.message_id)
+            );
+        });
+    }
+
+    #[test]
+    fn requeue_front_rejects_merged_source_active_4797() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let channel_id = ChannelId::new(4_797_208);
+            let persistence = QueuePersistenceContext::new(&provider, "merged-active", None);
+            let handle = ChannelMailboxRegistry::default().handle(channel_id);
+            let source_id = MessageId::new(4_797_209);
+            assert!(
+                handle
+                    .try_start_turn(Arc::new(CancelToken::new()), UserId::new(1), source_id)
+                    .await
+            );
+
+            let result = handle
+                .requeue_front(merged_intervention(4_797_210, source_id.get()), persistence)
+                .await;
+
+            assert!(!result.enqueued);
+            assert_eq!(
+                result.refusal_reason,
+                Some(EnqueueRefusalReason::SourceIdPendingOrActive)
+            );
+        });
+    }
+
+    #[test]
+    fn requeue_front_rejects_merged_source_queued_4797() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let channel_id = ChannelId::new(4_797_211);
+            let persistence = QueuePersistenceContext::new(&provider, "merged-queued", None);
+            let handle = ChannelMailboxRegistry::default().handle(channel_id);
+            let source = make_intervention(4_797_212, "queued A", None);
+            handle
+                .replace_queue(vec![source.clone()], persistence.clone())
+                .await;
+
+            let result = handle
+                .requeue_front(
+                    merged_intervention(4_797_213, source.message_id.get()),
+                    persistence,
+                )
+                .await;
+
+            assert!(!result.enqueued);
+            assert_eq!(
+                result.refusal_reason,
+                Some(EnqueueRefusalReason::SourceIdAlreadyQueued)
+            );
+            assert_eq!(handle.snapshot().await.intervention_queue.len(), 1);
         });
     }
 

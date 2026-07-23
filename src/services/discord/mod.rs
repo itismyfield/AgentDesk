@@ -214,6 +214,7 @@ use prompt_builder::{RecoveryContextManifestInput, build_system_prompt_with_mani
 pub(in crate::services::discord) use queue_dispatch::MailboxEnqueueOutcome;
 use queue_dispatch::{
     MailboxTakeNextSoftOutcome, mailbox_abandon_unclaimed_dispatch_after_success,
+    mailbox_requeue_intervention_front, mailbox_restore_dequeued_head,
 };
 use recovery_engine::restore_inflight_turns;
 use restart_report::flush_restart_reports;
@@ -3660,36 +3661,6 @@ async fn idle_queue_take_next_soft_if_ready(
     mailbox_take_next_soft_intervention(shared, provider, channel_id).await
 }
 
-async fn mailbox_requeue_intervention_front(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    intervention: Intervention,
-) -> MailboxEnqueueOutcome {
-    let result: RequeueInterventionResult = shared
-        .mailbox(channel_id)
-        .requeue_front(
-            intervention,
-            queue_persistence_context(shared, provider, channel_id),
-        )
-        .await;
-    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
-    if let Some(error) = result.persistence_error.as_ref() {
-        tracing::warn!(
-            provider = provider.as_str(),
-            channel_id = channel_id.get(),
-            error = %error,
-            "mailbox requeue-front failed durable pending-queue persistence; pending dispatch marker remains the durable backstop"
-        );
-    }
-    MailboxEnqueueOutcome {
-        enqueued: result.enqueued && result.persistence_error.is_none(),
-        merged: false,
-        refusal_reason: result.refusal_reason,
-        persistence_error: result.persistence_error,
-    }
-}
-
 pub(in crate::services::discord) async fn mailbox_abandon_pending_dispatch(
     shared: &SharedData,
     provider: &ProviderKind,
@@ -4242,12 +4213,14 @@ async fn kickoff_idle_queue_channel(
         has_more,
         false,
         "intake_admission_pre_kickoff_defer",
+        dispatch_lease.clone(),
     )
     .await
     {
         router::QueuedAdmissionDisposition::Admitted(admitted) => admitted,
         router::QueuedAdmissionDisposition::Deferred
-        | router::QueuedAdmissionDisposition::RejectedNonPortableAttachment => {
+        | router::QueuedAdmissionDisposition::RejectedNonPortableAttachment
+        | router::QueuedAdmissionDisposition::RejectedRestore => {
             drop(dispatch_lease);
             return IdleQueueKickoffChannelOutcome::default();
         }
@@ -4285,7 +4258,29 @@ async fn kickoff_idle_queue_channel(
                 "  [{ts}]   ⚠ KICKOFF: failed to start turn for channel {}: {e}",
                 channel_id
             );
-            mailbox_requeue_intervention_front(shared, provider, channel_id, intervention).await;
+            let restored = mailbox_restore_dequeued_head(
+                shared,
+                provider,
+                channel_id,
+                intervention,
+                dispatch_lease
+                    .as_ref()
+                    .expect("dequeued kickoff intervention must carry its lease")
+                    .clone(),
+            )
+            .await;
+            if !restored.enqueued {
+                tracing::error!(
+                    provider = provider.as_str(),
+                    channel_id = channel_id.get(),
+                    refusal_reason = restored
+                        .refusal_reason
+                        .map(|reason| reason.as_str())
+                        .unwrap_or("none"),
+                    persistence_error = restored.persistence_error.as_deref().unwrap_or("none"),
+                    "KICKOFF: dequeued-head restore rejected after dispatch failure"
+                );
+            }
             drop(dispatch_lease);
             IdleQueueKickoffChannelOutcome { started: false }
         }

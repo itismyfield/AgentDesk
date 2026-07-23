@@ -75,6 +75,9 @@ mod tests {
             _intervention: &'a Intervention,
             _request_owner_name: &'a str,
             _has_more_queued_turns: bool,
+            _dispatch_lease: Option<
+                std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>,
+            >,
         ) -> TestGatewayFuture<'a, Result<(), String>> {
             panic!("prompt-too-long replacement must not dispatch a queued turn")
         }
