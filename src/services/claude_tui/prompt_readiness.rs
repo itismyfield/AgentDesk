@@ -12,7 +12,11 @@ pub(crate) fn render_prompt_readiness_panel_line(
 }
 
 fn normalize_prompt_readiness_panel_line(line: &str) -> Option<String> {
-    let segments = line.trim().split(" │ ").map(str::trim).collect::<Vec<_>>();
+    let raw_segments = line.trim().split(" │ ").collect::<Vec<_>>();
+    let segments = raw_segments
+        .iter()
+        .map(|segment| segment.trim())
+        .collect::<Vec<_>>();
     let model_label = *segments.first()?;
     let model_name = model_label.strip_prefix("🤖 ")?;
     if model_name.is_empty() {
@@ -27,10 +31,8 @@ fn normalize_prompt_readiness_panel_line(line: &str) -> Option<String> {
         return None;
     }
     let context_percent = segments.get(2)?.strip_suffix('%')?.parse::<u64>().ok()?;
-    let tokens = *segments.get(3)?;
+    let tokens = *raw_segments.get(3)?;
     let (used_lexeme, window_lexeme) = tokens.split_once('/')?;
-    let used_lexeme = used_lexeme.trim();
-    let window_lexeme = window_lexeme.trim();
     let context = ContextWindowUsage {
         used_tokens: parse_compact_tokens(used_lexeme)?,
         window_tokens: parse_compact_tokens(window_lexeme)?,
@@ -60,20 +62,32 @@ fn normalize_prompt_readiness_panel_line(line: &str) -> Option<String> {
 fn parse_compact_tokens(value: &str) -> Option<u64> {
     const U64_UPPER_EXCLUSIVE: f64 = 18_446_744_073_709_551_616.0;
 
-    let value = value.trim();
     let (number, multiplier) = if let Some(value) = value.strip_suffix('K') {
         (value, 1_000.0)
     } else if let Some(value) = value.strip_suffix('M') {
         (value, 1_000_000.0)
     } else {
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
         return value.parse().ok();
     };
-    if number.starts_with('-') {
+    let (integer, fraction) = number
+        .split_once('.')
+        .map_or((number, None), |(integer, fraction)| {
+            (integer, Some(fraction))
+        });
+    if integer.is_empty()
+        || !integer.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.is_some_and(|fraction| {
+            fraction.is_empty() || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    {
         return None;
     }
     let number = number.parse::<f64>().ok()?;
     let scaled = number * multiplier;
-    (number.is_finite() && number >= 0.0 && scaled.is_finite() && scaled < U64_UPPER_EXCLUSIVE)
+    (number.is_finite() && scaled.is_finite() && scaled < U64_UPPER_EXCLUSIVE)
         .then_some(scaled as u64)
 }
 
@@ -282,6 +296,10 @@ mod tests {
     fn normalization_preserves_compact_token_lexemes_4822() {
         for (line, expected) in [
             (
+                "  🤖 Opus(H) │ ░░░░░░░░░░ │ 4% │ 49K/1.0M",
+                "  🤖 Opus(H) │ ░░░░░░░░░░ │ ctw: 4% (49K/1.0M)",
+            ),
+            (
                 "  🤖 Opus(H) │ ██░░░░░░░░ │ 15% │ 154.6K/1.0M",
                 "  🤖 Opus(H) │ ██░░░░░░░░ │ ctw: 15% (154.6K/1.0M)",
             ),
@@ -289,8 +307,25 @@ mod tests {
                 "  🤖 Opus(H) │ █░░░░░░░░░ │ 10% │ 1.04M/10.0M",
                 "  🤖 Opus(H) │ █░░░░░░░░░ │ ctw: 10% (1.04M/10.0M)",
             ),
+            (
+                "  🤖 Opus(H) │ ███░░░░░░░ │ 26% │ 265K/1.0M",
+                "  🤖 Opus(H) │ ███░░░░░░░ │ ctw: 26% (265K/1.0M)",
+            ),
         ] {
             assert_eq!(normalize_prompt_readiness_panel_in_capture(line), expected);
+        }
+    }
+
+    #[test]
+    fn normalization_preserves_malformed_compact_token_lexemes_4822() {
+        for line in [
+            "  🤖 Opus(H) │ ██████████ │ 100% │ 1e3K/1.0M",
+            "  🤖 Opus(H) │ ░░░░░░░░░░ │ 0% │ +1K/1.0M",
+            "  🤖 Opus(H) │ ░░░░░░░░░░ │ 0% │ +1/1000000",
+            "  🤖 Opus(H) │ █████░░░░░ │ 49% │ 49K / 1.0M",
+            "  🤖 Opus(H) │ █░░░░░░░░░ │ 15% │ 1..5K/10K",
+        ] {
+            assert_eq!(normalize_prompt_readiness_panel_in_capture(line), line);
         }
     }
 
