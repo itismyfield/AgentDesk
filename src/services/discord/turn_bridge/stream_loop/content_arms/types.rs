@@ -48,6 +48,8 @@ pub(in super::super) struct StreamContentArmContext<'a> {
     pub(in super::super) gateway: &'a Arc<dyn TurnGateway>,
     pub(in super::super) channel_id: ChannelId,
     pub(in super::super) provider: &'a ProviderKind,
+    pub(in super::super) expected_identity:
+        &'a crate::services::discord::inflight::InflightTurnIdentity,
     pub(in super::super) voice_progress_playback_channel_id: Option<ChannelId>,
     pub(in super::super) watcher_owns_assistant_relay: bool,
     pub(in super::super) watcher_relay_available_for_turn: bool,

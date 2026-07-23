@@ -5,9 +5,14 @@ mod claude_e_stamp;
 mod heartbeat;
 #[path = "identity_gate/runtime_stamp.rs"]
 mod runtime_stamp;
+#[path = "identity_gate/stream_loop_patch.rs"]
+mod stream_loop_patch;
 pub(in crate::services::discord) use claude_e_stamp::stamp_claude_e_process_if_matches_identity;
 pub(in crate::services::discord) use heartbeat::touch_inflight_state_if_matches_identity;
 pub(in crate::services::discord) use runtime_stamp::stamp_runtime_handoff_if_matches_identity;
+pub(in crate::services::discord) use stream_loop_patch::{
+    clear_long_running_placeholder_if_matches_identity, patch_restart_mode_if_matches_identity,
+};
 
 pub(in crate::services::discord) fn save_inflight_state_if_identity_unchanged(
     state: &InflightTurnState,

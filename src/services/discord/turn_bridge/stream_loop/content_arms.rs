@@ -39,6 +39,7 @@ pub(super) async fn handle_stream_content_message(
     let gateway = Arc::clone(ctx.gateway);
     let channel_id = ctx.channel_id;
     let provider = ctx.provider.clone();
+    let expected_identity = ctx.expected_identity;
     let voice_progress_playback_channel_id = ctx.voice_progress_playback_channel_id;
     let watcher_owns_assistant_relay = ctx.watcher_owns_assistant_relay;
     let watcher_relay_available_for_turn = ctx.watcher_relay_available_for_turn;
@@ -294,7 +295,13 @@ pub(super) async fn handle_stream_content_message(
                             }
                             if pending_long_running_open_after_state_save.take().is_some() {
                                 inflight_state.long_running_placeholder_active = false;
-                                let _ = save_inflight_state(inflight_state);
+                                let _ = crate::services::discord::inflight::
+                                    clear_long_running_placeholder_if_matches_identity(
+                                        &provider,
+                                        channel_id.get(),
+                                        expected_identity,
+                                        "turn_bridge::stream_loop::done_pending_placeholder_clear",
+                                    );
                             }
                             // #1255: turn finished while a long-running placeholder
                             // is still Active — close it now so the user does not

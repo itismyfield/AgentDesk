@@ -54,20 +54,19 @@ from pathlib import Path
 #
 # #4259 PR-1 baseline = 29; PR-2a lowered to 26; #4596 lowered to 25;
 # post-loop-finalize lowered to 21; external writers lowered to 13; R1 stream
-# tick lowered to 8; R2 runtime-handoff atomic stamps lower to 3. Remaining:
+# tick lowered to 8; R2 runtime-handoff atomic stamps lower to 3; R3 stream-loop
+# terminal/cancel patches lower to 1. Remaining:
 #   turn_bridge/runtime_handoff_loop.rs .. 0  (R2 field-scoped locked stamp)
 #   turn_bridge/stream_tick.rs .......... 0  (R1)
-#   turn_bridge/stream_loop.rs .......... 2  (R3)
+#   turn_bridge/stream_loop.rs .......... 0  (R3 narrow locked patches)
 #   turn_bridge/post_loop_finalize.rs ... 0
 #   turn_bridge/mod.rs (hotfile, solo) .. 1  (R4)
 #   external (router/session/tui) ....... 0
 #
-# R2 converts RuntimeReady ProcessBackend, ProcessReady, and the shared watcher
-# handoff's standby/spawn/handoff saves. The store-side locked RMW accepts a
-# first `tmux_session_name` population only after the pre-mutation durable
-# identity and authority match, pins an established session against changes,
-# and patches only runtime/session/output/owner evidence.
-BASELINE = 3
+# R3 converts cancel restart-mode sync and Done placeholder clearing to narrow
+# identity/authority-checked locked patches, so neither path can overwrite or
+# recreate a row owned by a newer turn.
+BASELINE = 1
 
 SCAN_ROOT = Path("src") / "services" / "discord"
 

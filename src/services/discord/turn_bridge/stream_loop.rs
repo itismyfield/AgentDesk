@@ -237,6 +237,8 @@ pub(super) async fn run_stream_loop(
     let mut last_status_panel_edit = *state.last_status_panel_edit;
     let mut bridge_spans = *state.bridge_spans;
     let mut status_panel_generation = *state.status_panel_generation;
+    let mut stream_tick_expected_identity =
+        crate::services::discord::inflight::InflightTurnIdentity::from_state(&inflight_state);
 
     // #2289 cancel finalization helper. Both the pre-`try_recv` guard
     // and the post-`try_recv` re-sample funnel through this so the
@@ -250,8 +252,22 @@ pub(super) async fn run_stream_loop(
     // boundary) so the loop exits to the cancel post-processing path.
     macro_rules! finalize_cancel_inner {
         () => {{
+            let previous_restart_mode = inflight_state.restart_mode;
+            let previous_restart_generation = inflight_state.restart_generation;
             if sync_inflight_restart_mode_from_cancel(cancel_token.as_ref(), &mut inflight_state) {
-                let _ = save_inflight_state(&inflight_state);
+                let outcome =
+                    crate::services::discord::inflight::patch_restart_mode_if_matches_identity(
+                        &inflight_state,
+                        &stream_tick_expected_identity,
+                        previous_restart_mode,
+                        previous_restart_generation,
+                        "turn_bridge::stream_loop::cancel_restart_mode",
+                    );
+                refresh_stream_tick_expected_identity_after_handoff(
+                    &mut stream_tick_expected_identity,
+                    &inflight_state,
+                    Some(outcome),
+                );
             }
             cancelled = true;
             close_all_tracked_background_children(
@@ -266,12 +282,6 @@ pub(super) async fn run_stream_loop(
 
     let mut pending_long_running_open_after_state_save = None;
     let mut pending_long_running_retarget_after_state_save = None;
-    // The periodic flush must remain bound to the owner that entered this
-    // stream loop. Runtime handoff may mutate identity-bearing cursor fields
-    // before a later tick, so deriving expected identity inside the tick would
-    // authorize a mutated stale snapshot rather than the original owner.
-    let mut stream_tick_expected_identity =
-        crate::services::discord::inflight::InflightTurnIdentity::from_state(&inflight_state);
 
     'outer: while !done
         || terminal_control_drain_until.is_some_and(|deadline| std::time::Instant::now() < deadline)
@@ -409,6 +419,7 @@ pub(super) async fn run_stream_loop(
                                     gateway: &gateway,
                                     channel_id,
                                     provider: &provider,
+                                    expected_identity: &stream_tick_expected_identity,
                                     voice_progress_playback_channel_id,
                                     watcher_owns_assistant_relay,
                                     watcher_relay_available_for_turn,
