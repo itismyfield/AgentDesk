@@ -25,7 +25,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 
 use dashmap::mapref::entry::Entry;
 use poise::serenity_prelude::ChannelId;
@@ -139,7 +139,7 @@ fn clear_redrive_grace_test_clock() {
 /// Dedicated no-progress tracker, kept separate from the wall-clock
 /// `OFFSET_OBSERVATIONS` the liveness path uses. Every timestamp here is
 /// monotonic: the redrive lifecycle has zero wall dependence (#4181 item-2).
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct NoProgressObservation {
     /// Highest committed relay offset observed for this key. A later snapshot
     /// reporting a LOWER offset is treated as stale and rejected, so a stale
@@ -156,6 +156,8 @@ struct NoProgressObservation {
 static NO_PROGRESS_OBSERVATIONS: LazyLock<
     dashmap::DashMap<(StallLivenessKey, u64), NoProgressObservation>,
 > = LazyLock::new(dashmap::DashMap::new);
+static DURABLE_BASELINE_LOCKS: LazyLock<dashmap::DashMap<(String, u64), Mutex<()>>> =
+    LazyLock::new(dashmap::DashMap::new);
 
 const REDRIVE_BASELINES_DIR: &str = "discord_redrive_baselines";
 
@@ -164,21 +166,25 @@ struct DurableNoProgressBaseline {
     boot_id: String,
     offset: u64,
     reset_incarnation: u64,
-    tmux_session: Option<String>,
-    user_msg_id: Option<u64>,
-    started_at: Option<String>,
+    identity: Option<crate::services::discord::inflight::InflightTurnIdentity>,
+    turn_nonce: Option<String>,
     unchanged_since_monotonic_secs: i64,
     last_seen_monotonic_secs: i64,
 }
 
 impl DurableNoProgressBaseline {
-    fn matches(&self, key: &StallLivenessKey, token: RelayFrontierToken, boot_id: &str) -> bool {
+    fn matches(
+        &self,
+        identity: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
+        turn_nonce: Option<&str>,
+        token: RelayFrontierToken,
+        boot_id: &str,
+    ) -> bool {
         self.boot_id == boot_id
             && self.offset == token.committed_offset
             && self.reset_incarnation == token.reset_incarnation
-            && self.tmux_session == key.tmux_session
-            && self.user_msg_id == key.user_msg_id
-            && self.started_at == key.started_at
+            && self.identity.as_ref() == identity
+            && self.turn_nonce.as_deref() == turn_nonce
     }
 
     fn observation(&self, mono_now: i64) -> NoProgressObservation {
@@ -338,6 +344,7 @@ fn relay_offset_stalled_past_grace_durable(
     provider: &ProviderKind,
     channel_id: ChannelId,
     key: &StallLivenessKey,
+    snapshot: &WatcherStateSnapshot,
     token: RelayFrontierToken,
     mono_now: i64,
 ) -> bool {
@@ -347,8 +354,17 @@ fn relay_offset_stalled_past_grace_durable(
     let Some(boot_id) = boot_id() else {
         return relay_offset_stalled_past_grace(key, token, mono_now);
     };
+    let lock_key = (provider.as_str().to_string(), channel_id.get());
+    let channel_lock = DURABLE_BASELINE_LOCKS
+        .entry(lock_key)
+        .or_insert_with(|| Mutex::new(()));
+    let _guard = channel_lock
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let identity = snapshot.inflight_identity.as_ref();
+    let turn_nonce = snapshot.mailbox_active_turn_nonce.as_deref();
     let map_key = (key.clone(), token.reset_incarnation);
-    match NO_PROGRESS_OBSERVATIONS.entry(map_key) {
+    let (stalled, observation) = match NO_PROGRESS_OBSERVATIONS.entry(map_key) {
         Entry::Occupied(mut occupied) => {
             let observation = occupied.get_mut();
             observation.last_seen_mono_secs = mono_now;
@@ -356,35 +372,51 @@ fn relay_offset_stalled_past_grace_durable(
                 observation.offset = token.committed_offset;
                 observation.unchanged_since_mono_secs = mono_now;
             }
+            (
+                token.committed_offset == observation.offset
+                    && mono_now.saturating_sub(observation.unchanged_since_mono_secs)
+                        >= STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
+                NoProgressObservation {
+                    offset: observation.offset,
+                    unchanged_since_mono_secs: observation.unchanged_since_mono_secs,
+                    last_seen_mono_secs: observation.last_seen_mono_secs,
+                },
+            )
         }
         Entry::Vacant(vacant) => {
             let observation = load_durable_baseline_at(&path)
-                .filter(|baseline| baseline.matches(key, token, &boot_id))
+                .filter(|baseline| baseline.matches(identity, turn_nonce, token, &boot_id))
                 .map(|baseline| baseline.observation(mono_now))
                 .unwrap_or(NoProgressObservation {
                     offset: token.committed_offset,
                     unchanged_since_mono_secs: mono_now,
                     last_seen_mono_secs: mono_now,
                 });
-            vacant.insert(observation);
+            let stalled = mono_now.saturating_sub(observation.unchanged_since_mono_secs)
+                >= STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64;
+            vacant.insert(NoProgressObservation {
+                offset: observation.offset,
+                unchanged_since_mono_secs: observation.unchanged_since_mono_secs,
+                last_seen_mono_secs: observation.last_seen_mono_secs,
+            });
+            (stalled, observation)
         }
-    }
+    };
 
-    let observation = NO_PROGRESS_OBSERVATIONS
-        .get(&(key.clone(), token.reset_incarnation))
-        .expect("redrive observation inserted under entry lock");
-    let stalled = token.committed_offset == observation.offset
-        && mono_now.saturating_sub(observation.unchanged_since_mono_secs)
-            >= STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64;
+    if load_durable_baseline_at(&path).is_some_and(|baseline| {
+        !baseline.matches(identity, turn_nonce, token, &boot_id)
+            && baseline.last_seen_monotonic_secs > observation.last_seen_mono_secs
+    }) {
+        return stalled;
+    }
     persist_durable_baseline_at(
         &path,
         &DurableNoProgressBaseline {
             boot_id,
             offset: observation.offset,
             reset_incarnation: token.reset_incarnation,
-            tmux_session: key.tmux_session.clone(),
-            user_msg_id: key.user_msg_id,
-            started_at: key.started_at.clone(),
+            identity: identity.cloned(),
+            turn_nonce: turn_nonce.map(str::to_string),
             unchanged_since_monotonic_secs: observation.unchanged_since_mono_secs,
             last_seen_monotonic_secs: observation.last_seen_mono_secs,
         },
@@ -426,11 +458,14 @@ fn stalled_undelivered_backlog_for_redrive_with_token_and_clock(
         return false;
     }
     let key = StallLivenessKey::from_snapshot(provider, channel_id, snapshot);
-    match clock.durable_mono_secs() {
-        Some(mono_now) => {
-            relay_offset_stalled_past_grace_durable(provider, channel_id, &key, token, mono_now)
-        }
-        None => relay_offset_stalled_past_grace(&key, token, clock.mono_secs()),
+    match (
+        clock.durable_mono_secs(),
+        snapshot.inflight_identity.as_ref(),
+    ) {
+        (Some(mono_now), Some(_)) => relay_offset_stalled_past_grace_durable(
+            provider, channel_id, &key, snapshot, token, mono_now,
+        ),
+        _ => relay_offset_stalled_past_grace(&key, token, clock.mono_secs()),
     }
 }
 
@@ -457,6 +492,13 @@ fn stalled_undelivered_backlog_for_redrive_with_clock(
 /// Drop redrive no-progress observations for a cleared session. Called by the
 /// parent's `clear_stall_watchdog_liveness_state`.
 pub(super) fn clear_for_session(probe: &StallLivenessKey) {
+    let lock_key = (probe.provider.clone(), probe.channel_id);
+    let channel_lock = DURABLE_BASELINE_LOCKS
+        .entry(lock_key)
+        .or_insert_with(|| Mutex::new(()));
+    let _guard = channel_lock
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     NO_PROGRESS_OBSERVATIONS.retain(|(key, _), _| !key.matches_session(probe));
     if let Some(path) = durable_baseline_path(&probe.provider, ChannelId::new(probe.channel_id)) {
         remove_durable_baseline_at(&path);
@@ -472,13 +514,42 @@ pub(super) fn gc() {
 }
 
 fn gc_with_clock(clock: &dyn RedriveClock) {
-    let mono_now = clock
-        .durable_mono_secs()
-        .unwrap_or_else(|| clock.mono_secs());
+    let durable_now = clock.durable_mono_secs();
+    let mono_now = durable_now.unwrap_or_else(|| clock.mono_secs());
     NO_PROGRESS_OBSERVATIONS.retain(|_, observation| {
         mono_now.saturating_sub(observation.last_seen_mono_secs)
             <= STALL_LIVENESS_STATE_TTL_SECS as i64
     });
+    let Some(boot_id) = boot_id() else {
+        return;
+    };
+    let Some(root) = runtime_store::runtime_root().map(|root| root.join(REDRIVE_BASELINES_DIR))
+    else {
+        return;
+    };
+    gc_durable_baselines_at(&root, &boot_id, mono_now);
+}
+
+fn gc_durable_baselines_at(root: &Path, boot_id: &str, mono_now: i64) {
+    let Ok(providers) = fs::read_dir(root) else {
+        return;
+    };
+    for provider in providers.flatten() {
+        let Ok(files) = fs::read_dir(provider.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            let keep = load_durable_baseline_at(&path).is_some_and(|baseline| {
+                baseline.boot_id == boot_id
+                    && mono_now.saturating_sub(baseline.last_seen_monotonic_secs)
+                        <= STALL_LIVENESS_STATE_TTL_SECS as i64
+            });
+            if !keep {
+                remove_durable_baseline_at(&path);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -595,7 +666,14 @@ mod tests {
             bound_output_path: None,
             bound_session_id: None,
             inflight_terminal_delivery_committed: false,
-            inflight_identity: None,
+            inflight_identity: Some(
+                crate::services::discord::inflight::InflightTurnIdentity {
+                    user_msg_id: 9001,
+                    started_at: "2026-06-12 00:00:00".to_string(),
+                    tmux_session_name: Some(tmux_session.to_string()),
+                    turn_start_offset: Some(relay_offset),
+                },
+            ),
             inflight_finalizer_turn_id: None,
             inflight_output_path: Some(format!("/tmp/{tmux_session}.jsonl")),
             relay_stall_state: RelayStallState::TmuxAliveRelayDead,
@@ -881,9 +959,8 @@ mod tests {
             boot_id: "boot-a".to_string(),
             offset: token.committed_offset,
             reset_incarnation: token.reset_incarnation,
-            tmux_session: key.tmux_session.clone(),
-            user_msg_id: key.user_msg_id,
-            started_at: key.started_at.clone(),
+            identity: snap.inflight_identity.clone(),
+            turn_nonce: None,
             unchanged_since_monotonic_secs: clock.mono.get(),
             last_seen_monotonic_secs: clock.mono.get(),
         };
@@ -893,9 +970,9 @@ mod tests {
         NO_PROGRESS_OBSERVATIONS.clear();
         clock.mono.set(10_000 + grace);
         let restored = load_durable_baseline_at(&path).expect("durable baseline");
-        assert!(restored.matches(&key, token, "boot-a"));
+        assert!(restored.matches(snap.inflight_identity.as_ref(), None, token, "boot-a"));
         assert!(
-            !restored.matches(&key, token, "boot-b"),
+            !restored.matches(snap.inflight_identity.as_ref(), None, token, "boot-b"),
             "a machine reboot must reject the prior boot's monotonic baseline"
         );
         NO_PROGRESS_OBSERVATIONS.insert(
@@ -938,22 +1015,84 @@ mod tests {
             reset_incarnation: 0,
             committed_offset: 10,
         };
-        let old_key = StallLivenessKey::from_snapshot(&provider, channel, &old);
         let new_key = StallLivenessKey::from_snapshot(&provider, channel, &new);
         let baseline = DurableNoProgressBaseline {
             boot_id: "boot-a".to_string(),
             offset: token.committed_offset,
             reset_incarnation: token.reset_incarnation,
-            tmux_session: old_key.tmux_session,
-            user_msg_id: old_key.user_msg_id,
-            started_at: old_key.started_at,
+            identity: old.inflight_identity.clone(),
+            turn_nonce: None,
             unchanged_since_monotonic_secs: 20_000,
             last_seen_monotonic_secs: 20_000,
         };
 
-        assert!(!baseline.matches(&new_key, token, "boot-a"));
+        assert!(!baseline.matches(new.inflight_identity.as_ref(), None, token, "boot-a"));
         assert!(!relay_offset_stalled_past_grace(&new_key, token, 20_180));
         NO_PROGRESS_OBSERVATIONS.remove(&(new_key, token.reset_incarnation));
+    }
+
+    #[test]
+    fn redrive_durable_baseline_rejects_same_second_synthetic_successor_4181() {
+        let _runtime = isolated_runtime_root();
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(4_181_009);
+        let snap = frozen_backlog_snapshot(channel.get(), "AgentDesk-codex-4181-synthetic", 10, 20);
+        let mut successor = snap.clone();
+        successor.inflight_identity.as_mut().unwrap().user_msg_id = 0;
+        successor
+            .inflight_identity
+            .as_mut()
+            .unwrap()
+            .turn_start_offset = Some(11);
+        let mut predecessor = successor.inflight_identity.clone().unwrap();
+        predecessor.turn_start_offset = Some(10);
+        let token = RelayFrontierToken {
+            reset_incarnation: 0,
+            committed_offset: 10,
+        };
+        let baseline = DurableNoProgressBaseline {
+            boot_id: "boot-a".to_string(),
+            offset: 10,
+            reset_incarnation: 0,
+            identity: Some(predecessor),
+            turn_nonce: Some("prior-turn".to_string()),
+            unchanged_since_monotonic_secs: 1,
+            last_seen_monotonic_secs: 1,
+        };
+
+        assert!(!baseline.matches(
+            successor.inflight_identity.as_ref(),
+            Some("successor-turn"),
+            token,
+            "boot-a",
+        ));
+    }
+
+    #[test]
+    fn redrive_durable_gc_removes_invalid_boot_malformed_and_stale_4181() {
+        let (_env, root, _lock) = isolated_runtime_root();
+        let records = root.path().join("records").join("codex");
+        fs::create_dir_all(&records).unwrap();
+        let sample = |boot_id: &str, last_seen: i64| DurableNoProgressBaseline {
+            boot_id: boot_id.to_string(),
+            offset: 10,
+            reset_incarnation: 0,
+            identity: None,
+            turn_nonce: None,
+            unchanged_since_monotonic_secs: last_seen,
+            last_seen_monotonic_secs: last_seen,
+        };
+        persist_durable_baseline_at(&records.join("fresh.json"), &sample("boot-a", 9_000));
+        persist_durable_baseline_at(&records.join("old-boot.json"), &sample("boot-b", 9_000));
+        persist_durable_baseline_at(&records.join("stale.json"), &sample("boot-a", 1));
+        fs::write(records.join("malformed.json"), "{").unwrap();
+
+        gc_durable_baselines_at(&root.path().join("records"), "boot-a", 10_000);
+
+        assert!(records.join("fresh.json").exists());
+        assert!(!records.join("old-boot.json").exists());
+        assert!(!records.join("stale.json").exists());
+        assert!(!records.join("malformed.json").exists());
     }
 
     #[test]
