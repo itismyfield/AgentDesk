@@ -42,6 +42,10 @@ pub(super) fn events_from_background_notification(
                 success: !notification_is_error(status),
             }];
         }
+        // Older/background notification shapes can omit the slot identity. The
+        // terminal envelope still ends the machine-only turn even though no
+        // footer slot can be updated.
+        return vec![StatusEvent::BackgroundMachineTurnCompleted];
     }
     (!summary.is_empty())
         .then_some(StatusEvent::Heartbeat)

@@ -418,15 +418,14 @@ fn background_task_terminal_event_clears_machine_turn_busy_footer_only() {
             reason: "background task 완료 알림".to_string(),
         },
     );
-    events.push_status_events(
-        channel_id,
-        status_events_from_task_notification_with_tool_use_id(
-            "background",
-            "completed",
-            "Background command finished",
-            Some(tool_use_id),
-        ),
+    let raw_background = format!(
+        "<task-notification>\n\
+         <tool-use-id>{tool_use_id}</tool-use-id>\n\
+         <status>completed</status>\n\
+         <summary>Background command \"sleep 1\" completed</summary>\n\
+         </task-notification>"
     );
+    events.bridge_task_notification_xml(channel_id, &raw_background);
 
     assert_eq!(
         status_for(&events, channel_id),
@@ -434,6 +433,60 @@ fn background_task_terminal_event_clears_machine_turn_busy_footer_only() {
             kind: CompletedKind::Background
         },
         "footer-only background completion must clear the machine busy label"
+    );
+}
+
+#[test]
+fn unmatched_background_task_end_cannot_clear_subagent_machine_turn_busy() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_783_003);
+
+    events.push_status_event(
+        channel_id,
+        StatusEvent::MachineTurnBusy {
+            reason: "subagent 완료 알림".to_string(),
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::BackgroundTaskEnd {
+            tool_use_id: "stale-background-id".to_string(),
+            success: true,
+        },
+    );
+
+    assert!(matches!(
+        status_for(&events, channel_id),
+        DerivedStatus::MachineTurnBusy { ref reason } if reason == "subagent 완료 알림"
+    ));
+}
+
+#[test]
+fn idless_terminal_background_xml_clears_background_machine_turn_busy() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_783_004);
+    events.push_status_event(
+        channel_id,
+        StatusEvent::MachineTurnBusy {
+            reason: "background task 완료 알림".to_string(),
+        },
+    );
+
+    let raw_background = "<task-notification>\n\
+        <task-id>legacy-background</task-id>\n\
+        <status>completed</status>\n\
+        <summary>Background command \"legacy wait\" completed</summary>\n\
+        </task-notification>";
+    let bridged = status_events_from_task_notification_xml_for_footer_mode(raw_background, true);
+    assert_eq!(bridged, vec![StatusEvent::BackgroundMachineTurnCompleted]);
+    events.bridge_task_notification_xml(channel_id, raw_background);
+
+    assert_eq!(
+        status_for(&events, channel_id),
+        DerivedStatus::Completed {
+            kind: CompletedKind::Background
+        },
+        "idless terminal background XML must end its machine-only display turn"
     );
 }
 

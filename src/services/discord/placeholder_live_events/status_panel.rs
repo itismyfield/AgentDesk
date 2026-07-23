@@ -459,18 +459,22 @@ impl StatusPanelState {
                 tool_use_id,
                 success,
             } => {
-                finish_background_task_tool_slot(&mut self.tasks, &tool_use_id, success);
+                let slot_matched =
+                    finish_background_task_tool_slot(&mut self.tasks, &tool_use_id, success);
                 // A footer-only background completion has no assistant body and
-                // therefore no ordinary TurnCompleted producer. Its terminal
-                // event is the machine turn's final observable lifecycle edge.
-                // Clear only the derived display status; task slots and all
-                // ownership/injection state remain untouched.
-                if matches!(self.status, DerivedStatus::MachineTurnBusy { .. }) {
-                    self.status = DerivedStatus::Completed {
-                        kind: CompletedKind::Background,
-                    };
-                    self.background_agent_pending = false;
-                    self.completed_at = Some(std::time::Instant::now());
+                // therefore no ordinary TurnCompleted producer. Only a matching
+                // background slot can close its own busy display state; stale or
+                // cross-kind terminal events leave an active machine turn alone.
+                if slot_matched && self.machine_turn_busy_is_background() {
+                    self.complete_background_machine_turn();
+                }
+            }
+            StatusEvent::BackgroundMachineTurnCompleted => {
+                // Terminal background envelopes without a tool-use id cannot
+                // update a slot, but still provide a complete display-only
+                // lifecycle. They cannot clear a subagent-origin busy turn.
+                if self.machine_turn_busy_is_background() {
+                    self.complete_background_machine_turn();
                 }
             }
             StatusEvent::TodoUpdate { items } => {
@@ -583,6 +587,22 @@ impl StatusPanelState {
                 }
             }
         }
+    }
+
+    fn machine_turn_busy_is_background(&self) -> bool {
+        matches!(
+            &self.status,
+            DerivedStatus::MachineTurnBusy { reason }
+                if reason == "background task 완료 알림"
+        )
+    }
+
+    fn complete_background_machine_turn(&mut self) {
+        self.status = DerivedStatus::Completed {
+            kind: CompletedKind::Background,
+        };
+        self.background_agent_pending = false;
+        self.completed_at = Some(std::time::Instant::now());
     }
 
     /// #3204/#3198: routes a running subagent's live step onto its slot's recent

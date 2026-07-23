@@ -412,6 +412,10 @@ pub enum StatusEvent {
     MachineTurnBusy {
         reason: String,
     },
+    /// A terminal background notification lacked the tool-use id required to
+    /// update a footer task slot. It still closes its own machine-only display
+    /// turn without changing ownership or injection state.
+    BackgroundMachineTurnCompleted,
     Heartbeat,
 }
 
