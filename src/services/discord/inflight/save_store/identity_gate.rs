@@ -3,8 +3,11 @@ use super::*;
 mod claude_e_stamp;
 #[path = "identity_gate/heartbeat.rs"]
 mod heartbeat;
+#[path = "identity_gate/runtime_stamp.rs"]
+mod runtime_stamp;
 pub(in crate::services::discord) use claude_e_stamp::stamp_claude_e_process_if_matches_identity;
 pub(in crate::services::discord) use heartbeat::touch_inflight_state_if_matches_identity;
+pub(in crate::services::discord) use runtime_stamp::stamp_runtime_handoff_if_matches_identity;
 
 pub(in crate::services::discord) fn save_inflight_state_if_identity_unchanged(
     state: &InflightTurnState,
@@ -41,18 +44,13 @@ pub(in crate::services::discord::inflight) fn save_inflight_state_if_identity_un
 /// session path that differs from the intake seed
 /// (`resolve_session_temp_path`; claude.rs/codex.rs/qwen.rs follow-up arms), so
 /// the strict `output_path` equality of the `_if_identity_unchanged` variant
-/// would refuse a legitimate same-turn stamp. Use THIS variant for
-/// runtime-handoff (re)stamp sites; it still refuses rows re-owned by another
-/// turn. The expected identity is captured before the caller mutates its
-/// restamp cursor, so the durable row must still have the loaded birth offset;
-/// the written state may then advance that cursor. The held-back blind sites in
-/// `turn_bridge/runtime_handoff_loop.rs`
-/// (RuntimeReady ProcessBackend/ClaudeEAdapter/ClaudeTui/CodexTui,
-/// ProcessReady, and the watcher-handoff helper — see
-/// `scripts/check_inflight_blind_save_ratchet.py`) are expected to convert to
-/// this variant too, once each site's identity-pinned fields (notably
-/// `tmux_session_name`, which some of them first-populate or clear) are
-/// verified stable across the stamp.
+/// would refuse a legitimate same-turn stamp. Use THIS variant for handoffs
+/// whose session identity was already established before the mutation; it still
+/// refuses rows re-owned by another turn. Handoffs that first-populate
+/// `tmux_session_name` use the field-scoped `runtime_stamp` RMW instead. The
+/// expected identity is captured before the caller mutates its restamp cursor,
+/// so the durable row must still have the loaded birth offset; the written state
+/// may then advance that cursor.
 pub(in crate::services::discord) fn save_inflight_state_if_identity_matches_allow_output_restamp(
     state: &InflightTurnState,
     expected: &InflightTurnIdentity,

@@ -393,16 +393,14 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// live, progressing re-adopted turn (matching `user_msg_id`, not committed)
     /// still yields reclaim-reason `None`.
     ///
-    /// NOTE (#4370): this marker IS persisted on a DrainRestart-preserved row. The
-    /// BROAD identity-refresh save (`save_inflight_state_if_identity_unchanged`)
-    /// refuses any row still carrying `restart_mode`, which is precisely why the
-    /// marker is written through the NARROW single-field patch
+    /// NOTE (#4370/#4810): this marker is written through the NARROW adoption patch
     /// `mark_readopted_from_inflight_if_identity_unchanged`
-    /// (`inflight/save_store/identity_gate.rs`) instead: it re-reads under the
-    /// sidecar flock, pins the turn identity, flips only this additive bit, and
-    /// preserves `restart_mode`. Test `readopted_marker_lands_on_restart_preserved_row_and_never_resurrects`
-    /// pins that behavior. So the present-row (Path A) reclaim DOES cover
-    /// restart-preserved rows.
+    /// (`inflight/save_store/identity_gate.rs`), not the broad identity-refresh
+    /// save. The patch re-reads under the sidecar flock, pins the turn identity,
+    /// flips this additive bit, and atomically consumes any planned-restart marker
+    /// so replacement-process authority is durable before runtime handoff. Test
+    /// `readopted_marker_lands_on_restart_preserved_row_and_never_resurrects` pins
+    /// the restart-preserved adoption and no-resurrection behavior.
     ///
     /// The ROW-ABSENT reclaim (Path B) still does not consult this field — there is
     /// no row left to read — and uses the in-memory

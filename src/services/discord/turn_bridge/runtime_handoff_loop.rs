@@ -80,11 +80,13 @@ struct WatcherRuntimeHandoffState<'a> {
     terminal_control_drain_until: &'a mut Option<std::time::Instant>,
 }
 
-// #4259 PR-2a: the `TmuxReady` identity-guarded save + its outcome-conditional
-// dirty policy live in a child module so this parent stays below the giant
-// (>= 1000 prod LoC) threshold (codex r1).
 mod guarded_save;
-use guarded_save::{guarded_runtime_handoff_save, tmux_ready_state_dirty_after_guarded_save};
+#[cfg(test)]
+mod tests;
+use guarded_save::{
+    guarded_runtime_atomic_stamp, guarded_runtime_handoff_save,
+    tmux_ready_state_dirty_after_guarded_save,
+};
 
 pub(super) async fn handle_runtime_handoff_loop_message(
     message: RuntimeHandoffLoopMessage,
@@ -468,7 +470,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                     tmux_session_name,
                     last_offset,
                 } => {
-                    handle_watcher_runtime_handoff(
+                    guarded_save_outcome = Some(handle_watcher_runtime_handoff(
                         WatcherRuntimeHandoffContext {
                             shared_owned: &shared_owned,
                             provider: &provider,
@@ -492,14 +494,14 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             state_dirty: &mut state_dirty,
                             terminal_control_drain_until: &mut terminal_control_drain_until,
                         },
-                    );
+                    ));
                 }
                 RuntimeHandoff::ClaudeTui {
                     transcript_path,
                     tmux_session_name,
                     last_offset,
                 } => {
-                    handle_watcher_runtime_handoff(
+                    guarded_save_outcome = Some(handle_watcher_runtime_handoff(
                         WatcherRuntimeHandoffContext {
                             shared_owned: &shared_owned,
                             provider: &provider,
@@ -523,7 +525,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             state_dirty: &mut state_dirty,
                             terminal_control_drain_until: &mut terminal_control_drain_until,
                         },
-                    );
+                    ));
                 }
                 RuntimeHandoff::CodexTui {
                     rollout_path,
@@ -534,7 +536,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                     if let Some(thread_id) = thread_id {
                         inflight_state.session_id = Some(thread_id);
                     }
-                    handle_watcher_runtime_handoff(
+                    guarded_save_outcome = Some(handle_watcher_runtime_handoff(
                         WatcherRuntimeHandoffContext {
                             shared_owned: &shared_owned,
                             provider: &provider,
@@ -558,29 +560,32 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             state_dirty: &mut state_dirty,
                             terminal_control_drain_until: &mut terminal_control_drain_until,
                         },
-                    );
+                    ));
                 }
                 RuntimeHandoff::ProcessBackend {
                     output_path,
                     session_name,
                     last_offset,
                 } => {
+                    let expected_identity =
+                        crate::services::discord::inflight::InflightTurnIdentity::from_state(
+                            inflight_state,
+                        );
                     tmux_last_offset = Some(last_offset);
                     inflight_state.runtime_kind = Some(RuntimeHandoffKind::ProcessBackend);
                     inflight_state.tmux_session_name = Some(session_name);
                     inflight_state.output_path = Some(output_path);
                     inflight_state.input_fifo_path = None;
                     inflight_state.last_offset = last_offset;
-                    state_dirty = true;
-                    // #2235: see CodexTui arm — durable stamp of
-                    // runtime_kind across a bridge-crash window.
-                    // #4259 PR-2a: kept BLIND (held-back ratchet row) — this
-                    // stamp rewrites identity-pinned `tmux_session_name` (plus
-                    // the ProcessBackend `output_path`); even the
-                    // `_allow_output_restamp` variant (codex r1) pins the
-                    // 4-field identity, so convert only after verifying the
-                    // session name is stable across the stamp.
-                    let _ = save_inflight_state(&inflight_state);
+                    let outcome = guarded_runtime_atomic_stamp(
+                        inflight_state,
+                        &expected_identity,
+                        channel_id,
+                        "turn_bridge::runtime_handoff_loop::runtime_ready_process_backend",
+                    );
+                    state_dirty =
+                        tmux_ready_state_dirty_after_guarded_save(state_dirty, Some(outcome));
+                    guarded_save_outcome = Some(outcome);
                     if done {
                         terminal_control_drain_until = None;
                     }
@@ -632,22 +637,24 @@ pub(super) async fn handle_runtime_handoff_loop_message(
             // Do NOT set tmux_handed_off: ProcessBackend has no watcher,
             // so the handoff cleanup path would delete the placeholder
             // with no one to send the final response.
+            let expected_identity =
+                crate::services::discord::inflight::InflightTurnIdentity::from_state(
+                    inflight_state,
+                );
             tmux_last_offset = Some(last_offset);
             inflight_state.runtime_kind = Some(RuntimeHandoffKind::ProcessBackend);
             inflight_state.tmux_session_name = Some(session_name);
             inflight_state.output_path = Some(output_path);
             inflight_state.input_fifo_path = None;
             inflight_state.last_offset = last_offset;
-            state_dirty = true;
-            // #2235: persist runtime_kind stamp immediately —
-            // ProcessBackend has no watcher so we want the
-            // on-disk row to reflect the new backend before
-            // any potential bridge crash.
-            // #4259 PR-2a: kept BLIND (held-back ratchet row) — rewrites
-            // identity-pinned `tmux_session_name` (plus `output_path`); even
-            // the `_allow_output_restamp` variant (codex r1) pins the 4-field
-            // identity, so convert only after verifying session-name stability.
-            let _ = save_inflight_state(&inflight_state);
+            let outcome = guarded_runtime_atomic_stamp(
+                inflight_state,
+                &expected_identity,
+                channel_id,
+                "turn_bridge::runtime_handoff_loop::process_ready",
+            );
+            state_dirty = tmux_ready_state_dirty_after_guarded_save(state_dirty, Some(outcome));
+            guarded_save_outcome = Some(outcome);
             if done {
                 terminal_control_drain_until = None;
             }
@@ -684,7 +691,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
 fn handle_watcher_runtime_handoff(
     ctx: WatcherRuntimeHandoffContext<'_>,
     state: WatcherRuntimeHandoffState<'_>,
-) {
+) -> crate::services::discord::inflight::GuardedSaveOutcome {
     let shared_owned = ctx.shared_owned;
     let provider = ctx.provider;
     let channel_id = ctx.channel_id;
@@ -704,6 +711,8 @@ fn handle_watcher_runtime_handoff(
     let watcher_owns_assistant_relay = state.watcher_owns_assistant_relay;
     let state_dirty = state.state_dirty;
     let terminal_control_drain_until = state.terminal_control_drain_until;
+    let expected_identity =
+        crate::services::discord::inflight::InflightTurnIdentity::from_state(inflight_state);
 
     *tmux_last_offset = Some(last_offset);
     inflight_state.runtime_kind = Some(runtime_kind);
@@ -723,33 +732,9 @@ fn handle_watcher_runtime_handoff(
     inflight_state.input_fifo_path = fifo_path;
     inflight_state.last_offset = last_offset;
     *state_dirty |= inflight_state.set_watcher_owner_channel_id(watcher_owner_channel_id.get());
-    // #2235 NOTE: we deliberately do NOT durably save the row here.
-    // `watcher_owns_live_relay` is still `false` at this point and only flips
-    // to `true` after the watcher is successfully claimed and spawned (the
-    // leader-branch path below). A save before that flag is set would leak a
-    // v8 row with the new handoff shape alongside `watcher_owns_live_relay =
-    // false`, which on restart would make the restored watcher yield to a
-    // phantom bridge owner (codex adversarial review on #2235). The
-    // existing branch-specific saves at the post-flag flip points plus the
-    // centralized `state_dirty` flush already cover the durable-stamp
-    // guarantee for watcher-owned RuntimeReady paths.
-    //
-    // #4259 PR-2a: the three branch-specific `save_inflight_state` calls in
-    // this helper (standby, leader-watcher spawn, and the
-    // `watcher_ready_for_relay` handoff) stay BLIND (held-back ratchet rows).
-    // This helper rewrites identity-pinned `tmux_session_name` from the
-    // handoff and serves ClaudeTui (transcript_path) / CodexTui (rollout_path)
-    // / recovery+rebind LegacyTmuxWrapper flows; the `_allow_output_restamp`
-    // variant (codex r1) tolerates only `output_path` drift, so converting
-    // these needs per-flow verification that the session name is stable (or an
-    // adoption-aware variant, cf. `save_existing_inflight_rebind_adoption_*`)
-    // plus the TmuxReady-arm-style outcome-conditional `state_dirty` handling.
-    //
-    // #2263: the standby branch is INTENTIONALLY not covered by this
-    // invariant — see the in-branch comment near the
-    // `*standby_relay_owns_output = true` assignment for why the flag
-    // stays `false` on standby and the trade-off vs duplicate delivery.
-
+    // Do not stamp before relay ownership is final: a runtime-shaped row with
+    // no durable relay owner would make a restored watcher yield incorrectly.
+    // R2 performs one field-scoped stamp below after the standby/watcher choice.
     // #226: Atomic claim via try_claim_watcher
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let paused = Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -891,7 +876,6 @@ fn handle_watcher_runtime_handoff(
                     // by `standby_relay_owns_output = true` above; that
                     // local flag is what gates the bridge's terminal
                     // delivery suppression for the current turn.
-                    let _ = save_inflight_state(inflight_state);
                 } else {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::warn!(
@@ -936,7 +920,6 @@ fn handle_watcher_runtime_handoff(
                     ),
                 );
                 *watcher_relay_available_for_turn = true;
-                let _ = save_inflight_state(inflight_state);
                 watcher_ready_for_relay = true;
             } else {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -958,7 +941,14 @@ fn handle_watcher_runtime_handoff(
         *tmux_handed_off = true;
         inflight_state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
         *watcher_owns_assistant_relay = true;
-        let _ = save_inflight_state(inflight_state);
+    }
+    let outcome = guarded_runtime_atomic_stamp(
+        inflight_state,
+        &expected_identity,
+        channel_id,
+        "turn_bridge::runtime_handoff_loop::watcher_runtime_owner_handoff",
+    );
+    if watcher_ready_for_relay {
         if let Some(watcher) = shared_owned.tmux_watchers.get(watcher_owner_channel_id) {
             *watcher_relay_available_for_turn = true;
             if let Ok(mut guard) = watcher.resume_offset.lock() {
@@ -991,8 +981,9 @@ fn handle_watcher_runtime_handoff(
                 .store(false, std::sync::atomic::Ordering::Release);
         }
     }
-    *state_dirty = true;
+    *state_dirty = tmux_ready_state_dirty_after_guarded_save(*state_dirty, Some(outcome));
     if done {
         *terminal_control_drain_until = None;
     }
+    outcome
 }

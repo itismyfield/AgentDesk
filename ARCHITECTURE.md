@@ -534,7 +534,8 @@ src/
 │   │   │   ├── save_store/
 │   │   │   │   ├── identity_gate/
 │   │   │   │   │   ├── claude_e_stamp.rs
-│   │   │   │   │   └── heartbeat.rs
+│   │   │   │   │   ├── heartbeat.rs
+│   │   │   │   │   └── runtime_stamp.rs
 │   │   │   │   ├── delivery_rewind.rs
 │   │   │   │   ├── identity_gate.rs
 │   │   │   │   ├── post_loop_identity_guard_tests.rs
@@ -844,7 +845,8 @@ src/
 │   │   │   │   └── channel_writeback.rs
 │   │   │   ├── runtime_handoff_loop/
 │   │   │   │   ├── claude_e.rs
-│   │   │   │   └── guarded_save.rs
+│   │   │   │   ├── guarded_save.rs
+│   │   │   │   └── tests.rs
 │   │   │   ├── stream_loop/
 │   │   │   │   ├── content_arms/
 │   │   │   │   │   ├── provider_error_presentation.rs

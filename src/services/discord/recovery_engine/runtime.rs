@@ -99,24 +99,23 @@ pub(in crate::services::discord) fn readopt_marker_eligible_real_user(
 ///     live successor turn owns a DIFFERENT id and can never match, so the entry
 ///     is inert once its turn ends (see `ReadoptedMailboxOwner`).
 ///   * The on-disk `readopted_from_inflight` marker — the companion signal for a
-///     PRESENT row, written through the identity-guarded single-field patch
+///     PRESENT row, written through the identity-guarded narrow patch
 ///     `mark_readopted_from_inflight_if_identity_unchanged` (NOT a blind whole-row
 ///     save): a concurrently-cleared row is NOT resurrected (`Missing`), and a row
-///     a newer turn re-owns is NOT clobbered (`IdentityMismatch`). It preserves
-///     `restart_mode`, so it also lands on DrainRestart-preserved rows — where the
-///     broad identity-refresh save would refuse to write, which is why the ABSENT
-///     path relies on the ledger rather than this marker.
+///     a newer turn re-owns is NOT clobbered (`IdentityMismatch`). Under the same
+///     canonical lock it also consumes any planned-restart marker, transferring
+///     durable authority to the replacement process before runtime handoff.
 ///
 /// This does NOT touch the completion lifecycle: the re-adopted turn's own
 /// `✅`/footer + analytics still fire (see the `readopted_from_inflight` field doc
 /// for why it is DISTINCT from `relay_ownership_only`).
-fn mark_readopted_from_inflight(
+pub(super) fn mark_readopted_from_inflight(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     state: &inflight::InflightTurnState,
     persist_durable_marker: bool,
-) {
+) -> inflight::GuardedSaveOutcome {
     // The re-adopted mailbox slot carries the turn's effective finalizer id as its
     // `active_user_message_id` (`mailbox_try_start_turn(..., finalizer_msg_id)` /
     // the existing-active-turn rebind below), so the ledger keys the row-ABSENT
@@ -137,17 +136,16 @@ fn mark_readopted_from_inflight(
             active_user_message_id,
             state,
         );
+        return inflight::GuardedSaveOutcome::Saved;
     }
 
-    if !persist_durable_marker {
-        return;
-    }
     let expected = inflight::InflightTurnIdentity::from_state(state);
-    match inflight::mark_readopted_from_inflight_if_identity_unchanged(
+    let outcome = inflight::mark_readopted_from_inflight_if_identity_unchanged(
         provider,
         channel_id.get(),
         &expected,
-    ) {
+    );
+    match outcome {
         inflight::GuardedSaveOutcome::Saved => {}
         inflight::GuardedSaveOutcome::Missing => {
             tracing::debug!(
@@ -171,6 +169,7 @@ fn mark_readopted_from_inflight(
             );
         }
     }
+    outcome
 }
 
 async fn reregister_active_turn_from_inflight_inner(
@@ -242,7 +241,7 @@ async fn reregister_active_turn_from_inflight_inner(
             reseed_watcher_owned_finalizer_ledger(shared, channel_id, finalizer_turn_id, &provider);
             // #4370: a real-user turn re-bound to the mailbox across a restart.
             if readopted_ledger_record_allowed(state) {
-                mark_readopted_from_inflight(
+                let _ = mark_readopted_from_inflight(
                     shared,
                     &provider,
                     channel_id,
