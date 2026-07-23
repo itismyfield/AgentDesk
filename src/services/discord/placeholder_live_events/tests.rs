@@ -517,6 +517,129 @@ fn idless_terminal_background_xml_clears_background_machine_turn_busy() {
 }
 
 #[test]
+fn machine_turn_busy_terminal_matrix_converges_after_real_xml_bridge() {
+    let terminal_statuses = ["completed", "failed"];
+    let nonterminal_statuses = [Some("running"), None];
+    let identities = [
+        ("id-bearing-matched", Some("known-background"), true),
+        ("id-bearing-unmatched", Some("unknown-background"), false),
+        ("idless", None, false),
+    ];
+
+    for status in terminal_statuses {
+        for (identity, tool_use_id, matched_slot) in identities {
+            let events = PlaceholderLiveEvents::default();
+            let channel_id =
+                ChannelId::new(4_783_100 + identity.len() as u64 + status.len() as u64);
+            if matched_slot {
+                events.push_status_events(
+                    channel_id,
+                    status_events_from_tool_use_with_id(
+                        "Bash",
+                        &json!({"command": "sleep 1", "run_in_background": true}).to_string(),
+                        tool_use_id,
+                    ),
+                );
+            }
+            events.push_status_event(
+                channel_id,
+                StatusEvent::MachineTurnBusy {
+                    reason: "background task 완료 알림".to_string(),
+                },
+            );
+            let tool_use_xml = tool_use_id
+                .map(|id| format!("<tool-use-id>{id}</tool-use-id>"))
+                .unwrap_or_default();
+            let raw = format!(
+                "<task-notification>{tool_use_xml}<status>{status}</status><summary>Background command \"wait\" {status}</summary></task-notification>"
+            );
+            events.bridge_task_notification_xml(channel_id, &raw);
+            assert!(
+                !matches!(
+                    status_for(&events, channel_id),
+                    DerivedStatus::MachineTurnBusy { .. }
+                ),
+                "terminal {status}, {identity} must converge after the XML bridge"
+            );
+        }
+    }
+
+    for status in nonterminal_statuses {
+        for (identity, tool_use_id, _) in identities {
+            let events = PlaceholderLiveEvents::default();
+            let channel_id = ChannelId::new(
+                4_783_200 + identity.len() as u64 + status.unwrap_or("").len() as u64,
+            );
+            let tool_use_xml = tool_use_id
+                .map(|id| format!("<tool-use-id>{id}</tool-use-id>"))
+                .unwrap_or_default();
+            let status_xml = status
+                .map(|value| format!("<status>{value}</status>"))
+                .unwrap_or_default();
+            let raw = format!(
+                "<task-notification>{tool_use_xml}{status_xml}<summary>Background command \"wait\" running</summary></task-notification>"
+            );
+            events.bridge_task_notification_xml(channel_id, &raw);
+            let busy = events
+                .status_by_channel
+                .get(&channel_id)
+                .is_some_and(|entry| {
+                    matches!(
+                        entry
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .status,
+                        DerivedStatus::MachineTurnBusy { .. }
+                    )
+                });
+            assert!(
+                !busy,
+                "non-terminal/malformed {identity} must never retain a busy state"
+            );
+        }
+    }
+
+    for status in terminal_statuses {
+        for (identity, tool_use_id, _) in identities {
+            let events = PlaceholderLiveEvents::default();
+            let channel_id =
+                ChannelId::new(4_783_300 + identity.len() as u64 + status.len() as u64);
+            events.push_status_event(
+                channel_id,
+                StatusEvent::MachineTurnBusy {
+                    reason: "subagent 완료 알림".to_string(),
+                },
+            );
+            let tool_use_xml = tool_use_id
+                .map(|id| format!("<tool-use-id>{id}</tool-use-id>"))
+                .unwrap_or_default();
+            let raw = format!(
+                "<task-notification>{tool_use_xml}<status>{status}</status><summary>Agent \"review\" {status}</summary></task-notification>"
+            );
+            events.bridge_task_notification_xml(channel_id, &raw);
+            assert!(matches!(
+                status_for(&events, channel_id),
+                DerivedStatus::MachineTurnBusy { .. }
+            ));
+            events.push_status_event(
+                channel_id,
+                StatusEvent::TurnCompleted {
+                    background: false,
+                    background_agent_pending: false,
+                },
+            );
+            assert!(
+                !matches!(
+                    status_for(&events, channel_id),
+                    DerivedStatus::MachineTurnBusy { .. }
+                ),
+                "subagent terminal {status}, {identity} must converge at TurnCompleted"
+            );
+        }
+    }
+}
+
+#[test]
 fn subagent_terminal_event_keeps_machine_turn_busy_until_turn_completed() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(4_783_002);

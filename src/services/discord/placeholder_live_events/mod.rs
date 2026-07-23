@@ -51,6 +51,7 @@ use common::{
 #[cfg(test)]
 use status_panel::truncate_status_panel_sections;
 
+pub(in crate::services::discord) use background_task_events::notification_is_terminal;
 pub(in crate::services::discord) use recent_events::RecentPlaceholderEvent;
 pub(in crate::services::discord) use status_events::{
     status_events_from_task_notification_with_tool_use_id, status_events_from_tool_result_with_id,

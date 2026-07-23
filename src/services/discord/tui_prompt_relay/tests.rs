@@ -909,6 +909,46 @@ fn classify_injected_prompt_task_notification_event() {
 // `<subagent_notification>{json}</subagent_notification>` envelopes. They are
 // neutral machine events, not human direct prompts.
 #[test]
+fn background_machine_turn_busy_set_requires_a_terminal_task_notification() {
+    for (label, status, expected_busy) in [
+        ("terminal success", Some("completed"), true),
+        ("terminal error", Some("failed"), true),
+        ("non-terminal", Some("running"), false),
+        ("missing status", None, false),
+    ] {
+        let prompt = status.map_or_else(
+            || "<task-notification><summary>Background command \"wait\"</summary></task-notification>".to_string(),
+            |status| format!(
+                "<task-notification><status>{status}</status><summary>Background command \"wait\"</summary></task-notification>"
+            ),
+        );
+        assert_eq!(
+            task_notification_prompt::machine_turn_busy_reason_for_prompt(
+                InjectedPromptClass::TaskNotificationEvent,
+                &prompt,
+                true,
+            ),
+            expected_busy.then_some("background task 완료 알림"),
+            "{label} background task notification busy-set decision"
+        );
+    }
+}
+
+#[test]
+fn subagent_machine_turn_busy_uses_its_turn_completed_lifecycle() {
+    let prompt =
+        r#"<subagent_notification>{"status":{"completed":"done"}}</subagent_notification>"#;
+    assert_eq!(
+        task_notification_prompt::machine_turn_busy_reason_for_prompt(
+            InjectedPromptClass::SubagentNotificationEvent,
+            prompt,
+            false,
+        ),
+        Some("subagent 완료 알림")
+    );
+}
+
+#[test]
 fn classify_injected_prompt_subagent_notification_event() {
     let unwrapped = r#"<subagent_notification>
 {"agent_path":"/tmp/agent","status":{"completed":"Read-only review complete."}}

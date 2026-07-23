@@ -27,7 +27,9 @@ pub(super) fn observe(
 ) -> TaskPromptObservation {
     let start_anchored = matches!(injected_class, InjectedPromptClass::TaskNotificationEvent)
         && injected_prompt_policy::is_start_anchored_task_notification(&prompt.prompt);
-    if let Some(reason) = injected_class.machine_turn_busy_reason() {
+    let machine_turn_busy_reason =
+        machine_turn_busy_reason_for_prompt(injected_class, &prompt.prompt, start_anchored);
+    if let Some(reason) = machine_turn_busy_reason {
         shared.ui.placeholder_live_events.push_status_event(
             channel_id,
             crate::services::agent_protocol::StatusEvent::MachineTurnBusy {
@@ -68,6 +70,30 @@ pub(super) fn observe(
         start_anchored,
         event,
     }
+}
+
+/// Returns a display-only busy reason only when this machine event has a
+/// matching terminal lifecycle edge. Background task XML clears only from a
+/// terminal status; setting busy for a running or malformed payload would leave
+/// no completion event to clear it. Subagent notifications retain their normal
+/// machine-turn completion path.
+pub(super) fn machine_turn_busy_reason_for_prompt(
+    injected_class: InjectedPromptClass,
+    prompt: &str,
+    start_anchored_task_notification: bool,
+) -> Option<&'static str> {
+    let reason = injected_class.machine_turn_busy_reason()?;
+    if !matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
+        return Some(reason);
+    }
+    let parsed = start_anchored_task_notification
+        .then(|| super::super::tui_task_card::parse_task_notification(prompt))?;
+    (parsed.kind() == "background"
+        && parsed
+            .status
+            .as_deref()
+            .is_some_and(super::super::placeholder_live_events::notification_is_terminal))
+    .then_some(reason)
 }
 
 pub(super) async fn resolve_gate(
