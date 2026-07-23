@@ -1371,13 +1371,8 @@ mod manual_decision_gate_tests {
     use std::{
         ffi::OsString,
         path::Path as FsPath,
-        sync::{Arc, Mutex, OnceLock},
+        sync::{Arc, Mutex},
     };
-
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-    }
 
     struct EnvVarGuard {
         key: &'static str,
@@ -1509,14 +1504,9 @@ mod manual_decision_gate_tests {
         format!("{}/{}", pg_test_base_database_url(), admin_db)
     }
 
-    // SAFETY (await_holding_lock): `env_lock()` is a std Mutex held across awaits
-    // to serialize tests that mutate process-global env vars (AGENTDESK_ROOT_DIR
-    // etc.); the hold must span the awaits so a concurrent test cannot observe or
-    // clobber the env mid-flight. Test-only.
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn emit_escalation_pg_rejects_superseded_manual_decision_cards_without_discord_send() {
-        let _env_lock = env_lock();
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let runtime_root = tempfile::tempdir().unwrap();
         let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
         write_test_bot_tokens(runtime_root.path());
