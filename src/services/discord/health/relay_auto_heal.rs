@@ -409,14 +409,17 @@ impl HealthRegistry {
         channel_id: ChannelId,
         now_unix_secs: i64,
     ) -> Result<bool, RelayRecoveryError> {
-        #[cfg(test)]
-        let _test_clock = stall_liveness::set_redrive_grace_test_clock(now_unix_secs);
         let Some(snapshot) = self
             .snapshot_watcher_state_for_shared(provider, shared.clone(), channel_id.get())
             .await
         else {
             return Ok(false);
         };
+        #[cfg(test)]
+        let _test_clock = stall_liveness::set_redrive_grace_test_clock(
+            now_unix_secs,
+            snapshot.inflight_identity.clone(),
+        );
 
         let token = shared.tmux_relay_coord(channel_id).frontier_token();
         if !should_redrive_undelivered_backlog(provider, channel_id, &snapshot, token) {
@@ -578,7 +581,10 @@ fn nudge_existing_watcher_for_backlog(
     token: RelayFrontierToken,
 ) -> bool {
     #[cfg(test)]
-    let _test_clock = stall_liveness::set_redrive_grace_test_clock(now_unix_secs);
+    let _test_clock = stall_liveness::set_redrive_grace_test_clock(
+        now_unix_secs,
+        snapshot.inflight_identity.clone(),
+    );
     if !should_redrive_undelivered_backlog(provider, channel_id, snapshot, token) {
         return false;
     }
@@ -1239,7 +1245,8 @@ mod tests {
         channel_id: ChannelId,
         now: i64,
     ) -> (bool, Option<u8>) {
-        let _test_clock = stall_liveness::set_redrive_grace_test_clock(now);
+        let _test_clock =
+            stall_liveness::set_redrive_grace_test_clock(now, snapshot.inflight_identity.clone());
         let token = shared.relay_frontier_token(channel_id);
         if !should_redrive_undelivered_backlog(provider, channel_id, snapshot, token)
             || !shared.relay_frontier_token_is_current(channel_id, token)
