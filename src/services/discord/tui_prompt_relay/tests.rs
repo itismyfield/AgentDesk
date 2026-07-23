@@ -4056,33 +4056,102 @@ fn claude_rehydrate_start_offset_uses_current_eof() {
     );
 }
 
-// U-17 Claude transcript scan must restart from offset 0 when the
-// recorded offset is past the current file length — this is the
-// /compact path, where Claude rewrites the transcript and our
-// previously-persisted offset would otherwise leak past the EOF and
-// skip all newly-written prompts.
+// #4549: `/compact` rewrites the same transcript path to a shorter historical
+// snapshot. The durable EOF-regression signal must fast-forward to the new EOF
+// instead of restarting at zero, which would mirror an old direct prompt again.
 #[test]
-fn claude_idle_transcript_scan_restarts_when_file_shrinks() {
+fn claude_idle_transcript_scan_fast_forwards_when_compaction_shrinks_file() {
+    assert_eq!(
+        claude_idle_compaction_reanchor(false, 99_999, 250, true),
+        Some(ClaudeIdleTranscriptScan::CompactionReanchor { offset: 250 })
+    );
+}
+
+#[test]
+fn claude_idle_transcript_scan_relays_prompt_appended_after_compaction_anchor() {
     let dir = tempfile::tempdir().expect("temp dir");
     let transcript = dir.path().join("transcript.jsonl");
-    let prompt = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"after compact\"}]},\"sessionId\":\"s1\"}\n";
-    std::fs::write(&transcript, prompt).expect("write transcript");
+    let compact = "{\"type\":\"system\",\"subtype\":\"compact\",\"sessionId\":\"s1\"}\n";
+    let historical_prompt = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"historical direct prompt\"}]},\"sessionId\":\"s1\"}\n";
+    let compacted = format!("{compact}{historical_prompt}");
+    std::fs::write(&transcript, &compacted).expect("write compacted transcript");
+    let anchored =
+        match claude_idle_compaction_reanchor(false, 99_999, compacted.len() as u64, true) {
+            Some(ClaudeIdleTranscriptScan::CompactionReanchor { offset }) => offset,
+            other => panic!("expected compaction anchor, got {other:?}"),
+        };
 
-    let scan = scan_claude_idle_transcript_for_prompt(&transcript, 99_999)
-        .expect("scan shrunken transcript");
-    match scan {
+    let fresh_prompt = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"fresh prompt after compact\"}]},\"sessionId\":\"s1\"}\n";
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .expect("open compacted transcript")
+        .write_all(fresh_prompt.as_bytes())
+        .expect("append fresh prompt");
+
+    assert_eq!(
+        scan_claude_idle_transcript_for_prompt(&transcript, anchored)
+            .expect("scan post-compact growth"),
         ClaudeIdleTranscriptScan::Prompt {
-            prompt: text,
-            line_end_offset,
-            prompt_start_offset,
-            ..
-        } => {
-            assert_eq!(text, "after compact");
-            assert_eq!(line_end_offset, prompt.len() as u64);
-            assert_eq!(prompt_start_offset, 0);
+            prompt: "fresh prompt after compact".to_string(),
+            prompt_start_offset: anchored,
+            line_end_offset: anchored + fresh_prompt.len() as u64,
+            entry_id: None,
         }
-        other => panic!("expected Prompt, got {other:?}"),
-    }
+    );
+}
+
+#[test]
+fn claude_idle_transcript_scan_preserves_normal_growth() {
+    assert_eq!(
+        claude_idle_compaction_reanchor(false, 100, 250, false),
+        None
+    );
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let transcript = dir.path().join("transcript.jsonl");
+    let before = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]},\"sessionId\":\"s1\"}\n";
+    let prompt = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"normally appended prompt\"}]},\"sessionId\":\"s1\"}\n";
+    std::fs::write(&transcript, format!("{before}{prompt}")).expect("write transcript");
+
+    assert_eq!(
+        scan_claude_idle_transcript_for_prompt(&transcript, before.len() as u64)
+            .expect("scan normal growth"),
+        ClaudeIdleTranscriptScan::Prompt {
+            prompt: "normally appended prompt".to_string(),
+            prompt_start_offset: before.len() as u64,
+            line_end_offset: (before.len() + prompt.len()) as u64,
+            entry_id: None,
+        }
+    );
+}
+
+#[test]
+fn claude_idle_transcript_rotation_lookback_still_observes_new_file_prompt() {
+    // A path/session rotation must never be mistaken for in-place compaction,
+    // even if the prior binding offset and durable frontier exceed the new EOF.
+    assert_eq!(
+        claude_idle_compaction_reanchor(true, 99_999, 250, true),
+        None
+    );
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let transcript = dir.path().join("new-session.jsonl");
+    let before = "{\"type\":\"system\",\"subtype\":\"init\",\"sessionId\":\"s2\"}\n";
+    let prompt = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"fresh rotation prompt\"}]},\"sessionId\":\"s2\"}\n";
+    std::fs::write(&transcript, format!("{before}{prompt}")).expect("write transcript");
+
+    assert_eq!(
+        scan_claude_idle_transcript_for_last_prompt(&transcript, 0)
+            .expect("scan replacement transcript lookback"),
+        ClaudeIdleTranscriptScan::Prompt {
+            prompt: "fresh rotation prompt".to_string(),
+            prompt_start_offset: before.len() as u64,
+            line_end_offset: (before.len() + prompt.len()) as u64,
+            entry_id: None,
+        }
+    );
 }
 
 #[cfg(unix)]

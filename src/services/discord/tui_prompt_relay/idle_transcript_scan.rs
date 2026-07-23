@@ -52,6 +52,9 @@ pub(super) enum ClaudeIdleTranscriptScan {
     NoPrompt {
         offset: u64,
     },
+    CompactionReanchor {
+        offset: u64,
+    },
     Prompt {
         prompt: String,
         prompt_start_offset: u64,
@@ -64,6 +67,23 @@ pub(super) enum ClaudeIdleTranscriptScan {
         /// the content-keyed recent-observed dedup (pre-#3540 behavior).
         entry_id: Option<String>,
     },
+}
+
+pub(super) fn claude_idle_compaction_reanchor(
+    path_changed: bool,
+    binding_offset: u64,
+    current_eof: u64,
+    durable_frontier_exceeds_eof: bool,
+) -> Option<ClaudeIdleTranscriptScan> {
+    // A real Claude session rotation changes the UUID/path and is handled by the
+    // bounded newest-prompt lookback. Only an unchanged-path, same-generation
+    // durable frontier beyond EOF proves an in-place `/compact` rewrite whose
+    // surviving bytes are historical and must be treated as already delivered.
+    (!path_changed && binding_offset > current_eof && durable_frontier_exceeds_eof).then_some(
+        ClaudeIdleTranscriptScan::CompactionReanchor {
+            offset: current_eof,
+        },
+    )
 }
 
 pub(super) fn scan_claude_idle_transcript_for_prompt(

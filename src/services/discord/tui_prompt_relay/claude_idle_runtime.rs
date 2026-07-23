@@ -152,10 +152,34 @@ pub(super) fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                 } else {
                     binding.last_offset
                 };
+                let transcript_eof = std::fs::metadata(&transcript_path)
+                    .ok()
+                    .map(|metadata| metadata.len());
+                // #4549: `/compact` rewrites the same UUID/path in place. When the
+                // current-generation durable frontier and binding cursor are both
+                // beyond the new EOF, re-anchor at EOF instead of scanning the
+                // compacted historical snapshot from zero. A real rotation changes
+                // path/session identity and stays on the bounded newest-prompt
+                // lookback below, so fresh replacement-file content is preserved.
+                let compaction_reanchor = transcript_eof.and_then(|eof| {
+                    claude_idle_compaction_reanchor(
+                        path_changed,
+                        binding.last_offset,
+                        eof,
+                        dr::delivered_frontier_exceeds_current_eof(
+                            &ProviderKind::Claude,
+                            channel_id,
+                            &tmux_session_name,
+                            eof,
+                        ),
+                    )
+                });
                 // #2843 (codex round-2 P1): the lookback can hold several finished
                 // turns — on a path change select the NEWEST prompt (the just-typed
                 // one); unchanged-path tailing keeps first-prompt semantics.
-                let scan_result = if path_changed {
+                let scan_result = if let Some(scan) = compaction_reanchor {
+                    Ok(scan)
+                } else if path_changed {
                     scan_claude_idle_transcript_for_last_prompt(&transcript_path, scan_offset)
                 } else {
                     scan_claude_idle_transcript_for_prompt(&transcript_path, scan_offset)
@@ -182,6 +206,21 @@ pub(super) fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                                 offset,
                             );
                         }
+                    }
+                    ClaudeIdleTranscriptScan::CompactionReanchor { offset } => {
+                        advance_claude_tmux_runtime_binding_offset(
+                            &tmux_session_name,
+                            &transcript_path,
+                            offset,
+                        );
+                        tracing::info!(
+                            tmux_session_name = %tmux_session_name,
+                            channel_id = channel_id.get(),
+                            transcript_path = %transcript_path.display(),
+                            previous_offset = binding.last_offset,
+                            reanchored_offset = offset,
+                            "Claude idle transcript relay fast-forwarded compacted history to current EOF"
+                        );
                     }
                     ClaudeIdleTranscriptScan::Prompt {
                         prompt,

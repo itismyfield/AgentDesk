@@ -818,6 +818,41 @@ pub(in crate::services::discord) fn delivered_frontier_end_current_generation(
         .unwrap_or(0)
 }
 
+fn current_generation_frontier_exceeds_eof_at(
+    path: &Path,
+    current_gen_mtime: i64,
+    current_transcript_eof: u64,
+) -> bool {
+    read_record_at(path)
+        .and_then(|record| record.delivered_frontier)
+        .is_some_and(|frontier| {
+            durable_frontier_generation_current(frontier.generation_mtime_ns, current_gen_mtime)
+                && frontier.range.1 > current_transcript_eof
+        })
+}
+
+/// #4549: detect the exact same-generation frontier/EOF regression that the
+/// ordinary durable reader distrusts. The Claude idle scanner uses this signal
+/// only on an unchanged transcript path to re-anchor its scan cursor at EOF after
+/// an in-place `/compact` rewrite. A rotated UUID/path bypasses this predicate and
+/// keeps the fresh-transcript lookback path, so replacement-file prompts are not
+/// lost.
+pub(in crate::services::discord) fn delivered_frontier_exceeds_current_eof(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    tmux_session_name: &str,
+    current_transcript_eof: u64,
+) -> bool {
+    let Some(path) = delivery_record_path(provider, channel.get()) else {
+        return false;
+    };
+    current_generation_frontier_exceeds_eof_at(
+        &path,
+        current_generation_mtime_ns(tmux_session_name),
+        current_transcript_eof,
+    )
+}
+
 /// #3089 B2b: the effective "already-committed" offset the dedup/skip gates read.
 /// Flag OFF (default) → the legacy in-memory `committed_relay_offset` verbatim
 /// (no record read → deploy no-op). Flag ON → `max(delivered_frontier.end,
@@ -2215,6 +2250,27 @@ mod tests {
             current_generation_durable_frontier_end_at(&path, gen_ns, None),
             None
         );
+    }
+
+    #[test]
+    fn current_generation_frontier_eof_regression_signal_is_exact_4549() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 4549);
+        write_delivered_frontier_at(
+            &path,
+            DeliveredCommit {
+                range: (0, 900),
+                generation_mtime_ns: 700,
+                attempts: 1,
+                panel_msg_id: None,
+                panel_channel_id: None,
+            },
+        )
+        .unwrap();
+
+        assert!(current_generation_frontier_exceeds_eof_at(&path, 700, 250));
+        assert!(!current_generation_frontier_exceeds_eof_at(&path, 701, 250));
+        assert!(!current_generation_frontier_exceeds_eof_at(&path, 700, 900));
     }
 
     /// I3 conservatism: an absent or malformed record yields no durable floor

@@ -43,7 +43,7 @@ use self::observed_prompt_decision::{
 
 mod idle_transcript_scan;
 use self::idle_transcript_scan::{
-    ClaudeIdleTranscriptScan, CodexIdleRolloutScan,
+    ClaudeIdleTranscriptScan, CodexIdleRolloutScan, claude_idle_compaction_reanchor,
     claude_idle_prompt_observation_should_tail_response,
     codex_idle_prompt_observation_should_tail_response,
     scan_claude_idle_transcript_for_last_prompt, scan_claude_idle_transcript_for_prompt,
