@@ -75,9 +75,12 @@ async fn try_start_turn_with_stale_busy_heal(
     cancel_token: Arc<CancelToken>,
     request_owner: serenity::UserId,
     user_msg_id: serenity::MessageId,
-    context: (Option<&str>, &ProviderKind, Option<&str>),
+    context: (
+        (Option<&str>, &ProviderKind, Option<&str>),
+        Option<LaunchState<'_>>,
+    ),
 ) -> bool {
-    let (session_key, provider, tmux_session_name) = context;
+    let ((session_key, provider, tmux_session_name), mut launch) = context;
     let started = mailbox_try_start_turn_with_terminal_marker_cleanup(
         shared,
         channel_id,
@@ -89,7 +92,7 @@ async fn try_start_turn_with_stale_busy_heal(
     .await;
 
     #[cfg(unix)]
-    if !started
+    let started = if !started
         && let Some(tmux_session_name) = tmux_session_name
         && heal_stale_busy_mailbox(
             shared,
@@ -100,7 +103,7 @@ async fn try_start_turn_with_stale_busy_heal(
         )
         .await
     {
-        return mailbox_try_start_turn_with_terminal_marker_cleanup(
+        mailbox_try_start_turn_with_terminal_marker_cleanup(
             shared,
             channel_id,
             cancel_token,
@@ -108,31 +111,104 @@ async fn try_start_turn_with_stale_busy_heal(
             user_msg_id,
             session_key,
         )
-        .await;
-    }
+        .await
+    } else {
+        started
+    };
 
     #[cfg(not(unix))]
     let _ = (provider, tmux_session_name);
+    if started && let Some(launch) = launch.take() {
+        refresh_claimed_runtime_for_launch(
+            shared,
+            provider,
+            channel_id,
+            true,
+            (launch.path, launch.session_id, launch.loaded, launch.reason),
+        )
+        .await;
+    }
     started
 }
 
-fn stale_busy_context<'a>(
+fn intake_claim_context<'a>(
+    session_key: Option<&'a str>,
     provider: &'a ProviderKind,
-    session_names: [Option<&'a str>; 2],
-) -> (Option<&'a str>, &'a ProviderKind, Option<&'a str>) {
-    (session_names[0], provider, session_names[1])
+    tmux_session_name: Option<&'a str>,
+    path: &'a mut String,
+    session_id: &'a mut Option<String>,
+    loaded: &'a mut bool,
+    reason: &'a mut &'static str,
+) -> (
+    (Option<&'a str>, &'a ProviderKind, Option<&'a str>),
+    Option<LaunchState<'a>>,
+) {
+    (
+        (session_key, provider, tmux_session_name),
+        Some(LaunchState::new(path, session_id, loaded, reason)),
+    )
 }
 
-async fn resolve_channel_tmux_names(
+impl<'a> LaunchState<'a> {
+    fn new(
+        path: &'a mut String,
+        session_id: &'a mut Option<String>,
+        loaded: &'a mut bool,
+        reason: &'a mut &'static str,
+    ) -> Self {
+        Self {
+            path,
+            session_id,
+            loaded,
+            reason,
+        }
+    }
+}
+
+struct LaunchState<'a> {
+    path: &'a mut String,
+    session_id: &'a mut Option<String>,
+    loaded: &'a mut bool,
+    reason: &'a mut &'static str,
+}
+
+async fn resolve_channel_runtime_for_launch(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
-) -> (Option<String>, Option<String>) {
-    let data = shared.core.lock().await;
+    mut current: (String, Option<String>, bool, &'static str),
+) -> (
+    String,
+    Option<String>,
+    bool,
+    &'static str,
+    Option<String>,
+    Option<String>,
+) {
+    let mut data = shared.core.lock().await;
     let channel_name = data
         .sessions
         .get(&channel_id)
         .and_then(|session| session.channel_name.clone());
+    if let Some(session) = data.sessions.get_mut(&channel_id) {
+        let refreshed_path = session.validated_path(channel_id);
+        let session_changed = session.session_id != current.1;
+        let loaded_changed = session.memento_context_loaded != current.2;
+        let path_changed = refreshed_path
+            .as_deref()
+            .is_some_and(|path| path != current.0);
+        let pending_reset = current.1.is_some() && session.session_id.is_none();
+        if pending_reset {
+            current.1 = None;
+            current.2 = session.memento_context_loaded;
+            current.3 = "explicit_provider_reset";
+        } else if refreshed_path.is_some() && (session_changed || loaded_changed || path_changed) {
+            current.0 = refreshed_path.expect("checked usable runtime path");
+            current.1 = session.session_id.clone();
+            current.2 = session.memento_context_loaded;
+            current.3 = "runtime_session_rebound";
+        }
+    }
     let tmux_session_name = if provider.uses_managed_tmux_backend() {
         channel_name
             .as_ref()
@@ -140,10 +216,43 @@ async fn resolve_channel_tmux_names(
     } else {
         None
     };
-    (channel_name, tmux_session_name)
+    (
+        current.0,
+        current.1,
+        current.2,
+        current.3,
+        channel_name,
+        tmux_session_name,
+    )
 }
 
-pub(super) use self::attachments::handle_file_upload;
+#[cfg_attr(not(test), allow(dead_code))]
+async fn refresh_claimed_runtime_for_launch(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+    started: bool,
+    state: (
+        &mut String,
+        &mut Option<String>,
+        &mut bool,
+        &mut &'static str,
+    ),
+) {
+    if !started {
+        return;
+    }
+    let current = (state.0.clone(), state.1.clone(), *state.2, *state.3);
+    let runtime = resolve_channel_runtime_for_launch(shared, provider, channel_id, current).await;
+    *state.0 = runtime.0;
+    *state.1 = runtime.1;
+    *state.2 = runtime.2;
+    *state.3 = runtime.3;
+}
+
+pub(super) use self::attachments::{
+    LocalAttachmentPreparationPermit, describe_attachments, prepare_admitted_local_attachment,
+};
 pub(super) use self::control::{handle_shell_command_raw, handle_text_command};
 #[allow(unused_imports)]
 pub(in crate::services::discord) use self::headless_turn::{

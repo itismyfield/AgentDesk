@@ -3,9 +3,6 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use serenity::model::id::{ChannelId, MessageId};
-use sqlx::PgPool;
-
 use super::super::SharedData;
 use super::super::health::HealthRegistry;
 use super::super::placeholder_live_events::PlaceholderLiveEvents;
@@ -17,13 +14,14 @@ use super::super::task_notification_delivery::{
     TaskCardTransport, TaskNotificationContext, TaskResponseCommitOutcome,
     claim_existing_task_response_delivery,
     claim_task_response_delivery_with_recovery_key_and_started_at,
-    commit_task_response_delivered_bounded, durable_response_turn_key, ensure_card,
+    commit_task_response_delivered_bounded, durable_response_turn_key, ensure_card_with_shared,
     fallback_response_turn_key, provider_bot_key, rebind_task_response_card,
     record_task_response_sent_bounded,
 };
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::stream_relay::RelaySinkError;
 use crate::services::provider::ProviderKind;
+use serenity::model::id::{ChannelId, MessageId};
 
 fn defer_task_response_to_watcher(
     turn_start_offset: Option<u64>,
@@ -90,7 +88,7 @@ pub(super) async fn ensure_task_context_card(
     );
     let transport = DiscordTaskCardTransport::new(shared.clone());
     let outcome = confirm_task_context_card(
-        shared.pg_pool.as_ref(),
+        Some(shared),
         &clients,
         &transport,
         &shared.ui.placeholder_live_events,
@@ -485,7 +483,7 @@ impl super::SessionBoundDiscordRelaySink {
 
 #[allow(clippy::too_many_arguments)]
 async fn confirm_task_context_card<T: TaskCardTransport>(
-    pool: Option<&PgPool>,
+    shared: Option<&Arc<SharedData>>,
     clients: &CardDeliveryClients,
     transport: &T,
     live_events: &PlaceholderLiveEvents,
@@ -498,7 +496,25 @@ async fn confirm_task_context_card<T: TaskCardTransport>(
         return Ok(None);
     };
     let event = context.to_event(channel_id, provider, session_name);
-    let outcome = ensure_card(pool, clients, transport, &event, EnsureIntent::Promotion).await?;
+    let outcome = if let Some(shared) = shared {
+        ensure_card_with_shared(
+            shared.as_ref(),
+            clients,
+            transport,
+            &event,
+            EnsureIntent::Promotion,
+        )
+        .await?
+    } else {
+        super::super::task_notification_delivery::ensure_card(
+            None,
+            clients,
+            transport,
+            &event,
+            EnsureIntent::Promotion,
+        )
+        .await?
+    };
     live_events.claim_terminal_slot_for_card(
         ChannelId::new(channel_id),
         event.kind(),

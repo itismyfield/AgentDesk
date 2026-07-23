@@ -525,7 +525,7 @@ pub(super) async fn refresh_session_strategy_after_pending_reset(
     }
 }
 
-pub(super) fn load_session_runtime_state(
+pub(in crate::services::discord) fn load_session_runtime_state(
     sessions: &mut std::collections::HashMap<ChannelId, DiscordSession>,
     channel_id: ChannelId,
 ) -> Option<(Option<String>, bool, String)> {

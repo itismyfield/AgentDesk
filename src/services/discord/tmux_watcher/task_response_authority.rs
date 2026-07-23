@@ -138,8 +138,8 @@ async fn prepare_watcher_task_response(
     }
     let clients = watcher_card_clients(http, shared, provider, None).await?;
     let transport = task_delivery::DiscordTaskCardTransport::new(shared.clone());
-    let card = task_delivery::ensure_card(
-        shared.pg_pool.as_ref(),
+    let card = task_delivery::ensure_card_with_shared(
+        shared.as_ref(),
         &clients,
         &transport,
         &event,
