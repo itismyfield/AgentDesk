@@ -26,7 +26,6 @@ import scripts.relay_watchdog as relay_watchdog
 from scripts.relay_watchdog import (
     COVERAGE_ACTIVITY_FRESH_SECS,
     COVERAGE_CONFIRM_TICKS,
-    COVERAGE_DESYNC_CONFIRM_SECS,
     COVERAGE_COVERED,
     COVERAGE_UNCOVERED,
     COVERAGE_UNKNOWN,
@@ -2729,7 +2728,7 @@ class TickChannelTests(unittest.TestCase):
         self.assertEqual(rt.alerts, [])
         self.assertNotIn("last_coverage_alert", state["999"])
 
-    def test_stale_foreground_desync_alarms_at_longer_backstop(self):
+    def test_stale_foreground_desync_needs_delivery_gap_not_duration(self):
         rt = self.make_rt()
         stale_ms = int(self.now * 1000) - COVERAGE_ACTIVITY_FRESH_SECS * 1000
         self.arm_coverage(
@@ -2742,15 +2741,15 @@ class TickChannelTests(unittest.TestCase):
         state = {
             "999": {
                 "coverage_uncovered_ticks": 1,
-                "coverage_desync_since": self.now - COVERAGE_DESYNC_CONFIRM_SECS,
+                "coverage_desync_since": self.now - 600,
             }
         }
 
         tick_channel(rt, TICK_CHANNEL, state, self.now)
 
-        self.assertEqual(len(rt.alerts), 1)
-        self.assertIn("커버리지 불변식 위반", rt.alerts[0][0])
-        self.assertIn("attached_but_desynced", rt.alerts[0][0])
+        self.assertEqual(rt.alerts, [])
+        self.assertNotIn("last_coverage_alert", state["999"])
+        self.assertTrue(any("uncorroborated" in line for line in rt.log_lines))
 
     def test_partial_foreground_schema_confirms_without_early_desync_alert(self):
         rt = self.make_rt()
@@ -2776,38 +2775,71 @@ class TickChannelTests(unittest.TestCase):
             state["999"]["coverage_uncovered_ticks"], COVERAGE_CONFIRM_TICKS
         )
 
-    def test_uncorroborated_load_desync_alarms_only_after_duration_backstop(self):
+    def test_uncorroborated_idle_desync_never_alarms_on_duration_alone(self):
         self.write_transcript([(self.now - 30, "delivered block")])
         rt = self.make_rt(poll_secs=60)
         rt.haystack = norm("delivered block")
-        self.arm_coverage(rt, self.active_foreground_probe(queue_depth=1))
-        state: dict = {}
+        tick_at = self.now + 600
+        self.arm_coverage(
+            rt,
+            self.active_foreground_probe(
+                queue_depth=1,
+                last_outbound_activity_ms=None,
+                last_relay_ts_ms=int(tick_at * 1000) - 1,
+            ),
+        )
+        state = {
+            "999": {
+                "coverage_uncovered_ticks": COVERAGE_CONFIRM_TICKS - 1,
+                "coverage_desync_since": self.now,
+            }
+        }
 
-        for tick_index in range(COVERAGE_DESYNC_CONFIRM_SECS // rt.cfg.poll_secs):
-            tick_channel(
-                rt,
-                TICK_CHANNEL,
-                state,
-                self.now + tick_index * rt.cfg.poll_secs,
-            )
-            self.assertFalse(
-                any("커버리지 불변식 위반" in body for body, _ in rt.alerts)
-            )
+        tick_coverage(
+            rt,
+            TICK_CHANNEL,
+            state["999"],
+            tick_at,
+            CoverageTranscriptProbe(growing=False, blocks=723, lost=0),
+        )
 
-        self.assertEqual(state["999"]["coverage_desync_since"], self.now)
-        tick_channel(
+        self.assertEqual(rt.alerts, [])
+        self.assertNotIn("last_coverage_alert", state["999"])
+        self.assertFalse(state["999"].get("gap_since"))
+        self.assertFalse(state["999"].get("alerting"))
+        self.assertTrue(
+            any("zero loss and recent relay" in line for line in rt.log_lines)
+        )
+
+    def test_uncorroborated_desync_without_gap_stays_suppressed(self):
+        rt = self.make_rt()
+        tick_at = self.now + 600
+        self.arm_coverage(
+            rt,
+            self.active_foreground_probe(
+                queue_depth=1,
+                last_outbound_activity_ms=None,
+                last_relay_ts_ms=(
+                    int(tick_at * 1000) - COVERAGE_ACTIVITY_FRESH_SECS * 1000
+                ),
+            ),
+        )
+        state = {
+            "coverage_uncovered_ticks": COVERAGE_CONFIRM_TICKS - 1,
+            "coverage_desync_since": self.now,
+        }
+
+        tick_coverage(
             rt,
             TICK_CHANNEL,
             state,
-            self.now + COVERAGE_DESYNC_CONFIRM_SECS,
+            tick_at,
+            CoverageTranscriptProbe(growing=False, blocks=723, lost=0),
         )
 
-        self.assertTrue(
-            any("커버리지 불변식 위반" in body for body, _ in rt.alerts)
-        )
-        self.assertIn("last_coverage_alert", state["999"])
-        self.assertFalse(state["999"].get("gap_since"))
-        self.assertFalse(state["999"].get("alerting"))
+        self.assertEqual(rt.alerts, [])
+        self.assertNotIn("last_coverage_alert", state)
+        self.assertTrue(any("uncorroborated" in line for line in rt.log_lines))
 
     def test_delivery_gap_corroborates_desync_coverage_alarm(self):
         rt = self.gap_rt()
@@ -2828,7 +2860,7 @@ class TickChannelTests(unittest.TestCase):
 
     def test_growth_lag_with_zero_loss_and_recent_relay_suppresses_alert(self):
         rt = self.make_rt()
-        tick_at = self.now + COVERAGE_DESYNC_CONFIRM_SECS
+        tick_at = self.now + 600
         probe = self.active_foreground_probe(
             queue_depth=1,
             last_outbound_activity_ms=None,
@@ -2850,11 +2882,13 @@ class TickChannelTests(unittest.TestCase):
 
         self.assertEqual(rt.alerts, [])
         self.assertNotIn("last_coverage_alert", state)
-        self.assertTrue(any("growth lag" in line for line in rt.log_lines))
+        self.assertTrue(
+            any("zero loss and recent relay" in line for line in rt.log_lines)
+        )
 
     def test_growth_with_loss_still_alerts_desync_coverage(self):
         rt = self.make_rt()
-        tick_at = self.now + COVERAGE_DESYNC_CONFIRM_SECS
+        tick_at = self.now + 600
         probe = self.active_foreground_probe(
             queue_depth=1,
             last_outbound_activity_ms=None,
@@ -2879,7 +2913,7 @@ class TickChannelTests(unittest.TestCase):
 
     def test_growth_with_stale_relay_timestamp_still_alerts(self):
         rt = self.make_rt()
-        tick_at = self.now + COVERAGE_DESYNC_CONFIRM_SECS
+        tick_at = self.now + 600
         stale_relay_ms = (
             int(tick_at * 1000) - COVERAGE_ACTIVITY_FRESH_SECS * 1000
         )
@@ -2909,7 +2943,7 @@ class TickChannelTests(unittest.TestCase):
         self.write_transcript([(self.now - 30, "delivered initial")])
         rt = self.make_rt(poll_secs=60)
         rt.haystack = norm("delivered initial selector growth")
-        tick_at = self.now + COVERAGE_DESYNC_CONFIRM_SECS
+        tick_at = self.now + 600
         self.arm_coverage(
             rt,
             self.active_foreground_probe(
@@ -2932,7 +2966,9 @@ class TickChannelTests(unittest.TestCase):
         tick_channel(rt, TICK_CHANNEL, state, tick_at)
 
         self.assertEqual(rt.alerts, [])
-        self.assertTrue(any("growth lag" in line for line in rt.log_lines))
+        self.assertTrue(
+            any("zero loss and recent relay" in line for line in rt.log_lines)
+        )
 
     def test_active_foreground_evidence_cannot_suppress_detached_alert(self):
         rt = self.make_rt()

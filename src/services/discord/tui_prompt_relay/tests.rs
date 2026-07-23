@@ -4056,13 +4056,22 @@ fn claude_rehydrate_start_offset_uses_current_eof() {
     );
 }
 
-// #4549: `/compact` rewrites the same transcript path to a shorter historical
-// snapshot. The durable EOF-regression signal must fast-forward to the new EOF
-// instead of restarting at zero, which would mirror an old direct prompt again.
+// #4549/#4841: `/compact` rewrites the same transcript path to a shorter
+// historical snapshot. Either direct cursor regression or its same-generation
+// durable evidence must fast-forward to the new EOF instead of restarting at
+// zero, which would mirror an old direct prompt again.
 #[test]
 fn claude_idle_transcript_scan_fast_forwards_when_compaction_shrinks_file() {
     assert_eq!(
-        claude_idle_compaction_reanchor(false, 99_999, 250, true),
+        claude_idle_compaction_reanchor(false, 99_999, 250, false),
+        Some(ClaudeIdleTranscriptScan::CompactionReanchor { offset: 250 })
+    );
+}
+
+#[test]
+fn claude_idle_transcript_scan_reanchors_after_restart_rehydrates_cursor_at_eof() {
+    assert_eq!(
+        claude_idle_compaction_reanchor(false, 250, 250, true),
         Some(ClaudeIdleTranscriptScan::CompactionReanchor { offset: 250 })
     );
 }
@@ -4107,6 +4116,16 @@ fn claude_idle_transcript_scan_preserves_normal_growth() {
     assert_eq!(
         claude_idle_compaction_reanchor(false, 100, 250, false),
         None
+    );
+    assert_eq!(
+        claude_idle_compaction_reanchor(false, 250, 400, false),
+        None,
+        "an append-only EOF advance must never re-anchor"
+    );
+    assert_eq!(
+        claude_idle_compaction_reanchor(false, 250, 400, true),
+        None,
+        "a stale-high durable frontier must not swallow bytes appended after rehydration"
     );
 
     let dir = tempfile::tempdir().expect("temp dir");

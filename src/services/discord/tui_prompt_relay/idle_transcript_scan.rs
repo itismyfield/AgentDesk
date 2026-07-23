@@ -76,10 +76,16 @@ pub(super) fn claude_idle_compaction_reanchor(
     durable_frontier_exceeds_eof: bool,
 ) -> Option<ClaudeIdleTranscriptScan> {
     // A real Claude session rotation changes the UUID/path and is handled by the
-    // bounded newest-prompt lookback. Only an unchanged-path, same-generation
-    // durable frontier beyond EOF proves an in-place `/compact` rewrite whose
-    // surviving bytes are historical and must be treated as already delivered.
-    (!path_changed && binding_offset > current_eof && durable_frontier_exceeds_eof).then_some(
+    // bounded newest-prompt lookback. On an unchanged path, cursor beyond EOF is
+    // direct shrink evidence. After restart, rehydration pins that cursor exactly
+    // at the compacted EOF, so the same-generation durable regression corroborates
+    // that equality case. Requiring equality is important: the durable frontier
+    // remains above EOF until later growth catches up, and must not swallow a new
+    // append whose EOF has advanced beyond the rehydrated cursor.
+    let cursor_regressed = binding_offset > current_eof;
+    let restart_rehydrated_regression =
+        binding_offset == current_eof && durable_frontier_exceeds_eof;
+    (!path_changed && (cursor_regressed || restart_rehydrated_regression)).then_some(
         ClaudeIdleTranscriptScan::CompactionReanchor {
             offset: current_eof,
         },

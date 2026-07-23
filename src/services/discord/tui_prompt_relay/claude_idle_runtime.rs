@@ -155,12 +155,11 @@ pub(super) fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                 let transcript_eof = std::fs::metadata(&transcript_path)
                     .ok()
                     .map(|metadata| metadata.len());
-                // #4549: `/compact` rewrites the same UUID/path in place. When the
-                // current-generation durable frontier and binding cursor are both
-                // beyond the new EOF, re-anchor at EOF instead of scanning the
-                // compacted historical snapshot from zero. A real rotation changes
-                // path/session identity and stays on the bounded newest-prompt
-                // lookback below, so fresh replacement-file content is preserved.
+                // #4549/#4841: `/compact` rewrites the same UUID/path in place.
+                // An in-memory cursor beyond EOF proves a live shrink; after restart,
+                // same-generation durable evidence corroborates only the rehydrated
+                // cursor-at-EOF shape. A real rotation changes path/session identity
+                // and stays on the bounded newest-prompt lookback below.
                 let compaction_reanchor = transcript_eof.and_then(|eof| {
                     claude_idle_compaction_reanchor(
                         path_changed,
