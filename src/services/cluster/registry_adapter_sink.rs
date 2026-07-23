@@ -146,6 +146,7 @@ mod tests {
             turn_user_msg_id: 0,
             turn_started_at: String::new(),
             turn_start_offset: None,
+            relay_range: None,
         };
         sink.deliver(&frame).await.expect("infallible");
         sink.deliver(&frame).await.expect("infallible");
