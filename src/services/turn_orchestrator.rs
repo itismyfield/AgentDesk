@@ -455,17 +455,28 @@ pub(crate) fn enqueue_intervention(
 pub(crate) fn requeue_intervention_front(
     queue: &mut Vec<Intervention>,
     mut intervention: Intervention,
+    pending_user_dispatch: Option<MessageId>,
+    active_user_message_id: Option<MessageId>,
 ) -> EnqueueInterventionResult {
     let mut queue_exit_events = prune_interventions(queue);
     ensure_source_message_ids(&mut intervention);
-    if queue
-        .iter()
-        .any(|item| item.source_message_ids.contains(&intervention.message_id))
-    {
+    let source_id = intervention.message_id;
+    let refusal_reason =
+        if pending_user_dispatch == Some(source_id) || active_user_message_id == Some(source_id) {
+            Some(EnqueueRefusalReason::SourceIdPendingOrActive)
+        } else if queue
+            .iter()
+            .any(|item| item.source_message_ids.contains(&source_id))
+        {
+            Some(EnqueueRefusalReason::SourceIdAlreadyQueued)
+        } else {
+            None
+        };
+    if let Some(refusal_reason) = refusal_reason {
         return EnqueueInterventionResult {
             enqueued: false,
             merged: false,
-            refusal_reason: Some(EnqueueRefusalReason::SourceIdAlreadyQueued),
+            refusal_reason: Some(refusal_reason),
             queue_exit_events,
             persistence_error: None,
         };
@@ -640,6 +651,9 @@ pub(crate) enum EnqueueRefusalReason {
     /// `source_message_ids` — duplicate insert from a re-entry or rehydrated
     /// queue.
     SourceIdAlreadyQueued,
+    /// A front-restored source is already reserved for dispatch or active.
+    /// Re-inserting it would execute the same message again after that turn.
+    SourceIdPendingOrActive,
     /// The queue's last entry matches the incoming intervention on
     /// `(author_id, text, reply_context, has_reply_boundary)` within
     /// `INTERVENTION_DEDUP_WINDOW` — rapid-resend dedup.
@@ -657,6 +671,7 @@ impl EnqueueRefusalReason {
         match self {
             EnqueueRefusalReason::AlreadyActiveTurn => "already_active_turn",
             EnqueueRefusalReason::SourceIdAlreadyQueued => "source_id_already_queued",
+            EnqueueRefusalReason::SourceIdPendingOrActive => "source_id_pending_or_active",
             EnqueueRefusalReason::LastItemDedup => "last_item_dedup",
             EnqueueRefusalReason::ActorUnreachable => "actor_unreachable",
             EnqueueRefusalReason::MailboxClosed => "mailbox_closed",
@@ -2772,8 +2787,12 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     let requeued_id = intervention.message_id;
                     let requeued_reserved = state.pending_user_dispatch == Some(requeued_id);
                     let previous_queue = state.intervention_queue.clone();
-                    let requeue_result =
-                        requeue_intervention_front(&mut state.intervention_queue, intervention);
+                    let requeue_result = requeue_intervention_front(
+                        &mut state.intervention_queue,
+                        intervention,
+                        state.pending_user_dispatch,
+                        state.active_user_message_id,
+                    );
                     let result = if !requeue_result.enqueued {
                         RequeueInterventionResult {
                             enqueued: false,
@@ -5384,7 +5403,7 @@ mod no_ttl_evict_tests {
         let mut queue: Vec<Intervention> = (0..(MAX_INTERVENTIONS_PER_CHANNEL as u64))
             .map(|i| intervention_at(i + 2, now))
             .collect();
-        let result = requeue_intervention_front(&mut queue, intervention_at(1, now));
+        let result = requeue_intervention_front(&mut queue, intervention_at(1, now), None, None);
         assert_eq!(
             result.queue_exit_events.len(),
             1,
@@ -6131,6 +6150,83 @@ mod persistence_tests {
                 marker_a.message_id.get(),
                 "dequeued restored head gets a fresh pending-dispatch marker"
             );
+        });
+    }
+
+    #[test]
+    fn requeue_front_rejects_pending_source_and_preserves_reservation_4797() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "requeue-front-pending-4797";
+            let channel_id = ChannelId::new(4_797_201);
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            let head = make_intervention(4_797_202, "pending A", None);
+            handle
+                .replace_queue(vec![head.clone()], persistence.clone())
+                .await;
+            let taken = handle.take_next_soft(persistence.clone()).await;
+            assert_eq!(
+                taken.intervention.as_ref().map(|item| item.message_id),
+                Some(head.message_id)
+            );
+
+            let result = handle.requeue_front(head.clone(), persistence).await;
+
+            assert!(!result.enqueued);
+            assert_eq!(
+                result.refusal_reason,
+                Some(EnqueueRefusalReason::SourceIdPendingOrActive)
+            );
+            let snapshot = handle.snapshot().await;
+            assert!(snapshot.intervention_queue.is_empty());
+            assert_eq!(snapshot.pending_user_dispatch, Some(head.message_id));
+            assert!(
+                marker_file_path(tmp.path(), &provider, token_hash, channel_id).exists(),
+                "pending duplicate refusal must preserve the dispatch marker"
+            );
+        });
+    }
+
+    #[test]
+    fn requeue_front_rejects_active_source_4797() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        run_async(async {
+            let provider = ProviderKind::Claude;
+            let token_hash = "requeue-front-active-4797";
+            let channel_id = ChannelId::new(4_797_203);
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            let head = make_intervention(4_797_204, "active A", None);
+            assert!(
+                handle
+                    .try_start_turn(
+                        Arc::new(CancelToken::new()),
+                        head.author_id,
+                        head.message_id
+                    )
+                    .await
+            );
+
+            let result = handle.requeue_front(head.clone(), persistence).await;
+
+            assert!(!result.enqueued);
+            assert_eq!(
+                result.refusal_reason,
+                Some(EnqueueRefusalReason::SourceIdPendingOrActive)
+            );
+            let snapshot = handle.snapshot().await;
+            assert!(snapshot.intervention_queue.is_empty());
+            assert_eq!(snapshot.active_user_message_id, Some(head.message_id));
         });
     }
 

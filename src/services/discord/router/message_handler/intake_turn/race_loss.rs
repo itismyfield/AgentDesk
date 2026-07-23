@@ -1,6 +1,6 @@
 use super::*;
 
-pub(in crate::services::discord::router::message_handler::intake_turn) mod mailbox_reaction;
+pub(in crate::services::discord::router::message_handler) mod mailbox_reaction;
 
 async fn enqueue_race_loss_requeued_intervention(
     shared: &Arc<SharedData>,
