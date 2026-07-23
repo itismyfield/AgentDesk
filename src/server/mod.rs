@@ -598,6 +598,21 @@ async fn policy_tick_loop(
         if count % 2 == 0 {
             fire_tick_hook_by_name_with_pg(&engine, pg_pool.as_deref(), "OnTick1min", "1min").await;
             if let Some(pool) = pg_pool.as_deref().or_else(|| engine.pg_pool()) {
+                match crate::services::stale_turn_reconciler::reconcile_stale_turns_pg(pool).await {
+                    Ok(reconciled) if reconciled > 0 => {
+                        tracing::warn!(
+                            reconciled,
+                            "[policy-tick] reconciled stale busy sessions blocking mailbox injection"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            "[policy-tick] stale busy session reconcile failed: {error}"
+                        );
+                    }
+                }
+
                 match crate::reconcile::reconcile_auto_queue_pending_delivery_orphans_pg(pool).await
                 {
                     Ok(stats) if stats.touched() => {

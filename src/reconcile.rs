@@ -283,6 +283,7 @@ pub(crate) struct BootReconcileStats {
     pub stale_channel_thread_map_entries_cleared: usize,
     pub missing_review_dispatches_refired: usize,
     pub completed_queue_review_drift_recovered: usize,
+    pub stale_busy_sessions_reconciled: usize,
 }
 
 impl BootReconcileStats {
@@ -295,6 +296,7 @@ impl BootReconcileStats {
             || self.stale_channel_thread_map_entries_cleared > 0
             || self.missing_review_dispatches_refired > 0
             || self.completed_queue_review_drift_recovered > 0
+            || self.stale_busy_sessions_reconciled > 0
     }
 }
 
@@ -348,6 +350,8 @@ pub(crate) async fn reconcile_boot_db_pg(
 
     let missing_notify_outbox_backfilled = backfill_missing_notify_outbox_pg(pool).await?;
     let broken_auto_queue_entries_reset = reset_broken_auto_queue_entries_pg(pool).await?;
+    let stale_busy_sessions_reconciled =
+        crate::services::stale_turn_reconciler::reconcile_stale_turns_pg(pool).await?;
 
     Ok(BootReconcileStats {
         stale_processing_outbox_reset,
@@ -358,6 +362,7 @@ pub(crate) async fn reconcile_boot_db_pg(
         stale_channel_thread_map_entries_cleared: 0,
         missing_review_dispatches_refired: 0,
         completed_queue_review_drift_recovered: 0,
+        stale_busy_sessions_reconciled,
     })
 }
 
@@ -387,7 +392,7 @@ pub(crate) async fn reconcile_boot_runtime(
 
     if stats.touched() {
         tracing::info!(
-            "[boot-reconcile] reset_processing={} cleared_reservations={} missing_notify={} broken_auto_queue={} dispatch_delivery_mismatches={} cleared_thread_map={} refired_review={} recovered_review_drift={}",
+            "[boot-reconcile] reset_processing={} cleared_reservations={} missing_notify={} broken_auto_queue={} dispatch_delivery_mismatches={} cleared_thread_map={} refired_review={} recovered_review_drift={} reconciled_stale_busy_sessions={}",
             stats.stale_processing_outbox_reset,
             stats.stale_dispatch_reservations_cleared,
             stats.missing_notify_outbox_backfilled,
@@ -395,7 +400,8 @@ pub(crate) async fn reconcile_boot_runtime(
             stats.dispatch_delivery_event_mismatches,
             stats.stale_channel_thread_map_entries_cleared,
             stats.missing_review_dispatches_refired,
-            stats.completed_queue_review_drift_recovered
+            stats.completed_queue_review_drift_recovered,
+            stats.stale_busy_sessions_reconciled
         );
     }
 

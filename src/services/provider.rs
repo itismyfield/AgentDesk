@@ -1659,9 +1659,8 @@ still running";
     }
 }
 
-#[cfg(unix)]
-pub(crate) fn tmux_session_fallback_ready_for_input(
-    tmux_session_name: &str,
+pub(crate) fn fallback_capture_ready_for_input(
+    capture: &str,
     provider: &ProviderKind,
     runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
 ) -> Option<crate::services::pane_readiness::FallbackPaneReadiness> {
@@ -1669,11 +1668,24 @@ pub(crate) fn tmux_session_fallback_ready_for_input(
         provider,
         runtime_kind,
         || {
-            crate::services::platform::tmux::capture_pane(tmux_session_name, -80)
-                .map(|stdout| tmux_capture_indicates_ready_for_input(&stdout, provider))
-                .unwrap_or(false)
+            let ready = tmux_capture_indicates_ready_for_input(capture, provider);
+            ready
+                && (!matches!(provider, ProviderKind::Claude)
+                    || !crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(
+                        capture,
+                    ))
         },
     )
+}
+
+#[cfg(unix)]
+pub(crate) fn tmux_session_fallback_ready_for_input(
+    tmux_session_name: &str,
+    provider: &ProviderKind,
+    runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+) -> Option<crate::services::pane_readiness::FallbackPaneReadiness> {
+    crate::services::platform::tmux::capture_pane(tmux_session_name, -80)
+        .and_then(|capture| fallback_capture_ready_for_input(&capture, provider, runtime_kind))
 }
 
 #[cfg(not(unix))]

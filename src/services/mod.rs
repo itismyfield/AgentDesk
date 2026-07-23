@@ -121,6 +121,7 @@ pub mod session_resume;
 pub mod settings;
 pub mod shell_guard;
 pub mod slo;
+pub(crate) mod stale_turn_reconciler;
 // #3034: 1 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during termination_audit dead-code cleanup.
 #[allow(dead_code)]

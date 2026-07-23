@@ -91,18 +91,47 @@ pub fn version() -> Result<String, String> {
     }
 }
 
-/// Check if a named tmux session exists.
-pub fn has_session(session_name: &str) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionPresence {
+    Present,
+    Missing,
+    ProbeFailed,
+}
+
+/// Check whether a named tmux session definitely exists or definitely does not.
+/// Transport, socket, permission, timeout, and unexpected tmux errors remain
+/// distinguishable from a confirmed missing session so destructive callers can
+/// fail closed.
+pub(crate) fn session_presence(session_name: &str) -> SessionPresence {
     if is_blank_session_name(session_name) {
-        return false;
+        return SessionPresence::ProbeFailed;
     }
-    tmux_command()
-        .args(["has-session", "-t", &exact_target(session_name)])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+
+    let mut command = tmux_command();
+    command.args(["has-session", "-t", &exact_target(session_name)]);
+    let Ok(output) = wait_for_tmux_output(command, Duration::from_secs(3), "tmux has-session")
+    else {
+        return SessionPresence::ProbeFailed;
+    };
+    if output.status.success() {
+        return SessionPresence::Present;
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    if stderr.contains("can't find session")
+        || stderr.contains("no such session")
+        || stderr.contains("no server running")
+    {
+        SessionPresence::Missing
+    } else {
+        SessionPresence::ProbeFailed
+    }
+}
+
+/// Compatibility boolean for non-destructive callers. Probe failures continue
+/// to read as unavailable; destructive recovery must use [`session_presence`].
+pub fn has_session(session_name: &str) -> bool {
+    session_presence(session_name) == SessionPresence::Present
 }
 
 /// Create a new detached tmux session.
@@ -1206,6 +1235,27 @@ mod timeout_tests {
         let mut permissions = std::fs::metadata(&path).expect("metadata").permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(path, permissions).expect("chmod");
+    }
+
+    #[test]
+    fn session_presence_distinguishes_missing_from_probe_failure() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        write_fake_tmux(
+            temp.path(),
+            "case \"$FAKE_TMUX_MODE\" in missing) echo \"can't find session: test\" >&2; exit 1;; failed) echo 'permission denied' >&2; exit 1;; *) exit 0;; esac",
+        );
+        let _path = PathOverride::prepend(temp.path());
+
+        unsafe { std::env::set_var("FAKE_TMUX_MODE", "missing") };
+        assert_eq!(session_presence("agentdesk-test"), SessionPresence::Missing);
+        unsafe { std::env::set_var("FAKE_TMUX_MODE", "failed") };
+        assert_eq!(
+            session_presence("agentdesk-test"),
+            SessionPresence::ProbeFailed
+        );
+        unsafe { std::env::set_var("FAKE_TMUX_MODE", "present") };
+        assert_eq!(session_presence("agentdesk-test"), SessionPresence::Present);
+        unsafe { std::env::remove_var("FAKE_TMUX_MODE") };
     }
 
     #[test]
