@@ -105,6 +105,28 @@ class TestModuleScannerTests(unittest.TestCase):
                 coverage.discover_test_modules(root), {"logical::nested::tests"}
             )
 
+    def test_inline_parent_path_alias_matches_rustc_logical_path(self) -> None:
+        """Regression fixture from the round-2 GPT review."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "src/outer").mkdir(parents=True)
+            (root / "src/lib.rs").write_text(
+                'mod outer { #[path = "leaf.rs"] mod renamed; }\n',
+                encoding="utf-8",
+            )
+            (root / "src/outer/leaf.rs").write_text(
+                "#[cfg(test)] mod tests { #[test] fn visible() {} }\n",
+                encoding="utf-8",
+            )
+
+            inventory = coverage.discover_test_inventory(root)
+
+            self.assertEqual(
+                inventory,
+                {"outer::renamed::tests": {"outer::renamed::tests::visible"}},
+            )
+            self.assertNotIn("outer::leaf::tests", inventory)
+
 
 class LaneFilterTests(unittest.TestCase):
     def test_parses_positive_skip_and_exact_filters(self) -> None:
@@ -136,6 +158,37 @@ class LaneFilterTests(unittest.TestCase):
         lanes = (coverage.LaneFilter(("alpha",), ("_pg",)),)
         self.assertEqual(
             coverage.uncovered_modules(modules, lanes), {"alpha::_pg_tests"}
+        )
+
+    def test_skip_matching_any_test_name_makes_module_partially_covered(self) -> None:
+        inventory = {
+            "services::auto_queue::tests": {
+                "services::auto_queue::tests::status_is_visible",
+                "services::auto_queue::tests::auto_queue_status_query_uses_latest_review_clock_pg",
+            }
+        }
+        lanes = (coverage.LaneFilter(("auto_queue",), ("_pg", "pg_", "postgres")),)
+
+        self.assertEqual(
+            coverage.uncovered_modules(inventory, lanes),
+            {"services::auto_queue::tests"},
+        )
+
+    def test_repository_auto_queue_pg_test_keeps_module_uncovered(self) -> None:
+        inventory = coverage.discover_test_inventory(REPO_ROOT)
+        test_name = (
+            "services::auto_queue::tests::"
+            "auto_queue_status_query_uses_latest_review_clock_pg"
+        )
+        self.assertIn(test_name, inventory["services::auto_queue::tests"])
+        lane = coverage.LaneFilter(
+            ("auto_queue",), ("_pg", "pg_", "postgres")
+        )
+        self.assertFalse(
+            lane.fully_selects(
+                "services::auto_queue::tests",
+                inventory["services::auto_queue::tests"],
+            )
         )
 
 

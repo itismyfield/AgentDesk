@@ -25,7 +25,7 @@ from typing import Iterable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE_REL = Path("scripts/test_lane_coverage_baseline.txt")
-BASELINE_ENTRY_COUNT = 689
+BASELINE_ENTRY_COUNT = 701
 
 # Attributes do not contain a closing square bracket in the forms used by this
 # repository. Strings and comments are blanked without changing offsets, so the
@@ -42,6 +42,15 @@ MOD_RE = re.compile(
 )
 CFG_TEST_RE = re.compile(r"#\s*\[\s*cfg\s*\([^\]]*\btest\b[^\]]*\)\s*\]")
 PATH_ATTR_RE = re.compile(r'#\s*\[\s*path\s*=\s*"(?P<path>[^"]+)"\s*\]')
+ATTRIBUTED_FN_RE = re.compile(
+    r"(?P<attrs>(?:#\s*\[[^\]]*\]\s*)+)"
+    r"(?:(?:pub(?:\s*\([^)]*\))?)\s+)?"
+    r"(?:async\s+)?(?:unsafe\s+)?fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
+    re.MULTILINE,
+)
+TEST_ATTR_RE = re.compile(
+    r"#\s*\[\s*(?:(?:tokio|async_std|actix_rt)::)?test\b(?:\([^\]]*\))?\s*\]"
+)
 
 _RAW_STRING_OPEN = re.compile(r'(?:r|br)(#*)"')
 _CHAR_LITERAL = re.compile(r"'(?:\\.|[^'\\])'")
@@ -81,8 +90,13 @@ class LaneFilter:
     skips: tuple[str, ...]
     exact: bool = False
 
-    def fully_selects(self, module: str) -> bool:
-        """Whether this command selects every test whose path starts at module."""
+    def fully_selects(self, module: str, test_names: Iterable[str]) -> bool:
+        """Whether this command selects every discovered test in the module.
+
+        This is deliberately conservative: if any ``--skip`` pattern matches a
+        discovered test's full path, the invocation provides only partial module
+        coverage and cannot satisfy the module-level gate.
+        """
         if self.exact:
             return False
         positive_match = not self.positives or any(
@@ -90,7 +104,13 @@ class LaneFilter:
         )
         if not positive_match:
             return False
-        return not any(skip in module for skip in self.skips)
+        if any(skip in module for skip in self.skips):
+            return False
+        return not any(
+            skip in test_name
+            for test_name in test_names
+            for skip in self.skips
+        )
 
 
 class StripState:
@@ -192,8 +212,17 @@ def file_module_path(src_root: Path, path: Path) -> tuple[str, ...]:
 
 def _module_records(
     source: str, base: tuple[str, ...]
-) -> tuple[set[str], list[tuple[tuple[str, ...], str]]]:
-    """Return cfg(test) modules and path aliases declared in one source file."""
+) -> tuple[
+    set[str],
+    dict[str, set[str]],
+    list[tuple[tuple[str, ...], str, tuple[str, ...]]],
+]:
+    """Return test modules/functions and path aliases from one source file.
+
+    Alias records carry the declaration's inline-parent stack separately. Rust
+    resolves a ``#[path]`` inside ``mod outer { ... }`` relative to a physical
+    ``outer/`` directory even though the source file itself is the parent file.
+    """
     clean = strip_rust(source)
     attributes: dict[int, str] = {}
     for match in ATTRIBUTED_MOD_RE.finditer(clean):
@@ -201,13 +230,32 @@ def _module_records(
             match.start("attrs") : match.end("attrs")
         ]
 
+    declarations: list[tuple[int, int, str, str, str]] = []
+    for match in MOD_RE.finditer(clean):
+        attrs = attributes.get(match.start("name"), "")
+        declarations.append(
+            (match.start(), match.end(), match.group("name"), match.group("term"), attrs)
+        )
+
+    test_functions = {
+        match.start("name"): match.group("name")
+        for match in ATTRIBUTED_FN_RE.finditer(clean)
+        if TEST_ATTR_RE.search(source[match.start("attrs") : match.end("attrs")])
+    }
+    events = sorted(
+        [(start, "mod", (end, name, term, attrs)) for start, end, name, term, attrs in declarations]
+        + [(start, "test_fn", name) for start, name in test_functions.items()],
+        key=lambda event: event[0],
+    )
+
     modules: set[str] = set()
-    aliases: list[tuple[tuple[str, ...], str]] = []
-    inline_stack: list[tuple[int, str]] = []
+    tests_by_module: dict[str, set[str]] = {}
+    aliases: list[tuple[tuple[str, ...], str, tuple[str, ...]]] = []
+    inline_stack: list[tuple[int, str, bool]] = []
     depth = 0
     cursor = 0
-    for match in MOD_RE.finditer(clean):
-        between = clean[cursor : match.start()]
+    for offset, kind, payload in events:
+        between = clean[cursor:offset]
         for brace in re.finditer(r"[{}]", between):
             if brace.group() == "{":
                 depth += 1
@@ -216,25 +264,47 @@ def _module_records(
                 while inline_stack and inline_stack[-1][0] > depth:
                     inline_stack.pop()
 
-        name = match.group("name")
-        logical = (*base, *(item[1] for item in inline_stack), name)
-        attrs = attributes.get(match.start("name"), "")
-        if CFG_TEST_RE.search(attrs):
-            modules.add("::".join(logical))
-        path_attr = PATH_ATTR_RE.search(attrs)
-        if path_attr and match.group("term") == ";":
-            aliases.append((logical, path_attr.group("path")))
+        if kind == "test_fn":
+            test_module = next(
+                (
+                    index
+                    for index in range(len(inline_stack) - 1, -1, -1)
+                    if inline_stack[index][2]
+                ),
+                None,
+            )
+            if test_module is not None:
+                module = "::".join(
+                    (*base, *(item[1] for item in inline_stack[: test_module + 1]))
+                )
+                full_name = "::".join(
+                    (*base, *(item[1] for item in inline_stack), str(payload))
+                )
+                tests_by_module.setdefault(module, set()).add(full_name)
+            cursor = offset
+            continue
 
-        if match.group("term") == "{":
+        end, name, term, attrs = payload
+        parent_names = tuple(item[1] for item in inline_stack)
+        logical = (*base, *parent_names, name)
+        is_test_module = bool(CFG_TEST_RE.search(attrs))
+        if is_test_module:
+            modules.add("::".join(logical))
+            tests_by_module.setdefault("::".join(logical), set())
+        path_attr = PATH_ATTR_RE.search(attrs)
+        if path_attr and term == ";":
+            aliases.append((logical, path_attr.group("path"), parent_names))
+
+        if term == "{":
             depth += 1
-            inline_stack.append((depth, name))
-        cursor = match.end()
-    return modules, aliases
+            inline_stack.append((depth, name, is_test_module))
+        cursor = end
+    return modules, tests_by_module, aliases
 
 
 def test_modules_in_source(source: str, base: tuple[str, ...]) -> set[str]:
     """Find cfg(test) module paths in one Rust source file."""
-    modules, _ = _module_records(source, base)
+    modules, _, _ = _module_records(source, base)
     return modules
 
 
@@ -267,10 +337,10 @@ def _normalize_alias_path(
     return current
 
 
-def discover_test_modules(repo_root: Path) -> set[str]:
-    """Inventory logical Rust library cfg(test) modules without building."""
+def discover_test_inventory(repo_root: Path) -> dict[str, set[str]]:
+    """Inventory logical test modules and test paths without building."""
     src_root = (repo_root / "src").resolve()
-    physical_modules: set[tuple[str, ...]] = set()
+    physical_inventory: dict[tuple[str, ...], set[tuple[str, ...]]] = {}
     raw_aliases: dict[tuple[str, ...], tuple[str, ...]] = {}
 
     for path in sorted(src_root.rglob("*.rs")):
@@ -279,10 +349,18 @@ def discover_test_modules(repo_root: Path) -> set[str]:
             continue
         base = file_module_path(src_root, path)
         source = path.read_text(encoding="utf-8")
-        modules, aliases = _module_records(source, base)
-        physical_modules.update(tuple(module.split("::")) for module in modules)
-        for logical, relative_target in aliases:
-            target = (path.parent / relative_target).resolve()
+        modules, tests_by_module, aliases = _module_records(source, base)
+        for module in modules:
+            physical = tuple(module.split("::"))
+            physical_inventory.setdefault(physical, set()).update(
+                tuple(test.split("::"))
+                for test in tests_by_module.get(module, set())
+            )
+        for logical, relative_target, inline_parents in aliases:
+            # Rust resolves #[path] inside inline modules from a matching
+            # physical subdirectory (e.g. mod outer { #[path="leaf.rs"] ... }
+            # resolves as outer/leaf.rs), not solely from the declaring file.
+            target = (path.parent.joinpath(*inline_parents) / relative_target).resolve()
             try:
                 physical_target = file_module_path(src_root, target)
             except ValueError as exc:
@@ -308,10 +386,19 @@ def discover_test_modules(repo_root: Path) -> set[str]:
             break
         aliases = updated
 
-    return {
-        "::".join(_normalize_alias_path(module, aliases))
-        for module in physical_modules
-    }
+    inventory: dict[str, set[str]] = {}
+    for physical_module, physical_tests in physical_inventory.items():
+        module = "::".join(_normalize_alias_path(physical_module, aliases))
+        inventory.setdefault(module, set()).update(
+            "::".join(_normalize_alias_path(test, aliases))
+            for test in physical_tests
+        )
+    return inventory
+
+
+def discover_test_modules(repo_root: Path) -> set[str]:
+    """Inventory logical Rust library cfg(test) modules without building."""
+    return set(discover_test_inventory(repo_root))
 
 
 def just_recipe_commands(justfile: str, recipe_name: str) -> tuple[str, ...]:
@@ -419,14 +506,15 @@ def discover_lane_filters(repo_root: Path) -> tuple[LaneFilter, ...]:
 
 
 def uncovered_modules(
-    modules: Iterable[str], lanes: Iterable[LaneFilter]
+    modules: Iterable[str] | dict[str, set[str]], lanes: Iterable[LaneFilter]
 ) -> set[str]:
     """Return modules not fully selected by any single curated invocation."""
+    inventory = modules if isinstance(modules, dict) else {module: set() for module in modules}
     active = tuple(lanes)
     return {
         module
-        for module in modules
-        if not any(lane.fully_selects(module) for lane in active)
+        for module, test_names in inventory.items()
+        if not any(lane.fully_selects(module, test_names) for lane in active)
     }
 
 
@@ -451,9 +539,9 @@ def check(
     *,
     emit_success: bool = True,
 ) -> int:
-    modules = discover_test_modules(repo_root)
+    inventory = discover_test_inventory(repo_root)
     lanes = discover_lane_filters(repo_root)
-    current = uncovered_modules(modules, lanes)
+    current = uncovered_modules(inventory, lanes)
     baseline = load_baseline(baseline_path)
 
     if len(baseline) != expected_baseline_count:
@@ -492,7 +580,8 @@ def check(
 
     if emit_success:
         print(
-            f"OK: {len(modules)} logical Rust cfg(test) modules inventoried; "
+            f"OK: {len(inventory)} logical Rust cfg(test) modules and "
+            f"{sum(map(len, inventory.values()))} test function(s) inventoried; "
             f"{len(current)} uncovered module(s) exactly match the locked baseline; "
             f"{len(lanes)} curated cargo-test invocation(s)."
         )

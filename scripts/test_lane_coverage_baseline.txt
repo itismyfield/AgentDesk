@@ -25,6 +25,7 @@ config::test_env_lock
 config_live_reload::tests
 credential::tests
 db::agents::tests
+db::auto_queue::entries::dispatch_failure::tests
 db::automation_candidates::verdict_tests
 db::dispatch_semaphores::tests
 db::dispatched_session_rebind_override::tests
@@ -103,6 +104,7 @@ server::routes::escalation::manual_decision_gate_tests
 server::routes::github::tests
 server::routes::kanban::update_card_validation_tests
 server::routes::memory_api::request_body_tests
+server::routes::message_outbox::tests
 server::routes::pr_summary::tests
 server::routes::receipt::tests
 server::routes::review_verdict::verdict_route::commit_validation_tests
@@ -124,6 +126,10 @@ services::analytics::dto::tests
 services::analytics::queue_metrics::tests
 services::analytics::session_metrics::tests
 services::api_friction::issue_body::tests
+services::auto_queue::route::activate_command::tests
+services::auto_queue::route::control_routes::phase_gate_repair_route_tests
+services::auto_queue::route::planning::failed_entry_alert_tests
+services::auto_queue::tests
 services::automation_candidate_contract::tests
 services::automation_candidate_materializer::allowed_path_tests
 services::automation_candidate_materializer::iteration_result_tests
@@ -229,6 +235,8 @@ services::discord::gateway::tests
 services::discord::gateway_voice_queue::tests
 services::discord::global_active_counter_tests
 services::discord::hard_ceiling_tests
+services::discord::health::recovery::stall_alert::tests
+services::discord::health::recovery::stall_watchdog_auto_heal_tests
 services::discord::http::tests
 services::discord::idle_cleanup_selector_tests
 services::discord::idle_detector::tests
@@ -332,6 +340,8 @@ services::discord::recovery_paths::restart::tests
 services::discord::recovery_paths::shared::tests
 services::discord::relay_coord_tests
 services::discord::relay_owner_observability::tests
+services::discord::relay_recovery::circuit_breaker::tests
+services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests
 services::discord::replace_outcome_policy::a0_replace_outcome_policy_tests
 services::discord::response_sanitizer::subagent_notification_card::tests
 services::discord::response_sanitizer::tests
@@ -555,6 +565,7 @@ services::git::repo_resolver::no_repo_mapping_classification_tests
 services::git::runner::tests
 services::git::worktree_resolver::automation_worktree_tests
 services::github_issue_creation::tests
+services::health_diagnostics::tests
 services::issue_announcements::tests
 services::long_turn_watchdog::tests
 services::maintenance::jobs::db_retention::tests
@@ -583,6 +594,7 @@ services::message_outbox::dedupe_key_tests
 services::message_outbox::stop_turn_notify_removal_tests
 services::message_outbox_circuit_authority_tests
 services::message_outbox_recovery_tests
+services::observability::cancellation_observability_tests
 services::observability::emit::tests
 services::observability::queries::alert_authority_tests
 services::observability::recovery_audit::tests
