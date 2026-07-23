@@ -52,6 +52,16 @@ pub(super) async fn reap_orphaned_gateway_lease_once(
     lock_id: i64,
     provider: &ProviderKind,
 ) -> Result<bool, String> {
+    reap_orphaned_gateway_lease_with_min_age(pool, lock_id, provider, GATEWAY_ORPHAN_MIN_AGE_SECS)
+        .await
+}
+
+pub(super) async fn reap_orphaned_gateway_lease_with_min_age(
+    pool: &sqlx::PgPool,
+    lock_id: i64,
+    provider: &ProviderKind,
+    min_age_secs: i64,
+) -> Result<bool, String> {
     let holder = sqlx::query_as::<_, GatewayLeaseHolder>(
         r#"
         SELECT a.pid,
@@ -62,11 +72,14 @@ pub(super) async fn reap_orphaned_gateway_lease_once(
                (n.process_id IS NOT NULL) AS process_matches
           FROM pg_locks l
           JOIN pg_stat_activity a ON a.pid = l.pid
+          LEFT JOIN LATERAL regexp_match(
+              a.application_name,
+              '^agentdesk:gateway:(.*):([0-9]+):([^:]+)$'
+          ) parsed ON TRUE
           LEFT JOIN worker_nodes n
-            ON split_part(a.application_name, ':', 3) = n.instance_id
-           AND split_part(a.application_name, ':', 4) ~ '^[0-9]+$'
-           AND n.process_id = split_part(a.application_name, ':', 4)::INTEGER
-           AND split_part(a.application_name, ':', 5) = $4
+            ON parsed[1] = n.instance_id
+           AND n.process_id = parsed[2]::INTEGER
+           AND parsed[3] = $4
          WHERE l.locktype = 'advisory'
            AND l.granted
            AND l.classid = (($1::BIGINT >> 32) & 4294967295)::OID
@@ -80,7 +93,7 @@ pub(super) async fn reap_orphaned_gateway_lease_once(
         "#,
     )
     .bind(lock_id)
-    .bind(GATEWAY_ORPHAN_MIN_AGE_SECS)
+    .bind(min_age_secs)
     .bind(GATEWAY_LEASE_APPLICATION_PREFIX)
     .bind(provider.as_str())
     .fetch_optional(pool)
@@ -145,10 +158,6 @@ fn unfence_runtimes(runtimes: &[Arc<SharedData>]) {
         runtime.restart.intake_worker_lifecycle.unfence_admission();
         runtime
             .restart
-            .shutting_down
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        runtime
-            .restart
             .restart_pending
             .store(false, std::sync::atomic::Ordering::SeqCst);
     }
@@ -180,10 +189,6 @@ async fn attempt_clean_standby_promotion(
         .await;
     for runtime in &runtimes {
         runtime.restart.intake_worker_lifecycle.fence_admission();
-        runtime
-            .restart
-            .shutting_down
-            .store(true, std::sync::atomic::Ordering::SeqCst);
         runtime
             .restart
             .restart_pending
@@ -233,8 +238,9 @@ async fn attempt_clean_standby_promotion(
         STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
         return false;
     }
-    unfence_runtimes(&runtimes);
-    STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
+    // The marker poller now owns the graceful restart. Keep every runtime's
+    // admission fence and restart_pending state closed until that poller exits
+    // the process; reopening here would reintroduce the preflight TOCTOU window.
     true
 }
 

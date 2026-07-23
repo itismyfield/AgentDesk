@@ -95,6 +95,7 @@ WS_RECONCILE_BODY='{"ok":false,"status":"degraded","version":"x","db":true,"dash
 WS_SCALAR_NO_PROVIDER_BODY='{ "ok": false , "status": "unhealthy" , "db": true , "dashboard": true , "server_up": true , "fully_recovered": false , "startup_status": "doctor_skipped" , "latest_startup_doctor": { "available": true , "skipped_reason": "no_provider_runtimes_registered" } }'
 GATEWAY_STANDBY_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":true,"degraded":true,"degraded_reasons":["provider:codex:gateway_standby"]}'
 GATEWAY_STANDBY_MIXED_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":true,"degraded":true,"degraded_reasons":["provider:codex:gateway_standby","disk_low_free_bytes:1"]}'
+GATEWAY_STANDBY_MIXED_UNRECOVERED_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":false,"cluster_standby":true,"degraded":true,"degraded_reasons":["provider:codex:gateway_standby","disk_low_free_bytes:1"]}'
 GATEWAY_REASON_WITHOUT_STANDBY_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"degraded_reasons":["gateway_standby"]}'
 
 run_gate_cases() {
@@ -196,6 +197,8 @@ run_gate_cases() {
     _health_json_gateway_standby_only "$GATEWAY_STANDBY_BODY"
   assert_rc "[$mode] standby plus another degraded reason → NOT ready" 1 \
     health_json_is_ready "$GATEWAY_STANDBY_MIXED_BODY" 1 1
+  assert_rc "[$mode] unrecovered standby plus another reason → NOT ready" 1 \
+    health_json_is_ready "$GATEWAY_STANDBY_MIXED_UNRECOVERED_BODY" 1 1
   assert_rc "[$mode] gateway reason without cluster_standby → NOT ready" 1 \
     health_json_is_ready "$GATEWAY_REASON_WITHOUT_STANDBY_BODY" 1 1
 }

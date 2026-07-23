@@ -1,16 +1,19 @@
+use std::str::FromStr;
+
 use sqlx::Connection;
 
 use super::gateway_lease_recovery::{
-    GATEWAY_LEASE_APPLICATION_PREFIX, GATEWAY_ORPHAN_MIN_AGE_SECS, GatewayLeaseHolder,
-    gateway_holder_is_reapable,
+    GATEWAY_LEASE_APPLICATION_PREFIX, GatewayLeaseHolder, gateway_holder_is_reapable,
+    reap_orphaned_gateway_lease_with_min_age,
 };
+use crate::services::discord::ProviderKind;
 
 #[test]
 fn orphan_reap_requires_named_stale_matching_worker() {
     let safe = GatewayLeaseHolder {
         pid: 42,
-        application_name: "agentdesk:gateway:node-a:42:claude".to_string(),
-        instance_id: Some("node-a".to_string()),
+        application_name: "agentdesk:gateway:node:a:42:claude".to_string(),
+        instance_id: Some("node:a".to_string()),
         node_status: Some("offline".to_string()),
         heartbeat_recent: Some(false),
         process_matches: Some(true),
@@ -61,7 +64,7 @@ fn pg_test_base_database_url() -> String {
 }
 
 #[tokio::test]
-async fn gateway_orphan_holder_sql_distinguishes_dcserver_and_backend_pids_pg() {
+async fn gateway_orphan_reap_uses_production_query_and_right_parses_instance_id_pg() {
     let _lifecycle = crate::db::postgres::lock_test_lifecycle();
     let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
         .ok()
@@ -88,31 +91,23 @@ async fn gateway_orphan_holder_sql_distinguishes_dcserver_and_backend_pids_pg() 
     .await
     .expect("connect isolated gateway reap database");
 
+    let instance_id = "node:east";
     let dcserver_pid = std::process::id() as i32;
     sqlx::query(
         "INSERT INTO worker_nodes (
              instance_id, process_id, role, effective_role, status, last_heartbeat_at
-         ) VALUES ('node-a', $1, 'auto', 'worker', 'offline',
-                   NOW() - ($2::BIGINT * INTERVAL '1 second'))",
+         ) VALUES ($1, $2, 'auto', 'worker', 'offline', NOW() - INTERVAL '1 minute')",
     )
+    .bind(instance_id)
     .bind(dcserver_pid)
-    .bind(GATEWAY_ORPHAN_MIN_AGE_SECS + 60)
     .execute(&pool)
     .await
     .expect("seed stale worker node");
 
-    let holder_name = format!("{GATEWAY_LEASE_APPLICATION_PREFIX}node-a:{dcserver_pid}:claude");
-    let options = sqlx::postgres::PgConnectOptions::new()
-        .host("localhost")
-        .username(
-            std::env::var("PGUSER")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .or_else(|| std::env::var("USER").ok())
-                .as_deref()
-                .unwrap_or("postgres"),
-        )
-        .database(&database_name)
+    let holder_name =
+        format!("{GATEWAY_LEASE_APPLICATION_PREFIX}{instance_id}:{dcserver_pid}:claude");
+    let options = sqlx::postgres::PgConnectOptions::from_str(&database_url)
+        .expect("parse isolated database url")
         .application_name(&holder_name);
     let mut holder = sqlx::PgConnection::connect_with(&options)
         .await
@@ -125,30 +120,33 @@ async fn gateway_orphan_holder_sql_distinguishes_dcserver_and_backend_pids_pg() 
         dcserver_pid, backend_pid,
         "PID domains must differ in this test"
     );
-    let inspected = sqlx::query_as::<_, GatewayLeaseHolder>(
-        r#"
-        SELECT a.pid, a.application_name, n.instance_id, n.status AS node_status,
-               (n.last_heartbeat_at >= NOW() - ($1::BIGINT * INTERVAL '1 second')) AS heartbeat_recent,
-               (n.process_id = split_part(a.application_name, ':', 4)::INTEGER) AS process_matches
-          FROM pg_stat_activity a
-          LEFT JOIN worker_nodes n
-            ON split_part(a.application_name, ':', 3) = n.instance_id
-           AND split_part(a.application_name, ':', 4) ~ '^[0-9]+$'
-           AND n.process_id = split_part(a.application_name, ':', 4)::INTEGER
-           AND split_part(a.application_name, ':', 5) = 'claude'
-         WHERE a.pid = $2 AND a.pid <> pg_backend_pid()
-        "#,
-    )
-    .bind(GATEWAY_ORPHAN_MIN_AGE_SECS)
-    .bind(backend_pid)
-    .fetch_one(&pool)
-    .await
-    .expect("inspect holder through production PID parsing contract");
-    assert_eq!(inspected.pid, backend_pid);
-    assert_eq!(inspected.instance_id.as_deref(), Some("node-a"));
-    assert_eq!(inspected.process_matches, Some(true));
-    assert_eq!(inspected.heartbeat_recent, Some(false));
-    assert!(gateway_holder_is_reapable(&inspected));
+
+    let lock_id = 91_480_100_i64;
+    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+        .bind(lock_id)
+        .fetch_one(&mut holder)
+        .await
+        .expect("hold gateway advisory lock");
+    assert!(acquired);
+    sqlx::query("SELECT 1")
+        .execute(&mut holder)
+        .await
+        .expect("leave holder idle");
+
+    let reaped = reap_orphaned_gateway_lease_with_min_age(&pool, lock_id, &ProviderKind::Claude, 0)
+        .await
+        .expect("run production orphan reap query");
+    assert!(
+        reaped,
+        "production query must reap delimiter-bearing stale instance"
+    );
+    let still_alive: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1)")
+            .bind(backend_pid)
+            .fetch_one(&pool)
+            .await
+            .expect("check holder termination");
+    assert!(!still_alive);
 
     drop(holder);
     crate::db::postgres::close_test_pool(pool, "gateway orphan holder pg")
