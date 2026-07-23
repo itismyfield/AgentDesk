@@ -2051,16 +2051,6 @@ pub(super) async fn handle_text_message(
                         );
                     }
                 }
-                // #3813 Phase 3 (§4 / AC#6): make the safe up-to-45s readiness
-                // wait visible so it doesn't look like a stalled session start.
-                // Borrow before `wait_readiness` moves into spawn_blocking below.
-                let _ = super::super::super::http::edit_channel_message(
-                    http,
-                    channel_id,
-                    placeholder_msg_id,
-                    readiness_wait_compact_status(&wait_readiness),
-                )
-                .await;
                 let wait_result =
                     tokio::task::spawn_blocking(move || {
                         match wait_readiness {

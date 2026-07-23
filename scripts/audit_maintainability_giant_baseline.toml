@@ -462,15 +462,6 @@
 # measurement/formatting logic lives in the sibling `latency_spans.rs` (monotonic
 # `Instant` deltas); the root only captures marks + emits. No control-flow change,
 # no new await/lock. 2797 -> 2815.
-# #3813 Phase 3 (§4/AC#6, reviewable admission): +10 prod LoC for one
-# `edit_channel_message` call-site that surfaces the hosted-TUI busy preflight
-# readiness wait on the intake placeholder (⏳ TUI 준비 대기 중) so a safe up-to-45s
-# wait doesn't look like a stalled session start. The render logic/const/tests
-# live in the sibling `tui_followup.rs` (non-baselined); the root only adds the
-# single edit call-site before `wait_readiness` moves into spawn_blocking. No
-# new control-flow branch; the compact state is transient (overwritten by
-# dispatch streaming on ready or by the queued-card / delete / refusal-notice
-# paths on the still-busy branch). 2815 -> 2825.
 # #4307 PR-B (reviewable admission): +9 prod LoC to fold the voluntary
 # tool_feedback reminder (stashed at the previous turn's end) into `reply_context`
 # — a two-line call to the sibling `take_and_merge_feedback_reminder`
@@ -478,7 +469,7 @@
 # here) plus the two-arg widening (`&provider` for the provider-scoped stash key,
 # `feedback_reminder` for the put-back) of the TUI-busy refusal call-site so the
 # taken reminder is put back on refusal. Same take/inject/put-back path as the
-# session-retry recovery context. 2825 -> 2834.
+# session-retry recovery context. 2815 -> 2824.
 # #4247 (reviewable admission): +3 prod LoC for the fail-safe queue-preservation
 # P0 fix, net-zero PROVEN impossible. (1) the turn-start DISPATCH-GUARD gains a
 # `&& !preserve_on_cancel` condition — rustfmt forces each `&&` in the if-let
@@ -487,8 +478,8 @@
 # (one-arg-per-line under rustfmt); (3) one `#[cfg(test)] mod` framing line for
 # the merged mutation-provable guard/wiring tests (doc moved to inner comments;
 # the two test mods were already merged into one). Dual-CLEAN (codex + Fable).
-# 2834 -> 2837.
-# #4552: behavior-preserving decomposition lowers 2837 -> 2705 by moving the
+# 2824 -> 2827.
+# #4552: behavior-preserving decomposition lowers 2827 -> 2695 by moving the
 # claim-success request-anchor recording and idle-recap bootstrap into
 # `intake_turn/claim_bootstrap.rs`. The helper remains after the stale-dispatch
 # guard and before the placeholder handoff; won-claim gating and bump-before-
@@ -500,8 +491,11 @@
 # the ~15-field IntakeSteeringContext threading, which must live at the intake call
 # site. Net-zero would require an unrelated extraction from this CORE relay-intake
 # giant; the injection is inert by default (AGENTDESK_TUI_STEERING off). Delivery-order
-# boundary deferred to #4740.
-"src/services/discord/router/message_handler/intake_turn.rs" = 2718
+# boundary deferred to #4740. 2695 -> 2708.
+# #4807: remove the hosted-TUI readiness-wait placeholder edit (-10), then
+# lower the frozen baseline to the measured production LoC after current-main
+# drift (-2) so the deleted presentation path cannot silently regrow. 2708 -> 2706.
+"src/services/discord/router/message_handler/intake_turn.rs" = 2706
 "src/services/discord/meeting_orchestrator.rs" = 3227
 # #3293: +3 for the `registry_purge` child-module declaration (peek +
 # operator-gated idle-entry purge live outside the frozen root); lowered
