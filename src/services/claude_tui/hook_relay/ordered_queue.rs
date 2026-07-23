@@ -18,10 +18,14 @@ use super::{
     write_hook_relay_failure_marker,
 };
 use crate::services::claude_tui::hook_server::relay_receipts::{DELIVERY_TTL, LEDGER_RETENTION};
+
+#[path = "queue_retention.rs"]
+mod queue_retention;
 #[cfg(test)]
 use crate::services::claude_tui::hook_server::relay_receipts::{
     RELAY_DEADLINE_HEADER, RELAY_PUBLISHED_AT_HEADER, RELAY_REQUEST_ID_HEADER,
 };
+use queue_retention::{IdleQueueRetentionGuard, prune_artifact_dir};
 
 const RELAY_QUEUE_IDLE_GRACE: Duration = Duration::from_millis(250);
 const RELAY_RESPONSE_POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -104,6 +108,14 @@ fn lock_relay_queue_file(
     path: &Path,
     nonblocking: bool,
 ) -> Result<Option<RelayQueueFileLock>, String> {
+    lock_relay_queue_file_with_mode(path, nonblocking, true)
+}
+
+fn lock_relay_queue_file_with_mode(
+    path: &Path,
+    nonblocking: bool,
+    exclusive: bool,
+) -> Result<Option<RelayQueueFileLock>, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("create hook relay queue dir {}: {err}", parent.display()))?;
@@ -118,7 +130,11 @@ fn lock_relay_queue_file(
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
-        let operation = libc::LOCK_EX | if nonblocking { libc::LOCK_NB } else { 0 };
+        let operation = if exclusive {
+            libc::LOCK_EX
+        } else {
+            libc::LOCK_SH
+        } | if nonblocking { libc::LOCK_NB } else { 0 };
         if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
             let error = std::io::Error::last_os_error();
             if nonblocking
@@ -370,12 +386,8 @@ pub(super) fn enqueue_ordered_hook_relay_request(
         failure_marker_dir(provider).ok_or_else(|| "runtime root is unavailable".to_string())?;
     let queue_dir = relay_queue_dir(provider, session_id)
         .ok_or_else(|| "runtime root is unavailable".to_string())?;
-    std::fs::create_dir_all(&queue_dir).map_err(|err| {
-        format!(
-            "create ordered hook relay queue {}: {err}",
-            queue_dir.display()
-        )
-    })?;
+    let producer_lock = queue_dir.join("producer.lock");
+    let _producer_lock = lock_relay_queue_file_with_mode(&producer_lock, true, false)?;
     let request_id = uuid::Uuid::new_v4().to_string();
     let published_at = Utc::now();
     let delivery_timeout = response_timeout.unwrap_or(DELIVERY_TTL).min(DELIVERY_TTL);
@@ -826,7 +838,7 @@ fn scan_ordered_hook_relay_queues_once(runtime_root: &Path) -> Result<(), String
 }
 
 fn gc_ordered_hook_relay_queue(queue_dir: &Path) {
-    let Ok(Some(_worker_lock)) = lock_relay_queue_file(&queue_dir.join("worker.lock"), true) else {
+    let Some(retention_guard) = IdleQueueRetentionGuard::acquire(queue_dir) else {
         return;
     };
     let retention = LEDGER_RETENTION;
@@ -857,28 +869,7 @@ fn gc_ordered_hook_relay_queue(queue_dir: &Path) {
     for dir in [queue_dir.join("responses"), queue_dir.join("quarantine")] {
         let _ = std::fs::remove_dir(dir);
     }
-}
-
-fn prune_artifact_dir(dir: &Path, cap: usize, retention: Duration) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut paths = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
-    paths.sort_by_key(|path| {
-        std::fs::metadata(path)
-            .and_then(|metadata| metadata.modified())
-            .ok()
-    });
-    let excess = paths.len().saturating_sub(cap);
-    for (index, path) in paths.into_iter().enumerate() {
-        if index < excess || file_is_older_than(&path, retention) {
-            let _ = std::fs::remove_file(path);
-        }
-    }
+    retention_guard.remove_if_stale_and_idle(retention);
 }
 
 fn file_is_older_than(path: &Path, age: Duration) -> bool {
@@ -1092,6 +1083,74 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn ordered relay worker process")
+    }
+
+    fn age_path(path: &Path, age: Duration) {
+        let modified = std::time::SystemTime::now() - age;
+        filetime::set_file_mtime(path, filetime::FileTime::from_system_time(modified)).unwrap();
+    }
+
+    fn age_queue_tree(queue_dir: &Path, age: Duration) {
+        let entries = std::fs::read_dir(queue_dir)
+            .unwrap()
+            .flatten()
+            .collect::<Vec<_>>();
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                for child in std::fs::read_dir(&path).unwrap().flatten() {
+                    age_path(&child.path(), age);
+                }
+            }
+            age_path(&path, age);
+        }
+        age_path(queue_dir, age);
+    }
+
+    #[test]
+    fn gc_preserves_active_queue() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let queue_dir = temp_dir.path().join("active");
+        std::fs::create_dir_all(queue_dir.join("ingress")).unwrap();
+        std::fs::write(queue_dir.join("worker.lock"), b"").unwrap();
+        std::fs::write(queue_dir.join("producer.lock"), b"").unwrap();
+        std::fs::write(queue_dir.join("ingress/pending.ingress.json"), b"{}").unwrap();
+        age_queue_tree(&queue_dir, LEDGER_RETENTION + Duration::from_secs(1));
+
+        gc_ordered_hook_relay_queue(&queue_dir);
+
+        assert!(queue_dir.exists());
+        assert!(queue_dir.join("ingress/pending.ingress.json").exists());
+    }
+
+    #[test]
+    fn gc_removes_stale_idle_queue() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let queue_dir = temp_dir.path().join("stale");
+        std::fs::create_dir_all(queue_dir.join("ingress")).unwrap();
+        std::fs::write(queue_dir.join("worker.lock"), b"").unwrap();
+        std::fs::write(queue_dir.join("producer.lock"), b"").unwrap();
+        std::fs::write(queue_dir.join("next-sequence"), b"3").unwrap();
+        std::fs::write(queue_dir.join("completed-high-water"), b"3").unwrap();
+        age_queue_tree(&queue_dir, LEDGER_RETENTION + Duration::from_secs(1));
+
+        gc_ordered_hook_relay_queue(&queue_dir);
+
+        assert!(!queue_dir.exists());
+    }
+
+    #[test]
+    fn gc_preserves_recently_emptied_queue() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let queue_dir = temp_dir.path().join("recent");
+        std::fs::create_dir_all(queue_dir.join("ingress")).unwrap();
+        std::fs::write(queue_dir.join("worker.lock"), b"").unwrap();
+        std::fs::write(queue_dir.join("producer.lock"), b"").unwrap();
+        std::fs::write(queue_dir.join("completed-high-water"), b"1").unwrap();
+
+        gc_ordered_hook_relay_queue(&queue_dir);
+
+        assert!(queue_dir.exists());
     }
 
     #[test]
