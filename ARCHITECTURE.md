@@ -850,6 +850,7 @@ src/
 │   │   │   │   │   ├── tui_error_classification.rs
 │   │   │   │   │   └── types.rs
 │   │   │   │   ├── content_arms.rs
+│   │   │   │   ├── expected_identity_tests.rs
 │   │   │   │   ├── message_conversion.rs
 │   │   │   │   └── tool_arms.rs
 │   │   │   ├── stream_tick/

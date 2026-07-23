@@ -29,10 +29,8 @@ pub(super) enum RuntimeHandoffLoopMessage {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RuntimeHandoffLoopOutcome {
-    ContinueDraining,
-}
+pub(super) type RuntimeHandoffLoopOutcome =
+    Option<crate::services::discord::inflight::GuardedSaveOutcome>;
 
 pub(super) struct RuntimeHandoffLoopContext<'a> {
     pub(super) shared_owned: &'a Arc<SharedData>,
@@ -111,6 +109,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
     let mut state_dirty = *state.state_dirty;
     let mut terminal_control_drain_until = *state.terminal_control_drain_until;
     let mut last_activity_heartbeat_at = *state.last_activity_heartbeat_at;
+    let mut guarded_save_outcome = None;
 
     match message {
         RuntimeHandoffLoopMessage::TmuxReady {
@@ -455,6 +454,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                 state_dirty,
                 tmux_ready_guarded_save_outcome,
             );
+            guarded_save_outcome = tmux_ready_guarded_save_outcome;
             if done {
                 terminal_control_drain_until = None;
             }
@@ -605,13 +605,15 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                     // not stamped here.
                     let _ = session_name;
                     tmux_last_offset = Some(last_offset);
-                    state_dirty = claude_e::stamp_process_evidence(
+                    let (next_state_dirty, outcome) = claude_e::stamp_process_evidence(
                         inflight_state,
                         output_path,
                         last_offset,
                         pid,
                         state_dirty,
                     );
+                    state_dirty = next_state_dirty;
+                    guarded_save_outcome = Some(outcome);
                     if done {
                         terminal_control_drain_until = None;
                     }
@@ -676,7 +678,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
     *state.terminal_control_drain_until = terminal_control_drain_until;
     *state.last_activity_heartbeat_at = last_activity_heartbeat_at;
 
-    RuntimeHandoffLoopOutcome::ContinueDraining
+    guarded_save_outcome
 }
 
 fn handle_watcher_runtime_handoff(

@@ -29,8 +29,25 @@ use tool_arms::{
 };
 
 mod content_arms;
+#[cfg(test)]
+#[path = "stream_loop/expected_identity_tests.rs"]
+mod expected_identity_tests;
 mod message_conversion;
 mod tool_arms;
+
+fn refresh_stream_tick_expected_identity_after_handoff(
+    expected: &mut crate::services::discord::inflight::InflightTurnIdentity,
+    inflight_state: &InflightTurnState,
+    guarded_save_outcome: Option<crate::services::discord::inflight::GuardedSaveOutcome>,
+) {
+    if matches!(
+        guarded_save_outcome,
+        Some(crate::services::discord::inflight::GuardedSaveOutcome::Saved)
+    ) {
+        *expected =
+            crate::services::discord::inflight::InflightTurnIdentity::from_state(inflight_state);
+    }
+}
 
 pub(super) struct StreamLoopContext {
     pub(super) shared_owned: Arc<SharedData>,
@@ -253,7 +270,7 @@ pub(super) async fn run_stream_loop(
     // stream loop. Runtime handoff may mutate identity-bearing cursor fields
     // before a later tick, so deriving expected identity inside the tick would
     // authorize a mutated stale snapshot rather than the original owner.
-    let stream_tick_expected_identity =
+    let mut stream_tick_expected_identity =
         crate::services::discord::inflight::InflightTurnIdentity::from_state(&inflight_state);
 
     'outer: while !done
@@ -679,9 +696,11 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            match outcome {
-                                RuntimeHandoffLoopOutcome::ContinueDraining => {}
-                            }
+                            refresh_stream_tick_expected_identity_after_handoff(
+                                &mut stream_tick_expected_identity,
+                                &inflight_state,
+                                outcome,
+                            );
                         }
                         StreamMessage::RuntimeReady { handoff } => {
                             let outcome = handle_runtime_handoff_loop_message(
@@ -712,9 +731,11 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            match outcome {
-                                RuntimeHandoffLoopOutcome::ContinueDraining => {}
-                            }
+                            refresh_stream_tick_expected_identity_after_handoff(
+                                &mut stream_tick_expected_identity,
+                                &inflight_state,
+                                outcome,
+                            );
                         }
                         StreamMessage::ProcessReady {
                             output_path,
@@ -753,9 +774,11 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            match outcome {
-                                RuntimeHandoffLoopOutcome::ContinueDraining => {}
-                            }
+                            refresh_stream_tick_expected_identity_after_handoff(
+                                &mut stream_tick_expected_identity,
+                                &inflight_state,
+                                outcome,
+                            );
                         }
                         StreamMessage::OutputOffset { offset } => {
                             let outcome = handle_runtime_handoff_loop_message(
@@ -786,9 +809,11 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            match outcome {
-                                RuntimeHandoffLoopOutcome::ContinueDraining => {}
-                            }
+                            refresh_stream_tick_expected_identity_after_handoff(
+                                &mut stream_tick_expected_identity,
+                                &inflight_state,
+                                outcome,
+                            );
                         }
                     }
                 }

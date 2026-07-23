@@ -4,7 +4,7 @@ use super::super::*;
 
 pub(super) type GuardedSaveOutcome = crate::services::discord::inflight::GuardedSaveOutcome;
 
-pub(super) fn persist_stream_tick_state(
+pub(in crate::services::discord::turn_bridge) fn persist_stream_tick_state(
     inflight_state: &InflightTurnState,
     expected: &crate::services::discord::inflight::InflightTurnIdentity,
     channel_id: ChannelId,

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::*;
 
 #[path = "stream_tick/guarded_persist.rs"]
-mod guarded_persist;
+pub(super) mod guarded_persist;
 use guarded_persist::{
     GuardedSaveOutcome, dirty_after_guarded_save, persist_stream_tick_heartbeat,
     persist_stream_tick_state,
