@@ -369,7 +369,7 @@ fn status_panel_turn_completed_renders_foreground_completion() {
         }
     );
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(rendered.starts_with("✅ 완료"));
+    assert!(rendered.starts_with("-# ✅ 완료"));
     assert!(!rendered.contains("🟢 진행 중"));
 }
 
@@ -410,7 +410,7 @@ fn status_panel_absorbs_stale_and_final_into_the_activity_emoji() {
         },
     );
     let done = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(done.starts_with("✅ 완료"), "final activity: {done:?}");
+    assert!(done.starts_with("-# ✅ 완료"), "final activity: {done:?}");
     assert!(!done.contains("신뢰도"));
 }
 
@@ -500,7 +500,7 @@ fn status_panel_turn_completed_after_monitor_wait_renders_background_completion(
         }
     );
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(rendered.starts_with("✅ 백그라운드 완료"));
+    assert!(rendered.starts_with("-# ✅ 백그라운드 완료"));
     assert!(!rendered.contains("💤 monitor 대기"));
 }
 
@@ -531,7 +531,7 @@ fn status_panel_turn_completed_after_aborted_tool_renders_terminal_completion() 
         }
     );
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(rendered.starts_with("✅ 완료"));
+    assert!(rendered.starts_with("-# ✅ 완료"));
     assert!(!rendered.contains("🟢 진행 중"));
 }
 
@@ -8871,10 +8871,10 @@ fn status_panel_free_renderer_orders_header_fields_on_separate_lines() {
     assert_eq!(
         out.lines().take(4).collect::<Vec<_>>(),
         vec![
-            "🟢 진행 중",
-            "턴 트리거: https://discord.com/channels/1/2/3",
-            "턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)",
-            "마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>)",
+            "-# 🟢 진행 중",
+            "-# 턴 트리거: https://discord.com/channels/1/2/3",
+            "-# 턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)",
+            "-# 마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>)",
         ],
         "header must render as four consecutive lines: {out:?}"
     );
@@ -8887,7 +8887,7 @@ fn status_panel_free_renderer_orders_header_fields_on_separate_lines() {
     );
     assert!(
         out.contains(
-            "턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)\n마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>)"
+            "-# 턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)\n-# 마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>)"
         ),
         "time fields must occupy separate consecutive lines: {out:?}"
     );

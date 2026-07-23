@@ -680,18 +680,18 @@ pub(in crate::services::discord) async fn ensure_card_with_shared(
         super::inflight::load_inflight_state(provider, event.scope.channel_id)
             .filter(|state| state.tmux_session_name.as_deref() == Some(&event.scope.session_key))
     });
-    let metadata = if let Some(provider) = provider.as_ref() {
-        Some(
+    let metadata = match provider.as_ref() {
+        Some(provider) => Some(
             super::completion_footer_metadata::load_completion_footer_metadata(
                 shared,
+                event.scope.channel_id.into(),
                 provider,
                 0,
                 inflight.as_ref().map(|state| state.started_at.as_str()),
             )
             .await,
-        )
-    } else {
-        None
+        ),
+        None => None,
     };
     ensure_card_with_metadata(
         shared.pg_pool.as_ref(),

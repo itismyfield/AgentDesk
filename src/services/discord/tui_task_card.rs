@@ -52,7 +52,7 @@ pub(super) struct TaskNotification {
     pub tool_uses: Option<String>,
     /// #3169: the workflow/agent `<usage>` block nests `<subagent-tokens>`,
     /// `<agent-count>`, `<duration-ms>` tags. Parsed individually so the footer
-    /// renders human-readable values (K/M tokens, `Xm Ys` duration) instead of
+    /// renders the tool count and human-readable duration instead of
     /// leaking the raw nested XML of `usage`.
     pub subagent_tokens: Option<String>,
     pub agent_count: Option<String>,
@@ -136,24 +136,6 @@ impl TaskNotification {
             "subagent"
         }
     }
-}
-
-/// #3169: format a raw integer token count as a compact `K`/`M` string
-/// (`66013` → `66K`, `359797` → `360K`, `1341096` → `1.3M`, `950` → `950`).
-/// Returns `None` if the input is not a parseable non-negative integer.
-fn format_token_count(raw: &str) -> Option<String> {
-    let n: u64 = raw.trim().parse().ok()?;
-    Some(if n >= 1_000_000 {
-        let m = n as f64 / 1_000_000.0;
-        // Trim a trailing `.0` (e.g. `2.0M` → `2M`).
-        let s = format!("{m:.1}");
-        let s = s.strip_suffix(".0").map(str::to_string).unwrap_or(s);
-        format!("{s}M")
-    } else if n >= 1_000 {
-        format!("{}K", (n as f64 / 1_000.0).round() as u64)
-    } else {
-        n.to_string()
-    })
 }
 
 /// #3169: format a raw millisecond duration as a human-readable string
@@ -277,7 +259,7 @@ pub(super) fn format_task_notification_card(note: &TaskNotification, update_coun
         footer_parts.push(format!("task {}", short_task_id(task_id)));
     }
     // #3169: render the structured usage sub-fields human-readably. Multi-agent
-    // count, then K/M token total, then tool count, then `Xm Ys` duration. The
+    // count, then tool count, then `Xm Ys` duration. The token total is omitted. The
     // raw `usage` block is only surfaced as a fallback when it carries NO nested
     // tags (`<`) — the workflow/agent payload nests `<subagent-tokens>` etc.,
     // which we parse above, so we must not dump that XML into the footer.
@@ -288,14 +270,6 @@ pub(super) fn format_task_notification_card(note: &TaskNotification, update_coun
         .filter(|n| *n > 1)
     {
         footer_parts.push(format!("{agents} agents"));
-    }
-    if let Some(tokens) = note
-        .subagent_tokens
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .and_then(format_token_count)
-    {
-        footer_parts.push(format!("{tokens} tok"));
     }
     if let Some(tool_uses) = note.tool_uses.as_deref().filter(|s| !s.is_empty()) {
         footer_parts.push(format!("{} tools", sanitize_oneline(tool_uses)));
@@ -308,9 +282,9 @@ pub(super) fn format_task_notification_card(note: &TaskNotification, update_coun
         .filter(|s| !s.is_empty())
         .and_then(format_duration_ms)
     {
-        footer_parts.push(dur);
+        footer_parts.push(format!("⏱ {dur}"));
     } else if let Some(duration) = note.duration.as_deref().filter(|s| !s.is_empty()) {
-        footer_parts.push(sanitize_oneline(duration));
+        footer_parts.push(format!("⏱ {}", sanitize_oneline(duration)));
     }
     // Fallback: a plain (non-XML) usage string, only when no structured
     // sub-field was parsed and it is not itself nested XML.
@@ -319,6 +293,10 @@ pub(super) fn format_task_notification_card(note: &TaskNotification, update_coun
             .usage
             .as_deref()
             .filter(|s| !s.is_empty() && !s.contains('<'))
+            .filter(|s| {
+                let normalized = s.to_ascii_lowercase();
+                !normalized.contains(" tok") && !normalized.contains("token")
+            })
         {
             footer_parts.push(sanitize_oneline(usage));
         }
@@ -1045,9 +1023,10 @@ mod tests {
             card.contains(RESULT_PREVIEW_TRUNCATED_MARKER),
             "oversized preview should use an explicit truncation marker: {card}"
         );
-        // PR URL surfaced + usage footer.
+        // PR URL surfaced + compact footer without token usage.
         assert!(card.contains("https://github.com/itismyfield/AgentDesk/pull/3034"));
-        assert!(card.contains("194k tok"));
+        assert!(!card.contains("194k tok"));
+        assert!(card.contains("⏱ 4.1s"));
         assert!(card.contains("task aa37b21a"));
     }
 
@@ -1317,16 +1296,6 @@ fn main() {}
     }
 
     #[test]
-    fn format_token_count_uses_k_and_m_units() {
-        assert_eq!(format_token_count("950").as_deref(), Some("950"));
-        assert_eq!(format_token_count("66013").as_deref(), Some("66K"));
-        assert_eq!(format_token_count("359797").as_deref(), Some("360K"));
-        assert_eq!(format_token_count("1341096").as_deref(), Some("1.3M"));
-        assert_eq!(format_token_count("2000000").as_deref(), Some("2M"));
-        assert_eq!(format_token_count("not-a-number"), None);
-    }
-
-    #[test]
     fn format_duration_ms_is_human_readable() {
         assert_eq!(format_duration_ms("900").as_deref(), Some("900ms"));
         assert_eq!(format_duration_ms("45000").as_deref(), Some("45s"));
@@ -1336,10 +1305,24 @@ fn main() {}
     }
 
     #[test]
+    fn task_card_footer_snapshot_uses_elapsed_icon_and_omits_tokens_4822() {
+        let raw = "<task-notification><task-id>a24eb9898b9662840</task-id>\
+            <status>completed</status><summary>done</summary>\
+            <usage><subagent_tokens>66013</subagent_tokens><tool_uses>37</tool_uses>\
+            <duration_ms>504983</duration_ms></usage></task-notification>";
+        let card = format_task_notification_card(&parse_task_notification(raw), 1);
+
+        assert_eq!(
+            card,
+            "✅ Task completed\n**done**\n\n-# task a24eb989 · 37 tools · ⏱ 8m 24s"
+        );
+    }
+
+    #[test]
     fn footer_renders_nested_usage_readably_not_raw_xml() {
         // #3169: a real agent payload nests `<subagent_tokens>`/`<tool_uses>`/
-        // `<duration_ms>` inside `<usage>`. The footer must render K/M tokens +
-        // human duration, never the raw nested XML, and never a duplicate count.
+        // `<duration_ms>` inside `<usage>`. The footer keeps the tool count and
+        // human duration without leaking the raw nested XML or token usage.
         let raw = "<task-notification><task-id>a24eb9898b9662840</task-id>\
             <status>completed</status><summary>done</summary>\
             <usage><agent_count>1</agent_count><subagent_tokens>66013</subagent_tokens>\
@@ -1352,15 +1335,15 @@ fn main() {}
             "raw nested usage XML must not leak into the card: {card}"
         );
         assert!(
-            card.contains("66K tok"),
-            "tokens should be K-formatted: {card}"
+            !card.contains(" tok"),
+            "token usage must be omitted: {card}"
         );
         assert!(
             card.contains("37 tools"),
             "tool count should render once: {card}"
         );
         assert!(
-            card.contains("8m 24s"),
+            card.contains("⏱ 8m 24s"),
             "duration should be human-readable: {card}"
         );
         // multi-agent count only shown when > 1
@@ -1389,10 +1372,8 @@ fn main() {}
         );
         assert_eq!(note.subagent_tokens.as_deref(), Some("66013"));
         let card = format_task_notification_card(&note, 0);
-        assert!(
-            card.contains("5 tools") && card.contains("66K tok"),
-            "{card}"
-        );
+        assert!(card.contains("5 tools"), "{card}");
+        assert!(!card.contains(" tok"), "{card}");
         assert!(
             !card.contains("999 tools") && !card.contains("889K"),
             "footer not poisoned: {card}"
@@ -1414,15 +1395,12 @@ fn main() {}
         assert_eq!(note.subagent_tokens.as_deref(), Some("66013"));
         assert_eq!(note.duration_ms.as_deref(), Some("504983"));
         let card = format_task_notification_card(&note, 0);
-        // Footer reflects the usage value (66K), NOT the poisoned 999999 (→1000K).
-        // (The summary prose may legitimately contain "999999" in the card body,
-        // so we assert on the footer-formatted value, not the raw number.)
-        assert!(card.contains("66K tok"), "{card}");
         assert!(
-            !card.contains("1000K"),
-            "footer must not be poisoned by prose: {card}"
+            !card.contains(" tok"),
+            "token usage must be omitted: {card}"
         );
-        assert!(card.contains("8m 24s"), "{card}");
+        assert!(card.contains("5 tools"), "{card}");
+        assert!(card.contains("⏱ 8m 24s"), "{card}");
     }
 
     #[test]
@@ -1437,6 +1415,17 @@ fn main() {}
             card.contains("6 agents"),
             "multi-agent count should show: {card}"
         );
-        assert!(card.contains("1.3M tok"), "M-formatted tokens: {card}");
+        assert!(
+            !card.contains(" tok"),
+            "token usage must be omitted: {card}"
+        );
+        assert!(
+            card.contains("178 tools"),
+            "tool count should remain: {card}"
+        );
+        assert!(
+            card.contains("⏱ 22m 21s"),
+            "elapsed icon should remain: {card}"
+        );
     }
 }

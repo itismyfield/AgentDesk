@@ -4763,6 +4763,7 @@ mod watcher_short_replace_controller {
                 run(&gw, &shared, &cell).await,
                 WatcherShortReplaceResult::DeliveredFallback {
                     edit_error: "edit failed".to_string(),
+                    replacement_anchor: None,
                 },
                 "CommitOnFallback maps SentFallbackAfterEditFailure → DeliveredFallback \
                      (advances, surfaces the replace identity + edit_error)"
@@ -5221,10 +5222,20 @@ mod watcher_short_replace_controller {
         // committed — the legacy fallback arm (tmux_watcher.rs:6289-6372).
         let fb = run(WatcherShortReplaceResult::DeliveredFallback {
             edit_error: "edit failed".to_string(),
+            replacement_anchor: None,
         });
         assert!(
             !fb.footer_registered,
-            "fallback must NOT register the original as the completion-footer target (#2757)"
+            "fallback without a replacement anchor cannot register the original (#2757)"
+        );
+
+        let anchored = run(WatcherShortReplaceResult::DeliveredFallback {
+            edit_error: "edit failed".to_string(),
+            replacement_anchor: Some(MessageId::new(4_822_001)),
+        });
+        assert!(
+            anchored.footer_registered,
+            "fresh fallback must register its delivered replacement anchor"
         );
         assert!(
             !fb.committed,

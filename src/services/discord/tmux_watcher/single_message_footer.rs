@@ -435,7 +435,7 @@ mod tests {
     fn single_message_panel_footer_status_block_keeps_spinner_first() {
         let block = compose_single_message_footer_status_block("⠸", PANEL);
 
-        assert!(block.starts_with("⠸ 진행 중 — Claude"));
+        assert!(block.starts_with("-# ⠸ 진행 중 — Claude"));
         assert!(!block.contains("계속 처리 중"));
         assert!(!block.contains('🟢'));
         assert!(block.contains("Subagents\n└ review inspect"));
@@ -479,7 +479,7 @@ mod tests {
         assert!(!plan.frozen_chunk.contains("계속 처리 중"));
         assert!(!plan.frozen_chunk.contains("Subagents"));
         assert!(plan.display_snapshot.ends_with(&footer));
-        assert!(seed.starts_with("⠸ 진행 중 — Claude"));
+        assert!(seed.starts_with("-# ⠸ 진행 중 — Claude"));
         assert!(!seed.contains("계속 처리 중"));
         assert!(!seed.contains('🟢'));
         assert!(seed.contains("Subagents"));

@@ -1,8 +1,12 @@
 //! Shared terminal metadata for Discord completion footers.
 
+use poise::serenity_prelude::ChannelId;
 use sqlx::Row;
 
 use super::{ProviderKind, SharedData};
+use crate::services::terminal_status_formatting::{
+    ContextWindowUsage, format_elapsed_status, format_subtext_lines, format_usage_status,
+};
 
 const ELAPSED_PREFIX: &str = "⏱ ";
 const RATE_LIMIT_PREFIX: &str = "⏳ ";
@@ -18,11 +22,20 @@ pub(in crate::services::discord) struct CompletionFooterMetadata {
 
 pub(in crate::services::discord) async fn load_completion_footer_metadata(
     shared: &SharedData,
+    channel_id: ChannelId,
     provider: &ProviderKind,
     owner_started_at_unix: i64,
     inflight_started_at: Option<&str>,
 ) -> CompletionFooterMetadata {
-    let rate_limit = terminal_rate_limit_summary(shared, provider).await;
+    let context = shared
+        .ui
+        .placeholder_live_events
+        .context_panel_snapshot(channel_id);
+    let context = context.map(|context| ContextWindowUsage {
+        used_tokens: context.used_tokens,
+        window_tokens: context.context_window_tokens,
+    });
+    let rate_limit = terminal_rate_limit_summary(shared, provider, context).await;
     let host = crate::config_live_reload::current()
         .is_some_and(|config| config.cluster.enabled)
         .then(crate::services::cluster::node_registry::resolve_self_instance_id_without_config);
@@ -71,10 +84,8 @@ pub(in crate::services::discord) fn completion_footer_metadata_from_block(
 
 impl CompletionFooterMetadata {
     pub(in crate::services::discord) fn subtext_lines(&self) -> Vec<String> {
-        self.lines()
-            .into_iter()
-            .map(|line| format!("-# {line}"))
-            .collect()
+        let lines = self.lines();
+        format_subtext_lines(lines.iter().map(String::as_str))
     }
 
     fn lines(&self) -> Vec<String> {
@@ -138,9 +149,8 @@ fn completion_footer_metadata_at(
         .then_some(owner_started_at_unix)
         .or_else(|| inflight_started_at.and_then(super::inflight::parse_started_at_unix));
     let elapsed = started_at_unix
-        .map(|started_at| now_unix.saturating_sub(started_at))
-        .filter(|elapsed_secs| *elapsed_secs > 0)
-        .map(format_turn_duration);
+        .and_then(|started_at| format_elapsed_status(now_unix.saturating_sub(started_at)))
+        .and_then(|line| line.strip_prefix(ELAPSED_PREFIX).map(str::to_string));
     CompletionFooterMetadata {
         elapsed,
         rate_limit: rate_limit.and_then(|value| nonempty(&value)),
@@ -153,19 +163,10 @@ fn nonempty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-fn format_turn_duration(total_secs: i64) -> String {
-    let minutes = total_secs / 60;
-    let seconds = total_secs % 60;
-    if minutes > 0 {
-        format!("{minutes}m {seconds}s")
-    } else {
-        format!("{seconds}s")
-    }
-}
-
 async fn terminal_rate_limit_summary(
     shared: &SharedData,
     provider: &ProviderKind,
+    context: Option<ContextWindowUsage>,
 ) -> Option<String> {
     let pool = shared.pg_pool.as_ref()?;
     let provider = provider.as_str();
@@ -176,18 +177,7 @@ async fn terminal_rate_limit_summary(
             .await
             .ok()??;
     let data = row.try_get::<String, _>("data").ok()?;
-    let buckets = serde_json::from_str::<serde_json::Value>(&data)
-        .ok()?
-        .get("buckets")?
-        .as_array()?
-        .iter()
-        .filter_map(|bucket| {
-            let name = bucket.get("name")?.as_str()?;
-            let remaining = bucket.get("remaining")?.as_i64()?.clamp(0, 100);
-            matches!(name, "5h" | "7d").then(|| format!("{name} {remaining}%"))
-        })
-        .collect::<Vec<_>>();
-    (!buckets.is_empty()).then(|| buckets.join(" · "))
+    format_usage_status(&data, chrono::Utc::now().timestamp(), context)
 }
 
 #[cfg(test)]
@@ -240,6 +230,28 @@ pub(in crate::services::discord) mod tests {
             Some("5h 80% · 7d 60%".to_string()),
             Some("node-a".to_string()),
         )
+    }
+
+    #[test]
+    fn quota_metadata_roundtrip_preserves_usage_reset_context_format_4822() {
+        let metadata = completion_footer_metadata_at(
+            1_800_000_154,
+            1_800_000_000,
+            None,
+            Some(
+                "5h: 3% (4h39m) │ 7d: 47% (4d20h) │ 7d-F: 34% (4d20h) │ ctw: 26% (265K/1.0M)"
+                    .to_string(),
+            ),
+            None,
+        );
+        let initial = append_completion_footer_metadata("Context".to_string(), &metadata);
+        let recovered = completion_footer_metadata_from_block(Some(&initial));
+        let refreshed = append_completion_footer_metadata("Context".to_string(), &recovered);
+
+        assert_eq!(initial, refreshed);
+        assert!(initial.contains(
+            "⏳ 5h: 3% (4h39m) │ 7d: 47% (4d20h) │ 7d-F: 34% (4d20h) │ ctw: 26% (265K/1.0M)"
+        ));
     }
 
     #[test]
