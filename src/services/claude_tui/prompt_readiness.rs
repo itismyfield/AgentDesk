@@ -57,9 +57,16 @@ fn claude_tui_background_agent_footer_before_composer(
     if !is_claude_tui_horizontal_separator(lines[separator_index]) {
         return None;
     }
-    let footer_index = lines[..separator_index]
+    const MAX_FOOTER_BLANK_LINES: usize = 1;
+    let blank_lines = lines[..separator_index]
         .iter()
-        .rposition(|line| !line.trim().is_empty())?;
+        .rev()
+        .take_while(|line| line.trim().is_empty())
+        .count();
+    if blank_lines > MAX_FOOTER_BLANK_LINES {
+        return None;
+    }
+    let footer_index = separator_index.checked_sub(blank_lines + 1)?;
     is_claude_tui_background_agent_footer(lines[footer_index]).then_some(footer_index)
 }
 
@@ -218,6 +225,20 @@ mod tests {
             claude_tui_background_agent_status_line_indexes(pane),
             vec![3, 10, 11],
         );
+    }
+
+    #[test]
+    fn background_agent_footer_rejects_assistant_footer_separated_by_many_blanks() {
+        let pane = "\
+✻ Waiting for 3 background agents to finish
+
+
+
+────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────
+  ◆ Opus(M) │ Tools: 224 done";
+        assert!(claude_tui_background_agent_status_line_indexes(pane).is_empty());
     }
 
     #[test]
