@@ -461,12 +461,16 @@ fn clear_record_for_live_owner_race(
     channel_id: u64,
     record: &AbandonRecord,
     after_edit: bool,
+    live_events: Option<&super::placeholder_live_events::PlaceholderLiveEvents>,
 ) {
     remove_record(provider, token_hash, channel_id, record);
     if after_edit {
+        if let Some(live_events) = live_events {
+            live_events.invalidate_panel_cache(serenity::ChannelId::new(channel_id), record.msg_id);
+        }
         // Discord offers no compare-and-swap edit. If ownership changed during the
-        // HTTP await, the stale terminal card can be visible only until the live
-        // owner's periodic bridge/watcher status tick edits this same panel again.
+        // HTTP await, force the live bridge/watcher owner past its byte-stable cache
+        // gate on the next tick so the stale terminal card is deterministically healed.
         tracing::warn!(
             target: "agentdesk::discord::live_panel",
             provider = provider.as_str(),
@@ -474,7 +478,7 @@ fn clear_record_for_live_owner_race(
             message_id = record.msg_id,
             record_user_msg_id = record.episode.user_msg_id,
             record_status_panel_generation = record.episode.status_panel_generation,
-            "abandon drain edit committed after live ownership appeared during the HTTP await; removed the stale record and awaiting the live owner's periodic panel refresh"
+            "abandon drain edit committed after live ownership appeared during the HTTP await; removed the stale record and invalidated the live owner's panel cache"
         );
     }
 }
@@ -505,7 +509,9 @@ pub(in crate::services::discord) async fn drain(
                 continue;
             }
             DrainOwnership::DropForNewerOwner => {
-                clear_record_for_live_owner_race(provider, token_hash, channel_id, &record, false);
+                clear_record_for_live_owner_race(
+                    provider, token_hash, channel_id, &record, false, None,
+                );
                 cleared += 1;
                 continue;
             }
@@ -531,7 +537,7 @@ pub(in crate::services::discord) async fn drain(
                     | DrainOwnership::DeferSameEpisodeNewRevision => continue,
                     DrainOwnership::DropForNewerOwner => {
                         clear_record_for_live_owner_race(
-                            provider, token_hash, channel_id, &record, false,
+                            provider, token_hash, channel_id, &record, false, None,
                         );
                         cleared += 1;
                         continue;
@@ -553,7 +559,12 @@ pub(in crate::services::discord) async fn drain(
                         );
                         if live_owner_raced {
                             clear_record_for_live_owner_race(
-                                provider, token_hash, channel_id, &record, true,
+                                provider,
+                                token_hash,
+                                channel_id,
+                                &record,
+                                true,
+                                Some(shared.ui.placeholder_live_events.as_ref()),
                             );
                         } else {
                             remove_record(provider, token_hash, channel_id, &record);
@@ -726,7 +737,7 @@ mod tests {
     }
 
     #[test]
-    fn post_edit_fence_detects_every_live_anchor_for_self_heal() {
+    fn post_edit_fence_detects_every_live_anchor_for_invalidation() {
         let old = rec_for_episode(5001, 7001, "2026-05-17 10:00:00");
 
         let newer = rec_for_episode(5001, 7002, "2026-05-17 10:01:00");

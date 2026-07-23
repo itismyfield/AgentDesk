@@ -196,7 +196,11 @@ pub(super) async fn update_streaming_status_tick(
                 &watcher_provider,
                 status_panel_started_at,
             );
-            if panel_text != last_status_panel_text {
+            let panel_cache_invalidation_epoch = shared
+                .ui
+                .placeholder_live_events
+                .panel_cache_invalidation_epoch(channel_id, status_msg_id.get());
+            if panel_cache_invalidation_epoch.is_some() || panel_text != last_status_panel_text {
                 rate_limit_wait(&shared, channel_id).await;
                 match crate::services::discord::http::edit_channel_message(
                     &http,
@@ -208,6 +212,16 @@ pub(super) async fn update_streaming_status_tick(
                 {
                     Ok(_) => {
                         last_status_panel_text = panel_text;
+                        if let Some(epoch) = panel_cache_invalidation_epoch {
+                            shared
+                                .ui
+                                .placeholder_live_events
+                                .clear_panel_cache_invalidation_if_epoch(
+                                    channel_id,
+                                    status_msg_id.get(),
+                                    epoch,
+                                );
+                        }
                     }
                     Err(error) => {
                         let ts = chrono::Local::now().format("%H:%M:%S");

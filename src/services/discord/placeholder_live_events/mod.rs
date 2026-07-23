@@ -13,6 +13,7 @@ mod common;
 mod completion_footer;
 mod context_panel;
 mod freshness;
+mod panel_cache_invalidation;
 mod recent_events;
 mod session_banner_claim;
 mod session_panel;
@@ -101,6 +102,7 @@ pub(in crate::services::discord) struct PlaceholderLiveEvents {
     // age here, so the rendered text stays byte-identical across heartbeat ticks
     // (no needless re-edit) while Discord shows the localized live age client-side.
     last_recent_event_unix: dashmap::DashMap<ChannelId, i64>,
+    panel_cache_invalidations: panel_cache_invalidation::PanelCacheInvalidations,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +118,44 @@ impl PlaceholderLiveEvents {
         self.status_by_channel.remove(&channel_id);
         self.last_recent_event_at.remove(&channel_id);
         self.last_recent_event_unix.remove(&channel_id); // #3812: drop the freshness anchor too.
+        self.panel_cache_invalidations.clear_channel(channel_id);
+    }
+
+    pub(in crate::services::discord) fn invalidate_panel_cache(
+        &self,
+        channel_id: ChannelId,
+        message_id: u64,
+    ) {
+        self.panel_cache_invalidations
+            .invalidate(channel_id, message_id);
+    }
+
+    pub(in crate::services::discord) fn panel_cache_invalidation_pending(
+        &self,
+        channel_id: ChannelId,
+        message_id: u64,
+    ) -> bool {
+        self.panel_cache_invalidations
+            .is_pending(channel_id, message_id)
+    }
+
+    pub(in crate::services::discord) fn panel_cache_invalidation_epoch(
+        &self,
+        channel_id: ChannelId,
+        message_id: u64,
+    ) -> Option<u64> {
+        self.panel_cache_invalidations
+            .current_epoch(channel_id, message_id)
+    }
+
+    pub(in crate::services::discord) fn clear_panel_cache_invalidation_if_epoch(
+        &self,
+        channel_id: ChannelId,
+        message_id: u64,
+        epoch: u64,
+    ) -> bool {
+        self.panel_cache_invalidations
+            .clear_if_epoch(channel_id, message_id, epoch)
     }
 
     pub(in crate::services::discord) fn clear_channel_preserving_footer_residuals(

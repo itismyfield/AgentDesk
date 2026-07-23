@@ -589,6 +589,7 @@ src/
 │   │   │   ├── context_panel.rs
 │   │   │   ├── freshness.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── panel_cache_invalidation.rs
 │   │   │   ├── recent_events.rs
 │   │   │   ├── session_banner_claim.rs
 │   │   │   ├── session_panel.rs

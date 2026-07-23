@@ -272,10 +272,15 @@ pub(super) async fn run_bridge_stream_tick(
     );
 
     if shared_owned.ui.status_panel_v2_enabled
-        && bridge_status_panel_dirty_should_edit_separate_panel(
+        && (bridge_status_panel_dirty_should_edit_separate_panel(
             status_panel_dirty,
             single_message_panel_footer_mode,
-        )
+        ) || status_panel_msg_id.is_some_and(|status_msg_id| {
+            shared_owned
+                .ui
+                .placeholder_live_events
+                .panel_cache_invalidation_pending(channel_id, status_msg_id.get())
+        }))
         && !defer_status_panel_for_first_answer
         && last_status_panel_edit.elapsed() >= status_interval
         && let Some(status_msg_id) = status_panel_msg_id
@@ -285,7 +290,11 @@ pub(super) async fn run_bridge_stream_tick(
             &provider,
             status_panel_started_at,
         );
-        if panel_text != last_status_panel_text {
+        let panel_cache_invalidation_epoch = shared_owned
+            .ui
+            .placeholder_live_events
+            .panel_cache_invalidation_epoch(channel_id, status_msg_id.get());
+        if panel_cache_invalidation_epoch.is_some() || panel_text != last_status_panel_text {
             match TurnGateway::edit_message(
                 gateway.as_ref(),
                 channel_id,
@@ -297,6 +306,16 @@ pub(super) async fn run_bridge_stream_tick(
                 Ok(()) => {
                     last_status_panel_text = panel_text;
                     last_status_panel_edit = tokio::time::Instant::now();
+                    if let Some(epoch) = panel_cache_invalidation_epoch {
+                        shared_owned
+                            .ui
+                            .placeholder_live_events
+                            .clear_panel_cache_invalidation_if_epoch(
+                                channel_id,
+                                status_msg_id.get(),
+                                epoch,
+                            );
+                    }
                     inflight_state.status_message_id = Some(status_msg_id.get());
                     state_dirty = true;
                 }
