@@ -666,6 +666,15 @@ pub(super) fn consume_monitor_auto_turn_preamble_once(injected: &mut bool) -> Op
     }
 }
 
+/// Stable outbox identity shared by prompt observation and watcher suppression
+/// for one footer-owned background completion.
+pub(in crate::services::discord) fn footer_background_marker_session_key(
+    channel_id: ChannelId,
+    event_key: &str,
+) -> String {
+    format!("footer_background:ch:{}:{event_key}", channel_id.get())
+}
+
 pub(super) fn suppressed_task_notification_marker(
     channel_id: ChannelId,
     tmux_session_name: &str,
@@ -686,11 +695,7 @@ pub(super) fn suppressed_task_notification_marker(
             )
         }
         TaskNotificationKind::Background => (
-            format!(
-                "footer_background:ch:{}:{}",
-                channel_id.get(),
-                footer_only_event_key?
-            ),
+            footer_background_marker_session_key(channel_id, footer_only_event_key?),
             "lifecycle.background_task_complete",
             "⚙️ Background complete".to_string(),
         ),
@@ -1535,7 +1540,7 @@ mod monitor_auto_turn_signal_tests {
 
 #[cfg(test)]
 mod suppressed_task_notification_marker_tests {
-    use super::suppressed_task_notification_marker;
+    use super::{footer_background_marker_session_key, suppressed_task_notification_marker};
     use crate::services::agent_protocol::TaskNotificationKind;
     use poise::serenity_prelude::ChannelId;
 
@@ -1567,6 +1572,11 @@ mod suppressed_task_notification_marker_tests {
         )
         .expect("same footer event remains marker eligible");
         assert_eq!(replay_at_new_offset.0, background_key);
+        assert_eq!(
+            footer_background_marker_session_key(channel_id, "event-identity"),
+            background_key,
+            "prompt and watcher paths must share one outbox identity"
+        );
         assert!(
             suppressed_task_notification_marker(
                 channel_id,
