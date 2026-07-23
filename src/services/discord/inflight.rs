@@ -36,7 +36,7 @@ pub(in crate::services::discord) use episode_guard::{
 };
 pub(in crate::services::discord) use store::InflightDeliveryRewindReason;
 use store::inflight_provider_dir;
-pub(in crate::services::discord::inflight) use store::inflight_state_path;
+pub(in crate::services::discord) use store::inflight_state_path;
 pub(crate) use store::lock_inflight_state_path;
 
 // #3715 / #3835: the rebind-origin dead-watcher/orphan-lock helpers PLUS the

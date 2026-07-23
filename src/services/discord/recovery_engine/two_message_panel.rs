@@ -35,6 +35,10 @@ trait RecoveryPanelGateway {
         Box::pin(async {})
     }
 
+    fn after_ownership_reload<'a>(&'a self) -> RecoveryPanelFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
     fn send_panel<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -179,7 +183,7 @@ async fn recover_two_message_panel_with_gateway<G: RecoveryPanelGateway + ?Sized
         channel_id.get(),
         new_panel_id.get(),
         &inflight::StatusPanelBindGuard {
-            require_identity: Some(identity),
+            require_identity: Some(identity.clone()),
             skip_if_panel_already_set: panel_message_id.is_none(),
             require_current_status_message_id: panel_message_id.map(MessageId::get),
             bump_status_panel_generation: true,
@@ -259,12 +263,17 @@ async fn recover_two_message_panel_with_gateway<G: RecoveryPanelGateway + ?Sized
         return false;
     }
 
-    status_panel_orphan_store::remove(
+    gateway.after_ownership_reload().await;
+    if status_panel_orphan_store::remove_pending_bind_if_owned(
         provider,
         &shared.token_hash,
         channel_id.get(),
         new_panel_id.get(),
-    );
+        &identity,
+    ) == status_panel_orphan_store::PendingBindOwnedRemovalOutcome::OwnershipMismatch
+    {
+        return false;
+    }
     *state = reloaded.expect("still_owned requires a loaded inflight row");
     true
 }
@@ -297,6 +306,7 @@ mod tests {
         deleted: Arc<Mutex<Vec<MessageId>>>,
         replacement_on_send: Option<inflight::InflightTurnState>,
         replacement_after_bind: Option<inflight::InflightTurnState>,
+        replacement_after_ownership_reload: Option<inflight::InflightTurnState>,
     }
 
     impl RecoveryPanelGateway for MockGateway {
@@ -312,6 +322,15 @@ mod tests {
             Box::pin(async move {
                 if let Some(replacement) = self.replacement_after_bind.as_ref() {
                     inflight::save_inflight_state(replacement).expect("persist post-bind owner");
+                }
+            })
+        }
+
+        fn after_ownership_reload<'a>(&'a self) -> RecoveryPanelFuture<'a, ()> {
+            Box::pin(async move {
+                if let Some(replacement) = self.replacement_after_ownership_reload.as_ref() {
+                    inflight::save_inflight_state(replacement)
+                        .expect("persist owner after ownership reload");
                 }
             })
         }
@@ -396,6 +415,7 @@ mod tests {
             deleted: Arc::new(Mutex::new(Vec::new())),
             replacement_on_send: None,
             replacement_after_bind: None,
+            replacement_after_ownership_reload: None,
         };
 
         assert!(
@@ -434,6 +454,7 @@ mod tests {
             deleted: Arc::new(Mutex::new(Vec::new())),
             replacement_on_send: None,
             replacement_after_bind: None,
+            replacement_after_ownership_reload: None,
         };
 
         assert!(
@@ -465,6 +486,7 @@ mod tests {
             deleted: Arc::new(Mutex::new(Vec::new())),
             replacement_on_send: Some(replacement.clone()),
             replacement_after_bind: None,
+            replacement_after_ownership_reload: None,
         };
 
         assert!(
@@ -501,6 +523,7 @@ mod tests {
             deleted: Arc::new(Mutex::new(Vec::new())),
             replacement_on_send: None,
             replacement_after_bind: Some(replacement.clone()),
+            replacement_after_ownership_reload: None,
         };
 
         assert!(
@@ -515,6 +538,46 @@ mod tests {
             vec![MessageId::new(200), MessageId::new(400)]
         );
         assert!(status_panel_orphan_store::load_pending(&provider, &shared.token_hash).is_empty());
+    }
+
+    #[tokio::test]
+    async fn replacement_owner_after_final_reload_keeps_recovery_panel_protected() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (_root, _guard) = isolate_runtime_root();
+        let shared = shared_with_two_message_enabled();
+        let provider = ProviderKind::Claude;
+        let mut stale = live_state(44_884, 7_005);
+        inflight::save_inflight_state(&stale).expect("seed stale owner");
+        let mut replacement = live_state(44_884, 8_005);
+        replacement.started_at = "2099-01-01 00:00:02".to_string();
+        replacement.current_msg_id = 900;
+        replacement.status_message_id = Some(901);
+        replacement.status_panel_generation = 11;
+        let gateway = MockGateway {
+            probe: PersistedPanelState::Live,
+            next_id: MessageId::new(400),
+            sent: Arc::new(Mutex::new(Vec::new())),
+            deleted: Arc::new(Mutex::new(Vec::new())),
+            replacement_on_send: None,
+            replacement_after_bind: None,
+            replacement_after_ownership_reload: Some(replacement.clone()),
+        };
+
+        assert!(
+            !recover_two_message_panel_with_gateway(&gateway, &shared, &provider, &mut stale).await
+        );
+        let durable = inflight::load_inflight_state(&provider, replacement.channel_id)
+            .expect("replacement owner remains");
+        assert_eq!(durable.user_msg_id, replacement.user_msg_id);
+        assert_eq!(durable.status_message_id, Some(901));
+        assert_eq!(*gateway.deleted.lock().unwrap(), vec![MessageId::new(200)]);
+        assert_eq!(
+            status_panel_orphan_store::load_pending(&provider, &shared.token_hash),
+            vec![(replacement.channel_id, 400)],
+            "the failed exact-owner removal must leave the panel for the sweeper"
+        );
     }
 
     #[test]
