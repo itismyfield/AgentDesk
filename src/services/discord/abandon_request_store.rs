@@ -51,9 +51,19 @@ use super::placeholder_sweeper::{PlaceholderProbe, probe_placeholder_state};
 use crate::services::discord::runtime_store;
 use crate::services::provider::ProviderKind;
 
-/// One stranded placeholder awaiting a terminal "중단됨" finalize. `msg_id` is the
-/// dedup key within a channel; `started_at` / `current_tool_line` render the
-/// abandoned card (no inflight row is consulted at drain time).
+/// Terminal state requested for a stranded live card. Legacy records predate
+/// this field and therefore deserialize as `Aborted`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::services::discord) enum TerminalCardStatus {
+    Completed,
+    #[default]
+    Aborted,
+}
+
+/// One stranded live card awaiting a terminal edit. `msg_id` is the dedup key
+/// within a channel; the remaining fields render the terminal card without an
+/// inflight row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(in crate::services::discord) struct AbandonRecord {
     pub msg_id: u64,
@@ -61,6 +71,8 @@ pub(in crate::services::discord) struct AbandonRecord {
     pub started_at: String,
     #[serde(default)]
     pub current_tool_line: Option<String>,
+    #[serde(default)]
+    pub terminal_status: TerminalCardStatus,
 }
 
 /// Serializes the read-modify-write of `enqueue`/`remove` across the failure-path
@@ -137,7 +149,13 @@ fn enqueue_in_root(
     let mut records = load_channel_in_root(root, provider, token_hash, channel_id);
     // Idempotent set semantics keyed by msg_id: a heartbeat sweeper that
     // re-observes the same stranded placeholder must not grow the file.
-    if records.iter().any(|r| r.msg_id == record.msg_id) {
+    if let Some(existing) = records.iter_mut().find(|r| r.msg_id == record.msg_id) {
+        if existing.terminal_status == TerminalCardStatus::Aborted
+            && record.terminal_status == TerminalCardStatus::Completed
+        {
+            *existing = record;
+            return save_channel_in_root(root, provider, token_hash, channel_id, &records);
+        }
         return Ok(());
     }
     records.push(record);
@@ -257,12 +275,16 @@ pub(in crate::services::discord) fn is_queued(
     is_queued_in_root(&root, provider, token_hash, channel_id, msg_id)
 }
 
-/// Render the terminal "중단됨" abandoned card for a record (no inflight row).
-fn build_abandoned_card(record: &AbandonRecord) -> String {
+/// Render the requested terminal card for a record (no inflight row).
+fn build_terminal_card(record: &AbandonRecord) -> String {
     let started_at_unix = super::inflight::parse_started_at_unix(&record.started_at)
         .unwrap_or_else(|| chrono::Utc::now().timestamp());
+    let status = match record.terminal_status {
+        TerminalCardStatus::Completed => MonitorHandoffStatus::Completed,
+        TerminalCardStatus::Aborted => MonitorHandoffStatus::Aborted,
+    };
     build_monitor_handoff_placeholder(
-        MonitorHandoffStatus::Aborted,
+        status,
         MonitorHandoffReason::AsyncDispatch,
         started_at_unix,
         record.current_tool_line.as_deref(),
@@ -297,19 +319,23 @@ pub(in crate::services::discord) async fn drain(
         if !is_queued(provider, token_hash, channel_id, record.msg_id) {
             continue;
         }
-        // Defer while a live inflight row still anchors this exact placeholder —
-        // its own completion/relay path may be editing it, and our unlocked edit
-        // would race that. (With immediate row deletion on the failure path this
-        // is rare, but a re-adopt that reused the id makes it load-bearing.)
-        let inflight_anchor = super::inflight::load_inflight_state(provider, channel_id)
-            .map(|state| state.current_msg_id);
-        if abandon_drain_defers_for_live_anchor(inflight_anchor, record.msg_id) {
+        // Defer while a live inflight row still anchors this exact message. The
+        // same durable store also carries separate status-panel reconciliation,
+        // so both assistant placeholders and status panels participate in this
+        // ownership fence.
+        let inflight = super::inflight::load_inflight_state(provider, channel_id);
+        let inflight_anchor = inflight.as_ref().map(|state| state.current_msg_id);
+        let live_status_panel_anchor =
+            inflight.as_ref().and_then(|state| state.status_message_id) == Some(record.msg_id);
+        if abandon_drain_defers_for_live_anchor(inflight_anchor, record.msg_id)
+            || live_status_panel_anchor
+        {
             continue;
         }
         let probe = probe_placeholder_state(http, channel_id, record.msg_id).await;
         match probe {
             PlaceholderProbe::StillPlaceholder => {
-                let text = build_abandoned_card(&record);
+                let text = build_terminal_card(&record);
                 let channel = serenity::ChannelId::new(channel_id);
                 let message = serenity::MessageId::new(record.msg_id);
                 match super::gateway::edit_outbound_message(
@@ -362,6 +388,7 @@ mod tests {
             msg_id,
             started_at: "2026-05-17 10:00:00".to_string(),
             current_tool_line: None,
+            terminal_status: TerminalCardStatus::Aborted,
         }
     }
 
@@ -391,6 +418,39 @@ mod tests {
         // Removing the last record deletes the channel file.
         remove_in_root(root, &provider, token, 100, 5002);
         assert!(load_pending_in_root(root, &provider, token).is_empty());
+    }
+
+    #[test]
+    fn completed_terminal_request_upgrades_abort_for_same_panel() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let root = root.path();
+        let provider = ProviderKind::Claude;
+        enqueue_in_root(root, &provider, "tok", 100, rec(5001)).expect("abort enqueue");
+        enqueue_in_root(
+            root,
+            &provider,
+            "tok",
+            100,
+            AbandonRecord {
+                terminal_status: TerminalCardStatus::Completed,
+                ..rec(5001)
+            },
+        )
+        .expect("completion upgrade");
+
+        let pending = load_pending_in_root(root, &provider, "tok");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].1.terminal_status, TerminalCardStatus::Completed);
+        assert!(build_terminal_card(&pending[0].1).contains("응답 완료"));
+    }
+
+    #[test]
+    fn legacy_record_defaults_to_aborted_terminal_status() {
+        let record: AbandonRecord = serde_json::from_str(
+            r#"{"msg_id":7,"started_at":"2026-05-17 09:00:00","current_tool_line":null}"#,
+        )
+        .expect("legacy record");
+        assert_eq!(record.terminal_status, TerminalCardStatus::Aborted);
     }
 
     /// #3859 r5: a failed durable write surfaces as `Err` (so the failure-path
@@ -448,6 +508,7 @@ mod tests {
                 msg_id: 7,
                 started_at: "2026-05-17 09:00:00".to_string(),
                 current_tool_line: Some("⚙ Bash: cargo build".to_string()),
+                terminal_status: TerminalCardStatus::Aborted,
             },
         )
         .expect("enqueue");
@@ -470,7 +531,7 @@ mod tests {
 
     #[test]
     fn abandoned_card_renders_terminal_marker() {
-        let card = build_abandoned_card(&rec(9001));
+        let card = build_terminal_card(&rec(9001));
         // Aborted handoff header — the terminal "중단됨" card the drain edits in.
         assert!(card.contains("응답 중단"), "card was: {card}");
     }

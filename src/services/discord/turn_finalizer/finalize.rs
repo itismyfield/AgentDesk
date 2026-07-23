@@ -54,6 +54,13 @@ pub(super) async fn do_finalize(
     // nothing — their guarantee runs at submit time from the pre-clear snapshot
     // (`submit_terminal_with_claim_snapshot`); rationale/gates: cleanup.rs.
     super::cleanup::ensure_synthetic_claim_marker_before_clear(key, &provider, submit_snapshot);
+    super::cleanup::enqueue_terminal_status_panel_reconcile(
+        key,
+        &provider,
+        event,
+        submit_snapshot,
+        shared.as_ref(),
+    );
     let skip_completion_reaction =
         super::cleanup::relay_ownership_only_for_finalize(key, &provider, submit_snapshot);
     let relay_owner_kind =

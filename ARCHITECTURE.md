@@ -602,7 +602,8 @@ src/
 │   │   │   ├── turn_anchor.rs
 │   │   │   └── workflow_panel.rs
 │   │   ├── placeholder_sweeper/
-│   │   │   └── abandon_guard.rs
+│   │   │   ├── abandon_guard.rs
+│   │   │   └── panel_shape.rs
 │   │   ├── prompt_builder/
 │   │   │   ├── channel_recent_context.rs
 │   │   │   ├── dispatch_contract.rs
