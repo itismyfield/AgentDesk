@@ -22,8 +22,9 @@ use anyhow::Result;
 use axum::Router;
 use axum::routing::get;
 use serde::Serialize;
-use sqlx::pool::PoolConnection;
-use sqlx::{PgPool, Postgres, Row};
+use sqlx::{PgPool, Row};
+
+use crate::db::postgres::AdvisoryLockLease;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tower_http::services::{ServeDir, ServeFile};
@@ -119,29 +120,12 @@ async fn try_acquire_pg_singleton_lock(
     pool: &PgPool,
     lock_id: i64,
     job_name: &str,
-) -> std::result::Result<Option<PoolConnection<Postgres>>, String> {
-    let mut conn = pool
-        .acquire()
-        .await
-        .map_err(|error| format!("{job_name} acquire advisory lock connection: {error}"))?;
-    let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
-        .bind(lock_id)
-        .fetch_one(&mut *conn)
-        .await
-        .map_err(|error| format!("{job_name} try advisory lock: {error}"))?;
-    if acquired { Ok(Some(conn)) } else { Ok(None) }
+) -> std::result::Result<Option<AdvisoryLockLease>, String> {
+    AdvisoryLockLease::try_acquire(pool, lock_id, job_name).await
 }
 
-async fn release_pg_singleton_lock(
-    mut conn: PoolConnection<Postgres>,
-    lock_id: i64,
-    job_name: &str,
-) {
-    if let Err(error) = sqlx::query("SELECT pg_advisory_unlock($1)")
-        .bind(lock_id)
-        .execute(&mut *conn)
-        .await
-    {
+async fn release_pg_singleton_lock(lease: AdvisoryLockLease, lock_id: i64, job_name: &str) {
+    if let Err(error) = lease.unlock().await {
         tracing::warn!("[{job_name}] failed to release advisory lock {lock_id}: {error}");
     }
 }

@@ -448,6 +448,15 @@
 ### Audited touches
 - #4779 target preflight: added a pure fail-closed readiness report and transfer guard over worker-node capability evidence; owner mutation remains delegated to the generation-fenced handoff interface.
 
+- #4800 PostgreSQL pool-starvation fix: the existing `policy-tick` and
+  `github-sync` session advisory locks retain lock IDs 7,801,001 and 7,801,002
+  and the same singleton critical sections, but each lock now owns a dedicated
+  PostgreSQL connection instead of pinning a node-local runtime-pool slot across
+  nested database work or GitHub CLI network I/O. The runtime-pool acquire
+  deadline rises from 3s to 10s as burst margin. Classification:
+  **leader-only/singleton behavior unchanged, worker-local pool capacity freed**;
+  this changes no leader election, lock key, shared-row authority, routing rule,
+  or failover semantics.
 - #4781 text-only routed attachment contract: leader-side `intake_router_hook.rs` rejects gateway-local attachment paths before a foreign-owner, `/node`, or preferred-label outbox insert. Queued nonportable uploads are notice-and-drop rather than indefinitely requeued; this changes no leader election, worker lease, or durable owner authority.
 - #4706 structural lint debt backfill: item-level Clippy annotations and their checked-in occurrence ratchet change no runtime ownership, leader election, PG lease, or multinode routing behavior.
 - #4515 worker-local recovery supervision: `src/server/worker_recovery.rs` owns
@@ -552,8 +561,9 @@
   authority, PG lease, or leader-only side effect changes.
 - #4249 PostgreSQL bootstrap timeout hardening runs migration/reseed on an eager
   startup pool with a 10s acquire deadline, then eagerly activates the separate
-  runtime pool with the original 3s deadline before the shared six-attempt
-  retry/alert envelope can succeed. Typed `sqlx::Error::PoolTimedOut` failures
+  runtime pool before the shared six-attempt retry/alert envelope can succeed.
+  The runtime deadline was originally 3s and became 10s in #4800. Typed
+  `sqlx::Error::PoolTimedOut` failures
   get timestamped, source-attributed bootstrap diagnostics.
   Classification: **worker-local** — every node owns its own connection pool,
   wait budget, retry loop, and stderr; this changes no shared row, schema,
