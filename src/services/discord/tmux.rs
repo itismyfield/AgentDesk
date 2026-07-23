@@ -666,23 +666,68 @@ pub(super) fn consume_monitor_auto_turn_preamble_once(injected: &mut bool) -> Op
     }
 }
 
-fn enqueue_monitor_auto_turn_suppressed_notification(
+pub(super) fn suppressed_task_notification_marker(
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    data_start_offset: u64,
+    kind: TaskNotificationKind,
+    event_count: usize,
+    monitor_entry_keys: &[String],
+) -> (String, &'static str, String) {
+    match kind {
+        TaskNotificationKind::MonitorAutoTurn => {
+            let session_key = monitor_auto_turn_session_key(channel_id, data_start_offset);
+            let label = monitor_auto_turn_label(tmux_session_name);
+            (
+                session_key,
+                MONITOR_AUTO_TURN_REASON_CODE,
+                monitor_auto_turn_completion_notice(&label, event_count, monitor_entry_keys),
+            )
+        }
+        TaskNotificationKind::Background => (
+            format!(
+                "background_task_notification:ch:{}:off:{}",
+                channel_id.get(),
+                data_start_offset
+            ),
+            "lifecycle.background_task_complete",
+            "⚙️ Background complete".to_string(),
+        ),
+        TaskNotificationKind::Subagent => (
+            format!(
+                "subagent_notification:ch:{}:off:{}",
+                channel_id.get(),
+                data_start_offset
+            ),
+            "lifecycle.agent_message_arrived",
+            "🤖 Agent message arrived".to_string(),
+        ),
+    }
+}
+
+pub(super) fn enqueue_suppressed_task_notification(
     pg_pool: Option<&sqlx::PgPool>,
     channel_id: ChannelId,
     tmux_session_name: &str,
     data_start_offset: u64,
+    kind: TaskNotificationKind,
     event_count: usize,
-    entry_keys: &[String],
+    monitor_entry_keys: &[String],
 ) -> bool {
     let target = format!("channel:{}", channel_id.get());
-    let session_key = monitor_auto_turn_session_key(channel_id, data_start_offset);
-    let label = monitor_auto_turn_label(tmux_session_name);
-    let content = monitor_auto_turn_completion_notice(&label, event_count, entry_keys);
+    let (session_key, reason_code, content) = suppressed_task_notification_marker(
+        channel_id,
+        tmux_session_name,
+        data_start_offset,
+        kind,
+        event_count,
+        monitor_entry_keys,
+    );
     enqueue_lifecycle_notification_best_effort(
         pg_pool,
         target.as_str(),
         Some(session_key.as_str()),
-        MONITOR_AUTO_TURN_REASON_CODE,
+        reason_code,
         content.as_str(),
     )
 }
@@ -1486,6 +1531,44 @@ mod monitor_auto_turn_signal_tests {
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
         let snapshot = shared.mailbox(channel_id).snapshot().await;
         assert_eq!(snapshot.active_user_message_id, None);
+    }
+}
+
+#[cfg(test)]
+mod suppressed_task_notification_marker_tests {
+    use super::suppressed_task_notification_marker;
+    use crate::services::agent_protocol::TaskNotificationKind;
+    use poise::serenity_prelude::ChannelId;
+
+    #[test]
+    fn background_and_subagent_markers_are_discrete_and_offset_deduped() {
+        let channel_id = ChannelId::new(4_799);
+        let (background_key, background_reason, background) = suppressed_task_notification_marker(
+            channel_id,
+            "AgentDesk-claude-4799",
+            44,
+            TaskNotificationKind::Background,
+            1,
+            &[],
+        );
+        assert_eq!(
+            background_key,
+            "background_task_notification:ch:4799:off:44"
+        );
+        assert_eq!(background_reason, "lifecycle.background_task_complete");
+        assert_eq!(background, "⚙️ Background complete");
+
+        let (subagent_key, subagent_reason, subagent) = suppressed_task_notification_marker(
+            channel_id,
+            "AgentDesk-claude-4799",
+            45,
+            TaskNotificationKind::Subagent,
+            1,
+            &[],
+        );
+        assert_eq!(subagent_key, "subagent_notification:ch:4799:off:45");
+        assert_eq!(subagent_reason, "lifecycle.agent_message_arrived");
+        assert_eq!(subagent, "🤖 Agent message arrived");
     }
 }
 

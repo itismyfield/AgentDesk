@@ -2167,15 +2167,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             } else {
                 Vec::new()
             };
-            if matches!(
-                task_notification_kind,
-                Some(TaskNotificationKind::MonitorAutoTurn)
-            ) {
-                let _ = enqueue_monitor_auto_turn_suppressed_notification(
+            if let Some(kind @ (TaskNotificationKind::MonitorAutoTurn
+            | TaskNotificationKind::Background
+            | TaskNotificationKind::Subagent)) = task_notification_kind
+            {
+                let _ = enqueue_suppressed_task_notification(
                     shared.pg_pool.as_ref(),
                     channel_id,
                     &tmux_session_name,
                     data_start_offset,
+                    kind,
                     monitor_event_count,
                     &monitor_entry_keys,
                 );
