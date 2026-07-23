@@ -2003,7 +2003,10 @@ these contextual numbers to match ordinary LoC churn.
   and flag-OFF pin tests; +7 from #3610 PR-1 passing the terminal anchor into the
   delivered-frontier shadow mirror; -1 prod from #4055 thin
   card-before-answer/context wiring, with task policy extracted to
-  `session_relay_sink/task_notification_context.rs`).
+  `session_relay_sink/task_notification_context.rs`; -135 prod from #4365 moving
+  the turn parser into `session_relay_sink/turn_parser.rs`, where terminal parse
+  atomically hands off completed response/context and clears turn-local state
+  before asynchronous Discord delivery).
 
 Decomposed below the giant-file threshold (no longer frozen; bugfix-scoped but
 normal test growth is allowed): `src/services/analytics.rs`,
