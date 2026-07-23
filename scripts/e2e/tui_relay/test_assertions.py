@@ -336,6 +336,20 @@ class RunAssertionDispatch(unittest.TestCase):
         with self.assertRaises(assertions.AssertionError):
             self.run_assertion({"ordered_text_present": ["b", "a"]}, window=window)
 
+    def test_feature_required_assertion_is_skipped_until_enabled(self):
+        spec = {
+            "requires_feature": "two_message_panel",
+            "status_panel_after_body": {"body_marker": "[BODY]"},
+        }
+        empty = _window(_relay_msg(1, "body [BODY]"))
+        self.run_assertion(spec, window=empty)
+        with self.assertRaises(assertions.AssertionError):
+            self.run_assertion(
+                spec,
+                window=empty,
+                enabled_features=frozenset({"two_message_panel"}),
+            )
+
     def test_no_duplicate_marker_dispatch(self):
         window = _window(_relay_msg(1, "x [M]"), _relay_msg(2, "y [M]"))
         with self.assertRaises(assertions.AssertionError):

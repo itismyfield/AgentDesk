@@ -31,6 +31,10 @@ trait RecoveryPanelGateway {
         panel_id: MessageId,
     ) -> RecoveryPanelFuture<'a, PersistedPanelState>;
 
+    fn after_bind<'a>(&'a self) -> RecoveryPanelFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
     fn send_panel<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -143,11 +147,8 @@ async fn recover_two_message_panel_with_gateway<G: RecoveryPanelGateway + ?Sized
         return false;
     }
 
-    let started_at_unix =
-        chrono::NaiveDateTime::parse_from_str(&state.started_at, "%Y-%m-%d %H:%M:%S")
-            .ok()
-            .map(|timestamp| timestamp.and_utc().timestamp())
-            .unwrap_or_else(|| chrono::Utc::now().timestamp());
+    let started_at_unix = inflight::parse_started_at_unix(&state.started_at)
+        .unwrap_or_else(|| chrono::Utc::now().timestamp());
     let panel_text = shared.ui.placeholder_live_events.render_status_panel(
         channel_id,
         provider,
@@ -214,12 +215,7 @@ async fn recover_two_message_panel_with_gateway<G: RecoveryPanelGateway + ?Sized
         return false;
     }
 
-    status_panel_orphan_store::remove(
-        provider,
-        &shared.token_hash,
-        channel_id.get(),
-        new_panel_id.get(),
-    );
+    gateway.after_bind().await;
     if let Some(old_panel_id) = panel_message_id
         && panel_state == PersistedPanelState::Live
         && gateway
@@ -235,15 +231,41 @@ async fn recover_two_message_panel_with_gateway<G: RecoveryPanelGateway + ?Sized
         );
     }
 
-    let Some(reloaded) = inflight::load_inflight_state(provider, channel_id.get()) else {
-        return false;
-    };
-    if !inflight::InflightTurnIdentity::from_state(state).matches_state(&reloaded)
-        || reloaded.status_message_id != Some(new_panel_id.get())
-    {
+    let reloaded = inflight::load_inflight_state(provider, channel_id.get());
+    let still_owned = reloaded.as_ref().is_some_and(|reloaded| {
+        inflight::InflightTurnIdentity::from_state(state).matches_state(reloaded)
+            && reloaded.status_message_id == Some(new_panel_id.get())
+    });
+    if !still_owned {
+        if gateway
+            .delete_panel(channel_id, new_panel_id)
+            .await
+            .is_err()
+        {
+            status_panel_orphan_store::enqueue(
+                provider,
+                &shared.token_hash,
+                channel_id.get(),
+                new_panel_id.get(),
+            );
+        } else {
+            status_panel_orphan_store::remove(
+                provider,
+                &shared.token_hash,
+                channel_id.get(),
+                new_panel_id.get(),
+            );
+        }
         return false;
     }
-    *state = reloaded;
+
+    status_panel_orphan_store::remove(
+        provider,
+        &shared.token_hash,
+        channel_id.get(),
+        new_panel_id.get(),
+    );
+    *state = reloaded.expect("still_owned requires a loaded inflight row");
     true
 }
 
@@ -274,6 +296,7 @@ mod tests {
         sent: Arc<Mutex<Vec<MessageId>>>,
         deleted: Arc<Mutex<Vec<MessageId>>>,
         replacement_on_send: Option<inflight::InflightTurnState>,
+        replacement_after_bind: Option<inflight::InflightTurnState>,
     }
 
     impl RecoveryPanelGateway for MockGateway {
@@ -283,6 +306,14 @@ mod tests {
             _panel_id: MessageId,
         ) -> RecoveryPanelFuture<'a, PersistedPanelState> {
             Box::pin(async move { self.probe })
+        }
+
+        fn after_bind<'a>(&'a self) -> RecoveryPanelFuture<'a, ()> {
+            Box::pin(async move {
+                if let Some(replacement) = self.replacement_after_bind.as_ref() {
+                    inflight::save_inflight_state(replacement).expect("persist post-bind owner");
+                }
+            })
         }
 
         fn send_panel<'a>(
@@ -364,6 +395,7 @@ mod tests {
             sent: Arc::new(Mutex::new(Vec::new())),
             deleted: Arc::new(Mutex::new(Vec::new())),
             replacement_on_send: None,
+            replacement_after_bind: None,
         };
 
         assert!(
@@ -401,6 +433,7 @@ mod tests {
             sent: Arc::new(Mutex::new(Vec::new())),
             deleted: Arc::new(Mutex::new(Vec::new())),
             replacement_on_send: None,
+            replacement_after_bind: None,
         };
 
         assert!(
@@ -431,6 +464,7 @@ mod tests {
             sent: Arc::new(Mutex::new(Vec::new())),
             deleted: Arc::new(Mutex::new(Vec::new())),
             replacement_on_send: Some(replacement.clone()),
+            replacement_after_bind: None,
         };
 
         assert!(
@@ -443,6 +477,44 @@ mod tests {
         assert_eq!(durable.status_message_id, Some(901));
         assert_eq!(durable.status_panel_generation, 11);
         assert_eq!(*gateway.deleted.lock().unwrap(), vec![MessageId::new(400)]);
+    }
+
+    #[tokio::test]
+    async fn replacement_owner_after_bind_cannot_leak_recovery_panel() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (_root, _guard) = isolate_runtime_root();
+        let shared = shared_with_two_message_enabled();
+        let provider = ProviderKind::Claude;
+        let mut stale = live_state(44_883, 7_004);
+        inflight::save_inflight_state(&stale).expect("seed stale owner");
+        let mut replacement = live_state(44_883, 8_004);
+        replacement.started_at = "2099-01-01 00:00:01".to_string();
+        replacement.current_msg_id = 900;
+        replacement.status_message_id = Some(901);
+        replacement.status_panel_generation = 11;
+        let gateway = MockGateway {
+            probe: PersistedPanelState::Live,
+            next_id: MessageId::new(400),
+            sent: Arc::new(Mutex::new(Vec::new())),
+            deleted: Arc::new(Mutex::new(Vec::new())),
+            replacement_on_send: None,
+            replacement_after_bind: Some(replacement.clone()),
+        };
+
+        assert!(
+            !recover_two_message_panel_with_gateway(&gateway, &shared, &provider, &mut stale).await
+        );
+        let durable = inflight::load_inflight_state(&provider, replacement.channel_id)
+            .expect("replacement owner remains");
+        assert_eq!(durable.user_msg_id, replacement.user_msg_id);
+        assert_eq!(durable.status_message_id, Some(901));
+        assert_eq!(
+            *gateway.deleted.lock().unwrap(),
+            vec![MessageId::new(200), MessageId::new(400)]
+        );
+        assert!(status_panel_orphan_store::load_pending(&provider, &shared.token_hash).is_empty());
     }
 
     #[test]

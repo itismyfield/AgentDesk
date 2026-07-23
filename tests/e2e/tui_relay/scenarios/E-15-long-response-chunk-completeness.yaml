@@ -49,6 +49,11 @@ assertions:
   - no_duplicate_marker: "[E2E:E15:END]"
   # #4488 PR-F: the separate status panel must remain below the newest chunk
   # after the long-answer rollover.
-  - status_panel_after_body:
+  # These rollout assertions are opt-in. Set
+  # AGENTDESK_E2E_FEATURES=two_message_panel only when the boot-bound
+  # placeholder.two_message_panel_enabled flag is enabled for the target.
+  - requires_feature: two_message_panel
+    status_panel_after_body:
       body_marker: "[E2E:E15:END]"
-  - single_status_panel: true
+  - requires_feature: two_message_panel
+    single_status_panel: true
