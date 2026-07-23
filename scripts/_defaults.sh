@@ -641,11 +641,11 @@ health_json_is_ready() {
       fi
       return 1
     fi
-    [ "$status" = "healthy" ] && return 0
     if _health_json_field_is_true "$health_json" "cluster_standby"; then
       _health_json_gateway_standby_only "$health_json"
       return $?
     fi
+    [ "$status" = "healthy" ] && return 0
     if [ "$allow_reconcile_degraded" = "1" ] \
       && _health_json_field_exists "$health_json" "fully_recovered" \
       && _health_json_field_is_false "$health_json" "fully_recovered"; then
@@ -657,13 +657,13 @@ health_json_is_ready() {
     return 1
   fi
 
-  if [ "$status" = "healthy" ]; then
-    return 0
-  fi
-
   if _health_json_field_is_true "$health_json" "cluster_standby"; then
     _health_json_gateway_standby_only "$health_json"
     return $?
+  fi
+
+  if [ "$status" = "healthy" ]; then
+    return 0
   fi
 
   if [ "$allow_reconcile_degraded" = "1" ] && _health_json_reconcile_only "$health_json"; then

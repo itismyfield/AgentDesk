@@ -4,7 +4,7 @@ use sqlx::Connection;
 
 use super::gateway_lease_recovery::{
     GATEWAY_LEASE_APPLICATION_PREFIX, GatewayLeaseHolder, gateway_holder_is_reapable,
-    reap_orphaned_gateway_lease_with_min_age,
+    gateway_lease_application_name_for, reap_orphaned_gateway_lease_for_instance_with_min_age,
 };
 use crate::services::discord::ProviderKind;
 
@@ -12,11 +12,12 @@ use crate::services::discord::ProviderKind;
 fn orphan_reap_requires_named_stale_matching_worker() {
     let safe = GatewayLeaseHolder {
         pid: 42,
-        application_name: "agentdesk:gateway:node:a:42:claude".to_string(),
+        application_name: gateway_lease_application_name_for("node:a", 42, "claude"),
         instance_id: Some("node:a".to_string()),
         node_status: Some("offline".to_string()),
         heartbeat_recent: Some(false),
         process_matches: Some(true),
+        dcserver_pid: Some(42),
     };
     assert!(gateway_holder_is_reapable(&safe));
 
@@ -91,7 +92,7 @@ async fn gateway_orphan_reap_uses_production_query_and_right_parses_instance_id_
     .await
     .expect("connect isolated gateway reap database");
 
-    let instance_id = "node:east";
+    let instance_id = &format!("node:east:{}", "x".repeat(120));
     let dcserver_pid = std::process::id() as i32;
     sqlx::query(
         "INSERT INTO worker_nodes (
@@ -105,7 +106,8 @@ async fn gateway_orphan_reap_uses_production_query_and_right_parses_instance_id_
     .expect("seed stale worker node");
 
     let holder_name =
-        format!("{GATEWAY_LEASE_APPLICATION_PREFIX}{instance_id}:{dcserver_pid}:claude");
+        gateway_lease_application_name_for(instance_id, dcserver_pid as u32, "claude");
+    assert!(holder_name.len() <= 63);
     let options = sqlx::postgres::PgConnectOptions::from_str(&database_url)
         .expect("parse isolated database url")
         .application_name(&holder_name);
@@ -133,9 +135,26 @@ async fn gateway_orphan_reap_uses_production_query_and_right_parses_instance_id_
         .await
         .expect("leave holder idle");
 
-    let reaped = reap_orphaned_gateway_lease_with_min_age(&pool, lock_id, &ProviderKind::Claude, 0)
-        .await
-        .expect("run production orphan reap query");
+    let stored_name: String =
+        sqlx::query_scalar("SELECT application_name FROM pg_stat_activity WHERE pid = $1")
+            .bind(backend_pid)
+            .fetch_one(&pool)
+            .await
+            .expect("read stored application name");
+    assert_eq!(
+        stored_name, holder_name,
+        "bounded identity must survive PostgreSQL storage"
+    );
+
+    let reaped = reap_orphaned_gateway_lease_for_instance_with_min_age(
+        &pool,
+        lock_id,
+        &ProviderKind::Claude,
+        0,
+        instance_id,
+    )
+    .await
+    .expect("run production orphan reap query");
     assert!(
         reaped,
         "production query must reap delimiter-bearing stale instance"

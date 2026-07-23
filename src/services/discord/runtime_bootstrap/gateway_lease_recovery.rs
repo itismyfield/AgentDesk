@@ -8,6 +8,12 @@ pub(super) const GATEWAY_STANDBY_RETRY_JITTER_SECS: u64 = 30;
 pub(super) const GATEWAY_ORPHAN_MIN_AGE_SECS: i64 = 30 * 60;
 pub(super) const GATEWAY_LEASE_APPLICATION_PREFIX: &str = "agentdesk:gateway:";
 
+fn gateway_instance_tag(instance_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(instance_id.as_bytes());
+    hex::encode(&digest[..8])
+}
+
 pub(super) fn gateway_lease_application_name(provider: &ProviderKind) -> String {
     let config = crate::config::load_graceful();
     let instance_id = config
@@ -20,11 +26,20 @@ pub(super) fn gateway_lease_application_name(provider: &ProviderKind) -> String 
         .unwrap_or_else(|| {
             crate::services::cluster::node_registry::resolve_self_instance_id_without_config()
         });
-    format!(
-        "{GATEWAY_LEASE_APPLICATION_PREFIX}{instance_id}:{}:{}",
-        std::process::id(),
-        provider.as_str()
-    )
+    gateway_lease_application_name_for(&instance_id, std::process::id(), provider.as_str())
+}
+
+pub(super) fn gateway_lease_application_name_for(
+    instance_id: &str,
+    dcserver_pid: u32,
+    provider: &str,
+) -> String {
+    let name = format!(
+        "{GATEWAY_LEASE_APPLICATION_PREFIX}{}:{dcserver_pid}:{provider}",
+        gateway_instance_tag(instance_id)
+    );
+    debug_assert!(name.len() <= 63);
+    name
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
@@ -35,6 +50,7 @@ pub(super) struct GatewayLeaseHolder {
     pub(super) node_status: Option<String>,
     pub(super) heartbeat_recent: Option<bool>,
     pub(super) process_matches: Option<bool>,
+    pub(super) dcserver_pid: Option<i32>,
 }
 
 pub(super) fn gateway_holder_is_reapable(holder: &GatewayLeaseHolder) -> bool {
@@ -45,6 +61,7 @@ pub(super) fn gateway_holder_is_reapable(holder: &GatewayLeaseHolder) -> bool {
         && holder.node_status.as_deref() != Some("online")
         && holder.heartbeat_recent == Some(false)
         && holder.process_matches == Some(true)
+        && holder.dcserver_pid.is_some()
 }
 
 pub(super) async fn reap_orphaned_gateway_lease_once(
@@ -62,6 +79,35 @@ pub(super) async fn reap_orphaned_gateway_lease_with_min_age(
     provider: &ProviderKind,
     min_age_secs: i64,
 ) -> Result<bool, String> {
+    let config = crate::config::load_graceful();
+    let instance_id = config
+        .cluster
+        .instance_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            crate::services::cluster::node_registry::resolve_self_instance_id_without_config()
+        });
+    reap_orphaned_gateway_lease_for_instance_with_min_age(
+        pool,
+        lock_id,
+        provider,
+        min_age_secs,
+        &instance_id,
+    )
+    .await
+}
+
+pub(super) async fn reap_orphaned_gateway_lease_for_instance_with_min_age(
+    pool: &sqlx::PgPool,
+    lock_id: i64,
+    provider: &ProviderKind,
+    min_age_secs: i64,
+    instance_id: &str,
+) -> Result<bool, String> {
+    let instance_tag = gateway_instance_tag(instance_id);
     let holder = sqlx::query_as::<_, GatewayLeaseHolder>(
         r#"
         SELECT a.pid,
@@ -69,16 +115,18 @@ pub(super) async fn reap_orphaned_gateway_lease_with_min_age(
                n.instance_id,
                n.status AS node_status,
                (n.last_heartbeat_at >= NOW() - ($2::BIGINT * INTERVAL '1 second')) AS heartbeat_recent,
-               (n.process_id IS NOT NULL) AS process_matches
+               (n.process_id IS NOT NULL) AS process_matches,
+               parsed[2]::INTEGER AS dcserver_pid
           FROM pg_locks l
           JOIN pg_stat_activity a ON a.pid = l.pid
           LEFT JOIN LATERAL regexp_match(
               a.application_name,
-              '^agentdesk:gateway:(.*):([0-9]+):([^:]+)$'
+              '^agentdesk:gateway:([0-9a-f]{16}):([0-9]+):([^:]+)$'
           ) parsed ON TRUE
           LEFT JOIN worker_nodes n
-            ON parsed[1] = n.instance_id
+            ON n.instance_id = $5
            AND n.process_id = parsed[2]::INTEGER
+           AND parsed[1] = $6
            AND parsed[3] = $4
          WHERE l.locktype = 'advisory'
            AND l.granted
@@ -96,6 +144,8 @@ pub(super) async fn reap_orphaned_gateway_lease_with_min_age(
     .bind(min_age_secs)
     .bind(GATEWAY_LEASE_APPLICATION_PREFIX)
     .bind(provider.as_str())
+    .bind(instance_id)
+    .bind(&instance_tag)
     .fetch_optional(pool)
     .await
     .map_err(|error| format!("inspect discord gateway lease holder: {error}"))?;

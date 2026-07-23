@@ -97,6 +97,8 @@ GATEWAY_STANDBY_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true
 GATEWAY_STANDBY_MIXED_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":true,"degraded":true,"degraded_reasons":["provider:codex:gateway_standby","disk_low_free_bytes:1"]}'
 GATEWAY_STANDBY_MIXED_UNRECOVERED_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":false,"cluster_standby":true,"degraded":true,"degraded_reasons":["provider:codex:gateway_standby","disk_low_free_bytes:1"]}'
 GATEWAY_REASON_WITHOUT_STANDBY_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"degraded_reasons":["gateway_standby"]}'
+HEALTHY_STANDBY_MIXED_BODY='{"ok":true,"status":"healthy","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":true,"degraded":false,"degraded_reasons":["gateway_standby","disk_low_free_bytes:1"]}'
+HEALTHY_STANDBY_EMPTY_BODY='{"ok":true,"status":"healthy","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":true,"degraded":false,"degraded_reasons":[]}'
 
 run_gate_cases() {
   local mode="$1"
@@ -201,6 +203,10 @@ run_gate_cases() {
     health_json_is_ready "$GATEWAY_STANDBY_MIXED_UNRECOVERED_BODY" 1 1
   assert_rc "[$mode] gateway reason without cluster_standby → NOT ready" 1 \
     health_json_is_ready "$GATEWAY_REASON_WITHOUT_STANDBY_BODY" 1 1
+  assert_rc "[$mode] contradictory healthy standby with mixed reasons → NOT ready" 1 \
+    health_json_is_ready "$HEALTHY_STANDBY_MIXED_BODY" 1 1
+  assert_rc "[$mode] contradictory healthy standby with empty reasons → NOT ready" 1 \
+    health_json_is_ready "$HEALTHY_STANDBY_EMPTY_BODY" 1 1
 }
 
 # jq path (jq is present in this environment).
