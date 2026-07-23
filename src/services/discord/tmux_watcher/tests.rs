@@ -514,7 +514,7 @@ async fn terminal_delivery_timeout_cleanup_releases_mailbox_and_preserves_follow
             author_id: UserId::new(99),
             author_is_bot: false,
             message_id: MessageId::new(2001),
-            queued_generation: crate::services::discord::runtime_store::load_generation(),
+            queued_generation: crate::services::discord::runtime_store::process_generation(),
             source_message_ids: vec![MessageId::new(2001)],
             source_message_queued_generations: Vec::new(),
             source_text_segments: Vec::new(),
@@ -654,7 +654,7 @@ fn watchdog_timeout_path_releases_mailbox_via_finalizer_and_does_not_double_fina
                 author_id: UserId::new(99),
                 author_is_bot: false,
                 message_id: MessageId::new(6001),
-                queued_generation: crate::services::discord::runtime_store::load_generation(),
+                queued_generation: crate::services::discord::runtime_store::process_generation(),
                 source_message_ids: vec![MessageId::new(6001)],
                 source_message_queued_generations: Vec::new(),
             source_text_segments: Vec::new(),
@@ -942,7 +942,7 @@ fn timeout_finalize_drains_reacquired_id_zero_wedge_for_live_pinned_turn() {
                 author_id: UserId::new(99),
                 author_is_bot: false,
                 message_id: MessageId::new(3600),
-                queued_generation: crate::services::discord::runtime_store::load_generation(),
+                queued_generation: crate::services::discord::runtime_store::process_generation(),
                 source_message_ids: vec![MessageId::new(3600)],
                 source_message_queued_generations: Vec::new(),
             source_text_segments: Vec::new(),
@@ -4183,6 +4183,9 @@ mod watcher_short_replace_controller {
             _i: &'a crate::services::discord::Intervention,
             _o: &'a str,
             _h: bool,
+            _dispatch_lease: Option<
+                std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>,
+            >,
         ) -> GatewayFuture<'a, Result<(), String>> {
             panic!("unused on the short-replace path")
         }
@@ -4285,6 +4288,9 @@ mod watcher_short_replace_controller {
             _i: &'a crate::services::discord::Intervention,
             _o: &'a str,
             _h: bool,
+            _dispatch_lease: Option<
+                std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>,
+            >,
         ) -> GatewayFuture<'a, Result<(), String>> {
             panic!("unused on long chunks")
         }
@@ -4566,6 +4572,9 @@ mod watcher_short_replace_controller {
                 _i: &'a crate::services::discord::Intervention,
                 _o: &'a str,
                 _h: bool,
+                _dispatch_lease: Option<
+                    std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>,
+                >,
             ) -> GatewayFuture<'a, Result<(), String>> {
                 panic!("unused")
             }

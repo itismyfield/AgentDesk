@@ -808,7 +808,7 @@ mod presleep_tests {
             author_id: UserId::new(id),
             author_is_bot: false,
             message_id: MessageId::new(id),
-            queued_generation: crate::services::discord::runtime_store::load_generation(),
+            queued_generation: crate::services::discord::runtime_store::process_generation(),
             source_message_ids: vec![MessageId::new(id)],
             source_message_queued_generations: Vec::new(),
             source_text_segments: Vec::new(),

@@ -64,7 +64,7 @@ impl RestartCompletionReport {
             completed_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
             channel_name: None,
             user_msg_id: None,
-            generation: super::runtime_store::load_generation(),
+            generation: super::runtime_store::process_generation(),
             doctor_summary: latest_startup_doctor_summary(),
         }
     }

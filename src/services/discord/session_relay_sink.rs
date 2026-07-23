@@ -2951,6 +2951,9 @@ mod tests {
             _i: &'a super::super::Intervention,
             _o: &'a str,
             _h: bool,
+            _dispatch_lease: Option<
+                std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>,
+            >,
         ) -> super::super::gateway::GatewayFuture<'a, Result<(), String>> {
             panic!("unused TurnGateway method on the short-replace path")
         }

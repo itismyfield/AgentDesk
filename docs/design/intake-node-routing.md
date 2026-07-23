@@ -603,6 +603,11 @@ cluster:
     # observe: emit decision events but do NOT INSERT outbox rows.
     # enforce: actually forward.
     mode: "observe"
+    # Raw top-level Discord channel IDs selected for owner-authority rollout.
+    # PR-1 records this scope in planner telemetry only; authority behavior is
+    # unchanged until a later rollout PR consumes the allowlist.
+    owner_authority_channel_ids:
+      - "123456789012345678"
     # Pre-claim takeover threshold. After this many seconds without
     # reaching `claimed` (= worker SELECT FOR UPDATE), leader steals
     # and runs locally. Spawned/accepted rows are NEVER stolen.
@@ -617,10 +622,21 @@ Implemented authority (#3749): `cluster.intake_routing` is the primary
 source of truth. `ADK_INTAKE_ROUTING_MODE` remains as an emergency
 process override and wins over YAML when set (`disabled`/`off`/`false`/`0`,
 `observe`, `enforce`; invalid values fail closed to `disabled`). Operators
-can confirm the effective `mode`, `source`, YAML values, and warning count
-through `/api/health` or `/api/health/detail` under `intake_routing`.
+can confirm the effective `enabled`, `mode`, `source`, allowlist size, recent
+planner-decision count, YAML values, and warning count through `/api/health` or
+`/api/health/detail` under `intake_routing`.
 
-Operational reload note: worker consumers are spawned when the effective mode
+Every Disabled, Observe, and Enforce planner result emits an info-level structured
+`intake_routing_decision` event with stable `reason_code`, `would_assign_target`,
+`preferred_label_match`, `owner_resolution`, and `authority_channel_opted_in`
+fields. The allowlist tag is telemetry-only in PR-1. In particular,
+`ADK_INTAKE_ROUTING_MODE=enforce` can change the effective planner mode but cannot
+opt a channel into owner authority; only `owner_authority_channel_ids` controls
+that tag.
+
+Operational reload note: `owner_authority_channel_ids` is read from the runtime
+config snapshot for every intake decision, so allowlist edits are reflected by
+planner telemetry without a restart. Worker consumers are spawned when the effective mode
 is `observe` or `enforce`. Start from `enabled: true, mode: "observe"` and
 restart once to put consumers on standby; then observe→enforce rollback/promote
 changes are read by the hook and `/node` from the runtime config snapshot. A

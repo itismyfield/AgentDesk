@@ -3,7 +3,10 @@ use super::*;
 fn should_publish_queue_marker(outcome: &crate::services::discord::MailboxEnqueueOutcome) -> bool {
     !matches!(
         outcome.refusal_reason,
-        Some(crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued)
+        Some(
+            crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued
+                | crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdPendingOrActive
+        )
     )
 }
 
@@ -13,6 +16,7 @@ fn retry_present_or_accepted(outcome: &crate::services::discord::MailboxEnqueueO
             outcome.refusal_reason,
             Some(
                 crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued
+                    | crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdPendingOrActive
                     | crate::services::turn_orchestrator::EnqueueRefusalReason::LastItemDedup
             )
         )

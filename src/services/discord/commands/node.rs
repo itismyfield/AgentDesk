@@ -454,9 +454,8 @@ pub(in crate::services::discord) async fn handle_node_picker_interaction(
 mod tests {
     use super::*;
     use crate::config::ClusterIntakeRoutingMode;
-    use crate::services::cluster::intake_router_hook::{
-        IntakeRoutingMode, IntakeRoutingModeSource,
-    };
+    use crate::services::cluster::intake_router_hook::IntakeRoutingMode;
+    use crate::services::cluster::intake_routing_config::IntakeRoutingModeSource;
 
     #[test]
     fn node_unavailable_message_reports_effective_mode_and_source() {
@@ -467,6 +466,7 @@ mod tests {
             yaml_mode: ClusterIntakeRoutingMode::Enforce,
             env_override: Some("observe"),
             warnings: Vec::new(),
+            owner_authority_channel_ids: Vec::new(),
             forward_pre_claim_timeout_secs: 12,
             stale_claim_recovery_secs: 60,
         };

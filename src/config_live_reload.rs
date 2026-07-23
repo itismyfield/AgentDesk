@@ -280,8 +280,20 @@ pub fn restart_required_changes(old: &Config, new: &Config) -> Vec<&'static str>
     if section_changed(&old.data, &new.data) {
         changed.push("data");
     }
-    // Cluster runtime and wait-queue snapshots are installed at boot.
-    if old.cluster != new.cluster {
+    // Most cluster runtime and wait-queue snapshots are installed at boot. The
+    // owner-authority channel allowlist is a planner telemetry scope read from
+    // `current()` per intake, so exclude only that field from the boot fingerprint.
+    let mut old_cluster = old.cluster.clone();
+    let mut new_cluster = new.cluster.clone();
+    old_cluster
+        .intake_routing
+        .owner_authority_channel_ids
+        .clear();
+    new_cluster
+        .intake_routing
+        .owner_authority_channel_ids
+        .clear();
+    if old_cluster != new_cluster {
         changed.push("cluster");
     }
     // The policy engine constructs its QuickJS runtime, directory watcher, and
@@ -653,6 +665,18 @@ mod tests {
         new = old.clone();
         new.policies.hook_timeout_ms = old.policies.hook_timeout_ms.wrapping_add(1);
         assert_eq!(restart_required_changes(&old, &new), vec!["policies"]);
+    }
+
+    #[test]
+    fn intake_owner_authority_allowlist_change_needs_no_restart() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.cluster
+            .intake_routing
+            .owner_authority_channel_ids
+            .push("123456789012345678".to_string());
+
+        assert!(restart_required_changes(&old, &new).is_empty());
     }
 
     // A hot-swappable-only change (routine tunable) reports no restart-required.

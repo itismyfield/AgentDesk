@@ -455,6 +455,36 @@ _health_json_reasons() {
   _health_json_get_string_array_csv "$health_json" "degraded_reasons"
 }
 
+_health_json_gateway_standby_only() {
+  local health_json="$1"
+  local reasons_csv reason
+  [ -n "$health_json" ] || return 1
+
+  if _health_json_has_jq; then
+    printf '%s' "$health_json" | jq -e '
+      .status == "degraded"
+      and (.db == true)
+      and (.server_up == true)
+      and (.cluster_standby == true)
+      and ((.degraded_reasons // []) | length > 0)
+      and all((.degraded_reasons // [])[]; test("^(gateway_standby|provider:[^:]+:gateway_standby)$"))
+    ' >/dev/null 2>&1
+    return
+  fi
+
+  [ "$(_health_json_status "$health_json")" = "degraded" ] || return 1
+  _health_json_field_is_true "$health_json" "db" || return 1
+  _health_json_field_is_true "$health_json" "server_up" || return 1
+  _health_json_field_is_true "$health_json" "cluster_standby" || return 1
+  reasons_csv=$(_health_json_reasons "$health_json" || true)
+  [ -n "$reasons_csv" ] || return 1
+  while IFS=, read -r reason; do
+    [ -n "$reason" ] || return 1
+    [[ "$reason" =~ ^gateway_standby$|^provider:[^:]+:gateway_standby$ ]] || return 1
+  done <<< "$reasons_csv"
+  return 0
+}
+
 _health_json_reconcile_only() {
   local health_json="$1"
   local reasons_csv reason
@@ -611,6 +641,10 @@ health_json_is_ready() {
       fi
       return 1
     fi
+    if _health_json_field_is_true "$health_json" "cluster_standby"; then
+      _health_json_gateway_standby_only "$health_json"
+      return $?
+    fi
     [ "$status" = "healthy" ] && return 0
     if [ "$allow_reconcile_degraded" = "1" ] \
       && _health_json_field_exists "$health_json" "fully_recovered" \
@@ -621,6 +655,11 @@ health_json_is_ready() {
       return 0
     fi
     return 1
+  fi
+
+  if _health_json_field_is_true "$health_json" "cluster_standby"; then
+    _health_json_gateway_standby_only "$health_json"
+    return $?
   fi
 
   if [ "$status" = "healthy" ]; then
@@ -972,23 +1011,19 @@ request_restart_drain_mode_or_fail() {
   }
 
   marker="$runtime_root/restart_pending"
-  tmp_marker="${marker}.$$"
   nonce="$(date -u '+%Y%m%dT%H%M%S')-$$-${RANDOM:-0}"
-  {
+  # O_EXCL ownership: never overwrite another restart nonce. The marker is the
+  # process-wide restart lease, shared with standby promotion.
+  if ! ( set -o noclobber; {
     printf 'nonce=%s\n' "$nonce"
     printf 'source=%s\n' "$source"
     printf 'scope=%s\n' "$scope"
     printf 'label=%s\n' "$label"
     date -u '+requested_at=%Y-%m-%dT%H:%M:%SZ'
-  } >"$tmp_marker" || {
-    echo "✗ [gate] failed to write restart drain marker: $tmp_marker" >&2
+  } >"$marker" ) 2>/dev/null; then
+    echo "✗ [gate] restart drain marker already owned: $marker" >&2
     return 1
-  }
-  mv "$tmp_marker" "$marker" || {
-    rm -f "$tmp_marker"
-    echo "✗ [gate] failed to publish restart drain marker: $marker" >&2
-    return 1
-  }
+  fi
 
   while [ "$waited" -lt "$ack_wait" ]; do
     if _restart_pending_acknowledged "$port"; then

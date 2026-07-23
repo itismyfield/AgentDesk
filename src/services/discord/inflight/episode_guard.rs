@@ -97,14 +97,10 @@ impl LockedInflightEpisode {
         if self.state.rebind_origin {
             return GuardedSaveOutcome::IdentityMismatch;
         }
-        if self.state.readopted_from_inflight {
-            return GuardedSaveOutcome::Saved;
-        }
-        self.state.readopted_from_inflight = true;
-        persist_under_lock(
+        persist_readopted_under_lock(
             &self.root,
             &self.path,
-            &self.state,
+            &mut self.state,
             "src/services/discord/inflight/episode_guard.rs:mark_readopted_under_guard",
         )
         .map_or(GuardedSaveOutcome::IoError, |()| GuardedSaveOutcome::Saved)
@@ -143,7 +139,16 @@ pub(in crate::services::discord) fn lock_inflight_episode(
     expected: &InflightEpisodePin,
 ) -> Result<LockedInflightEpisode, InflightEpisodeLockError> {
     let root = inflight_runtime_root().ok_or(InflightEpisodeLockError::Missing)?;
-    let path = inflight_state_path(&root, provider, channel_id);
+    lock_inflight_episode_in_root(&root, provider, channel_id, expected)
+}
+
+fn lock_inflight_episode_in_root(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightEpisodePin,
+) -> Result<LockedInflightEpisode, InflightEpisodeLockError> {
+    let path = inflight_state_path(root, provider, channel_id);
     let lock = lock_inflight_state_path(&path).map_err(|_| InflightEpisodeLockError::Io)?;
     let state = load_inflight_state_unlocked(&path).ok_or(InflightEpisodeLockError::Missing)?;
     if !expected.matches_state(&state) {
@@ -151,8 +156,58 @@ pub(in crate::services::discord) fn lock_inflight_episode(
     }
     Ok(LockedInflightEpisode {
         _lock: lock,
-        root,
+        root: root.to_path_buf(),
         path,
         state,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_episode_readoption_consumes_marker_before_completion_clear() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let provider = ProviderKind::Claude;
+        let mut state = InflightTurnState::new(
+            provider.clone(),
+            4_805_904,
+            None,
+            7,
+            4_805_914,
+            4_805_915,
+            "episode readoption".to_string(),
+            None,
+            Some("tmux-4805-episode".to_string()),
+            None,
+            None,
+            0,
+        );
+        state.readopted_from_inflight = true;
+        state.set_restart_mode(InflightRestartMode::DrainRestart);
+        super::super::save_store::save_inflight_state_in_root(root.path(), &state).unwrap();
+        let pin = InflightEpisodePin::from_state(&state);
+
+        let mut guard =
+            lock_inflight_episode_in_root(root.path(), &provider, state.channel_id, &pin)
+                .expect("exact episode guard");
+        assert_eq!(
+            guard.mark_readopted_under_guard(),
+            GuardedSaveOutcome::Saved
+        );
+        assert_eq!(guard.state().restart_mode, None);
+        drop(guard);
+
+        assert_eq!(
+            super::super::clear_store::clear_inflight_state_if_matches_in_root(
+                root.path(),
+                &provider,
+                state.channel_id,
+                state.user_msg_id,
+            ),
+            GuardedClearOutcome::Cleared,
+            "completion clear ordered after the episode guard must not see PlannedRestartSkipped"
+        );
+    }
 }

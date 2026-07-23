@@ -13,9 +13,10 @@ pub(super) fn claude_tui_busy_followup_refusal_notice(
     reason: Option<crate::services::turn_orchestrator::EnqueueRefusalReason>,
 ) -> &'static str {
     match reason {
-        Some(crate::services::turn_orchestrator::EnqueueRefusalReason::AlreadyActiveTurn) => {
-            CLAUDE_TUI_BUSY_FOLLOWUP_ALREADY_ACTIVE_NOTICE
-        }
+        Some(
+            crate::services::turn_orchestrator::EnqueueRefusalReason::AlreadyActiveTurn
+            | crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdPendingOrActive,
+        ) => CLAUDE_TUI_BUSY_FOLLOWUP_ALREADY_ACTIVE_NOTICE,
         Some(crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued) => {
             CLAUDE_TUI_BUSY_FOLLOWUP_ALREADY_QUEUED_NOTICE
         }
@@ -828,17 +829,32 @@ pub(in crate::services::discord) async fn defer_promoted_dispatch_if_hosted_tui_
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     intervention: &crate::services::turn_orchestrator::Intervention,
+    dispatch_lease: Arc<crate::services::turn_orchestrator::DispatchLease>,
 ) -> bool {
     if !hosted_tui_promote_readiness_blocked(shared, provider, channel_id).await {
         return false;
     }
-    super::super::super::mailbox_requeue_intervention_front(
+    let restored = super::super::super::mailbox_restore_dequeued_head(
         shared,
         provider,
         channel_id,
         intervention.clone(),
+        dispatch_lease,
     )
     .await;
+    if !restored.enqueued {
+        tracing::error!(
+            provider = provider.as_str(),
+            channel_id = channel_id.get(),
+            refusal_reason = restored
+                .refusal_reason
+                .map(|reason| reason.as_str())
+                .unwrap_or("none"),
+            persistence_error = restored.persistence_error.as_deref().unwrap_or("none"),
+            "hosted TUI promote defer rejected dequeued-head restore"
+        );
+        return false;
+    }
     super::super::super::arm_slow_idle_queue_backstop_if_queue_nonempty(
         shared,
         provider,
@@ -875,7 +891,7 @@ pub(super) async fn enqueue_busy_tui_followup_for_retry(
     pending_uploads: Vec<String>,
     voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> MailboxEnqueueOutcome {
-    let result = super::super::super::mailbox_requeue_intervention_front(
+    super::super::super::mailbox_requeue_intervention_front(
         shared,
         provider,
         channel_id,
@@ -891,13 +907,7 @@ pub(super) async fn enqueue_busy_tui_followup_for_retry(
             voice_announcement,
         ),
     )
-    .await;
-    MailboxEnqueueOutcome {
-        enqueued: result.persistence_error.is_none(),
-        merged: false,
-        refusal_reason: None,
-        persistence_error: result.persistence_error,
-    }
+    .await
 }
 
 #[cfg(test)]
@@ -967,6 +977,13 @@ mod busy_retry_fifo_tests {
             .intervention
             .expect("A is dequeued first");
         assert_eq!(dequeued.message_id, first.message_id);
+        crate::services::discord::mailbox_clear_pending_dispatch_reservation(
+            &shared,
+            &provider,
+            channel_id,
+            dequeued.message_id,
+        )
+        .await;
 
         let retry = enqueue_busy_tui_followup_for_retry(
             &shared,
@@ -1049,6 +1066,67 @@ mod busy_retry_fifo_tests {
             .expect("normal FIFO returns B");
         assert_eq!(normal_first.message_id, first.message_id);
         assert_eq!(normal_second.message_id, second.message_id);
+    }
+
+    #[test]
+    fn busy_retry_treats_pending_or_active_source_as_already_processing_4797() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::tempdir().expect("temporary runtime root");
+        let _root_guard = RuntimeRootGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        runtime.block_on(async {
+            let shared = make_shared_data_for_tests();
+            let provider = ProviderKind::Claude;
+            let channel_id = serenity::ChannelId::new(4_797_301);
+            let first = intervention(4_797_302, 4_797_303, "pending A", false);
+            let persistence =
+                crate::services::discord::queue_persistence_context(&shared, &provider, channel_id);
+            shared
+                .mailbox(channel_id)
+                .replace_queue(vec![first.clone()], persistence.clone())
+                .await;
+            let dequeued = shared
+                .mailbox(channel_id)
+                .take_next_soft(persistence)
+                .await
+                .intervention
+                .expect("A is pending dispatch");
+
+            let retry = enqueue_busy_tui_followup_for_retry(
+                &shared,
+                &provider,
+                channel_id,
+                dequeued.author_id,
+                dequeued.message_id,
+                &dequeued.text,
+                dequeued.preserve_on_cancel(),
+                dequeued.reply_context,
+                dequeued.has_reply_boundary,
+                dequeued.merge_consecutive,
+                dequeued.pending_uploads,
+                dequeued.voice_announcement,
+            )
+            .await;
+
+            assert!(!retry.enqueued);
+            assert_eq!(
+                retry.refusal_reason,
+                Some(
+                    crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdPendingOrActive
+                )
+            );
+            assert!(super::super::busy_retry::present_or_accepted(&retry));
+            let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
+            assert!(snapshot.intervention_queue.is_empty());
+            assert_eq!(snapshot.pending_user_dispatch, Some(first.message_id));
+        });
     }
 }
 

@@ -93,6 +93,12 @@ WS_RECONCILE_BODY='{"ok":false,"status":"degraded","version":"x","db":true,"dash
 # Every scalar read (status / db / dashboard / server_up / startup_status /
 # latest_startup_doctor.skipped_reason) must parse correctly in both modes.
 WS_SCALAR_NO_PROVIDER_BODY='{ "ok": false , "status": "unhealthy" , "db": true , "dashboard": true , "server_up": true , "fully_recovered": false , "startup_status": "doctor_skipped" , "latest_startup_doctor": { "available": true , "skipped_reason": "no_provider_runtimes_registered" } }'
+GATEWAY_STANDBY_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":true,"degraded":true,"degraded_reasons":["provider:codex:gateway_standby"]}'
+GATEWAY_STANDBY_MIXED_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":true,"degraded":true,"degraded_reasons":["provider:codex:gateway_standby","disk_low_free_bytes:1"]}'
+GATEWAY_STANDBY_MIXED_UNRECOVERED_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":false,"cluster_standby":true,"degraded":true,"degraded_reasons":["provider:codex:gateway_standby","disk_low_free_bytes:1"]}'
+GATEWAY_REASON_WITHOUT_STANDBY_BODY='{"ok":false,"status":"degraded","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"degraded_reasons":["gateway_standby"]}'
+HEALTHY_STANDBY_MIXED_BODY='{"ok":true,"status":"healthy","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":true,"degraded":false,"degraded_reasons":["gateway_standby","disk_low_free_bytes:1"]}'
+HEALTHY_STANDBY_EMPTY_BODY='{"ok":true,"status":"healthy","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":true,"degraded":false,"degraded_reasons":[]}'
 
 run_gate_cases() {
   local mode="$1"
@@ -186,6 +192,21 @@ run_gate_cases() {
     "unhealthy" "$(_health_json_status "$WS_SCALAR_NO_PROVIDER_BODY")"
   assert_rc "[$mode] whitespace-padded no-provider body → predicate matches" 0 \
     _health_json_unhealthy_only_no_provider_runtimes "$WS_SCALAR_NO_PROVIDER_BODY"
+
+  assert_rc "[$mode] gateway-only standby degradation → READY" 0 \
+    health_json_is_ready "$GATEWAY_STANDBY_BODY" 1 1
+  assert_rc "[$mode] gateway-only standby predicate matches" 0 \
+    _health_json_gateway_standby_only "$GATEWAY_STANDBY_BODY"
+  assert_rc "[$mode] standby plus another degraded reason → NOT ready" 1 \
+    health_json_is_ready "$GATEWAY_STANDBY_MIXED_BODY" 1 1
+  assert_rc "[$mode] unrecovered standby plus another reason → NOT ready" 1 \
+    health_json_is_ready "$GATEWAY_STANDBY_MIXED_UNRECOVERED_BODY" 1 1
+  assert_rc "[$mode] gateway reason without cluster_standby → NOT ready" 1 \
+    health_json_is_ready "$GATEWAY_REASON_WITHOUT_STANDBY_BODY" 1 1
+  assert_rc "[$mode] contradictory healthy standby with mixed reasons → NOT ready" 1 \
+    health_json_is_ready "$HEALTHY_STANDBY_MIXED_BODY" 1 1
+  assert_rc "[$mode] contradictory healthy standby with empty reasons → NOT ready" 1 \
+    health_json_is_ready "$HEALTHY_STANDBY_EMPTY_BODY" 1 1
 }
 
 # jq path (jq is present in this environment).

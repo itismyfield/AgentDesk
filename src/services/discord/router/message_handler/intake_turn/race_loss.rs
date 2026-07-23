@@ -1,6 +1,6 @@
 use super::*;
 
-pub(in crate::services::discord::router::message_handler::intake_turn) mod mailbox_reaction;
+pub(in crate::services::discord::router::message_handler) mod mailbox_reaction;
 
 async fn enqueue_race_loss_requeued_intervention(
     shared: &Arc<SharedData>,
@@ -619,7 +619,7 @@ mod race_loss_requeue_tests {
             author_id: UserId::new(id),
             author_is_bot: false,
             message_id: MessageId::new(id),
-            queued_generation: crate::services::discord::runtime_store::load_generation(),
+            queued_generation: crate::services::discord::runtime_store::process_generation(),
             source_message_ids: vec![MessageId::new(id)],
             source_message_queued_generations: Vec::new(),
             source_text_segments: Vec::new(),

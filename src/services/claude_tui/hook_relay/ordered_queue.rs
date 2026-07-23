@@ -18,10 +18,14 @@ use super::{
     write_hook_relay_failure_marker,
 };
 use crate::services::claude_tui::hook_server::relay_receipts::{DELIVERY_TTL, LEDGER_RETENTION};
+
+#[path = "queue_retention.rs"]
+mod queue_retention;
 #[cfg(test)]
 use crate::services::claude_tui::hook_server::relay_receipts::{
     RELAY_DEADLINE_HEADER, RELAY_PUBLISHED_AT_HEADER, RELAY_REQUEST_ID_HEADER,
 };
+use queue_retention::{IdleQueueRetentionGuard, prune_artifact_dir};
 
 const RELAY_QUEUE_IDLE_GRACE: Duration = Duration::from_millis(250);
 const RELAY_RESPONSE_POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -104,6 +108,14 @@ fn lock_relay_queue_file(
     path: &Path,
     nonblocking: bool,
 ) -> Result<Option<RelayQueueFileLock>, String> {
+    lock_relay_queue_file_with_mode(path, nonblocking, true)
+}
+
+fn lock_relay_queue_file_with_mode(
+    path: &Path,
+    nonblocking: bool,
+    exclusive: bool,
+) -> Result<Option<RelayQueueFileLock>, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("create hook relay queue dir {}: {err}", parent.display()))?;
@@ -118,7 +130,11 @@ fn lock_relay_queue_file(
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
-        let operation = libc::LOCK_EX | if nonblocking { libc::LOCK_NB } else { 0 };
+        let operation = if exclusive {
+            libc::LOCK_EX
+        } else {
+            libc::LOCK_SH
+        } | if nonblocking { libc::LOCK_NB } else { 0 };
         if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
             let error = std::io::Error::last_os_error();
             if nonblocking
@@ -370,12 +386,11 @@ pub(super) fn enqueue_ordered_hook_relay_request(
         failure_marker_dir(provider).ok_or_else(|| "runtime root is unavailable".to_string())?;
     let queue_dir = relay_queue_dir(provider, session_id)
         .ok_or_else(|| "runtime root is unavailable".to_string())?;
-    std::fs::create_dir_all(&queue_dir).map_err(|err| {
-        format!(
-            "create ordered hook relay queue {}: {err}",
-            queue_dir.display()
-        )
-    })?;
+    let producer_lock = queue_dir.join("producer.lock");
+    let Some(_producer_lock) = lock_relay_queue_file_with_mode(&producer_lock, false, false)?
+    else {
+        return Err("ordered hook relay producer lock was unavailable".to_string());
+    };
     let request_id = uuid::Uuid::new_v4().to_string();
     let published_at = Utc::now();
     let delivery_timeout = response_timeout.unwrap_or(DELIVERY_TTL).min(DELIVERY_TTL);
@@ -749,7 +764,21 @@ impl Drop for OrderedHookRelayRecoveryOwner {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            let join_started = Instant::now();
+            tracing::info!(
+                thread_finished = thread.is_finished(),
+                "ordered hook relay recovery owner join begin"
+            );
+            match thread.join() {
+                Ok(()) => tracing::info!(
+                    join_latency_ms = join_started.elapsed().as_millis(),
+                    "ordered hook relay recovery owner join end"
+                ),
+                Err(_) => tracing::warn!(
+                    join_latency_ms = join_started.elapsed().as_millis(),
+                    "ordered hook relay recovery owner join end after thread panic"
+                ),
+            }
         }
     }
 }
@@ -766,8 +795,19 @@ pub(crate) fn start_ordered_hook_relay_recovery_owner() -> Option<OrderedHookRel
         .name("hook-relay-recovery".to_string())
         .spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
-                if let Err(error) = scan_ordered_hook_relay_queues_once(&runtime_root) {
-                    tracing::warn!(error, "ordered hook relay recovery scan failed");
+                let scan_started = Instant::now();
+                match scan_ordered_hook_relay_queues_once(&runtime_root) {
+                    Ok(stats) => tracing::debug!(
+                        scan_latency_ms = scan_started.elapsed().as_millis(),
+                        queue_count = stats.queue_count,
+                        active_queue_count = stats.active_queue_count,
+                        "ordered hook relay recovery scan completed"
+                    ),
+                    Err(error) => tracing::warn!(
+                        scan_latency_ms = scan_started.elapsed().as_millis(),
+                        error,
+                        "ordered hook relay recovery scan failed"
+                    ),
                 }
                 let deadline = Instant::now() + RELAY_RECOVERY_SCAN_INTERVAL;
                 while !thread_stop.load(Ordering::Acquire) && Instant::now() < deadline {
@@ -782,7 +822,16 @@ pub(crate) fn start_ordered_hook_relay_recovery_owner() -> Option<OrderedHookRel
     })
 }
 
-fn scan_ordered_hook_relay_queues_once(runtime_root: &Path) -> Result<(), String> {
+#[derive(Debug, Default, PartialEq, Eq)]
+struct OrderedHookRelayScanStats {
+    queue_count: usize,
+    active_queue_count: usize,
+}
+
+fn scan_ordered_hook_relay_queues_once(
+    runtime_root: &Path,
+) -> Result<OrderedHookRelayScanStats, String> {
+    let mut stats = OrderedHookRelayScanStats::default();
     for provider in ["claude", "codex"] {
         let provider_root = runtime_root.join(relay_queue_subdir(provider));
         if std::fs::symlink_metadata(&provider_root)
@@ -810,9 +859,13 @@ fn scan_ordered_hook_relay_queues_once(runtime_root: &Path) -> Result<(), String
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
                 continue;
             }
+            stats.queue_count += 1;
             gc_ordered_hook_relay_queue(&queue_dir);
             let has_work = queue_ingress_paths(&queue_dir).is_ok_and(|paths| !paths.is_empty())
                 || queue_request_paths(&queue_dir).is_ok_and(|paths| !paths.is_empty());
+            if has_work {
+                stats.active_queue_count += 1;
+            }
             if has_work && let Err(error) = start_ordered_hook_relay_worker(&queue_dir) {
                 tracing::warn!(
                     queue_dir = %queue_dir.display(),
@@ -822,11 +875,11 @@ fn scan_ordered_hook_relay_queues_once(runtime_root: &Path) -> Result<(), String
             }
         }
     }
-    Ok(())
+    Ok(stats)
 }
 
 fn gc_ordered_hook_relay_queue(queue_dir: &Path) {
-    let Ok(Some(_worker_lock)) = lock_relay_queue_file(&queue_dir.join("worker.lock"), true) else {
+    let Some(retention_guard) = IdleQueueRetentionGuard::acquire(queue_dir) else {
         return;
     };
     let retention = LEDGER_RETENTION;
@@ -857,28 +910,7 @@ fn gc_ordered_hook_relay_queue(queue_dir: &Path) {
     for dir in [queue_dir.join("responses"), queue_dir.join("quarantine")] {
         let _ = std::fs::remove_dir(dir);
     }
-}
-
-fn prune_artifact_dir(dir: &Path, cap: usize, retention: Duration) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut paths = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
-    paths.sort_by_key(|path| {
-        std::fs::metadata(path)
-            .and_then(|metadata| metadata.modified())
-            .ok()
-    });
-    let excess = paths.len().saturating_sub(cap);
-    for (index, path) in paths.into_iter().enumerate() {
-        if index < excess || file_is_older_than(&path, retention) {
-            let _ = std::fs::remove_file(path);
-        }
-    }
+    retention_guard.remove_if_stale_and_idle(retention);
 }
 
 fn file_is_older_than(path: &Path, age: Duration) -> bool {
@@ -1094,6 +1126,116 @@ mod tests {
             .expect("spawn ordered relay worker process")
     }
 
+    fn age_path(path: &Path, age: Duration) {
+        let modified = std::time::SystemTime::now() - age;
+        filetime::set_file_mtime(path, filetime::FileTime::from_system_time(modified)).unwrap();
+    }
+
+    fn age_queue_tree(queue_dir: &Path, age: Duration) {
+        let entries = std::fs::read_dir(queue_dir)
+            .unwrap()
+            .flatten()
+            .collect::<Vec<_>>();
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                for child in std::fs::read_dir(&path).unwrap().flatten() {
+                    age_path(&child.path(), age);
+                }
+            }
+            age_path(&path, age);
+        }
+        age_path(queue_dir, age);
+    }
+
+    #[test]
+    fn gc_preserves_active_queue() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let queue_dir = temp_dir.path().join("active");
+        std::fs::create_dir_all(queue_dir.join("ingress")).unwrap();
+        std::fs::write(queue_dir.join("worker.lock"), b"").unwrap();
+        std::fs::write(queue_dir.join("producer.lock"), b"").unwrap();
+        std::fs::write(queue_dir.join("ingress/pending.ingress.json"), b"{}").unwrap();
+        age_queue_tree(&queue_dir, LEDGER_RETENTION + Duration::from_secs(1));
+
+        gc_ordered_hook_relay_queue(&queue_dir);
+
+        assert!(queue_dir.exists());
+        assert!(queue_dir.join("ingress/pending.ingress.json").exists());
+    }
+
+    #[test]
+    fn gc_removes_stale_idle_queue() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let queue_dir = temp_dir.path().join("stale");
+        std::fs::create_dir_all(queue_dir.join("ingress")).unwrap();
+        std::fs::write(queue_dir.join("worker.lock"), b"").unwrap();
+        std::fs::write(queue_dir.join("producer.lock"), b"").unwrap();
+        std::fs::write(queue_dir.join("next-sequence"), b"3").unwrap();
+        std::fs::write(queue_dir.join("completed-high-water"), b"3").unwrap();
+        age_queue_tree(&queue_dir, LEDGER_RETENTION + Duration::from_secs(1));
+
+        gc_ordered_hook_relay_queue(&queue_dir);
+
+        assert!(!queue_dir.exists());
+    }
+
+    #[test]
+    fn gc_preserves_recently_emptied_queue() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let queue_dir = temp_dir.path().join("recent");
+        std::fs::create_dir_all(queue_dir.join("ingress")).unwrap();
+        std::fs::write(queue_dir.join("worker.lock"), b"").unwrap();
+        std::fs::write(queue_dir.join("producer.lock"), b"").unwrap();
+        std::fs::write(queue_dir.join("completed-high-water"), b"1").unwrap();
+
+        gc_ordered_hook_relay_queue(&queue_dir);
+
+        assert!(queue_dir.exists());
+    }
+
+    #[test]
+    fn artifact_pruning_does_not_hold_the_producer_lock() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let queue_dir = temp_dir.path().join("pruning");
+        let quarantine_dir = queue_dir.join("quarantine");
+        std::fs::create_dir_all(&quarantine_dir).unwrap();
+        std::fs::write(queue_dir.join("worker.lock"), b"").unwrap();
+        std::fs::write(queue_dir.join("producer.lock"), b"").unwrap();
+        for index in 0..2_000 {
+            std::fs::write(
+                quarantine_dir.join(format!("{index:04}.artifact")),
+                b"artifact",
+            )
+            .unwrap();
+        }
+        age_queue_tree(&queue_dir, LEDGER_RETENTION + Duration::from_secs(1));
+        let retention_guard = IdleQueueRetentionGuard::acquire(&queue_dir).unwrap();
+        let pruning = std::thread::spawn({
+            let quarantine_dir = quarantine_dir.clone();
+            move || {
+                for _ in 0..20 {
+                    prune_artifact_dir(&quarantine_dir, 0, Duration::ZERO);
+                }
+                drop(retention_guard);
+            }
+        });
+
+        let started = Instant::now();
+        let producer_lock =
+            lock_relay_queue_file_with_mode(&queue_dir.join("producer.lock"), false, false)
+                .unwrap()
+                .expect("producer shared lock");
+        let elapsed = started.elapsed();
+        drop(producer_lock);
+        pruning.join().unwrap();
+
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "artifact pruning blocked the producer for {elapsed:?}"
+        );
+    }
+
     #[test]
     fn corrupt_counter_recovers_without_reusing_completed_high_water() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1259,6 +1401,32 @@ mod tests {
     }
 
     #[test]
+    fn recovery_scan_reports_idle_queue_cardinality_with_bounded_latency() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let provider_root = temp_dir.path().join(relay_queue_subdir("claude"));
+        std::fs::create_dir_all(&provider_root).unwrap();
+        for queue_index in 0..1_000 {
+            std::fs::create_dir(provider_root.join(format!("queue-{queue_index:04}"))).unwrap();
+        }
+
+        let started = Instant::now();
+        let stats = scan_ordered_hook_relay_queues_once(temp_dir.path()).unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            stats,
+            OrderedHookRelayScanStats {
+                queue_count: 1_000,
+                active_queue_count: 0,
+            }
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "1,000 idle queue scan exceeded the bounded-time budget: {elapsed:?}"
+        );
+    }
+
+    #[test]
     fn published_request_is_drained_by_receiver_owner_without_producer_restart() {
         let temp_dir = tempfile::tempdir().unwrap();
         let _root = crate::config::set_agentdesk_root_for_test(temp_dir.path());
@@ -1289,10 +1457,10 @@ mod tests {
     }
 
     #[test]
-    fn contended_producer_returns_bounded_and_earlier_ingress_is_not_overtaken() {
+    fn producer_waits_for_retention_lock_and_preserves_event() {
         let temp_dir = tempfile::tempdir().unwrap();
         let _root = crate::config::set_agentdesk_root_for_test(temp_dir.path());
-        let (endpoint, requests, receiver) = spawn_test_receiver(2);
+        let (endpoint, requests, receiver) = spawn_test_receiver(1);
         let session_id = "producer-lock-contention";
         let queue_dir = relay_queue_dir("claude", session_id).unwrap();
         std::fs::create_dir_all(&queue_dir).unwrap();
@@ -1314,48 +1482,39 @@ mod tests {
             .expect("spawn producer lock holder");
         wait_until(|| ready_path.exists(), "producer lock holder readiness");
 
-        let started = Instant::now();
-        enqueue_ordered_hook_relay_request(
-            &endpoint,
-            "claude",
-            "PostToolUse",
-            session_id,
-            json!({"ordinal": 1}),
-            None,
-        )
-        .expect("contended producer leaves a durable ingress handoff");
-        let elapsed = started.elapsed();
-        let ingress_was_durable = recursively_contains(&queue_dir, ".ingress.json");
+        let endpoint_for_post = endpoint.clone();
+        let post = std::thread::spawn(move || {
+            enqueue_ordered_hook_relay_request(
+                &endpoint_for_post,
+                "claude",
+                "PostToolUse",
+                session_id,
+                json!({"ordinal": 1}),
+                None,
+            )
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !post.is_finished(),
+            "producer must wait while retention owns the exclusive lock"
+        );
+
         std::fs::write(&release_path, b"release").unwrap();
         assert!(holder.wait().unwrap().success());
+        let (published_queue_dir, _) = post
+            .join()
+            .unwrap()
+            .expect("producer publishes after retention releases the lock");
+        assert_eq!(published_queue_dir, queue_dir);
+        assert!(
+            recursively_contains(&queue_dir, ".ingress.json"),
+            "the event must remain durable after lock handoff"
+        );
 
-        enqueue_ordered_hook_relay_request(
-            &endpoint,
-            "claude",
-            "PostToolUse",
-            session_id,
-            json!({"ordinal": 2}),
-            None,
-        )
-        .unwrap();
         start_ordered_hook_relay_worker(&queue_dir).unwrap();
-        let first = requests.recv_timeout(Duration::from_secs(3)).unwrap();
-        let second = requests.recv_timeout(Duration::from_secs(3)).unwrap();
-        assert_eq!(receiver.join().unwrap(), 2);
-
-        assert!(
-            elapsed < Duration::from_millis(750),
-            "producer flock blocked the hook boundary for {elapsed:?}"
-        );
-        assert!(
-            ingress_was_durable,
-            "lock contention must leave durable handoff/failure evidence before returning"
-        );
-        assert_eq!(
-            [first["ordinal"].as_u64(), second["ordinal"].as_u64()],
-            [Some(1), Some(2)],
-            "a fast-path sequence must not overtake an already-published ingress"
-        );
+        let delivered = requests.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(receiver.join().unwrap(), 1);
+        assert_eq!(delivered["ordinal"].as_u64(), Some(1));
     }
 
     #[test]

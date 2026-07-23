@@ -24,6 +24,9 @@ cluster:
   intake_routing:
     enabled: false
     mode: "observe"
+    # Raw top-level Discord channel IDs. PR-1 uses this allowlist only to tag
+    # planner telemetry; owner-authority enforcement remains unchanged.
+    owner_authority_channel_ids: []
     forward_pre_claim_timeout_secs: 12
     stale_claim_recovery_secs: 60
   # #4351. The gateway node is the node every conversational tmux session runs

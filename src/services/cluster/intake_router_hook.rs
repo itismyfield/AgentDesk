@@ -13,7 +13,6 @@
 //! observe / enforce mode. `ADK_INTAKE_ROUTING_MODE` remains as an
 //! emergency override and is surfaced in health.
 
-use crate::config::{ClusterIntakeRoutingConfig, ClusterIntakeRoutingMode};
 use crate::db::intake_outbox::{
     InsertPendingPayload, IntakeInsertConflict, classify_insert_pending_error, insert_pending,
 };
@@ -27,180 +26,28 @@ mod session_owner;
 
 use session_owner::SessionOwnerResolution;
 
-/// How aggressively to apply the Phase-2 routing decision in front of
-/// the existing leader intake path.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IntakeRoutingMode {
-    /// Hook is a no-op; the leader runs every intake locally as today.
-    /// Default until Phase 5 flips the global flag — keeps prod
-    /// behaviour byte-identical while phases 1-4 land.
-    Disabled,
-    /// The hook does the full decision (label match, worker eligibility,
-    /// 23505 classification) but never INSERTs. Logs the decision so
-    /// operators can verify routing behaviour against real traffic
-    /// before promoting to `Enforce`.
-    Observe,
-    /// The hook actually INSERTs into `intake_outbox` and tells the
-    /// caller to skip local execution.
-    Enforce,
-}
-
-impl IntakeRoutingMode {
-    fn from_config(mode: ClusterIntakeRoutingMode) -> Self {
-        match mode {
-            ClusterIntakeRoutingMode::Disabled => Self::Disabled,
-            ClusterIntakeRoutingMode::Observe => Self::Observe,
-            ClusterIntakeRoutingMode::Enforce => Self::Enforce,
-        }
-    }
-
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Disabled => "disabled",
-            Self::Observe => "observe",
-            Self::Enforce => "enforce",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IntakeRoutingModeSource {
-    ConfigYaml,
-    EnvOverride,
-}
-
-impl IntakeRoutingModeSource {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::ConfigYaml => "yaml",
-            Self::EnvOverride => "env_override",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum IntakeRoutingEnvOverride {
-    Disabled,
-    Observe,
-    Enforce,
-    Invalid,
-}
-
-impl IntakeRoutingEnvOverride {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Disabled => "disabled",
-            Self::Observe => "observe",
-            Self::Enforce => "enforce",
-            Self::Invalid => "invalid",
-        }
-    }
-
-    fn mode(self) -> IntakeRoutingMode {
-        match self {
-            Self::Disabled | Self::Invalid => IntakeRoutingMode::Disabled,
-            Self::Observe => IntakeRoutingMode::Observe,
-            Self::Enforce => IntakeRoutingMode::Enforce,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct EffectiveIntakeRoutingConfig {
-    pub(crate) mode: IntakeRoutingMode,
-    pub(crate) source: IntakeRoutingModeSource,
-    pub(crate) yaml_enabled: bool,
-    pub(crate) yaml_mode: ClusterIntakeRoutingMode,
-    pub(crate) env_override: Option<&'static str>,
-    pub(crate) warnings: Vec<&'static str>,
-    pub(crate) forward_pre_claim_timeout_secs: u64,
-    pub(crate) stale_claim_recovery_secs: u64,
-}
-
-impl EffectiveIntakeRoutingConfig {
-    pub(crate) fn mode_is_enforce(&self) -> bool {
-        matches!(self.mode, IntakeRoutingMode::Enforce)
-    }
-
-    pub(crate) fn worker_consumer_should_spawn(&self) -> bool {
-        !matches!(self.mode, IntakeRoutingMode::Disabled)
-    }
-
-    pub(crate) fn status_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "mode": self.mode.as_str(),
-            "source": self.source.as_str(),
-            "yaml": {
-                "enabled": self.yaml_enabled,
-                "mode": self.yaml_mode.as_str(),
-                "forward_pre_claim_timeout_secs": self.forward_pre_claim_timeout_secs,
-                "stale_claim_recovery_secs": self.stale_claim_recovery_secs,
-            },
-            "env_override": self.env_override,
-            "warning_count": self.warnings.len(),
-            "configuration_warnings": self.warnings,
-        })
-    }
-}
-
-fn parse_intake_routing_env_override(value: &str) -> IntakeRoutingEnvOverride {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "disabled" | "disable" | "off" | "false" | "0" => IntakeRoutingEnvOverride::Disabled,
-        "observe" => IntakeRoutingEnvOverride::Observe,
-        "enforce" => IntakeRoutingEnvOverride::Enforce,
-        _ => IntakeRoutingEnvOverride::Invalid,
-    }
-}
-
-fn effective_intake_routing_config_for(
-    config: &ClusterIntakeRoutingConfig,
-    env_override: Option<&str>,
-) -> EffectiveIntakeRoutingConfig {
-    let yaml_mode = if config.enabled {
-        IntakeRoutingMode::from_config(config.mode)
-    } else {
-        IntakeRoutingMode::Disabled
-    };
-    let parsed_env = env_override.map(parse_intake_routing_env_override);
-    let (mode, source) = match parsed_env {
-        Some(value) => (value.mode(), IntakeRoutingModeSource::EnvOverride),
-        None => (yaml_mode, IntakeRoutingModeSource::ConfigYaml),
-    };
-    let mut warnings = Vec::new();
-    if parsed_env == Some(IntakeRoutingEnvOverride::Invalid) {
-        warnings.push("invalid_ADK_INTAKE_ROUTING_MODE_fail_closed");
-    }
-    EffectiveIntakeRoutingConfig {
-        mode,
-        source,
-        yaml_enabled: config.enabled,
-        yaml_mode: config.mode,
-        env_override: parsed_env.map(IntakeRoutingEnvOverride::as_str),
-        warnings,
-        forward_pre_claim_timeout_secs: config.forward_pre_claim_timeout_secs,
-        stale_claim_recovery_secs: config.stale_claim_recovery_secs,
-    }
-}
-
-pub(crate) fn effective_intake_routing_config() -> EffectiveIntakeRoutingConfig {
-    let config = crate::config_live_reload::current()
-        .map(|config| config.cluster.intake_routing.clone())
-        .unwrap_or_else(|| crate::config::load_graceful().cluster.intake_routing);
-    let env_override = std::env::var("ADK_INTAKE_ROUTING_MODE").ok();
-    effective_intake_routing_config_for(&config, env_override.as_deref())
-}
-
-pub(crate) fn effective_intake_routing_mode() -> IntakeRoutingMode {
-    effective_intake_routing_config().mode
-}
-
-pub(crate) fn intake_routing_status_json() -> serde_json::Value {
-    effective_intake_routing_config().status_json()
-}
+pub(crate) use super::intake_routing_config::{
+    EffectiveIntakeRoutingConfig, IntakeRoutingMode, effective_intake_routing_config,
+    intake_routing_status_json,
+};
 
 /// What the hook decided. The intake gate uses this to choose between
 /// "skip local execution; the worker has the row" and "fall through
 /// to `handle_text_message` as today".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IntakeRoutingBasis {
+    LiveForeignOwner,
+    NodeOverride,
+    PreferredLabels,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResolvedSessionOwner {
+    NoOwner,
+    LiveLocal,
+    LiveForeign,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum IntakeRouterDecision {
     /// No forwarding happened (Disabled mode, a confirmed ownerless channel
@@ -216,6 +63,7 @@ pub(crate) enum IntakeRouterDecision {
     Forwarded {
         target_instance_id: String,
         outbox_id: i64,
+        basis: IntakeRoutingBasis,
     },
     /// At-most-once skip: Discord redelivered the same
     /// `(channel_id, user_msg_id)` and the 3-tuple unique constraint
@@ -223,11 +71,16 @@ pub(crate) enum IntakeRouterDecision {
     /// the message. Caller MUST NOT run the turn locally — running it
     /// would double-emit. Distinct from `RanLocal { DbErrorFellBack }`
     /// because the gate's response differs (skip vs run-local).
-    SkippedDuplicate,
+    SkippedDuplicate {
+        resolved_owner: ResolvedSessionOwner,
+    },
     /// A different message already owns the channel's single open outbox
     /// route. The producer must preserve/retry queued work and MUST NOT run it
     /// locally while the predecessor is open.
-    DeferredOpenRoute { target_instance_id: String },
+    DeferredOpenRoute {
+        target_instance_id: String,
+        resolved_owner: ResolvedSessionOwner,
+    },
     /// Ownership or placement could not be proven safe. Caller MUST NOT run
     /// the local execution body.
     Blocked { reason: IntakeBlockedReason },
@@ -236,12 +89,25 @@ pub(crate) enum IntakeRouterDecision {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ObservedIntakeOutcome {
     WouldKeepLocalExistingOwner,
-    WouldForwardLiveForeignOwner { target_instance_id: String },
-    WouldAssignNoOwnerToTarget { target_instance_id: String },
-    WouldKeepNoOwnerLocal { reason: RanLocalReason },
-    WouldSkipDuplicate,
-    WouldDeferOpenRoute { target_instance_id: String },
-    WouldBlock { reason: IntakeBlockedReason },
+    WouldForwardLiveForeignOwner {
+        target_instance_id: String,
+    },
+    WouldAssignNoOwnerToTarget {
+        target_instance_id: String,
+    },
+    WouldKeepNoOwnerLocal {
+        reason: RanLocalReason,
+    },
+    WouldSkipDuplicate {
+        resolved_owner: ResolvedSessionOwner,
+    },
+    WouldDeferOpenRoute {
+        target_instance_id: String,
+        resolved_owner: ResolvedSessionOwner,
+    },
+    WouldBlock {
+        reason: IntakeBlockedReason,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -434,15 +300,32 @@ pub(crate) async fn try_route_intake(
     }
 
     // The durable single-open-route fence surrounds every placement branch,
-    // including a local live owner and attachment-first placement.
+    // including a local live owner and attachment-first placement. Preserve the
+    // resolved owner classification for telemetry without changing the fence.
+    let resolved_owner = match &owner {
+        SessionOwnerResolution::NoOwner => ResolvedSessionOwner::NoOwner,
+        SessionOwnerResolution::LiveLocal { .. } => ResolvedSessionOwner::LiveLocal,
+        SessionOwnerResolution::LiveForeign { .. } => ResolvedSessionOwner::LiveForeign,
+        SessionOwnerResolution::StaleOwners { .. }
+        | SessionOwnerResolution::ConflictingLiveOwners { .. }
+        | SessionOwnerResolution::LiveForeignIncompatible { .. } => {
+            unreachable!("owner fail-safe outcomes return before the open-route fence")
+        }
+    };
     match existing_open_route(pool, ctx.channel_id).await {
         Ok(Some((_, existing_user_msg_id))) if existing_user_msg_id == ctx.user_msg_id => {
-            return apply_observe_mode(ctx.mode, IntakeRouterDecision::SkippedDuplicate);
+            return apply_observe_mode(
+                ctx.mode,
+                IntakeRouterDecision::SkippedDuplicate { resolved_owner },
+            );
         }
         Ok(Some((target_instance_id, _))) => {
             return apply_observe_mode(
                 ctx.mode,
-                IntakeRouterDecision::DeferredOpenRoute { target_instance_id },
+                IntakeRouterDecision::DeferredOpenRoute {
+                    target_instance_id,
+                    resolved_owner,
+                },
             );
         }
         Ok(None) => {}
@@ -650,7 +533,7 @@ async fn route_by_preferred_labels(
         &target,
         &preferred_labels,
         &agent_id,
-        ObserveTargetKind::NoOwnerPlacement,
+        ObserveTargetKind::PreferredLabels,
     )
     .await
 }
@@ -746,7 +629,7 @@ async fn route_node_override_without_owner(
         target,
         &required_labels,
         &agent_id,
-        ObserveTargetKind::NoOwnerPlacement,
+        ObserveTargetKind::NodeOverride,
     )
     .await
 }
@@ -754,7 +637,8 @@ async fn route_node_override_without_owner(
 #[derive(Clone, Copy)]
 enum ObserveTargetKind {
     LiveForeignOwner,
-    NoOwnerPlacement,
+    NodeOverride,
+    PreferredLabels,
 }
 
 fn apply_observe_mode(
@@ -772,10 +656,16 @@ fn apply_observe_mode(
         IntakeRouterDecision::RanLocal { reason } => {
             ObservedIntakeOutcome::WouldKeepNoOwnerLocal { reason }
         }
-        IntakeRouterDecision::SkippedDuplicate => ObservedIntakeOutcome::WouldSkipDuplicate,
-        IntakeRouterDecision::DeferredOpenRoute { target_instance_id } => {
-            ObservedIntakeOutcome::WouldDeferOpenRoute { target_instance_id }
+        IntakeRouterDecision::SkippedDuplicate { resolved_owner } => {
+            ObservedIntakeOutcome::WouldSkipDuplicate { resolved_owner }
         }
+        IntakeRouterDecision::DeferredOpenRoute {
+            target_instance_id,
+            resolved_owner,
+        } => ObservedIntakeOutcome::WouldDeferOpenRoute {
+            target_instance_id,
+            resolved_owner,
+        },
         IntakeRouterDecision::Blocked { reason } => ObservedIntakeOutcome::WouldBlock { reason },
         IntakeRouterDecision::Observed { .. } | IntakeRouterDecision::Forwarded { .. } => {
             unreachable!("observe conversion accepts only a mutation-free routing decision")
@@ -809,15 +699,25 @@ async fn route_to_instance(
     agent_id: &str,
     observe_target_kind: ObserveTargetKind,
 ) -> IntakeRouterDecision {
+    let resolved_owner = match observe_target_kind {
+        ObserveTargetKind::LiveForeignOwner => ResolvedSessionOwner::LiveForeign,
+        ObserveTargetKind::NodeOverride | ObserveTargetKind::PreferredLabels => {
+            ResolvedSessionOwner::NoOwner
+        }
+    };
     match existing_open_route(pool, ctx.channel_id).await {
         Ok(Some((_, existing_user_msg_id))) if existing_user_msg_id == ctx.user_msg_id => {
-            return apply_observe_mode(ctx.mode, IntakeRouterDecision::SkippedDuplicate);
+            return apply_observe_mode(
+                ctx.mode,
+                IntakeRouterDecision::SkippedDuplicate { resolved_owner },
+            );
         }
         Ok(Some((existing_target, _))) => {
             return apply_observe_mode(
                 ctx.mode,
                 IntakeRouterDecision::DeferredOpenRoute {
                     target_instance_id: existing_target,
+                    resolved_owner,
                 },
             );
         }
@@ -841,7 +741,7 @@ async fn route_to_instance(
                     target_instance_id: target.to_string(),
                 }
             }
-            ObserveTargetKind::NoOwnerPlacement => {
+            ObserveTargetKind::NodeOverride | ObserveTargetKind::PreferredLabels => {
                 ObservedIntakeOutcome::WouldAssignNoOwnerToTarget {
                     target_instance_id: target.to_string(),
                 }
@@ -864,6 +764,11 @@ async fn route_to_instance(
         Ok(outbox_id) => IntakeRouterDecision::Forwarded {
             target_instance_id: target.to_string(),
             outbox_id,
+            basis: match observe_target_kind {
+                ObserveTargetKind::LiveForeignOwner => IntakeRoutingBasis::LiveForeignOwner,
+                ObserveTargetKind::NodeOverride => IntakeRoutingBasis::NodeOverride,
+                ObserveTargetKind::PreferredLabels => IntakeRoutingBasis::PreferredLabels,
+            },
         },
         Err(error) => match classify_insert_pending_error(&error) {
             Some(IntakeInsertConflict::OpenRoutePerChannel) => {
@@ -871,13 +776,15 @@ async fn route_to_instance(
                     Ok(Some((_, existing_user_msg_id)))
                         if existing_user_msg_id == ctx.user_msg_id =>
                     {
-                        IntakeRouterDecision::SkippedDuplicate
+                        IntakeRouterDecision::SkippedDuplicate { resolved_owner }
                     }
                     Ok(Some((existing_target, _))) => IntakeRouterDecision::DeferredOpenRoute {
                         target_instance_id: existing_target,
+                        resolved_owner,
                     },
                     Ok(None) | Err(_) => IntakeRouterDecision::DeferredOpenRoute {
                         target_instance_id: target.to_string(),
+                        resolved_owner,
                     },
                 }
             }
@@ -887,7 +794,7 @@ async fn route_to_instance(
                     user_msg_id = ctx.user_msg_id,
                     "[intake_router] duplicate Discord message (node override) — existing row already covers it; skipping local execution"
                 );
-                IntakeRouterDecision::SkippedDuplicate
+                IntakeRouterDecision::SkippedDuplicate { resolved_owner }
             }
             None => IntakeRouterDecision::Blocked {
                 reason: IntakeBlockedReason::RoutingDependencyFailed {
@@ -978,49 +885,6 @@ async fn agent_preferred_labels_for_channel(
     Ok(agent_id_and_preferred_labels(pool, channel_id)
         .await?
         .map(|(_, _, labels)| labels))
-}
-
-#[cfg(test)]
-mod unit_tests {
-    use super::*;
-
-    #[test]
-    fn effective_intake_routing_config_resolves_yaml_and_env_override() {
-        let mut yaml = ClusterIntakeRoutingConfig::default();
-        assert_eq!(
-            effective_intake_routing_config_for(&yaml, None).mode,
-            IntakeRoutingMode::Disabled
-        );
-
-        yaml.enabled = true;
-        assert_eq!(
-            effective_intake_routing_config_for(&yaml, None).mode,
-            IntakeRoutingMode::Observe
-        );
-
-        yaml.mode = ClusterIntakeRoutingMode::Enforce;
-        let from_yaml = effective_intake_routing_config_for(&yaml, None);
-        assert_eq!(from_yaml.mode, IntakeRoutingMode::Enforce);
-        assert_eq!(from_yaml.source, IntakeRoutingModeSource::ConfigYaml);
-
-        let env_observe = effective_intake_routing_config_for(&yaml, Some("observe"));
-        assert_eq!(env_observe.mode, IntakeRoutingMode::Observe);
-        assert_eq!(env_observe.source, IntakeRoutingModeSource::EnvOverride);
-        assert_eq!(env_observe.env_override, Some("observe"));
-
-        let env_disabled = effective_intake_routing_config_for(&yaml, Some("OFF"));
-        assert_eq!(env_disabled.mode, IntakeRoutingMode::Disabled);
-        assert_eq!(env_disabled.env_override, Some("disabled"));
-
-        let invalid = effective_intake_routing_config_for(&yaml, Some("garbage"));
-        assert_eq!(invalid.mode, IntakeRoutingMode::Disabled);
-        assert_eq!(invalid.source, IntakeRoutingModeSource::EnvOverride);
-        assert_eq!(invalid.env_override, Some("invalid"));
-        assert_eq!(
-            invalid.warnings,
-            vec!["invalid_ADK_INTAKE_ROUTING_MODE_fail_closed"]
-        );
-    }
 }
 
 #[cfg(test)]
@@ -1460,6 +1324,7 @@ mod pg_tests {
             IntakeRouterDecision::Forwarded {
                 target_instance_id,
                 outbox_id,
+                ..
             } => {
                 assert_eq!(target_instance_id, "worker-enforce");
                 outbox_id
@@ -1614,6 +1479,7 @@ mod pg_tests {
             IntakeRouterDecision::Forwarded {
                 target_instance_id,
                 outbox_id,
+                ..
             } => {
                 assert_eq!(target_instance_id, "worker-owner");
                 outbox_id
@@ -2100,6 +1966,7 @@ mod pg_tests {
             IntakeRouterDecision::Forwarded {
                 target_instance_id,
                 outbox_id,
+                ..
             } => {
                 assert_eq!(target_instance_id, "worker-codex");
                 outbox_id
@@ -2468,6 +2335,7 @@ mod pg_tests {
             IntakeRouterDecision::Forwarded {
                 target_instance_id,
                 outbox_id,
+                ..
             } => {
                 assert_eq!(target_instance_id, "worker-selected");
                 outbox_id
@@ -2565,7 +2433,12 @@ mod pg_tests {
 
         // Second call (same Discord message) — must report SkippedDuplicate.
         let second = try_route_intake(&pool, &ctx).await;
-        assert_eq!(second, IntakeRouterDecision::SkippedDuplicate);
+        assert_eq!(
+            second,
+            IntakeRouterDecision::SkippedDuplicate {
+                resolved_owner: ResolvedSessionOwner::NoOwner
+            }
+        );
 
         pool.close().await;
         pg_db.drop().await;
@@ -2705,12 +2578,116 @@ mod pg_tests {
         assert_eq!(
             decision,
             IntakeRouterDecision::DeferredOpenRoute {
-                target_instance_id: "worker-conflict".to_string()
+                target_instance_id: "worker-conflict".to_string(),
+                resolved_owner: ResolvedSessionOwner::NoOwner,
             }
         );
 
         pool.close().await;
         pg_db.drop().await;
+    }
+
+    async fn seed_open_route(pool: &PgPool, channel_id: &str, target_instance_id: &str) {
+        sqlx::query(
+            "INSERT INTO intake_outbox (
+                target_instance_id, forwarded_by_instance_id, required_labels,
+                channel_id, user_msg_id, request_owner_id, user_text,
+                turn_kind, agent_id, status, attempt_no
+             ) VALUES ($1, 'leader-1', '[]'::JSONB, $2, 'msg-prior', '50',
+                'prior', 'foreground', 'agent-owner-telemetry', 'pending', 1)",
+        )
+        .bind(target_instance_id)
+        .bind(channel_id)
+        .execute(pool)
+        .await
+        .expect("seed open route");
+    }
+
+    async fn open_route_owner_telemetry_case(
+        channel_id: &str,
+        owner_instance_id: Option<&str>,
+        expected_owner: ResolvedSessionOwner,
+    ) {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_open_route(&pool, channel_id, "worker-open-route").await;
+        if let Some(instance_id) = owner_instance_id {
+            if instance_id != "leader-1" {
+                seed_worker_node(&pool, instance_id, serde_json::json!([]), "online").await;
+            }
+            seed_session_owner(
+                &pool,
+                &format!("claude:{instance_id}:{channel_id}"),
+                "claude",
+                channel_id,
+                instance_id,
+                "turn_active",
+            )
+            .await;
+        }
+
+        let decision = try_route_intake(
+            &pool,
+            &ctx_for_channel(IntakeRoutingMode::Observe, channel_id),
+        )
+        .await;
+        assert!(matches!(
+            &decision,
+            IntakeRouterDecision::Observed {
+                outcome: ObservedIntakeOutcome::WouldDeferOpenRoute {
+                    resolved_owner: owner,
+                    ..
+                }
+            } if *owner == expected_owner
+        ));
+        assert_eq!(
+            super::super::intake_routing_telemetry::telemetry_for_decision(&decision)
+                .owner_resolution,
+            match expected_owner {
+                ResolvedSessionOwner::NoOwner => {
+                    super::super::intake_routing_telemetry::OwnerResolutionCode::NoOwner
+                }
+                ResolvedSessionOwner::LiveLocal => {
+                    super::super::intake_routing_telemetry::OwnerResolutionCode::LiveLocal
+                }
+                ResolvedSessionOwner::LiveForeign => {
+                    super::super::intake_routing_telemetry::OwnerResolutionCode::LiveForeign
+                }
+            }
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_route_telemetry_preserves_local_owner_pg() {
+        open_route_owner_telemetry_case(
+            "ch-open-route-local-owner",
+            Some("leader-1"),
+            ResolvedSessionOwner::LiveLocal,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_route_telemetry_preserves_foreign_owner_pg() {
+        open_route_owner_telemetry_case(
+            "ch-open-route-foreign-owner",
+            Some("worker-live-owner"),
+            ResolvedSessionOwner::LiveForeign,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn open_route_telemetry_preserves_no_owner_pg() {
+        open_route_owner_telemetry_case(
+            "ch-open-route-no-owner",
+            None,
+            ResolvedSessionOwner::NoOwner,
+        )
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2794,7 +2771,12 @@ mod pg_tests {
             &ctx_for_channel(IntakeRoutingMode::Enforce, "ch-dup"),
         )
         .await;
-        assert_eq!(second, IntakeRouterDecision::SkippedDuplicate);
+        assert_eq!(
+            second,
+            IntakeRouterDecision::SkippedDuplicate {
+                resolved_owner: ResolvedSessionOwner::NoOwner
+            }
+        );
 
         // CRITICAL: the family did NOT grow — only one row exists.
         let count: i64 = sqlx::query_scalar(

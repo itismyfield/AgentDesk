@@ -39,6 +39,7 @@ src/
 │   ├── client.rs
 │   ├── dcserver.rs
 │   ├── dcserver_pg_bootstrap.rs
+│   ├── dcserver_restart_marker.rs
 │   ├── direct.rs
 │   ├── discord.rs
 │   ├── discord_thread_create.rs
@@ -389,7 +390,8 @@ src/
 │   │   └── spawn_queue.rs
 │   ├── claude_tui/
 │   │   ├── hook_relay/
-│   │   │   └── ordered_queue.rs
+│   │   │   ├── ordered_queue.rs
+│   │   │   └── queue_retention.rs
 │   │   ├── hook_server/
 │   │   │   └── relay_receipts.rs
 │   │   ├── hosting/
@@ -422,6 +424,8 @@ src/
 │   │   ├── intake_preflight.rs
 │   │   ├── intake_router_hook.rs
 │   │   ├── intake_routing.rs
+│   │   ├── intake_routing_config.rs
+│   │   ├── intake_routing_telemetry.rs
 │   │   ├── intake_worker.rs
 │   │   ├── intake_worker_capabilities.rs
 │   │   ├── mod.rs
@@ -668,6 +672,7 @@ src/
 │   │   │   │   │   ├── turn_watchdog.rs
 │   │   │   │   │   └── voice_intake.rs
 │   │   │   │   ├── attachments.rs
+│   │   │   │   ├── busy_retry.rs
 │   │   │   │   ├── control.rs
 │   │   │   │   ├── goal_lifecycle.rs
 │   │   │   │   ├── headless_turn.rs
@@ -695,6 +700,8 @@ src/
 │   │   ├── runtime_bootstrap/
 │   │   │   ├── framework_setup.rs
 │   │   │   ├── gateway_lease.rs
+│   │   │   ├── gateway_lease_recovery.rs
+│   │   │   ├── gateway_lease_recovery_tests.rs
 │   │   │   ├── gateway_lease_tests.rs
 │   │   │   ├── gateway_runtime.rs
 │   │   │   ├── intake.rs
@@ -1189,8 +1196,10 @@ src/
 │   │   └── completion_scan.rs
 │   ├── turn_orchestrator/
 │   │   ├── active_source_dedup.rs
+│   │   ├── dispatch_cleanup.rs
 │   │   ├── dispatch_reservation.rs
 │   │   ├── episode_identity.rs
+│   │   ├── front_requeue.rs
 │   │   ├── overflow.rs
 │   │   ├── pending_queue_persistence.rs
 │   │   ├── queue_cancellation.rs
@@ -1271,6 +1280,7 @@ src/
 │   ├── termination_audit.rs
 │   ├── tmux_common.rs
 │   ├── tmux_diagnostics.rs
+│   ├── tmux_turn_liveness.rs
 │   ├── tmux_wrapper.rs
 │   ├── tool_output_guard.rs
 │   ├── tui_prompt_control.rs

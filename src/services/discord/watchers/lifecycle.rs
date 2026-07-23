@@ -2453,7 +2453,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok())
             .unwrap_or(0);
-        let current_gen = super::super::runtime_store::load_generation();
+        let current_gen = super::super::runtime_store::process_generation();
         if session_gen < current_gen && current_gen > 0 {
             // Skip sessions belonging to other runtimes
             let current_owner_marker = current_tmux_owner_marker();
@@ -2629,7 +2629,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                         last_active: tokio::time::Instant::now(),
                         worktree: None,
 
-                        born_generation: super::super::runtime_store::load_generation(),
+                        born_generation: super::super::runtime_store::process_generation(),
                     });
 
             if session.session_id.is_none() && persisted_session_id.is_some() {

@@ -1819,7 +1819,7 @@ fn queued_intervention(message_id: MessageId, index: usize) -> Intervention {
         author_id: serenity::UserId::new(HUMAN_ID),
         author_is_bot: false,
         message_id,
-        queued_generation: super::runtime_store::load_generation(),
+        queued_generation: super::runtime_store::process_generation(),
         source_message_ids: vec![message_id],
         source_message_queued_generations: Vec::new(),
         source_text_segments: Vec::new(),

@@ -139,7 +139,7 @@ mod tests {
             author_id: UserId::new(99),
             author_is_bot: false,
             message_id: MessageId::new(message_id),
-            queued_generation: crate::services::discord::runtime_store::load_generation(),
+            queued_generation: crate::services::discord::runtime_store::process_generation(),
             source_message_ids: vec![MessageId::new(message_id)],
             source_message_queued_generations: Vec::new(),
             source_text_segments: Vec::new(),
@@ -181,6 +181,8 @@ mod tests {
 
     #[tokio::test]
     async fn stale_episode_cannot_release_pre_cutoff_same_id_successor() {
+        let tmp = tempfile::tempdir().expect("isolated persistence root");
+        let _root_guard = crate::config::set_agentdesk_root_for_test(tmp.path());
         let registry = ChannelMailboxRegistry::default();
         let handle = registry.handle(ChannelId::new(4_595_001));
         let user_msg_id = MessageId::new(9_595);

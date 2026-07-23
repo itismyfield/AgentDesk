@@ -3,8 +3,18 @@
 //! Split out of `gateway_lease.rs` (#4356): the file crossed the 700-LoC
 //! namespace cap once these gained coverage of self-id resolution.
 
+use super::super::gateway_lease_recovery::standby_retry_delay;
 use super::*;
 use serde_json::json;
+
+#[test]
+fn standby_retry_delay_stays_inside_thirty_to_sixty_seconds() {
+    for _ in 0..128 {
+        let delay = standby_retry_delay();
+        assert!(delay >= Duration::from_secs(30));
+        assert!(delay <= Duration::from_secs(60));
+    }
+}
 
 #[test]
 fn failed_lease_does_not_authorize_worker_or_poller_startup() {

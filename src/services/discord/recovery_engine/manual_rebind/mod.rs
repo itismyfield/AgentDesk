@@ -810,7 +810,7 @@ async fn rebind_inflight_for_channel_inner(
         state.rebind_origin_created_at_unix = Some(super::inflight::now_unix());
         state.rebind_origin_deadline_secs =
             Some(super::inflight::rebind_origin_deadline_secs_env());
-        state.rebind_origin_birth_generation = Some(super::runtime_store::load_generation());
+        state.rebind_origin_birth_generation = Some(super::runtime_store::process_generation());
 
         // Atomic create-or-fail: if a legitimate turn created its inflight file
         // between the preflight check above and this point, the write fails

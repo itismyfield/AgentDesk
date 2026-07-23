@@ -724,7 +724,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                                 category_name: None,
                                 last_active: tokio::time::Instant::now(),
                                 worktree: None,
-                                born_generation: super::runtime_store::load_generation(),
+                                born_generation: super::runtime_store::process_generation(),
                             });
                     session.channel_id = Some(state.channel_id);
                     session.last_active = tokio::time::Instant::now();
@@ -1881,7 +1881,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                         category_name: None,
                         last_active: tokio::time::Instant::now(),
                         worktree: None,
-                        born_generation: super::runtime_store::load_generation(),
+                        born_generation: super::runtime_store::process_generation(),
                     });
                 session.channel_id = Some(channel_id.get());
                 session.last_active = tokio::time::Instant::now();
@@ -2119,7 +2119,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     last_active: tokio::time::Instant::now(),
                     worktree: None,
 
-                    born_generation: super::runtime_store::load_generation(),
+                    born_generation: super::runtime_store::process_generation(),
                 });
             session.channel_id = Some(channel_id.get());
             session.last_active = tokio::time::Instant::now();

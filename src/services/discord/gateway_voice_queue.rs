@@ -31,7 +31,7 @@ mod tests {
             author_id: UserId::new(author_id),
             author_is_bot: true,
             message_id: MessageId::new(50_001),
-            queued_generation: crate::services::discord::runtime_store::load_generation(),
+            queued_generation: crate::services::discord::runtime_store::process_generation(),
             source_message_ids: vec![MessageId::new(50_001)],
             source_message_queued_generations: Vec::new(),
             source_text_segments: Vec::new(),

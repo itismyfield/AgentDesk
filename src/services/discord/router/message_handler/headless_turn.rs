@@ -390,7 +390,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                     channel_id: Some(channel_id.get()),
                     last_active: tokio::time::Instant::now(),
                     worktree: None,
-                    born_generation: super::super::super::runtime_store::load_generation(),
+                    born_generation: super::super::super::runtime_store::process_generation(),
                 });
             session.current_path = Some(canonical.clone());
             if session.channel_name.is_none() {
