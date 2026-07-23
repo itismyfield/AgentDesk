@@ -32,11 +32,9 @@ pub(crate) struct TargetPreflightPolicy {
     pub source_provider_binary_version: String,
     pub expected_workspace_head: String,
     pub expected_workspace_branch: String,
-    pub require_clean_workspace: bool,
     pub minimum_disk_free_bytes: u64,
     pub minimum_memory_available_bytes: u64,
     pub maximum_recent_db_pool_errors: u64,
-    pub require_standby_relay: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -136,18 +134,6 @@ pub(crate) struct PreflightBlocked {
     pub failures: Vec<PreflightFailure>,
 }
 
-/// Runs an owner mutation only after every required target check passes.
-///
-/// Planned-handoff code should use this boundary immediately around its
-/// generation-fenced transfer call. A failed report never invokes `transfer`.
-pub(crate) fn transfer_if_target_ready<T>(
-    report: &TargetPreflightReport,
-    transfer: impl FnOnce() -> T,
-) -> Result<T, PreflightBlocked> {
-    report.require_ready()?;
-    Ok(transfer())
-}
-
 fn push_failure(
     failures: &mut Vec<PreflightFailure>,
     condition: bool,
@@ -164,6 +150,10 @@ fn push_failure(
 
 fn nonempty_equal(actual: &str, expected: &str) -> bool {
     !actual.trim().is_empty() && actual.trim() == expected.trim()
+}
+
+fn equal_when_expected(actual: &str, expected: &str) -> bool {
+    expected.trim().is_empty() || nonempty_equal(actual, expected)
 }
 
 fn supported_provider(provider: &str) -> bool {
@@ -257,7 +247,7 @@ pub(crate) fn evaluate_target_preflight(
     );
     push_failure(
         &mut failures,
-        nonempty_equal(&snapshot.release_sha, &policy.source_release_sha),
+        equal_when_expected(&snapshot.release_sha, &policy.source_release_sha),
         PreflightReasonCode::ReleaseShaMismatch,
         || {
             format!(
@@ -268,7 +258,7 @@ pub(crate) fn evaluate_target_preflight(
     );
     push_failure(
         &mut failures,
-        nonempty_equal(&snapshot.config_schema, &policy.source_config_schema),
+        equal_when_expected(&snapshot.config_schema, &policy.source_config_schema),
         PreflightReasonCode::ConfigSchemaMismatch,
         || {
             format!(
@@ -279,7 +269,7 @@ pub(crate) fn evaluate_target_preflight(
     );
     push_failure(
         &mut failures,
-        nonempty_equal(
+        equal_when_expected(
             &snapshot.provider_binary_version,
             &policy.source_provider_binary_version,
         ),
@@ -317,7 +307,7 @@ pub(crate) fn evaluate_target_preflight(
     );
     push_failure(
         &mut failures,
-        nonempty_equal(&snapshot.workspace_head, &policy.expected_workspace_head),
+        equal_when_expected(&snapshot.workspace_head, &policy.expected_workspace_head),
         PreflightReasonCode::WorkspaceHeadMismatch,
         || {
             format!(
@@ -328,7 +318,7 @@ pub(crate) fn evaluate_target_preflight(
     );
     push_failure(
         &mut failures,
-        nonempty_equal(
+        equal_when_expected(
             &snapshot.workspace_branch,
             &policy.expected_workspace_branch,
         ),
@@ -340,14 +330,12 @@ pub(crate) fn evaluate_target_preflight(
             )
         },
     );
-    if policy.require_clean_workspace {
-        push_failure(
-            &mut failures,
-            snapshot.workspace_clean,
-            PreflightReasonCode::WorkspaceDirty,
-            || "target workspace is dirty".to_string(),
-        );
-    }
+    push_failure(
+        &mut failures,
+        snapshot.workspace_clean,
+        PreflightReasonCode::WorkspaceDirty,
+        || "target workspace is dirty".to_string(),
+    );
     push_failure(
         &mut failures,
         snapshot.disk_free_bytes >= policy.minimum_disk_free_bytes,
@@ -387,14 +375,12 @@ pub(crate) fn evaluate_target_preflight(
         PreflightReasonCode::TerminalRelayUnavailable,
         || "terminal relay probe failed".to_string(),
     );
-    if policy.require_standby_relay {
-        push_failure(
-            &mut failures,
-            snapshot.standby_relay_ready,
-            PreflightReasonCode::StandbyRelayUnavailable,
-            || "standby relay probe failed".to_string(),
-        );
-    }
+    push_failure(
+        &mut failures,
+        snapshot.standby_relay_ready,
+        PreflightReasonCode::StandbyRelayUnavailable,
+        || "standby relay probe failed".to_string(),
+    );
     push_failure(
         &mut failures,
         snapshot.intake_outbox_operator_ready,
@@ -448,11 +434,9 @@ mod tests {
             source_provider_binary_version: "2.1.0".to_string(),
             expected_workspace_head: "abc123".to_string(),
             expected_workspace_branch: "main".to_string(),
-            require_clean_workspace: true,
             minimum_disk_free_bytes: 100,
             minimum_memory_available_bytes: 200,
             maximum_recent_db_pool_errors: 1,
-            require_standby_relay: true,
         }
     }
 
@@ -487,20 +471,18 @@ mod tests {
     }
 
     #[test]
-    fn ready_target_allows_transfer_and_reports_text_only_notice() {
+    fn ready_target_requires_no_execution_callback() {
         let report = evaluate_target_preflight(&ready_node(), &policy());
-        let mut owner = "mac-book-release";
-        let result = transfer_if_target_ready(&report, || owner = "mac-mini-release");
 
-        assert!(result.is_ok());
-        assert_eq!(owner, "mac-mini-release");
+        assert!(report.require_ready().is_ok());
         assert!(report.passed);
         assert!(report.attachment_notice.is_some());
     }
 
-    #[test]
-    fn each_required_failure_preserves_owner_and_generation() {
-        let mutations: Vec<(&str, PreflightReasonCode, Box<dyn Fn(&mut Value)>)> = vec![
+    type NodeMutation = (&'static str, PreflightReasonCode, Box<dyn Fn(&mut Value)>);
+
+    fn required_failure_mutations() -> Vec<NodeMutation> {
+        vec![
             (
                 "offline",
                 PreflightReasonCode::TargetOffline,
@@ -635,27 +617,25 @@ mod tests {
                     n["capabilities"]["intake_preflight"]["attachments"] = json!("unsupported")
                 }),
             ),
-        ];
+        ]
+    }
 
-        for (name, expected_reason, mutate) in mutations {
+    #[test]
+    fn each_required_failure_is_independently_fail_closed() {
+        for (name, expected_reason, mutate) in required_failure_mutations() {
             let mut node = ready_node();
             mutate(&mut node);
             let report = evaluate_target_preflight(&node, &policy());
-            let mut owner = "mac-book-release";
-            let mut generation = 41_u64;
-            let result = transfer_if_target_ready(&report, || {
-                owner = "mac-mini-release";
-                generation += 1;
-            });
-            assert!(result.is_err(), "{name} unexpectedly passed");
+            assert!(
+                report.require_ready().is_err(),
+                "{name} unexpectedly passed"
+            );
             assert_eq!(
                 report.failures.len(),
                 1,
                 "{name} did not fail independently"
             );
             assert_eq!(report.failures[0].code, expected_reason, "{name} reason");
-            assert_eq!(owner, "mac-book-release", "{name} mutated owner");
-            assert_eq!(generation, 41, "{name} mutated generation");
         }
     }
 
@@ -697,20 +677,17 @@ mod tests {
             let mut policy = policy();
             mutate(&mut policy);
             let report = evaluate_target_preflight(&ready_node(), &policy);
-            let mut owner = "mac-book-release";
-            let mut generation = 41_u64;
 
             assert!(
-                transfer_if_target_ready(&report, || {
-                    owner = "mac-mini-release";
-                    generation += 1;
-                })
-                .is_err(),
+                report.require_ready().is_err(),
                 "{name} unexpectedly passed"
             );
+            assert_eq!(
+                report.failures.len(),
+                1,
+                "{name} did not fail independently"
+            );
             assert_eq!(report.failures[0].code, expected_reason, "{name} reason");
-            assert_eq!(owner, "mac-book-release", "{name} mutated owner");
-            assert_eq!(generation, 41, "{name} mutated generation");
         }
     }
 
@@ -722,6 +699,98 @@ mod tests {
 
         assert!(!report.passed);
         assert!(report.failures.len() > 1);
+    }
+
+    async fn production_state_snapshot(pool: &sqlx::PgPool) -> Value {
+        let sessions: Value = sqlx::query_scalar(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(s) ORDER BY s.id), '[]'::jsonb) FROM sessions s",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("snapshot sessions");
+        let intake_outbox: Value = sqlx::query_scalar(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(o) ORDER BY o.id), '[]'::jsonb) FROM intake_outbox o",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("snapshot intake_outbox");
+        let intake_session_owners: Value = sqlx::query_scalar(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(o) ORDER BY o.id), '[]'::jsonb) FROM intake_session_owners o",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("snapshot intake_session_owners");
+        json!({
+            "sessions": sessions,
+            "intake_outbox": intake_outbox,
+            "intake_session_owners": intake_session_owners,
+        })
+    }
+
+    #[tokio::test]
+    async fn evaluation_does_not_mutate_production_handoff_state_pg() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        sqlx::query("INSERT INTO agents (id, name) VALUES ('preflight-agent', 'Preflight')")
+            .execute(&pool)
+            .await
+            .expect("seed agent");
+        sqlx::query(
+            "INSERT INTO sessions
+                (session_key, agent_id, provider, status, channel_id, instance_id)
+             VALUES
+                ('preflight-session', 'preflight-agent', 'claude', 'idle',
+                 'preflight-channel', 'mac-book-release')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed session");
+        sqlx::query(
+            "INSERT INTO intake_session_owners
+                (provider, raw_channel_id, owner_instance_id, generation, status)
+             VALUES ('claude', 'preflight-channel', 'mac-book-release', 41, 'active')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed intake owner");
+        sqlx::query(
+            "INSERT INTO intake_outbox
+                (target_instance_id, forwarded_by_instance_id, channel_id, user_msg_id,
+                 request_owner_id, user_text, turn_kind, agent_id, status,
+                 owner_generation, owner_instance_id)
+             VALUES
+                ('mac-book-release', 'mac-mini-release', 'preflight-channel',
+                 'preflight-message', 'preflight-user', 'hello', 'message',
+                 'preflight-agent', 'failed_pre_accept', 41, 'mac-book-release')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed intake outbox");
+
+        let before = production_state_snapshot(&pool).await;
+        let passing = evaluate_target_preflight(&ready_node(), &policy());
+        assert!(passing.require_ready().is_ok());
+        for (name, expected_reason, mutate) in required_failure_mutations() {
+            let mut node = ready_node();
+            mutate(&mut node);
+            let report = evaluate_target_preflight(&node, &policy());
+            assert!(
+                report.require_ready().is_err(),
+                "{name} unexpectedly passed"
+            );
+            assert_eq!(report.failures.len(), 1, "{name} failure count");
+            assert_eq!(report.failures[0].code, expected_reason, "{name} reason");
+            assert_eq!(
+                production_state_snapshot(&pool).await,
+                before,
+                "{name} mutated production handoff state"
+            );
+        }
+        let after = production_state_snapshot(&pool).await;
+
+        assert_eq!(after, before);
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[test]
@@ -758,14 +827,12 @@ mod tests {
         let mut node = ready_node();
         node["capabilities"]["intake_worker"]["providers"] = json!(["gemini"]);
         let report = evaluate_target_preflight(&node, &policy);
-        let mut owner = "mac-book-release";
 
         assert_eq!(report.verdict, PreflightVerdict::Fail);
         assert_eq!(
             report.failures[0].code,
             PreflightReasonCode::ProviderUnsupported
         );
-        assert!(transfer_if_target_ready(&report, || owner = "mac-mini-release").is_err());
-        assert_eq!(owner, "mac-book-release");
+        assert!(report.require_ready().is_err());
     }
 }
