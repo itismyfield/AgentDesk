@@ -302,6 +302,15 @@ impl HealthRegistry {
                 .all(|entry| entry.role == ProviderRuntimeRole::Standby)
     }
 
+    pub(in crate::services::discord) async fn provider_runtimes(&self) -> Vec<Arc<SharedData>> {
+        self.providers
+            .lock()
+            .await
+            .iter()
+            .map(|entry| entry.shared.clone())
+            .collect()
+    }
+
     pub(in crate::services::discord) async fn register(
         &self,
         name: String,

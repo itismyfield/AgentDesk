@@ -695,6 +695,7 @@ src/
 │   │   │   ├── framework_setup.rs
 │   │   │   ├── gateway_lease.rs
 │   │   │   ├── gateway_lease_recovery.rs
+│   │   │   ├── gateway_lease_recovery_tests.rs
 │   │   │   ├── gateway_lease_tests.rs
 │   │   │   ├── gateway_runtime.rs
 │   │   │   ├── intake.rs

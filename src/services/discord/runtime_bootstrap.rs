@@ -3,6 +3,8 @@ use super::*;
 mod framework_setup;
 mod gateway_lease;
 mod gateway_lease_recovery;
+#[cfg(test)]
+mod gateway_lease_recovery_tests;
 mod gateway_runtime;
 mod intake;
 mod orphan_recovery;

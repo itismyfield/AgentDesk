@@ -455,6 +455,36 @@ _health_json_reasons() {
   _health_json_get_string_array_csv "$health_json" "degraded_reasons"
 }
 
+_health_json_gateway_standby_only() {
+  local health_json="$1"
+  local reasons_csv reason
+  [ -n "$health_json" ] || return 1
+
+  if _health_json_has_jq; then
+    printf '%s' "$health_json" | jq -e '
+      .status == "degraded"
+      and (.db == true)
+      and (.server_up == true)
+      and (.cluster_standby == true)
+      and ((.degraded_reasons // []) | length > 0)
+      and all((.degraded_reasons // [])[]; test("^(gateway_standby|provider:[^:]+:gateway_standby)$"))
+    ' >/dev/null 2>&1
+    return
+  fi
+
+  [ "$(_health_json_status "$health_json")" = "degraded" ] || return 1
+  _health_json_field_is_true "$health_json" "db" || return 1
+  _health_json_field_is_true "$health_json" "server_up" || return 1
+  _health_json_field_is_true "$health_json" "cluster_standby" || return 1
+  reasons_csv=$(_health_json_reasons "$health_json" || true)
+  [ -n "$reasons_csv" ] || return 1
+  while IFS=, read -r reason; do
+    [ -n "$reason" ] || return 1
+    [[ "$reason" =~ ^gateway_standby$|^provider:[^:]+:gateway_standby$ ]] || return 1
+  done <<< "$reasons_csv"
+  return 0
+}
+
 _health_json_reconcile_only() {
   local health_json="$1"
   local reasons_csv reason
@@ -612,6 +642,9 @@ health_json_is_ready() {
       return 1
     fi
     [ "$status" = "healthy" ] && return 0
+    if _health_json_gateway_standby_only "$health_json"; then
+      return 0
+    fi
     if [ "$allow_reconcile_degraded" = "1" ] \
       && _health_json_field_exists "$health_json" "fully_recovered" \
       && _health_json_field_is_false "$health_json" "fully_recovered"; then
@@ -624,6 +657,10 @@ health_json_is_ready() {
   fi
 
   if [ "$status" = "healthy" ]; then
+    return 0
+  fi
+
+  if _health_json_gateway_standby_only "$health_json"; then
     return 0
   fi
 

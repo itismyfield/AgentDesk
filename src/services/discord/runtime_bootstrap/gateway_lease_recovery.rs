@@ -1,5 +1,8 @@
 use super::*;
 
+static STANDBY_PROMOTION_IN_PROGRESS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub(super) const GATEWAY_STANDBY_RETRY_MIN_SECS: u64 = 30;
 pub(super) const GATEWAY_STANDBY_RETRY_JITTER_SECS: u64 = 30;
 pub(super) const GATEWAY_ORPHAN_MIN_AGE_SECS: i64 = 30 * 60;
@@ -49,31 +52,34 @@ pub(super) async fn reap_orphaned_gateway_lease_once(
     lock_id: i64,
     provider: &ProviderKind,
 ) -> Result<bool, String> {
-    let self_pid = std::process::id() as i32;
     let holder = sqlx::query_as::<_, GatewayLeaseHolder>(
         r#"
         SELECT a.pid,
                a.application_name,
                n.instance_id,
                n.status AS node_status,
-               (n.last_heartbeat_at >= NOW() - ($3::BIGINT * INTERVAL '1 second')) AS heartbeat_recent,
-               (n.process_id = a.pid) AS process_matches
+               (n.last_heartbeat_at >= NOW() - ($2::BIGINT * INTERVAL '1 second')) AS heartbeat_recent,
+               (n.process_id IS NOT NULL) AS process_matches
           FROM pg_locks l
           JOIN pg_stat_activity a ON a.pid = l.pid
           LEFT JOIN worker_nodes n
-            ON a.application_name = $4 || n.instance_id || ':' || a.pid::TEXT || ':' || $5
+            ON split_part(a.application_name, ':', 3) = n.instance_id
+           AND split_part(a.application_name, ':', 4) ~ '^[0-9]+$'
+           AND n.process_id = split_part(a.application_name, ':', 4)::INTEGER
+           AND split_part(a.application_name, ':', 5) = $4
          WHERE l.locktype = 'advisory'
            AND l.granted
            AND l.classid = (($1::BIGINT >> 32) & 4294967295)::OID
            AND l.objid = ($1::BIGINT & 4294967295)::OID
            AND l.objsubid = 1
-           AND a.pid <> $2
+           AND a.pid <> pg_backend_pid()
+           AND a.application_name LIKE $3 || '%'
            AND a.state = 'idle'
-           AND a.backend_start < NOW() - ($3::BIGINT * INTERVAL '1 second')
+           AND a.state_change < NOW() - ($2::BIGINT * INTERVAL '1 second')
+           AND a.backend_start < NOW() - ($2::BIGINT * INTERVAL '1 second')
         "#,
     )
     .bind(lock_id)
-    .bind(self_pid)
     .bind(GATEWAY_ORPHAN_MIN_AGE_SECS)
     .bind(GATEWAY_LEASE_APPLICATION_PREFIX)
     .bind(provider.as_str())
@@ -121,10 +127,121 @@ pub(super) fn standby_retry_delay() -> Duration {
     )
 }
 
+fn runtime_is_idle(shared: &SharedData) -> bool {
+    shared
+        .restart
+        .global_active
+        .load(std::sync::atomic::Ordering::Acquire)
+        == 0
+        && shared
+            .restart
+            .global_finalizing
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
+}
+
+fn unfence_runtimes(runtimes: &[Arc<SharedData>]) {
+    for runtime in runtimes {
+        runtime.restart.intake_worker_lifecycle.unfence_admission();
+        runtime
+            .restart
+            .shutting_down
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        runtime
+            .restart
+            .restart_pending
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+async fn attempt_clean_standby_promotion(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    lease: crate::db::postgres::AdvisoryLockLease,
+) -> bool {
+    if STANDBY_PROMOTION_IN_PROGRESS
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
+        drop(lease);
+        return false;
+    }
+
+    let runtimes = shared
+        .health_registry
+        .upgrade()
+        .map(|registry| async move { registry.provider_runtimes().await })
+        .expect("registered standby keeps the process health registry alive")
+        .await;
+    for runtime in &runtimes {
+        runtime.restart.intake_worker_lifecycle.fence_admission();
+        runtime
+            .restart
+            .shutting_down
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        runtime
+            .restart
+            .restart_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    for runtime in &runtimes {
+        runtime
+            .restart
+            .intake_worker_lifecycle
+            .wait_until_drained()
+            .await;
+    }
+
+    if !runtime_is_idle(shared) {
+        drop(lease);
+        unfence_runtimes(&runtimes);
+        STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
+        return false;
+    }
+
+    for runtime in &runtimes {
+        let runtime_provider = runtime.provider.clone();
+        let drain = mailbox_restart_drain_all(runtime, &runtime_provider).await;
+        if drain.queued_count > 0 || !drain.persistence_errors.is_empty() {
+            drop(lease);
+            unfence_runtimes(&runtimes);
+            STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
+            return false;
+        }
+    }
+
+    drop(lease);
+    let Some(root) = crate::agentdesk_runtime_root() else {
+        unfence_runtimes(&runtimes);
+        STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
+        return false;
+    };
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let marker = root.join("restart_pending");
+    let request = format!(
+        "nonce={nonce}\nreason=gateway_standby_promotion\nprovider={}\n",
+        provider.as_str()
+    );
+    if let Err(error) = std::fs::write(&marker, request) {
+        tracing::error!(%error, "GATEWAY-LEASE: failed to publish standby promotion restart marker");
+        unfence_runtimes(&runtimes);
+        STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
+        return false;
+    }
+    unfence_runtimes(&runtimes);
+    STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
+    true
+}
+
 /// Retry a confirmed standby lease until it becomes available. The provider's
-/// `SharedData` and intake workers are already live, so starting a second gateway
-/// in place would duplicate runtime state. Releasing the probe lease and exiting
-/// the process lets launchd rebuild every provider atomically on a clean runtime.
+/// `SharedData` and intake workers are already live, so promotion uses the
+/// existing fenced deferred-restart path rather than constructing a second
+/// gateway in place.
 pub(super) async fn spawn_standby_gateway_retry(
     shared: Arc<SharedData>,
     token_hash: String,
@@ -143,19 +260,6 @@ pub(super) async fn spawn_standby_gateway_retry(
             {
                 return;
             }
-            if shared
-                .restart
-                .global_active
-                .load(std::sync::atomic::Ordering::Acquire)
-                > 0
-                || shared
-                    .restart
-                    .global_finalizing
-                    .load(std::sync::atomic::Ordering::Acquire)
-                    > 0
-            {
-                continue;
-            }
             match super::gateway_lease::try_acquire_discord_gateway_lease(
                 &pool,
                 &token_hash,
@@ -164,12 +268,13 @@ pub(super) async fn spawn_standby_gateway_retry(
             .await
             {
                 Ok(Some(lease)) => {
-                    drop(lease);
-                    tracing::warn!(
-                        provider = provider.as_str(),
-                        "GATEWAY-LEASE: standby observed an available lease; exiting for clean launchd promotion"
-                    );
-                    std::process::exit(0);
+                    if attempt_clean_standby_promotion(&shared, &provider, lease).await {
+                        tracing::warn!(
+                            provider = provider.as_str(),
+                            "GATEWAY-LEASE: standby published a fenced graceful promotion restart"
+                        );
+                        return;
+                    }
                 }
                 Ok(None) => {}
                 Err(error) => tracing::warn!(
