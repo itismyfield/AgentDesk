@@ -1284,9 +1284,14 @@ pub(super) async fn handle_text_message(
         cancel_token.clone(),
         request_owner,
         user_msg_id,
-        stale_busy_context(
+        intake_claim_context(
+            adk_session_key.as_deref(),
             &provider,
-            [adk_session_key.as_deref(), tmux_session_name.as_deref()],
+            tmux_session_name.as_deref(),
+            &mut current_path,
+            &mut session_id,
+            &mut memento_context_loaded,
+            &mut session_strategy_reason,
         ),
     )
     .await;
@@ -1806,14 +1811,7 @@ pub(super) async fn handle_text_message(
     // #3813 Phase 1a: prompt prep complete — this mark sits INSIDE the
     // `[prompt-prep]` window below (overlaps it; do not sum — see latency_spans.rs).
     intake_latency.mark_prep_done();
-    let provider_label = match &provider {
-        ProviderKind::Claude => "claude",
-        ProviderKind::Codex => "codex",
-        ProviderKind::Gemini => "gemini",
-        ProviderKind::OpenCode => "opencode",
-        ProviderKind::Qwen => "qwen",
-        ProviderKind::Unsupported(_) => "unsupported",
-    };
+    let provider_label = provider.as_str();
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
         "  [{ts}] [prompt-prep] channel={} provider={} dispatch={} memory_backend={} reused_session={} duration_ms={}",
