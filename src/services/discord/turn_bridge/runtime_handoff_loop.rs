@@ -125,6 +125,10 @@ pub(super) async fn handle_runtime_handoff_loop_message(
             // tail so a skipped save is not undone by the stream_tick blind
             // dirty flush re-writing the stale snapshot.
             let mut tmux_ready_guarded_save_outcome = None;
+            let tmux_ready_expected =
+                crate::services::discord::inflight::InflightTurnIdentity::from_state(
+                    inflight_state,
+                );
             tmux_last_offset = Some(last_offset);
             inflight_state.runtime_kind = Some(RuntimeHandoffKind::LegacyTmuxWrapper);
             inflight_state.tmux_session_name = Some(tmux_session_name.clone());
@@ -294,6 +298,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             // durably by `relay_owner_kind`.
                             tmux_ready_guarded_save_outcome = Some(guarded_runtime_handoff_save(
                                 &inflight_state,
+                                &tmux_ready_expected,
                                 channel_id,
                                 "turn_bridge::runtime_handoff_loop::tmux_ready_standby_relay",
                             ));
@@ -349,6 +354,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                         watcher_relay_available_for_turn = true;
                         tmux_ready_guarded_save_outcome = Some(guarded_runtime_handoff_save(
                             &inflight_state,
+                            &tmux_ready_expected,
                             channel_id,
                             "turn_bridge::runtime_handoff_loop::tmux_ready_watcher_spawn",
                         ));
@@ -373,6 +379,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                 watcher_owns_assistant_relay = true;
                 tmux_ready_guarded_save_outcome = Some(guarded_runtime_handoff_save(
                     &inflight_state,
+                    &tmux_ready_expected,
                     channel_id,
                     "turn_bridge::runtime_handoff_loop::tmux_ready_watcher_handoff",
                 ));
