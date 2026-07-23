@@ -1,4 +1,18 @@
+#[cfg(test)]
+use crate::services::terminal_status_formatting::{ContextWindowUsage, format_usage_status};
 use crate::services::tui_turn_state::TuiTurnState;
+
+#[cfg(test)]
+fn render_prompt_readiness_panel_line(
+    model_label: &str,
+    progress_bar: &str,
+    rate_limit_json: &str,
+    now_unix: i64,
+    context: ContextWindowUsage,
+) -> Option<String> {
+    format_usage_status(rate_limit_json, now_unix, Some(context))
+        .map(|usage| format!("  {model_label} │ {progress_bar} │ {usage}"))
+}
 
 /// Return line indexes occupied by authenticated Claude TUI background-agent
 /// chrome. The three shapes deliberately include their TUI-only placement:
@@ -208,21 +222,31 @@ mod tests {
 
     #[test]
     fn captured_background_agent_frame_with_draft_composer_is_detected() {
-        let pane = "\
-원하는 대로 할게:
-  어느 쪽?
-
-✻ Waiting for 5 background agents to finish
-
-─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-❯ a로 확정짓고 4:22 타임라인 떠서 처리해
-─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  🤖 Opus(H) │ ███░░░░░░░ │ 26% │ 265K/1.0M │ 5h: 8% (3h0m) │ 7d: 55% (1d23h)
-  ⏺ main                                                                                        ↑/↓ to select · Enter to view
-  ◯ general-purpose  Fix #3207 turn-stop + resume                                                    16m 5s · ↓ 159.5k tokens
-  ◯ general-purpose  Implement #3154 A converged design                                             10m 53s · ↓ 110.5k tokens";
+        let usage = r#"{"buckets":[
+            {"name":"5h","used":8,"reset":1800010800},
+            {"name":"7d","used":55,"reset":1800169200},
+            {"name":"7d Sonnet","used":34,"reset":1800417600}
+        ]}"#;
+        let panel_line = render_prompt_readiness_panel_line(
+            "🤖 Opus(H)",
+            "███░░░░░░░",
+            usage,
+            1_800_000_000,
+            ContextWindowUsage {
+                used_tokens: 265_000,
+                window_tokens: 1_000_000,
+            },
+        )
+        .expect("usage panel line");
         assert_eq!(
-            claude_tui_background_agent_status_line_indexes(pane),
+            panel_line,
+            "  🤖 Opus(H) │ ███░░░░░░░ │ 5h: 8% (3h0m) │ 7d: 55% (1d23h) │ 7d-F: 34% (4d20h) │ ctw: 26% (265K/1.0M)"
+        );
+        let pane = format!(
+            "원하는 대로 할게:\n  어느 쪽?\n\n✻ Waiting for 5 background agents to finish\n\n─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ a로 확정짓고 4:22 타임라인 떠서 처리해\n─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n{panel_line}\n  ⏺ main                                                                                        ↑/↓ to select · Enter to view\n  ◯ general-purpose  Fix #3207 turn-stop + resume                                                    16m 5s · ↓ 159.5k tokens\n  ◯ general-purpose  Implement #3154 A converged design                                             10m 53s · ↓ 110.5k tokens"
+        );
+        assert_eq!(
+            claude_tui_background_agent_status_line_indexes(&pane),
             vec![3, 10, 11],
         );
     }
