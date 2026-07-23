@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Reject new Rust library test modules that no curated CI lane selects.
+"""Reject new Rust library test modules that no curated CI lane fully selects.
 
 AgentDesk's ``test-non-pg`` recipe and PR test jobs intentionally use libtest
 name filters instead of running every library test. This source-only guard finds
-``#[cfg(test)] mod ...`` declarations, derives their Rust module paths, and
-checks whether at least one positive ``cargo test`` filter is a substring of the
-module path (the same matching direction libtest uses for every test in that
-module).
+``#[cfg(test)] mod ...`` declarations, derives their logical Rust module paths
+(including ``#[path = "..."]`` aliases), and compares them with each curated
+``cargo test`` command's positive and ``--skip`` filters.
 
-Existing uncovered modules are recorded in a baseline. The baseline is a debt
-inventory, not an allowlist: a newly uncovered module fails, while a module that
-becomes covered prints a reminder to remove its stale baseline entry.
+The existing uncovered set is locked twice: its sorted names live in the
+baseline file and its entry count lives in this script. Any new module, stale
+entry, or baseline growth fails. Reducing debt therefore requires an explicit,
+reviewable edit to both locks.
 """
 
 from __future__ import annotations
@@ -19,17 +19,17 @@ import argparse
 import re
 import shlex
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-JUSTFILE = REPO_ROOT / "justfile"
-PR_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci-pr.yml"
-BASELINE = REPO_ROOT / "scripts" / "test_lane_coverage_baseline.txt"
+BASELINE_REL = Path("scripts/test_lane_coverage_baseline.txt")
+BASELINE_ENTRY_COUNT = 689
 
 # Attributes do not contain a closing square bracket in the forms used by this
-# repository. Keeping this deliberately small makes the scanner independent of
-# a Rust build and parser toolchain.
+# repository. Strings and comments are blanked without changing offsets, so the
+# original attribute text can be recovered safely from the same span.
 ATTRIBUTED_MOD_RE = re.compile(
     r"(?P<attrs>(?:#\s*\[[^\]]*\]\s*)+)"
     r"(?:(?:pub(?:\s*\([^)]*\))?)\s+)?"
@@ -41,11 +41,11 @@ MOD_RE = re.compile(
     re.MULTILINE,
 )
 CFG_TEST_RE = re.compile(r"#\s*\[\s*cfg\s*\([^\]]*\btest\b[^\]]*\)\s*\]")
+PATH_ATTR_RE = re.compile(r'#\s*\[\s*path\s*=\s*"(?P<path>[^"]+)"\s*\]')
 
 _RAW_STRING_OPEN = re.compile(r'(?:r|br)(#*)"')
 _CHAR_LITERAL = re.compile(r"'(?:\\.|[^'\\])'")
 
-# Cargo options whose following token is an option value, not a test filter.
 _CARGO_VALUE_OPTIONS = {
     "--package",
     "-p",
@@ -59,7 +59,7 @@ _CARGO_VALUE_OPTIONS = {
     "--color",
     "--config",
 }
-_LIBTEST_VALUE_OPTIONS = {"--skip", "--test-threads", "--format", "--color"}
+_LIBTEST_VALUE_OPTIONS = {"--test-threads", "--format", "--color"}
 _NON_LIB_TARGET_OPTIONS = {
     "--bin",
     "--bins",
@@ -71,6 +71,26 @@ _NON_LIB_TARGET_OPTIONS = {
     "--benches",
     "--doc",
 }
+
+
+@dataclass(frozen=True)
+class LaneFilter:
+    """One cargo-test invocation's libtest selection contract."""
+
+    positives: tuple[str, ...]
+    skips: tuple[str, ...]
+    exact: bool = False
+
+    def fully_selects(self, module: str) -> bool:
+        """Whether this command selects every test whose path starts at module."""
+        if self.exact:
+            return False
+        positive_match = not self.positives or any(
+            positive in module for positive in self.positives
+        )
+        if not positive_match:
+            return False
+        return not any(skip in module for skip in self.skips)
 
 
 class StripState:
@@ -161,7 +181,7 @@ def strip_rust(source: str) -> str:
 
 
 def file_module_path(src_root: Path, path: Path) -> tuple[str, ...]:
-    """Return the conventional library module path for a Rust source file."""
+    """Return a source file's conventional physical module path."""
     rel = path.relative_to(src_root)
     if rel.name == "lib.rs":
         return ()
@@ -170,21 +190,23 @@ def file_module_path(src_root: Path, path: Path) -> tuple[str, ...]:
     return (*rel.parent.parts, rel.stem)
 
 
-def test_modules_in_source(source: str, base: tuple[str, ...]) -> set[str]:
-    """Find cfg(test) module paths in one stripped Rust source file."""
+def _module_records(
+    source: str, base: tuple[str, ...]
+) -> tuple[set[str], list[tuple[tuple[str, ...], str]]]:
+    """Return cfg(test) modules and path aliases declared in one source file."""
     clean = strip_rust(source)
-    test_mod_offsets = {
-        match.start("name")
-        for match in ATTRIBUTED_MOD_RE.finditer(clean)
-        if CFG_TEST_RE.search(match.group("attrs"))
-    }
+    attributes: dict[int, str] = {}
+    for match in ATTRIBUTED_MOD_RE.finditer(clean):
+        attributes[match.start("name")] = source[
+            match.start("attrs") : match.end("attrs")
+        ]
 
     modules: set[str] = set()
+    aliases: list[tuple[tuple[str, ...], str]] = []
     inline_stack: list[tuple[int, str]] = []
     depth = 0
     cursor = 0
     for match in MOD_RE.finditer(clean):
-        # Account for ordinary scopes between module declarations.
         between = clean[cursor : match.start()]
         for brace in re.finditer(r"[{}]", between):
             if brace.group() == "{":
@@ -195,32 +217,101 @@ def test_modules_in_source(source: str, base: tuple[str, ...]) -> set[str]:
                     inline_stack.pop()
 
         name = match.group("name")
-        path = (*base, *(item[1] for item in inline_stack), name)
-        if match.start("name") in test_mod_offsets:
-            modules.add("::".join(path))
+        logical = (*base, *(item[1] for item in inline_stack), name)
+        attrs = attributes.get(match.start("name"), "")
+        if CFG_TEST_RE.search(attrs):
+            modules.add("::".join(logical))
+        path_attr = PATH_ATTR_RE.search(attrs)
+        if path_attr and match.group("term") == ";":
+            aliases.append((logical, path_attr.group("path")))
 
         if match.group("term") == "{":
             depth += 1
             inline_stack.append((depth, name))
         cursor = match.end()
+    return modules, aliases
 
+
+def test_modules_in_source(source: str, base: tuple[str, ...]) -> set[str]:
+    """Find cfg(test) module paths in one Rust source file."""
+    modules, _ = _module_records(source, base)
     return modules
 
 
+def _normalize_alias_path(
+    path: tuple[str, ...], aliases: dict[tuple[str, ...], tuple[str, ...]]
+) -> tuple[str, ...]:
+    """Replace the longest physical prefix until the logical path is stable."""
+    seen: set[tuple[str, ...]] = set()
+    current = path
+    while current not in seen:
+        seen.add(current)
+        replacement = next(
+            (
+                (physical, logical)
+                for physical, logical in sorted(
+                    aliases.items(), key=lambda item: len(item[0]), reverse=True
+                )
+                if current[: len(physical)] == physical
+                and (*logical, *current[len(physical) :]) != current
+            ),
+            None,
+        )
+        if replacement is None:
+            break
+        physical, logical = replacement
+        updated = (*logical, *current[len(physical) :])
+        if updated == current:
+            break
+        current = updated
+    return current
+
+
 def discover_test_modules(repo_root: Path) -> set[str]:
-    """Inventory conventional Rust library cfg(test) modules without building."""
-    src_root = repo_root / "src"
-    modules: set[str] = set()
+    """Inventory logical Rust library cfg(test) modules without building."""
+    src_root = (repo_root / "src").resolve()
+    physical_modules: set[tuple[str, ...]] = set()
+    raw_aliases: dict[tuple[str, ...], tuple[str, ...]] = {}
+
     for path in sorted(src_root.rglob("*.rs")):
         rel = path.relative_to(src_root)
         if rel.name == "main.rs" or (rel.parts and rel.parts[0] == "bin"):
             continue
-        modules.update(
-            test_modules_in_source(
-                path.read_text(encoding="utf-8"), file_module_path(src_root, path)
-            )
-        )
-    return modules
+        base = file_module_path(src_root, path)
+        source = path.read_text(encoding="utf-8")
+        modules, aliases = _module_records(source, base)
+        physical_modules.update(tuple(module.split("::")) for module in modules)
+        for logical, relative_target in aliases:
+            target = (path.parent / relative_target).resolve()
+            try:
+                physical_target = file_module_path(src_root, target)
+            except ValueError as exc:
+                raise ValueError(
+                    f"#[path] target escapes src/: {path.relative_to(repo_root)} -> "
+                    f"{relative_target}"
+                ) from exc
+            previous = raw_aliases.get(physical_target)
+            if previous is not None and previous != logical:
+                raise ValueError(
+                    f"conflicting #[path] aliases for {target.relative_to(repo_root)}: "
+                    f"{'::'.join(previous)} vs {'::'.join(logical)}"
+                )
+            raw_aliases[physical_target] = logical
+
+    aliases = dict(raw_aliases)
+    for _ in range(len(aliases) + 1):
+        updated = {
+            physical: _normalize_alias_path(logical, aliases)
+            for physical, logical in aliases.items()
+        }
+        if updated == aliases:
+            break
+        aliases = updated
+
+    return {
+        "::".join(_normalize_alias_path(module, aliases))
+        for module in physical_modules
+    }
 
 
 def just_recipe_commands(justfile: str, recipe_name: str) -> tuple[str, ...]:
@@ -239,28 +330,27 @@ def just_recipe_commands(justfile: str, recipe_name: str) -> tuple[str, ...]:
     return tuple(commands)
 
 
-def cargo_test_filters(command: str) -> set[str]:
-    """Return positive libtest filters from a cargo-test shell command."""
+def cargo_test_filter(command: str) -> LaneFilter | None:
+    """Parse one library cargo-test command's positive and skip filters."""
     cargo = command.find("cargo test")
     if cargo < 0:
-        return set()
+        return None
     try:
         words = shlex.split(command[cargo:], comments=True)
     except ValueError as exc:
         raise ValueError(f"cannot parse cargo test command: {command!r}: {exc}") from exc
     if words[:2] != ["cargo", "test"]:
-        return set()
+        return None
 
     args = words[2:]
-    before, separator, after = args, [], []
+    before, after = args, []
     if "--" in args:
         split = args.index("--")
-        before, separator, after = args[:split], ["--"], args[split + 1 :]
-
+        before, after = args[:split], args[split + 1 :]
     if any(option in before for option in _NON_LIB_TARGET_OPTIONS) and "--all-targets" not in before:
-        return set()
+        return None
 
-    filters: set[str] = set()
+    positives: list[str] = []
     skip_next = False
     for token in before:
         if skip_next:
@@ -269,28 +359,37 @@ def cargo_test_filters(command: str) -> set[str]:
         if token in _CARGO_VALUE_OPTIONS:
             skip_next = True
             continue
-        if token.startswith("-") or "=" in token and token.startswith("-"):
-            continue
-        filters.add(token)
-
-    skip_next = False
-    for token in after if separator else ():
-        if skip_next:
-            skip_next = False
-            continue
-        if token in _LIBTEST_VALUE_OPTIONS:
-            skip_next = True
-            continue
-        if token.startswith("--skip=") or token.startswith("--test-threads="):
-            continue
         if token.startswith("-"):
             continue
-        filters.add(token)
-    return filters
+        positives.append(token)
+
+    skips: list[str] = []
+    exact = False
+    index = 0
+    while index < len(after):
+        token = after[index]
+        if token == "--exact":
+            exact = True
+        elif token == "--skip":
+            if index + 1 >= len(after):
+                raise ValueError(f"--skip has no value: {command!r}")
+            skips.append(after[index + 1])
+            index += 1
+        elif token.startswith("--skip="):
+            skips.append(token.partition("=")[2])
+        elif token in _LIBTEST_VALUE_OPTIONS:
+            index += 1
+        elif token.startswith("--test-threads="):
+            pass
+        elif not token.startswith("-"):
+            positives.append(token)
+        index += 1
+
+    return LaneFilter(tuple(positives), tuple(skips), exact)
 
 
-def discover_lane_filters(repo_root: Path) -> set[str]:
-    """Parse positive filters from test-non-pg and PR-targeted test commands."""
+def discover_lane_filters(repo_root: Path) -> tuple[LaneFilter, ...]:
+    """Parse selection contracts from test-non-pg and PR targeted commands."""
     just_text = (repo_root / "justfile").read_text(encoding="utf-8")
     workflow = (repo_root / ".github/workflows/ci-pr.yml").read_text(encoding="utf-8")
 
@@ -305,27 +404,29 @@ def discover_lane_filters(repo_root: Path) -> set[str]:
                 command = command[1:-1]
         commands.append(command)
 
-    # PR jobs may delegate their targeted suite to a just recipe (test_fast does
-    # this for test-postgres). Expand every referenced recipe that exists.
     for recipe in sorted(set(re.findall(r"\bjust\s+([A-Za-z0-9_-]+)", workflow))):
         try:
             commands.extend(just_recipe_commands(just_text, recipe))
         except ValueError:
             continue
 
-    filters: set[str] = set()
+    lanes: list[LaneFilter] = []
     for command in commands:
-        filters.update(cargo_test_filters(command))
-    return filters
+        lane = cargo_test_filter(command)
+        if lane is not None:
+            lanes.append(lane)
+    return tuple(dict.fromkeys(lanes))
 
 
-def uncovered_modules(modules: Iterable[str], filters: Iterable[str]) -> set[str]:
-    """Return modules not wholly selected by any positive libtest filter."""
-    active = tuple(filter_name for filter_name in filters if filter_name)
+def uncovered_modules(
+    modules: Iterable[str], lanes: Iterable[LaneFilter]
+) -> set[str]:
+    """Return modules not fully selected by any single curated invocation."""
+    active = tuple(lanes)
     return {
         module
         for module in modules
-        if not any(f in module or f.startswith(f"{module}::") for f in active)
+        if not any(lane.fully_selects(module) for lane in active)
     }
 
 
@@ -343,42 +444,58 @@ def load_baseline(path: Path) -> set[str]:
     return set(entries)
 
 
-def check(repo_root: Path, baseline_path: Path) -> int:
+def check(
+    repo_root: Path,
+    baseline_path: Path,
+    expected_baseline_count: int = BASELINE_ENTRY_COUNT,
+    *,
+    emit_success: bool = True,
+) -> int:
     modules = discover_test_modules(repo_root)
-    filters = discover_lane_filters(repo_root)
-    current = uncovered_modules(modules, filters)
+    lanes = discover_lane_filters(repo_root)
+    current = uncovered_modules(modules, lanes)
     baseline = load_baseline(baseline_path)
 
-    new = sorted(current - baseline)
-    resolved = sorted(baseline - current)
-    if new:
+    if len(baseline) != expected_baseline_count:
+        direction = "growth" if len(baseline) > expected_baseline_count else "shrinkage"
         print(
-            f"FAIL: {len(new)} newly uncovered Rust test module(s); "
-            f"{len(current)} currently uncovered (baseline {len(baseline)}).",
+            f"FAIL: baseline {direction}: {len(baseline)} entries, but the locked "
+            f"count is {expected_baseline_count}.",
             file=sys.stderr,
         )
         print(
-            "Add a module-level cargo test filter to test-non-pg or a PR targeted "
-            "lane. Do not grow the baseline for new debt.",
+            "Update BASELINE_ENTRY_COUNT only when review intentionally accepts a "
+            "smaller corrected debt set; baseline growth is forbidden.",
+            file=sys.stderr,
+        )
+        return 1
+
+    new = sorted(current - baseline)
+    stale = sorted(baseline - current)
+    if new or stale:
+        print(
+            f"FAIL: coverage baseline drift: {len(new)} newly uncovered, "
+            f"{len(stale)} stale/covered, {len(current)} currently uncovered "
+            f"(locked baseline {len(baseline)}).",
             file=sys.stderr,
         )
         for module in new:
             print(f"  + {module}", file=sys.stderr)
+        for module in stale:
+            print(f"  - {module}", file=sys.stderr)
+        print(
+            "Add broad module coverage for '+' entries. Remove '-' entries and "
+            "lower BASELINE_ENTRY_COUNT to lock in debt reduction.",
+            file=sys.stderr,
+        )
         return 1
 
-    if resolved:
+    if emit_success:
         print(
-            f"NOTE: {len(resolved)} baseline module(s) are now covered or removed; "
-            f"delete them from {baseline_path.relative_to(repo_root)}."
+            f"OK: {len(modules)} logical Rust cfg(test) modules inventoried; "
+            f"{len(current)} uncovered module(s) exactly match the locked baseline; "
+            f"{len(lanes)} curated cargo-test invocation(s)."
         )
-        for module in resolved:
-            print(f"  - {module}")
-
-    print(
-        f"OK: {len(modules)} Rust cfg(test) modules inventoried; "
-        f"{len(current)} uncovered module(s) match baseline; "
-        f"{len(filters)} positive lane filter(s)."
-    )
     return 0
 
 
@@ -388,7 +505,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--baseline", type=Path, default=None)
     args = parser.parse_args(argv)
     repo_root = args.repo_root.resolve()
-    baseline = args.baseline.resolve() if args.baseline else repo_root / "scripts/test_lane_coverage_baseline.txt"
+    baseline = args.baseline.resolve() if args.baseline else repo_root / BASELINE_REL
     try:
         return check(repo_root, baseline)
     except (OSError, ValueError) as exc:

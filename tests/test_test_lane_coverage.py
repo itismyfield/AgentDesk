@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,7 @@ SCRIPT = REPO_ROOT / "scripts" / "check_test_lane_coverage.py"
 _spec = importlib.util.spec_from_file_location("check_test_lane_coverage", SCRIPT)
 assert _spec and _spec.loader
 coverage = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = coverage
 _spec.loader.exec_module(coverage)
 
 
@@ -65,25 +67,76 @@ class TestModuleScannerTests(unittest.TestCase):
                 },
             )
 
+    def test_path_alias_uses_logical_module_path_for_nested_tests(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "src/services/discord").mkdir(parents=True)
+            (root / "src/lib.rs").write_text("", encoding="utf-8")
+            (root / "src/services/discord/tmux.rs").write_text(
+                '#[path = "tmux_watcher.rs"]\nmod watcher_alias;\n',
+                encoding="utf-8",
+            )
+            (root / "src/services/discord/tmux_watcher.rs").write_text(
+                "mod footer { #[cfg(test)] mod tests {} }\n", encoding="utf-8"
+            )
+
+            modules = coverage.discover_test_modules(root)
+
+            self.assertEqual(
+                modules,
+                {"services::discord::tmux::watcher_alias::footer::tests"},
+            )
+
+    def test_nested_path_alias_chain_normalizes_to_logical_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "src/physical/child").mkdir(parents=True)
+            (root / "src/lib.rs").write_text(
+                '#[path = "physical/parent.rs"] mod logical;\n', encoding="utf-8"
+            )
+            (root / "src/physical/parent.rs").write_text(
+                '#[path = "child/leaf.rs"] mod nested;\n', encoding="utf-8"
+            )
+            (root / "src/physical/child/leaf.rs").write_text(
+                "#[cfg(test)] mod tests {}\n", encoding="utf-8"
+            )
+
+            self.assertEqual(
+                coverage.discover_test_modules(root), {"logical::nested::tests"}
+            )
+
 
 class LaneFilterTests(unittest.TestCase):
-    def test_parses_only_positive_libtest_filters(self) -> None:
-        command = (
-            "cargo test --lib relay_recovery -- --skip postgres "
-            "--test-threads=1"
+    def test_parses_positive_skip_and_exact_filters(self) -> None:
+        lane = coverage.cargo_test_filter(
+            "cargo test --lib relay_recovery -- --skip postgres --exact"
         )
-        self.assertEqual(coverage.cargo_test_filters(command), {"relay_recovery"})
         self.assertEqual(
-            coverage.cargo_test_filters(
+            lane,
+            coverage.LaneFilter(("relay_recovery",), ("postgres",), True),
+        )
+        self.assertIsNone(
+            coverage.cargo_test_filter(
                 "cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1"
-            ),
-            set(),
+            )
         )
 
-    def test_exact_test_filter_marks_its_module_selected(self) -> None:
+    def test_single_test_filter_does_not_cover_parent_module(self) -> None:
         modules = {"service::tests", "other::tests"}
-        filters = {"service::tests::one_case"}
-        self.assertEqual(coverage.uncovered_modules(modules, filters), {"other::tests"})
+        lanes = (coverage.LaneFilter(("service::tests::one_case",), ()),)
+        self.assertEqual(coverage.uncovered_modules(modules, lanes), modules)
+
+    def test_module_filter_covers_nested_module(self) -> None:
+        modules = {"service::tests", "other::tests"}
+        lanes = (coverage.LaneFilter(("service",), ()),)
+        self.assertEqual(coverage.uncovered_modules(modules, lanes), {"other::tests"})
+
+    def test_skip_matching_module_overrides_positive_filter(self) -> None:
+        modules = {"alpha::tests", "alpha::_pg_tests"}
+        lanes = (coverage.LaneFilter(("alpha",), ("_pg",)),)
+        self.assertEqual(
+            coverage.uncovered_modules(modules, lanes), {"alpha::_pg_tests"}
+        )
 
 
 class RatchetTests(unittest.TestCase):
@@ -101,49 +154,71 @@ class RatchetTests(unittest.TestCase):
             "run: cargo test --lib targeted_tests\n", encoding="utf-8"
         )
 
+    def run_check(
+        self, root: Path, baseline_entries: str, expected_count: int
+    ) -> tuple[int, str]:
+        baseline = root / "scripts/test_lane_coverage_baseline.txt"
+        baseline.write_text(baseline_entries, encoding="utf-8")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result = coverage.check(
+                root, baseline, expected_count, emit_success=False
+            )
+        return result, stderr.getvalue()
+
     def test_new_uncovered_module_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             self.make_repo(root, "new_tests")
-            baseline = root / "scripts/test_lane_coverage_baseline.txt"
-            baseline.write_text("", encoding="utf-8")
-            stderr = io.StringIO()
-
-            with contextlib.redirect_stderr(stderr):
-                result = coverage.check(root, baseline)
-
+            result, stderr = self.run_check(root, "", 0)
             self.assertEqual(result, 1)
-            self.assertIn("+ new_tests", stderr.getvalue())
+            self.assertIn("+ new_tests", stderr)
 
-    def test_baselined_debt_passes_and_stale_entry_is_reported(self) -> None:
+    def test_baseline_growth_fails_even_if_it_contains_new_module(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.make_repo(root, "new_tests")
+            result, stderr = self.run_check(root, "new_tests\n", 0)
+            self.assertEqual(result, 1)
+            self.assertIn("baseline growth", stderr)
+
+    def test_stale_baseline_entry_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             self.make_repo(root, "covered_tests")
-            baseline = root / "scripts/test_lane_coverage_baseline.txt"
-            baseline.write_text("covered_tests\n", encoding="utf-8")
-            stdout = io.StringIO()
+            result, stderr = self.run_check(root, "covered_tests\n", 1)
+            self.assertEqual(result, 1)
+            self.assertIn("1 stale/covered", stderr)
+            self.assertIn("- covered_tests", stderr)
 
-            with contextlib.redirect_stdout(stdout):
-                result = coverage.check(root, baseline)
-
+    def test_baselined_uncovered_debt_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.make_repo(root, "legacy_tests")
+            result, stderr = self.run_check(root, "legacy_tests\n", 1)
             self.assertEqual(result, 0)
-            self.assertIn("baseline module(s) are now covered", stdout.getvalue())
+            self.assertEqual(stderr, "")
 
-    def test_repository_baseline_contains_footer_regression_module(self) -> None:
-        baseline = coverage.load_baseline(
-            REPO_ROOT / "scripts/test_lane_coverage_baseline.txt"
-        )
+    def test_repository_baseline_contains_logical_footer_path(self) -> None:
+        baseline = coverage.load_baseline(REPO_ROOT / coverage.BASELINE_REL)
         self.assertIn(
-            "services::discord::turn_bridge::single_message_footer::tests", baseline
+            "services::discord::tmux::tmux_watcher::single_message_footer::tests",
+            baseline,
         )
+        self.assertNotIn(
+            "services::discord::tmux_watcher::single_message_footer::tests",
+            baseline,
+        )
+
+    def test_repository_baseline_count_matches_locked_constant(self) -> None:
+        baseline = coverage.load_baseline(REPO_ROOT / coverage.BASELINE_REL)
+        self.assertEqual(len(baseline), coverage.BASELINE_ENTRY_COUNT)
 
     def test_ci_script_checks_wires_guard_and_tests(self) -> None:
         script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(
             encoding="utf-8"
         )
-        self.assertIn(
-            '"$PYTHON" scripts/check_test_lane_coverage.py', script
-        )
+        self.assertIn('"$PYTHON" scripts/check_test_lane_coverage.py', script)
         self.assertIn(
             '"$PYTHON" -m unittest tests.test_test_lane_coverage', script
         )
