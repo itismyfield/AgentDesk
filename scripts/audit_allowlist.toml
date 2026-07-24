@@ -70,7 +70,10 @@ direct_discord_sends = [
   # gated on `two_message_panel_enabled` and ordered answer-first (the panel is
   # the NEW message BELOW the answer). Retires with the #1436 outbound v3
   # extraction alongside the other bridge panel sends.
-  "src/services/discord/turn_bridge/two_message_panel.rs#direct_discord_sends:dd70d6753b664c07",
+  # 2026-07-24 #4860 re-fingerprint: same PR-B `gateway.send_message` panel
+  # create; context hash shifted by the singleton re-anchor sequence (prior-
+  # binding load + durable persist + old-panel retire) around the send.
+  "src/services/discord/turn_bridge/two_message_panel.rs#direct_discord_sends:c4e8a3a063c75061",
   # #3805 P2 PR-D: the sink rollover re-anchor sends the NEW status panel BELOW
   # the new tail answer chunk via the same TurnGateway used elsewhere in this
   # module. Retires with the #1436 outbound v3 extraction alongside the create.
@@ -78,7 +81,9 @@ direct_discord_sends = [
   # #3038 turn_bridge S1: status-panel completion direct gateway calls moved
   # verbatim from turn_bridge/mod.rs to turn_bridge/status_panel.rs.
 
-  "src/services/discord/turn_bridge/status_panel.rs#direct_discord_sends:c4f1e0c4fddb4380",
+  # 2026-07-24 #4860 size-cap relief: the completion fallback send moved verbatim
+  # from status_panel.rs to status_panel/fallback.rs (same call, same hash).
+  "src/services/discord/turn_bridge/status_panel/fallback.rs#direct_discord_sends:c4f1e0c4fddb4380",
   # #3016 msg_id==0 recovery: bridge creates a fresh placeholder / posts a recovery
   # notice for turns with no anchored Discord message. Consistent with the bridge's
   # existing pre-migration direct sends; retire with the #1436 outbound v3 extraction.
@@ -91,7 +96,9 @@ direct_discord_sends = [
 # footer_view_reconciler.
 footer_view_writes = [
   "src/services/discord/tmux_watcher/two_message_panel.rs#footer_view_writes:5337251a73d4d11f",
-  "src/services/discord/turn_bridge/two_message_panel.rs#footer_view_writes:a9ce6b67175262d4",
+  # 2026-07-24 #4860 re-fingerprint: same S4-b2-owned live panel write (create);
+  # context hash shifted by the singleton re-anchor sequence around the send.
+  "src/services/discord/turn_bridge/two_message_panel.rs#footer_view_writes:1e52b256e43e9a29",
   "src/services/discord/turn_bridge/two_message_panel.rs#footer_view_writes:86e7bb20f9b34ca7"
 ]
 

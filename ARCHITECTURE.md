@@ -817,6 +817,7 @@ src/
 │   │   │   ├── turn_identity_tests.rs
 │   │   │   ├── turn_stream_collector.rs
 │   │   │   ├── two_message_panel.rs
+│   │   │   ├── two_message_panel_tests.rs
 │   │   │   ├── utf8_chunk_decoder.rs
 │   │   │   └── utf8_chunk_decoder_tests.rs
 │   │   ├── tui_direct_abort_marker/
@@ -859,6 +860,7 @@ src/
 │   │   │   │   ├── guarded_save.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── status_panel/
+│   │   │   │   ├── fallback.rs
 │   │   │   │   ├── purge.rs
 │   │   │   │   └── singleton.rs
 │   │   │   ├── stream_loop/
