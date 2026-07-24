@@ -443,11 +443,11 @@ services::discord::tmux::tmux_watcher::two_message_panel::tests
 services::discord::tmux::tmux_watcher::utf8_chunk_decoder::tests
 services::discord::tmux::tui_completion_gate_outcome_tests
 services::discord::tmux::tui_completion_gate_tests
-services::discord::tmux::watcher_lifecycle::claude_tui_transcript_fallback_tests
+services::discord::tmux::watcher_lifecycle::claude_restore::claude_tui_transcript_fallback_tests
 services::discord::tmux::watcher_lifecycle::codex_restore::codex_direct_resume_args_tests
-services::discord::tmux::watcher_lifecycle::post_terminal_output_tests
-services::discord::tmux::watcher_lifecycle::restored_session_cwd_channel_isolation_tests
-services::discord::tmux::watcher_lifecycle::tests
+services::discord::tmux::watcher_lifecycle::output_policy::post_terminal_output_tests
+services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_tests
+services::discord::tmux::watcher_lifecycle::tests::tests
 services::discord::tmux::watcher_placeholder_status_tests
 services::discord::tmux::watcher_stream_progress_tests
 services::discord::tmux_error_detect::pure_tests
