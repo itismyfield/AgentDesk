@@ -1401,6 +1401,8 @@ fn pane_has_codex_active_turn_in_pane(pane: &str) -> bool {
 }
 
 const CODEX_ACTIVE_TURN_SIGNAL_FRESHNESS: std::time::Duration = std::time::Duration::from_secs(90);
+const CODEX_ACTIVE_TURN_CAPTURE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CodexPaneBusySignal {
@@ -1433,7 +1435,11 @@ impl CodexPaneBusySignalTracker {
     }
 
     pub(crate) fn probe_tmux(&mut self, session_name: &str) -> CodexPaneBusySignal {
-        let Some(pane) = crate::services::platform::tmux::capture_pane(session_name, -80) else {
+        let Some(pane) = crate::services::platform::tmux::capture_pane_timeout(
+            session_name,
+            -80,
+            CODEX_ACTIVE_TURN_CAPTURE_TIMEOUT,
+        ) else {
             return CodexPaneBusySignal::Unavailable;
         };
         self.observe_capture_at(&pane, std::time::Instant::now())
