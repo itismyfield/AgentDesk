@@ -276,7 +276,7 @@ pub(super) fn resolved_codex_idle_relay_binding(
                 channel_id.get(),
                 fresh.clone(),
             );
-            tracing::warn!(
+            tracing::info!(
                 tmux_session_name = %tmux_session_name,
                 channel_id = channel_id.get(),
                 stale_output_path = %binding.output_path,

@@ -223,7 +223,7 @@ pub(super) async fn restore_live_tui_provider_session_from_binding(
         .await;
     }
     let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::warn!(
+    tracing::info!(
         "  [{ts}] ↻ Recovered provider session_id from live TUI runtime binding for channel {}: tmux={} transcript={}",
         channel_id.get(),
         tmux_session_name.unwrap_or("(none)"),

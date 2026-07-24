@@ -62,7 +62,7 @@ impl Drop for TmuxWatcherTaskGuard {
             .tmux_watchers
             .remove_tmux_session_if_current(&self.tmux_session_name, &self.cancel)
         {
-            tracing::warn!(
+            tracing::info!(
                 channel_id = owner_channel_id.get(),
                 tmux_session_name = %self.tmux_session_name,
                 "tmux watcher task exited; removed matching watcher registry entry"

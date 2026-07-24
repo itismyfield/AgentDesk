@@ -263,7 +263,7 @@ async fn clear_stale_session_dispatch_links(pg_pool: Option<&sqlx::PgPool>) {
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
-                tracing::warn!(
+                tracing::info!(
                     cleared = rows.len(),
                     sample = %sample,
                     "cleared stale terminal active_dispatch_id links during startup recovery"
@@ -310,7 +310,7 @@ async fn clear_stale_session_dispatch_links(pg_pool: Option<&sqlx::PgPool>) {
                     .filter_map(|row| row.try_get::<String, _>("session_key").ok())
                     .collect::<Vec<_>>()
                     .join(", ");
-                tracing::warn!(
+                tracing::info!(
                     cleared = rows.len(),
                     sample = %sample,
                     "cleared missing active_dispatch_id links during startup recovery"

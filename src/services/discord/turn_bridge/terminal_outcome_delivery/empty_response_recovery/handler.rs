@@ -167,7 +167,7 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
             // turn and must never be attributed to the queued follow-up.
             if quick_empty_resume || preserve_busy_claude_followup(claude_tui_followup_busy_readiness_timeout) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
+                tracing::info!(
                     "  [{ts}] ⏭ Skipping output file recovery after quick empty resume exit or busy follow-up timeout (channel {})",
                     channel_id
                 );
@@ -178,7 +178,7 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                 );
                 if !recovered.trim().is_empty() {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
+                    tracing::info!(
                         "  [{ts}] ↻ Recovered {} chars from output file for channel {}",
                         recovered.len(),
                         channel_id
@@ -438,7 +438,7 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                     // Skip — identity-guard the epilogue save (no resurrect).
                     bridge_skip_holder_owns_inflight = true;
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
+                    tracing::info!(
                         channel_id = channel_id.get(),
                         "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge silent_turn skipped offset advance, left turn retry-able (channel {})",
                         channel_id

@@ -1381,7 +1381,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                 } else {
                     "unknown panic".to_string()
                 };
-                tracing::warn!("  [headless streaming] PANIC: {}", msg);
+                tracing::error!("  [headless streaming] PANIC: {}", msg);
                 let _ = tx.send(StreamMessage::Error {
                     message: format!("Internal error (panic): {}", msg),
                     stdout: String::new(),

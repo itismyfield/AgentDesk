@@ -289,7 +289,7 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                 let stale_count = filter_outcome.stale_count;
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 if stale_count > 0 {
-                    tracing::warn!(
+                    tracing::info!(
                         "  [{ts}] 📋 FLUSH: restored {live_count} queued-placeholder mapping(s) from disk; pruned {stale_count} stale mapping(s) with no live queue entry"
                     );
                 } else {

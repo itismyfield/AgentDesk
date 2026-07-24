@@ -1613,7 +1613,7 @@ pub fn spawn_watchdog(port: u16) {
                 if ok {
                     if consecutive_failures > 0 {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::warn!(
+                        tracing::info!(
                             "  [{ts}] 🩺 watchdog: health recovered after {consecutive_failures} failure(s)"
                         );
                     }

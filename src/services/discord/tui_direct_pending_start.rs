@@ -793,7 +793,7 @@ async fn submit_stale_foreign_inflight_cancel(
         return false;
     }
     let Some(current) = super::inflight::load_inflight_state(provider, channel_id.get()) else {
-        tracing::warn!(
+        tracing::info!(
             provider = %provider.as_str(),
             channel_id = channel_id.get(),
             finalizer_turn_id,
@@ -810,7 +810,7 @@ async fn submit_stale_foreign_inflight_cancel(
         || current.updated_at != probe.updated_at
         || current.save_generation != probe.save_generation
     {
-        tracing::warn!(
+        tracing::info!(
             provider = %provider.as_str(),
             channel_id = channel_id.get(),
             expected_finalizer_turn_id = finalizer_turn_id,
@@ -880,7 +880,7 @@ async fn submit_committed_foreign_inflight_complete(
         return false;
     }
     let Some(current) = super::inflight::load_inflight_state(provider, channel_id.get()) else {
-        tracing::warn!(
+        tracing::info!(
             provider = %provider.as_str(),
             channel_id = channel_id.get(),
             finalizer_turn_id,
@@ -901,7 +901,7 @@ async fn submit_committed_foreign_inflight_complete(
         || current.updated_at != probe.updated_at
         || current.save_generation != probe.save_generation
     {
-        tracing::warn!(
+        tracing::info!(
             provider = %provider.as_str(),
             channel_id = channel_id.get(),
             expected_finalizer_turn_id = finalizer_turn_id,

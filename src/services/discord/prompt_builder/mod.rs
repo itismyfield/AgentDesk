@@ -350,7 +350,7 @@ pub(super) fn build_system_prompt_with_manifest(
             if let Some(shared_prompt) = load_shared_prompt_for_profile(shared_profile) {
                 let shared_rules = format!("\n\n[Shared Agent Rules]\n{shared_prompt}");
                 if dedupe_tracker.record("shared_agent_rules", &shared_rules) {
-                    tracing::warn!(
+                    tracing::info!(
                         "  [role-map] Injected {} shared agent rules ({} chars) for channel {}",
                         shared_profile,
                         shared_rules.len(),
@@ -371,7 +371,7 @@ pub(super) fn build_system_prompt_with_manifest(
                 // workspace actually is an AgentDesk checkout. Compute once and
                 // reuse for both the log and the append.
                 let shared_rules = shared_agent_rules_lookup(current_path);
-                tracing::warn!(
+                tracing::info!(
                     "  [role-map] Injected compact shared rule index ({} chars) for channel {}",
                     shared_rules.len(),
                     channel_id.get()
@@ -411,7 +411,7 @@ pub(super) fn build_system_prompt_with_manifest(
                         PromptContentVisibility::AdkProvided,
                         role_binding_contract,
                     ));
-                    tracing::warn!(
+                    tracing::info!(
                         "  [role-map] Applied role '{}' for channel {}",
                         binding.role_id,
                         channel_id.get()

@@ -803,7 +803,7 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
     // Dedup guard: prevent turn_bridge + watcher from both firing
     // auto-retry for the same channel simultaneously.
     if !RETRY_PENDING.insert(channel_id.get()) {
-        tracing::warn!("  [{ts}] ⏭ auto-retry: skipped (dedup) for channel {channel_id}");
+        tracing::info!("  [{ts}] ⏭ auto-retry: skipped (dedup) for channel {channel_id}");
         return;
     }
     // #2452 H6 graduation: the lockout release is now driven by an
@@ -822,7 +822,7 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
         RETRY_PENDING.remove(&ch_id);
     });
 
-    tracing::warn!("  [{ts}] ↻ auto-retry: fetching last 10 messages for channel {channel_id}");
+    tracing::info!("  [{ts}] ↻ auto-retry: fetching last 10 messages for channel {channel_id}");
 
     // Fetch last 10 messages from Discord
     let recovery_context = match channel_id
@@ -922,7 +922,7 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
     )
     .await;
     if !enqueued {
-        tracing::warn!("  [{ts}] ⏭ auto-retry: follow-up deduped for channel {channel_id}");
+        tracing::info!("  [{ts}] ⏭ auto-retry: follow-up deduped for channel {channel_id}");
     }
 }
 

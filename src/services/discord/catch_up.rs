@@ -904,7 +904,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
     let pruned = prune_stale_checkpoint_files(&dir, max_checkpoint_age);
     if pruned > 0 {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!("  [{ts}] 🧹 catch-up: pruned {pruned} stale checkpoint(s) (>10min old)");
+        tracing::info!("  [{ts}] 🧹 catch-up: pruned {pruned} stale checkpoint(s) (>10min old)");
     }
 
     let mut candidates = collect_catch_up_channel_candidates(&dir, provider);
@@ -984,7 +984,7 @@ async fn run_catch_up_sweep<A: CatchUpDiscordApi + ?Sized>(deps: CatchUpDeps<'_,
             RuntimeChannelBindingStatus::Owned => {}
             RuntimeChannelBindingStatus::Unowned => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
+                tracing::info!(
                     "  [{ts}] ⏭ catch-up: dropping stale checkpoint for unowned channel {} ({})",
                     channel_id,
                     candidate
