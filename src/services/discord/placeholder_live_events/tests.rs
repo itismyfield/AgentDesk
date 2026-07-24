@@ -9307,7 +9307,7 @@ fn status_panel_free_renderer_orders_header_fields_on_separate_lines() {
     assert_eq!(
         out.lines().take(4).collect::<Vec<_>>(),
         vec![
-            "-# 🛠️ 도구 호출 대기",
+            "-# 🔧 마지막 도구 (아직 없음)",
             "-# 턴 트리거: https://discord.com/channels/1/2/3",
             "-# 턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)",
             "-# 마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>)",

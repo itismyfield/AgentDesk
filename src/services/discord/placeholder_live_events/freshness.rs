@@ -98,7 +98,7 @@ pub(super) fn render_activity_line_with_last_tool(
 
 fn render_last_tool(last_tool: Option<&LastToolCall>) -> String {
     last_tool.map_or_else(
-        || "🛠️ 도구 호출 대기".to_string(),
+        || "🔧 마지막 도구 (아직 없음)".to_string(),
         |tool| render_tool_activity(&tool.name, tool.summary.as_deref()),
     )
 }
@@ -130,7 +130,7 @@ mod tests {
     fn running_turn_without_tool_uses_non_duplicate_fallback() {
         let rendered = render_activity_line_with_last_tool(&DerivedStatus::Running, None);
 
-        assert_eq!(rendered, "🛠️ 도구 호출 대기");
+        assert_eq!(rendered, "🔧 마지막 도구 (아직 없음)");
         assert!(!rendered.contains("진행 중"));
     }
 
