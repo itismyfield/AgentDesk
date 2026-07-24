@@ -229,7 +229,11 @@
     output policy, recovery marker, and test clusters moved verbatim into
     sub-1000-LoC `watchers/lifecycle/*.rs` modules. The root remains the
     canonical facade and preserves all prior call paths through re-exports.
-  - `src/services/discord/tmux.rs` (frozen giant surface; test-only #4277 re-exports
+  - `src/services/discord/tmux.rs` (frozen giant surface; #4895 replaces watcher
+    plaintext overload substring classification with structured result-error provenance;
+    the classifier implementation and incident regressions live in the extracted
+    `tmux_error_detect.rs` / `tmux_output_stream.rs` modules, while `tmux.rs` only
+    imports the replacement helper; test-only #4277 re-exports
     the watcher delivery-lease key helper so session-sink production-entry tests
     prove bidirectional contention on the same idle JSONL range; -9 from the #4804
     Windows-compile hotfix moving `footer_background_marker_session_key` into
