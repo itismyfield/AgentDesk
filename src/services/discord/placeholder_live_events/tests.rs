@@ -258,12 +258,13 @@ fn status_panel_renders_derived_tool_state_under_limit() {
     );
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(rendered.contains("도구 실행 중"));
+    assert!(rendered.contains("마지막 도구"));
     assert!(rendered.contains("[Bash]"));
     assert!(
-        !rendered.contains("cargo test"),
-        "status header should show the tool class, not raw command text: {rendered}"
+        rendered.contains("cargo test"),
+        "status header should show the latest tool's short target: {rendered}"
     );
+    assert!(!rendered.contains("진행 중"));
     assert!(rendered.chars().count() <= STATUS_PANEL_MAX_CHARS);
 }
 
@@ -280,14 +281,14 @@ fn status_panel_recent_compacts_raw_command_details() {
     );
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    // #3983 item 5a: the footer no longer echoes the compact 🖥️ Recent block; the
-    // activity label shows the tool class, never the raw command detail.
-    assert!(rendered.contains("🔧 도구 실행 중"));
+    // #3983 item 5a: the footer no longer echoes the compact 🖥️ Recent block;
+    // #4892 instead exposes the formatter's bounded target as the latest tool.
+    assert!(rendered.contains("🔧 마지막 도구"));
     assert!(!rendered.contains("🖥️ Recent"));
     assert!(!rendered.contains("```text"));
     assert!(
-        !rendered.contains(raw_command),
-        "normal status panel must not render raw command detail: {rendered}"
+        rendered.contains(raw_command),
+        "normal status panel must render the latest tool's short target: {rendered}"
     );
 
     let raw_debug_block = events.render_raw_block_for_tests(channel_id).unwrap();
@@ -309,9 +310,9 @@ fn characterize_rollover_seed_has_no_status_panel_content_s0() {
     );
 
     let panel = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(panel.contains("도구 실행 중"));
+    assert!(panel.contains("마지막 도구"));
     assert!(panel.contains("[Bash]"));
-    assert!(!panel.contains("cargo test --lib placeholder_live_events"));
+    assert!(panel.contains("cargo test --lib placeholder\_live\_events"));
 
     let status_block = build_processing_status_block("⠸");
     let current_portion = "relay body ".repeat(250);
@@ -325,7 +326,7 @@ fn characterize_rollover_seed_has_no_status_panel_content_s0() {
             .ends_with(&format!("\n\n{status_block}"))
     );
     for status_panel_fragment in [
-        "도구 실행 중",
+        "마지막 도구",
         "[Bash]",
         "cargo test --lib placeholder_live_events",
     ] {
@@ -387,7 +388,7 @@ fn status_panel_absorbs_stale_and_final_into_the_activity_emoji() {
     );
     let live = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
     assert!(
-        live.contains("🔧 도구 실행 중"),
+        live.contains("🔧 마지막 도구"),
         "running activity: {live:?}"
     );
     assert!(
@@ -441,7 +442,7 @@ fn status_panel_codex_active_omits_processing_tail_after_recent_block() {
         1_700_000_005,
     );
 
-    assert!(rendered.contains("🔧 도구 실행 중"));
+    assert!(rendered.contains("🔧 마지막 도구"));
     assert!(rendered.contains("[Bash]"));
     // #3983 item 5a: the 🖥️ Recent echo is retired from the footer.
     assert!(!rendered.contains("🖥️ Recent"));
@@ -4141,10 +4142,11 @@ fn status_panel_shows_live_subagent_activity_by_parent_id() {
         !rendered.contains("grep ERROR app.log"),
         "subagent activity must not leak raw command args, got: {rendered}"
     );
-    // Nested activity must NOT turn the panel header into a foreground tool run.
+    // Nested activity must not replace the top-level Agent launch remembered by
+    // the panel header; the nested Bash step belongs only to the subagent slot.
     assert!(
-        !rendered.contains("🔧 도구 실행 중"),
-        "nested subagent step must not clobber the panel header, got: {rendered}"
+        rendered.contains("🔧 마지막 도구 ([Agent]"),
+        "top-level Agent launch must remain the panel's latest tool, got: {rendered}"
     );
 }
 
@@ -9305,7 +9307,7 @@ fn status_panel_free_renderer_orders_header_fields_on_separate_lines() {
     assert_eq!(
         out.lines().take(4).collect::<Vec<_>>(),
         vec![
-            "-# 🟢 진행 중",
+            "-# 🛠️ 도구 호출 대기",
             "-# 턴 트리거: https://discord.com/channels/1/2/3",
             "-# 턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)",
             "-# 마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>)",
