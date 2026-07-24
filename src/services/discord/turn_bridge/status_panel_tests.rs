@@ -1159,10 +1159,7 @@ async fn completion_keeps_completed_panel_when_singleton_bookkeeping_fails_4891(
         committed,
         "a successful Discord completion edit must stay committed when singleton bookkeeping fails"
     );
-    let live_messages = gateway
-        .live_messages
-        .lock()
-        .expect("live messages lock");
+    let live_messages = gateway.live_messages.lock().expect("live messages lock");
     let completed_text = live_messages
         .get(&completed_panel)
         .expect("the completed panel must still exist after turn end");
