@@ -7,36 +7,6 @@ fn compact_command_name_first_stub() -> &'static str {
     "<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>"
 }
 
-/// Scoped env-var override for inflight persistence tests. `AGENTDESK_ROOT_DIR`
-/// is process-global, so serialize it with the shared test env lock.
-struct EnvRootGuard {
-    previous: Option<std::ffi::OsString>,
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-impl EnvRootGuard {
-    fn set(path: &std::path::Path) -> Self {
-        let lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let previous = std::env::var_os("AGENTDESK_ROOT_DIR");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", path) };
-        Self {
-            previous,
-            _lock: lock,
-        }
-    }
-}
-
-impl Drop for EnvRootGuard {
-    fn drop(&mut self) {
-        match self.previous.take() {
-            Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-            None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-        }
-    }
-}
-
 // ====================================================================
 // #3154 P2-2 (c) — the KEY residual risk: prove there is NO relay GAP
 // (not merely no duplicate) on the deferred synthetic-start path.
@@ -2574,7 +2544,7 @@ fn claude_bridge_lease_clears_when_tail_dedup_skips_spawn() {
 #[tokio::test]
 async fn claude_bridge_lease_guard_cleans_no_binding_precondition_skip() {
     let temp = tempfile::tempdir().expect("temp runtime root");
-    let _env = EnvRootGuard::set(temp.path());
+    let _env = crate::config::set_agentdesk_root_for_test(temp.path());
     let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
         .unwrap();
@@ -3178,7 +3148,7 @@ fn codex_external_input_relay_output_path_uses_rollout_not_wrapper() {
 #[test]
 fn codex_external_input_binding_refreshes_from_live_rollout_marker() {
     let temp = tempfile::tempdir().expect("temp runtime root");
-    let _env = EnvRootGuard::set(temp.path());
+    let _env = crate::config::set_agentdesk_root_for_test(temp.path());
     let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
         .unwrap();
@@ -3229,7 +3199,7 @@ fn codex_external_input_binding_refreshes_from_live_rollout_marker() {
 #[test]
 fn codex_ownerless_external_input_undelivered_turn_needs_rollout_repair() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let _env = EnvRootGuard::set(dir.path());
+    let _env = crate::config::set_agentdesk_root_for_test(dir.path());
     let rollout_path = dir.path().join("rollout.jsonl");
     std::fs::write(
         &rollout_path,
@@ -3360,7 +3330,7 @@ fn idle_bridge_stands_down_for_every_resolved_non_bridge_synthetic_claim() {
     use super::synthetic_start::tui_direct_synthetic_non_bridge_owner_matches;
 
     let root = tempfile::tempdir().expect("runtime root");
-    let _env = EnvRootGuard::set(root.path());
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
     let tmux = "AgentDesk-codex-adk-cdx-4455";
     let channel = ChannelId::new(1_479_671_301_387_059_200);
     let lease = ExternalInputRelayLease::unassigned(Some(channel.get()));
@@ -3597,7 +3567,7 @@ fn failed_synthetic_placeholder_delete_is_terminal_cleanup_guarded() {
 #[tokio::test]
 async fn compact_continuation_injection_skips_synthetic_and_leaves_mailbox_free() {
     let temp = tempfile::tempdir().expect("temp runtime root");
-    let _env = EnvRootGuard::set(temp.path());
+    let _env = crate::config::set_agentdesk_root_for_test(temp.path());
     let shared = super::super::make_shared_data_for_tests();
     let provider = ProviderKind::Claude;
     let channel_id = ChannelId::new(940_000_000_004_082);
@@ -3671,7 +3641,7 @@ async fn compact_continuation_injection_skips_synthetic_and_leaves_mailbox_free(
 #[tokio::test]
 async fn genuine_tui_direct_typed_prompt_still_creates_synthetic_inflight() {
     let temp = tempfile::tempdir().expect("temp runtime root");
-    let _env = EnvRootGuard::set(temp.path());
+    let _env = crate::config::set_agentdesk_root_for_test(temp.path());
     let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
         .unwrap();
@@ -3825,7 +3795,7 @@ fn save_ownerless_tui_direct_inflight_for_mailbox_release_test(
 #[tokio::test]
 async fn stale_ownerless_tui_direct_mailbox_release_allows_new_synthetic_claim() {
     let temp = tempfile::tempdir().expect("temp runtime root");
-    let _env = EnvRootGuard::set(temp.path());
+    let _env = crate::config::set_agentdesk_root_for_test(temp.path());
     let shared = super::super::make_shared_data_for_tests();
     let provider = ProviderKind::Codex;
     let channel_id = ChannelId::new(940_000_000_000_009);
@@ -3890,7 +3860,7 @@ async fn stale_ownerless_tui_direct_mailbox_release_allows_new_synthetic_claim()
 #[tokio::test]
 async fn stale_ownerless_tui_direct_mailbox_release_preserves_fresh_owner() {
     let temp = tempfile::tempdir().expect("temp runtime root");
-    let _env = EnvRootGuard::set(temp.path());
+    let _env = crate::config::set_agentdesk_root_for_test(temp.path());
     let shared = super::super::make_shared_data_for_tests();
     let provider = ProviderKind::Codex;
     let channel_id = ChannelId::new(940_000_000_000_010);

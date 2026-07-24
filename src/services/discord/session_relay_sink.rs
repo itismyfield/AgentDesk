@@ -2847,6 +2847,8 @@ mod tests {
 
     #[tokio::test]
     async fn watcher_preemption_blocks_task_context_route_promotion_before_card_post_4277() {
+        let temp = tempfile::tempdir().expect("temp runtime root");
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
         let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());

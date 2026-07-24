@@ -231,21 +231,8 @@ mod tests {
 
     #[tokio::test]
     async fn cross_session_reclaim_uses_row_owner_and_unblocks_iterating_session() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        struct EnvReset(Option<std::ffi::OsString>);
-        impl Drop for EnvReset {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-                }
-            }
-        }
-        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let temp = tempfile::TempDir::new().expect("temp runtime root");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
 
         let provider = ProviderKind::Claude;
         let channel_id = 4_136_116;
@@ -295,21 +282,8 @@ mod tests {
         use crate::services::cluster::stream_relay::{DiscardSink, RelaySink, spawn_stream_relay};
         use std::sync::Arc;
 
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        struct EnvReset(Option<std::ffi::OsString>);
-        impl Drop for EnvReset {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-                }
-            }
-        }
-        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let temp = tempfile::TempDir::new().expect("temp runtime root");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
 
         let provider = ProviderKind::Claude;
         let channel_id = 4_140_117;

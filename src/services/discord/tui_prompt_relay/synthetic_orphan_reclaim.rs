@@ -137,29 +137,10 @@ mod tests {
     };
     use crate::services::provider::ProviderKind;
 
-    struct EnvReset(Option<std::ffi::OsString>);
-
-    impl Drop for EnvReset {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-            }
-        }
-    }
-
-    fn isolated_runtime_root() -> (
-        std::sync::MutexGuard<'static, ()>,
-        tempfile::TempDir,
-        EnvReset,
-    ) {
-        let env_lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+    fn isolated_runtime_root() -> (tempfile::TempDir, crate::config::TestEnvVarGuard) {
         let root = tempfile::TempDir::new().expect("runtime root");
-        let env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
-        (env_lock, root, env)
+        let env = crate::config::set_agentdesk_root_for_test(root.path());
+        (root, env)
     }
 
     fn write_inflight_fixture(
@@ -245,7 +226,7 @@ mod tests {
     /// `tui_direct_pending_start::tests::backstop_orphan_reclaim_*`.
     #[test]
     fn orphan_row_is_reclaimable_matches_stale_session_bound_orphan_on_caller_session() {
-        let (_env_lock, _root, _env) = isolated_runtime_root();
+        let (_root, _env) = isolated_runtime_root();
         let tmux = "AgentDesk-claude-adk-cc";
         let orphan = session_bound_row(4242, tmux, true);
         // Sanity: this is a genuine producer-dead SessionBoundRelay orphan.
@@ -264,7 +245,7 @@ mod tests {
     /// reclaimable. Guards over-reclaim of a slow-but-live turn.
     #[test]
     fn orphan_row_is_reclaimable_skips_fresh_row() {
-        let (_env_lock, _root, _env) = isolated_runtime_root();
+        let (_root, _env) = isolated_runtime_root();
         let tmux = "AgentDesk-claude-adk-cc";
         let fresh = session_bound_row(4343, tmux, false);
         assert!(
@@ -283,7 +264,7 @@ mod tests {
     /// otherwise orphan-shaped.
     #[test]
     fn orphan_row_is_reclaimable_skips_foreign_session() {
-        let (_env_lock, _root, _env) = isolated_runtime_root();
+        let (_root, _env) = isolated_runtime_root();
         let orphan = session_bound_row(4444, "AgentDesk-claude-adk-cc", true);
         assert!(
             session_bound_relay_external_input_orphan_shape(&orphan),
@@ -297,7 +278,7 @@ mod tests {
 
     #[test]
     fn pending_start_reclaim_orphan_fn_uses_real_ordering_for_session_bound_orphan() {
-        let (_env_lock, root, _env) = isolated_runtime_root();
+        let (root, _env) = isolated_runtime_root();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
