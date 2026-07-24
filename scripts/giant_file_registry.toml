@@ -112,7 +112,10 @@ grandfathered_baseline_paths = [
   # prod-giant, so it is removed from the frozen baseline as well as the
   # [[entry]] below (win-locked: a re-expanded inflight cannot be
   # re-grandfathered — it would have to land as a full [[entry]] or shrink).
-  "src/services/discord/meeting_orchestrator.rs",
+  # meeting_orchestrator.rs was decomposed in #4712 (selection, lifecycle,
+  # rounds, records, and selection-runtime clusters moved verbatim into
+  # meeting_orchestrator/ children); no longer a prod-giant. Removed from the
+  # frozen baseline and [[entry]] so a re-expansion cannot be grandfathered.
   "src/services/discord/mod.rs",
   "src/services/discord/recovery_engine.rs",
   "src/services/discord/router/intake_gate.rs",
@@ -479,12 +482,11 @@ owner = "discord-relay"
 deadline = "2027-01-31"
 decompose_issue = "#4712"
 
-[[entry]]
-file = "src/services/discord/meeting_orchestrator.rs"
-decision = "shrink"
-owner = "discord-relay"
-deadline = "2027-01-31"
-decompose_issue = "#4712"
+# RETIRED 2026-07-24 (#4712): meeting_orchestrator.rs dropped below the
+# production giant threshold after cohesive selection, lifecycle, meeting-round,
+# record-persistence, and selection-runtime clusters moved verbatim into
+# `meeting_orchestrator/` child modules. Remove the [[entry]] to avoid a ghost
+# registration; all resulting production modules remain below 1000 lines.
 
 [[entry]]
 file = "src/services/discord/mod.rs"

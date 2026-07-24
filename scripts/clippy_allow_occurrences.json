@@ -268,7 +268,7 @@
       "count": 2
     },
     {
-      "path": "src/services/discord/meeting_orchestrator.rs",
+      "path": "src/services/discord/meeting_orchestrator/rounds.rs",
       "lint": "too_many_arguments",
       "count": 1
     },
