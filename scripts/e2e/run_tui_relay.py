@@ -3279,8 +3279,18 @@ def run_one_cell(
     _update_record_window_snapshot(record, window)
 
     try:
+        enabled_features = frozenset(
+            feature.strip()
+            for feature in os.environ.get("AGENTDESK_E2E_FEATURES", "").split(",")
+            if feature.strip()
+        )
         for assertion_spec in scenario.get("assertions") or []:
-            run_assertion(assertion_spec, window=window, record=record)
+            run_assertion(
+                assertion_spec,
+                window=window,
+                record=record,
+                enabled_features=enabled_features,
+            )
             record["assertions"].append({"spec": assertion_spec, "passed": True})
 
         idle_check = assert_cell_idle(
@@ -3638,9 +3648,16 @@ def run_assertion(
     *,
     window: assertions.Window,
     record: dict[str, Any] | None = None,
+    enabled_features: frozenset[str] = frozenset(),
 ) -> None:
     if not isinstance(spec, dict):
         raise assertions.AssertionError(f"bad assertion spec: {spec!r}")
+    required_feature = spec.get("requires_feature")
+    if required_feature is not None:
+        required_feature = str(required_feature)
+        if required_feature not in enabled_features:
+            return
+        spec = {key: value for key, value in spec.items() if key != "requires_feature"}
     if "message_count_between_markers" in spec:
         params = spec["message_count_between_markers"]
         assertions.message_count_between_markers(
@@ -3744,6 +3761,27 @@ def run_assertion(
             ),
             include_our_send=bool(params.get("include_our_send", False)),
         )
+    elif "status_panel_after_body" in spec:
+        params = spec["status_panel_after_body"]
+        if not isinstance(params, dict) or "body_marker" not in params:
+            raise assertions.AssertionError(
+                f"status_panel_after_body requires body_marker: {spec!r}"
+            )
+        assertions.status_panel_after_body(
+            window,
+            body_marker=str(params["body_marker"]),
+            panel_regex=str(
+                params.get("panel_regex", r"Processing\.\.\.|진행 중|응답 완료|^🟢|^✅|^🔴|^📦")
+            ),
+        )
+    elif "single_status_panel" in spec:
+        params = spec["single_status_panel"]
+        panel_regex = (
+            params.get("panel_regex", r"Processing\.\.\.|진행 중|응답 완료|^🟢|^✅|^🔴|^📦")
+            if isinstance(params, dict)
+            else r"Processing\.\.\.|진행 중|응답 완료|^🟢|^✅|^🔴|^📦"
+        )
+        assertions.single_status_panel(window, panel_regex=str(panel_regex))
     elif "completion_chrome_after_body" in spec:
         params = spec["completion_chrome_after_body"]
         body_marker = params.get("body_marker") if isinstance(params, dict) else params

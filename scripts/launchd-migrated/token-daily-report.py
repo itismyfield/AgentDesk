@@ -600,6 +600,13 @@ def collect(yday):
 
 
 # --------------------------------------------------------------------------- #
+def _bucket_str(pct, countdown):
+    # usageStatus=unavailable accounts report pct=None
+    if pct is None:
+        return "n/a"
+    return f"**{pct:.0f}%**({countdown})"
+
+
 def render(data):
     L = [f"**[Token Manager] 일일 리포트 — {data['report_date']}**", ""]
     L.append("**Claude 계정 (cswap 3개)**")
@@ -608,7 +615,8 @@ def render(data):
         sc = ""
         if a.get("scoped"):
             sc = " / " + " ".join(f"{s['name']} {s['pct']:.0f}%" for s in a["scoped"] if s.get("pct") is not None)
-        L.append(f"- {star} #{a['n']} {a['email']}: 5h **{a['h5']:.0f}%**({a['h5_countdown']}) · 7d **{a['d7']:.0f}%**({a['d7_countdown']}){sc}")
+        stat = f" ⚠️{a['status']}" if a.get("status") not in (None, "ok") else ""
+        L.append(f"- {star} #{a['n']} {a['email']}: 5h {_bucket_str(a['h5'], a['h5_countdown'])} · 7d {_bucket_str(a['d7'], a['d7_countdown'])}{sc}{stat}")
     cx = data.get("codex_rate")
     if cx:
         parts = [f"{bn} **{bd['used']:.0f}%**" + (f"({bd['countdown']})" if bd.get("countdown") else "")

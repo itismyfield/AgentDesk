@@ -125,6 +125,141 @@ fn pending_bind_drain_removes_record_when_bind_landed_without_delete() {
 }
 
 #[test]
+fn pending_bind_exact_owner_remove_keeps_record_after_reownership() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let orphan_root = root.path().join("orphans");
+    let inflight_root = root.path().join("inflight");
+    let provider = ProviderKind::Claude;
+    let token = "tok";
+    let channel_id = 100;
+    let panel_id = 5001;
+    let original = test_inflight(&provider, channel_id, 7001, Some(panel_id), 6001, Some(10));
+    let replacement = test_inflight(&provider, channel_id, 7002, Some(5002), 6002, Some(20));
+    enqueue_pending_bind_in_root(
+        &orphan_root,
+        &provider,
+        token,
+        channel_id,
+        panel_id,
+        Some(InflightTurnIdentity::from_state(&original)),
+    );
+    let inflight_path = crate::services::discord::inflight::inflight_state_path(
+        &inflight_root,
+        &provider,
+        channel_id,
+    );
+    fs::create_dir_all(inflight_path.parent().expect("inflight parent")).expect("mkdir inflight");
+    fs::write(
+        &inflight_path,
+        serde_json::to_string_pretty(&replacement).expect("replacement json"),
+    )
+    .expect("persist replacement");
+
+    assert_eq!(
+        remove_pending_bind_if_owned_in_root(
+            &orphan_root,
+            &inflight_root,
+            &provider,
+            token,
+            channel_id,
+            panel_id,
+            &InflightTurnIdentity::from_state(&original),
+        ),
+        PendingBindOwnedRemovalOutcome::OwnershipMismatch
+    );
+    assert_eq!(
+        load_pending_in_root(&orphan_root, &provider, token),
+        vec![(channel_id, panel_id)]
+    );
+}
+
+#[test]
+fn pending_bind_exact_owner_remove_clears_matching_record() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let orphan_root = root.path().join("orphans");
+    let inflight_root = root.path().join("inflight");
+    let provider = ProviderKind::Claude;
+    let token = "tok";
+    let channel_id = 100;
+    let panel_id = 5001;
+    let live = test_inflight(&provider, channel_id, 7001, Some(panel_id), 6001, Some(10));
+    enqueue_pending_bind_in_root(
+        &orphan_root,
+        &provider,
+        token,
+        channel_id,
+        panel_id,
+        Some(InflightTurnIdentity::from_state(&live)),
+    );
+    let inflight_path = crate::services::discord::inflight::inflight_state_path(
+        &inflight_root,
+        &provider,
+        channel_id,
+    );
+    fs::create_dir_all(inflight_path.parent().expect("inflight parent")).expect("mkdir inflight");
+    fs::write(
+        &inflight_path,
+        serde_json::to_string_pretty(&live).expect("live json"),
+    )
+    .expect("persist live owner");
+
+    assert_eq!(
+        remove_pending_bind_if_owned_in_root(
+            &orphan_root,
+            &inflight_root,
+            &provider,
+            token,
+            channel_id,
+            panel_id,
+            &InflightTurnIdentity::from_state(&live),
+        ),
+        PendingBindOwnedRemovalOutcome::OwnedRecordRemoved
+    );
+    assert!(load_pending_in_root(&orphan_root, &provider, token).is_empty());
+}
+
+#[test]
+fn pending_bind_exact_owner_remove_restores_missing_protection_after_reownership() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let orphan_root = root.path().join("orphans");
+    let inflight_root = root.path().join("inflight");
+    let provider = ProviderKind::Claude;
+    let token = "tok";
+    let channel_id = 100;
+    let panel_id = 5001;
+    let original = test_inflight(&provider, channel_id, 7001, Some(panel_id), 6001, Some(10));
+    let replacement = test_inflight(&provider, channel_id, 7002, Some(5002), 6002, Some(20));
+    let inflight_path = crate::services::discord::inflight::inflight_state_path(
+        &inflight_root,
+        &provider,
+        channel_id,
+    );
+    fs::create_dir_all(inflight_path.parent().expect("inflight parent")).expect("mkdir inflight");
+    fs::write(
+        &inflight_path,
+        serde_json::to_string_pretty(&replacement).expect("replacement json"),
+    )
+    .expect("persist replacement");
+
+    assert_eq!(
+        remove_pending_bind_if_owned_in_root(
+            &orphan_root,
+            &inflight_root,
+            &provider,
+            token,
+            channel_id,
+            panel_id,
+            &InflightTurnIdentity::from_state(&original),
+        ),
+        PendingBindOwnedRemovalOutcome::OwnershipMismatch
+    );
+    assert_eq!(
+        load_pending_in_root(&orphan_root, &provider, token),
+        vec![(channel_id, panel_id)]
+    );
+}
+
+#[test]
 fn pending_bind_drain_defers_same_turn_unbound_window() {
     let root = tempfile::tempdir().expect("tempdir");
     let root = root.path();

@@ -2307,6 +2307,8 @@ async fn release_restored_watcher_active_turn_before_panel_edit(
 #[path = "tmux_watcher.rs"]
 #[allow(clippy::too_many_arguments)]
 mod tmux_watcher;
+#[cfg(test)]
+pub(in crate::services::discord) use self::tmux_watcher::pinned_delivery_lease_key_for_test;
 pub(super) use self::tmux_watcher::{
     TuiCompletionGateOutcome, emit_explicit_inflight_cleanup_signal, run_tui_completion_gate,
     tmux_output_watcher, tmux_output_watcher_with_restore,

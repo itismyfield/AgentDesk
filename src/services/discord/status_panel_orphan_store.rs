@@ -267,6 +267,97 @@ fn remove_pending_bind_in_root(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum PendingBindOwnedRemovalOutcome {
+    OwnershipMismatch,
+    OwnedRecordRemoved,
+    OwnedRecordMissing,
+}
+
+fn ensure_pending_bind_protection_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    panel_msg_id: u64,
+    identity: &InflightTurnIdentity,
+) {
+    let _store_guard = STORE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut entries = load_channel_in_root(root, provider, token_hash, channel_id);
+    if entries.iter().any(|entry| entry.id == panel_msg_id) {
+        return;
+    }
+    entries.push(StatusPanelOrphanEntry::pending_bind(
+        panel_msg_id,
+        Some(identity.clone()),
+    ));
+    save_channel_in_root(root, provider, token_hash, channel_id, &entries);
+}
+
+fn remove_pending_bind_if_owned_in_root(
+    root: &Path,
+    inflight_root: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    panel_msg_id: u64,
+    identity: &InflightTurnIdentity,
+) -> PendingBindOwnedRemovalOutcome {
+    let inflight_path = crate::services::discord::inflight::inflight_state_path(
+        inflight_root,
+        provider,
+        channel_id,
+    );
+    let Ok(_inflight_guard) =
+        crate::services::discord::inflight::lock_inflight_state_path(&inflight_path)
+    else {
+        ensure_pending_bind_protection_in_root(
+            root,
+            provider,
+            token_hash,
+            channel_id,
+            panel_msg_id,
+            identity,
+        );
+        return PendingBindOwnedRemovalOutcome::OwnershipMismatch;
+    };
+    let Some(inflight) = fs::read_to_string(&inflight_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<InflightTurnState>(&raw).ok())
+    else {
+        ensure_pending_bind_protection_in_root(
+            root,
+            provider,
+            token_hash,
+            channel_id,
+            panel_msg_id,
+            identity,
+        );
+        return PendingBindOwnedRemovalOutcome::OwnershipMismatch;
+    };
+    if !identity.matches_state(&inflight) || inflight.status_message_id != Some(panel_msg_id) {
+        ensure_pending_bind_protection_in_root(
+            root,
+            provider,
+            token_hash,
+            channel_id,
+            panel_msg_id,
+            identity,
+        );
+        return PendingBindOwnedRemovalOutcome::OwnershipMismatch;
+    }
+
+    let _store_guard = STORE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut entries = load_channel_in_root(root, provider, token_hash, channel_id);
+    let before = entries.len();
+    entries.retain(|entry| !(entry.id == panel_msg_id && entry.is_pending_bind()));
+    if entries.len() == before {
+        return PendingBindOwnedRemovalOutcome::OwnedRecordMissing;
+    }
+    save_channel_in_root(root, provider, token_hash, channel_id, &entries);
+    PendingBindOwnedRemovalOutcome::OwnedRecordRemoved
+}
+
 fn is_queued_in_root(
     root: &Path,
     provider: &ProviderKind,
@@ -443,6 +534,33 @@ pub(in crate::services::discord) fn remove_pending_bind(
         return;
     };
     remove_pending_bind_in_root(&root, provider, token_hash, channel_id, panel_msg_id);
+}
+
+/// Drop a pending-bind record only while the same durable turn still owns the
+/// exact panel. The inflight flock stays held through the orphan-store removal,
+/// so a replacement owner cannot land between the ownership check and removal.
+pub(in crate::services::discord) fn remove_pending_bind_if_owned(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    panel_msg_id: u64,
+    identity: &InflightTurnIdentity,
+) -> PendingBindOwnedRemovalOutcome {
+    let (Some(root), Some(inflight_root)) = (
+        runtime_store::discord_status_panel_orphans_root(),
+        runtime_store::discord_inflight_root(),
+    ) else {
+        return PendingBindOwnedRemovalOutcome::OwnershipMismatch;
+    };
+    remove_pending_bind_if_owned_in_root(
+        &root,
+        &inflight_root,
+        provider,
+        token_hash,
+        channel_id,
+        panel_msg_id,
+        identity,
+    )
 }
 
 /// Is this panel still queued for deletion? Used by [`drain`] to re-validate a

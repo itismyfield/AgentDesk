@@ -17,6 +17,11 @@ If you change relay ownership, every invariant below must continue to hold.
 A regression here is a user-visible relay miss / duplicate, so keep the
 checks loud (debug_assert + observability record) instead of silent.
 
+The persistence and node-ownership status of these values is classified in
+[`relay-live-state-taxonomy.md`](relay-live-state-taxonomy.md). In particular,
+a durable sidecar is host-local unless a PostgreSQL-backed ownership contract
+explicitly says otherwise.
+
 ### Reference format
 
 Code anchors below are **symbol-path references**, not `file:line` (which
@@ -302,6 +307,31 @@ plan.
   can kill the successor's tmux session.
 - Invariant key: `mailbox_episode_identity_exact` (enforced by the actor predicate
   and mutation-proven regression tests rather than an observe-only hook).
+
+## I9. every session-bound terminal POST holds the shared delivery lease (#4277)
+
+- Definition: terminal deliveries parsed by
+  `SessionRelayParser::ingest_frame`
+  (`sym:session_relay_sink::turn_parser::SessionRelayParser::ingest_frame`) carry
+  either their strict turn fence, an idle/catch-up ordered JSONL range, or the
+  legacy no-range shape.
+- Producer: `SessionBoundDiscordRelaySink::deliver_response`
+  (`sym:session_relay_sink::SessionBoundDiscordRelaySink::deliver_response`)
+  derives one lease coordinate before any Discord transport. Strict fenced
+  frames use `[turn_start_offset, terminal_consumed_end)`, ordered idle/catch-up
+  frames use their carried range, and unresolvable legacy frames still contend
+  on the degenerate key and zero-width coordinate.
+- Consumer: the sink and watcher share the channel's `DeliveryLeaseCell`; a lost
+  acquire is a deterministic not-delivered result and must never fall through to
+  a markerless POST.
+- Invariant: there is no session-bound terminal POST/edit path without first
+  winning the shared delivery lease. The controller short-replace path owns its
+  own acquire; all other terminal paths use `SinkDeliveryLeaseGuard`.
+- Violation surface: an inflight-less idle-tail frame POSTs without a lease while
+  the watcher independently wins the fallback-keyed lease for the same bytes,
+  producing a duplicate Discord response.
+- Invariant key: `session_terminal_post_lease_required` (enforced structurally by
+  the mandatory acquire and production-entry regression tests).
 
 ## How to add a new invariant
 

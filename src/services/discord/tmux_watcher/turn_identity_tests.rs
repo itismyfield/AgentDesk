@@ -222,7 +222,7 @@ fn pinned_delivery_lease_key_id0_without_offset_acquires_and_commits_delivery() 
     let mut state = state_with_offsets(0, session, None, 0);
     state.started_at = "2026-07-03T06:00:00Z".to_string();
 
-    let key = pinned_delivery_lease_key(channel_id, 33, Some(&state), session, 50);
+    let key = pinned_delivery_lease_key(channel_id, 33, Some(&state), session, 50, 0);
     let cell = crate::services::discord::DeliveryLeaseCell::new(channel_id);
     let holder = crate::services::discord::LeaseHolder::Watcher { instance_id: 77 };
     let acquired = cell.try_acquire(
@@ -256,6 +256,36 @@ fn pinned_delivery_lease_key_id0_without_offset_acquires_and_commits_delivery() 
         "acquired watcher path can commit the delivered range"
     );
     assert!(cell.release(holder, key, 0, 50));
+}
+
+#[test]
+fn no_inflight_offset_key_still_refuses_append_edit_tail_duplicate_4277() {
+    let temp = tempfile::TempDir::new().expect("temp runtime root");
+    let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
+
+    let provider = ProviderKind::Claude;
+    let session = "AgentDesk-claude-adk-cc-4277";
+    let channel_id = poise::serenity_prelude::ChannelId::new(7_4277);
+    let body = "already edited prose tail";
+    let gen_path = crate::services::tmux_common::session_temp_path(session, "generation");
+    std::fs::create_dir_all(std::path::Path::new(&gen_path).parent().unwrap()).unwrap();
+    std::fs::write(&gen_path, b"1").unwrap();
+    crate::services::discord::outbound::delivery_record::record_delivered_content_fingerprint(
+        &provider, channel_id, session, body,
+    );
+
+    let key = pinned_delivery_lease_key(channel_id, 33, None, session, 2_484_989, 2_484_000);
+    assert!(
+        !key.is_degenerate_legacy(),
+        "the observed range must promote the lease out of the channel-only legacy class"
+    );
+    assert_eq!(
+        watcher_direct_terminal_response_decision(
+            &provider, channel_id, 33, session, None, 2_484_989, false, body,
+        ),
+        WatcherDirectTerminalResponseDecision::RefusedDegenerateDuplicate,
+        "promoting the lease identity must not disable the content guard that blocks an append-edit tail reattachment"
+    );
 }
 
 #[test]
@@ -580,8 +610,14 @@ async fn live_long_chunk_delivery_fingerprint_uses_raw_body_4081() {
 
     let generation = 33;
     let cell = shared.delivery_lease(channel_id);
-    let lease_key =
-        pinned_delivery_lease_key(channel_id, generation, None, session, raw_body.len() as u64);
+    let lease_key = pinned_delivery_lease_key(
+        channel_id,
+        generation,
+        None,
+        session,
+        raw_body.len() as u64,
+        0,
+    );
     let turn = crate::services::discord::turn_finalizer::TurnKey::new(channel_id, 0, generation);
     let outcome = super::super::terminal_long_chunks::deliver_long_chunks_via_controller(
         &LongChunkGateway,
