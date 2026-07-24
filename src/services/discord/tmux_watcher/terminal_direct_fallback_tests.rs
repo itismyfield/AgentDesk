@@ -24,6 +24,87 @@ fn legacy_edit_failure_revalidation_precedes_fallback_post_4508() {
         !source.contains("replace_long_message_raw_with_outcome("),
         "legacy owner must not call the generic auto-fallback replace API"
     );
+    let capture = source
+        .find("capture_edit_failure_transcript_identity(")
+        .expect("legacy owner must pin transcript identity before editing");
+    assert!(
+        capture < deferred,
+        "expected path/generation identity must be captured before the edit await"
+    );
+}
+
+#[test]
+fn committed_edit_failure_cleanup_has_controller_legacy_parity_4508() {
+    let controller = include_str!("terminal_send.rs");
+    let legacy = include_str!("terminal_direct_fallback.rs");
+    for (label, source) in [("controller", controller), ("legacy", legacy)] {
+        assert!(
+            source.contains("reconcile_already_committed_after_edit_failure("),
+            "{label}: committed branch must use shared guarded reconciliation"
+        );
+    }
+    let cleanup = include_str!("committed_placeholder_cleanup.rs");
+    assert!(cleanup.contains("delete_terminal_placeholder_unless_delivered("));
+    assert!(cleanup.contains("true,"));
+    assert!(cleanup.contains("reconcile_committed_placeholder_cleanup("));
+}
+
+#[test]
+fn committed_cleanup_preserves_tracking_until_delete_commits_4508() {
+    use std::cell::Cell;
+
+    use crate::services::discord::placeholder_cleanup::PlaceholderCleanupOutcome;
+    use super::terminal_send::committed_placeholder_cleanup::reconcile_committed_placeholder_cleanup;
+
+    fn run(
+        outcome: Option<&PlaceholderCleanupOutcome>,
+    ) -> (bool, Option<MessageId>, bool, String, bool) {
+        let mut placeholder_msg_id = Some(MessageId::new(45_080_900));
+        let mut restored = true;
+        let mut last_edit_text = "streamed body".to_string();
+        let orphan_dropped = Cell::new(false);
+        let committed = reconcile_committed_placeholder_cleanup(
+            outcome,
+            &mut placeholder_msg_id,
+            &mut restored,
+            &mut last_edit_text,
+            || orphan_dropped.set(true),
+        );
+        (
+            committed,
+            placeholder_msg_id,
+            restored,
+            last_edit_text,
+            orphan_dropped.get(),
+        )
+    }
+
+    let preserved = run(Some(&PlaceholderCleanupOutcome::failed(
+        "transient delete failure",
+    )));
+    assert_eq!(
+        preserved,
+        (
+            false,
+            Some(MessageId::new(45_080_900)),
+            true,
+            "streamed body".to_string(),
+            false,
+        ),
+        "uncommitted cleanup must retain local and durable orphan tracking"
+    );
+
+    for committed_outcome in [
+        PlaceholderCleanupOutcome::Succeeded,
+        PlaceholderCleanupOutcome::AlreadyGone,
+    ] {
+        assert_eq!(
+            run(Some(&committed_outcome)),
+            (true, None, false, String::new(), true),
+            "committed delete is the sole authority to clear lifecycle tracking"
+        );
+    }
+    assert!(!run(None).0);
 }
 
 #[test]

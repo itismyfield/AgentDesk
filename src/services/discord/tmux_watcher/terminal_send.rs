@@ -19,6 +19,9 @@ use crate::services::provider::ProviderKind;
 
 use super::controller_heartbeat::WatcherPostHeartbeat;
 
+#[path = "committed_placeholder_cleanup.rs"]
+pub(super) mod committed_placeholder_cleanup;
+
 /// #3089 A4/#3998 S1-d: watcher terminal controller cut-over decision.
 /// Computed at the lease acquire site so the watcher's own acquire/heartbeat/
 /// commit/advance/release can be gated behind `!cutover`.
@@ -205,17 +208,15 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
         );
         true
     };
+    let expected_transcript =
+        dr::capture_edit_failure_transcript_identity(shared, tmux_session_name);
     let revalidate_after_edit_failure = || {
-        let current_transcript_eof = shared
-            .tmux_watchers
-            .watcher_output_path(tmux_session_name)
-            .and_then(|path| std::fs::metadata(path).ok().map(|metadata| metadata.len()));
         dr::range_committed_after_edit_failure(
             shared,
             provider,
             channel_id,
             tmux_session_name,
-            current_transcript_eof,
+            expected_transcript.as_ref(),
             end,
         )
     };
@@ -378,6 +379,7 @@ pub(in crate::services::discord) async fn apply_watcher_short_replace_controller
     lease_key: Option<crate::services::discord::DeliveryLeaseKey>,
     instance_id: u64,
     range: (u64, u64),
+    response_sent_offset: usize,
     single_message_panel_footer_mode: bool,
     inflight_before_relay: Option<&crate::services::discord::InflightTurnState>,
     locals: WatcherShortReplaceLocals<'_>,
@@ -406,6 +408,33 @@ pub(in crate::services::discord) async fn apply_watcher_short_replace_controller
         range.1,
     )
     .await;
+    if let WatcherShortReplaceResult::AlreadyCommittedAfterEditFailure { edit_error } = result {
+        committed_placeholder_cleanup::reconcile_already_committed_after_edit_failure(
+            committed_placeholder_cleanup::CommittedEditFailureReconcileCtx {
+                http,
+                shared,
+                provider,
+                channel_id,
+                tmux_session_name,
+                msg_id,
+                inflight_before_relay,
+                range,
+                response_sent_offset,
+                edit_error,
+                direct_send_delivered: locals.direct_send_delivered,
+                tui_direct_anchor_terminal_body_visible: locals
+                    .tui_direct_anchor_terminal_body_visible,
+                placeholder_msg_id: locals.placeholder_msg_id,
+                placeholder_from_restored_inflight: locals.placeholder_from_restored_inflight,
+                last_edit_text: locals.last_edit_text,
+                cleanup_source: "watcher_terminal_relay_controller_already_committed_cleanup",
+                record_source:
+                    "watcher_terminal_relay_controller_already_committed_after_edit_failure",
+            },
+        )
+        .await;
+        return;
+    }
     apply_watcher_short_replace_result(
         result,
         shared,
@@ -531,25 +560,8 @@ pub(in crate::services::discord) fn apply_watcher_short_replace_result(
             locals.last_edit_text.clear();
             drop_placeholder_orphan_record(provider, shared, channel_id, msg_id);
         }
-        WatcherShortReplaceResult::AlreadyCommittedAfterEditFailure { edit_error } => {
-            *locals.direct_send_delivered = true;
-            *locals.tui_direct_anchor_terminal_body_visible = false;
-            *locals.placeholder_msg_id = None;
-            *locals.placeholder_from_restored_inflight = false;
-            locals.last_edit_text.clear();
-            drop_placeholder_orphan_record(provider, shared, channel_id, msg_id);
-            super::super::record_placeholder_cleanup(
-                shared,
-                provider,
-                channel_id,
-                msg_id,
-                tmux_session_name,
-                crate::services::discord::placeholder_cleanup::PlaceholderCleanupOperation::EditTerminal,
-                crate::services::discord::placeholder_cleanup::PlaceholderCleanupOutcome::failed(
-                    edit_error,
-                ),
-                "watcher_terminal_relay_controller_already_committed_after_edit_failure",
-            );
+        WatcherShortReplaceResult::AlreadyCommittedAfterEditFailure { .. } => {
+            unreachable!("async controller wrapper owns guarded committed reconciliation")
         }
         WatcherShortReplaceResult::B2Skip | WatcherShortReplaceResult::Skipped => {
             *locals.relay_ok = false;

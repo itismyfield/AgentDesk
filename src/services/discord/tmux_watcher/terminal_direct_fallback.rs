@@ -293,6 +293,7 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                         Some(watcher_lease_key.clone()),
                         watcher_instance_id,
                         (watcher_lease_start, watcher_lease_end),
+                        response_sent_offset,
                         single_message_panel_footer_mode,
                         inflight_before_relay.as_ref(),
                         terminal_send::WatcherShortReplaceLocals {
@@ -317,6 +318,10 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                     // #3805 P1: capture the tail continuation chunk (id +
                     // its own text) so the completion footer re-anchors onto
                     // it instead of stranding on the edited chunk 0.
+                    let expected_transcript = crate::services::discord::outbound::delivery_record::capture_edit_failure_transcript_identity(
+                        shared,
+                        tmux_session_name,
+                    );
                     let mut last_chunk_anchor = None;
                     let replace_outcome = replace_long_message_raw_deferred(
                         &http,
@@ -336,18 +341,12 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                             Ok(WatcherDeferredReplaceOutcome::Replace(outcome))
                         }
                         Ok(DeferredReplaceLongMessageOutcome::EditFailed { edit_error }) => {
-                            let current_transcript_eof = shared
-                                .tmux_watchers
-                                .watcher_output_path(tmux_session_name)
-                                .and_then(|path| {
-                                    std::fs::metadata(path).ok().map(|metadata| metadata.len())
-                                });
                             if crate::services::discord::outbound::delivery_record::range_committed_after_edit_failure(
                                 shared,
                                 watcher_provider,
                                 channel_id,
                                 tmux_session_name,
-                                current_transcript_eof,
+                                expected_transcript.as_ref(),
                                 watcher_lease_end,
                             ) {
                                 Ok(WatcherDeferredReplaceOutcome::AlreadyCommittedAfterEditFailure {
@@ -531,27 +530,28 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                         Ok(WatcherDeferredReplaceOutcome::AlreadyCommittedAfterEditFailure {
                             edit_error,
                         }) => {
-                            direct_send_delivered = true;
-                            *tui_direct_anchor_terminal_body_visible = false;
-                            *placeholder_msg_id = None;
-                            *placeholder_from_restored_inflight = false;
-                            last_edit_text.clear();
-                            drop_placeholder_orphan_record(
-                                watcher_provider,
-                                shared,
-                                channel_id,
-                                msg_id,
-                            );
-                            record_placeholder_cleanup(
-                                shared,
-                                watcher_provider,
-                                channel_id,
-                                msg_id,
-                                tmux_session_name,
-                                PlaceholderCleanupOperation::EditTerminal,
-                                PlaceholderCleanupOutcome::failed(edit_error),
-                                "watcher_terminal_relay_already_committed_after_edit_failure",
-                            );
+                            terminal_send::committed_placeholder_cleanup::reconcile_already_committed_after_edit_failure(
+                                terminal_send::committed_placeholder_cleanup::CommittedEditFailureReconcileCtx {
+                                    http,
+                                    shared,
+                                    provider: watcher_provider,
+                                    channel_id,
+                                    tmux_session_name,
+                                    msg_id,
+                                    inflight_before_relay: inflight_before_relay.as_ref(),
+                                    range: (watcher_lease_start, watcher_lease_end),
+                                    response_sent_offset,
+                                    edit_error,
+                                    direct_send_delivered: &mut direct_send_delivered,
+                                    tui_direct_anchor_terminal_body_visible,
+                                    placeholder_msg_id,
+                                    placeholder_from_restored_inflight,
+                                    last_edit_text,
+                                    cleanup_source: "watcher_terminal_relay_already_committed_cleanup",
+                                    record_source: "watcher_terminal_relay_already_committed_after_edit_failure",
+                                },
+                            )
+                            .await;
                         }
                         Ok(WatcherDeferredReplaceOutcome::Replace(
                             ReplaceLongMessageOutcome::PartialContinuationFailure {

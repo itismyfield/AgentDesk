@@ -1,5 +1,7 @@
 # Discord Outbound Migration — Coverage Map (#1006 v3 / #1280 / #1436 / #1457)
 
+> Last refreshed: 2026-07-24 (#4508 review follow-up — watcher anchored short-replace now uses an edit-only deferred transport boundary in both controller and retained legacy paths. On edit failure, the range owner keeps the same delivery lease and suppresses fallback POST only after a locked, stable pre-edit-path/generation + EOF-bounded durable-frontier recheck; any rotate, marker, metadata, or frontier uncertainty remains fail-open. Already-committed reconciliation reuses delivered-anchor-aware guarded placeholder cleanup and drops local/orphan tracking only after cleanup commits. This changes A4 replacement authority and lifecycle parity, but adds no v3 producer or direct-send callsite; the coverage rows below are unchanged).
+>
 > Last refreshed: 2026-07-24 (#4536 — confirmed idle/catch-up ranged POSTs now persist a generation-scoped ordered JSONL frontier before advancing the in-memory watermark. This adds an internal delivery-record commit writer but no Discord transport verb or v3 producer callsite; the coverage map below is unchanged).
 >
 > Last refreshed: 2026-07-23 (#4797 round 4 — test gateway implementations thread the queued-dispatch capability required by the `TurnGateway` trait; outbound controller delivery verbs, production callsite coverage, and delivery semantics are unchanged).
@@ -138,6 +140,8 @@ label or caller class must update `outbound/source_registry.rs`, its exact-label
 and caller-class tests, and this coverage page in the same change.
 
 `DeliveryOutcome::Delivered` replace metadata is additive: `FreshFallbackAfterEditFailure` carries the fallback replacement anchor when Discord returns one, so A6a recovery can re-record D1 idempotency while non-recovery owners continue to ignore the extra field.
+
+For A4 watcher anchored short-replace, #4508 splits edit from fallback-send authority. Both the controller adapter and retained legacy branch capture the watcher transcript path/generation before the edit await, keep the same `DeliveryLease` across edit, durable recheck, and possible fallback, and issue a fresh POST only when the locked path/generation/EOF/frontier snapshot does not prove the range committed. A proven concurrent commit returns `AlreadyCommittedAfterEditFailure`; its stale-placeholder cleanup uses the shared delivered-anchor-aware guard and clears placeholder/orphan tracking only after deletion commits. Thus controller and legacy paths have the same fail-open transport and lifecycle boundary without introducing a new callsite category.
 
 `outbound/mod.rs` re-exports the v3 message/policy/result and shared
 transport primitives. New production callsites should import

@@ -374,19 +374,28 @@ plan.
 - Definition: the formatting layer's edit-only replace primitive
   (`sym:formatting::replace_long_message_raw_deferred`) returns a typed edit
   failure without issuing a fallback POST.
-- Producer: the range owner re-reads current-generation durable coverage with
+- Producer: before awaiting the edit, the range owner captures the expected
+  watcher output path and nonzero generation. After edit failure it re-reads a
+  stable path+generation+EOF+durable-frontier snapshot with
   `range_committed_after_edit_failure`
   (`sym:outbound::delivery_record::range_committed_after_edit_failure`) while the
-  same `DeliveryLease` is still held.
+  same `DeliveryLease` is still held. The delivery-record lock serializes
+  conforming frontier writes, and post-read path/generation/file-identity checks
+  reject wrapper rotation or transcript replacement during the snapshot.
 - Consumer: controller and legacy watcher short-replace paths suppress fallback
-  delivery only when fresh, generation-matching, EOF-bounded coverage reaches the
-  range end. Missing markers, generation mismatch, unknown EOF, and frontier past
-  EOF remain fail-open for delivery and retain the existing one-shot fallback.
+  delivery only when the pre-edit identity still matches and fresh,
+  generation-matching, EOF-bounded coverage reaches the range end. Missing
+  markers, path or generation changes, unstable file metadata, unknown EOF, and
+  frontier past EOF remain fail-open for delivery and retain the existing
+  one-shot fallback.
 - Invariant: an edit failure is not fresh-send authority. Confirmed committed
   coverage yields `AlreadyCommittedAfterEditFailure` with zero fallback POSTs and
-  no transport-success commit; only idempotent watcher lifecycle/watermark
-  reconciliation against that already-committed frontier may follow. Otherwise,
-  only a confirmed fallback POST may run the existing commit/advance path.
+  no transport-success commit; watcher reconciliation uses the delivered-anchor-
+  aware guarded cleanup and clears placeholder/orphan tracking only after a
+  committed stale-placeholder delete. The delivered anchor itself and any case
+  without positive delivered-elsewhere proof remain tracked and preserved.
+  Otherwise, only a confirmed fallback POST may run the existing commit/advance
+  path.
 - Violation surface: a restart leaves a stale placeholder target, another owner
   commits the JSONL range while the edit is awaited, Discord returns Unknown
   Message, and the stale owner duplicates the already delivered response via a
