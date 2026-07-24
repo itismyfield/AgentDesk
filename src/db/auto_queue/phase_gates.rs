@@ -1431,7 +1431,10 @@ async fn load_sibling_phase_gate_dispatches_on_pg_tx(
                 .unwrap_or_else(|| {
                     format!(
                         "expected verdict {expected_verdict}, got {}",
-                        diagnostic_verdict.as_deref().or(actual_verdict).unwrap_or("none")
+                        diagnostic_verdict
+                            .as_deref()
+                            .or(actual_verdict)
+                            .unwrap_or("none")
                     )
                 });
             summary.failed_sibling = Some(FailedSibling {
@@ -1817,7 +1820,7 @@ mod reconcile_phase_gate_pg_tests {
     use crate::db::auto_queue::phase_gate_verdict::{VerdictResolution, resolve_verdict};
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use serde_json::json;
-    use sqlx::PgPool;
+    use sqlx::{PgPool, Row};
     use std::sync::Arc;
     use tokio::sync::Barrier;
 
@@ -1931,7 +1934,8 @@ mod reconcile_phase_gate_pg_tests {
         .expect("gate failure diagnostic");
         (
             row.try_get("verdict").expect("decode verdict"),
-            row.try_get("failure_reason").expect("decode failure reason"),
+            row.try_get("failure_reason")
+                .expect("decode failure reason"),
         )
     }
 
@@ -2316,15 +2320,12 @@ mod reconcile_phase_gate_pg_tests {
         .await
         .expect("seed gate state");
 
-        let outcome = run_reconcile(
-            &pool,
-            "dsp-diagnostic",
-            "completed",
-            context,
-            Some(result),
-        )
-        .await;
-        assert!(matches!(outcome, PhaseGateReconciliation::MarkedFailed { .. }));
+        let outcome =
+            run_reconcile(&pool, "dsp-diagnostic", "completed", context, Some(result)).await;
+        assert!(matches!(
+            outcome,
+            PhaseGateReconciliation::MarkedFailed { .. }
+        ));
         let (verdict, reason) = gate_failure_diagnostic(&pool, "run-pg-test", 0).await;
         assert_eq!(verdict.as_deref(), Some(r#"{"blocked_by":"operator"}"#));
         assert!(
