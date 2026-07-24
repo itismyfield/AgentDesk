@@ -216,29 +216,52 @@ mod tests {
     fn activity_labels_lead_with_a_spinner_swap_marker() {
         // Every actively-rendered label must lead with a status emoji so the
         // spinner-merge swaps it for the animation cleanly (spinner-prefix parity).
-        for status in [
-            DerivedStatus::Running,
-            DerivedStatus::MonitorWait,
-            DerivedStatus::ScheduleWakeup(Some(30)),
-            DerivedStatus::ToolRunning {
-                name: "Bash".to_string(),
-                summary: None,
-            },
-            DerivedStatus::SubagentRunning {
-                desc: "explore".to_string(),
-            },
-            DerivedStatus::WorkflowRunning {
-                label: "review".to_string(),
-            },
-            DerivedStatus::Completed {
-                kind: CompletedKind::Foreground,
-            },
+        let last_tool = LastToolCall {
+            name: "Read".to_string(),
+            summary: None,
+        };
+        for (status, last_tool, expected_prefix) in [
+            (DerivedStatus::Running, None, "🛠️"),
+            (DerivedStatus::MonitorWait, Some(&last_tool), "🔧"),
+            (
+                DerivedStatus::ScheduleWakeup(Some(30)),
+                Some(&last_tool),
+                "🔧",
+            ),
+            (
+                DerivedStatus::ToolRunning {
+                    name: "Bash".to_string(),
+                    summary: None,
+                },
+                None,
+                "🔧",
+            ),
+            (
+                DerivedStatus::SubagentRunning {
+                    desc: "explore".to_string(),
+                },
+                Some(&last_tool),
+                "🔧",
+            ),
+            (
+                DerivedStatus::WorkflowRunning {
+                    label: "review".to_string(),
+                },
+                Some(&last_tool),
+                "🔧",
+            ),
+            (
+                DerivedStatus::Completed {
+                    kind: CompletedKind::Foreground,
+                },
+                None,
+                "✅",
+            ),
         ] {
-            let line = render_activity_line_with_last_tool(&status, None);
-            let first = line.chars().next().expect("non-empty label");
+            let line = render_activity_line_with_last_tool(&status, last_tool);
             assert!(
-                ['🛠', '🔧', '✅'].contains(&first),
-                "label {line:?} must lead with a spinner-swap marker"
+                line.starts_with(expected_prefix),
+                "label {line:?} must lead with spinner-swap marker {expected_prefix:?}"
             );
         }
     }
