@@ -859,7 +859,8 @@ src/
 │   │   │   │   ├── guarded_save.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── status_panel/
-│   │   │   │   └── purge.rs
+│   │   │   │   ├── purge.rs
+│   │   │   │   └── singleton.rs
 │   │   │   ├── stream_loop/
 │   │   │   │   ├── content_arms/
 │   │   │   │   │   ├── provider_error_presentation.rs
@@ -1055,6 +1056,7 @@ src/
 │   │   ├── startup_reclaim.rs
 │   │   ├── status_panel_orphan_store.rs
 │   │   ├── status_panel_orphan_store_tests.rs
+│   │   ├── status_panel_singleton_store.rs
 │   │   ├── streaming_finalizer.rs
 │   │   ├── subagent_notification_card.rs
 │   │   ├── task_supervisor.rs

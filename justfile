@@ -45,6 +45,7 @@ test-non-pg:
     cargo test --lib mailbox_reaction_tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib queue_marker::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib queue_status_presentation::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib status_panel_singleton_store -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::outbound::serenity_reference::tests::lifecycle_notice_nonce_is_stable_and_semantic_event_scoped -- --exact
     cargo test --lib services::discord::outbound::delivery::tests::v3_referenced_send_preserves_reference_and_dedupes -- --exact
     cargo test --lib cli::args::tests::legacy_queue_help_directs_users_to_query_without_changing_compatibility_contract
