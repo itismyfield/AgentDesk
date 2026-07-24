@@ -1074,6 +1074,147 @@ async fn status_panel_completion_purges_pending_bind_for_final_panel() {
     );
 }
 
+// #4860 (a): the singleton status panel is a state DISPLAY, not a log — the
+// background-waiting completion and the final completion must both land as
+// EDITS of the SAME panel message (never a new send), and the durable
+// singleton binding must keep pointing at that one message throughout.
+#[tokio::test]
+async fn singleton_panel_state_transitions_edit_the_same_message() {
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+    let shared = make_status_panel_v2_shared_for_tests();
+    let gateway = StatusPanelFallbackGateway::default();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_860_101);
+    let panel = MessageId::new(1_500_000_000_486_010);
+    let mut last_status_panel_text = String::new();
+
+    // Transition 1: turn ended, background agents still pending → panel edit.
+    let committed = complete_status_panel_v2(
+        shared.as_ref(),
+        &gateway,
+        channel_id,
+        Some(panel),
+        &provider,
+        1_700_000_000,
+        &mut last_status_panel_text,
+        false,
+        true,
+        "test_singleton_transition_pending",
+        4_860_102,
+    )
+    .await;
+    assert!(committed);
+
+    // The panel content changes (fresh context usage arrived) …
+    assert!(
+        shared
+            .ui
+            .placeholder_live_events
+            .set_context_panel_usage(channel_id, None, 460_000, 0, 0, 1_000_000, 50)
+    );
+
+    // Transition 2: fully completed → the SAME message is edited again.
+    let committed = complete_status_panel_v2(
+        shared.as_ref(),
+        &gateway,
+        channel_id,
+        Some(panel),
+        &provider,
+        1_700_000_000,
+        &mut last_status_panel_text,
+        false,
+        false,
+        "test_singleton_transition_final",
+        4_860_102,
+    )
+    .await;
+    assert!(committed);
+
+    assert_eq!(
+        gateway
+            .edited_message_ids
+            .lock()
+            .expect("edited ids lock")
+            .as_slice(),
+        &[panel, panel],
+        "both completion states must EDIT the one singleton panel message"
+    );
+    assert!(
+        gateway
+            .sent_messages
+            .lock()
+            .expect("sent messages lock")
+            .is_empty(),
+        "state transitions must never mint a new panel message"
+    );
+    assert_eq!(
+        crate::services::discord::status_panel_singleton_store::load(
+            &provider,
+            &shared.token_hash,
+            channel_id.get(),
+        )
+        .map(|binding| binding.panel_message_id),
+        Some(panel.get()),
+        "the durable singleton binding must survive every transition on the same id"
+    );
+}
+
+// #4860 (d): with the two-message flag OFF the singleton machinery must be
+// fully inert — legacy/single-message panel completion neither reads nor
+// writes the durable singleton store.
+#[tokio::test]
+async fn single_message_mode_completion_leaves_singleton_store_untouched() {
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+    let mut shared = super::super::make_shared_data_for_tests();
+    {
+        let ui = &mut Arc::get_mut(&mut shared)
+            .expect("fresh test shared data should be uniquely owned")
+            .ui;
+        ui.status_panel_v2_enabled = true;
+        ui.two_message_panel_enabled = false;
+    }
+    let gateway = StatusPanelFallbackGateway::default();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_860_201);
+    let panel = MessageId::new(1_500_000_000_486_020);
+    let mut last_status_panel_text = String::new();
+
+    let committed = complete_status_panel_v2(
+        shared.as_ref(),
+        &gateway,
+        channel_id,
+        Some(panel),
+        &provider,
+        1_700_000_000,
+        &mut last_status_panel_text,
+        false,
+        false,
+        "test_flag_off_no_singleton",
+        4_860_202,
+    )
+    .await;
+
+    assert!(committed);
+    assert_eq!(
+        gateway
+            .edited_message_ids
+            .lock()
+            .expect("edited ids lock")
+            .as_slice(),
+        &[panel],
+        "flag-OFF completion behavior is unchanged (one panel edit)"
+    );
+    assert_eq!(
+        crate::services::discord::status_panel_singleton_store::load(
+            &provider,
+            &shared.token_hash,
+            channel_id.get(),
+        ),
+        None,
+        "flag OFF must not create a singleton binding"
+    );
+}
+
 fn inflight_row_owned_by(
     provider: &ProviderKind,
     channel_id: u64,

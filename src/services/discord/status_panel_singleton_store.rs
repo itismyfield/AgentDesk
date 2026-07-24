@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::services::discord::runtime_store;
+use crate::services::discord::{inflight, runtime_store};
 use crate::services::provider::ProviderKind;
 
 static STORE_WRITE_LOCK: Mutex<()> = Mutex::new(());
@@ -65,6 +65,32 @@ fn bind_in_root(
     let path = channel_file_path_in_root(root, provider, token_hash, channel_id);
     let json = serde_json::to_string_pretty(&binding).map_err(|error| error.to_string())?;
     runtime_store::atomic_write(&path, &json)
+}
+
+pub(in crate::services::discord) fn bind_if_owned(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    panel_message_id: u64,
+) -> Result<StatusPanelSingletonBinding, String> {
+    let inflight_root = runtime_store::discord_inflight_root()
+        .ok_or_else(|| "AgentDesk inflight runtime root unavailable".to_string())?;
+    let path = inflight::inflight_state_path(&inflight_root, provider, channel_id);
+    let _guard = inflight::lock_inflight_state_path(&path)?;
+    let raw = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    let state = serde_json::from_str::<inflight::InflightTurnState>(&raw)
+        .map_err(|error| error.to_string())?;
+    if state.status_message_id != Some(panel_message_id) {
+        return Err("status panel singleton ownership changed".to_string());
+    }
+    let binding = StatusPanelSingletonBinding {
+        panel_message_id,
+        generation: state.status_panel_generation,
+    };
+    let root = runtime_store::discord_status_panel_singletons_root()
+        .ok_or_else(|| "AgentDesk runtime root unavailable".to_string())?;
+    bind_in_root(&root, provider, token_hash, channel_id, binding)?;
+    Ok(binding)
 }
 
 fn clear_if_current_in_root(

@@ -624,13 +624,6 @@ pub(super) async fn update_streaming_status_tick(
                             } else {
                                 // Bound / AlreadyBound: the row now owns this exact id.
                                 debug_assert!(decision.adopt_sent_panel);
-                                remove_watcher_two_message_panel_orphan_registration(
-                                    shared.ui.two_message_panel_enabled,
-                                    shared.as_ref(),
-                                    &watcher_provider,
-                                    channel_id,
-                                    panel_msg.id,
-                                );
                                 status_panel_msg_id = Some(panel_msg.id);
                                 // #3805 P2 (PR-C): a FRESH Bound opened this
                                 // turn's panel epoch (the generation the
@@ -640,10 +633,18 @@ pub(super) async fn update_streaming_status_tick(
                                 // re-open it (the local already carries the
                                 // on-disk seed). None/OFF → local untouched.
                                 if shared.ui.two_message_panel_enabled
-                                    && let Some(opened) =
-                                        bind_outcome.bound_status_panel_generation()
+                                    && let Some(adopted_generation) =
+                                        adopt_watcher_singleton_panel_after_fresh_bind(
+                                            &http,
+                                            &shared,
+                                            &watcher_provider,
+                                            channel_id,
+                                            &tmux_session_name,
+                                            panel_msg.id,
+                                        )
+                                        .await
                                 {
-                                    this_turn_status_panel_generation = opened;
+                                    this_turn_status_panel_generation = adopted_generation;
                                 }
                                 let ts = chrono::Local::now().format("%H:%M:%S");
                                 tracing::info!(

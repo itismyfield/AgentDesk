@@ -162,6 +162,29 @@ pub(super) async fn create_bridge_two_message_status_panel_below_answer<G: TurnG
                 }
             };
             let next_generation = next_generation.max(bound_generation);
+            if crate::services::discord::status_panel_orphan_store::remove_pending_bind_if_owned(
+                provider,
+                &shared.token_hash,
+                channel_id.get(),
+                panel_msg_id.get(),
+                &identity,
+            ) == crate::services::discord::status_panel_orphan_store::PendingBindOwnedRemovalOutcome::OwnershipMismatch
+            {
+                if gateway
+                    .delete_message(channel_id, panel_msg_id)
+                    .await
+                    .is_err()
+                {
+                    crate::services::discord::status_panel_orphan_store::enqueue(
+                        provider,
+                        &shared.token_hash,
+                        channel_id.get(),
+                        panel_msg_id.get(),
+                    );
+                }
+                *status_panel_dirty = false;
+                return;
+            }
             if let Err(error) = crate::services::discord::status_panel_singleton_store::bind(
                 provider,
                 &shared.token_hash,
@@ -175,15 +198,6 @@ pub(super) async fn create_bridge_two_message_status_panel_below_answer<G: TurnG
                     channel_id,
                     error
                 );
-            }
-            if crate::services::discord::status_panel_orphan_store::remove_pending_bind_if_owned(
-                provider,
-                &shared.token_hash,
-                channel_id.get(),
-                panel_msg_id.get(),
-                &identity,
-            ) == crate::services::discord::status_panel_orphan_store::PendingBindOwnedRemovalOutcome::OwnershipMismatch
-            {
                 *status_panel_dirty = false;
                 return;
             }
@@ -697,6 +711,71 @@ mod tests {
         let sent = gateway.sent.lock().expect("sent lock");
         assert_eq!(sent.len(), 1);
         assert!(sent[0].contains('⠸'));
+    }
+
+    /// #4860 (b): a NEW turn's create is the singleton re-anchor — the previous
+    /// turn's completed panel (recorded in the durable singleton store) is
+    /// retired AFTER the new binding is persisted, leaving exactly ONE panel.
+    #[tokio::test]
+    async fn create_on_new_turn_retires_prior_singleton_panel() {
+        let _env = isolate_agentdesk_runtime_root();
+        let channel = ChannelId::new(777);
+        let answer = MessageId::new(10);
+        let prior_panel = 900u64;
+        let panel_id = 20;
+        let gateway = SendTrackingGateway::returning(panel_id);
+        let shared = make_status_panel_v2_shared_for_tests();
+        let provider = ProviderKind::Claude;
+        // The PREVIOUS turn left its completed panel bound in the durable store.
+        crate::services::discord::status_panel_singleton_store::bind(
+            &provider,
+            &shared.token_hash,
+            channel.get(),
+            prior_panel,
+            3,
+        )
+        .expect("seed prior singleton binding");
+        let mut inflight = test_inflight(answer.get());
+        crate::services::discord::inflight::save_inflight_state(&inflight)
+            .expect("persist creation owner");
+        let mut status_panel_msg_id: Option<MessageId> = None;
+        let mut generation = inflight.status_panel_generation;
+        let mut dirty = true;
+
+        create_bridge_two_message_status_panel_below_answer(
+            &gateway,
+            shared.as_ref(),
+            &provider,
+            channel,
+            "⠸",
+            answer,
+            &mut status_panel_msg_id,
+            &mut inflight,
+            &mut generation,
+            &mut dirty,
+        )
+        .await;
+
+        assert_eq!(status_panel_msg_id, Some(MessageId::new(panel_id)));
+        // The prior completed panel was deleted; nothing else was.
+        assert_eq!(
+            *gateway.deleted.lock().expect("deleted lock"),
+            vec![prior_panel],
+            "the previous turn's completed singleton panel must be retired"
+        );
+        // Exactly one new panel was sent → exactly one panel remains live.
+        assert_eq!(gateway.sent.lock().expect("sent lock").len(), 1);
+        // The durable binding now points at the NEW panel with a generation
+        // strictly above the prior binding's (monotonic across turns).
+        let durable = crate::services::discord::status_panel_singleton_store::load(
+            &provider,
+            &shared.token_hash,
+            channel.get(),
+        )
+        .expect("singleton binding after re-anchor");
+        assert_eq!(durable.panel_message_id, panel_id);
+        assert_eq!(durable.generation, 4);
+        assert_eq!(generation, 4);
     }
 
     #[tokio::test]

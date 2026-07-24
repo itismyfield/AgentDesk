@@ -237,6 +237,76 @@ pub(in crate::services::discord) async fn complete_watcher_status_panel_v2_with_
     }
 }
 
+/// #4860: after a FRESH watcher panel bind (`Bound`/`AlreadyBound`), adopt the
+/// just-bound panel as the channel's two-message SINGLETON: persist the durable
+/// binding under the inflight flock (`bind_if_owned` — fail-closed when the row
+/// no longer owns the panel), drop the crash-window pending-bind record, and
+/// retire the PREVIOUS turn's completed panel recorded in the store (transient
+/// delete failure → durable orphan). This is the watcher-side turn-boundary
+/// re-anchor: the prior completed panel is the "old panel" of the PR-D sequence.
+///
+/// Returns the persisted singleton generation to mirror into the tick-local
+/// epoch, or `None` when the durable persist failed (locals untouched; the
+/// pending-bind record stays for the sweeper). Extracted from the giant-capped
+/// `streaming_status_tick.rs` call site, which stays thin.
+pub(in crate::services::discord) async fn adopt_watcher_singleton_panel_after_fresh_bind(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    panel_msg_id: serenity::MessageId,
+) -> Option<u64> {
+    let prior_singleton = crate::services::discord::status_panel_singleton_store::load(
+        provider,
+        &shared.token_hash,
+        channel_id.get(),
+    );
+    let binding = match crate::services::discord::status_panel_singleton_store::bind_if_owned(
+        provider,
+        &shared.token_hash,
+        channel_id.get(),
+        panel_msg_id.get(),
+    ) {
+        Ok(binding) => binding,
+        Err(error) => {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                panel_message_id = panel_msg_id.get(),
+                error = %error,
+                "watcher failed to persist owned singleton status panel"
+            );
+            return None;
+        }
+    };
+    remove_watcher_two_message_panel_orphan_registration(
+        true,
+        shared.as_ref(),
+        provider,
+        channel_id,
+        panel_msg_id,
+    );
+    if let Some(prior) =
+        prior_singleton.filter(|prior| prior.panel_message_id != panel_msg_id.get())
+    {
+        let prior_panel = serenity::MessageId::new(prior.panel_message_id);
+        let retire = delete_nonterminal_placeholder(
+            http,
+            channel_id,
+            shared,
+            provider,
+            tmux_session_name,
+            prior_panel,
+            "watcher_fresh_turn_prior_singleton_panel",
+        )
+        .await;
+        if watcher_status_panel_delete_needs_orphan_retry(&retire) {
+            enqueue_watcher_status_panel_orphan(shared.as_ref(), provider, channel_id, prior_panel);
+        }
+    }
+    Some(binding.generation)
+}
+
 /// #3805 P2 (PR-D): re-anchor the watcher's two-message status panel BELOW the
 /// new answer chunk after a mid-turn rollover created a fresh tail message.
 ///
@@ -352,6 +422,23 @@ pub(in crate::services::discord) async fn reanchor_watcher_two_message_status_pa
         return false;
     }
 
+    let singleton = match crate::services::discord::status_panel_singleton_store::bind_if_owned(
+        provider,
+        &shared.token_hash,
+        channel_id.get(),
+        new_panel.id.get(),
+    ) {
+        Ok(binding) => binding,
+        Err(error) => {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                panel_message_id = new_panel.id.get(),
+                error = %error,
+                "watcher re-anchor failed to persist owned singleton status panel"
+            );
+            return false;
+        }
+    };
     remove_watcher_two_message_panel_orphan_registration(
         true,
         shared.as_ref(),
@@ -373,9 +460,7 @@ pub(in crate::services::discord) async fn reanchor_watcher_two_message_status_pa
         enqueue_watcher_status_panel_orphan(shared.as_ref(), provider, channel_id, old_panel_id);
     }
     *status_panel_msg_id = Some(new_panel.id);
-    *this_turn_status_panel_generation = bind_outcome
-        .bound_status_panel_generation()
-        .unwrap_or(*this_turn_status_panel_generation);
+    *this_turn_status_panel_generation = singleton.generation;
     *last_status_panel_text = panel_text.to_string();
     true
 }
