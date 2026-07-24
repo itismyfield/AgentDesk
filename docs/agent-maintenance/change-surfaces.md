@@ -1221,13 +1221,11 @@
     marker suppression for stop-control transcript envelopes; +62 from #3304:
     slash-command canonical prompt keys for `<command-*>` XML vs
     `/command args` dedupe, plus focused loop skill-expansion regressions).
-  - `src/services/discord/relay_recovery.rs` (frozen giant surface; +242 from
-    #4030 fix-round review hardening: destructive watcher-owner Cancel now routes
-    through the shared death-evidence gate (`destructive_cancel_gate.rs`), pins
-    decision-time turn/mailbox/tmux identity before apply-time finalizer submit,
-    and covers frozen nonzero-frontier / empty-capture variants. This admission
-    is bugfix-only for PR #4035; further recovery policy expansion should extract
-    decision/apply helpers instead of growing this file.)
+  - `src/services/discord/relay_recovery.rs` (sub-1000 production facade after
+    #4712 pure-move extraction. Recovery models/planning now live in
+    `relay_recovery/decision.rs`, idle-tmux and pinned-clear helpers in
+    `relay_recovery/idle_tmux.rs`, and action execution in
+    `relay_recovery/apply.rs`; keep future policy growth inside the owning child.)
   - `src/services/discord/recovery_engine/restore_inflight.rs` (frozen giant surface; tracked #3834 follow-up giant after the r2 behavior-preserving split.
     Owns the restart-path inflight scan: retry-aware tmux liveness probes,
     `finish_recovered_turn_mailbox`, live output-path detection,
