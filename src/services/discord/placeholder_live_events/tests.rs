@@ -2203,6 +2203,87 @@ fn status_panel_clamps_codex_context_usage_display_to_window() {
     assert!(!rendered.contains("2.3M"));
 }
 
+// #4860 (e): the (singleton) status panel shows only what is RUNNING. A
+// finished subagent and a finished background task must not appear on the
+// completed-state panel render — no `Agent … finished`-style residue.
+#[test]
+fn completed_panel_shows_running_only_and_drops_finished_entries_4860() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_860_301);
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("reviewer".to_string()),
+            desc: Some("finished review".to_string()),
+            agent_id: None,
+            tool_use_id: Some("toolu-4860-done".to_string()),
+            background: false,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentEnd {
+            success: true,
+            agent_id: None,
+            desc: None,
+            tool_use_id: Some("toolu-4860-done".to_string()),
+            summary: None,
+            ack_only: false,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("builder".to_string()),
+            desc: Some("still running".to_string()),
+            agent_id: None,
+            tool_use_id: Some("toolu-4860-live".to_string()),
+            background: true,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::BackgroundTaskStart {
+            name: "Bash".to_string(),
+            summary: "finished shell".to_string(),
+            tool_use_id: "toolu-4860-shell".to_string(),
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::BackgroundTaskEnd {
+            tool_use_id: "toolu-4860-shell".to_string(),
+            success: true,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::TurnCompleted {
+            background: false,
+            background_agent_pending: true,
+        },
+    );
+
+    let panel = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+
+    assert!(
+        panel.contains("still running"),
+        "running entries stay: {panel:?}"
+    );
+    assert!(
+        !panel.contains("finished review"),
+        "a finished subagent must not render on the panel: {panel:?}"
+    );
+    assert!(
+        !panel.contains("finished shell"),
+        "a finished background task must not render on the panel: {panel:?}"
+    );
+    assert!(
+        !panel.contains('✓'),
+        "no terminal marks on the panel: {panel:?}"
+    );
+}
+
 #[test]
 fn completion_footer_context_only_has_no_spinner_and_stops_scheduling() {
     let events = PlaceholderLiveEvents::default();
@@ -2242,6 +2323,70 @@ fn completion_footer_keeps_background_agent_pending_payload_open() {
     assert!(rendered.has_unfinished_entries);
     assert!(block.contains("Background agents"));
     assert!(block.contains("Waiting for background agents ⠸"));
+}
+
+// #4860 관측 문제 해소 + 뮤테이션 증명: #4848 rendered the waiting block from
+// TWO insertion sites (a pre-clamp `emitted` push AND the post-clamp prepend),
+// so every pending footer carried the block twice ("턴마다 2개씩"). These pins
+// fail if either duplicate site is reintroduced (the mutant: restoring the
+// removed pre-clamp push makes the counts read 2).
+#[test]
+fn waiting_block_renders_exactly_once_4860() {
+    // Case 1: no task/subagent lines at all — the waiting block is the ONLY
+    // section, exactly once.
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(1904);
+    events.push_status_event(
+        channel_id,
+        StatusEvent::TurnCompleted {
+            background: false,
+            background_agent_pending: true,
+        },
+    );
+    let rendered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = rendered.block.expect("pending-only footer");
+    assert!(rendered.has_unfinished_entries);
+    assert_eq!(
+        block.matches("Background agents").count(),
+        1,
+        "pending-only footer must carry exactly one waiting header: {block:?}"
+    );
+    assert_eq!(block.matches("Waiting for background agents").count(), 1);
+}
+
+#[test]
+fn waiting_block_above_tasks_renders_exactly_once_4860() {
+    // Case 2: a terminal (non-background) task section is present but shows no
+    // unfinished background entry — the waiting block is prepended ABOVE the
+    // Tasks section exactly once.
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(1905);
+    events.push_status_event(
+        channel_id,
+        StatusEvent::TaskToolUpdate {
+            name: "TaskUpdate".to_string(),
+            task_id: Some("t-4860".to_string()),
+            summary: Some("done work".to_string()),
+            status: Some("completed".to_string()),
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::TurnCompleted {
+            background: false,
+            background_agent_pending: true,
+        },
+    );
+    let rendered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = rendered.block.expect("pending footer with tasks");
+    assert!(rendered.has_unfinished_entries);
+    assert_eq!(
+        block.matches("Waiting for background agents").count(),
+        1,
+        "the waiting block must not be double-inserted around the clamp: {block:?}"
+    );
+    assert_eq!(block.matches("Background agents").count(), 1);
+    assert!(block.contains("Tasks"));
 }
 
 #[test]

@@ -294,16 +294,15 @@ pub(super) fn render_completion_footer(
         has_unfinished_entries |= subagent_unfinished;
     }
 
-    if emitted.is_empty() && snapshot.background_agent_pending {
-        emitted.push(EmittedLine::header("Background agents"));
-        emitted.push(EmittedLine {
-            text: format!("Waiting for background agents {indicator}"),
-            terminal_id: None,
-            unfinished_background: false,
-        });
-        has_unfinished_entries = true;
-    }
-
+    // #4860 (관측 문제 규명): #4848 introduced TWO insertion sites for the
+    // `Background agents / Waiting …` block — a pre-clamp push into `emitted`
+    // when the task/subagent lists were empty AND the post-clamp prepend below.
+    // The pushed lines carry `unfinished_background: false`, so the post-clamp
+    // guard (`visible_detailed_background_entry`) never saw them and prepended
+    // the SAME block again → every pending completion footer rendered the
+    // waiting block twice ("턴마다 2개씩"). The post-clamp prepend is now the
+    // ONLY insertion site; the empty-list case is handled after the clamp
+    // branch below.
     if !emitted.is_empty() {
         // #3089 completion footer: keep the context-usage line outside the S3 budget
         // so usage never disappears because a task section is noisy. The same
@@ -342,6 +341,17 @@ pub(super) fn render_completion_footer(
             has_unfinished_entries,
             delivered_terminal_ids,
         };
+    }
+
+    // #4860: no task/subagent lines at all — the waiting block IS the section.
+    // Exactly one copy (the mutation proof for the #4848 double render: re-adding
+    // the removed pre-clamp push makes `waiting_block_renders_exactly_once_4860`
+    // count two `Background agents` headers and fail).
+    if snapshot.background_agent_pending {
+        sections.push(format!(
+            "Background agents\nWaiting for background agents {indicator}"
+        ));
+        has_unfinished_entries = true;
     }
 
     CompletionFooterRender {
