@@ -680,6 +680,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         };
         match abort_exit_outcome {
             AbortExitOutcome::ContinueWatcherLoop => continue,
+            AbortExitOutcome::BreakWatcherLoop => break 'watcher_loop,
             AbortExitOutcome::Fallthrough => {}
         }
 

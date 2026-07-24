@@ -7,7 +7,20 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AbortExitOutcome {
     ContinueWatcherLoop,
+    BreakWatcherLoop,
     Fallthrough,
+}
+
+pub(super) fn watcher_session_is_main_orchestration(
+    tmux_session_name: &str,
+    channel_id: serenity::ChannelId,
+) -> bool {
+    let Some((_provider, channel_segment)) =
+        crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_session_name)
+    else {
+        return true;
+    };
+    !channel_segment.ends_with(&format!("-t{}", channel_id.get()))
 }
 
 pub(super) struct TerminalAbortExitContext<'a> {
@@ -342,17 +355,26 @@ pub(super) async fn handle_terminal_abort_exits(
             .as_deref()
             .map(|text| record_provider_overload_retry(channel_id, text))
             .unwrap_or(ProviderOverloadDecision::Exhausted);
-        let retry_notice = match &decision {
-            ProviderOverloadDecision::Retry { attempt, delay, .. } => format!(
-                "⚠️ 모델 capacity 상태를 감지해 세션을 정리했습니다. {}분 후 자동 재시도합니다. ({}/{})",
-                delay.as_secs() / 60,
-                attempt,
-                PROVIDER_OVERLOAD_MAX_RETRIES
-            ),
-            ProviderOverloadDecision::Exhausted => format!(
-                "⚠️ 모델 capacity 상태가 계속되어 자동 재시도를 중단했습니다. 잠시 후 다시 시도해 주세요.\n\n사유: {}",
+        let main_orchestration_session =
+            watcher_session_is_main_orchestration(tmux_session_name, channel_id);
+        let retry_notice = if main_orchestration_session {
+            format!(
+                "⚠️ 모델 capacity 상태를 감지했지만 메인 오케스트레이션 세션은 보존했습니다. 현재 turn을 실패 처리하고 watcher를 분리합니다.\n\n사유: {}",
                 truncate_str(overload_message, 300)
-            ),
+            )
+        } else {
+            match &decision {
+                ProviderOverloadDecision::Retry { attempt, delay, .. } => format!(
+                    "⚠️ 모델 capacity 상태를 감지해 세션을 정리했습니다. {}분 후 자동 재시도합니다. ({}/{})",
+                    delay.as_secs() / 60,
+                    attempt,
+                    PROVIDER_OVERLOAD_MAX_RETRIES
+                ),
+                ProviderOverloadDecision::Exhausted => format!(
+                    "⚠️ 모델 capacity 상태가 계속되어 자동 재시도를 중단했습니다. 잠시 후 다시 시도해 주세요.\n\n사유: {}",
+                    truncate_str(overload_message, 300)
+                ),
+            }
         };
 
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -371,28 +393,38 @@ pub(super) async fn handle_terminal_abort_exits(
         )
         .await;
 
-        let sess = (*tmux_session_name).clone();
-        let termination_reason = match &decision {
-            ProviderOverloadDecision::Retry { .. } => "provider_overload_retry",
-            ProviderOverloadDecision::Exhausted => "provider_overload_exhausted",
-        };
-        let termination_detail = format!("watcher cleanup: {overload_message}");
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            tokio::task::spawn_blocking(move || {
-                crate::services::termination_audit::record_termination_for_tmux(
-                    &sess,
-                    None,
-                    "tmux_watcher",
-                    termination_reason,
-                    Some(&termination_detail),
-                    None,
-                );
-                record_tmux_exit_reason(&sess, &termination_detail);
-                crate::services::platform::tmux::kill_session(&sess, &termination_detail);
-            }),
-        )
-        .await;
+        if main_orchestration_session {
+            tracing::error!(
+                tmux_session = %tmux_session_name,
+                channel_id = channel_id.get(),
+                current_offset = locals.current_offset,
+                decision_reason = "structured_provider_overload",
+                "watcher blocked automatic kill of main orchestration session; detaching watcher"
+            );
+        } else {
+            let sess = (*tmux_session_name).clone();
+            let termination_reason = match &decision {
+                ProviderOverloadDecision::Retry { .. } => "provider_overload_retry",
+                ProviderOverloadDecision::Exhausted => "provider_overload_exhausted",
+            };
+            let termination_detail = format!("watcher cleanup: {overload_message}");
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                tokio::task::spawn_blocking(move || {
+                    crate::services::termination_audit::record_termination_for_tmux(
+                        &sess,
+                        None,
+                        "tmux_watcher",
+                        termination_reason,
+                        Some(&termination_detail),
+                        None,
+                    );
+                    record_tmux_exit_reason(&sess, &termination_detail);
+                    crate::services::platform::tmux::kill_session(&sess, &termination_detail);
+                }),
+            )
+            .await;
+        }
 
         let notice_ok = match locals.placeholder_msg_id {
             Some(msg_id) => {
@@ -471,50 +503,64 @@ pub(super) async fn handle_terminal_abort_exits(
         )
         .await;
 
-        match decision {
-            ProviderOverloadDecision::Retry {
-                attempt,
-                delay,
-                fingerprint,
-            } => {
-                if let Some(retry_text) = retry_text {
-                    // A turn with no anchored user message (rebind_origin or
-                    // user_msg_id == 0, e.g. a TUI-direct turn) has no
-                    // message to re-prompt against; clear retry state
-                    // instead of building `MessageId::new(0)` (panics).
-                    if let Some(state) = inflight_state.as_ref().filter(|s| !s.rebind_origin)
-                        && let Some(user_msg_id) = opt_message_id(state.user_msg_id)
-                    {
-                        schedule_provider_overload_retry(
-                            Arc::clone(shared),
-                            Arc::clone(http),
-                            watcher_provider.clone(),
-                            channel_id,
-                            user_msg_id,
-                            retry_text,
-                            attempt,
-                            delay,
-                            fingerprint,
-                        );
+        if main_orchestration_session {
+            let failure_text = format!(
+                "provider overloaded; main orchestration session preserved: {}",
+                truncate_str(overload_message, 300)
+            );
+            crate::services::discord::turn_bridge::fail_dispatch_with_retry(
+                shared.api_port,
+                dispatch_id.as_deref(),
+                &failure_text,
+            )
+            .await;
+            clear_provider_overload_retry_state(channel_id);
+        } else {
+            match decision {
+                ProviderOverloadDecision::Retry {
+                    attempt,
+                    delay,
+                    fingerprint,
+                } => {
+                    if let Some(retry_text) = retry_text {
+                        // A turn with no anchored user message (rebind_origin or
+                        // user_msg_id == 0, e.g. a TUI-direct turn) has no
+                        // message to re-prompt against; clear retry state
+                        // instead of building `MessageId::new(0)` (panics).
+                        if let Some(state) = inflight_state.as_ref().filter(|s| !s.rebind_origin)
+                            && let Some(user_msg_id) = opt_message_id(state.user_msg_id)
+                        {
+                            schedule_provider_overload_retry(
+                                Arc::clone(shared),
+                                Arc::clone(http),
+                                watcher_provider.clone(),
+                                channel_id,
+                                user_msg_id,
+                                retry_text,
+                                attempt,
+                                delay,
+                                fingerprint,
+                            );
+                        } else {
+                            clear_provider_overload_retry_state(channel_id);
+                        }
                     } else {
                         clear_provider_overload_retry_state(channel_id);
                     }
-                } else {
-                    clear_provider_overload_retry_state(channel_id);
                 }
-            }
-            ProviderOverloadDecision::Exhausted => {
-                let failure_text = format!(
-                    "provider overloaded after {} auto-retries: {}",
-                    PROVIDER_OVERLOAD_MAX_RETRIES,
-                    truncate_str(overload_message, 300)
-                );
-                crate::services::discord::turn_bridge::fail_dispatch_with_retry(
-                    shared.api_port,
-                    dispatch_id.as_deref(),
-                    &failure_text,
-                )
-                .await;
+                ProviderOverloadDecision::Exhausted => {
+                    let failure_text = format!(
+                        "provider overloaded after {} auto-retries: {}",
+                        PROVIDER_OVERLOAD_MAX_RETRIES,
+                        truncate_str(overload_message, 300)
+                    );
+                    crate::services::discord::turn_bridge::fail_dispatch_with_retry(
+                        shared.api_port,
+                        dispatch_id.as_deref(),
+                        &failure_text,
+                    )
+                    .await;
+                }
             }
         }
         finish_monitor_auto_turn_if_claimed(
@@ -527,8 +573,39 @@ pub(super) async fn handle_terminal_abort_exits(
             &mut *state.monitor_auto_turn_ledger_generation,
         )
         .await;
-        return AbortExitOutcome::ContinueWatcherLoop;
+        return if main_orchestration_session {
+            AbortExitOutcome::BreakWatcherLoop
+        } else {
+            AbortExitOutcome::ContinueWatcherLoop
+        };
     }
 
     AbortExitOutcome::Fallthrough
+}
+
+#[cfg(test)]
+mod tests {
+    use super::watcher_session_is_main_orchestration;
+    use poise::serenity_prelude::ChannelId;
+
+    #[test]
+    fn main_orchestration_session_is_never_automatic_kill_target() {
+        let channel_id = ChannelId::new(1_504_468_805_772_902_471);
+        assert!(watcher_session_is_main_orchestration(
+            "AgentDesk-claude-adk-cc",
+            channel_id,
+        ));
+        assert!(!watcher_session_is_main_orchestration(
+            "AgentDesk-claude-adk-cc-t1504468805772902471",
+            channel_id,
+        ));
+    }
+
+    #[test]
+    fn unparseable_session_role_fails_closed_as_main() {
+        assert!(watcher_session_is_main_orchestration(
+            "operator-created-session",
+            ChannelId::new(42),
+        ));
+    }
 }
