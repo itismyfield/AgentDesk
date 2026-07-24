@@ -6,8 +6,11 @@ use std::path::{Path, PathBuf};
 use crate::services::tmux_diagnostics::clear_tmux_exit_reason;
 
 const CLAUDE_TUI_READY_SCAN_LINES: usize = 12;
-const CLAUDE_TUI_ACTIVE_SCAN_LINES: usize = 24;
 const CLAUDE_TUI_DRAFT_SCAN_LINES: usize = 36;
+// Readiness must never accept a composer from deeper scrollback than the busy
+// classifiers can veto. Keep the acceptance window inside the veto window.
+const CLAUDE_TUI_ACTIVE_SCAN_LINES: usize = CLAUDE_TUI_DRAFT_SCAN_LINES;
+const _: () = assert!(CLAUDE_TUI_DRAFT_SCAN_LINES <= CLAUDE_TUI_ACTIVE_SCAN_LINES);
 /// Recent non-empty pane lines scanned for the MCP-authentication-required
 /// cold-boot banner. The warning renders just above the composer on a fresh
 /// boot, so a modest tail window captures it reliably while keeping older
@@ -2351,12 +2354,25 @@ earlier assistant prose
 
     #[test]
     fn displaced_composer_does_not_override_foreground_spinner_veto_4888() {
-        let mut lines = vec!["────────────────────────".to_string(), "❯".to_string()];
-        lines.extend((0..20).map(|index| format!("  footer/status row {index}")));
-        lines.push("✳ Architecting… (12s · esc to interrupt)".to_string());
-        lines.extend((0..10).map(|index| format!("  live status row {index}")));
+        let mut lines = vec![
+            "✳ Compacting conversation… (12s · esc to interrupt)".to_string(),
+            "❯".to_string(),
+        ];
+        lines.extend((0..30).map(|index| format!("  footer/status row {index}")));
         let capture = lines.join("\n");
 
+        assert_eq!(
+            capture
+                .lines()
+                .rev()
+                .position(|line| line.starts_with('✳'))
+                .expect("spinner depth"),
+            31,
+            "regression fixture must keep the spinner beyond the old 24-line veto"
+        );
+        assert!(tmux_capture_indicates_claude_tui_exact_empty_composer(
+            &capture
+        ));
         assert!(tmux_capture_indicates_claude_tui_busy(&capture));
         assert!(!tmux_capture_indicates_claude_tui_ready_for_input(&capture));
     }
