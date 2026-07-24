@@ -958,7 +958,9 @@ pub(in crate::services::discord) async fn handle_event(
                 )
                 .await?;
                 if handled {
-                    if !is_skill_command && !upload_records_appended_to_session {
+                    if (!is_skill_command || attachment_local_permit.is_some())
+                        && !upload_records_appended_to_session
+                    {
                         let _ =
                             append_pending_uploads(&data.shared, channel_id, &upload_records).await;
                     }
