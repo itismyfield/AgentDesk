@@ -5,8 +5,8 @@
 //! derived-status activity label and the store-facing time-line builder live here
 //! with their tests.
 //!
-//! The footer header starts with the derived-status ACTIVITY label (`🟢 진행 중` /
-//! `🔧 도구 실행 중 (…)` / `✅ 완료`). The spinner merge
+//! The footer header starts with the derived-status ACTIVITY label (`🛠️ 도구 호출 전` /
+//! `🔧 마지막 도구 (…)` / `✅ 완료`). The spinner merge
 //! (`single_message_panel::merged_footer_header_line`) swaps the leading status
 //! emoji for the animated spinner, so the marker set there must stay in sync with
 //! the emojis this label can start with. The request anchor follows the activity
@@ -24,7 +24,7 @@
 use poise::serenity_prelude::ChannelId;
 
 use super::common::{escape_status_panel_markdown, tool_prefix, truncate_chars};
-use super::status_panel::{CompletedKind, DerivedStatus};
+use super::status_panel::{CompletedKind, DerivedStatus, LastToolCall};
 
 impl super::PlaceholderLiveEvents {
     /// #3983: builds the panel's time line from the channel's STABLE last-activity
@@ -65,13 +65,20 @@ pub(super) fn render_time_line(last_activity_unix: Option<i64>, started_at_unix:
     )
 }
 
-/// #3983: the panel's first (activity) line — the derived-status label alone (no
-/// provider, no timestamp; those moved to the time line). The final confidence
-/// class is absorbed into the emoji here (item B): a clean completion reads
-/// `✅ 완료`.
-pub(super) fn render_activity_line(status: &DerivedStatus) -> String {
+/// #3983/#4892: the panel's first (activity) line — the derived-status label
+/// alone (no provider, no timestamp; those moved to the time line). A generic
+/// running state renders the latest observed tool call instead of duplicating the
+/// answer message's spinner. The final confidence class is absorbed into the emoji
+/// here (item B): a clean completion reads `✅ 완료`.
+pub(super) fn render_activity_line(
+    status: &DerivedStatus,
+    last_tool: Option<&LastToolCall>,
+) -> String {
     match status {
-        DerivedStatus::Running => "🟢 진행 중".to_string(),
+        DerivedStatus::Running => last_tool.map_or_else(
+            || "🛠️ 도구 호출 전".to_string(),
+            |tool| render_tool_activity("마지막 도구", &tool.name, tool.summary.as_deref()),
+        ),
         DerivedStatus::MonitorWait => "💤 monitor 대기".to_string(),
         DerivedStatus::ScheduleWakeup(Some(eta_secs)) => {
             format!("⏰ scheduled wakeup ({eta_secs}s 후)")
@@ -83,9 +90,8 @@ pub(super) fn render_activity_line(status: &DerivedStatus) -> String {
         DerivedStatus::Completed {
             kind: CompletedKind::Foreground,
         } => "✅ 완료".to_string(),
-        DerivedStatus::ToolRunning { name, summary: _ } => {
-            let rendered = tool_prefix(name);
-            format!("🔧 도구 실행 중 ({})", truncate_chars(&rendered, 140))
+        DerivedStatus::ToolRunning { name, summary } => {
+            render_tool_activity("마지막 도구", name, summary.as_deref())
         }
         DerivedStatus::SubagentRunning { desc } => {
             let desc = escape_status_panel_markdown(desc);
@@ -98,6 +104,20 @@ pub(super) fn render_activity_line(status: &DerivedStatus) -> String {
     }
 }
 
+fn render_tool_activity(label: &str, name: &str, summary: Option<&str>) -> String {
+    let name = tool_prefix(name);
+    let detail = summary
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+        .map(escape_status_panel_markdown)
+        .map(|summary| truncate_chars(&summary, 100));
+    let rendered = match detail {
+        Some(detail) => format!("{name} · {detail}"),
+        None => name,
+    };
+    format!("🔧 {label} ({})", truncate_chars(&rendered, 140))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,18 +128,39 @@ mod tests {
     // ---- render_activity_line: the derived-status labels ------------------
 
     #[test]
-    fn running_turn_renders_green_activity_label() {
-        assert_eq!(render_activity_line(&DerivedStatus::Running), "🟢 진행 중");
+    fn running_turn_without_tool_uses_non_duplicate_fallback() {
+        let rendered = render_activity_line(&DerivedStatus::Running, None);
+
+        assert_eq!(rendered, "🛠️ 도구 호출 전");
+        assert!(!rendered.contains("진행 중"));
     }
 
     #[test]
-    fn tool_running_renders_wrench_activity_label() {
+    fn running_turn_renders_last_tool_name_and_short_target() {
+        let last_tool = LastToolCall {
+            name: "Read".to_string(),
+            summary: Some("/workspace/src/services/discord/status_panel.rs".to_string()),
+        };
+        let rendered = render_activity_line(&DerivedStatus::Running, Some(&last_tool));
+
         assert_eq!(
-            render_activity_line(&DerivedStatus::ToolRunning {
-                name: "Bash".to_string(),
-                summary: None,
-            }),
-            "🔧 도구 실행 중 ([Bash])"
+            rendered,
+            "🔧 마지막 도구 ([Read] · /workspace/src/services/discord/status\_panel.rs)"
+        );
+        assert!(!rendered.contains("진행 중"));
+    }
+
+    #[test]
+    fn tool_running_uses_same_last_tool_format() {
+        assert_eq!(
+            render_activity_line(
+                &DerivedStatus::ToolRunning {
+                    name: "Bash".to_string(),
+                    summary: Some("check status".to_string()),
+                },
+                None,
+            ),
+            "🔧 마지막 도구 ([Bash] · check status)"
         );
     }
 
@@ -162,7 +203,7 @@ mod tests {
                 kind: CompletedKind::Foreground,
             },
         ] {
-            let line = render_activity_line(&status);
+            let line = render_activity_line(&status, None);
             let first = line.chars().next().expect("non-empty label");
             assert!(
                 ['🟢', '💤', '⏰', '🔧', '🧵', '🧬', '✅'].contains(&first),
