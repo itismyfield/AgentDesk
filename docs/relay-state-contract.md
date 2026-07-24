@@ -17,6 +17,11 @@ If you change relay ownership, every invariant below must continue to hold.
 A regression here is a user-visible relay miss / duplicate, so keep the
 checks loud (debug_assert + observability record) instead of silent.
 
+The persistence and node-ownership status of these values is classified in
+[`relay-live-state-taxonomy.md`](relay-live-state-taxonomy.md). In particular,
+a durable sidecar is host-local unless a PostgreSQL-backed ownership contract
+explicitly says otherwise.
+
 ### Reference format
 
 Code anchors below are **symbol-path references**, not `file:line` (which
