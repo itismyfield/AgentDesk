@@ -375,7 +375,8 @@ mod placeholder_suppression_tests {
     }
 
     fn completion_footer_block() -> String {
-        "Context   📦 154.6k / 1.0M tokens (15%) · auto-compact 60%\n\nSubagents\n└ bgworker Long background job ✓".to_string()
+        "📦 154.6k / 1.0M (15%) · auto-compact 60%\n\nSubagents\n└ bgworker Long background job ✓"
+            .to_string()
     }
 
     fn completion_footer_only_placeholder() -> String {
@@ -510,7 +511,7 @@ mod placeholder_suppression_tests {
             content,
             format!("visible assistant body\n\n{SUPPRESSED_INTERNAL_LABEL}")
         );
-        assert!(!content.contains("Context   📦"));
+        assert!(!content.contains("📦"));
         assert!(!content.contains("Subagents"));
     }
 

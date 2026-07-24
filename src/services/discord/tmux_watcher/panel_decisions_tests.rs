@@ -193,7 +193,7 @@ fn synthetic_tui_mirror_emits_prose_without_tui_chrome_3964() {
     // Context/Tasks/Subagents footer. A suppressed mirror composes with a `None`
     // block → prose ALONE; a Discord-origin turn (block present) keeps the footer.
     let prose = "#3879 작업 완료 — 다음 이슈 대기.";
-    let chrome = "Context   📦 166.4k / 1.0M tokens (16%) · auto-compact 60%\n\nTasks\n└ TaskUpdate 4\n\nSubagents\n└ general-purpose Fix #3879";
+    let chrome = "📦 166.4k / 1.0M (16%) · auto-compact 60%\n\nTasks\n└ TaskUpdate 4\n\nSubagents\n└ general-purpose Fix #3879";
 
     let discord_origin =
         crate::services::discord::single_message_panel::compose_completion_footer_text(
@@ -201,7 +201,7 @@ fn synthetic_tui_mirror_emits_prose_without_tui_chrome_3964() {
             Some(chrome),
         );
     assert!(discord_origin.starts_with(prose));
-    assert!(discord_origin.contains("Context   📦"));
+    assert!(discord_origin.contains("📦"));
     assert!(discord_origin.contains("Subagents"));
 
     let mirror =

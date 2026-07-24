@@ -27,6 +27,30 @@ pub(crate) fn format_subtext_lines<'a>(lines: impl IntoIterator<Item = &'a str>)
         .collect()
 }
 
+/// Format a multiline status block as Discord subtext while preserving blank
+/// section separators. Already-formatted lines remain unchanged.
+pub(crate) fn format_subtext_block(block: &str) -> String {
+    block
+        .lines()
+        .filter(|line| line.trim() != "\u{2063}")
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else {
+                format!("{SUBTEXT_PREFIX}{}", strip_subtext_prefix(line))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn strip_subtext_prefix(mut line: &str) -> &str {
+    while let Some(rest) = line.trim_start().strip_prefix(SUBTEXT_PREFIX) {
+        line = rest;
+    }
+    line
+}
+
 pub(crate) fn format_elapsed_status(total_secs: i64) -> Option<String> {
     (total_secs > 0).then(|| format!("⏱ {}", format_turn_duration(total_secs)))
 }
@@ -44,6 +68,10 @@ pub(crate) fn format_usage_status(
         .filter_map(|bucket| render_bucket(bucket, now_unix))
         .collect::<Vec<_>>();
     render_usage_parts(rendered, context)
+}
+
+pub(crate) fn format_quota_status(cache_json: Option<&str>, now_unix: i64) -> Option<String> {
+    format_usage_status(cache_json, now_unix, None)
 }
 
 pub(crate) fn format_usage_status_segments<'a>(
@@ -106,7 +134,7 @@ fn render_bucket(bucket: &Value, now_unix: i64) -> Option<RenderedBucket> {
     let (order, name) = match raw_name {
         "5h" => (0, "5h"),
         "7d" => (1, "7d"),
-        "7d Sonnet" | "7d-F" => (2, "7d-F"),
+        "7d Fable" | "7d-F" => (2, "7d-F"),
         _ => return None,
     };
     let used = bucket
@@ -176,7 +204,7 @@ mod tests {
     #[test]
     fn renders_usage_reset_fast_tier_and_context_window_4822() {
         let data = r#"{"buckets":[
-            {"name":"7d Sonnet","used":34,"reset":1800417600},
+            {"name":"7d Fable","used":34,"reset":1800417600},
             {"name":"5h","remaining":97,"reset":1800016740},
             {"name":"7d","utilization":47.8,"reset":1800417600}
         ]}"#;
@@ -192,6 +220,26 @@ mod tests {
             .as_deref(),
             Some("5h: 3% (4h39m) │ 7d: 47% (4d20h) │ 7d-F: 34% (4d20h) │ ctw: 26% (265K/1.0M)")
         );
+    }
+
+    #[test]
+    fn quota_only_formatter_omits_context_window_4846() {
+        let data = r#"{"buckets":[
+            {"name":"7d Fable","used":34,"reset":1800417600},
+            {"name":"5h","used":3,"reset":1800016740},
+            {"name":"7d","used":47,"reset":1800417600}
+        ]}"#;
+
+        assert_eq!(
+            format_quota_status(Some(data), 1_800_000_000).as_deref(),
+            Some("5h: 3% (4h39m) │ 7d: 47% (4d20h) │ 7d-F: 34% (4d20h)")
+        );
+    }
+
+    #[test]
+    fn legacy_sonnet_bucket_is_not_relabeled_as_fable_4846() {
+        let data = r#"{"buckets":[{"name":"7d Sonnet","used":0,"reset":0}]}"#;
+        assert_eq!(format_quota_status(Some(data), 1_800_000_000), None);
     }
 
     #[test]
@@ -228,5 +276,15 @@ mod tests {
             format_subtext_lines(["⠙ 진행 중", "-# 턴 시작 : now", ""]),
             vec!["-# ⠙ 진행 중", "-# 턴 시작 : now"]
         );
+    }
+
+    #[test]
+    fn shared_subtext_block_preserves_sections_and_is_idempotent_4848() {
+        let expected = "-# 🟢 진행 중\n\n-# Tasks\n-# └ cargo test";
+        assert_eq!(
+            format_subtext_block("-# 🟢 진행 중\n\nTasks\n└ cargo test"),
+            expected
+        );
+        assert_eq!(format_subtext_block(expected), expected);
     }
 }
