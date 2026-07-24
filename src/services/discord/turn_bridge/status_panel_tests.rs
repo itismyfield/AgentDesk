@@ -15,6 +15,7 @@ use crate::services::discord::inflight::{
     load_inflight_state, save_inflight_state,
 };
 use crate::services::git::GitCommand;
+use std::collections::HashMap;
 use std::fs;
 use std::future::Future;
 use std::path::Path;
@@ -26,6 +27,7 @@ type TestGatewayFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 struct StatusPanelFallbackGateway {
     sent_messages: Arc<Mutex<Vec<String>>>,
     edited_message_ids: Arc<Mutex<Vec<MessageId>>>,
+    live_messages: Arc<Mutex<HashMap<MessageId, String>>>,
     edit_error: Option<String>,
     send_id: MessageId,
     can_chain_locally: bool,
@@ -45,6 +47,7 @@ impl Default for StatusPanelFallbackGateway {
         Self {
             sent_messages: Arc::new(Mutex::new(Vec::new())),
             edited_message_ids: Arc::new(Mutex::new(Vec::new())),
+            live_messages: Arc::new(Mutex::new(HashMap::new())),
             edit_error: None,
             send_id: MessageId::new(1_500_000_000_000_999),
             can_chain_locally: true,
@@ -59,12 +62,17 @@ impl TurnGateway for StatusPanelFallbackGateway {
         content: &'a str,
     ) -> TestGatewayFuture<'a, Result<MessageId, String>> {
         let sent_messages = self.sent_messages.clone();
+        let live_messages = self.live_messages.clone();
         let send_id = self.send_id;
         Box::pin(async move {
             sent_messages
                 .lock()
                 .expect("sent messages lock")
                 .push(content.to_string());
+            live_messages
+                .lock()
+                .expect("live messages lock")
+                .insert(send_id, content.to_string());
             Ok(send_id)
         })
     }
@@ -73,9 +81,10 @@ impl TurnGateway for StatusPanelFallbackGateway {
         &'a self,
         _channel_id: ChannelId,
         message_id: MessageId,
-        _content: &'a str,
+        content: &'a str,
     ) -> TestGatewayFuture<'a, Result<(), String>> {
         let edited_message_ids = self.edited_message_ids.clone();
+        let live_messages = self.live_messages.clone();
         let edit_error = self.edit_error.clone();
         Box::pin(async move {
             edited_message_ids
@@ -84,7 +93,13 @@ impl TurnGateway for StatusPanelFallbackGateway {
                 .push(message_id);
             match edit_error {
                 Some(error) => Err(error),
-                None => Ok(()),
+                None => {
+                    live_messages
+                        .lock()
+                        .expect("live messages lock")
+                        .insert(message_id, content.to_string());
+                    Ok(())
+                }
             }
         })
     }
@@ -1079,6 +1094,100 @@ async fn status_panel_completion_purges_pending_bind_for_final_panel() {
         )
         .is_empty(),
         "completion success must purge a crash-window pending_bind for the final live panel"
+    );
+}
+
+#[tokio::test]
+async fn completion_keeps_completed_panel_when_singleton_bookkeeping_fails_4891() {
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+    let shared = make_two_message_status_panel_shared_for_tests();
+    let gateway = StatusPanelFallbackGateway::default();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_891_101);
+    let completed_panel = MessageId::new(1_500_000_000_489_110);
+    let current_panel = MessageId::new(1_500_000_000_489_111);
+    let mut current_owner = InflightTurnState::new(
+        provider.clone(),
+        channel_id.get(),
+        Some("completion-bookkeeping-failure-test".to_string()),
+        42,
+        4_891_102,
+        4_891_103,
+        "newer turn".to_string(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    current_owner.status_message_id = Some(current_panel.get());
+    current_owner.status_panel_generation = 2;
+    save_inflight_state(&current_owner).expect("persist current singleton owner");
+    crate::services::discord::status_panel_singleton_store::bind_if_owned(
+        &provider,
+        &shared.token_hash,
+        channel_id.get(),
+        current_panel.get(),
+        None,
+    )
+    .expect("bind a different current singleton");
+    crate::services::discord::status_panel_orphan_store::enqueue_separate_status_panel_orphan(
+        true,
+        &provider,
+        &shared.token_hash,
+        channel_id.get(),
+        completed_panel.get(),
+    );
+    let mut last_status_panel_text = String::new();
+
+    let committed = complete_status_panel_v2(
+        shared.as_ref(),
+        &gateway,
+        channel_id,
+        Some(completed_panel),
+        &provider,
+        1_700_000_000,
+        &mut last_status_panel_text,
+        false,
+        false,
+        "test_completion_bookkeeping_failure",
+        4_891_100,
+    )
+    .await;
+
+    assert!(
+        committed,
+        "a successful Discord completion edit must stay committed when singleton bookkeeping fails"
+    );
+    let live_messages = gateway
+        .live_messages
+        .lock()
+        .expect("live messages lock");
+    let completed_text = live_messages
+        .get(&completed_panel)
+        .expect("the completed panel must still exist after turn end");
+    assert!(
+        completed_text.contains("완료"),
+        "the surviving panel must contain the completed footer state"
+    );
+    assert!(
+        !crate::services::discord::status_panel_orphan_store::is_queued(
+            &provider,
+            &shared.token_hash,
+            channel_id.get(),
+            completed_panel.get(),
+        ),
+        "successful completion must purge stale orphan cleanup intent for the live panel"
+    );
+    assert_eq!(
+        crate::services::discord::status_panel_singleton_store::load(
+            &provider,
+            &shared.token_hash,
+            channel_id.get(),
+        )
+        .map(|binding| binding.panel_message_id),
+        Some(current_panel.get()),
+        "failed bookkeeping must not overwrite the actual current singleton"
     );
 }
 

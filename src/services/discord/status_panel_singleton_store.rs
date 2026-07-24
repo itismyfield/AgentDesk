@@ -119,7 +119,18 @@ pub(in crate::services::discord) fn commit_if_owned_or_current(
             let state = serde_json::from_str::<inflight::InflightTurnState>(&raw)
                 .map_err(|error| error.to_string())?;
             if state.status_message_id != Some(panel_message_id) {
-                return Err("status panel singleton ownership changed".to_string());
+                // #4891: the live inflight row already moved on (next turn, or a
+                // mid-turn re-anchor), but the completed panel can still be the
+                // channel's current durable singleton. Fall back to the same
+                // "is this the current singleton?" check the absent-row branch
+                // uses instead of failing the completion outright.
+                return rebind_current_singleton_in_root(
+                    &root,
+                    provider,
+                    token_hash,
+                    channel_id,
+                    panel_message_id,
+                );
             }
             let binding = StatusPanelSingletonBinding {
                 panel_message_id,
@@ -129,14 +140,33 @@ pub(in crate::services::discord) fn commit_if_owned_or_current(
             Ok(binding)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let binding = load_in_root(&root, provider, token_hash, channel_id)
-                .filter(|binding| binding.panel_message_id == panel_message_id)
-                .ok_or_else(|| "completed status panel is not the current singleton".to_string())?;
-            bind_in_root(&root, provider, token_hash, channel_id, binding)?;
-            Ok(binding)
+            rebind_current_singleton_in_root(
+                &root,
+                provider,
+                token_hash,
+                channel_id,
+                panel_message_id,
+            )
         }
         Err(error) => Err(error.to_string()),
     }
+}
+
+/// Re-commit `panel_message_id` only when it already is the channel's current
+/// durable singleton binding. Shared by both `commit_if_owned_or_current`
+/// branches that cannot consult an owning inflight row (#4891).
+fn rebind_current_singleton_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    panel_message_id: u64,
+) -> Result<StatusPanelSingletonBinding, String> {
+    let binding = load_in_root(root, provider, token_hash, channel_id)
+        .filter(|binding| binding.panel_message_id == panel_message_id)
+        .ok_or_else(|| "completed status panel is not the current singleton".to_string())?;
+    bind_in_root(root, provider, token_hash, channel_id, binding)?;
+    Ok(binding)
 }
 
 fn clear_if_current_in_root(
@@ -261,6 +291,47 @@ mod tests {
                 generation: 5,
             }),
             "the replacement owner's singleton must remain authoritative"
+        );
+    }
+
+    #[test]
+    fn completion_with_new_inflight_owner_recommits_still_current_singleton_4891() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let token_hash = "test-token";
+        let channel_id = 48_911;
+        let completed_panel = 810;
+        let next_panel = 811;
+
+        let completed_owner = test_state(channel_id, 30, completed_panel, 8);
+        inflight::save_inflight_state(&completed_owner).expect("persist completed owner");
+        bind_if_owned(&provider, token_hash, channel_id, completed_panel, None)
+            .expect("bind completed owner");
+        let next_owner = test_state(channel_id, 40, next_panel, 9);
+        inflight::save_inflight_state(&next_owner).expect("persist next inflight owner");
+
+        assert_eq!(
+            commit_if_owned_or_current(&provider, token_hash, channel_id, completed_panel),
+            Ok(StatusPanelSingletonBinding {
+                panel_message_id: completed_panel,
+                generation: 8,
+            }),
+            "a moved inflight row must not reject a panel that is still the durable singleton"
+        );
+        assert_eq!(
+            load(&provider, token_hash, channel_id),
+            Some(StatusPanelSingletonBinding {
+                panel_message_id: completed_panel,
+                generation: 8,
+            }),
+            "the fallback must preserve the current binding and generation"
         );
     }
 
