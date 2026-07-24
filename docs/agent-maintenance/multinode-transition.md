@@ -446,6 +446,11 @@
   before merging.
 
 ### Audited touches
+- 2026-07-25 — #4891 completed-panel orphan convergence: the completion outcome,
+  singleton binding, and orphan retry records remain worker-local durable sidecars
+  serialized by the existing inflight flock. The orphan drain now consults the
+  current worker-local singleton before deletion; no leader election, PostgreSQL
+  lease, cross-node adoption authority, schema, or routing rule changes.
 - 2026-07-24 — #4712 lifecycle de-giant rebase: `runtime_bootstrap.rs` changes only
   update the restart-marker characterization fixture to the current nonce/version
   encoding, while watcher lifecycle logic moves verbatim behind the existing facade.
