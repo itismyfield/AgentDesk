@@ -1131,12 +1131,20 @@ async fn completion_keeps_completed_panel_when_singleton_bookkeeping_fails_4891(
         None,
     )
     .expect("bind a different current singleton");
-    crate::services::discord::status_panel_orphan_store::enqueue_separate_status_panel_orphan(
-        true,
+    crate::services::discord::status_panel_orphan_store::enqueue(
         &provider,
         &shared.token_hash,
         channel_id.get(),
         completed_panel.get(),
+    );
+    assert!(
+        crate::services::discord::status_panel_orphan_store::is_queued(
+            &provider,
+            &shared.token_hash,
+            channel_id.get(),
+            completed_panel.get(),
+        ),
+        "the fixture must seed a real stranded orphan record"
     );
     let mut last_status_panel_text = String::new();
 
@@ -1168,13 +1176,13 @@ async fn completion_keeps_completed_panel_when_singleton_bookkeeping_fails_4891(
         "the surviving panel must contain the completed footer state"
     );
     assert!(
-        !crate::services::discord::status_panel_orphan_store::is_queued(
+        crate::services::discord::status_panel_orphan_store::is_queued(
             &provider,
             &shared.token_hash,
             channel_id.get(),
             completed_panel.get(),
         ),
-        "successful completion must purge stale orphan cleanup intent for the live panel"
+        "a superseded completion must retain its orphan retirement intent"
     );
     assert_eq!(
         crate::services::discord::status_panel_singleton_store::load(

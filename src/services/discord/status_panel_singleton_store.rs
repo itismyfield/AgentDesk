@@ -344,7 +344,7 @@ mod tests {
 
         assert_eq!(
             commit_if_owned_or_current(&provider, token_hash, channel_id, completed_panel),
-            Ok(StatusPanelSingletonBinding {
+            CompletedBindingCommitOutcome::CommittedCurrent(StatusPanelSingletonBinding {
                 panel_message_id: completed_panel,
                 generation: 8,
             }),
@@ -357,6 +357,40 @@ mod tests {
                 generation: 8,
             }),
             "the fallback must preserve the current binding and generation"
+        );
+    }
+
+    #[test]
+    fn completion_with_new_inflight_and_new_singleton_is_superseded_4891() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let token_hash = "test-token";
+        let channel_id = 48_912;
+        let completed_panel = 820;
+        let next_panel = 821;
+
+        let next_owner = test_state(channel_id, 40, next_panel, 9);
+        inflight::save_inflight_state(&next_owner).expect("persist next inflight owner");
+        bind_if_owned(&provider, token_hash, channel_id, next_panel, None)
+            .expect("bind next singleton owner");
+
+        assert_eq!(
+            commit_if_owned_or_current(&provider, token_hash, channel_id, completed_panel),
+            CompletedBindingCommitOutcome::Superseded
+        );
+        assert_eq!(
+            load(&provider, token_hash, channel_id),
+            Some(StatusPanelSingletonBinding {
+                panel_message_id: next_panel,
+                generation: 9,
+            })
         );
     }
 
@@ -387,13 +421,14 @@ mod tests {
 
         assert_eq!(
             commit_if_owned_or_current(&provider, token_hash, channel_id, current_panel),
-            Ok(StatusPanelSingletonBinding {
+            CompletedBindingCommitOutcome::CommittedCurrent(StatusPanelSingletonBinding {
                 panel_message_id: current_panel,
                 generation: 8,
             })
         );
-        assert!(
-            commit_if_owned_or_current(&provider, token_hash, channel_id, 802).is_err(),
+        assert_eq!(
+            commit_if_owned_or_current(&provider, token_hash, channel_id, 802),
+            CompletedBindingCommitOutcome::Superseded,
             "an absent inflight row must not authorize replacing the current singleton"
         );
     }

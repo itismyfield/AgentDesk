@@ -215,6 +215,30 @@ fn reanchor_bind_bumps_epoch_atomically_and_guard_stale_skips_old_epoch() {
 }
 
 #[test]
+fn completion_disposition_keeps_superseded_or_durability_orphans_4891() {
+    use crate::services::discord::turn_bridge::{
+        CompletedBindingDisposition, completion_commit_allows_orphan_removal,
+        completion_commit_allows_pending_bind_purge,
+    };
+
+    assert!(completion_commit_allows_orphan_removal(
+        CompletedBindingDisposition::CommittedCurrent
+    ));
+    assert!(!completion_commit_allows_orphan_removal(
+        CompletedBindingDisposition::Superseded
+    ));
+    assert!(!completion_commit_allows_orphan_removal(
+        CompletedBindingDisposition::DurabilityFailure
+    ));
+    assert!(completion_commit_allows_pending_bind_purge(
+        CompletedBindingDisposition::Superseded
+    ));
+    assert!(!completion_commit_allows_pending_bind_purge(
+        CompletedBindingDisposition::DurabilityFailure
+    ));
+}
+
+#[test]
 fn watcher_orphan_preregistration_is_flag_gated_and_removed_after_persist() {
     let _env = isolate_agentdesk_runtime_root_for_two_message_tests();
     let mut shared = crate::services::discord::make_shared_data_for_tests();

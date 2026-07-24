@@ -330,8 +330,29 @@ fn pending_bind_unclaimed_after_grace_reclassifies_to_stranded_delete_path() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].kind, StatusPanelOrphanKind::Stranded);
     assert!(
-        stranded_orphan_drain_should_delete(None, panel_id),
+        stranded_orphan_drain_should_delete(None, None, panel_id),
         "case (c): after two grace cycles an unclaimed pending bind follows the normal stranded delete path"
+    );
+}
+
+#[test]
+fn stranded_orphan_drain_preserves_current_completed_singleton_4891() {
+    let provider = ProviderKind::Claude;
+    let channel_id = 48_911;
+    let completed_panel = 5001;
+    let next_turn = test_inflight(&provider, channel_id, 7002, Some(5002), 6002, Some(20));
+
+    assert!(
+        !stranded_orphan_drain_should_delete(
+            Some(&next_turn),
+            Some(completed_panel),
+            completed_panel,
+        ),
+        "the 3-to-4 orphan drain link must not delete the current completed singleton after inflight moved"
+    );
+    assert!(
+        stranded_orphan_drain_should_delete(Some(&next_turn), Some(5002), completed_panel),
+        "once a newer durable singleton supersedes it, the stranded old panel remains reclaimable"
     );
 }
 
