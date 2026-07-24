@@ -970,6 +970,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                             pending_unkeyed = state.pending_tool_calls_unkeyed,
                             "Codex rollout tail kept pending tool call open because the pane busy signal is fresh"
                         );
+                        std::thread::sleep(Duration::from_millis(100));
                         continue;
                     }
 
@@ -2935,6 +2936,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let probe_count = probes.clone();
+        let started_at = Instant::now();
         let (result, _outcome) = tail_rollout_file_until_assistant_response_with_pane_busy_probe(
             &rollout,
             0,
@@ -2962,6 +2964,10 @@ mod tests {
 
         assert!(matches!(result, ReadOutputResult::Completed { .. }));
         assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert!(
+            started_at.elapsed() >= Duration::from_millis(300),
+            "fresh-veto probes must retain the EOF poll throttle"
+        );
         assert!(
             rx.iter()
                 .any(|message| matches!(message, StreamMessage::Done { .. }))
