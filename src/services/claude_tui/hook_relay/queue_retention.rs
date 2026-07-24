@@ -15,8 +15,14 @@ impl IdleQueueRetentionGuard {
     pub(super) fn acquire(queue_dir: &Path) -> Option<Self> {
         let worker_lock_path = queue_dir.join("worker.lock");
         let producer_lock_path = queue_dir.join("producer.lock");
-        let lock_files_existed = worker_lock_path.exists() && producer_lock_path.exists();
+        let worker_lock_existed = worker_lock_path.exists();
+        let producer_lock_existed = producer_lock_path.exists();
+        let lock_files_existed = worker_lock_existed && producer_lock_existed;
         let worker_lock = lock_relay_queue_file(&worker_lock_path, true).ok()??;
+        if worker_lock_existed && !producer_lock_existed {
+            let _producer_lock =
+                lock_relay_queue_file_with_mode(&producer_lock_path, true, true).ok()??;
+        }
         Some(Self {
             queue_dir: queue_dir.to_path_buf(),
             lock_files_existed,
