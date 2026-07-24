@@ -38,12 +38,13 @@ mod relay_format;
 mod task_notification_context;
 mod turn_parser;
 use self::idle_jsonl::{
-    IdleJsonlSessionInitRearm, IdleRelayRangeAction, idle_jsonl_apply_active_inflight_gate,
+    IdleJsonlSessionInitRearm, IdleJsonlSuppression, IdleRelayRangeAction,
+    idle_jsonl_apply_active_inflight_gate,
     idle_jsonl_clear_session_init_on_generation_signature_change, idle_jsonl_consume_offset,
-    idle_jsonl_payload_contains_init_event, idle_jsonl_payload_contains_schedule_wakeup_setup,
-    idle_jsonl_payload_contains_user_event, idle_jsonl_prepare_dedup_shared,
-    idle_jsonl_relay_source_for_matched, idle_jsonl_session_has_init,
-    idle_jsonl_should_retry_without_dedup_shared, idle_relay_range_action,
+    idle_jsonl_current_eof, idle_jsonl_payload_contains_init_event,
+    idle_jsonl_payload_contains_schedule_wakeup_setup, idle_jsonl_payload_contains_user_event,
+    idle_jsonl_prepare_dedup_shared, idle_jsonl_relay_source_for_matched,
+    idle_jsonl_session_has_init, idle_jsonl_suppressed_range_action, idle_relay_range_action,
     prune_idle_jsonl_session_state, read_jsonl_range,
 };
 use self::task_notification_context::ensure_card_and_route;
@@ -535,11 +536,97 @@ impl SessionBoundDiscordRelaySink {
             .ingest_frame(frame)
     }
 
-    /// #3041 P1-3 (Part a, B1 — FRAME-CARRIED commit fence): the post-POST wrapper around
-    /// the identity-gated advance. Re-loads inflight FRESH AFTER the POST (codex P1-3 issue
-    /// 3 — a pre-POST snapshot could authorize a wrong-turn advance if the turn was
-    /// cleared/replaced during the POST), runs the pure gate
-    /// (`advance_offset_for_confirmed_delegated_terminal`), and commits the #3151 marker.
+    /// Commit a confirmed idle/catch-up delivery in the frame's ordered JSONL
+    /// coordinate space. The wrapper generation and current EOF are rechecked
+    /// after transport before either durable or in-memory authority advances.
+    pub(in crate::services::discord) fn advance_idle_range_after_confirmed_post(
+        &self,
+        shared: &super::SharedData,
+        provider: &ProviderKind,
+        channel_id: u64,
+        session_name: &str,
+        delivery: &SessionRelayDelivery,
+    ) -> bool {
+        let Some((start, end)) = delivery.relay_range.filter(|(start, end)| end > start) else {
+            return false;
+        };
+        let Some(frame_generation) = delivery
+            .relay_generation_mtime_ns
+            .filter(|generation| *generation != 0)
+        else {
+            return false;
+        };
+        let current_generation = dr::current_generation_mtime_ns(session_name);
+        let current_eof = idle_jsonl_current_eof(provider, session_name);
+        if current_generation == 0
+            || current_generation != frame_generation
+            || current_eof.is_none_or(|eof| end > eof)
+        {
+            return false;
+        }
+        if !matches!(
+            dr::commit_ordered_jsonl_range(
+                provider,
+                ChannelId::new(channel_id),
+                (start, end),
+                frame_generation,
+            ),
+            Ok(true)
+        ) {
+            return false;
+        }
+        super::tmux::advance_watcher_confirmed_end(
+            shared,
+            provider,
+            ChannelId::new(channel_id),
+            session_name,
+            end,
+            "src/services/discord/session_relay_sink.rs:idle_range_confirmed_advance",
+        );
+        dr::record_delivered_content_fingerprint(
+            provider,
+            ChannelId::new(channel_id),
+            session_name,
+            &delivery.response_text,
+        );
+        true
+    }
+
+    pub(in crate::services::discord) fn idle_range_already_committed_before_transport(
+        &self,
+        shared: &super::SharedData,
+        provider: &ProviderKind,
+        channel_id: u64,
+        session_name: &str,
+        delivery: &SessionRelayDelivery,
+    ) -> bool {
+        let Some((_, end)) = delivery.relay_range else {
+            return false;
+        };
+        let Some(frame_generation) = delivery.relay_generation_mtime_ns else {
+            return false;
+        };
+        let current_generation = dr::current_generation_mtime_ns(session_name);
+        let current_eof = idle_jsonl_current_eof(provider, session_name);
+        if frame_generation == 0 || current_generation != frame_generation || current_eof.is_none()
+        {
+            return false;
+        }
+        dr::effective_committed_offset(
+            shared,
+            provider,
+            ChannelId::new(channel_id),
+            session_name,
+            current_eof,
+        )
+        .max(dr::delivered_frontier_end_current_generation(
+            provider,
+            ChannelId::new(channel_id),
+            session_name,
+            current_eof,
+        )) >= end
+    }
+
     fn advance_after_confirmed_post(
         &self,
         shared: &super::SharedData,
@@ -549,15 +636,25 @@ impl SessionBoundDiscordRelaySink {
         delivery: &SessionRelayDelivery,
         sink_lease_guard: Option<&SinkDeliveryLeaseGuard>,
     ) {
-        let fresh_inflight = super::inflight::load_inflight_state(provider, channel_id);
-        let advanced = self.advance_offset_for_confirmed_delegated_terminal(
-            shared,
-            provider,
-            channel_id,
-            session_name,
-            delivery,
-            fresh_inflight.as_ref(),
-        );
+        let advanced = if delivery.relay_range.is_some() {
+            self.advance_idle_range_after_confirmed_post(
+                shared,
+                provider,
+                channel_id,
+                session_name,
+                delivery,
+            )
+        } else {
+            let fresh_inflight = super::inflight::load_inflight_state(provider, channel_id);
+            self.advance_offset_for_confirmed_delegated_terminal(
+                shared,
+                provider,
+                channel_id,
+                session_name,
+                delivery,
+                fresh_inflight.as_ref(),
+            )
+        };
         // #3151 CLEAR: advance committed FIRST, THEN commit the marker. #3159 BUG 1: the
         // commit outcome MUST reflect whether the advance fired — see
         // `SinkDeliveryLeaseGuard::commit` (a refused-advance `Delivered` is a black-hole).
@@ -928,6 +1025,30 @@ impl SessionBoundDiscordRelaySink {
             Some(guard)
         };
 
+        if delivery.relay_range.is_some() {
+            if self.idle_range_already_committed_before_transport(
+                &shared,
+                &provider,
+                channel_id,
+                &delivery.session_name,
+                &delivery,
+            ) {
+                if let Some(guard) = sink_lease_guard.as_ref() {
+                    guard.commit(super::LeaseOutcome::Delivered);
+                }
+                return Ok(SessionRelayDeliveryOutcome::Delivered);
+            }
+            let frame_generation = delivery.relay_generation_mtime_ns.unwrap_or(0);
+            let current_generation = dr::current_generation_mtime_ns(&delivery.session_name);
+            let current_eof = idle_jsonl_current_eof(&provider, &delivery.session_name);
+            if frame_generation == 0
+                || current_generation != frame_generation
+                || current_eof.is_none_or(|eof| lease_range.1 > eof)
+            {
+                return Ok(SessionRelayDeliveryOutcome::NotDelivered);
+            }
+        }
+
         let http = shared.serenity_http_or_token_fallback().ok_or_else(|| {
             RelaySinkError::Transient(format!(
                 "discord http unavailable for provider {}",
@@ -1285,6 +1406,7 @@ async fn run_idle_jsonl_relay_loop(
     let producers =
         crate::services::cluster::relay_producer_registry::global_relay_producer_registry();
     let mut offsets: HashMap<String, u64> = HashMap::new();
+    let mut pending_ends: HashMap<String, u64> = HashMap::new();
     let mut first_seen_at: HashMap<String, Instant> = HashMap::new();
     let mut last_inflight_seen_at: HashMap<String, Instant> = HashMap::new();
     let mut session_init_seen: HashSet<String> = HashSet::new();
@@ -1310,16 +1432,46 @@ async fn run_idle_jsonl_relay_loop(
             let offset = offsets.entry(session_name.clone()).or_insert(len);
             if len < *offset {
                 *offset = 0;
+                pending_ends.remove(&session_name);
                 session_init_seen.remove(&session_name);
             }
             let current_generation_signature =
                 super::tmux::read_generation_file_mtime_ns(&session_name);
-            idle_jsonl_clear_session_init_on_generation_signature_change(
+            if idle_jsonl_clear_session_init_on_generation_signature_change(
                 &mut session_init_seen,
                 &mut session_generation_signatures,
                 &session_name,
                 current_generation_signature,
-            );
+            ) {
+                pending_ends.remove(&session_name);
+            }
+            let channel = ChannelId::new(channel_id);
+            let shared_for_dedup = idle_jsonl_prepare_dedup_shared(
+                &health_registry,
+                &matched,
+                channel,
+                &session_name,
+                len,
+                &mut session_init_seen,
+            )
+            .await;
+            let Some(shared) = shared_for_dedup else {
+                continue;
+            };
+            let committed = dr::effective_committed_offset(
+                &shared,
+                &matched.provider,
+                channel,
+                &session_name,
+                Some(len),
+            )
+            .max(dr::delivered_frontier_end_current_generation(
+                &matched.provider,
+                channel,
+                &session_name,
+                Some(len),
+            ));
+
             macro_rules! consume_idle_offset {
                 ($to:expr, $rearm:expr) => {
                     idle_jsonl_consume_offset(
@@ -1335,9 +1487,6 @@ async fn run_idle_jsonl_relay_loop(
             if let Some(mut inflight) =
                 super::inflight::load_inflight_state(&matched.provider, channel_id)
             {
-                // #3960: if a SessionBoundRelay claim lost its producer before
-                // commit, downgrade it to the ownerless backstop after fresh
-                // liveness/offset checks; the send point still re-gates delivery.
                 if orphan_reclaim::reclaim_orphaned_session_bound_relay_if_dead(
                     &health_registry,
                     &producers,
@@ -1351,39 +1500,68 @@ async fn run_idle_jsonl_relay_loop(
                     inflight.set_relay_owner_kind(super::inflight::RelayOwnerKind::None);
                 }
                 if !super::inflight::ownerless_external_input_inflight_is_stale(&inflight) {
-                    let _decision = idle_jsonl_apply_active_inflight_gate(
+                    let decision = idle_jsonl_apply_active_inflight_gate(
                         &mut last_inflight_seen_at,
                         &matched,
                         channel_id,
                         &inflight,
-                        len,
-                        offset,
                     );
+                    if matches!(
+                        decision,
+                        idle_jsonl::IdleJsonlInflightGateDecision::DeferUntilCommitted
+                    ) {
+                        let pending_end = pending_ends.entry(session_name.clone()).or_insert(len);
+                        *pending_end = (*pending_end).max(len);
+                        if matches!(
+                            idle_jsonl_suppressed_range_action(
+                                committed,
+                                *offset,
+                                *pending_end,
+                                IdleJsonlSuppression::DeferUntilCommitted,
+                            ),
+                            IdleRelayRangeAction::AdvanceCommitted
+                        ) {
+                            consume_idle_offset!(*pending_end, IdleJsonlSessionInitRearm::Keep);
+                            pending_ends.remove(&session_name);
+                        }
+                    }
                     continue;
                 }
                 last_inflight_seen_at.remove(&session_name);
-                tracing::debug!(
-                    provider = matched.provider.as_str(),
-                    channel_id,
-                    tmux_session = %session_name,
-                    user_msg_id = inflight.user_msg_id,
-                    updated_at = %inflight.updated_at,
-                    "idle JSONL relay ignored stale ownerless TUI-direct inflight blocker"
-                );
             }
-            if last_inflight_seen_at
+
+            let in_recent_inflight_grace = last_inflight_seen_at
                 .get(&session_name)
-                .is_some_and(|seen_at| seen_at.elapsed() < IDLE_JSONL_RELAY_RECENT_INFLIGHT_GRACE)
-            {
-                consume_idle_offset!(len, IdleJsonlSessionInitRearm::Keep);
+                .is_some_and(|seen_at| seen_at.elapsed() < IDLE_JSONL_RELAY_RECENT_INFLIGHT_GRACE);
+            let in_new_session_grace =
+                first_seen.elapsed() < IDLE_JSONL_RELAY_RECENT_INFLIGHT_GRACE;
+            if in_recent_inflight_grace || in_new_session_grace {
+                let pending_end = pending_ends.entry(session_name.clone()).or_insert(len);
+                *pending_end = (*pending_end).max(len);
+                match idle_jsonl_suppressed_range_action(
+                    committed,
+                    *offset,
+                    *pending_end,
+                    IdleJsonlSuppression::DeferUntilCommitted,
+                ) {
+                    IdleRelayRangeAction::AdvanceCommitted => {
+                        consume_idle_offset!(*pending_end, IdleJsonlSessionInitRearm::Keep);
+                        pending_ends.remove(&session_name);
+                    }
+                    IdleRelayRangeAction::HoldPending => {}
+                    _ => unreachable!("deferred suppression returns only hold/advance"),
+                }
                 continue;
             }
             if len <= *offset {
+                pending_ends.remove(&session_name);
                 continue;
             }
 
             let start = *offset;
-            let end = len.min(start.saturating_add(IDLE_JSONL_RELAY_MAX_BYTES_PER_TICK));
+            let was_deferred = pending_ends.contains_key(&session_name);
+            let pending_end = pending_ends.remove(&session_name).unwrap_or(len).max(len);
+            let end = pending_end.min(start.saturating_add(IDLE_JSONL_RELAY_MAX_BYTES_PER_TICK));
             let Ok(payload) = read_jsonl_range(&relay_source.path, start, end) else {
                 continue;
             };
@@ -1391,173 +1569,59 @@ async fn run_idle_jsonl_relay_loop(
                 consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
                 continue;
             }
-            // Classify the WHOLE payload first so the dedup/trim run on an
-            // already-classified turn (mirrors `idle_relay_range_action`'s ordering;
-            // the per-reason debug logs below stay for observability).
-            let in_new_session_grace =
-                first_seen.elapsed() < IDLE_JSONL_RELAY_RECENT_INFLIGHT_GRACE;
-            if in_new_session_grace {
-                consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
-                tracing::debug!(
-                    provider = matched.provider.as_str(),
-                    channel_id,
-                    tmux_session = %session_name,
-                    bytes = payload.len(),
-                    "idle JSONL relay skipped new-session grace payload"
-                );
-                continue;
-            }
-            if idle_jsonl_payload_contains_user_event(&payload) {
-                consume_idle_offset!(end, IdleJsonlSessionInitRearm::Clear);
-                tracing::debug!(
-                    provider = matched.provider.as_str(),
-                    channel_id,
-                    tmux_session = %session_name,
-                    bytes = payload.len(),
-                    "idle JSONL relay skipped active-turn payload with user/tool-result event"
-                );
-                continue;
-            }
             if idle_jsonl_payload_contains_schedule_wakeup_setup(&payload) {
                 consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
-                tracing::debug!(
-                    provider = matched.provider.as_str(),
-                    channel_id,
-                    tmux_session = %session_name,
-                    bytes = payload.len(),
-                    "idle JSONL relay skipped ScheduleWakeup setup payload"
-                );
                 continue;
             }
-            let channel = ChannelId::new(channel_id);
-            let shared_for_dedup = idle_jsonl_prepare_dedup_shared(
-                &health_registry,
-                &matched,
-                channel,
-                &session_name,
-                len,
-                &mut session_init_seen,
-            )
-            .await;
+            if !was_deferred && idle_jsonl_payload_contains_user_event(&payload) {
+                consume_idle_offset!(end, IdleJsonlSessionInitRearm::Clear);
+                continue;
+            }
             let session_has_init =
                 idle_jsonl_session_has_init(&mut session_init_seen, &session_name, &payload);
-            if !relay_source.allow_continued_session_without_init && !session_has_init {
-                consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
-                tracing::debug!(
-                    provider = matched.provider.as_str(),
-                    channel_id,
-                    tmux_session = %session_name,
-                    bytes = payload.len(),
-                    "idle JSONL relay skipped non-init active-session payload"
-                );
-                continue;
-            }
-            let Some(producer) = producers.get_producer(&session_name) else {
-                tracing::debug!(
-                    tmux_session = %session_name,
-                    "idle JSONL relay found new bytes but no session-bound producer"
-                );
-                continue;
-            };
-            if idle_jsonl_should_retry_without_dedup_shared(shared_for_dedup.as_ref()) {
-                tracing::debug!(
-                    provider = matched.provider.as_str(),
-                    channel_id,
-                    tmux_session = %session_name,
-                    range_start = start,
-                    range_end = end,
-                    "idle JSONL relay skipped range because dedup shared data is unavailable; will retry without consuming"
-                );
-                continue;
-            }
-            // #3017 single output-offset authority: this idle path and the watcher both read
-            // the SAME JSONL (E-13: an inflight-less wake relayed twice). The watcher is PRIMARY
-            // and advances `confirmed_end_offset`; this backstop only CONSULTS it read-only
-            // (committed >= range end → skip), no advance (codex P1: `try_send_frame` only QUEUES).
-            if let Some(shared) = shared_for_dedup {
-                // #3089 B2b: durable-frontier dedup authority (flag OFF → in-memory).
-                let committed = dr::effective_committed_offset(
-                    &shared,
-                    &matched.provider,
-                    channel,
-                    &session_name,
-                    Some(len),
-                );
-                // Classification passed above → consults ONLY the offset-authority dedup branch.
-                match idle_relay_range_action(
-                    &payload,
-                    start,
-                    end,
-                    committed,
-                    false,
-                    relay_source.allow_continued_session_without_init,
-                    session_has_init,
-                ) {
-                    IdleRelayRangeAction::SkipAlreadyRelayed => {
-                        // Whole range already delivered by the watcher → skip.
-                        consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
-                        tracing::debug!(
-                            provider = matched.provider.as_str(),
-                            channel_id,
-                            tmux_session = %session_name,
-                            committed_relay_offset = committed,
-                            end,
-                            "idle JSONL relay skipped range already relayed by watcher (offset authority dedup)"
-                        );
-                        continue;
-                    }
-                    IdleRelayRangeAction::SendSuffixFrom(from) => {
-                        // Codex r5 P2 + codex r6 P1 (black-hole): PARTIAL overlap — the watcher
-                        // delivered the `[start, committed)` prefix; deliver ONLY the uncommitted
-                        // suffix THIS pass (a next-tick bounce would re-read a suffix that lost the
-                        // `system/init` event → re-classified and DROPPED). See `SendSuffixFrom`.
-                        let suffix = match read_jsonl_range(&relay_source.path, from, end) {
-                            Ok(suffix) => suffix,
-                            Err(_) => continue,
-                        };
-                        if suffix.is_empty() {
-                            consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
-                            continue;
-                        }
-                        if producer.try_send_frame_for_range(
-                            String::from_utf8_lossy(&suffix).into_owned(),
-                            from,
-                            end,
-                        ) {
-                            consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
-                            tracing::debug!(
-                                provider = matched.provider.as_str(),
-                                channel_id,
-                                tmux_session = %session_name,
-                                committed_relay_offset = committed,
-                                start,
-                                end,
-                                bytes = suffix.len(),
-                                "idle JSONL relay sent un-committed suffix after trimming already-relayed prefix (offset authority dedup, no black-hole)"
-                            );
-                        }
-                        continue;
-                    }
-                    // `committed <= start` → nothing covered → fall through to the full-range send.
-                    IdleRelayRangeAction::SendFull => {}
-                    // Unreachable here: `in_new_session_grace = false` and the payload already
-                    // passed the init gate (classification happened above).
-                    IdleRelayRangeAction::SkipClassified => {}
-                }
-            }
-            if producer.try_send_frame_for_range(
-                String::from_utf8_lossy(&payload).into_owned(),
+            let action = idle_relay_range_action(
+                &payload,
                 start,
                 end,
-            ) {
-                consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
-                tracing::debug!(
-                    provider = matched.provider.as_str(),
-                    channel_id,
-                    tmux_session = %session_name,
-                    bytes = payload.len(),
-                    "idle JSONL relay forwarded background session output"
-                );
+                committed,
+                relay_source.allow_continued_session_without_init,
+                session_has_init,
+                was_deferred,
+            );
+            match action {
+                IdleRelayRangeAction::DropAndConsume => {
+                    consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
+                }
+                IdleRelayRangeAction::AdvanceCommitted => {
+                    consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
+                }
+                IdleRelayRangeAction::SendPendingSuffixFrom(from) => {
+                    let Some(producer) = producers.get_producer(&session_name) else {
+                        continue;
+                    };
+                    let suffix = if from == start {
+                        payload.clone()
+                    } else {
+                        match read_jsonl_range(&relay_source.path, from, end) {
+                            Ok(suffix) => suffix,
+                            Err(_) => continue,
+                        }
+                    };
+                    if suffix.is_empty() {
+                        continue;
+                    }
+                    if producer.try_send_frame_for_range(
+                        String::from_utf8_lossy(&suffix).into_owned(),
+                        from,
+                        end,
+                        current_generation_signature,
+                    ) {
+                        pending_ends.insert(session_name.clone(), end);
+                    }
+                }
+                IdleRelayRangeAction::HoldPending => {
+                    pending_ends.insert(session_name.clone(), end);
+                }
             }
         }
 
@@ -1568,6 +1632,7 @@ async fn run_idle_jsonl_relay_loop(
             &mut last_inflight_seen_at,
             &mut session_init_seen,
             &mut session_generation_signatures,
+            &mut pending_ends,
         );
         tokio::time::sleep(IDLE_JSONL_RELAY_POLL_INTERVAL).await;
     }
@@ -1579,6 +1644,9 @@ mod relay_state_contract_refs {
     fn relay_state_contract_symbol_references_compile() {
         let _ = super::turn_parser::SessionRelayParser::ingest_frame;
         let _ = super::SessionBoundDiscordRelaySink::deliver_response;
+        let _ = super::SessionBoundDiscordRelaySink::advance_idle_range_after_confirmed_post;
+        let _ = super::idle_jsonl::idle_jsonl_suppressed_range_action;
+        let _ = crate::services::discord::outbound::delivery_record::commit_ordered_jsonl_range;
     }
 }
 
@@ -1639,6 +1707,7 @@ mod tests {
             turn_started_at: String::new(),
             turn_start_offset: None,
             relay_range: None,
+            relay_generation_mtime_ns: None,
         }
     }
 
@@ -1651,6 +1720,9 @@ mod tests {
     ) -> StreamFrame {
         let mut frame = frame(binding, payload, sequence);
         frame.relay_range = Some((range_start, range_end));
+        frame.relay_generation_mtime_ns = Some(dr::current_generation_mtime_ns(
+            &binding.expected_session_name,
+        ));
         frame
     }
 
@@ -1693,6 +1765,7 @@ mod tests {
             turn_started_at: turn_started_at.to_string(),
             turn_start_offset,
             relay_range: None,
+            relay_generation_mtime_ns: None,
         }
     }
 
@@ -2264,7 +2337,7 @@ mod tests {
             idle_relay_range_action(full_bytes, start, end, committed, false, false, false);
         assert_eq!(
             action,
-            super::IdleRelayRangeAction::SendSuffixFrom(committed),
+            super::IdleRelayRangeAction::SendPendingSuffixFrom(committed),
             "the loop must deliver the uncommitted suffix in the same pass (no black-hole)"
         );
 
@@ -2287,29 +2360,34 @@ mod tests {
             idle_relay_range_action(suffix, 0, suffix.len() as u64, 0, false, false, false);
         assert_eq!(
             suffix_only_action,
-            super::IdleRelayRangeAction::SkipClassified,
+            super::IdleRelayRangeAction::DropAndConsume,
             "re-gating the init-less suffix as a fresh payload WOULD black-hole it (the old bug)"
         );
         assert_eq!(
-            idle_relay_range_action(suffix, 0, suffix.len() as u64, 0, false, true, false,),
-            super::IdleRelayRangeAction::SendFull,
+            idle_relay_range_action(suffix, 0, suffix.len() as u64, 0, true, false, false),
+            super::IdleRelayRangeAction::SendPendingSuffixFrom(0),
             "a known continued Codex TUI runtime binding may relay assistant-only suffixes without init"
         );
 
         // Whole range uncommitted → relay the full payload (control case).
         assert_eq!(
             idle_relay_range_action(full_bytes, start, end, 0, false, false, false),
-            super::IdleRelayRangeAction::SendFull
+            super::IdleRelayRangeAction::SendPendingSuffixFrom(start)
         );
         // Whole range already committed → skip (control case).
         assert_eq!(
             idle_relay_range_action(full_bytes, start, end, end, false, false, false),
-            super::IdleRelayRangeAction::SkipAlreadyRelayed
+            super::IdleRelayRangeAction::AdvanceCommitted
         );
-        // New-session grace still wins over everything (ordering preserved).
         assert_eq!(
-            idle_relay_range_action(full_bytes, start, end, committed, true, true, false),
-            super::IdleRelayRangeAction::SkipClassified
+            idle_jsonl_suppressed_range_action(
+                committed,
+                start,
+                end,
+                IdleJsonlSuppression::DeferUntilCommitted,
+            ),
+            super::IdleRelayRangeAction::HoldPending,
+            "new-session grace holds uncommitted bytes instead of consuming them"
         );
     }
 
@@ -2325,7 +2403,7 @@ mod tests {
 
         assert_eq!(
             idle_relay_range_action(continued_chunk, start, end, 0, false, false, false),
-            super::IdleRelayRangeAction::SkipClassified,
+            super::IdleRelayRangeAction::DropAndConsume,
             "without session-level init state, a later init-less chunk would be dropped"
         );
         assert!(idle_jsonl_session_has_init(
@@ -2351,10 +2429,10 @@ mod tests {
                 end,
                 0,
                 false,
-                false,
-                session_init_seen.contains(session_name)
+                session_init_seen.contains(session_name),
+                false
             ),
-            super::IdleRelayRangeAction::SendFull,
+            super::IdleRelayRangeAction::SendPendingSuffixFrom(start),
             "once the session has accepted an init chunk, later chunks are not re-gated by init"
         );
         idle_jsonl_consume_offset(
@@ -2402,10 +2480,10 @@ mod tests {
                 continued_chunk.len() as u64,
                 0,
                 false,
-                false,
-                session_init_seen.contains(session_name)
+                session_init_seen.contains(session_name),
+                false
             ),
-            super::IdleRelayRangeAction::SkipClassified,
+            super::IdleRelayRangeAction::DropAndConsume,
             "after generation reset, assistant-only bytes cannot inherit the prior wrapper's init marker"
         );
     }
@@ -2499,10 +2577,10 @@ mod tests {
                 tick_a_end,
                 0,
                 false,
-                false,
                 tick_a_session_has_init,
+                false,
             ),
-            super::IdleRelayRangeAction::SendFull,
+            super::IdleRelayRangeAction::SendPendingSuffixFrom(0),
             "tick A relays the init-only payload"
         );
         idle_jsonl_consume_offset(
@@ -2532,10 +2610,10 @@ mod tests {
                 tick_b_end,
                 0,
                 false,
-                false,
                 tick_b_session_has_init,
+                false,
             ),
-            super::IdleRelayRangeAction::SendFull,
+            super::IdleRelayRangeAction::SendPendingSuffixFrom(tick_b_start),
             "tick B relays the assistant-only continuation without a fresh init/user event/inflight"
         );
         idle_jsonl_consume_offset(
@@ -2582,8 +2660,6 @@ mod tests {
             &background,
             42,
             &inflight,
-            end,
-            &mut offset,
         );
         assert_eq!(
             decision,
@@ -2596,8 +2672,8 @@ mod tests {
         );
 
         assert_eq!(
-            idle_relay_range_action(wake_payload.as_bytes(), offset, end, 0, false, false, false,),
-            super::IdleRelayRangeAction::SendFull,
+            idle_relay_range_action(wake_payload.as_bytes(), offset, end, 0, false, false, false),
+            super::IdleRelayRangeAction::SendPendingSuffixFrom(offset),
             "the preserved Y bytes relay on the next no-inflight tick"
         );
         offset = end;
@@ -2648,8 +2724,6 @@ mod tests {
             &matched,
             42,
             &inflight,
-            end,
-            &mut offset,
         );
         assert_eq!(
             decision,
@@ -2764,9 +2838,10 @@ mod tests {
 
         probe.release.notify_waiters();
         let result = sink_task.await.expect("sink task joined");
-        assert!(
-            matches!(result, Err(RelaySinkError::Transient(_))),
-            "the fake token makes transport unavailable only after lease acquisition"
+        assert_eq!(
+            result.expect("stale or unprovable ranged frame is declined after acquire"),
+            RelaySinkOutcome::TerminalNotDelivered,
+            "a range without a provable live generation must not reach transport"
         );
     }
 
@@ -3037,7 +3112,92 @@ mod tests {
             frame_turn_started_at: turn_started_at.to_string(),
             frame_turn_start_offset: turn_start_offset,
             relay_range: None,
+            relay_generation_mtime_ns: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_range_commit_requires_current_generation_and_persists_frontier() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        struct EnvReset(Option<std::ffi::OsString>);
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
+                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
+                }
+            }
+        }
+        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+
+        let channel = ChannelId::new(45_360);
+        let session = ProviderKind::Claude.build_tmux_session_name(&channel.get().to_string());
+        let output_path =
+            crate::services::cluster::session_matcher::expected_rollout_path_for(&session);
+        let generation_path =
+            crate::services::tmux_common::session_temp_path(&session, "generation");
+        std::fs::create_dir_all(std::path::Path::new(&output_path).parent().unwrap())
+            .expect("output dir");
+        std::fs::write(&output_path, vec![b'x'; 256]).expect("output file");
+        std::fs::write(&generation_path, b"1").expect("generation marker");
+        let generation = dr::current_generation_mtime_ns(&session);
+        assert_ne!(generation, 0);
+
+        let shared = super::super::make_shared_data_for_tests();
+        let sink = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
+        let mut delivery = delivery_with_fence_offset(&session, None, 0, "", None);
+        delivery.channel_id = channel.get();
+        delivery.relay_range = Some((128, 256));
+        delivery.relay_generation_mtime_ns = Some(generation);
+
+        assert!(!sink.idle_range_already_committed_before_transport(
+            &shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            &session,
+            &delivery,
+        ));
+        assert!(sink.advance_idle_range_after_confirmed_post(
+            &shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            &session,
+            &delivery,
+        ));
+        assert_eq!(shared.committed_relay_offset(channel), 256);
+        assert!(sink.idle_range_already_committed_before_transport(
+            &shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            &session,
+            &delivery,
+        ));
+        assert_eq!(
+            dr::delivered_frontier_end_current_generation(
+                &ProviderKind::Claude,
+                channel,
+                &session,
+                Some(256),
+            ),
+            256,
+            "confirmed ranged delivery is durable even when rollout shadow mode is off"
+        );
+
+        delivery.relay_range = Some((256, 300));
+        delivery.relay_generation_mtime_ns = Some(generation.saturating_add(1));
+        assert!(!sink.advance_idle_range_after_confirmed_post(
+            &shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            &session,
+            &delivery,
+        ));
+        assert_eq!(shared.committed_relay_offset(channel), 256);
     }
 
     #[test]
@@ -4545,6 +4705,7 @@ mod tests {
             frame_turn_started_at: "2026-06-04T00:00:00Z".to_string(),
             frame_turn_start_offset: None,
             relay_range: None,
+            relay_generation_mtime_ns: None,
         }
     }
 

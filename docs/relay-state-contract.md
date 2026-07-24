@@ -328,6 +328,32 @@ plan.
 - Invariant key: `session_terminal_post_lease_required` (enforced structurally by
   the mandatory acquire and production-entry regression tests).
 
+## I10. idle JSONL cursors consume only classified drops or confirmed commits (#4536)
+
+- Definition: the idle backstop range decision
+  (`sym:session_relay_sink::idle_jsonl::idle_jsonl_suppressed_range_action`)
+  separates intentional classification drops from temporary inflight/grace
+  deferral.
+- Producer: confirmed ranged transport commits through
+  `SessionBoundDiscordRelaySink::advance_idle_range_after_confirmed_post`
+  (`sym:session_relay_sink::SessionBoundDiscordRelaySink::advance_idle_range_after_confirmed_post`),
+  which first persists the generation-scoped frontier via
+  `commit_ordered_jsonl_range`
+  (`sym:outbound::delivery_record::commit_ordered_jsonl_range`) and then advances
+  the in-memory watermark.
+- Consumer: the idle loop advances its local cursor only when the range is an
+  intentional drop or current-generation committed coverage reaches its end;
+  enqueue acceptance alone leaves the pending range retryable.
+- Invariant: active-turn, post-inflight-grace, and new-session-grace suppression
+  never consumes an uncommitted byte. A confirmed ranged POST must match the
+  queued wrapper generation and remain EOF-bounded before either authority is
+  advanced.
+- Violation surface: enqueue followed by transport/commit failure permanently
+  skips a wake/background answer, or a delayed range commits against a replaced
+  transcript and suppresses unrelated output.
+- Invariant key: `idle_cursor_confirmed_commit_only` (enforced structurally and by
+  cursor/commit/generation regression tests).
+
 ## How to add a new invariant
 
 1. Document it here with the same structure (definition, producer,

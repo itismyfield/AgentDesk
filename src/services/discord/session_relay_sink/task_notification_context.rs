@@ -688,6 +688,7 @@ mod tests {
             frame_turn_started_at: "2026-07-11T01:37:00Z".to_string(),
             frame_turn_start_offset: Some(4055),
             relay_range: None,
+            relay_generation_mtime_ns: None,
         };
         let transport = OrderedTransport {
             fail: AtomicBool::new(false),

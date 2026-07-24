@@ -21,8 +21,8 @@
 //! delivery that lands AFTER this read still leaves the row orphan-shaped, so the
 //! downgrade proceeds. Single delivery is then guaranteed at the SEND POINT —
 //! every re-delivery path re-reads `effective_committed_offset` FRESH and
-//! `idle_relay_range_action` returns `SkipAlreadyRelayed` (body already past the
-//! watermark) or `SendSuffixFrom(committed)` (only the uncommitted tail). See the
+//! `idle_relay_range_action` returns `AdvanceCommitted` (body already past the
+//! watermark) or `SendPendingSuffixFrom(committed)` (only the uncommitted tail). See the
 //! `send_point_re_gate_*` tests below.
 
 use crate::services::cluster::relay_producer_registry::RelayProducerRegistry;
@@ -393,7 +393,7 @@ mod tests {
                 false,
                 false
             ),
-            IdleRelayRangeAction::SkipAlreadyRelayed,
+            IdleRelayRangeAction::AdvanceCommitted,
             "the send-point re-gate skips a body already past the watermark — no double-relay"
         );
     }
@@ -424,7 +424,7 @@ mod tests {
                 false,
                 false
             ),
-            IdleRelayRangeAction::SendSuffixFrom(committed_advanced),
+            IdleRelayRangeAction::SendPendingSuffixFrom(committed_advanced),
             "the send-point re-gate delivers only the uncommitted tail — no duplicate of the \
              delivered prefix"
         );
