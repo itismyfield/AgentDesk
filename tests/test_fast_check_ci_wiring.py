@@ -19,6 +19,8 @@ EXPECTED_TEST_NON_PG_COMMANDS = (
     "cargo test --lib source_registry -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib task_notification -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib delivery_lease_key -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib services::discord::e2e_control::tests -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib server::routes::e2e_control::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib tui_task_card::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib server::routes::message_outbox::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib discord_thread_create -- --test-threads=1",
