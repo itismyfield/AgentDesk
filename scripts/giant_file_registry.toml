@@ -870,15 +870,6 @@ deadline = "2026-10-31"
 decompose_issue = "#4712"
 
 [[entry]]
-# Crossed the giant threshold while #4706 backfilled explicit decision metadata.
-# Keep the manual-rebind authority cohesive until #3405 extracts the recovery
-# admission and execution halves behind one typed plan boundary.
-file = "src/services/discord/recovery_engine/manual_rebind/mod.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4712"
-
-[[entry]]
 # Crossed the 1000-prod-LoC giant threshold while catch-up phase1/phase2
 # admission semantics were aligned for #4107. Decomposition should split the
 # scan/admission commit paths from durable cleanup and checkpoint bookkeeping.

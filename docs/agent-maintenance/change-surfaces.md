@@ -1246,7 +1246,10 @@
   - `src/services/discord/recovery_engine/completion_delivery.rs` (sub-1000;
     behavior-preserving #3834 r2 extraction of recovery terminal relay,
     visible completion/status-panel completion helpers, and their tests.)
-  - `src/services/discord/recovery_engine/manual_rebind/mod.rs` (frozen giant surface; keeps the manual rebind entrypoints,
+  - `src/services/discord/recovery_engine/manual_rebind/mod.rs` (911 prod lines
+    after the #4712 pure-move extraction of the test-only race-seam barrier
+    cluster into `manual_rebind/test_barriers.rs` (114 prod lines); no longer a
+    prod giant. Keeps the manual rebind entrypoints,
     rollback carrier, session refresh, active-turn re-registration hook, and
     watcher claim/spawn path. #4465's durable automatic lane performs the
     blocking exact-episode adoption on `spawn_blocking`, retains that same
@@ -1260,7 +1263,8 @@
     (363 prod lines) owns the Codex-TUI replay/resume helper cluster, and
     `src/services/discord/recovery_engine/manual_rebind/adoption.rs` (95 prod
     lines) owns transcript-adoption offset and binding decisions. The retired
-    `manual_rebind.rs` giant registration was removed from
+    `manual_rebind.rs` giant registration and the later `manual_rebind/mod.rs`
+    shrink entry (de-gianted by #4712) were removed from
     scripts/giant_file_registry.toml.)
   - `src/services/discord/recovery_engine/rebind_runtime.rs` (below the giant threshold
     after #4455) owns provider runtime resolution

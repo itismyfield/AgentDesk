@@ -90,7 +90,7 @@ pub(super) async fn commit_episode_side_effects(
 
     #[cfg(test)]
     if locked_episode.is_some() {
-        super::await_episode_authority_held_barrier().await;
+        super::test_barriers::await_episode_authority_held_barrier().await;
     }
 
     let finish_mailbox_on_completion = if existing_inflight_present {

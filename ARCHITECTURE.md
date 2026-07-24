@@ -626,6 +626,7 @@ src/
 │   │   │   │   ├── episode_handoff.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── post_adoption_guard_tests.rs
+│   │   │   │   ├── test_barriers.rs
 │   │   │   │   └── watcher_claim.rs
 │   │   │   ├── rebind_runtime/
 │   │   │   │   └── codex_relay_generation.rs

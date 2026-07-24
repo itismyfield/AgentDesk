@@ -18,14 +18,15 @@
 use super::manual_rebind_output_path::saved_output_path_for_rebind_resolution;
 use super::manual_rebind_override::upsert_rebind_session_id_override;
 use super::*;
-#[cfg(test)]
-use std::sync::{Mutex, OnceLock};
 
 mod adoption;
 mod codex_tui_replay;
 mod episode_handoff;
+mod test_barriers;
 #[cfg(unix)]
 mod watcher_claim;
+#[cfg(test)]
+use test_barriers::await_post_adoption_claim_barrier;
 #[cfg(unix)]
 use watcher_claim::claim_rebind_watcher;
 
@@ -44,6 +45,11 @@ pub(crate) use self::codex_tui_replay::{
     codex_tui_rebind_replays_existing_raw_bytes,
     codex_tui_rebind_should_load_existing_normalized_replay_events,
     codex_tui_rebind_start_after_crossed_provider_turn,
+};
+#[cfg(test)]
+pub(crate) use self::test_barriers::{
+    EpisodeAuthorityHeldBarrier, PostAdoptionClaimBarrier, install_episode_authority_held_barrier,
+    install_post_adoption_claim_barrier,
 };
 
 #[allow(clippy::large_enum_variant)]
@@ -122,102 +128,6 @@ impl PendingRebindInflightRollback {
                 format!("clear_rebind_origin:{outcome:?}")
             }
         }
-    }
-}
-
-#[cfg(test)]
-#[derive(Clone)]
-pub(crate) struct PostAdoptionClaimBarrier {
-    pub(crate) reached: std::sync::Arc<tokio::sync::Barrier>,
-    pub(crate) resume: std::sync::Arc<tokio::sync::Barrier>,
-}
-
-#[cfg(test)]
-#[derive(Clone)]
-pub(crate) struct EpisodeAuthorityHeldBarrier {
-    pub(crate) reached: std::sync::Arc<tokio::sync::Barrier>,
-    pub(crate) resume: std::sync::Arc<tokio::sync::Barrier>,
-}
-
-#[cfg(test)]
-fn post_adoption_claim_barrier_slot() -> &'static Mutex<Option<PostAdoptionClaimBarrier>> {
-    static SLOT: OnceLock<Mutex<Option<PostAdoptionClaimBarrier>>> = OnceLock::new();
-    SLOT.get_or_init(|| Mutex::new(None))
-}
-
-#[cfg(test)]
-fn episode_authority_held_barrier_slot() -> &'static Mutex<Option<EpisodeAuthorityHeldBarrier>> {
-    static SLOT: OnceLock<Mutex<Option<EpisodeAuthorityHeldBarrier>>> = OnceLock::new();
-    SLOT.get_or_init(|| Mutex::new(None))
-}
-
-#[cfg(test)]
-pub(crate) struct PostAdoptionClaimBarrierGuard(Option<PostAdoptionClaimBarrier>);
-
-#[cfg(test)]
-pub(crate) struct EpisodeAuthorityHeldBarrierGuard(Option<EpisodeAuthorityHeldBarrier>);
-
-#[cfg(test)]
-impl Drop for PostAdoptionClaimBarrierGuard {
-    fn drop(&mut self) {
-        *post_adoption_claim_barrier_slot()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = self.0.take();
-    }
-}
-
-#[cfg(test)]
-impl Drop for EpisodeAuthorityHeldBarrierGuard {
-    fn drop(&mut self) {
-        *episode_authority_held_barrier_slot()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = self.0.take();
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn install_post_adoption_claim_barrier(
-    barrier: PostAdoptionClaimBarrier,
-) -> PostAdoptionClaimBarrierGuard {
-    let previous = post_adoption_claim_barrier_slot()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .replace(barrier);
-    PostAdoptionClaimBarrierGuard(previous)
-}
-
-#[cfg(test)]
-pub(crate) fn install_episode_authority_held_barrier(
-    barrier: EpisodeAuthorityHeldBarrier,
-) -> EpisodeAuthorityHeldBarrierGuard {
-    let previous = episode_authority_held_barrier_slot()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .replace(barrier);
-    EpisodeAuthorityHeldBarrierGuard(previous)
-}
-
-#[cfg(test)]
-async fn await_post_adoption_claim_barrier() {
-    let barrier = post_adoption_claim_barrier_slot()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .clone();
-    if let Some(barrier) = barrier {
-        barrier.reached.wait().await;
-        barrier.resume.wait().await;
-    }
-}
-
-#[cfg(test)]
-async fn await_episode_authority_held_barrier() {
-    let barrier = episode_authority_held_barrier_slot()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .clone();
-    if let Some(barrier) = barrier {
-        barrier.reached.wait().await;
-        barrier.resume.wait().await;
     }
 }
 
