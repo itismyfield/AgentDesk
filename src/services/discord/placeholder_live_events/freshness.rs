@@ -144,7 +144,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "🔧 마지막 도구 ([Read] · src/services/discord/status\_panel.rs)"
+            r"🔧 마지막 도구 ([Read] · src/services/discord/status\_panel.rs)"
         );
         assert!(!rendered.contains("진행 중"));
     }
