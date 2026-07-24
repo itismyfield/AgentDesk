@@ -233,20 +233,6 @@ async fn recover_two_message_panel_with_gateway<G: RecoveryPanelGateway + ?Sized
     }
 
     gateway.after_bind().await;
-    if let Some(old_panel_id) = panel_message_id
-        && panel_state == PersistedPanelState::Live
-        && gateway
-            .delete_panel(channel_id, old_panel_id)
-            .await
-            .is_err()
-    {
-        status_panel_orphan_store::enqueue(
-            provider,
-            &shared.token_hash,
-            channel_id.get(),
-            old_panel_id.get(),
-        );
-    }
 
     let reloaded = inflight::load_inflight_state(provider, channel_id.get());
     let still_owned = reloaded.as_ref().is_some_and(|reloaded| {
@@ -277,6 +263,38 @@ async fn recover_two_message_panel_with_gateway<G: RecoveryPanelGateway + ?Sized
     }
 
     gateway.after_ownership_reload().await;
+    let mut reloaded = reloaded.expect("still_owned requires a loaded inflight row");
+    let singleton = match crate::services::discord::status_panel_singleton_store::bind_if_owned(
+        provider,
+        &shared.token_hash,
+        channel_id.get(),
+        new_panel_id.get(),
+        None,
+    ) {
+        Ok(binding) => binding,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id = channel_id.get(),
+                panel_message_id = new_panel_id.get(),
+                error = %error,
+                "two-message restart recovery failed to persist singleton panel binding"
+            );
+            if gateway
+                .delete_panel(channel_id, new_panel_id)
+                .await
+                .is_err()
+            {
+                status_panel_orphan_store::enqueue(
+                    provider,
+                    &shared.token_hash,
+                    channel_id.get(),
+                    new_panel_id.get(),
+                );
+            }
+            return false;
+        }
+    };
     if status_panel_orphan_store::remove_pending_bind_if_owned(
         provider,
         &shared.token_hash,
@@ -285,9 +303,36 @@ async fn recover_two_message_panel_with_gateway<G: RecoveryPanelGateway + ?Sized
         &identity,
     ) == status_panel_orphan_store::PendingBindOwnedRemovalOutcome::OwnershipMismatch
     {
+        if gateway
+            .delete_panel(channel_id, new_panel_id)
+            .await
+            .is_err()
+        {
+            status_panel_orphan_store::enqueue(
+                provider,
+                &shared.token_hash,
+                channel_id.get(),
+                new_panel_id.get(),
+            );
+        }
         return false;
     }
-    *state = reloaded.expect("still_owned requires a loaded inflight row");
+    reloaded.status_panel_generation = singleton.generation;
+    if let Some(old_panel_id) = panel_message_id
+        && panel_state == PersistedPanelState::Live
+        && gateway
+            .delete_panel(channel_id, old_panel_id)
+            .await
+            .is_err()
+    {
+        status_panel_orphan_store::enqueue(
+            provider,
+            &shared.token_hash,
+            channel_id.get(),
+            old_panel_id.get(),
+        );
+    }
+    *state = reloaded;
     true
 }
 
@@ -439,6 +484,18 @@ mod tests {
         assert_eq!(state.status_panel_generation, 4);
         assert_eq!(*gateway.deleted.lock().unwrap(), vec![MessageId::new(200)]);
         assert!(status_panel_orphan_store::load_pending(&provider, &shared.token_hash).is_empty());
+        // #4860 (f): the PR-E restart path must also restore the durable
+        // singleton binding, so the NEXT turn's create can retire this panel.
+        assert_eq!(
+            crate::services::discord::status_panel_singleton_store::load(
+                &provider,
+                &shared.token_hash,
+                state.channel_id,
+            )
+            .map(|binding| (binding.panel_message_id, binding.generation)),
+            Some((400, 4)),
+            "restart recovery must rebind the two-message singleton store to the replacement panel"
+        );
 
         assert!(
             !recover_two_message_panel_with_gateway(&gateway, &shared, &provider, &mut state).await,
@@ -546,10 +603,13 @@ mod tests {
             .expect("replacement owner remains");
         assert_eq!(durable.user_msg_id, replacement.user_msg_id);
         assert_eq!(durable.status_message_id, Some(901));
-        assert_eq!(
-            *gateway.deleted.lock().unwrap(),
-            vec![MessageId::new(200), MessageId::new(400)]
-        );
+        // #4860: ownership was lost BEFORE the singleton binding was durably
+        // persisted, so ONLY the just-sent replacement panel (400) is discarded.
+        // The persisted OLD panel (200) is deliberately preserved — deleting it
+        // before the new binding is durable would open a crash window with no
+        // recoverable panel; the replacement owner's own singleton takeover (or
+        // the orphan sweeper) retires it instead.
+        assert_eq!(*gateway.deleted.lock().unwrap(), vec![MessageId::new(400)]);
         assert!(status_panel_orphan_store::load_pending(&provider, &shared.token_hash).is_empty());
     }
 
@@ -585,11 +645,16 @@ mod tests {
             .expect("replacement owner remains");
         assert_eq!(durable.user_msg_id, replacement.user_msg_id);
         assert_eq!(durable.status_message_id, Some(901));
-        assert_eq!(*gateway.deleted.lock().unwrap(), vec![MessageId::new(200)]);
+        // #4860: the ownership loss surfaced at the exact-owner pending-bind
+        // removal (AFTER the reload), still BEFORE the singleton persist + old-
+        // panel retire. The replacement panel (400) is discarded immediately and
+        // the OLD panel (200) is preserved (same crash-window invariant as the
+        // post-bind loss above).
+        assert_eq!(*gateway.deleted.lock().unwrap(), vec![MessageId::new(400)]);
         assert_eq!(
             status_panel_orphan_store::load_pending(&provider, &shared.token_hash),
             vec![(replacement.channel_id, 400)],
-            "the failed exact-owner removal must leave the panel for the sweeper"
+            "the failed exact-owner removal must leave its pending record for the sweeper (404-drop)"
         );
     }
 

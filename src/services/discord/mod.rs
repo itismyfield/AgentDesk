@@ -95,6 +95,7 @@ mod single_message_panel;
 mod stall_recovery;
 mod startup_reclaim;
 mod status_panel_orphan_store;
+mod status_panel_singleton_store;
 pub(in crate::services::discord) mod streaming_finalizer;
 mod task_notification_delivery;
 pub(in crate::services::discord) mod task_supervisor;

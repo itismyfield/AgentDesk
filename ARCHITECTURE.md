@@ -822,6 +822,7 @@ src/
 │   │   │   ├── turn_identity_tests.rs
 │   │   │   ├── turn_stream_collector.rs
 │   │   │   ├── two_message_panel.rs
+│   │   │   ├── two_message_panel_tests.rs
 │   │   │   ├── utf8_chunk_decoder.rs
 │   │   │   └── utf8_chunk_decoder_tests.rs
 │   │   ├── tui_direct_abort_marker/
@@ -864,7 +865,9 @@ src/
 │   │   │   │   ├── guarded_save.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── status_panel/
-│   │   │   │   └── purge.rs
+│   │   │   │   ├── fallback.rs
+│   │   │   │   ├── purge.rs
+│   │   │   │   └── singleton.rs
 │   │   │   ├── stream_loop/
 │   │   │   │   ├── content_arms/
 │   │   │   │   │   ├── provider_error_presentation.rs
@@ -1060,6 +1063,7 @@ src/
 │   │   ├── startup_reclaim.rs
 │   │   ├── status_panel_orphan_store.rs
 │   │   ├── status_panel_orphan_store_tests.rs
+│   │   ├── status_panel_singleton_store.rs
 │   │   ├── streaming_finalizer.rs
 │   │   ├── subagent_notification_card.rs
 │   │   ├── task_supervisor.rs
