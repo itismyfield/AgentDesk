@@ -193,10 +193,8 @@ pub(crate) fn claim_watcher(
     if let Some((existing_channel_id, existing_cancelled, existing_paused, existing_output_path)) =
         find_watcher_by_tmux_session(watchers, &requested_tmux)
     {
-        let turn_start_uses_provisional_output_path = matches!(
-            source,
-            "turn_start_message" | "turn_start_headless"
-        );
+        let turn_start_uses_provisional_output_path =
+            matches!(source, "turn_start_message" | "turn_start_headless");
         let output_path_changed = existing_output_path != requested_output_path;
         let replace_paused_incumbent = existing_paused && !turn_start_uses_provisional_output_path;
         // Turn admission resolves the canonical pre-handoff wrapper path. Once a
