@@ -84,26 +84,10 @@ pub(super) fn ensure_tui_direct_bridge_delivery_committed(
 mod tests {
     use super::*;
 
-    const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
-
-    struct EnvGuard(Option<String>);
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, value) },
-                None => unsafe { std::env::remove_var(AGENTDESK_ROOT_DIR_ENV) },
-            }
-        }
-    }
-
     #[test]
     fn tui_direct_bridge_completion_rejects_uncommitted_matching_inflight() {
-        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
-        let previous = std::env::var(AGENTDESK_ROOT_DIR_ENV).ok();
-        let _guard = EnvGuard(previous);
         let temp = tempfile::tempdir().expect("temp runtime root");
-        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, temp.path()) };
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
 
         let provider = ProviderKind::Codex;
         let channel_id = ChannelId::new(88_001);

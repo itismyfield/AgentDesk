@@ -21,8 +21,8 @@
 //! delivery that lands AFTER this read still leaves the row orphan-shaped, so the
 //! downgrade proceeds. Single delivery is then guaranteed at the SEND POINT —
 //! every re-delivery path re-reads `effective_committed_offset` FRESH and
-//! `idle_relay_range_action` returns `SkipAlreadyRelayed` (body already past the
-//! watermark) or `SendSuffixFrom(committed)` (only the uncommitted tail). See the
+//! `idle_relay_range_action` returns `AdvanceCommitted` (body already past the
+//! watermark) or `SendPendingSuffixFrom(committed)` (only the uncommitted tail). See the
 //! `send_point_re_gate_*` tests below.
 
 use crate::services::cluster::relay_producer_registry::RelayProducerRegistry;
@@ -231,21 +231,8 @@ mod tests {
 
     #[tokio::test]
     async fn cross_session_reclaim_uses_row_owner_and_unblocks_iterating_session() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        struct EnvReset(Option<std::ffi::OsString>);
-        impl Drop for EnvReset {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-                }
-            }
-        }
-        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let temp = tempfile::TempDir::new().expect("temp runtime root");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
 
         let provider = ProviderKind::Claude;
         let channel_id = 4_136_116;
@@ -295,21 +282,8 @@ mod tests {
         use crate::services::cluster::stream_relay::{DiscardSink, RelaySink, spawn_stream_relay};
         use std::sync::Arc;
 
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        struct EnvReset(Option<std::ffi::OsString>);
-        impl Drop for EnvReset {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-                }
-            }
-        }
-        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let temp = tempfile::TempDir::new().expect("temp runtime root");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
 
         let provider = ProviderKind::Claude;
         let channel_id = 4_140_117;
@@ -393,7 +367,7 @@ mod tests {
                 false,
                 false
             ),
-            IdleRelayRangeAction::SkipAlreadyRelayed,
+            IdleRelayRangeAction::AdvanceCommitted,
             "the send-point re-gate skips a body already past the watermark — no double-relay"
         );
     }
@@ -424,7 +398,7 @@ mod tests {
                 false,
                 false
             ),
-            IdleRelayRangeAction::SendSuffixFrom(committed_advanced),
+            IdleRelayRangeAction::SendPendingSuffixFrom(committed_advanced),
             "the send-point re-gate delivers only the uncommitted tail — no duplicate of the \
              delivered prefix"
         );

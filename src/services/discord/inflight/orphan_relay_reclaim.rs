@@ -30,8 +30,8 @@
 //! So a delivered-but-unmirrored row STAYS orphan-shaped under the flock and the
 //! downgrade PROCEEDS — that is expected and correct. Single delivery is then
 //! guaranteed because EVERY re-delivery path re-reads `effective_committed_offset`
-//! FRESH and `idle_relay_range_action` returns `SkipAlreadyRelayed` (whole body
-//! already past the watermark) or `SendSuffixFrom(committed)` (only the
+//! FRESH and `idle_relay_range_action` returns `AdvanceCommitted` (whole body
+//! already past the watermark) or `SendPendingSuffixFrom(committed)` (only the
 //! uncommitted tail). The caller's unlocked `committed <= turn_floor` gate is a
 //! first-line filter for the already-advanced case; the send-point re-gate is
 //! the authority.

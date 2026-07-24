@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Reject new Rust library test modules that no curated CI lane fully selects.
 
-AgentDesk's ``test-non-pg`` recipe and PR test jobs intentionally use libtest
-name filters instead of running every library test. This source-only guard finds
+AgentDesk's main-push ``test-non-pg`` recipe intentionally uses libtest name
+filters instead of running every library test. This source-only guard finds
 ``#[cfg(test)] mod ...`` declarations, derives their logical Rust module paths
 (including ``#[path = "..."]`` aliases), and compares them with each curated
 ``cargo test`` command's positive and ``--skip`` filters.
@@ -476,26 +476,36 @@ def cargo_test_filter(command: str) -> LaneFilter | None:
 
 
 def discover_lane_filters(repo_root: Path) -> tuple[LaneFilter, ...]:
-    """Parse selection contracts from test-non-pg and PR targeted commands."""
+    """Parse selection contracts from positive main-push and PR test lanes."""
     just_text = (repo_root / "justfile").read_text(encoding="utf-8")
-    workflow = (repo_root / ".github/workflows/ci-pr.yml").read_text(encoding="utf-8")
+    workflows = (
+        (repo_root / ".github/workflows/ci-main.yml").read_text(encoding="utf-8"),
+        (repo_root / ".github/workflows/ci-pr.yml").read_text(encoding="utf-8"),
+    )
 
     commands = list(just_recipe_commands(just_text, "test-non-pg"))
-    for line in workflow.splitlines():
-        if "cargo test" not in line:
-            continue
-        command = line.strip()
-        if command.startswith("run:"):
-            command = command.removeprefix("run:").strip()
-            if len(command) >= 2 and command[0] == command[-1] and command[0] in "\"'":
-                command = command[1:-1]
-        commands.append(command)
+    for workflow in workflows:
+        for line in workflow.splitlines():
+            command = line.strip()
+            if "cargo test" not in command or command.startswith("#"):
+                continue
+            if command.startswith("run:"):
+                command = command.removeprefix("run:").strip()
+                if (
+                    len(command) >= 2
+                    and command[0] == command[-1]
+                    and command[0] in "\"'"
+                ):
+                    command = command[1:-1]
+            commands.append(command)
 
-    for recipe in sorted(set(re.findall(r"\bjust\s+([A-Za-z0-9_-]+)", workflow))):
-        try:
-            commands.extend(just_recipe_commands(just_text, recipe))
-        except ValueError:
-            continue
+        for recipe in sorted(
+            set(re.findall(r"\bjust\s+([A-Za-z0-9_-]+)", workflow))
+        ):
+            try:
+                commands.extend(just_recipe_commands(just_text, recipe))
+            except ValueError:
+                continue
 
     lanes: list[LaneFilter] = []
     for command in commands:

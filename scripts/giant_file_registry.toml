@@ -712,6 +712,14 @@ deadline = "2026-10-31"
 decompose_issue = "#4712"
 
 [[entry]]
+# Crossed the threshold in #4536 when ordered idle ranges gained generation
+# coordinates alongside the existing sequence/terminal-fence queue protocol.
+file = "src/services/cluster/stream_relay.rs"
+decision = "keep"
+owner = "discord-relay"
+keep_reason = "The queue, exact-sequence outcome ring, and producer/consumer frame protocol form one ordered delivery boundary; keep them cohesive while #4766 relay lanes establish the ranged commit contract."
+
+[[entry]]
 # Crossed the 1000-prod-LoC threshold when #3017 re-landed the single
 # output-offset relay-dedup authority: the idle-JSONL relay loop now consults
 # `committed_relay_offset` (read-only) with generation-aware watermark resets to

@@ -28,7 +28,7 @@ class RelayRecoveryCiWiringTest(unittest.TestCase):
     def test_relay_recovery_filter_wired_into_every_targeted_non_pg_lane(self) -> None:
         expected_counts = {
             "justfile": 1,
-            ".github/workflows/ci-pr.yml": 1,
+            ".github/workflows/ci-pr.yml": 0,
             ".github/workflows/ci-macos-trusted.yml": 2,
         }
         for relative_path, expected_count in expected_counts.items():
@@ -37,8 +37,8 @@ class RelayRecoveryCiWiringTest(unittest.TestCase):
                 self.assertEqual(
                     count_executable_relay_recovery_commands(text),
                     expected_count,
-                    f"{relative_path} must run the relay_recovery non-PG filter "
-                    f"in all {expected_count} targeted lane(s)",
+                    f"{relative_path} must retain exactly {expected_count} "
+                    "relay_recovery non-PG lane(s)",
                 )
 
     def test_commented_or_echoed_commands_do_not_count_as_executable_wiring(self) -> None:

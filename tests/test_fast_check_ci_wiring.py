@@ -40,6 +40,7 @@ EXPECTED_TEST_NON_PG_COMMANDS = (
     "cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --all-targets stall_recovery -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --all-targets routines -- --skip _pg --skip pg_ --skip postgres",
     "python3 scripts/ci-timeout.py 900 env -u AGENTDESK_ROOT_DIR cargo test --lib health -- --skip _pg --skip pg_ --skip postgres",
     "env -u AGENTDESK_ROOT_DIR cargo test --lib relay_recovery -- --skip _pg --skip pg_ --skip postgres",
     "cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres",
@@ -136,6 +137,16 @@ class FastCheckCiWiringTests(unittest.TestCase):
             r"(?m)^    if: needs\.changes\.outputs\.pg_db == 'true'$",
         )
 
+    def test_pr_cross_os_lane_is_compile_only(self) -> None:
+        job = job_block(PR_WORKFLOW.read_text(encoding="utf-8"), "check_fast_cross_os")
+
+        self.assertIn("name: Fast check + non-PG tests (${{ matrix.os }})", job)
+        self.assertIn("os: [windows-latest]", job)
+        self.assertIn("- name: cargo check", job)
+        self.assertNotRegex(job, r"(?m)^\s*cargo test\b")
+        self.assertNotIn("- name: cargo test", job)
+        self.assertNotIn("Discord thread-create cross-process lock", job)
+
     def test_main_and_nightly_retain_non_pg_test_coverage(self) -> None:
         justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
         self.assertIn("check: fmt-check lint cargo-check test", justfile)
@@ -156,6 +167,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 self.assertIn(
                     "cargo test --all-targets -- --skip _pg_ --skip postgres_", job
                 )
+        self.assertIn(
+            "cargo test --lib discord_thread_create -- --test-threads=1",
+            job_block(nightly, "full_windows"),
+        )
 
     def test_ci_script_checks_runs_this_contract(self) -> None:
         script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(

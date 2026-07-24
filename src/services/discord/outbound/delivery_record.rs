@@ -365,6 +365,63 @@ pub(in crate::services::discord) fn write_delivered_frontier(
     write_delivered_frontier_at(&record_path_or_err(provider, channel_id)?, frontier)
 }
 
+fn commit_ordered_jsonl_range_at(
+    path: &Path,
+    range: (u64, u64),
+    generation_mtime_ns: i64,
+) -> Result<bool, String> {
+    if generation_mtime_ns == 0 || range.1 <= range.0 {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let _lock = lock_record_path(path)?;
+    let mut record = read_record_at(path).unwrap_or_default();
+    if let Some(frontier) = record.delivered_frontier.as_ref()
+        && frontier.generation_mtime_ns == generation_mtime_ns
+        && frontier.range.1 >= range.1
+    {
+        return Ok(true);
+    }
+    let previous_attempts = record
+        .delivered_frontier
+        .as_ref()
+        .filter(|frontier| frontier.generation_mtime_ns == generation_mtime_ns)
+        .map(|frontier| frontier.attempts)
+        .unwrap_or(0);
+    let committed_range = record
+        .delivered_frontier
+        .as_ref()
+        .filter(|frontier| frontier.generation_mtime_ns == generation_mtime_ns)
+        .map(|frontier| (frontier.range.0.min(range.0), frontier.range.1.max(range.1)))
+        .unwrap_or(range);
+    record.delivered_frontier = Some(DeliveredCommit {
+        range: committed_range,
+        generation_mtime_ns,
+        attempts: previous_attempts.saturating_add(1),
+        panel_msg_id: None,
+        panel_channel_id: None,
+    });
+    write_record_at(path, &record)?;
+    Ok(true)
+}
+
+/// Durably commit a confirmed idle/catch-up JSONL range. Unlike the rollout
+/// shadow writer, this is delivery authority and is therefore flag-independent.
+pub(in crate::services::discord) fn commit_ordered_jsonl_range(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    range: (u64, u64),
+    generation_mtime_ns: i64,
+) -> Result<bool, String> {
+    commit_ordered_jsonl_range_at(
+        &record_path_or_err(provider, channel.get())?,
+        range,
+        generation_mtime_ns,
+    )
+}
+
 fn write_watcher_owner_context_at(
     path: &Path,
     watcher_owner_channel_id: u64,
@@ -1542,6 +1599,38 @@ mod tests {
             panel_msg_id: Some(999),
             panel_channel_id: Some(1234),
         }
+    }
+
+    #[test]
+    fn ordered_jsonl_commit_is_generation_scoped_and_monotonic() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("record.json");
+
+        assert!(commit_ordered_jsonl_range_at(&path, (100, 200), 7).unwrap());
+        assert!(commit_ordered_jsonl_range_at(&path, (150, 180), 7).unwrap());
+        assert_eq!(
+            read_record_at(&path).unwrap().delivered_frontier.unwrap(),
+            DeliveredCommit {
+                range: (100, 200),
+                generation_mtime_ns: 7,
+                attempts: 1,
+                panel_msg_id: None,
+                panel_channel_id: None,
+            }
+        );
+
+        assert!(commit_ordered_jsonl_range_at(&path, (0, 50), 8).unwrap());
+        assert_eq!(
+            read_record_at(&path)
+                .unwrap()
+                .delivered_frontier
+                .unwrap()
+                .range,
+            (0, 50),
+            "a replacement wrapper starts a new coordinate space"
+        );
+        assert!(!commit_ordered_jsonl_range_at(&path, (50, 50), 8).unwrap());
+        assert!(!commit_ordered_jsonl_range_at(&path, (50, 60), 0).unwrap());
     }
 
     #[test]

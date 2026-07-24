@@ -155,8 +155,12 @@ pub struct StreamFrame {
     /// identity for backpressure attribution, but only frames with
     /// `terminal_consumed_end` can advance the sink commit fence.
     pub turn_start_offset: Option<u64>,
-    /// Idle/catch-up lease range; never a commit fence.
+    /// Idle/catch-up ordered JSONL range. The range is a commit candidate only
+    /// when `relay_generation_mtime_ns` still matches the live wrapper.
     pub relay_range: Option<(u64, u64)>,
+    /// Wrapper generation captured with `relay_range`. A queued range from a
+    /// replaced wrapper must never commit against the replacement transcript.
+    pub relay_generation_mtime_ns: Option<i64>,
 }
 
 /// Per-session counters. Exposed via the supervisor for diagnostics.
@@ -477,9 +481,21 @@ impl RelayProducer {
         self.try_send_frame_with_sequence_and_identity(payload, None)
     }
 
-    pub fn try_send_frame_for_range(&self, payload: String, start: u64, end: u64) -> bool {
-        self.enqueue(payload, None, None, Some((start, end)))
-            .is_alive()
+    pub fn try_send_frame_for_range(
+        &self,
+        payload: String,
+        start: u64,
+        end: u64,
+        generation_mtime_ns: i64,
+    ) -> bool {
+        self.enqueue(
+            payload,
+            None,
+            None,
+            Some((start, end)),
+            Some(generation_mtime_ns),
+        )
+        .is_alive()
     }
 
     fn enqueue(
@@ -488,6 +504,7 @@ impl RelayProducer {
         terminal: Option<TerminalCommitFence>,
         identity: Option<RelayTurnIdentity>,
         range: Option<(u64, u64)>,
+        relay_generation_mtime_ns: Option<i64>,
     ) -> RelaySendOutcome {
         try_send_frame_inner(
             &self.matched,
@@ -499,6 +516,7 @@ impl RelayProducer {
             terminal,
             identity,
             range,
+            relay_generation_mtime_ns,
         )
     }
 
@@ -511,7 +529,7 @@ impl RelayProducer {
         payload: String,
         frame_identity: Option<RelayTurnIdentity>,
     ) -> RelaySendOutcome {
-        self.enqueue(payload, None, frame_identity, None)
+        self.enqueue(payload, None, frame_identity, None, None)
     }
 
     /// #3041 P1-3 (Part a, B1): forward the RESULT-bearing chunk as a terminal
@@ -524,7 +542,7 @@ impl RelayProducer {
         payload: String,
         terminal: TerminalCommitFence,
     ) -> RelaySendOutcome {
-        self.enqueue(payload, Some(terminal), None, None)
+        self.enqueue(payload, Some(terminal), None, None, None)
     }
 }
 
@@ -663,6 +681,7 @@ fn try_send_frame_inner(
     terminal: Option<TerminalCommitFence>,
     frame_identity: Option<RelayTurnIdentity>,
     relay_range: Option<(u64, u64)>,
+    relay_generation_mtime_ns: Option<i64>,
 ) -> RelaySendOutcome {
     if shutdown.load(Ordering::Acquire) {
         return RelaySendOutcome::closed();
@@ -689,6 +708,7 @@ fn try_send_frame_inner(
         turn_started_at: frame_identity.turn_started_at,
         turn_start_offset: frame_identity.turn_start_offset,
         relay_range,
+        relay_generation_mtime_ns,
     };
     metrics.frames_received.fetch_add(1, Ordering::AcqRel);
     match queue.push_drop_oldest(frame) {
@@ -748,6 +768,7 @@ impl StreamRelayHandle {
             &self.metrics,
             &self.sequence,
             payload,
+            None,
             None,
             None,
             None,
@@ -1118,12 +1139,13 @@ mod tests {
         let handle = spawn_stream_relay(matched_for("c-range"), sink.clone());
         let producer = handle.producer();
 
-        assert!(producer.try_send_frame_for_range("idle-result".into(), 640, 1_024));
+        assert!(producer.try_send_frame_for_range("idle-result".into(), 640, 1_024, 77));
         flush_pending().await;
 
         let delivered = sink.delivered();
         assert_eq!(delivered.len(), 1);
         assert_eq!(delivered[0].relay_range, Some((640, 1_024)));
+        assert_eq!(delivered[0].relay_generation_mtime_ns, Some(77));
         assert_eq!(delivered[0].terminal_consumed_end, None);
         assert_eq!(delivered[0].turn_start_offset, None);
         handle.shutdown().await;

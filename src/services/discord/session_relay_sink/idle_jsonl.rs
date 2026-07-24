@@ -17,31 +17,26 @@ use crate::services::provider::ProviderKind;
 const MISMATCHED_INFLIGHT_LOG_THROTTLE: Duration = Duration::from_secs(60);
 static MISMATCHED_INFLIGHT_LOGGED_AT: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 
-/// REAL loop ordering: classification gates run on the WHOLE payload FIRST (an
-/// `init` event anywhere keeps the range relayable), the offset-authority dedup
-/// SECOND. Extracting it makes the "init in committed prefix, suffix uncommitted"
-/// black-hole regression testable without spinning the live poll loop.
+/// The idle cursor may advance only for intentional classification drops or a
+/// committed frontier. Temporary ownership/grace suppression holds the range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum IdleJsonlSuppression {
+    DropAndConsume,
+    DeferUntilCommitted,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum IdleRelayRangeAction {
-    /// Classification dropped the range (grace window, user/tool-result event,
-    /// ScheduleWakeup setup, or non-init active-session payload). Advance the
-    /// offset past `end` without relaying.
-    SkipClassified,
-    /// The offset authority already covers `[start, end)` (`committed >= end`).
-    /// Advance past `end` without relaying (dedup, whole range).
-    SkipAlreadyRelayed,
-    /// PARTIAL overlap (`start < committed < end`): the prefix was already relayed;
-    /// relay ONLY the uncommitted `[committed, end)` suffix of THIS classified turn (not
-    /// re-gated as a fresh non-init payload → no black-hole, codex r6 P1).
-    SendSuffixFrom(u64),
-    /// Nothing covered (`committed <= start`): relay the whole `[start, end)`.
-    SendFull,
+    DropAndConsume,
+    HoldPending,
+    AdvanceCommitted,
+    SendPendingSuffixFrom(u64),
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum IdleJsonlInflightGateDecision {
     SuppressWithoutConsuming,
-    ConsumeToEnd,
+    DeferUntilCommitted,
 }
 
 pub(super) fn idle_jsonl_should_retry_without_dedup_shared<T>(
@@ -65,10 +60,21 @@ pub(super) struct IdleJsonlRelaySource {
 pub(super) fn idle_jsonl_relay_source_for_matched(
     matched: &MatchedChannel,
 ) -> IdleJsonlRelaySource {
-    if matched.provider == ProviderKind::Codex
-        && let Some(binding) = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
-            &matched.expected_session_name,
-        )
+    idle_jsonl_relay_source(
+        &matched.provider,
+        &matched.expected_session_name,
+        &matched.expected_rollout_path,
+    )
+}
+
+fn idle_jsonl_relay_source(
+    provider: &ProviderKind,
+    session_name: &str,
+    fallback_path: &str,
+) -> IdleJsonlRelaySource {
+    if *provider == ProviderKind::Codex
+        && let Some(binding) =
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session_name)
         && binding.runtime_kind == RuntimeHandoffKind::CodexTui
         && !binding.output_path.trim().is_empty()
         && std::path::Path::new(&binding.output_path).exists()
@@ -80,9 +86,18 @@ pub(super) fn idle_jsonl_relay_source_for_matched(
     }
 
     IdleJsonlRelaySource {
-        path: matched.expected_rollout_path.clone(),
+        path: fallback_path.to_string(),
         allow_continued_session_without_init: false,
     }
+}
+
+pub(super) fn idle_jsonl_current_eof(provider: &ProviderKind, session_name: &str) -> Option<u64> {
+    let fallback =
+        crate::services::cluster::session_matcher::expected_rollout_path_for(session_name);
+    let source = idle_jsonl_relay_source(provider, session_name, &fallback);
+    std::fs::metadata(source.path)
+        .ok()
+        .map(|metadata| metadata.len())
 }
 
 pub(super) fn idle_jsonl_inflight_mismatches_session(
@@ -117,8 +132,6 @@ pub(super) fn idle_jsonl_apply_active_inflight_gate(
     matched: &MatchedChannel,
     channel_id: u64,
     inflight: &InflightTurnState,
-    len: u64,
-    offset: &mut u64,
 ) -> IdleJsonlInflightGateDecision {
     if idle_jsonl_should_skip_mismatched_inflight(
         last_inflight_seen_at,
@@ -129,8 +142,7 @@ pub(super) fn idle_jsonl_apply_active_inflight_gate(
         return IdleJsonlInflightGateDecision::SuppressWithoutConsuming;
     }
     last_inflight_seen_at.insert(matched.expected_session_name.clone(), Instant::now());
-    *offset = len;
-    IdleJsonlInflightGateDecision::ConsumeToEnd
+    IdleJsonlInflightGateDecision::DeferUntilCommitted
 }
 
 pub(super) fn idle_jsonl_session_has_init(
@@ -227,12 +239,14 @@ pub(super) fn prune_idle_jsonl_session_state(
     last_inflight_seen_at: &mut HashMap<String, Instant>,
     session_init_seen: &mut HashSet<String>,
     session_generation_signatures: &mut HashMap<String, i64>,
+    pending_ends: &mut HashMap<String, u64>,
 ) {
     offsets.retain(|session, _| seen_sessions.contains(session));
     first_seen_at.retain(|session, _| seen_sessions.contains(session));
     last_inflight_seen_at.retain(|session, _| seen_sessions.contains(session));
     session_init_seen.retain(|session| seen_sessions.contains(session));
     session_generation_signatures.retain(|session, _| seen_sessions.contains(session));
+    pending_ends.retain(|session, _| seen_sessions.contains(session));
     prune_mismatched_inflight_log_sessions(seen_sessions);
 }
 
@@ -274,39 +288,47 @@ fn log_mismatched_inflight_skip(
     );
 }
 
-/// Pure decision for the idle relay's classification + offset-authority dedup,
-/// in the loop's real order. `payload` is the full `[start, end)` bytes.
-/// `in_new_session_grace` mirrors the runtime `first_seen.elapsed() < grace`
-/// gate. `committed` is the offset authority's `committed_relay_offset`.
-/// `session_init_seen` means this session already passed an init-bearing range,
-/// so later chunks from the same file are not dropped solely for lacking init.
+pub(super) fn idle_jsonl_suppressed_range_action(
+    committed: u64,
+    _start: u64,
+    end: u64,
+    suppression: IdleJsonlSuppression,
+) -> IdleRelayRangeAction {
+    if suppression == IdleJsonlSuppression::DropAndConsume {
+        return IdleRelayRangeAction::DropAndConsume;
+    }
+    if committed >= end {
+        IdleRelayRangeAction::AdvanceCommitted
+    } else {
+        IdleRelayRangeAction::HoldPending
+    }
+}
+
+/// Pure decision for the idle relay's intentional classification drops and
+/// current-generation committed-frontier dedup. Temporary grace suppression is
+/// handled separately by [`idle_jsonl_suppressed_range_action`].
 pub(super) fn idle_relay_range_action(
     payload: &[u8],
     start: u64,
     end: u64,
     committed: u64,
-    in_new_session_grace: bool,
     allow_continued_session_without_init: bool,
     session_init_seen: bool,
+    was_deferred: bool,
 ) -> IdleRelayRangeAction {
-    // Classification first, on the WHOLE payload (matches the loop's gate
-    // ordering at the top of `run_idle_jsonl_relay_loop`).
-    if in_new_session_grace
-        || idle_jsonl_payload_contains_user_event(payload)
-        || idle_jsonl_payload_contains_schedule_wakeup_setup(payload)
-        || (!allow_continued_session_without_init
+    if idle_jsonl_payload_contains_schedule_wakeup_setup(payload)
+        || (!was_deferred && idle_jsonl_payload_contains_user_event(payload))
+        || (!was_deferred
+            && !allow_continued_session_without_init
             && !session_init_seen
             && !idle_jsonl_payload_contains_init_event(payload))
     {
-        return IdleRelayRangeAction::SkipClassified;
+        return IdleRelayRangeAction::DropAndConsume;
     }
-    // Offset-authority dedup second, on the already-classified range.
     if committed >= end {
-        IdleRelayRangeAction::SkipAlreadyRelayed
-    } else if committed > start {
-        IdleRelayRangeAction::SendSuffixFrom(committed)
+        IdleRelayRangeAction::AdvanceCommitted
     } else {
-        IdleRelayRangeAction::SendFull
+        IdleRelayRangeAction::SendPendingSuffixFrom(committed.max(start))
     }
 }
 
@@ -433,8 +455,8 @@ mod tests {
             idle_jsonl_session_has_init(&mut session_init_seen, session_name, payload);
         assert!(session_has_init);
         assert_eq!(
-            idle_relay_range_action(payload, start, end, 0, false, false, session_has_init),
-            IdleRelayRangeAction::SendFull,
+            idle_relay_range_action(payload, start, end, 0, false, session_has_init, false),
+            IdleRelayRangeAction::SendPendingSuffixFrom(start),
             "without the missing-shared gate this eligible range would fall through to send"
         );
 
@@ -442,8 +464,8 @@ mod tests {
             idle_jsonl_should_retry_without_dedup_shared(shared_for_dedup);
         assert!(retry_without_consuming);
         if !retry_without_consuming
-            && idle_relay_range_action(payload, start, end, 0, false, false, session_has_init)
-                == IdleRelayRangeAction::SendFull
+            && idle_relay_range_action(payload, start, end, 0, false, session_has_init, false)
+                == IdleRelayRangeAction::SendPendingSuffixFrom(start)
         {
             send_attempts += 1;
             idle_jsonl_consume_offset(
@@ -505,21 +527,19 @@ mod tests {
             end,
             committed,
             false,
-            false,
             session_has_init,
+            false,
         ) {
-            IdleRelayRangeAction::SendFull => {
+            IdleRelayRangeAction::SendPendingSuffixFrom(from) => {
+                assert_eq!(from, start);
                 send_attempts += 1;
-                idle_jsonl_consume_offset(
-                    &mut session_init_seen,
-                    session_name,
-                    &mut offset,
-                    end,
-                    IdleJsonlSessionInitRearm::Keep,
-                );
             }
             other => panic!("first shared pass must send, got {other:?}"),
         }
+        assert_eq!(
+            offset, start,
+            "enqueue acceptance is not a confirmed commit and must not consume the cursor"
+        );
 
         shared
             .tmux_relay_coord(channel)
@@ -540,10 +560,10 @@ mod tests {
             end,
             committed,
             false,
-            false,
             session_init_seen.contains(session_name),
+            false,
         ) {
-            IdleRelayRangeAction::SkipAlreadyRelayed => {
+            IdleRelayRangeAction::AdvanceCommitted => {
                 idle_jsonl_consume_offset(
                     &mut session_init_seen,
                     session_name,
@@ -559,7 +579,56 @@ mod tests {
             send_attempts, 1,
             "shared dedup sends the range exactly once"
         );
-        assert_eq!(offset, end);
+        assert_eq!(offset, start);
         assert_eq!(duplicate_actor_offset, end);
+    }
+
+    #[test]
+    fn deferred_active_range_ignores_user_prefix_and_relays_uncommitted_tail() {
+        let payload = concat!(
+            "{\"type\":\"user\",\"message\":{\"content\":\"wake\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"wake answer\"}]}}\n",
+            "{\"type\":\"result\",\"result\":\"wake answer\"}\n"
+        )
+        .as_bytes();
+        assert_eq!(
+            idle_relay_range_action(payload, 100, 300, 180, false, false, true),
+            IdleRelayRangeAction::SendPendingSuffixFrom(180),
+            "the user event explains why the range was deferred; it must not discard the assistant tail after grace"
+        );
+        assert_eq!(
+            idle_relay_range_action(payload, 100, 300, 180, false, false, false),
+            IdleRelayRangeAction::DropAndConsume,
+            "a fresh active-turn classification still intentionally drops the range"
+        );
+    }
+
+    #[test]
+    fn temporary_suppression_holds_until_confirmed_commit() {
+        let start = 128;
+        let end = 256;
+
+        assert_eq!(
+            idle_jsonl_suppressed_range_action(
+                127,
+                start,
+                end,
+                IdleJsonlSuppression::DeferUntilCommitted,
+            ),
+            IdleRelayRangeAction::HoldPending
+        );
+        assert_eq!(
+            idle_jsonl_suppressed_range_action(
+                end,
+                start,
+                end,
+                IdleJsonlSuppression::DeferUntilCommitted,
+            ),
+            IdleRelayRangeAction::AdvanceCommitted
+        );
+        assert_eq!(
+            idle_jsonl_suppressed_range_action(0, start, end, IdleJsonlSuppression::DropAndConsume,),
+            IdleRelayRangeAction::DropAndConsume
+        );
     }
 }

@@ -67,36 +67,13 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
     "runs_on" => '${{ matrix.os }}',
-    # #4466 formally admits the non-advisory Windows named-mutex runtime proof.
-    # #4747 (opt.3) re-pins after making PR cache access restore-only.
-    "job_sha256" => "7040d0cb8412f30c878bc1357c28c7dd9ad6483d315d83cacddfb1382cc66011",
+    # #4747 (opt.2) re-pins the compile-only PR lane after moving long-pole
+    # Windows runtime tests to nightly. Option 3 keeps PR cache access restore-only.
+    "job_sha256" => "d27244ced15d0bb13f89e680de42978cb74452af4b02457ab034d462f4fa103a",
     "cargo_steps" => {
       "cargo check" => {
         "commands" => ["cargo check --workspace --all-targets"],
         "continue_on_error" => nil,
-        "timeout_minutes" => nil,
-      },
-      "Discord thread-create cross-process lock" => {
-        "commands" => ["cargo test --lib discord_thread_create -- --test-threads=1"],
-        "continue_on_error" => nil,
-        "timeout_minutes" => nil,
-      },
-      "cargo test (non-PG, targeted subset)" => {
-        "commands" => [
-          "set -euo pipefail",
-          "cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
-          "cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres",
-          "cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres",
-          "cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres",
-          "cargo test --all-targets stall_recovery -- --skip _pg --skip pg_ --skip postgres",
-          "# Health must precede relay_recovery: fail-fast recipes otherwise hide",
-          "# health regressions whenever the earlier recovery filter also fails.",
-          "python3 scripts/ci-timeout.py 900 env -u AGENTDESK_ROOT_DIR cargo test --lib health -- --skip _pg --skip pg_ --skip postgres",
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib relay_recovery -- --skip _pg --skip pg_ --skip postgres",
-          "cargo test --all-targets routines -- --skip _pg --skip pg_ --skip postgres",
-          "cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres",
-        ],
-        "continue_on_error" => true,
         "timeout_minutes" => nil,
       },
     },
