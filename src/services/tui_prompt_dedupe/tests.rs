@@ -1526,7 +1526,8 @@ fn local_note_delivery_ack_does_not_record_nonlocal_entries() {
 fn task_notification_is_status_only_and_next_prompt_keeps_lease_free() {
     let _guard = TEST_LOCK.lock().unwrap();
     reset_state();
-    let task = "<task-notification><status>killed</status><task-id>stop-1</task-id></task-notification>";
+    let task =
+        "<task-notification><status>killed</status><task-id>stop-1</task-id></task-notification>";
     assert_eq!(
         observe_prompt_by_tmux("claude", "tmux-stop-task", task),
         PromptObservation::PublishedTaskNotification
@@ -2182,25 +2183,13 @@ fn missing_entry_id_falls_back_to_content_dedup() {
     let now = Utc::now();
 
     assert_eq!(
-        observe_prompt_by_tmux_with_entry_id_at(
-            "claude",
-            "tmux-3540",
-            "no-uuid prompt",
-            None,
-            now,
-        ),
+        observe_prompt_by_tmux_with_entry_id_at("claude", "tmux-3540", "no-uuid prompt", None, now,),
         PromptObservation::PublishedSshDirect
     );
     // Same content again with no uuid → the content-keyed recent dedup
     // suppresses it (the existing 30s path), NOT the entry-id path.
     assert_eq!(
-        observe_prompt_by_tmux_with_entry_id_at(
-            "claude",
-            "tmux-3540",
-            "no-uuid prompt",
-            None,
-            now,
-        ),
+        observe_prompt_by_tmux_with_entry_id_at("claude", "tmux-3540", "no-uuid prompt", None, now,),
         PromptObservation::SuppressedRecentDuplicate,
         "with no stable id the legacy content-keyed dedup still applies"
     );
@@ -2272,8 +2261,7 @@ fn relayed_entry_id_ledger_purges_after_ttl() {
             .get_mut(&PromptKey::new("claude", "tmux-3540"))
         {
             for entry in queue.iter_mut() {
-                entry.recorded_at =
-                    Instant::now() - (PROMPT_ANCHOR_TTL + Duration::from_secs(1));
+                entry.recorded_at = Instant::now() - (PROMPT_ANCHOR_TTL + Duration::from_secs(1));
             }
         }
         state.purge_expired();
@@ -2392,8 +2380,7 @@ fn streaming_activity_restamps_anchor_so_long_turn_never_loses_it() {
             .prompt_anchor_by_tmux
             .get_mut(&PromptKey::new(provider, tmux))
             .expect("anchor present after touch")
-            .recorded_at =
-            Instant::now() - (PROMPT_ANCHOR_SUBMIT_TTL - Duration::from_secs(60));
+            .recorded_at = Instant::now() - (PROMPT_ANCHOR_SUBMIT_TTL - Duration::from_secs(60));
     }
     assert_eq!(
         prompt_anchor_for_response(provider, tmux, channel),
