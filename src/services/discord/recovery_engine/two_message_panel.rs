@@ -263,6 +263,38 @@ async fn recover_two_message_panel_with_gateway<G: RecoveryPanelGateway + ?Sized
     }
 
     gateway.after_ownership_reload().await;
+    let mut reloaded = reloaded.expect("still_owned requires a loaded inflight row");
+    let singleton = match crate::services::discord::status_panel_singleton_store::bind_if_owned(
+        provider,
+        &shared.token_hash,
+        channel_id.get(),
+        new_panel_id.get(),
+        None,
+    ) {
+        Ok(binding) => binding,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id = channel_id.get(),
+                panel_message_id = new_panel_id.get(),
+                error = %error,
+                "two-message restart recovery failed to persist singleton panel binding"
+            );
+            if gateway
+                .delete_panel(channel_id, new_panel_id)
+                .await
+                .is_err()
+            {
+                status_panel_orphan_store::enqueue(
+                    provider,
+                    &shared.token_hash,
+                    channel_id.get(),
+                    new_panel_id.get(),
+                );
+            }
+            return false;
+        }
+    };
     if status_panel_orphan_store::remove_pending_bind_if_owned(
         provider,
         &shared.token_hash,
@@ -285,23 +317,7 @@ async fn recover_two_message_panel_with_gateway<G: RecoveryPanelGateway + ?Sized
         }
         return false;
     }
-    let reloaded = reloaded.expect("still_owned requires a loaded inflight row");
-    if let Err(error) = crate::services::discord::status_panel_singleton_store::bind(
-        provider,
-        &shared.token_hash,
-        channel_id.get(),
-        new_panel_id.get(),
-        reloaded.status_panel_generation,
-    ) {
-        tracing::warn!(
-            provider = %provider.as_str(),
-            channel_id = channel_id.get(),
-            panel_message_id = new_panel_id.get(),
-            error = %error,
-            "two-message restart recovery failed to persist singleton panel binding"
-        );
-        return false;
-    }
+    reloaded.status_panel_generation = singleton.generation;
     if let Some(old_panel_id) = panel_message_id
         && panel_state == PersistedPanelState::Live
         && gateway

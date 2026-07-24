@@ -2389,6 +2389,71 @@ fn waiting_block_above_tasks_renders_exactly_once_4860() {
     assert!(block.contains("Tasks"));
 }
 
+// #4860 round 2 mutation proof: clamping the detail section before prepending
+// Waiting exceeds the 600-byte section budget. The budget must cover the final
+// Waiting + Tasks + Subagents combination while preserving Waiting at the head.
+#[test]
+fn waiting_task_subagent_combined_section_stays_within_budget_4860() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(1906);
+    for index in 0..STATUS_PANEL_TASK_LIMIT {
+        events.push_status_event(
+            channel_id,
+            StatusEvent::BackgroundTaskStart {
+                name: "Bash".to_string(),
+                summary: format!("task-{index}-{}", "x".repeat(EVENT_LINE_MAX_CHARS)),
+                tool_use_id: format!("tool-{index}"),
+            },
+        );
+        events.push_status_event(
+            channel_id,
+            StatusEvent::BackgroundTaskEnd {
+                tool_use_id: format!("tool-{index}"),
+                success: true,
+            },
+        );
+    }
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("reviewer".to_string()),
+            desc: Some(format!("subagent-{}", "y".repeat(EVENT_LINE_MAX_CHARS))),
+            agent_id: None,
+            tool_use_id: Some("toolu-terminal-subagent".to_string()),
+            background: false,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentEnd {
+            success: true,
+            agent_id: None,
+            desc: None,
+            tool_use_id: Some("toolu-terminal-subagent".to_string()),
+            summary: None,
+            ack_only: false,
+        },
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::TurnCompleted {
+            background: false,
+            background_agent_pending: true,
+        },
+    );
+
+    let rendered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let combined = rendered.block.expect("waiting and detail section");
+    assert!(combined.starts_with("Background agents\nWaiting for background agents ⠸\n\nTasks"));
+    assert!(combined.contains("Subagents") || combined.ends_with('…'));
+    assert!(
+        combined.len()
+            <= crate::services::discord::single_message_panel::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES,
+        "Waiting plus task/subagent details exceeded the shared budget: {} bytes",
+        combined.len()
+    );
+}
+
 #[test]
 fn completion_footer_prefers_detailed_background_entry_over_generic_waiting_line_4846() {
     let events = PlaceholderLiveEvents::default();

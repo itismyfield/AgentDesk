@@ -162,6 +162,26 @@ pub(super) async fn create_bridge_two_message_status_panel_below_answer<G: TurnG
                 }
             };
             let next_generation = next_generation.max(bound_generation);
+            let singleton =
+                match crate::services::discord::status_panel_singleton_store::bind_if_owned(
+                    provider,
+                    &shared.token_hash,
+                    channel_id.get(),
+                    panel_msg_id.get(),
+                    Some(next_generation),
+                ) {
+                    Ok(binding) => binding,
+                    Err(error) => {
+                        tracing::warn!(
+                            "[turn_bridge] #4860 failed to persist singleton panel {} in channel {}: {}",
+                            panel_msg_id,
+                            channel_id,
+                            error
+                        );
+                        *status_panel_dirty = false;
+                        return;
+                    }
+                };
             if crate::services::discord::status_panel_orphan_store::remove_pending_bind_if_owned(
                 provider,
                 &shared.token_hash,
@@ -185,22 +205,7 @@ pub(super) async fn create_bridge_two_message_status_panel_below_answer<G: TurnG
                 *status_panel_dirty = false;
                 return;
             }
-            if let Err(error) = crate::services::discord::status_panel_singleton_store::bind(
-                provider,
-                &shared.token_hash,
-                channel_id.get(),
-                panel_msg_id.get(),
-                next_generation,
-            ) {
-                tracing::warn!(
-                    "[turn_bridge] #4860 failed to persist singleton panel {} in channel {}: {}",
-                    panel_msg_id,
-                    channel_id,
-                    error
-                );
-                *status_panel_dirty = false;
-                return;
-            }
+            let next_generation = singleton.generation;
             if let Some(old_panel_id) = prior_binding
                 .map(|binding| MessageId::new(binding.panel_message_id))
                 .filter(|old_panel_id| *old_panel_id != panel_msg_id)
@@ -360,26 +365,33 @@ pub(super) async fn reanchor_bridge_two_message_status_panel_below_answer<
                 }
                 return false;
             }
+            let singleton =
+                match crate::services::discord::status_panel_singleton_store::bind_if_owned(
+                    provider,
+                    &shared.token_hash,
+                    channel_id.get(),
+                    new_panel_id.get(),
+                    Some(next_generation),
+                ) {
+                    Ok(binding) => binding,
+                    Err(error) => {
+                        tracing::warn!(
+                            "[turn_bridge] failed to update singleton binding after re-anchor to panel {} in channel {}: {}",
+                            new_panel_id,
+                            channel_id,
+                            error
+                        );
+                        return false;
+                    }
+                };
             crate::services::discord::status_panel_orphan_store::remove(
                 provider,
                 &shared.token_hash,
                 channel_id.get(),
                 new_panel_id.get(),
             );
-            if let Err(error) = crate::services::discord::status_panel_singleton_store::bind(
-                provider,
-                &shared.token_hash,
-                channel_id.get(),
-                new_panel_id.get(),
-                next_generation,
-            ) {
-                tracing::warn!(
-                    "[turn_bridge] failed to update singleton binding after re-anchor to panel {} in channel {}: {}",
-                    new_panel_id,
-                    channel_id,
-                    error
-                );
-            }
+            let next_generation = singleton.generation;
+            updated.status_panel_generation = next_generation;
             *inflight_state = updated;
             *status_panel_msg_id = Some(new_panel_id);
             *status_panel_generation = next_generation;
@@ -727,12 +739,17 @@ mod tests {
         let shared = make_status_panel_v2_shared_for_tests();
         let provider = ProviderKind::Claude;
         // The PREVIOUS turn left its completed panel bound in the durable store.
-        crate::services::discord::status_panel_singleton_store::bind(
+        let mut prior_owner = test_inflight(answer.get());
+        prior_owner.status_message_id = Some(prior_panel);
+        prior_owner.status_panel_generation = 3;
+        crate::services::discord::inflight::save_inflight_state(&prior_owner)
+            .expect("persist prior singleton owner");
+        crate::services::discord::status_panel_singleton_store::bind_if_owned(
             &provider,
             &shared.token_hash,
             channel.get(),
             prior_panel,
-            3,
+            None,
         )
         .expect("seed prior singleton binding");
         let mut inflight = test_inflight(answer.get());

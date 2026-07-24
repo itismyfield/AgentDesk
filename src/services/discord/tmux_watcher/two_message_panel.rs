@@ -267,6 +267,7 @@ pub(in crate::services::discord) async fn adopt_watcher_singleton_panel_after_fr
         &shared.token_hash,
         channel_id.get(),
         panel_msg_id.get(),
+        None,
     ) {
         Ok(binding) => binding,
         Err(error) => {
@@ -427,6 +428,7 @@ pub(in crate::services::discord) async fn reanchor_watcher_two_message_status_pa
         &shared.token_hash,
         channel_id.get(),
         new_panel.id.get(),
+        None,
     ) {
         Ok(binding) => binding,
         Err(error) => {

@@ -312,18 +312,21 @@ pub(super) fn render_completion_footer(
             .map(|line| line.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        let (mut clamped, kept_count) = clamp_completion_task_section(&section);
+        let (mut clamped, mut kept_count) = clamp_completion_task_section(&section);
         let visible_detailed_background_entry = emitted
             .iter()
             .take(kept_count)
             .any(|line| line.unfinished_background);
         if snapshot.background_agent_pending && !visible_detailed_background_entry {
             let waiting = format!("Background agents\nWaiting for background agents {indicator}");
-            clamped = if clamped.is_empty() {
-                waiting
-            } else {
-                format!("{waiting}\n\n{clamped}")
-            };
+            let combined = format!("{waiting}\n\n{section}");
+            let clamped_combined = clamp_completion_task_section(&combined).0;
+            kept_count = clamped_combined
+                .lines()
+                .skip(waiting.lines().count() + 1)
+                .take_while(|line| *line != "…")
+                .count();
+            clamped = clamped_combined;
             has_unfinished_entries = true;
         }
         // #3391: a terminal mark counts as delivered iff its emitted line

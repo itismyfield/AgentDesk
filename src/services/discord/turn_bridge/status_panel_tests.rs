@@ -150,7 +150,15 @@ fn make_status_panel_v2_shared_for_tests() -> Arc<crate::services::discord::Shar
         .expect("fresh test shared data should be uniquely owned")
         .ui;
     ui.status_panel_v2_enabled = true;
-    ui.two_message_panel_enabled = true;
+    shared
+}
+
+fn make_two_message_status_panel_shared_for_tests() -> Arc<crate::services::discord::SharedData> {
+    let mut shared = make_status_panel_v2_shared_for_tests();
+    Arc::get_mut(&mut shared)
+        .expect("fresh test shared data should be uniquely owned")
+        .ui
+        .two_message_panel_enabled = true;
     shared
 }
 
@@ -1010,7 +1018,7 @@ async fn status_panel_completion_fallback_posts_after_unknown_message_edit() {
 #[tokio::test]
 async fn status_panel_completion_purges_pending_bind_for_final_panel() {
     let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
-    let shared = make_status_panel_v2_shared_for_tests();
+    let shared = make_two_message_status_panel_shared_for_tests();
     let gateway = StatusPanelFallbackGateway::default();
     let provider = ProviderKind::Claude;
     let channel_id = ChannelId::new(3_805_401);
@@ -1081,11 +1089,36 @@ async fn status_panel_completion_purges_pending_bind_for_final_panel() {
 #[tokio::test]
 async fn singleton_panel_state_transitions_edit_the_same_message() {
     let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
-    let shared = make_status_panel_v2_shared_for_tests();
+    let shared = make_two_message_status_panel_shared_for_tests();
     let gateway = StatusPanelFallbackGateway::default();
     let provider = ProviderKind::Claude;
     let channel_id = ChannelId::new(4_860_101);
     let panel = MessageId::new(1_500_000_000_486_010);
+    let mut owner = InflightTurnState::new(
+        provider.clone(),
+        channel_id.get(),
+        Some("singleton-completion-test".to_string()),
+        42,
+        4_860_102,
+        4_860_103,
+        "turn".to_string(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    owner.status_message_id = Some(panel.get());
+    owner.status_panel_generation = 7;
+    save_inflight_state(&owner).expect("persist singleton completion owner");
+    crate::services::discord::status_panel_singleton_store::bind_if_owned(
+        &provider,
+        &shared.token_hash,
+        channel_id.get(),
+        panel.get(),
+        None,
+    )
+    .expect("seed singleton completion binding");
     let mut last_status_panel_text = String::new();
 
     // Transition 1: turn ended, background agents still pending → panel edit.
