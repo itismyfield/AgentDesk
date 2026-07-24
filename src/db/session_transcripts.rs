@@ -838,7 +838,7 @@ mod clear_fence_pg_tests {
     async fn channel_pairs(pool: &PgPool, channel_id: &str) -> Vec<ChannelTranscriptPair> {
         fetch_recent_channel_pairs(pool, channel_id, 10)
             .await
-            .expect("fetch recent pairs"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
+            .expect("fetch recent pairs") // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
