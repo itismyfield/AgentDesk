@@ -157,13 +157,15 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
         let high_risk_enabled = super::high_risk_enabled_via_env();
         let decision = super::evaluate_policy(risk, is_owner, high_risk_enabled);
         if let Some(reply) = decision.denial_message(cmd) {
-            let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
-                "  [{ts}] ⛔ CommandPolicy denied {} for {} (id:{}) — risk={:?}",
-                cmd,
-                msg.author.name,
-                msg.author.id.get(),
-                risk,
+                event = "discord_command_denied",
+                channel_id = channel_id.get(),
+                user_id = msg.author.id.get(),
+                user_name = %msg.author.name,
+                command = cmd,
+                reason = "command_policy",
+                risk = ?risk,
+                "discord_command_denied"
             );
             let _ = msg.reply(&ctx.http, reply).await;
             return Ok(true);
@@ -217,12 +219,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                 return Ok(true);
             }
 
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ◀ [{}] !start path={}",
-                msg.author.name,
-                effective_path
-            );
+            log_command_received!(channel_id.get(), msg.author.name, "!start", path = %effective_path);
 
             let (ch_name, cat_name) =
                 resolve_channel_category(&ctx.http, Some(&ctx.cache), channel_id).await;
@@ -253,8 +250,11 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                 session.last_active = tokio::time::Instant::now();
             }
 
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!("  [{ts}] ▶ Session started: {}", effective_path);
+            log_info_event!(
+                "discord_session_started",
+                channel_id = channel_id.get(),
+                path = %effective_path,
+            );
             let _ = msg
                 .reply(&ctx.http, super::session_started_response(&effective_path))
                 .await;
@@ -279,11 +279,12 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                         agenda
                     };
 
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        "  [{ts}] ◀ [{}] !meeting start {}",
+                    log_command_received!(
+                        channel_id.get(),
                         msg.author.name,
-                        agenda_text
+                        "!meeting",
+                        action = "start",
+                        agenda = %agenda_text
                     );
 
                     let http = ctx.http.clone();
@@ -314,15 +315,12 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                         )
                         .await
                         {
-                            Ok(Some(id)) => {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                tracing::info!("  [{ts}] ✅ Meeting completed: {id}");
-                            }
+                            Ok(Some(id)) => log_info_event!(
+                                "discord_meeting_completed",
+                                meeting_id = %id,
+                            ),
                             Ok(None) => {}
-                            Err(e) => {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                tracing::info!("  [{ts}] ❌ Meeting error: {e}");
-                            }
+                            Err(e) => log_info_event!("discord_meeting_failed", reason = %e,),
                         }
                     });
                     return Ok(true);
@@ -341,8 +339,13 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                         let _ = msg.reply(&ctx.http, "사용법: `!meeting <안건>`").await;
                         return Ok(true);
                     }
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!("  [{ts}] ◀ [{}] !meeting {}", msg.author.name, full_agenda);
+                    log_command_received!(
+                        channel_id.get(),
+                        msg.author.name,
+                        "!meeting",
+                        action = "start",
+                        agenda = %full_agenda
+                    );
 
                     let http = ctx.http.clone();
                     let shared = data.shared.clone();
@@ -372,15 +375,12 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                         )
                         .await
                         {
-                            Ok(Some(id)) => {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                tracing::info!("  [{ts}] ✅ Meeting completed: {id}");
-                            }
+                            Ok(Some(id)) => log_info_event!(
+                                "discord_meeting_completed",
+                                meeting_id = %id,
+                            ),
                             Ok(None) => {}
-                            Err(e) => {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                tracing::info!("  [{ts}] ❌ Meeting error: {e}");
-                            }
+                            Err(e) => log_info_event!("discord_meeting_failed", reason = %e,),
                         }
                     });
                     return Ok(true);
@@ -448,8 +448,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
         }
 
         "!pwd" => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!("  [{ts}] ◀ [{}] !pwd", msg.author.name);
+            log_command_received!(channel_id.get(), msg.author.name, "!pwd");
 
             auto_restore_session(&data.shared, channel_id, ctx).await;
 
@@ -467,8 +466,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
         }
 
         "!health" => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!("  [{ts}] ◀ [{}] !health", msg.author.name);
+            log_command_received!(channel_id.get(), msg.author.name, "!health");
 
             let text = super::build_health_report(&data.shared, &data.provider, channel_id).await;
             send_long_message_raw(&ctx.http, channel_id, &text, &data.shared).await?;
@@ -476,8 +474,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
         }
 
         "!status" => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!("  [{ts}] ◀ [{}] !status", msg.author.name);
+            log_command_received!(channel_id.get(), msg.author.name, "!status");
 
             let text = super::build_status_report(&data.shared, &data.provider, channel_id).await;
             send_long_message_raw(&ctx.http, channel_id, &text, &data.shared).await?;
@@ -485,8 +482,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
         }
 
         "!inflight" => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!("  [{ts}] ◀ [{}] !inflight", msg.author.name);
+            log_command_received!(channel_id.get(), msg.author.name, "!inflight");
 
             let text = super::build_inflight_report(&data.shared, &data.provider, channel_id).await;
             send_long_message_raw(&ctx.http, channel_id, &text, &data.shared).await?;
@@ -494,8 +490,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
         }
 
         "!queue" => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!("  [{ts}] ◀ [{}] !queue", msg.author.name);
+            log_command_received!(channel_id.get(), msg.author.name, "!queue");
 
             let show_all = *arg1 == "all";
             let text =
@@ -505,8 +500,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
         }
 
         "!metrics" => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!("  [{ts}] ◀ [{}] !metrics", msg.author.name);
+            log_command_received!(channel_id.get(), msg.author.name, "!metrics");
 
             let metrics_data = if arg1.is_empty() {
                 super::super::metrics::load_today()
@@ -520,22 +514,24 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
         }
 
         "!debug" => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!("  [{ts}] ◀ [{}] !debug", msg.author.name);
+            log_command_received!(channel_id.get(), msg.author.name, "!debug");
 
             let new_state = crate::services::claude::toggle_debug();
             let status = if new_state { "ON" } else { "OFF" };
             let _ = msg
                 .reply(&ctx.http, format!("Debug logging: **{}**", status))
                 .await;
-            tracing::info!("  [{ts}] ▶ Debug logging toggled to {status}");
+            log_info_event!(
+                "discord_debug_logging_changed",
+                channel_id = channel_id.get(),
+                status = status,
+            );
             return Ok(true);
         }
 
         "!escalation" => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
             let rest = text.strip_prefix("!escalation").unwrap_or("").trim();
-            tracing::info!("  [{ts}] ◀ [{}] !escalation {}", msg.author.name, rest);
+            log_command_received!(channel_id.get(), msg.author.name, "!escalation", action = %rest);
 
             if !check_owner(msg.author.id, &data.shared).await {
                 let _ = msg
@@ -667,8 +663,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
         }
 
         "!help" => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!("  [{ts}] ◀ [{}] !help", msg.author.name);
+            log_command_received!(channel_id.get(), msg.author.name, "!help");
 
             let provider_name = data.provider.display_name();
             let claude_tui_settings = if matches!(
@@ -746,8 +741,7 @@ Any other message is sent to {p}.
         }
 
         "!allowedtools" => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!("  [{ts}] ◀ [{}] !allowedtools", msg.author.name);
+            log_command_received!(channel_id.get(), msg.author.name, "!allowedtools");
 
             let tools = {
                 let settings = data.shared.settings.read().await;
@@ -774,8 +768,7 @@ Any other message is sent to {p}.
         }
 
         "!allowed" => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!("  [{ts}] ◀ [{}] !allowed {}", msg.author.name, arg1);
+            log_command_received!(channel_id.get(), msg.author.name, "!allowed", action = %arg1);
 
             let arg = arg1.trim();
             let (op, raw_name) = if let Some(name) = arg.strip_prefix('+') {
@@ -837,8 +830,7 @@ Any other message is sent to {p}.
         }
 
         "!adduser" => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!("  [{ts}] ◀ [{}] !adduser {}", msg.author.name, arg1);
+            log_command_received!(channel_id.get(), msg.author.name, "!adduser", target_user = %arg1);
 
             if !check_owner(msg.author.id, &data.shared).await {
                 let _ = msg.reply(&ctx.http, "Only the owner can add users.").await;
@@ -878,13 +870,17 @@ Any other message is sent to {p}.
                     format!("Added `{}` as authorized user.", target_id),
                 )
                 .await;
-            tracing::info!("  [{ts}] ▶ Added user: {target_id}");
+            log_info_event!(
+                "discord_user_access_added",
+                channel_id = channel_id.get(),
+                user_id = target_id,
+                status = "added",
+            );
             return Ok(true);
         }
 
         "!allowall" => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!("  [{ts}] ◀ [{}] !allowall {}", msg.author.name, arg1);
+            log_command_received!(channel_id.get(), msg.author.name, "!allowall", enabled = %arg1);
 
             if !check_owner(msg.author.id, &data.shared).await {
                 let _ = msg
@@ -939,13 +935,16 @@ Any other message is sent to {p}.
             // Issue #1005: pin the policy reminder to the toggle response too.
             let combined = format!("{response}\n\n{}", super::build_allowall_policy_note());
             let _ = msg.reply(&ctx.http, combined).await;
-            tracing::info!("  [{ts}] ▶ {response}");
+            log_info_event!(
+                "discord_public_access_changed",
+                channel_id = channel_id.get(),
+                status = if enabled { "enabled" } else { "disabled" },
+            );
             return Ok(true);
         }
 
         "!removeuser" => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!("  [{ts}] ◀ [{}] !removeuser {}", msg.author.name, arg1);
+            log_command_received!(channel_id.get(), msg.author.name, "!removeuser", target_user = %arg1);
 
             if !check_owner(msg.author.id, &data.shared).await {
                 let _ = msg
@@ -994,14 +993,18 @@ Any other message is sent to {p}.
                     format!("Removed `{}` from authorized users.", target_id),
                 )
                 .await;
-            tracing::info!("  [{ts}] ▶ Removed user: {target_id}");
+            log_info_event!(
+                "discord_user_access_removed",
+                channel_id = channel_id.get(),
+                user_id = target_id,
+                status = "removed",
+            );
             return Ok(true);
         }
 
         "!down" => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
             let file_arg = text.strip_prefix("!down").unwrap_or("").trim();
-            tracing::info!("  [{ts}] ◀ [{}] !down {}", msg.author.name, file_arg);
+            log_command_received!(channel_id.get(), msg.author.name, "!down", path = %file_arg);
 
             if file_arg.is_empty() {
                 let _ = msg
@@ -1060,9 +1063,8 @@ Any other message is sent to {p}.
 
         "!shell" => {
             let cmd_str = text.strip_prefix("!shell").unwrap_or("").trim();
-            let ts = chrono::Local::now().format("%H:%M:%S");
             let preview = truncate_str(cmd_str, 60);
-            tracing::info!("  [{ts}] ◀ [{}] !shell {}", msg.author.name, preview);
+            log_command_received!(channel_id.get(), msg.author.name, "!shell", command_preview = %preview);
 
             if cmd_str.is_empty() {
                 let _ = msg
@@ -1206,12 +1208,11 @@ Any other message is sent to {p}.
                 }
                 _ => unreachable!("outer match arm guards command name"),
             };
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ◀ [{}] {} (kind={})",
+            log_command_received!(
+                channel_id.get(),
                 msg.author.name,
                 cmd,
-                kind.name()
+                recovery_kind = kind.name()
             );
             let script = build_recovery_script(&kind);
             let working_dir = dirs::home_dir()
@@ -1281,13 +1282,12 @@ Any other message is sent to {p}.
                 .strip_prefix(&skill)
                 .unwrap_or("")
                 .trim();
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ◀ [{}] {} {} {}",
+            log_command_received!(
+                channel_id.get(),
                 msg.author.name,
                 invoked_as,
-                skill,
-                args_str
+                skill = %skill,
+                args = %args_str
             );
 
             if skill.is_empty() {
@@ -1323,12 +1323,14 @@ Any other message is sent to {p}.
                         "!cc stop"
                     };
                     if let Some(reply) = alias_decision.denial_message(&stop_reason) {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::warn!(
-                            "  [{ts}] ⛔ CommandPolicy denied {} for {} (id:{})",
-                            stop_reason,
-                            msg.author.name,
-                            msg.author.id.get(),
+                            event = "discord_command_denied",
+                            channel_id = channel_id.get(),
+                            user_id = msg.author.id.get(),
+                            user_name = %msg.author.name,
+                            command = %stop_reason,
+                            reason = "command_policy",
+                            "discord_command_denied"
                         );
                         let _ = msg.reply(&ctx.http, reply).await;
                         return Ok(true);
