@@ -196,6 +196,119 @@ mod not_attempted_sentinel {
     }
 }
 
+mod confirmed_fresh_delivery {
+    use super::super::{
+        SessionBoundRelayAckOutcome, SessionBoundRelayAckTarget,
+        session_bound_ack_confirms_transport, session_bound_ack_delivery_outcome,
+        session_bound_relay_ack_snapshot_outcome,
+        watcher_should_direct_send_after_session_bound_ack,
+    };
+    use crate::services::cluster::stream_relay::{DeliveryOutcome, RelayMetrics};
+    use std::sync::Arc;
+
+    fn target(metrics: Arc<RelayMetrics>, sequence: u64) -> SessionBoundRelayAckTarget {
+        SessionBoundRelayAckTarget {
+            metrics,
+            sequence,
+            turn_start_offset: Some(100),
+        }
+    }
+
+    #[test]
+    fn delivered_and_fresh_delivered_both_own_terminal_delivery() {
+        assert!(session_bound_ack_confirms_transport(
+            SessionBoundRelayAckOutcome::Delivered
+        ));
+        assert!(session_bound_ack_confirms_transport(
+            SessionBoundRelayAckOutcome::FreshDelivered {
+                committed_to: None,
+                persistence_recorded: false,
+            }
+        ));
+        assert!(!session_bound_ack_confirms_transport(
+            SessionBoundRelayAckOutcome::NotDelivered
+        ));
+    }
+
+    #[test]
+    fn exact_fresh_resolution_suppresses_same_process_fallback_for_all_metadata_shapes() {
+        for (sequence, committed_to, persistence_recorded) in [
+            (41, Some(200), true),
+            (42, Some(200), false),
+            (43, None, true),
+            (44, None, false),
+        ] {
+            let metrics = Arc::new(RelayMetrics::default());
+            metrics.record_terminal_outcome(
+                sequence,
+                DeliveryOutcome::FreshDelivered {
+                    committed_to,
+                    persistence_recorded,
+                },
+            );
+            let ack = session_bound_relay_ack_snapshot_outcome(Some(&target(metrics, sequence)))
+                .expect("fresh resolution must resolve its exact ACK");
+            assert_eq!(
+                ack,
+                SessionBoundRelayAckOutcome::FreshDelivered {
+                    committed_to,
+                    persistence_recorded,
+                }
+            );
+            assert!(
+                !watcher_should_direct_send_after_session_bound_ack(true, ack, true),
+                "confirmed fresh transport must suppress SendFull even without a frontier or persistence record"
+            );
+        }
+    }
+
+    #[test]
+    fn fresh_resolution_is_exact_sequence_and_does_not_suppress_neighbors() {
+        let metrics = Arc::new(RelayMetrics::default());
+        metrics.record_terminal_outcome(
+            50,
+            DeliveryOutcome::FreshDelivered {
+                committed_to: None,
+                persistence_recorded: false,
+            },
+        );
+        metrics.record_terminal_outcome(51, DeliveryOutcome::NotDelivered);
+
+        assert!(matches!(
+            session_bound_relay_ack_snapshot_outcome(Some(&target(metrics.clone(), 50))),
+            Some(SessionBoundRelayAckOutcome::FreshDelivered { .. })
+        ));
+        let neighbor = session_bound_relay_ack_snapshot_outcome(Some(&target(metrics, 51)))
+            .expect("neighbor resolution");
+        assert_eq!(neighbor, SessionBoundRelayAckOutcome::NotDelivered);
+        assert!(watcher_should_direct_send_after_session_bound_ack(
+            true, neighbor, true
+        ));
+    }
+
+    #[test]
+    fn actual_failures_keep_existing_reconciliation_intent() {
+        for ack in [
+            SessionBoundRelayAckOutcome::NotDelivered,
+            SessionBoundRelayAckOutcome::RingUnknown,
+            SessionBoundRelayAckOutcome::Dropped,
+            SessionBoundRelayAckOutcome::SinkError,
+            SessionBoundRelayAckOutcome::TimedOut,
+            SessionBoundRelayAckOutcome::MissingTarget,
+        ] {
+            assert!(
+                watcher_should_direct_send_after_session_bound_ack(true, ack, true),
+                "{ack:?} must retain the existing SendFull-or-Skip reconciliation path"
+            );
+        }
+        assert_eq!(
+            session_bound_ack_delivery_outcome(SessionBoundRelayAckOutcome::SinkError),
+            DeliveryOutcome::Unknown,
+            "a Permanent sink error remains an unconfirmed sink error, never fresh confirmation"
+        );
+    }
+}
+
 /// #3151: the deterministic decision seam for the in-flight sink-delivery
 /// marker gate (`watcher_terminal_resend_action_gated`). Table-drives the gate
 /// over every lease-snapshot variant and asserts the reclaim side-effect flag.

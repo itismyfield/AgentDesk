@@ -50,6 +50,10 @@ use super::supervisor_relay::SessionBoundRelayAckTarget;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SessionBoundRelayAckOutcome {
     Delivered,
+    FreshDelivered {
+        committed_to: Option<u64>,
+        persistence_recorded: bool,
+    },
     NotDelivered,
     RingUnknown,
     Dropped,
@@ -73,6 +77,13 @@ pub(super) fn session_bound_ack_delivery_outcome(
     use crate::services::cluster::stream_relay::DeliveryOutcome;
     match ack_outcome {
         SessionBoundRelayAckOutcome::Delivered => DeliveryOutcome::Delivered,
+        SessionBoundRelayAckOutcome::FreshDelivered {
+            committed_to,
+            persistence_recorded,
+        } => DeliveryOutcome::FreshDelivered {
+            committed_to,
+            persistence_recorded,
+        },
         SessionBoundRelayAckOutcome::NotDelivered => DeliveryOutcome::NotDelivered,
         SessionBoundRelayAckOutcome::RingUnknown
         | SessionBoundRelayAckOutcome::Dropped
@@ -111,6 +122,15 @@ pub(super) fn session_bound_relay_ack_snapshot_outcome(
     {
         Some(DeliveryOutcome::Delivered) => {
             return Some(SessionBoundRelayAckOutcome::Delivered);
+        }
+        Some(DeliveryOutcome::FreshDelivered {
+            committed_to,
+            persistence_recorded,
+        }) => {
+            return Some(SessionBoundRelayAckOutcome::FreshDelivered {
+                committed_to,
+                persistence_recorded,
+            });
         }
         Some(DeliveryOutcome::NotDelivered) => {
             return Some(SessionBoundRelayAckOutcome::NotDelivered);
@@ -171,11 +191,20 @@ pub(super) fn session_bound_ack_outcome_after_resolve_time_mirror_check(
         return ack_outcome;
     }
     *turn_fully_mirrored = false;
-    if matches!(ack_outcome, SessionBoundRelayAckOutcome::Delivered) {
+    if session_bound_ack_confirms_transport(ack_outcome) {
         SessionBoundRelayAckOutcome::Dropped
     } else {
         ack_outcome
     }
+}
+
+pub(super) fn session_bound_ack_confirms_transport(
+    ack_outcome: SessionBoundRelayAckOutcome,
+) -> bool {
+    matches!(
+        ack_outcome,
+        SessionBoundRelayAckOutcome::Delivered | SessionBoundRelayAckOutcome::FreshDelivered { .. }
+    )
 }
 
 pub(super) fn watcher_should_direct_send_after_session_bound_ack(
@@ -183,7 +212,6 @@ pub(super) fn watcher_should_direct_send_after_session_bound_ack(
     ack_outcome: SessionBoundRelayAckOutcome,
     relay_owner_present: bool,
 ) -> bool {
-    use crate::services::cluster::stream_relay::DeliveryOutcome;
     // #3042 (relay-stability P1, OBSOLETE band-aid — removed by #3041 P1-5): #3042
     // early-`return false`d an ownerless (post-restart restore_inflight gap)
     // `TimedOut` to blanket-suppress the watcher-direct fallback (rationale: the sink
@@ -210,11 +238,7 @@ pub(super) fn watcher_should_direct_send_after_session_bound_ack(
     // is masked downstream by `watcher_terminal_resend_action` (committed-offset
     // reconciliation), so neither gets a blind skip (NotDelivered) nor a blind
     // re-send (Unknown). §3.2 SAFETY INVARIANT.
-    should_direct_send
-        && !matches!(
-            session_bound_ack_delivery_outcome(ack_outcome),
-            DeliveryOutcome::Delivered
-        )
+    should_direct_send && !session_bound_ack_confirms_transport(ack_outcome)
 }
 
 /// #3041 P1-3 (Part b, §3.2): the watcher's terminal re-send DECISION after a

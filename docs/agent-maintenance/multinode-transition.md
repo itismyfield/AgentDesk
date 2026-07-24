@@ -446,6 +446,11 @@
   before merging.
 
 ### Audited touches
+- 2026-07-24 — #4623 confirmed fresh-delivery cutover: the session sink preserves
+  transport-confirmed fresh outcomes through the process-local exact-sequence ring
+  and watcher ACK instead of folding them into sink errors. Existing shared delivery
+  leases and durable frontier authority remain unchanged; this adds no PostgreSQL
+  schema, leader election, worker placement, or cross-node adoption rule.
 - #4488 PR-F destructive E2E controls are worker-local and opt-in: exact-message deletion and one-shot send/delete failure injection resolve the provider runtime registered on the receiving dcserver; the route subtree remains unmounted unless `AGENTDESK_E2E_CONTROL=1`, and every target must be in the boot-bound `AGENTDESK_E2E_CHANNEL_IDS` allowlist. They add no PostgreSQL authority, leader election, lease, worker placement, or cross-node routing rule; the harness targets the node-local loopback control plane for the owning E2E cell.
 - 2026-07-24 — #4536 idle JSONL cursor/commit boundary: temporary active/grace
   suppression now holds uncommitted ordered ranges, and only generation/EOF-checked

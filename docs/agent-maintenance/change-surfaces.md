@@ -1999,9 +1999,6 @@ these contextual numbers to match ordinary LoC churn.
   from #3864 moving SIGTERM queue-restore merge inside the mailbox actor; +10
   from #4018 round-2 adding the distinct `MonitorAutoTurn` active-turn marker
   while keeping monitor turns background for queue-yield/cancel semantics).
-- `src/services/cluster/stream_relay.rs` (tracked giant surface; #4536 carries the
-  ordered idle JSONL range plus wrapper-generation coordinate through the existing
-  producer queue/consumer protocol; keep per `scripts/giant_file_registry.toml`).
 - `src/services/discord/session_relay_sink.rs` (frozen giant surface; +1 from #4046
   S1r-1 conservatively rejecting the dormant fresh-send-only outcome at this
   replace-only caller; -59 from #3998 S1-f2 retiring the A2b rollout getter/cache
@@ -2015,7 +2012,9 @@ these contextual numbers to match ordinary LoC churn.
   until a generation-scoped confirmed delivery commits the durable frontier).
 
 Decomposed below the giant-file threshold (no longer frozen; bugfix-scoped but
-normal test growth is allowed): `src/services/analytics.rs`,
+normal test growth is allowed): `src/services/cluster/stream_relay.rs` (#4623:
+typed terminal resolutions moved to `stream_relay/terminal_resolution.rs`),
+`src/services/analytics.rs`,
 `src/services/provider_hosting.rs`, `src/services/claude_tui/hook_bundle.rs`,
 `src/services/observability/mod.rs`, `src/services/pipeline_override.rs`,
 `src/services/routines/loader.rs`, `src/services/platform/shell.rs`,

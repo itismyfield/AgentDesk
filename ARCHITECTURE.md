@@ -421,7 +421,8 @@ src/
 │   │   │   ├── owner_record.rs
 │   │   │   └── session_owner.rs
 │   │   ├── stream_relay/
-│   │   │   └── identity.rs
+│   │   │   ├── identity.rs
+│   │   │   └── terminal_resolution.rs
 │   │   ├── capability_routing.rs
 │   │   ├── intake_preflight.rs
 │   │   ├── intake_router_hook.rs

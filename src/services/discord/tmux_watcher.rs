@@ -1556,7 +1556,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 );
                 session_bound_ack_outcome = ack_outcome;
                 let delivered = session_bound_relay_turn_fully_mirrored
-                    && matches!(ack_outcome, SessionBoundRelayAckOutcome::Delivered);
+                    && session_bound_ack_confirms_transport(ack_outcome);
                 if !delivered {
                     tracing::warn!(
                         provider = watcher_provider.as_str(),

@@ -871,13 +871,14 @@ impl SessionBoundDiscordRelaySink {
                 );
                 Ok(SessionRelayDeliveryOutcome::Delivered)
             }
-            // #4046 S1r-1 P2: FreshDelivered is a confirmed cross-verb POST (dormant
-            // here); its `Permanent` mapping is a non-retry INTENT marker only and does
-            // NOT itself prevent a duplicate POST — the sink consumer is
-            // error-variant-blind (see `delivery_outcome_classify` doc + #4623). Others
-            // are uncommitted → retriable. Classified out-of-line (frozen #3016 giant).
-            non_delivery @ (toc::DeliveryOutcome::FreshDelivered { .. }
-            | toc::DeliveryOutcome::Transient { .. }
+            toc::DeliveryOutcome::FreshDelivered {
+                committed_to,
+                persistence_recorded,
+            } => Ok(SessionRelayDeliveryOutcome::FreshDelivered {
+                committed_to,
+                persistence_recorded,
+            }),
+            non_delivery @ (toc::DeliveryOutcome::Transient { .. }
             | toc::DeliveryOutcome::Unknown { .. }
             | toc::DeliveryOutcome::Skipped) => Err(
                 delivery_outcome_classify::short_replace_non_delivery_error(&non_delivery),
@@ -1324,6 +1325,10 @@ impl SessionBoundDiscordRelaySink {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionRelayDeliveryOutcome {
     Delivered,
+    FreshDelivered {
+        committed_to: Option<u64>,
+        persistence_recorded: bool,
+    },
     SentButUncommitted,
     NotDelivered,
 }
@@ -1339,6 +1344,7 @@ impl RelaySink for SessionBoundDiscordRelaySink {
         // (inline in `deliver_response`) — outcome and advance are decoupled.
         let deliveries = self.ingest_frame(frame);
         let mut terminal_delivered = false;
+        let mut terminal_fresh_delivered = None;
         let mut terminal_not_delivered = false;
         for delivery in deliveries {
             match self.deliver_response(delivery).await {
@@ -1346,6 +1352,12 @@ impl RelaySink for SessionBoundDiscordRelaySink {
                     // #3041 P1-3 (B1 CLOSED): the offset advance is owned INLINE by
                     // `deliver_response` — see `advance_after_confirmed_post`.
                     terminal_delivered = true;
+                }
+                Ok(SessionRelayDeliveryOutcome::FreshDelivered {
+                    committed_to,
+                    persistence_recorded,
+                }) => {
+                    terminal_fresh_delivered = Some((committed_to, persistence_recorded));
                 }
                 Ok(SessionRelayDeliveryOutcome::SentButUncommitted) => {
                     return Ok(RelaySinkOutcome::TerminalUnknown);
@@ -1362,6 +1374,11 @@ impl RelaySink for SessionBoundDiscordRelaySink {
         // #3041 P1-5: NO `TerminalUnknown` (the sink always KNOWS its result).
         if terminal_delivered {
             Ok(RelaySinkOutcome::TerminalDelivered)
+        } else if let Some((committed_to, persistence_recorded)) = terminal_fresh_delivered {
+            Ok(RelaySinkOutcome::TerminalFreshDelivered {
+                committed_to,
+                persistence_recorded,
+            })
         } else if terminal_not_delivered {
             Ok(RelaySinkOutcome::TerminalNotDelivered)
         } else {
