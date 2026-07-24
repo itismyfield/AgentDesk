@@ -1503,17 +1503,18 @@ fn normalize_codex_active_turn_marker(marker: &str) -> String {
         return marker.to_string();
     }
 
-    format!("{}(<elapsed> {}", &marker[..open_paren], &marker[elapsed_end..])
+    format!(
+        "{}(<elapsed> {}",
+        &marker[..open_paren],
+        &marker[elapsed_end..]
+    )
 }
 
 fn codex_elapsed_time_component(candidate: &str) -> bool {
     let mut rest = candidate;
     let mut components = 0;
     for suffix in ['h', 'm', 's'] {
-        let digits = rest
-            .chars()
-            .take_while(|ch| ch.is_ascii_digit())
-            .count();
+        let digits = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
         if digits == 0 {
             continue;
         }

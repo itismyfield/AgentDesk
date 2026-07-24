@@ -1921,7 +1921,7 @@ mod tests {
                 tmux_session_name: None,
                 discord_origin_prompt: None,
                 pane_busy_probe: None,
-            pane_busy_veto_cap: Duration::from_secs(DEFAULT_PANE_BUSY_VETO_CAP_SECS),
+                pane_busy_veto_cap: Duration::from_secs(DEFAULT_PANE_BUSY_VETO_CAP_SECS),
             },
         )
         .unwrap();
@@ -1984,7 +1984,7 @@ mod tests {
                 tmux_session_name: None,
                 discord_origin_prompt: None,
                 pane_busy_probe: None,
-            pane_busy_veto_cap: Duration::from_secs(DEFAULT_PANE_BUSY_VETO_CAP_SECS),
+                pane_busy_veto_cap: Duration::from_secs(DEFAULT_PANE_BUSY_VETO_CAP_SECS),
             },
         )
         .unwrap();
