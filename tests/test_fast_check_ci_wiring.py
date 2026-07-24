@@ -18,6 +18,7 @@ NIGHTLY_WORKFLOW = REPO_ROOT / ".github/workflows/ci-nightly.yml"
 EXPECTED_TEST_NON_PG_COMMANDS = (
     "cargo test --lib source_registry -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib task_notification -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib delivery_lease_key -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib tui_task_card::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib server::routes::message_outbox::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib discord_thread_create -- --test-threads=1",
@@ -159,6 +160,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
         )
         self.assertIn(
             '"$PYTHON" -m unittest tests.test_fast_check_ci_wiring', script
+        )
+        self.assertIn('"$PYTHON" scripts/check_test_lane_coverage.py', script)
+        self.assertIn(
+            '"$PYTHON" -m unittest tests.test_test_lane_coverage', script
         )
 
 

@@ -449,15 +449,13 @@ mod request_body_tests {
     const TEST_MEMENTO_ACCESS_KEY_ENV: &str = "ADK_TEST_MEMENTO_ACCESS_KEY_3743";
 
     struct TestEnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
         saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
     }
 
     impl TestEnvGuard {
         fn new(names: &[&'static str]) -> Self {
-            let lock = crate::config::shared_test_env_lock()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
             let saved = names
                 .iter()
                 .map(|name| (*name, std::env::var_os(name)))
