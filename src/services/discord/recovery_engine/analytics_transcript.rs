@@ -96,6 +96,7 @@ pub(super) async fn persist_recovered_transcript(
             assistant_message,
             events: &[],
             duration_ms: None,
+            turn_started_at_millis: None,
         },
     )
     .await

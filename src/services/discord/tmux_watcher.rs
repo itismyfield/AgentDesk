@@ -3138,6 +3138,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         assistant_message: &full_response,
                         events: &tool_state.transcript_events,
                         duration_ms: inflight_duration_ms(Some(state.started_at.as_str())),
+                        turn_started_at_millis: Some(user_msg_id.created_at().timestamp_millis()),
                     },
                 )
                 .await

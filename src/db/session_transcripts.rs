@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use std::future::Future;
 
 use crate::db::session_agent_resolution::resolve_agent_id_for_session_pg;
@@ -66,6 +66,9 @@ pub struct PersistSessionTranscript<'a> {
     pub assistant_message: &'a str,
     pub events: &'a [SessionTranscriptEvent],
     pub duration_ms: Option<i64>,
+    /// Unix timestamp (milliseconds) used to fence interactive turns against `/clear`.
+    /// `None` preserves persistence for callers that do not represent user turns.
+    pub turn_started_at_millis: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +90,13 @@ pub(crate) async fn record_channel_clear_boundary(
         ));
     }
 
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| anyhow!("begin channel clear boundary transaction failed: {error}"))?;
+    lock_channel_transcript_clear_fence(&mut tx, channel_id)
+        .await
+        .map_err(|error| anyhow!("lock channel clear boundary failed: {error}"))?;
     sqlx::query(
         "INSERT INTO channel_session_clear_boundaries (channel_id, cleared_at)
          VALUES ($1, NOW())
@@ -97,9 +107,12 @@ pub(crate) async fn record_channel_clear_boundary(
              )",
     )
     .bind(channel_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|error| anyhow!("record channel clear boundary failed: {error}"))?;
+    tx.commit()
+        .await
+        .map_err(|error| anyhow!("commit channel clear boundary failed: {error}"))?;
 
     Ok(())
 }
@@ -266,11 +279,99 @@ pub async fn persist_turn_db(
         return Ok(false);
     };
 
-    persist_turn_pg(pool, &prepared).await?;
+    let Some(channel_id) = prepared.channel_id.as_deref() else {
+        persist_turn_pg(pool, &prepared).await?;
+        return Ok(true);
+    };
+    let Some(turn_started_at) = entry
+        .turn_started_at_millis
+        .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
+    else {
+        persist_turn_pg(pool, &prepared).await?;
+        return Ok(true);
+    };
+
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            tracing::warn!(
+                channel_id,
+                error = %error,
+                "transcript clear-fence transaction unavailable; preserving legacy persistence"
+            );
+            persist_turn_pg(pool, &prepared).await?;
+            return Ok(true);
+        }
+    };
+    if let Err(error) = lock_channel_transcript_clear_fence(&mut tx, channel_id).await {
+        tracing::warn!(
+            channel_id,
+            error = %error,
+            "transcript clear-fence lock unavailable; preserving legacy persistence"
+        );
+        drop(tx);
+        persist_turn_pg(pool, &prepared).await?;
+        return Ok(true);
+    }
+
+    let boundary = sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+        "SELECT cleared_at FROM channel_session_clear_boundaries WHERE channel_id = $1",
+    )
+    .bind(channel_id)
+    .fetch_optional(&mut *tx)
+    .await;
+    let should_skip = match boundary {
+        Ok(Some(Some(cleared_at))) => turn_started_at <= cleared_at,
+        Ok(_) => false,
+        Err(error) => {
+            tracing::warn!(
+                channel_id,
+                error = %error,
+                "transcript clear-boundary lookup unavailable; preserving legacy persistence"
+            );
+            tx.rollback().await.map_err(|rollback_error| {
+                anyhow!(
+                    "rollback failed after clear-boundary lookup error ({error}): {rollback_error}"
+                )
+            })?;
+            persist_turn_pg(pool, &prepared).await?;
+            return Ok(true);
+        }
+    };
+    if should_skip {
+        tx.rollback().await.map_err(|error| {
+            anyhow!("rollback pre-clear transcript transaction failed: {error}")
+        })?;
+        return Ok(false);
+    }
+
+    persist_turn_pg_on(&mut *tx, &prepared).await?;
+    tx.commit()
+        .await
+        .map_err(|error| anyhow!("commit postgres transcript failed: {error}"))?;
     Ok(true)
 }
 
+async fn lock_channel_transcript_clear_fence(
+    tx: &mut Transaction<'_, Postgres>,
+    channel_id: &str,
+) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(4533, hashtext($1))")
+        .bind(channel_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| anyhow!("channel transcript clear fence lock failed: {error}"))?;
+    Ok(())
+}
+
 async fn persist_turn_pg(pool: &PgPool, entry: &PreparedSessionTranscript) -> Result<()> {
+    persist_turn_pg_on(pool, entry).await
+}
+
+async fn persist_turn_pg_on<'e, E>(executor: E, entry: &PreparedSessionTranscript) -> Result<()>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     sqlx::query(
         "INSERT INTO session_transcripts (
             turn_id,
@@ -305,7 +406,7 @@ async fn persist_turn_pg(pool: &PgPool, entry: &PreparedSessionTranscript) -> Re
     .bind(&entry.assistant_message)
     .bind(&entry.events_json)
     .bind(entry.duration_ms)
-    .execute(pool)
+    .execute(executor)
     .await
     .map_err(|e| anyhow!("persist postgres transcript failed: {e}"))?;
     Ok(())
@@ -693,5 +794,139 @@ mod tests {
 
         assert_eq!(pairs[0].user_message, "lower-id-at-tied-time");
         assert_eq!(pairs[1].user_message, "higher-id-at-tied-time");
+    }
+}
+
+#[cfg(test)]
+mod clear_fence_pg_tests {
+    use super::*;
+
+    async fn create_pool() -> (
+        crate::dispatch::test_support::DispatchPostgresTestDb,
+        PgPool,
+    ) {
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_transcript_clear_fence_4533",
+            "session transcript clear fence",
+        )
+        .await;
+        let pool = db.connect_and_migrate_with_max_connections(4).await;
+        (db, pool)
+    }
+
+    fn entry<'a>(
+        turn_id: &'a str,
+        channel_id: &'a str,
+        turn_started_at_millis: i64,
+    ) -> PersistSessionTranscript<'a> {
+        PersistSessionTranscript {
+            turn_id,
+            session_key: Some("clear-fence-session"),
+            channel_id: Some(channel_id),
+            agent_id: None,
+            provider: Some("claude"),
+            dispatch_id: None,
+            user_message: "secret before clear",
+            assistant_message: "private answer",
+            events: &[],
+            duration_ms: None,
+            turn_started_at_millis: Some(turn_started_at_millis),
+        }
+    }
+
+    async fn channel_pairs(pool: &PgPool, channel_id: &str) -> Vec<ChannelTranscriptPair> {
+        fetch_recent_channel_pairs(pool, channel_id, 10)
+            .await
+            .expect("fetch recent pairs")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pre_clear_turn_committed_after_boundary_is_not_reinjected_pg() {
+        let (db, pool) = create_pool().await;
+        let channel_id = "4533001";
+        let turn_started_at = chrono::Utc::now() - chrono::Duration::minutes(1);
+        record_channel_clear_boundary(Some(&pool), channel_id)
+            .await
+            .expect("record clear boundary");
+
+        let stored = persist_turn_db(
+            Some(&pool),
+            entry("pre-clear", channel_id, turn_started_at.timestamp_millis()),
+        )
+        .await
+        .expect("persist pre-clear transcript");
+
+        assert!(
+            !stored,
+            "pre-clear turn must be rejected after the boundary commits"
+        );
+        assert!(
+            channel_pairs(&pool, channel_id).await.is_empty(),
+            "recent-pairs injection must not observe the rejected pre-clear turn"
+        );
+        pool.close().await;
+        db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn post_clear_turn_persists_and_is_reinjected_pg() {
+        let (db, pool) = create_pool().await;
+        let channel_id = "4533002";
+        record_channel_clear_boundary(Some(&pool), channel_id)
+            .await
+            .expect("record clear boundary");
+        let turn_started_at = chrono::Utc::now() + chrono::Duration::seconds(1);
+
+        let stored = persist_turn_db(
+            Some(&pool),
+            entry("post-clear", channel_id, turn_started_at.timestamp_millis()),
+        )
+        .await
+        .expect("persist post-clear transcript");
+
+        assert!(stored, "turns started after /clear must persist normally");
+        let pairs = channel_pairs(&pool, channel_id).await;
+        assert_eq!(pairs.len(), 1, "post-clear turn must remain injectable");
+        assert_eq!(pairs[0].user_message, "secret before clear");
+        pool.close().await;
+        db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn boundary_lookup_failure_preserves_legacy_persist_pg() {
+        let (db, pool) = create_pool().await;
+        let channel_id = "4533003";
+        sqlx::query(
+            "ALTER TABLE channel_session_clear_boundaries RENAME TO channel_session_clear_boundaries_unavailable",
+        )
+        .execute(&pool)
+        .await
+        .expect("hide boundary table");
+
+        let stored = persist_turn_db(
+            Some(&pool),
+            entry(
+                "lookup-failure",
+                channel_id,
+                chrono::Utc::now().timestamp_millis(),
+            ),
+        )
+        .await
+        .expect("fall back to legacy transcript persistence");
+
+        assert!(
+            stored,
+            "boundary lookup failure must preserve existing behavior"
+        );
+        let row_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM session_transcripts WHERE channel_id = $1",
+        )
+        .bind(channel_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count persisted transcript");
+        assert_eq!(row_count, 1);
+        pool.close().await;
+        db.drop().await;
     }
 }

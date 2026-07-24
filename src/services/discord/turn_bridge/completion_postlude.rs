@@ -535,6 +535,7 @@ pub(super) async fn run_completion_postlude(
                 assistant_message: &full_response,
                 events: &transcript_events,
                 duration_ms: Some(turn_duration_ms(turn_start)),
+                turn_started_at_millis: None,
             },
         )
         .await
