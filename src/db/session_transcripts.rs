@@ -798,6 +798,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)] // Test-only PostgreSQL setup and assertions intentionally fail fast.
 mod clear_fence_pg_tests {
     use super::*;
 
@@ -837,7 +838,7 @@ mod clear_fence_pg_tests {
     async fn channel_pairs(pool: &PgPool, channel_id: &str) -> Vec<ChannelTranscriptPair> {
         fetch_recent_channel_pairs(pool, channel_id, 10)
             .await
-            .expect("fetch recent pairs")
+            .expect("fetch recent pairs"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -847,14 +848,14 @@ mod clear_fence_pg_tests {
         let turn_started_at = chrono::Utc::now() - chrono::Duration::minutes(1);
         record_channel_clear_boundary(Some(&pool), channel_id)
             .await
-            .expect("record clear boundary");
+            .expect("record clear boundary"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
 
         let stored = persist_turn_db(
             Some(&pool),
             entry("pre-clear", channel_id, turn_started_at.timestamp_millis()),
         )
         .await
-        .expect("persist pre-clear transcript");
+        .expect("persist pre-clear transcript"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
 
         assert!(
             !stored,
@@ -874,7 +875,7 @@ mod clear_fence_pg_tests {
         let channel_id = "4533002";
         record_channel_clear_boundary(Some(&pool), channel_id)
             .await
-            .expect("record clear boundary");
+            .expect("record clear boundary"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
         let turn_started_at = chrono::Utc::now() + chrono::Duration::seconds(1);
 
         let stored = persist_turn_db(
@@ -882,7 +883,7 @@ mod clear_fence_pg_tests {
             entry("post-clear", channel_id, turn_started_at.timestamp_millis()),
         )
         .await
-        .expect("persist post-clear transcript");
+        .expect("persist post-clear transcript"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
 
         assert!(stored, "turns started after /clear must persist normally");
         let pairs = channel_pairs(&pool, channel_id).await;
@@ -901,7 +902,7 @@ mod clear_fence_pg_tests {
         )
         .execute(&pool)
         .await
-        .expect("hide boundary table");
+        .expect("hide boundary table"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
 
         let stored = persist_turn_db(
             Some(&pool),
@@ -912,7 +913,7 @@ mod clear_fence_pg_tests {
             ),
         )
         .await
-        .expect("fall back to legacy transcript persistence");
+        .expect("fall back to legacy transcript persistence"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
 
         assert!(
             stored,
@@ -924,7 +925,7 @@ mod clear_fence_pg_tests {
         .bind(channel_id)
         .fetch_one(&pool)
         .await
-        .expect("count persisted transcript");
+        .expect("count persisted transcript"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
         assert_eq!(row_count, 1);
         pool.close().await;
         db.drop().await;
