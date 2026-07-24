@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn evaluate_liveness_probe(
+pub(crate) fn evaluate_liveness_probe(
     marker_present: bool,
     pane_alive: bool,
 ) -> LivenessProbeOutcome {
@@ -11,7 +11,7 @@ pub(super) fn evaluate_liveness_probe(
     }
 }
 
-pub(super) async fn probe_tmux_session_liveness(tmux_session_name: &str) -> bool {
+pub(crate) async fn probe_tmux_session_liveness(tmux_session_name: &str) -> bool {
     let marker_path = crate::services::tmux_common::session_dead_marker_path(tmux_session_name);
     let marker_present = std::path::Path::new(&marker_path).exists();
 
@@ -40,11 +40,11 @@ pub(super) async fn probe_tmux_session_liveness(tmux_session_name: &str) -> bool
     }
 }
 
-pub(super) fn watcher_output_file_offset(output_path: &str) -> Option<u64> {
+pub(crate) fn watcher_output_file_offset(output_path: &str) -> Option<u64> {
     std::fs::metadata(output_path).ok().map(|meta| meta.len())
 }
 
-pub(super) fn cancel_suppression_applies_to_watcher_death(
+pub(crate) fn cancel_suppression_applies_to_watcher_death(
     cancel_induced_candidate: bool,
     terminal_delivery_observed: bool,
 ) -> bool {
@@ -69,7 +69,7 @@ pub(super) fn cancel_suppression_applies_to_watcher_death(
 /// - A pane death does NOT start a fresh session: the DB `claude_session_id`
 ///   persists and the next message resumes the conversation with `--resume`,
 ///   so "start a new session" was incorrect for every death that reached it.
-pub(super) fn tmux_death_should_attempt_restart_handoff(
+pub(crate) fn tmux_death_should_attempt_restart_handoff(
     cancel_induced: bool,
     prompt_too_long_killed: bool,
     terminal_delivery_observed: bool,
@@ -82,7 +82,7 @@ pub(super) fn tmux_death_should_attempt_restart_handoff(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn handle_tmux_watcher_observed_death(
+pub(crate) async fn handle_tmux_watcher_observed_death(
     channel_id: ChannelId,
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,

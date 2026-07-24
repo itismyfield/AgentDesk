@@ -6,7 +6,7 @@ pub(in crate::services::discord) fn recovery_handled_channel_exists(
 ) -> bool {
     let key = recovery_handled_channel_key(channel_id);
 
-    if let Ok(value) = super::super::internal_api::get_kv_value(&key) {
+    if let Ok(value) = super::super::super::internal_api::get_kv_value(&key) {
         return value.is_some();
     }
 
@@ -48,7 +48,7 @@ pub(in crate::services::discord) async fn store_recovery_handled_channels(
     let mut stored_via_internal_api = true;
     for channel_id in channel_ids {
         let key = recovery_handled_channel_key(*channel_id);
-        if let Err(error) = super::super::internal_api::set_kv_value(&key, &marker_value) {
+        if let Err(error) = super::super::super::internal_api::set_kv_value(&key, &marker_value) {
             tracing::debug!(
                 "recovery handled marker fallback for {key}: direct runtime API unavailable: {error}"
             );
@@ -98,7 +98,9 @@ pub(in crate::services::discord) async fn store_recovery_handled_channels(
 }
 
 pub(in crate::services::discord) async fn clear_recovery_handled_channels(shared: &SharedData) {
-    if let Err(error) = super::super::internal_api::clear_kv_prefix("recovery_handled_channel:") {
+    if let Err(error) =
+        super::super::super::internal_api::clear_kv_prefix("recovery_handled_channel:")
+    {
         tracing::debug!(
             "recovery handled marker clear fallback: direct runtime API unavailable: {error}"
         );
@@ -120,7 +122,7 @@ pub(in crate::services::discord) async fn clear_recovery_handled_channels(shared
     let _ = shared;
 }
 
-pub(super) async fn clear_provider_session_for_retry(
+pub(crate) async fn clear_provider_session_for_retry(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
     tmux_session_name: &str,
@@ -144,9 +146,10 @@ pub(super) async fn clear_provider_session_for_retry(
         crate::services::platform::hostname_short(),
         tmux_session_name
     );
-    super::super::adk_session::clear_provider_session_id(&session_key, shared.api_port).await;
+    super::super::super::adk_session::clear_provider_session_id(&session_key, shared.api_port)
+        .await;
 
     if let Some(sid) = stale_sid {
-        let _ = super::super::internal_api::clear_stale_session_id(&sid).await;
+        let _ = super::super::super::internal_api::clear_stale_session_id(&sid).await;
     }
 }

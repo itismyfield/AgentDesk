@@ -180,7 +180,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         // Resolve thread parent so validation uses the same semantics
         // as normal message routing (router.rs).
         let (allowlist_channel_id, provider_channel_name) = if let Some((pid, pname)) =
-            super::super::resolve_thread_parent(http, *channel_id).await
+            super::super::super::resolve_thread_parent(http, *channel_id).await
         {
             (pid, pname.unwrap_or_else(|| channel_name.clone()))
         } else {
@@ -203,7 +203,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             continue;
         }
 
-        if let Some(started) = super::super::mailbox_snapshot(&shared, *channel_id)
+        if let Some(started) = super::super::super::mailbox_snapshot(&shared, *channel_id)
             .await
             .recovery_started_at
         {
@@ -242,7 +242,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                     "  [{ts}] ✅ recovery_done signal observed for {} — proceeding with watcher restore",
                     session_name
                 );
-                super::super::mailbox_clear_recovery_marker(&shared, *channel_id).await;
+                super::super::super::mailbox_clear_recovery_marker(&shared, *channel_id).await;
             } else if started.elapsed() < std::time::Duration::from_secs(60) {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
@@ -262,7 +262,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                     session_name,
                     started.elapsed().as_secs_f64()
                 );
-                super::super::mailbox_clear_recovery_marker(&shared, *channel_id).await;
+                super::super::super::mailbox_clear_recovery_marker(&shared, *channel_id).await;
             }
         }
 
@@ -279,9 +279,11 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         // codex rollout looked up by the inflight `session_id` so the
         // restore loop can still attach a watcher and keep the live pane
         // relayed.
-        let configured_workspace =
-            super::super::settings::resolve_workspace(*channel_id, Some(channel_name.as_str()));
-        let session_keys = super::super::adk_session::build_session_key_candidates(
+        let configured_workspace = super::super::super::settings::resolve_workspace(
+            *channel_id,
+            Some(channel_name.as_str()),
+        );
+        let session_keys = super::super::super::adk_session::build_session_key_candidates(
             &shared.token_hash,
             &provider,
             session_name,
@@ -386,7 +388,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok())
             .unwrap_or(0);
-        let current_gen = super::super::runtime_store::process_generation();
+        let current_gen = super::super::super::runtime_store::process_generation();
         if session_gen < current_gen && current_gen > 0 {
             // Skip sessions belonging to other runtimes
             let current_owner_marker = current_tmux_owner_marker();
@@ -455,7 +457,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
 
         let mut restored_turn = None;
         let initial_offset = if let Some(state) =
-            super::super::inflight::load_inflight_state(&provider, channel_id.get())
+            super::super::super::inflight::load_inflight_state(&provider, channel_id.get())
         {
             if let Some(restored_tmux) =
                 restored_watcher_turn_from_inflight(&state, session_name, false)
@@ -473,8 +475,10 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                     continue;
                 }
                 let finish_mailbox_on_completion =
-                    super::super::recovery::reregister_active_turn_from_inflight(&shared, &state)
-                        .await;
+                    super::super::super::recovery::reregister_active_turn_from_inflight(
+                        &shared, &state,
+                    )
+                    .await;
                 restored_turn = Some(RestoredWatcherTurn {
                     finish_mailbox_on_completion,
                     ..restored_tmux
@@ -527,10 +531,12 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                 &provider,
                 channel_name,
             );
-            let configured_path =
-                super::super::settings::resolve_workspace(*channel_id, Some(channel_name.as_str()));
+            let configured_path = super::super::super::settings::resolve_workspace(
+                *channel_id,
+                Some(channel_name.as_str()),
+            );
             let tmux_name = provider.build_tmux_session_name(channel_name);
-            let session_keys = super::super::adk_session::build_session_key_candidates(
+            let session_keys = super::super::super::adk_session::build_session_key_candidates(
                 &shared.token_hash,
                 &provider,
                 &tmux_name,
@@ -538,32 +544,31 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             let db_cwd =
                 load_restored_session_cwd(shared.pg_pool.as_ref(), &session_keys, channel_id.get());
 
-            let session =
-                data.sessions
-                    .entry(*channel_id)
-                    .or_insert_with(|| super::super::DiscordSession {
-                        session_id: persisted_session_id.clone(),
-                        memento_context_loaded:
-                            super::super::session_runtime::restored_memento_context_loaded(
-                                false,
-                                None,
-                                persisted_session_id.as_deref(),
-                            ),
-                        memento_reflected: false,
-                        current_path: None,
-                        history: Vec::new(),
-                        pending_uploads: Vec::new(),
-                        cleared: false,
-                        channel_name: Some(channel_name.clone()),
-                        category_name: None,
-                        remote_profile_name: None,
-                        channel_id: Some(channel_id.get()),
+            let session = data.sessions.entry(*channel_id).or_insert_with(|| {
+                super::super::super::DiscordSession {
+                    session_id: persisted_session_id.clone(),
+                    memento_context_loaded:
+                        super::super::super::session_runtime::restored_memento_context_loaded(
+                            false,
+                            None,
+                            persisted_session_id.as_deref(),
+                        ),
+                    memento_reflected: false,
+                    current_path: None,
+                    history: Vec::new(),
+                    pending_uploads: Vec::new(),
+                    cleared: false,
+                    channel_name: Some(channel_name.clone()),
+                    category_name: None,
+                    remote_profile_name: None,
+                    channel_id: Some(channel_id.get()),
 
-                        last_active: tokio::time::Instant::now(),
-                        worktree: None,
+                    last_active: tokio::time::Instant::now(),
+                    worktree: None,
 
-                        born_generation: super::super::runtime_store::process_generation(),
-                    });
+                    born_generation: super::super::super::runtime_store::process_generation(),
+                }
+            });
 
             if session.session_id.is_none() && persisted_session_id.is_some() {
                 session.restore_provider_session(persisted_session_id.clone());
@@ -573,10 +578,11 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             if session.current_path.is_none() {
                 // #3219: prefer the channel's own reusable managed worktree over
                 // the configured base; only log "ignoring" when it is NOT reused.
-                let reusable_worktree = super::super::session_runtime::db_cwd_is_reusable_worktree(
-                    configured_path.as_deref(),
-                    db_cwd.as_deref(),
-                );
+                let reusable_worktree =
+                    super::super::super::session_runtime::db_cwd_is_reusable_worktree(
+                        configured_path.as_deref(),
+                        db_cwd.as_deref(),
+                    );
                 if let (Some(configured), Some(restored)) =
                     (configured_path.as_ref(), db_cwd.as_ref())
                 {
@@ -590,7 +596,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                         );
                     }
                 }
-                let effective_path = super::super::select_restored_session_path(
+                let effective_path = super::super::super::select_restored_session_path(
                     configured_path,
                     db_cwd,
                     persisted_path,
@@ -639,7 +645,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         let pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let turn_delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let last_heartbeat_ts_ms = Arc::new(std::sync::atomic::AtomicI64::new(
-            super::super::tmux_watcher_now_ms(),
+            super::super::super::tmux_watcher_now_ms(),
         ));
 
         let handle = TmuxWatcherHandle {
@@ -676,7 +682,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         );
 
         shared.record_tmux_watcher_reconnect(pw.channel_id);
-        super::super::task_supervisor::spawn_observed_tmux_watcher(
+        super::super::super::task_supervisor::spawn_observed_tmux_watcher(
             "watchers_lifecycle_tmux_output_watcher_with_restore",
             shared.clone(),
             pw.session_name.clone(),
@@ -707,7 +713,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         let mut cleaned_dead_sessions = 0usize;
         for dc in &dead_cleanups {
             let dispatch_protection =
-                super::super::tmux_lifecycle::resolve_dispatch_tmux_protection(
+                super::super::super::tmux_lifecycle::resolve_dispatch_tmux_protection(
                     shared.pg_pool.as_ref(),
                     &shared.token_hash,
                     &provider,
@@ -716,7 +722,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                 );
             let dispatch_failed_for_dead_session =
                 if let Some(protection) = dispatch_protection.as_ref() {
-                    super::super::tmux_lifecycle::fail_active_dispatch_for_dead_tmux_session(
+                    super::super::super::tmux_lifecycle::fail_active_dispatch_for_dead_tmux_session(
                         api_port,
                         protection,
                         &dc.session_name,
@@ -749,8 +755,10 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
 
             let tmux_name = provider.build_tmux_session_name(&dc.channel_name);
             let thread_channel_id =
-                super::super::adk_session::parse_thread_channel_id_from_name(&dc.channel_name);
-            let session_key = super::super::adk_session::build_namespaced_session_key(
+                super::super::super::adk_session::parse_thread_channel_id_from_name(
+                    &dc.channel_name,
+                );
+            let session_key = super::super::super::adk_session::build_namespaced_session_key(
                 &shared.token_hash,
                 &provider,
                 &tmux_name,
@@ -760,7 +768,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                     .map(|binding| binding.role_id);
 
             if cleanup_plan.report_idle_status {
-                super::super::adk_session::post_adk_session_status(
+                super::super::super::adk_session::post_adk_session_status(
                     Some(&session_key),
                     Some(&dc.channel_name),
                     None,

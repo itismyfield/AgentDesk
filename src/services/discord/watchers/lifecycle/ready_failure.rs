@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn normalize_human_alert_target(channel: &str) -> Option<String> {
+pub(crate) fn normalize_human_alert_target(channel: &str) -> Option<String> {
     let channel = channel.trim();
     if channel.is_empty() {
         return None;
@@ -12,7 +12,7 @@ pub(super) fn normalize_human_alert_target(channel: &str) -> Option<String> {
     })
 }
 
-pub(super) fn load_human_alert_target(shared: &SharedData) -> Option<String> {
+pub(crate) fn load_human_alert_target(shared: &SharedData) -> Option<String> {
     if let Some(pool) = shared.pg_pool.as_ref() {
         return crate::utils::async_bridge::block_on_pg_result(
             pool,
@@ -35,7 +35,7 @@ pub(super) fn load_human_alert_target(shared: &SharedData) -> Option<String> {
     None
 }
 
-pub(super) fn merge_card_label_metadata(existing_metadata: Option<&str>, label: &str) -> String {
+pub(crate) fn merge_card_label_metadata(existing_metadata: Option<&str>, label: &str) -> String {
     let mut metadata = existing_metadata
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
         .and_then(|value| value.as_object().cloned())
@@ -64,7 +64,7 @@ pub(super) fn merge_card_label_metadata(existing_metadata: Option<&str>, label: 
     serde_json::Value::Object(metadata).to_string()
 }
 
-pub(super) async fn update_card_ready_failure_marker_pg(
+pub(crate) async fn update_card_ready_failure_marker_pg(
     pool: &sqlx::PgPool,
     card_id: &str,
     reason: &str,
@@ -96,7 +96,7 @@ pub(super) async fn update_card_ready_failure_marker_pg(
     Ok(updated > 0)
 }
 
-pub(super) fn load_dispatch_card_id(shared: &SharedData, dispatch_id: &str) -> Option<String> {
+pub(crate) fn load_dispatch_card_id(shared: &SharedData, dispatch_id: &str) -> Option<String> {
     if let Some(pool) = shared.pg_pool.as_ref() {
         let dispatch_id = dispatch_id.to_string();
         return crate::utils::async_bridge::block_on_pg_result(

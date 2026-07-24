@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RestoreDispatchRebindOutcome {
+pub(crate) enum RestoreDispatchRebindOutcome {
     NotRebound,
     Rebound,
 }
@@ -9,9 +9,9 @@ pub(super) enum RestoreDispatchRebindOutcome {
 /// Rebind only an inflight dispatch that is still active. The status and blank
 /// dispatch-link predicates are the CAS guard: a concurrent new turn must not
 /// have its session link overwritten by an older restore pass.
-pub(super) async fn rebind_restored_dispatch_if_missing(
+pub(crate) async fn rebind_restored_dispatch_if_missing(
     pg_pool: Option<&sqlx::PgPool>,
-    state: &super::super::inflight::InflightTurnState,
+    state: &super::super::super::inflight::InflightTurnState,
 ) -> RestoreDispatchRebindOutcome {
     let (Some(pool), Some(session_key), Some(dispatch_id), Some(turn_nonce)) = (
         pg_pool,
@@ -66,7 +66,7 @@ pub(super) async fn rebind_restored_dispatch_if_missing(
     }
 }
 
-pub(super) fn extract_result_error_text(value: &serde_json::Value) -> String {
+pub(crate) fn extract_result_error_text(value: &serde_json::Value) -> String {
     let errors = value
         .get("errors")
         .and_then(|v| v.as_array())
@@ -101,7 +101,7 @@ pub(super) fn extract_result_error_text(value: &serde_json::Value) -> String {
 /// `channel_id = $2` predicate is the cross-channel guard; legacy NULL
 /// `channel_id` rows are intentionally NOT reused (that is exactly the hazard
 /// being closed — reuse self-heals on the next turn once the row is stamped).
-pub(super) fn load_restored_session_cwd(
+pub(crate) fn load_restored_session_cwd(
     pg_pool: Option<&sqlx::PgPool>,
     session_keys: &[String],
     channel_id: u64,
@@ -140,7 +140,7 @@ pub(super) fn load_restored_session_cwd(
     None
 }
 
-pub(super) fn push_transcript_event(
+pub(crate) fn push_transcript_event(
     events: &mut Vec<SessionTranscriptEvent>,
     event: SessionTranscriptEvent,
 ) {
@@ -167,9 +167,9 @@ pub(super) fn push_transcript_event(
     }
 }
 
-pub(super) const REDACTED_THINKING_STATUS_LINE: &str = "💭 Thinking...";
+pub(crate) const REDACTED_THINKING_STATUS_LINE: &str = "💭 Thinking...";
 
-pub(super) fn redacted_thinking_transcript_event() -> SessionTranscriptEvent {
+pub(crate) fn redacted_thinking_transcript_event() -> SessionTranscriptEvent {
     SessionTranscriptEvent {
         kind: SessionTranscriptEventKind::Thinking,
         tool_name: None,
@@ -180,7 +180,7 @@ pub(super) fn redacted_thinking_transcript_event() -> SessionTranscriptEvent {
     }
 }
 
-pub(super) fn inflight_duration_ms(started_at: Option<&str>) -> Option<i64> {
+pub(crate) fn inflight_duration_ms(started_at: Option<&str>) -> Option<i64> {
     let started_at = started_at?.trim();
     if started_at.is_empty() {
         return None;
@@ -190,15 +190,16 @@ pub(super) fn inflight_duration_ms(started_at: Option<&str>) -> Option<i64> {
     Some(elapsed.num_milliseconds().max(0))
 }
 
-pub(super) fn load_restored_provider_session_id(
+pub(crate) fn load_restored_provider_session_id(
     pg_pool: Option<&sqlx::PgPool>,
     token_hash: &str,
     provider: &ProviderKind,
     channel_name: &str,
 ) -> Option<String> {
     let tmux_name = provider.build_tmux_session_name(channel_name);
-    let session_keys =
-        super::super::adk_session::build_session_key_candidates(token_hash, provider, &tmux_name);
+    let session_keys = super::super::super::adk_session::build_session_key_candidates(
+        token_hash, provider, &tmux_name,
+    );
 
     if let Some(pg_pool) = pg_pool {
         let session_keys = session_keys.clone();
@@ -236,11 +237,11 @@ pub(super) fn load_restored_provider_session_id(
     None
 }
 
-pub(super) fn recovery_handled_channel_key(channel_id: u64) -> String {
+pub(crate) fn recovery_handled_channel_key(channel_id: u64) -> String {
     format!("recovery_handled_channel:{channel_id}")
 }
 
-pub(super) fn watcher_has_post_work_ready_evidence(
+pub(crate) fn watcher_has_post_work_ready_evidence(
     full_response: &str,
     tool_state: &WatcherToolState,
     _task_notification_kind: Option<TaskNotificationKind>,

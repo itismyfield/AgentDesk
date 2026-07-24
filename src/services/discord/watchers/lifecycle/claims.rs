@@ -11,7 +11,7 @@ pub(crate) enum WatcherClaimAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WatcherClaimOutcome {
-    pub(super) action: WatcherClaimAction,
+    pub(crate) action: WatcherClaimAction,
     owner_channel_id: ChannelId,
 }
 
@@ -57,7 +57,7 @@ impl WatcherClaimOutcome {
     }
 }
 
-pub(super) fn find_watcher_by_tmux_session(
+pub(crate) fn find_watcher_by_tmux_session(
     watchers: &TmuxWatcherRegistry,
     tmux_session_name: &str,
 ) -> Option<(ChannelId, bool, bool, String)> {
@@ -71,7 +71,7 @@ pub(super) fn find_watcher_by_tmux_session(
     ))
 }
 
-pub(super) fn restore_scan_should_skip_existing_watcher(
+pub(crate) fn restore_scan_should_skip_existing_watcher(
     cancelled: bool,
     paused: bool,
     existing_output_path: &str,
@@ -177,7 +177,7 @@ pub(in crate::services::discord) fn claim_or_replace_watcher(
     claim_watcher(watchers, channel_id, handle, provider, source, true)
 }
 
-pub(super) fn claim_watcher(
+pub(crate) fn claim_watcher(
     watchers: &TmuxWatcherRegistry,
     channel_id: ChannelId,
     handle: TmuxWatcherHandle,

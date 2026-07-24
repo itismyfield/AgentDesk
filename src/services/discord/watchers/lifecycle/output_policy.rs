@@ -1,18 +1,19 @@
 use super::*;
 
-pub(super) async fn resolve_watcher_dispatch_id(
+pub(crate) async fn resolve_watcher_dispatch_id(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
-    inflight_state: Option<&super::super::inflight::InflightTurnState>,
+    inflight_state: Option<&super::super::super::inflight::InflightTurnState>,
 ) -> Option<String> {
     inflight_state
         .and_then(|state| state.dispatch_id.clone())
         .or_else(|| {
-            inflight_state
-                .and_then(|state| super::super::adk_session::parse_dispatch_id(&state.user_text))
+            inflight_state.and_then(|state| {
+                super::super::super::adk_session::parse_dispatch_id(&state.user_text)
+            })
         })
         .or(
-            super::super::adk_session::lookup_pending_dispatch_for_thread(
+            super::super::super::adk_session::lookup_pending_dispatch_for_thread(
                 shared.api_port,
                 channel_id.get(),
             )
@@ -23,7 +24,7 @@ pub(super) async fn resolve_watcher_dispatch_id(
         })
 }
 
-pub(super) fn should_suppress_terminal_output_after_recent_stop(
+pub(crate) fn should_suppress_terminal_output_after_recent_stop(
     has_assistant_response: bool,
     inflight_missing: bool,
     recent_turn_stop: bool,
@@ -35,7 +36,7 @@ pub(super) fn should_suppress_terminal_output_after_recent_stop(
     )
 }
 
-pub(super) fn should_suppress_streaming_placeholder_after_recent_stop(
+pub(crate) fn should_suppress_streaming_placeholder_after_recent_stop(
     has_assistant_response: bool,
     inflight_missing: bool,
     recent_turn_stop: bool,
@@ -43,7 +44,7 @@ pub(super) fn should_suppress_streaming_placeholder_after_recent_stop(
     has_assistant_response && inflight_missing && recent_turn_stop
 }
 
-pub(super) fn should_skip_streaming_placeholder_without_inflight(
+pub(crate) fn should_skip_streaming_placeholder_without_inflight(
     inflight_missing: bool,
     pane_actively_streaming: bool,
 ) -> bool {
@@ -58,7 +59,7 @@ pub(super) fn should_skip_streaming_placeholder_without_inflight(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn should_suppress_post_terminal_output_without_inflight(
+pub(crate) fn should_suppress_post_terminal_output_without_inflight(
     terminal_success_seen: bool,
     inflight_missing: bool,
     ssh_direct_prompt_pending: bool,

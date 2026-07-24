@@ -57,11 +57,15 @@ pub(super) use self::tests::*;
 
 #[path = "lifecycle/ready_failure.rs"]
 mod ready_failure;
+pub(in crate::services::discord) use self::ready_failure::fail_dispatch_for_ready_for_input_stall;
 pub(super) use self::ready_failure::*;
 
 #[path = "lifecycle/recovery_markers.rs"]
 mod recovery_markers;
 pub(super) use self::recovery_markers::*;
+pub(in crate::services::discord) use self::recovery_markers::{
+    clear_recovery_handled_channels, store_recovery_handled_channels,
+};
 
 #[path = "lifecycle/output_policy.rs"]
 mod output_policy;
@@ -70,10 +74,16 @@ pub(super) use self::output_policy::*;
 #[path = "lifecycle/claims.rs"]
 mod claims;
 pub(super) use self::claims::*;
+pub(in crate::services::discord) use self::claims::{
+    claim_or_replace_watcher, claim_or_reuse_watcher,
+};
 
 #[path = "lifecycle/restore.rs"]
 mod restore;
 pub(super) use self::restore::*;
+pub(in crate::services::discord) use self::restore::{
+    restore_tmux_watchers, session_belongs_to_current_runtime,
+};
 
 #[path = "lifecycle/restore_tests.rs"]
 mod restore_tests;

@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn claude_tui_transcript_fallback_path(
+pub(crate) fn claude_tui_transcript_fallback_path(
     provider: &crate::services::provider::ProviderKind,
     tmux_session_name: &str,
     workspace: Option<&str>,
@@ -14,7 +14,7 @@ pub(super) fn claude_tui_transcript_fallback_path(
     }
     let scan_context = claude_tui_restore_scan_context(tmux_session_name, restored_cwd, workspace)?;
     let mut claimed_by_other_sessions =
-        super::super::tui_prompt_relay::other_session_claimed_transcripts(
+        super::super::super::tui_prompt_relay::other_session_claimed_transcripts(
             shared,
             tmux_session_name,
         );
@@ -40,7 +40,7 @@ fn claude_tui_restore_scan_context(
     workspace: Option<&str>,
 ) -> Option<ClaudeTuiRestoreScanContext> {
     let launch_context =
-        super::super::tui_prompt_relay::claude_tui_launch_context(tmux_session_name);
+        super::super::super::tui_prompt_relay::claude_tui_launch_context(tmux_session_name);
     let fallback_modified_since = if launch_context.is_none() {
         claude_tui_restore_fallback_modified_since(tmux_session_name)
     } else {
