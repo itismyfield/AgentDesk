@@ -125,12 +125,14 @@ pub struct RoutineTickAgent {
 /// mutating the store, so callers keep the last-known-good registry.
 pub struct RoutineScriptLoader {
     scripts: RoutineScriptStore,
+    failed_script_versions: Mutex<HashMap<PathBuf, String>>,
 }
 
 impl RoutineScriptLoader {
     pub fn new() -> Result<Self> {
         Ok(Self {
             scripts: Arc::new(Mutex::new(HashMap::new())),
+            failed_script_versions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -232,8 +234,44 @@ impl RoutineScriptLoader {
                     selected = Some((script.clone(), false));
                     break;
                 }
+                let source_version = match routine_script_source_version(&candidate.path) {
+                    Ok(version) => version,
+                    Err(e) => {
+                        tracing::error!(
+                            routine_script = %candidate.path.display(),
+                            error = %e,
+                            "failed to read routine script; keeping last-known-good registry"
+                        );
+                        if has_existing {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                let unchanged_failure = self
+                    .failed_script_versions
+                    .lock()
+                    .unwrap_or_else(recover_poisoned_lock)
+                    .get(&candidate.path)
+                    .is_some_and(|failed_version| failed_version == &source_version);
+                if unchanged_failure {
+                    tracing::debug!(
+                        routine_script = %candidate.path.display(),
+                        script_version = %source_version,
+                        "skipped unchanged routine script after previous load failure"
+                    );
+                    if has_existing {
+                        break;
+                    }
+                    continue;
+                }
+
                 match load_single_routine_script(&candidate.root, &candidate.path) {
                     Ok(script) => {
+                        self.failed_script_versions
+                            .lock()
+                            .unwrap_or_else(recover_poisoned_lock)
+                            .remove(&candidate.path);
                         if candidates.len() > 1 {
                             tracing::info!(
                                 routine_script = %script_ref,
@@ -246,6 +284,10 @@ impl RoutineScriptLoader {
                         break;
                     }
                     Err(e) => {
+                        self.failed_script_versions
+                            .lock()
+                            .unwrap_or_else(recover_poisoned_lock)
+                            .insert(candidate.path.clone(), source_version);
                         tracing::error!(
                             routine_script = %candidate.path.display(),
                             error = %e,
@@ -466,8 +508,22 @@ fn capture_registered_routine<'js>(
     let eval_result: rquickjs::Result<rquickjs::Value> =
         ctx.eval_with_options(source.as_bytes().to_vec(), eval_opts);
     if let Err(e) = eval_result {
+        let exception_detail = ctx
+            .catch()
+            .into_exception()
+            .map(|exception| {
+                let message = exception.message().unwrap_or_default();
+                let stack = exception.stack().unwrap_or_default();
+                if stack.is_empty() {
+                    message
+                } else {
+                    format!("{message}\n{stack}")
+                }
+            })
+            .filter(|detail| !detail.is_empty())
+            .unwrap_or_else(|| e.to_string());
         return Err(anyhow!(
-            "JS eval error in routine script {}: {e}",
+            "JS eval error in routine script {}: {exception_detail}",
             path.display()
         ));
     }
@@ -630,6 +686,12 @@ fn script_ref(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
+fn routine_script_source_version(path: &Path) -> Result<String> {
+    let source = std::fs::read_to_string(path)
+        .map_err(|e| anyhow!("read routine script {}: {e}", path.display()))?;
+    Ok(compute_policy_version(&source))
+}
+
 fn add_cached_candidates_for_root(
     existing_scripts: &HashMap<String, LoadedRoutineScript>,
     candidates_by_ref: &mut BTreeMap<String, Vec<RoutineScriptCandidate>>,
@@ -661,11 +723,23 @@ fn collect_routine_script_paths(root: &Path, out: &mut Vec<PathBuf>) -> Result<(
         let path = entry.path();
         if file_type.is_dir() {
             collect_routine_script_paths(&path, out)?;
-        } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "js") {
+        } else if file_type.is_file()
+            && path.extension().is_some_and(|ext| ext == "js")
+            && !is_node_only_helper(&path)
+        {
             out.push(path);
         }
     }
     Ok(())
+}
+
+fn is_node_only_helper(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name == "local_worktree_inventory.js")
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "monitoring")
 }
 
 #[cfg(test)]
@@ -828,6 +902,64 @@ mod tests {
         assert_eq!(loader.load_dir(dir.path()).unwrap(), 1);
         assert_eq!(loader.script_refs().unwrap(), vec!["ops/daily/summary.js"]);
         assert!(loader.has_script("ops/daily/summary.js").unwrap());
+    }
+
+    #[test]
+    fn load_dir_excludes_node_only_worktree_inventory_helper() {
+        let dir = tempfile::tempdir().unwrap();
+        let monitoring = dir.path().join("monitoring");
+        std::fs::create_dir_all(&monitoring).unwrap();
+        std::fs::write(
+            monitoring.join("local_worktree_inventory.js"),
+            "const fs = require('node:fs'); module.exports = { fs };",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("inventory-routine.js"),
+            "agentdesk.routines.register({ name: 'Inventory', tick() { return { action: 'skip' }; } });",
+        )
+        .unwrap();
+
+        let loader = RoutineScriptLoader::new().unwrap();
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 1);
+        assert_eq!(loader.script_refs().unwrap(), vec!["inventory-routine.js"]);
+    }
+
+    #[test]
+    fn unchanged_failed_script_is_retried_only_after_content_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recoverable.js");
+        let broken =
+            "globalThis.__attempts = (globalThis.__attempts || 0) + 1; throw new Error('broken');";
+        std::fs::write(&path, broken).unwrap();
+
+        let loader = RoutineScriptLoader::new().unwrap();
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        assert_eq!(loader.failed_script_versions.lock().unwrap().len(), 1);
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        assert_eq!(loader.failed_script_versions.lock().unwrap().len(), 1);
+
+        std::fs::write(
+            &path,
+            "agentdesk.routines.register({ name: 'Recovered', tick() { return { action: 'skip' }; } });",
+        )
+        .unwrap();
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 1);
+        assert!(loader.failed_script_versions.lock().unwrap().is_empty());
+        assert_eq!(
+            loader.get_script("recoverable.js").unwrap().unwrap().name,
+            "Recovered"
+        );
+    }
+
+    #[test]
+    fn quickjs_eval_error_includes_exception_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node-only.js");
+        std::fs::write(&path, "require('node:fs');").unwrap();
+
+        let error = load_single_routine_script(dir.path(), &path).unwrap_err();
+        assert!(error.to_string().contains("require is not defined"));
     }
 
     #[test]
