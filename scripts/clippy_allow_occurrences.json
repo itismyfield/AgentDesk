@@ -703,12 +703,17 @@
       "count": 1
     },
     {
-      "path": "src/services/discord/turn_view_reconciler.rs",
+      "path": "src/services/discord/turn_view_reconciler/apply.rs",
       "lint": "too_many_arguments",
-      "count": 2
+      "count": 1
     },
     {
       "path": "src/services/discord/turn_view_reconciler/orphan_sweep.rs",
+      "lint": "too_many_arguments",
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/turn_view_reconciler/resolution.rs",
       "lint": "too_many_arguments",
       "count": 1
     },
