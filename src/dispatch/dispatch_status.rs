@@ -1581,7 +1581,7 @@ mod auto_queue_terminal_sync_policy_tests {
 }
 
 #[cfg(test)]
-mod phase_gate_finalize_wrapper_tests {
+mod auto_queue_phase_gate_finalize_wrapper_tests {
     use super::{infer_effective_completion_result, infer_phase_gate_verdict};
     use serde_json::json;
 
