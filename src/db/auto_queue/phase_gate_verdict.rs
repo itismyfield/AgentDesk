@@ -61,14 +61,14 @@ impl VerdictResolution {
 /// including values that are not strings. Matching JS here matters because the
 /// policy hook and the durable path must not disagree about whether a result
 /// "already decided".
-pub fn has_explicit_verdict(result: &Value) -> bool {
+fn has_explicit_verdict(result: &Value) -> bool {
     first_explicit_value(result).is_some()
 }
 
 /// Trimmed, non-empty string form of the first truthy explicit verdict, if it
 /// is a string. A truthy non-string value blocks later keys, matching the JS
 /// `verdict || decision || phase_gate_verdict` precedence chain.
-pub fn explicit_verdict(result: &Value) -> Option<String> {
+fn explicit_verdict(result: &Value) -> Option<String> {
     first_explicit_value(result)
         .and_then(Value::as_str)
         .map(str::trim)
@@ -82,7 +82,7 @@ pub fn explicit_verdict(result: &Value) -> Option<String> {
 /// "pass"}` alias, and a bare `"pass"` string. `status` is only consulted when
 /// it is a non-empty string so an empty `status` falls through to `result`,
 /// mirroring the JS `entry.status || entry.result` chain (#2048 F12).
-pub fn check_entry_is_pass(entry: &Value) -> bool {
+fn check_entry_is_pass(entry: &Value) -> bool {
     let raw = match entry {
         Value::String(text) => Some(text.as_str()),
         Value::Object(map) => map
@@ -115,7 +115,7 @@ pub fn pass_verdict_of(phase_gate: &Value) -> String {
 /// Refuses to infer when the gate context is not an object, when no checks are
 /// reported, when a declared check is missing from `result.checks`, or when any
 /// declared-or-present check does not pass.
-pub fn infer_pass_verdict_in_gate(phase_gate: &Value, result: &Value) -> Option<String> {
+fn infer_pass_verdict_in_gate(phase_gate: &Value, result: &Value) -> Option<String> {
     if !phase_gate.is_object() {
         return None;
     }
@@ -148,13 +148,14 @@ pub fn infer_pass_verdict_in_gate(phase_gate: &Value, result: &Value) -> Option<
 }
 
 /// Checks-only inference against a full dispatch context (`context.phase_gate`).
-pub fn infer_pass_verdict_from_checks(context: Option<&Value>, result: &Value) -> Option<String> {
+fn infer_pass_verdict_from_checks(context: Option<&Value>, result: &Value) -> Option<String> {
     infer_pass_verdict_in_gate(context?.get("phase_gate")?, result)
 }
 
 /// Full inference: never overrides an explicit verdict (even an explicit
 /// failure), otherwise falls back to checks-only inference.
-pub fn infer_pass_verdict(context: Option<&Value>, result: &Value) -> Option<String> {
+#[cfg(test)]
+pub(super) fn infer_pass_verdict(context: Option<&Value>, result: &Value) -> Option<String> {
     if has_explicit_verdict(result) {
         return None;
     }
