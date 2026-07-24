@@ -588,6 +588,50 @@ mod tests {
     }
 
     #[test]
+    fn bridge_mid_turn_placeholder_context_uses_subtext_and_compact_format_4848() {
+        let shared = super::super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_848_301);
+        assert!(
+            shared
+                .ui
+                .placeholder_live_events
+                .set_context_panel_usage(channel_id, None, 460_000, 0, 0, 1_000_000, 50,)
+        );
+
+        let panel_text = shared.ui.placeholder_live_events.render_status_panel(
+            channel_id,
+            &ProviderKind::Claude,
+            1_700_000_000,
+        );
+        let status_block =
+            super::single_message_panel::compose_footer_status_block("⠸", &panel_text);
+        let rendered = super::super::build_turn_bridge_streaming_edit_text(
+            true,
+            "Bridge body",
+            &status_block,
+            &ProviderKind::Claude,
+        );
+        let footer = rendered
+            .split_once("\n\n")
+            .map(|(_, footer)| footer)
+            .expect("mid-turn placeholder footer");
+
+        assert!(
+            footer.contains("-# 📦 460.0k / 1.0M (46%) · auto-compact 50%"),
+            "mid-turn placeholder footer used the wrong context format: {footer:?}"
+        );
+        assert!(!footer.contains("Context"));
+        assert!(!footer.contains("tokens"));
+        assert!(
+            footer
+                .lines()
+                .filter(|line| !line.is_empty())
+                .all(|line| line.starts_with("-# ")),
+            "every mid-turn placeholder footer line must be subtext: {footer:?}"
+        );
+    }
+
+    #[test]
     fn bridge_footer_disables_separate_panel_creation_and_binding() {
         let footer_mode = super::single_message_panel::footer_mode_enabled(true, true);
         let current = MessageId::new(7);
