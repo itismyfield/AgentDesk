@@ -1397,6 +1397,77 @@ fn pane_looks_ready_for_codex_prompt_with_ansi(pane: &str) -> bool {
 }
 
 fn pane_has_codex_active_turn_in_pane(pane: &str) -> bool {
+    recent_codex_active_turn_marker(pane).is_some()
+}
+
+const CODEX_ACTIVE_TURN_SIGNAL_FRESHNESS: std::time::Duration = std::time::Duration::from_secs(90);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodexPaneBusySignal {
+    Fresh,
+    Idle,
+    Expired,
+    Unavailable,
+}
+
+#[derive(Debug)]
+pub(crate) struct CodexPaneBusySignalTracker {
+    last_marker: Option<String>,
+    last_marker_changed_at: Option<std::time::Instant>,
+    freshness: std::time::Duration,
+}
+
+impl Default for CodexPaneBusySignalTracker {
+    fn default() -> Self {
+        Self::with_freshness(CODEX_ACTIVE_TURN_SIGNAL_FRESHNESS)
+    }
+}
+
+impl CodexPaneBusySignalTracker {
+    fn with_freshness(freshness: std::time::Duration) -> Self {
+        Self {
+            last_marker: None,
+            last_marker_changed_at: None,
+            freshness,
+        }
+    }
+
+    pub(crate) fn probe_tmux(&mut self, session_name: &str) -> CodexPaneBusySignal {
+        let Some(pane) = crate::services::platform::tmux::capture_pane(session_name, -80) else {
+            return CodexPaneBusySignal::Unavailable;
+        };
+        self.observe_capture_at(&pane, std::time::Instant::now())
+    }
+
+    fn observe_capture_at(
+        &mut self,
+        pane: &str,
+        observed_at: std::time::Instant,
+    ) -> CodexPaneBusySignal {
+        let Some(marker) = recent_codex_active_turn_marker(pane) else {
+            self.last_marker = None;
+            self.last_marker_changed_at = None;
+            return CodexPaneBusySignal::Idle;
+        };
+
+        if self.last_marker.as_deref() != Some(marker.as_str()) {
+            self.last_marker = Some(marker);
+            self.last_marker_changed_at = Some(observed_at);
+            return CodexPaneBusySignal::Fresh;
+        }
+
+        if self
+            .last_marker_changed_at
+            .is_some_and(|changed_at| observed_at.duration_since(changed_at) <= self.freshness)
+        {
+            CodexPaneBusySignal::Fresh
+        } else {
+            CodexPaneBusySignal::Expired
+        }
+    }
+}
+
+fn recent_codex_active_turn_marker(pane: &str) -> Option<String> {
     let recent: Vec<&str> = pane
         .lines()
         .map(str::trim_end)
@@ -1404,7 +1475,11 @@ fn pane_has_codex_active_turn_in_pane(pane: &str) -> bool {
         .rev()
         .take(PROMPT_READY_SCAN_LINES)
         .collect();
-    recent_has_codex_active_turn(&recent)
+    recent
+        .iter()
+        .take(6)
+        .find(|line| line_is_codex_active_turn_marker(line))
+        .map(|line| line.trim().to_string())
 }
 
 fn pane_has_dim_legacy_codex_prompt_in_pane(pane: &str) -> bool {
@@ -1486,11 +1561,13 @@ fn recent_has_codex_active_turn(recent_bottom_up: &[&str]) -> bool {
     recent_bottom_up
         .iter()
         .take(ACTIVE_TURN_BOTTOM_WINDOW)
-        .any(|line| {
-            let trimmed = line.trim_start();
-            (trimmed.starts_with('•') || trimmed.starts_with('◦'))
-                && (trimmed.contains("esc to interrupt") || trimmed.contains("Esc to interrupt"))
-        })
+        .any(|line| line_is_codex_active_turn_marker(line))
+}
+
+fn line_is_codex_active_turn_marker(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    (trimmed.starts_with('•') || trimmed.starts_with('◦'))
+        && (trimmed.contains("esc to interrupt") || trimmed.contains("Esc to interrupt"))
 }
 
 fn line_is_codex_status_with_ansi(line: &str) -> bool {
@@ -2405,6 +2482,38 @@ more output\n\
     fn codex_pane_with_composer_and_footer_is_ready() {
         assert!(pane_looks_ready_for_codex_prompt(CODEX_TUI_READY_PANE));
         assert!(!pane_has_codex_prompt_draft(CODEX_TUI_READY_PANE));
+    }
+
+    #[test]
+    fn codex_pane_busy_signal_expires_when_marker_stops_changing() {
+        let started_at = std::time::Instant::now();
+        let mut tracker =
+            CodexPaneBusySignalTracker::with_freshness(std::time::Duration::from_millis(100));
+        let busy = "• Working (5m 00s • esc to interrupt)";
+
+        assert_eq!(
+            tracker.observe_capture_at(busy, started_at),
+            CodexPaneBusySignal::Fresh
+        );
+        assert_eq!(
+            tracker.observe_capture_at(busy, started_at + std::time::Duration::from_millis(50)),
+            CodexPaneBusySignal::Fresh
+        );
+        assert_eq!(
+            tracker.observe_capture_at(busy, started_at + std::time::Duration::from_millis(101)),
+            CodexPaneBusySignal::Expired
+        );
+        assert_eq!(
+            tracker.observe_capture_at(
+                "• Working (5m 01s • esc to interrupt)",
+                started_at + std::time::Duration::from_millis(102),
+            ),
+            CodexPaneBusySignal::Fresh
+        );
+        assert_eq!(
+            tracker.observe_capture_at(CODEX_TUI_READY_PANE, started_at),
+            CodexPaneBusySignal::Idle
+        );
     }
 
     #[test]

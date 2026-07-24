@@ -475,7 +475,7 @@ pub(super) fn spawn_codex_tui_rebind_relay_output(
             let tail_handle = std::thread::Builder::new()
                 .name("codex_tui_rebind_rollout_tail".to_string())
                 .spawn(move || {
-                    crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset(
+                    crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset_for_tmux(
                         &tail_rollout_path,
                         raw_start_offset,
                         tail_session_id.as_deref(),
@@ -488,6 +488,7 @@ pub(super) fn spawn_codex_tui_rebind_relay_output(
                                     &tail_tmux_session_name,
                                 )
                         },
+                        &tail_tmux_session_name,
                     )
                 });
 
