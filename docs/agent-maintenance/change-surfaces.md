@@ -98,8 +98,9 @@
     from #4130 cfg(test) shadow_test_seam — per-thread override so default-OFF
     tests ignore developer-shell AGENTDESK_DELIVERY_RECORD_SHADOW; production
     paths untouched; durable delivery lease/frontier/owner-context sidecar, plus
-    the #4081 bounded recent-content fingerprint guard; bugfix only until split
-    under #3405).
+    the #4081 bounded recent-content fingerprint guard; +25 from #4508 adding the
+    edit-failure fresh current-generation/EOF-bounded range recheck seam and its
+    fail-open regression coverage; bugfix only until split under #3405).
   - `src/services/message_outbox.rs` is the PG-backed message outbox
     enqueue/claim/accounting surface. #4465 adds a deduplicated `held` staging
     state that workers cannot claim; callers activate it to `pending` only

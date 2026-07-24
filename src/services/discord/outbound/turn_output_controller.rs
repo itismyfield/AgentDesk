@@ -685,21 +685,47 @@ where
     G: TurnGateway + ?Sized,
     L: DeliveryLease + ?Sized,
 {
+    match deliver_turn_output_with_fallback_revalidation(gateway, ctx, None).await {
+        RevalidatedDeliveryOutcome::Delivery(outcome) => outcome,
+        RevalidatedDeliveryOutcome::AlreadyCommittedAfterEditFailure { .. } => {
+            unreachable!("suppression requires a fallback revalidation callback")
+        }
+    }
+}
+
+pub(in crate::services::discord) enum RevalidatedDeliveryOutcome {
+    Delivery(DeliveryOutcome),
+    AlreadyCommittedAfterEditFailure { edit_error: String },
+}
+
+/// Range-owner variant of [`deliver_turn_output`] that performs a fresh
+/// authority check after an edit failure while the acquired lease is still held.
+pub(in crate::services::discord) async fn deliver_turn_output_with_fallback_revalidation<G, L>(
+    gateway: &G,
+    ctx: TurnOutputCtx<'_, L>,
+    fallback_revalidation: Option<&(dyn Fn() -> bool + Send + Sync)>,
+) -> RevalidatedDeliveryOutcome
+where
+    G: TurnGateway + ?Sized,
+    L: DeliveryLease + ?Sized,
+{
     if matches!(&ctx.plan, OutputPlan::SendFresh { .. }) {
-        return fresh_send::deliver(gateway, ctx).await;
+        return RevalidatedDeliveryOutcome::Delivery(fresh_send::deliver(gateway, ctx).await);
     }
 
     let (start, end) = ctx.send_range;
 
     // NoOp short-circuits before touching the lease — nothing to deliver.
     let chunk_count = match &ctx.plan {
-        OutputPlan::NoOp => return DeliveryOutcome::Skipped,
+        OutputPlan::NoOp => {
+            return RevalidatedDeliveryOutcome::Delivery(DeliveryOutcome::Skipped);
+        }
         OutputPlan::SendFresh { .. } => unreachable!("fresh-send dispatches to its child module"),
         OutputPlan::Replace { .. } => 1usize,
         OutputPlan::SendNewChunks { chunk_count, .. } => *chunk_count,
     };
     if ctx.body.is_empty() {
-        return DeliveryOutcome::Skipped;
+        return RevalidatedDeliveryOutcome::Delivery(DeliveryOutcome::Skipped);
     }
 
     // ---- acquire ---------------------------------------------------------
@@ -718,9 +744,9 @@ where
         match ctx.acquire_failure_mode {
             AcquireFailureMode::Transient => {
                 // Watcher/bridge: do not send; the owner retries.
-                return DeliveryOutcome::Transient {
+                return RevalidatedDeliveryOutcome::Delivery(DeliveryOutcome::Transient {
                     retry_from_offset: start,
-                };
+                });
             }
             AcquireFailureMode::ProceedMarkerless => {
                 // Sink (`session_relay_sink.rs:777-795`): POST WITHOUT a marker
@@ -751,9 +777,9 @@ where
     // ---- send (transport) ------------------------------------------------
     // Any post-send work (placeholder terminal transition, fallback cleanup,
     // release) happens AFTER the inline commit below (I1).
-    let transport = drive_transport(gateway, &ctx, chunk_count).await;
+    let transport = drive_transport(gateway, &ctx, chunk_count, fallback_revalidation).await;
 
-    match transport {
+    let outcome = match transport {
         TransportResult::Delivered {
             replace_kind,
             new_chunks,
@@ -816,7 +842,20 @@ where
             }
             DeliveryOutcome::Unknown { fell_back }
         }
-    }
+        TransportResult::AlreadyCommittedAfterEditFailure { edit_error } => {
+            tracing::info!(
+                channel_id = ctx.channel_id.get(),
+                error = %edit_error,
+                "turn-output controller suppressed fallback POST after fresh committed-range proof"
+            );
+            drop(heartbeat_guard);
+            if let Some(guard) = lease_guard.as_mut() {
+                guard.release_and_disarm();
+            }
+            return RevalidatedDeliveryOutcome::AlreadyCommittedAfterEditFailure { edit_error };
+        }
+    };
+    RevalidatedDeliveryOutcome::Delivery(outcome)
 }
 
 /// The SINGLE commit+advance authority (I1). Runs the owner's identity-gated
@@ -966,6 +1005,11 @@ enum TransportResult {
     Unknown {
         fell_back: bool,
     },
+    /// The edit failed, then a fresh authority check proved the range had already
+    /// committed. No POST occurred; commit/advance must remain untouched.
+    AlreadyCommittedAfterEditFailure {
+        edit_error: String,
+    },
 }
 
 /// Drive the gateway transport for the plan. Returns ONLY the transport
@@ -975,6 +1019,7 @@ async fn drive_transport<G, L>(
     gateway: &G,
     ctx: &TurnOutputCtx<'_, L>,
     chunk_count: usize,
+    fallback_revalidation: Option<&(dyn Fn() -> bool + Send + Sync)>,
 ) -> TransportResult
 where
     G: TurnGateway + ?Sized,
@@ -983,10 +1028,33 @@ where
     match (&ctx.plan, &ctx.placeholder) {
         (OutputPlan::Replace { .. }, PlaceholderSlot::Active { message_id, .. }) => {
             match gateway
-                .replace_message_with_outcome(ctx.channel_id, *message_id, ctx.body)
+                .replace_message_deferred(ctx.channel_id, *message_id, ctx.body)
                 .await
             {
-                Ok(outcome) => classify_replace_outcome(&outcome, &ctx.fallback_commit_policy),
+                Ok(crate::services::discord::formatting::DeferredReplaceLongMessageOutcome::Edited(
+                    outcome,
+                )) => classify_replace_outcome(&outcome, &ctx.fallback_commit_policy),
+                Ok(crate::services::discord::formatting::DeferredReplaceLongMessageOutcome::EditFailed {
+                    edit_error,
+                }) => {
+                    if fallback_revalidation.is_some_and(|revalidate| revalidate()) {
+                        TransportResult::AlreadyCommittedAfterEditFailure { edit_error }
+                    } else {
+                        match gateway
+                            .send_long_message_with_rollback(ctx.channel_id, *message_id, ctx.body)
+                            .await
+                        {
+                            Ok(message_ids) => classify_replace_outcome(
+                                &crate::services::discord::formatting::ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+                                    edit_error,
+                                    replacement_anchor: message_ids.first().copied(),
+                                },
+                                &ctx.fallback_commit_policy,
+                            ),
+                            Err(error) => classify_transport_failure(ctx, &error),
+                        }
+                    }
+                }
                 Err(error) => classify_transport_failure(ctx, &error),
             }
         }
@@ -1441,6 +1509,10 @@ mod tests {
         first_commit_was_delivered: AtomicBool,
         /// when false, the transport send returns Err (drives the I2 path).
         transport_ok: bool,
+        /// Makes the edit-only replace phase return a typed Unknown Message failure.
+        deferred_edit_fails: bool,
+        /// Fresh POST attempts after the deferred edit phase.
+        post_count: AtomicUsize,
         /// The `ReplaceLongMessageOutcome` returned by `replace_message_with_outcome`
         /// when `transport_ok` (so H2 tests can drive `PartialContinuationFailure`).
         replace_outcome: ReplaceLongMessageOutcome,
@@ -1470,6 +1542,8 @@ mod tests {
                 first_commit_step: AtomicUsize::new(0),
                 first_commit_was_delivered: AtomicBool::new(false),
                 transport_ok,
+                deferred_edit_fails: false,
+                post_count: AtomicUsize::new(0),
                 replace_outcome: ReplaceLongMessageOutcome::EditedOriginal,
                 edit_fails: AtomicBool::new(false),
                 delete_calls: AtomicUsize::new(0),
@@ -1496,6 +1570,11 @@ mod tests {
         /// Drive a specific replace outcome on the transport-ok path (H2).
         fn with_replace_outcome(mut self, outcome: ReplaceLongMessageOutcome) -> Self {
             self.replace_outcome = outcome;
+            self
+        }
+
+        fn with_deferred_edit_failure(mut self) -> Self {
+            self.deferred_edit_fails = true;
             self
         }
 
@@ -1638,6 +1717,51 @@ mod tests {
             })
         }
 
+        fn replace_message_deferred<'a>(
+            &'a self,
+            _c: ChannelId,
+            _m: MessageId,
+            _content: &'a str,
+        ) -> GatewayFuture<
+            'a,
+            Result<crate::services::discord::formatting::DeferredReplaceLongMessageOutcome, String>,
+        > {
+            Box::pin(async move {
+                self.observe_lease_for_commit();
+                self.send_step
+                    .store(self.clock.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
+                self.committed_at_send
+                    .store(self.lease_is_committed_delivered(), Ordering::SeqCst);
+                if self.deferred_edit_fails {
+                    Ok(crate::services::discord::formatting::DeferredReplaceLongMessageOutcome::EditFailed {
+                        edit_error: "Unknown Message".to_string(),
+                    })
+                } else if self.transport_ok {
+                    Ok(crate::services::discord::formatting::DeferredReplaceLongMessageOutcome::Edited(
+                        self.replace_outcome.clone(),
+                    ))
+                } else {
+                    Err("fake replace failure".to_string())
+                }
+            })
+        }
+
+        fn send_long_message_with_rollback<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _rollback_anchor_msg_id: MessageId,
+            _content: &'a str,
+        ) -> GatewayFuture<'a, Result<Vec<MessageId>, String>> {
+            Box::pin(async move {
+                self.post_count.fetch_add(1, Ordering::SeqCst);
+                if self.transport_ok {
+                    Ok(vec![MessageId::new(42)])
+                } else {
+                    Err("fake fallback send failure".to_string())
+                }
+            })
+        }
+
         fn schedule_retry_with_history<'a>(
             &'a self,
             _c: ChannelId,
@@ -1673,6 +1797,114 @@ mod tests {
         fn bot_owner_provider(&self) -> Option<ProviderKind> {
             None
         }
+    }
+
+    #[tokio::test]
+    async fn edit_failure_fresh_committed_proof_suppresses_fallback_post() {
+        let channel = ChannelId::new(4508);
+        let lease = Arc::new(RecordingLease::new(channel));
+        let gateway =
+            ObservingGateway::new(lease.clone() as Arc<dyn DeliveryLease + Send + Sync>, true)
+                .with_deferred_edit_failure();
+        let controller = PlaceholderController::default();
+        let placeholder_msg = MessageId::new(4508);
+        let revalidation_calls = AtomicUsize::new(0);
+        let revalidate = || {
+            revalidation_calls.fetch_add(1, Ordering::SeqCst);
+            true
+        };
+        let outcome = deliver_turn_output_with_fallback_revalidation(
+            &gateway,
+            TurnOutputCtx {
+                turn: turn_key(channel),
+                lease_key: Some(lease_key(channel)),
+                owner: RelayOwnerKind::Watcher,
+                holder: LeaseHolder::Watcher { instance_id: 1 },
+                lease: lease.as_ref(),
+                channel_id: channel,
+                placeholder_controller: &controller,
+                placeholder: PlaceholderSlot::Active {
+                    message_id: placeholder_msg,
+                    key: placeholder_key(channel, placeholder_msg),
+                },
+                body: "already delivered",
+                send_range: (0, 17),
+                plan: OutputPlan::Replace {
+                    lifecycle: PlaceholderLifecycle::Active,
+                },
+                edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+                fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+                acquire_failure_mode: AcquireFailureMode::Transient,
+                advance: None,
+                heartbeat: None,
+            },
+            Some(&revalidate),
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            RevalidatedDeliveryOutcome::AlreadyCommittedAfterEditFailure { .. }
+        ));
+        assert_eq!(revalidation_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            gateway.post_count.load(Ordering::SeqCst),
+            0,
+            "mutation proof: removing the post-edit recheck must make this assertion fail"
+        );
+        assert_eq!(lease.commit_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(lease.release_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn edit_failure_without_committed_proof_posts_once_and_commits() {
+        let channel = ChannelId::new(4509);
+        let lease = Arc::new(RecordingLease::new(channel));
+        let gateway =
+            ObservingGateway::new(lease.clone() as Arc<dyn DeliveryLease + Send + Sync>, true)
+                .with_deferred_edit_failure();
+        let controller = PlaceholderController::default();
+        let placeholder_msg = MessageId::new(4509);
+        let revalidate = || false;
+        let outcome = deliver_turn_output_with_fallback_revalidation(
+            &gateway,
+            TurnOutputCtx {
+                turn: turn_key(channel),
+                lease_key: Some(lease_key(channel)),
+                owner: RelayOwnerKind::Watcher,
+                holder: LeaseHolder::Watcher { instance_id: 2 },
+                lease: lease.as_ref(),
+                channel_id: channel,
+                placeholder_controller: &controller,
+                placeholder: PlaceholderSlot::Active {
+                    message_id: placeholder_msg,
+                    key: placeholder_key(channel, placeholder_msg),
+                },
+                body: "not yet delivered",
+                send_range: (0, 17),
+                plan: OutputPlan::Replace {
+                    lifecycle: PlaceholderLifecycle::Active,
+                },
+                edit_fail_policy: EditFailPlaceholderPolicy::PreserveAlways,
+                fallback_commit_policy: FallbackCommitPolicy::CommitOnFallback,
+                acquire_failure_mode: AcquireFailureMode::Transient,
+                advance: None,
+                heartbeat: None,
+            },
+            Some(&revalidate),
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            RevalidatedDeliveryOutcome::Delivery(DeliveryOutcome::Delivered {
+                replace_kind: Some(ReplaceDeliveryKind::FreshFallbackAfterEditFailure { .. }),
+                ..
+            })
+        ));
+        assert_eq!(gateway.post_count.load(Ordering::SeqCst), 1);
+        assert_eq!(lease.delivered_commit_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(lease.release_calls.load(Ordering::SeqCst), 1);
     }
 
     /// I1 — commit+advance happens INSIDE the controller, after confirmed

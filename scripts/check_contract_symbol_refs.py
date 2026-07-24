@@ -108,6 +108,8 @@ REFERENCE_SOURCE_MODULES: dict[str, tuple[str, ...]] = {
     "router/message_handler/watchdog.rs": ("router", "message_handler", "watchdog"),
     "mailbox_finish.rs": ("mailbox_finish",),
     "session_relay_sink.rs": ("session_relay_sink",),
+    "formatting.rs": ("formatting",),
+    "outbound/delivery_record.rs": ("outbound", "delivery_record"),
 }
 
 DEFAULT_REFERENCE_SOURCES: tuple[Path, ...] = tuple(

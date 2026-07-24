@@ -369,6 +369,32 @@ plan.
 - Invariant key: `idle_cursor_confirmed_commit_only` (enforced structurally and by
   cursor/commit/generation regression tests).
 
+## I11. edit failure does not authorize a fresh fallback POST (#4508)
+
+- Definition: the formatting layer's edit-only replace primitive
+  (`sym:formatting::replace_long_message_raw_deferred`) returns a typed edit
+  failure without issuing a fallback POST.
+- Producer: the range owner re-reads current-generation durable coverage with
+  `range_committed_after_edit_failure`
+  (`sym:outbound::delivery_record::range_committed_after_edit_failure`) while the
+  same `DeliveryLease` is still held.
+- Consumer: controller and legacy watcher short-replace paths suppress fallback
+  delivery only when fresh, generation-matching, EOF-bounded coverage reaches the
+  range end. Missing markers, generation mismatch, unknown EOF, and frontier past
+  EOF remain fail-open for delivery and retain the existing one-shot fallback.
+- Invariant: an edit failure is not fresh-send authority. Confirmed committed
+  coverage yields `AlreadyCommittedAfterEditFailure` with zero fallback POSTs and
+  no transport-success commit; only idempotent watcher lifecycle/watermark
+  reconciliation against that already-committed frontier may follow. Otherwise,
+  only a confirmed fallback POST may run the existing commit/advance path.
+- Violation surface: a restart leaves a stale placeholder target, another owner
+  commits the JSONL range while the edit is awaited, Discord returns Unknown
+  Message, and the stale owner duplicates the already delivered response via a
+  fresh POST.
+- Invariant key: `edit_failure_fallback_requires_fresh_frontier` (enforced by
+  controller mutation-sensitive post-count tests, delivery-record generation/EOF
+  tests, and controller/legacy owner wiring tests).
+
 ## How to add a new invariant
 
 1. Document it here with the same structure (definition, producer,

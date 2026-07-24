@@ -226,9 +226,6 @@ services::discord::dispatch_policy::allowed_turn_sender_tests
 services::discord::dispatch_policy::dispatch_turn_gate_tests
 services::discord::followup_retry_requeue_tests
 services::discord::footer_view_reconciler::tests
-services::discord::formatting::replace_long_message_tests
-services::discord::formatting::rollback_transport_test_hook
-services::discord::formatting::status_panel_v2_formatter_tests
 services::discord::gateway::answer_flush_gate_tests
 services::discord::gateway::outbound_messages::classified_post_tests
 services::discord::gateway::tests
@@ -269,9 +266,6 @@ services::discord::mailbox_finish::relay_state_contract_refs
 services::discord::mcp_credential_watcher::tests
 services::discord::outbound::completed_turn_ledger::tests
 services::discord::outbound::delivery::tests
-services::discord::outbound::delivery_record::authority_test_seam
-services::discord::outbound::delivery_record::shadow_test_seam
-services::discord::outbound::delivery_record::tests
 services::discord::outbound::manual_delivery::manual_v3_delivery_tests
 services::discord::outbound::message::tests
 services::discord::outbound::send_api::handle_send_contract_tests
@@ -642,7 +636,6 @@ services::session_selector_validity::tests
 services::settings::tests
 services::slo::avg_latency_tests
 services::stale_turn_reconciler::tests
-services::terminal_status_formatting::tests
 services::tmux_common::channel_binding_tests
 services::tmux_common::mcp_auth_required_tests
 services::tmux_common::selector_overlay_tests

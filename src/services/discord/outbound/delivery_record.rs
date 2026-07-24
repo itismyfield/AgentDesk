@@ -1031,6 +1031,30 @@ pub(in crate::services::discord) fn committed_floor_for_resend_dedup(
     ))
 }
 
+/// Re-read only the current-generation durable frontier after an edit failure
+/// and decide whether a fallback POST would duplicate a confirmed JSONL range.
+/// The in-memory committed offset is deliberately excluded: missing
+/// generation/record/EOF authority remains fail-open for delivery, so only
+/// positive current-generation durable coverage suppresses the POST.
+pub(in crate::services::discord) fn range_committed_after_edit_failure(
+    _shared: &crate::services::discord::SharedData,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    tmux_session_name: &str,
+    current_transcript_eof: Option<u64>,
+    range_end: u64,
+) -> bool {
+    range_already_committed(
+        range_end,
+        delivered_frontier_end_current_generation(
+            provider,
+            channel,
+            tmux_session_name,
+            current_transcript_eof,
+        ),
+    )
+}
+
 /// #3593 JSONL-space monotonic dedup predicate (pure, testable). `range_end` is the
 /// END of the consumed JSONL byte range a watcher pass is about to relay;
 /// `committed` is the already-delivered committed JSONL offset (the relay coord's
@@ -1572,6 +1596,14 @@ pub(in crate::services::discord) fn record_long_chunk_terminal_delivery(
         Some(delivered_body),
         ledger_user_msg_id,
     );
+}
+
+#[cfg(test)]
+mod relay_state_contract_refs {
+    #[test]
+    fn contract_symbols_exist() {
+        use super::range_committed_after_edit_failure as _;
+    }
 }
 
 #[cfg(test)]
@@ -3324,6 +3356,119 @@ mod tests {
         // Watchdog re-relay of the delivered body → suppressed (dup guard).
         assert!(range_already_committed(500_000, floor));
         assert!(range_already_committed(durable_end, floor)); // inclusive boundary
+    }
+
+    #[test]
+    fn edit_failure_recheck_suppresses_only_fresh_bounded_commit_4508() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(45_080_001);
+        let tmux = "AgentDesk-claude-4508";
+        let committed_end = 900_u64;
+        seed_current_generation_frontier(&provider, channel, tmux, committed_end);
+        let shared = shared_with_committed(channel, 0);
+
+        assert!(range_committed_after_edit_failure(
+            shared.as_ref(),
+            &provider,
+            channel,
+            tmux,
+            Some(committed_end),
+            committed_end,
+        ));
+        assert!(!range_committed_after_edit_failure(
+            shared.as_ref(),
+            &provider,
+            channel,
+            tmux,
+            Some(committed_end),
+            committed_end + 1,
+        ));
+        assert!(!range_committed_after_edit_failure(
+            shared.as_ref(),
+            &provider,
+            channel,
+            tmux,
+            None,
+            committed_end,
+        ));
+        assert!(!range_committed_after_edit_failure(
+            shared.as_ref(),
+            &provider,
+            channel,
+            tmux,
+            Some(committed_end - 1),
+            committed_end,
+        ));
+    }
+
+    #[test]
+    fn edit_failure_recheck_distrusts_prior_generation_4508() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(45_080_002);
+        let tmux = "AgentDesk-claude-4508-stale";
+        let committed_end = 900_u64;
+        seed_current_generation_frontier(&provider, channel, tmux, committed_end);
+        let record_path = delivery_record_path(&provider, channel.get()).unwrap();
+        write_delivered_frontier_at(
+            &record_path,
+            DeliveredCommit {
+                range: (0, committed_end),
+                generation_mtime_ns: 1,
+                attempts: 1,
+                panel_msg_id: None,
+                panel_channel_id: None,
+            },
+        )
+        .unwrap();
+        let shared = shared_with_committed(channel, committed_end);
+
+        assert!(!range_committed_after_edit_failure(
+            shared.as_ref(),
+            &provider,
+            channel,
+            tmux,
+            Some(committed_end),
+            committed_end,
+        ));
+    }
+
+    #[test]
+    fn edit_failure_recheck_requires_durable_proof_despite_high_memory_floor_4508() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(45_080_003);
+        let tmux = "AgentDesk-claude-4508-unverifiable";
+        let committed_end = 900_u64;
+        let shared = shared_with_committed(channel, committed_end);
+
+        assert!(!range_committed_after_edit_failure(
+            shared.as_ref(),
+            &provider,
+            channel,
+            tmux,
+            Some(committed_end),
+            committed_end,
+        ));
+
+        seed_current_generation_frontier(&provider, channel, tmux, committed_end);
+        assert!(!range_committed_after_edit_failure(
+            shared.as_ref(),
+            &provider,
+            channel,
+            tmux,
+            None,
+            committed_end,
+        ));
+        assert!(!range_committed_after_edit_failure(
+            shared.as_ref(),
+            &provider,
+            channel,
+            tmux,
+            Some(committed_end - 1),
+            committed_end,
+        ));
     }
 
     /// Even with authority ON, a STALE prior-generation durable frontier is

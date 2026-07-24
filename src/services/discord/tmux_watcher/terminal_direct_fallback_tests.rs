@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn legacy_edit_failure_revalidation_precedes_fallback_post_4508() {
+    let source = include_str!("terminal_direct_fallback.rs");
+    let deferred = source
+        .find("replace_long_message_raw_deferred(")
+        .expect("legacy short replace must defer fallback authority");
+    let recheck = source[deferred..]
+        .find("range_committed_after_edit_failure(")
+        .map(|offset| deferred + offset)
+        .expect("legacy edit failure must re-read the durable frontier");
+    let fallback = source[recheck..]
+        .find("send_long_message_raw_with_rollback(")
+        .map(|offset| recheck + offset)
+        .expect("uncommitted legacy range must retain fallback delivery");
+    assert!(deferred < recheck && recheck < fallback);
+    let guarded_body = &source[recheck..fallback];
+    assert!(
+        guarded_body.contains("AlreadyCommittedAfterEditFailure"),
+        "committed proof must branch away before the fallback POST"
+    );
+    assert!(
+        !source.contains("replace_long_message_raw_with_outcome("),
+        "legacy owner must not call the generic auto-fallback replace API"
+    );
+}
+
+#[test]
 fn recovered_task_response_identity_is_stable_without_inflight_or_context() {
     let provider = ProviderKind::Claude;
     let channel_id = ChannelId::new(4_055_902);

@@ -205,7 +205,21 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
         );
         true
     };
-    let outcome = toc::deliver_turn_output(
+    let revalidate_after_edit_failure = || {
+        let current_transcript_eof = shared
+            .tmux_watchers
+            .watcher_output_path(tmux_session_name)
+            .and_then(|path| std::fs::metadata(path).ok().map(|metadata| metadata.len()));
+        dr::range_committed_after_edit_failure(
+            shared,
+            provider,
+            channel_id,
+            tmux_session_name,
+            current_transcript_eof,
+            end,
+        )
+    };
+    let outcome = toc::deliver_turn_output_with_fallback_revalidation(
         gateway,
         toc::TurnOutputCtx {
             turn,
@@ -241,8 +255,16 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
             advance: Some(&advance),
             heartbeat: Some(&heartbeat),
         },
+        Some(&revalidate_after_edit_failure),
     )
     .await;
+
+    let outcome = match outcome {
+        toc::RevalidatedDeliveryOutcome::Delivery(outcome) => outcome,
+        toc::RevalidatedDeliveryOutcome::AlreadyCommittedAfterEditFailure { edit_error } => {
+            return WatcherShortReplaceResult::AlreadyCommittedAfterEditFailure { edit_error };
+        }
+    };
 
     // #3089 B2a: shadow-mirror durable delivered frontier — flag-gated,
     // observe-only, Delivered-only (I2). #4081 still records confirmed body
@@ -509,6 +531,26 @@ pub(in crate::services::discord) fn apply_watcher_short_replace_result(
             locals.last_edit_text.clear();
             drop_placeholder_orphan_record(provider, shared, channel_id, msg_id);
         }
+        WatcherShortReplaceResult::AlreadyCommittedAfterEditFailure { edit_error } => {
+            *locals.direct_send_delivered = true;
+            *locals.tui_direct_anchor_terminal_body_visible = false;
+            *locals.placeholder_msg_id = None;
+            *locals.placeholder_from_restored_inflight = false;
+            locals.last_edit_text.clear();
+            drop_placeholder_orphan_record(provider, shared, channel_id, msg_id);
+            super::super::record_placeholder_cleanup(
+                shared,
+                provider,
+                channel_id,
+                msg_id,
+                tmux_session_name,
+                crate::services::discord::placeholder_cleanup::PlaceholderCleanupOperation::EditTerminal,
+                crate::services::discord::placeholder_cleanup::PlaceholderCleanupOutcome::failed(
+                    edit_error,
+                ),
+                "watcher_terminal_relay_controller_already_committed_after_edit_failure",
+            );
+        }
         WatcherShortReplaceResult::B2Skip | WatcherShortReplaceResult::Skipped => {
             *locals.relay_ok = false;
         }
@@ -598,6 +640,10 @@ pub(in crate::services::discord) enum WatcherShortReplaceResult {
         edit_error: String,
         replacement_anchor: Option<MessageId>,
     },
+    /// The edit failed, and a fresh current-generation frontier read proved the
+    /// range was already committed by another owner. No fallback POST or new
+    /// commit occurred; the watcher reconciles its local lifecycle to that proof.
+    AlreadyCommittedAfterEditFailure { edit_error: String },
     /// Lost acquire → the legacy `watcher_lease_b2_skip` arm: another holder owns
     /// the range. No transport. `relay_ok = false`, `direct_send_delivered = false`
     /// (the live holder advances the offset).

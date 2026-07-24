@@ -141,6 +141,22 @@ pub(super) trait TurnGateway: Send + Sync {
         content: &'a str,
     ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>>;
 
+    /// Attempt only the edit phase of a replace. An edit failure is returned as a
+    /// typed outcome so a range owner can revalidate durable delivery authority
+    /// before deciding whether a fresh fallback POST is still allowed.
+    fn replace_message_deferred<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        content: &'a str,
+    ) -> GatewayFuture<'a, Result<formatting::DeferredReplaceLongMessageOutcome, String>> {
+        Box::pin(async move {
+            self.replace_message_with_outcome(channel_id, message_id, content)
+                .await
+                .map(formatting::DeferredReplaceLongMessageOutcome::Edited)
+        })
+    }
+
     fn schedule_retry_with_history<'a>(
         &'a self,
         channel_id: ChannelId,
@@ -625,6 +641,26 @@ impl TurnGateway for DiscordGateway {
                 &self.shared,
                 // #3805 P1: gateway trait returns the outcome only; the last-chunk
                 // footer anchor is consumed exclusively by the tmux watcher.
+                &mut None,
+            )
+            .await
+            .map_err(|error| watcher_classified_error_string(error.as_ref()))
+        })
+    }
+
+    fn replace_message_deferred<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        content: &'a str,
+    ) -> GatewayFuture<'a, Result<formatting::DeferredReplaceLongMessageOutcome, String>> {
+        Box::pin(async move {
+            formatting::replace_long_message_raw_deferred(
+                &self.http,
+                channel_id,
+                message_id,
+                content,
+                &self.shared,
                 &mut None,
             )
             .await

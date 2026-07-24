@@ -2215,6 +2215,12 @@ pub(super) fn replace_long_message_outcome_to_result(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum DeferredReplaceLongMessageOutcome {
+    Edited(ReplaceLongMessageOutcome),
+    EditFailed { edit_error: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ReplaceLongMessageOutcome {
     EditedOriginal,
     SentFallbackAfterEditFailure {
@@ -2280,12 +2286,43 @@ pub(super) async fn replace_long_message_raw_with_outcome(
     message_id: MessageId,
     text: &str,
     shared: &Arc<SharedData>,
+    last_chunk_anchor: &mut Option<ReplaceLastChunkAnchor>,
+) -> Result<ReplaceLongMessageOutcome, Error> {
+    match replace_long_message_raw_deferred(
+        http,
+        channel_id,
+        message_id,
+        text,
+        shared,
+        last_chunk_anchor,
+    )
+    .await?
+    {
+        DeferredReplaceLongMessageOutcome::Edited(outcome) => Ok(outcome),
+        DeferredReplaceLongMessageOutcome::EditFailed { edit_error } => {
+            let replacement_message_ids =
+                send_long_message_raw_with_rollback(http, channel_id, message_id, text, shared)
+                    .await?;
+            Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+                edit_error,
+                replacement_anchor: replacement_message_ids.first().copied(),
+            })
+        }
+    }
+}
+
+pub(super) async fn replace_long_message_raw_deferred(
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    message_id: MessageId,
+    text: &str,
+    shared: &Arc<SharedData>,
     // #3805 P1: on the fully-successful multi-chunk edit path this is set to the
     // tail continuation chunk (id + text) so a footer-appending caller can
     // re-anchor onto it; left untouched (caller-initialised `None`) on every
     // other path (single-chunk, edit-failure fallback, partial failure).
     last_chunk_anchor: &mut Option<ReplaceLastChunkAnchor>,
-) -> Result<ReplaceLongMessageOutcome, Error> {
+) -> Result<DeferredReplaceLongMessageOutcome, Error> {
     let payload_byte_len = text.len();
     let chunks = split_message(text);
     let total = chunks.len();
@@ -2298,23 +2335,27 @@ pub(super) async fn replace_long_message_raw_with_outcome(
             total_chunks = 0usize,
             "discord replace: no chunks"
         );
-        return Ok(ReplaceLongMessageOutcome::EditedOriginal);
+        return Ok(DeferredReplaceLongMessageOutcome::Edited(
+            ReplaceLongMessageOutcome::EditedOriginal,
+        ));
     };
     let rollback_key = replace_continuation_rollback_key(channel_id, message_id);
     match claim_replace_continuation_rollback(&rollback_key) {
         ReplaceContinuationRollbackClaim::None => {}
         ReplaceContinuationRollbackClaim::InProgress(pending_ids) => {
-            return Ok(ReplaceLongMessageOutcome::PartialContinuationFailure {
-                sent_chunks: 0,
-                total_chunks: total,
-                failed_chunk_index: 0,
-                sent_continuation_message_ids: pending_ids,
-                cleanup_errors: Vec::new(),
-                error: watcher_send_failure_message(
-                    super::replace_outcome_policy::WatcherSendFailureClass::RollbackIncomplete,
-                    "previous continuation cleanup in progress",
-                ),
-            });
+            return Ok(DeferredReplaceLongMessageOutcome::Edited(
+                ReplaceLongMessageOutcome::PartialContinuationFailure {
+                    sent_chunks: 0,
+                    total_chunks: total,
+                    failed_chunk_index: 0,
+                    sent_continuation_message_ids: pending_ids,
+                    cleanup_errors: Vec::new(),
+                    error: watcher_send_failure_message(
+                        super::replace_outcome_policy::WatcherSendFailureClass::RollbackIncomplete,
+                        "previous continuation cleanup in progress",
+                    ),
+                },
+            ));
         }
         ReplaceContinuationRollbackClaim::Owner(pending_ids) => {
             let cleanup =
@@ -2325,19 +2366,21 @@ pub(super) async fn replace_long_message_raw_with_outcome(
                     unclaim_replace_continuation_rollback(&rollback_key);
                     let mut cleanup_errors = cleanup.errors;
                     cleanup_errors.push(error.clone());
-                    return Ok(ReplaceLongMessageOutcome::PartialContinuationFailure {
-                        sent_chunks: 0,
-                        total_chunks: total,
-                        failed_chunk_index: 0,
-                        sent_continuation_message_ids: pending_ids,
-                        cleanup_errors,
-                        error: watcher_send_failure_message(
-                            super::replace_outcome_policy::WatcherSendFailureClass::Transient,
-                            format!(
-                                "previous continuation rollback state was not cleared: {error}"
+                    return Ok(DeferredReplaceLongMessageOutcome::Edited(
+                        ReplaceLongMessageOutcome::PartialContinuationFailure {
+                            sent_chunks: 0,
+                            total_chunks: total,
+                            failed_chunk_index: 0,
+                            sent_continuation_message_ids: pending_ids,
+                            cleanup_errors,
+                            error: watcher_send_failure_message(
+                                super::replace_outcome_policy::WatcherSendFailureClass::Transient,
+                                format!(
+                                    "previous continuation rollback state was not cleared: {error}"
+                                ),
                             ),
-                        ),
-                    });
+                        },
+                    ));
                 }
             } else {
                 let mut cleanup_errors = cleanup.errors;
@@ -2351,7 +2394,8 @@ pub(super) async fn replace_long_message_raw_with_outcome(
                     );
                     cleanup_errors.push(error.clone());
                 }
-                return Ok(ReplaceLongMessageOutcome::PartialContinuationFailure {
+                return Ok(DeferredReplaceLongMessageOutcome::Edited(
+                ReplaceLongMessageOutcome::PartialContinuationFailure {
                     sent_chunks: 0,
                     total_chunks: total,
                     failed_chunk_index: 0,
@@ -2361,7 +2405,7 @@ pub(super) async fn replace_long_message_raw_with_outcome(
                         super::replace_outcome_policy::WatcherSendFailureClass::RollbackIncomplete,
                         "previous continuation cleanup incomplete",
                     ),
-                });
+                }));
             }
         }
     }
@@ -2411,14 +2455,10 @@ pub(super) async fn replace_long_message_raw_with_outcome(
             total_chunks = total,
             outcome = "edit_failed_falling_back_to_send",
             error = %e,
-            "discord first-chunk edit failed; falling back to send_long_message_raw (issue #1043)"
+            "discord first-chunk edit failed; deferring fallback-send authority to caller"
         );
-        let edit_error = e.to_string();
-        let replacement_message_ids =
-            send_long_message_raw_with_rollback(http, channel_id, message_id, text, shared).await?;
-        return Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
-            edit_error,
-            replacement_anchor: replacement_message_ids.first().copied(),
+        return Ok(DeferredReplaceLongMessageOutcome::EditFailed {
+            edit_error: e.to_string(),
         });
     }
 
@@ -2512,14 +2552,16 @@ pub(super) async fn replace_long_message_raw_with_outcome(
                     } else {
                         super::replace_outcome_policy::WatcherSendFailureClass::RollbackIncomplete
                     };
-                    return Ok(ReplaceLongMessageOutcome::PartialContinuationFailure {
-                        sent_chunks: i + 1,
-                        total_chunks: total,
-                        failed_chunk_index: i,
-                        sent_continuation_message_ids: sent_continuation_message_ids.clone(),
-                        cleanup_errors: errors,
-                        error: watcher_send_failure_message(class, error),
-                    });
+                    return Ok(DeferredReplaceLongMessageOutcome::Edited(
+                        ReplaceLongMessageOutcome::PartialContinuationFailure {
+                            sent_chunks: i + 1,
+                            total_chunks: total,
+                            failed_chunk_index: i,
+                            sent_continuation_message_ids: sent_continuation_message_ids.clone(),
+                            cleanup_errors: errors,
+                            error: watcher_send_failure_message(class, error),
+                        },
+                    ));
                 }
                 if is_last {
                     tracing::debug!(
@@ -2561,14 +2603,17 @@ pub(super) async fn replace_long_message_raw_with_outcome(
                         unclaim_replace_continuation_rollback(&rollback_key);
                         let mut errors = cleanup_errors.errors;
                         errors.push(error.clone());
-                        return Ok(ReplaceLongMessageOutcome::PartialContinuationFailure {
-                            sent_chunks: i,
-                            total_chunks: total,
-                            failed_chunk_index: i,
-                            sent_continuation_message_ids: sent_continuation_message_ids.clone(),
-                            cleanup_errors: errors,
-                            error: watcher_send_failure_message(failure_class, error),
-                        });
+                        return Ok(DeferredReplaceLongMessageOutcome::Edited(
+                            ReplaceLongMessageOutcome::PartialContinuationFailure {
+                                sent_chunks: i,
+                                total_chunks: total,
+                                failed_chunk_index: i,
+                                sent_continuation_message_ids: sent_continuation_message_ids
+                                    .clone(),
+                                cleanup_errors: errors,
+                                error: watcher_send_failure_message(failure_class, error),
+                            },
+                        ));
                     }
                 } else {
                     let mut errors = cleanup_errors.errors;
@@ -2582,7 +2627,8 @@ pub(super) async fn replace_long_message_raw_with_outcome(
                         );
                         errors.push(record_error);
                     }
-                    return Ok(ReplaceLongMessageOutcome::PartialContinuationFailure {
+                    return Ok(DeferredReplaceLongMessageOutcome::Edited(
+                ReplaceLongMessageOutcome::PartialContinuationFailure {
                         sent_chunks: i,
                         total_chunks: total,
                         failed_chunk_index: i,
@@ -2592,16 +2638,18 @@ pub(super) async fn replace_long_message_raw_with_outcome(
                             super::replace_outcome_policy::WatcherSendFailureClass::RollbackIncomplete,
                             error,
                         ),
-                    });
+                    }));
                 }
-                return Ok(ReplaceLongMessageOutcome::PartialContinuationFailure {
-                    sent_chunks: i,
-                    total_chunks: total,
-                    failed_chunk_index: i,
-                    sent_continuation_message_ids: sent_continuation_message_ids.clone(),
-                    cleanup_errors: cleanup_errors.errors,
-                    error: watcher_send_failure_message(failure_class, error),
-                });
+                return Ok(DeferredReplaceLongMessageOutcome::Edited(
+                    ReplaceLongMessageOutcome::PartialContinuationFailure {
+                        sent_chunks: i,
+                        total_chunks: total,
+                        failed_chunk_index: i,
+                        sent_continuation_message_ids: sent_continuation_message_ids.clone(),
+                        cleanup_errors: cleanup_errors.errors,
+                        error: watcher_send_failure_message(failure_class, error),
+                    },
+                ));
             }
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -2632,7 +2680,9 @@ pub(super) async fn replace_long_message_raw_with_outcome(
                 msg_id,
                 text: chunks.last().cloned().unwrap_or_default(),
             });
-    Ok(ReplaceLongMessageOutcome::EditedOriginal)
+    Ok(DeferredReplaceLongMessageOutcome::Edited(
+        ReplaceLongMessageOutcome::EditedOriginal,
+    ))
 }
 
 #[derive(Debug, Default)]
@@ -2672,6 +2722,14 @@ async fn cleanup_replace_continuations_after_failure(
         }
     }
     result
+}
+
+#[cfg(test)]
+mod relay_state_contract_refs {
+    #[test]
+    fn contract_symbols_exist() {
+        use super::replace_long_message_raw_deferred as _;
+    }
 }
 
 #[cfg(test)]
@@ -3130,7 +3188,6 @@ mod replace_long_message_tests {
         super::clear_replace_continuation_rollback(&key_one).expect("clear turn-one debt");
     }
 }
-
 /// Split a message into chunks that fit within Discord's 2000 char limit.
 /// Handles code block boundaries correctly. Used by stream/slash-command/recovery
 /// paths where overflow is delivered as additional inline messages. The manual

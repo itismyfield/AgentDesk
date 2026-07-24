@@ -25,7 +25,7 @@ from typing import Iterable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE_REL = Path("scripts/test_lane_coverage_baseline.txt")
-BASELINE_ENTRY_COUNT = 700
+BASELINE_ENTRY_COUNT = 693
 
 # Attributes do not contain a closing square bracket in the forms used by this
 # repository. Strings and comments are blanked without changing offsets, so the
