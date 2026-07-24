@@ -4,17 +4,20 @@ use crate::services::cluster::intake_router_hook::{
 };
 use crate::services::provider::ProviderKind;
 
+mod attachment;
 mod notice;
 mod queued;
 mod skill;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use attachment::{prepare_admitted_live_attachments, resolve_attachment_admission};
 use notice::notify_blocked_intake;
 pub(crate) use queued::{
     QueuedAdmissionDisposition, admit_queued_intake, finish_admitted_queued_intake,
 };
 pub(crate) use skill::dispatch_skill_intake;
+pub(crate) use skill::finish_admitted_skill_intake;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IntakeOrigin {
@@ -41,6 +44,7 @@ pub(crate) struct IntakeSubmission {
     pub(crate) origin: IntakeOrigin,
     pub(crate) preserve_on_cancel: bool,
     pub(crate) has_nonportable_uploads: bool,
+    pub(crate) attachments: Vec<message_handler::AttachmentDescriptor>,
     pub(crate) preloaded_uploads: Vec<String>,
     pub(crate) voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 }
@@ -144,6 +148,7 @@ pub(crate) async fn admit_text_intake(
         preserve_on_cancel: submission.preserve_on_cancel,
         node_override_instance_id: node_override.as_deref(),
         has_nonportable_uploads: submission.has_nonportable_uploads
+            || !submission.attachments.is_empty()
             || !submission.preloaded_uploads.is_empty(),
     };
 
@@ -185,6 +190,14 @@ pub(crate) async fn dispatch_text_intake(
     submission: IntakeSubmission,
 ) -> Result<(), super::super::Error> {
     let admission = admit_text_intake(deps, &submission).await;
+    finish_text_intake_admission(deps, admission, submission).await
+}
+
+pub(crate) async fn finish_text_intake_admission(
+    deps: &IntakeDeps<'_>,
+    admission: IntakeAdmission,
+    submission: IntakeSubmission,
+) -> Result<(), super::super::Error> {
     match admission {
         IntakeAdmission::Local(permit) => {
             finish_admitted_local(deps, permit, submission).await?;
@@ -202,6 +215,14 @@ pub(crate) async fn dispatch_text_intake(
         | IntakeAdmission::Blocked { .. } => {}
     }
     Ok(())
+}
+
+pub(crate) async fn finish_admitted_text_intake(
+    deps: &IntakeDeps<'_>,
+    permit: LocalAdmissionPermit,
+    submission: IntakeSubmission,
+) -> Result<(), super::super::Error> {
+    finish_admitted_local(deps, permit, submission).await
 }
 
 pub(crate) async fn finish_admitted_local(

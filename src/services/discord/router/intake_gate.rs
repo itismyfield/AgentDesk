@@ -29,25 +29,6 @@ use stale_turn::{
     thread_guard_should_force_clean_stale_thread,
 };
 
-async fn record_upload_history(
-    shared: &std::sync::Arc<SharedData>,
-    channel_id: serenity::ChannelId,
-    upload_records: &[String],
-) {
-    if upload_records.is_empty() {
-        return;
-    }
-    let mut data = shared.core.lock().await;
-    if let Some(session) = data.sessions.get_mut(&channel_id) {
-        session
-            .history
-            .extend(upload_records.iter().cloned().map(|content| HistoryItem {
-                item_type: HistoryType::User,
-                content,
-            }));
-    }
-}
-
 async fn append_pending_uploads(
     shared: &std::sync::Arc<SharedData>,
     channel_id: serenity::ChannelId,
@@ -672,12 +653,15 @@ pub(in crate::services::discord) async fn handle_event(
             {
                 return Ok(());
             }
+            let mut deferred_attachment_unbound_check = false;
             if !is_dm && !is_voice_transcript_announcement {
                 match resolve_runtime_channel_binding_status(&ctx.http, effective_channel_id).await
                 {
                     RuntimeChannelBindingStatus::Owned => {}
                     RuntimeChannelBindingStatus::Unowned => {
-                        if can_route_unbound_direct_session(
+                        if !new_message.attachments.is_empty() {
+                            deferred_attachment_unbound_check = true;
+                        } else if can_route_unbound_direct_session(
                             data,
                             ctx,
                             channel_id,
@@ -812,56 +796,114 @@ pub(in crate::services::discord) async fn handle_event(
                 }
             }
 
-            // Handle file attachments — download regardless of session state.
-            // For thread messages, bootstrap the thread session before saving so
-            // upload context attaches to the eventual turn instead of being
-            // dropped while only the parent session exists.
-            let upload_records = if !new_message.attachments.is_empty() {
+            let attachments = super::message_handler::describe_attachments(new_message);
+            let mut attachment_local_permit = None;
+            let mut admitted_attachment_submission = None;
+            if !attachments.is_empty() {
+                let has_reply_boundary = new_message.message_reference.is_some();
+                let reply_context = if has_reply_boundary {
+                    build_reply_context(ctx, channel_id, &new_message).await
+                } else {
+                    None
+                };
+                let turn_kind = super::message_handler::classify_turn_kind_from_author(
+                    user_id.get(),
+                    notify_resolution.user_id(),
+                );
+                let deps = super::message_handler::IntakeDeps {
+                    http: &ctx.http,
+                    cache: Some(&ctx.cache),
+                    ctx_for_chained_dispatch: Some(ctx),
+                    shared: &data.shared,
+                    token: &data.token,
+                };
+                let submission = super::IntakeSubmission {
+                    provider: data.provider.clone(),
+                    request: super::IntakeRequest {
+                        channel_id,
+                        user_msg_id: new_message.id,
+                        request_owner: user_id,
+                        request_owner_name: user_name.to_string(),
+                        user_text: text.to_string(),
+                        reply_to_user_message: false,
+                        defer_watcher_resume: false,
+                        wait_for_completion: false,
+                        merge_consecutive: false,
+                        reply_context: reply_context.clone(),
+                        has_reply_boundary,
+                        dm_hint: Some(is_dm),
+                        turn_kind,
+                        preserve_on_cancel,
+                    },
+                    origin: super::IntakeOrigin::LiveMessage,
+                    preserve_on_cancel,
+                    has_nonportable_uploads: true,
+                    attachments: attachments.clone(),
+                    preloaded_uploads: Vec::new(),
+                    voice_announcement: resolved_voice_announcement.clone(),
+                };
+                let admission = super::admit_text_intake(&deps, &submission).await;
+                match super::resolve_attachment_admission(admission) {
+                    Ok(permit) => {
+                        attachment_local_permit = Some(permit);
+                        admitted_attachment_submission = Some(submission);
+                    }
+                    Err(nonlocal) => {
+                        super::finish_text_intake_admission(&deps, nonlocal, submission).await?;
+                        return Ok(());
+                    }
+                }
+
+                if deferred_attachment_unbound_check
+                    && !can_route_unbound_direct_session(
+                        data,
+                        ctx,
+                        channel_id,
+                        effective_channel_id,
+                        is_dm,
+                    )
+                    .await
+                {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] ⏭ BINDING-GUARD: skipping message {} in unbound channel {} (effective {})",
+                        new_message.id,
+                        channel_id,
+                        effective_channel_id
+                    );
+                    return Ok(());
+                }
+            }
+
+            // A local permit is the only path that may bootstrap session state,
+            // download bytes, or write upload history.
+            let upload_records = if let Some(permit) = attachment_local_permit.as_ref() {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
                     "  [{ts}] ◀ [{user_name}] Upload: {} file(s)",
                     new_message.attachments.len()
                 );
-                auto_restore_session_with_dm_hint(&data.shared, channel_id, ctx, Some(is_dm)).await;
-                if effective_channel_id != channel_id {
-                    let needs_parent = {
-                        let d = data.shared.core.lock().await;
-                        !d.sessions.contains_key(&channel_id)
-                    };
-                    if needs_parent {
-                        auto_restore_session(&data.shared, effective_channel_id, ctx).await;
-                        let parent_path = {
-                            let d = data.shared.core.lock().await;
-                            d.sessions
-                                .get(&effective_channel_id)
-                                .and_then(|s| s.current_path.clone())
-                        };
-                        if let Some(path) = parent_path {
-                            bootstrap_thread_session(
-                                &data.shared,
-                                channel_id,
-                                &path,
-                                &ctx.http,
-                                Some(&ctx.cache),
-                            )
-                            .await;
-                        }
-                    }
-                }
-                let attachments = super::message_handler::describe_attachments(new_message);
-                let permit = super::message_handler::LocalAttachmentPreparationPermit::preserving_existing_intake_order();
-                super::message_handler::prepare_admitted_local_attachment(
-                    ctx,
+                super::prepare_admitted_live_attachments(
+                    &super::message_handler::IntakeDeps {
+                        http: &ctx.http,
+                        cache: Some(&ctx.cache),
+                        ctx_for_chained_dispatch: Some(ctx),
+                        shared: &data.shared,
+                        token: &data.token,
+                    },
+                    permit,
                     channel_id,
-                    &attachments,
-                    &data.shared,
-                    &permit,
+                    effective_channel_id,
+                    is_dm,
+                    &admitted_attachment_submission
+                        .as_ref()
+                        .expect("local attachment admission keeps its submission")
+                        .attachments,
                 )
                 .await?
             } else {
                 Vec::new()
             };
-            record_upload_history(&data.shared, channel_id, &upload_records).await;
             let mut upload_records_appended_to_session = false;
 
             let attachment_only_turn =
@@ -912,6 +954,7 @@ pub(in crate::services::discord) async fn handle_event(
                     channel_id,
                     &cmd_text,
                     &upload_records,
+                    &mut attachment_local_permit,
                 )
                 .await?;
                 if handled {
@@ -1011,12 +1054,21 @@ pub(in crate::services::discord) async fn handle_event(
                 }
             }
 
-            let has_reply_boundary = new_message.message_reference.is_some();
-            let reply_context = if has_reply_boundary {
-                build_reply_context(ctx, channel_id, &new_message).await
-            } else {
-                None
-            };
+            let (has_reply_boundary, reply_context) =
+                if let Some(admitted) = admitted_attachment_submission.as_ref() {
+                    (
+                        admitted.request.has_reply_boundary,
+                        admitted.request.reply_context.clone(),
+                    )
+                } else {
+                    let has_reply_boundary = new_message.message_reference.is_some();
+                    let reply_context = if has_reply_boundary {
+                        build_reply_context(ctx, channel_id, &new_message).await
+                    } else {
+                        None
+                    };
+                    (has_reply_boundary, reply_context)
+                };
             let merge_consecutive = upload_records.is_empty()
                 && should_merge_consecutive_messages(text, is_allowed_bot);
 
@@ -1535,11 +1587,15 @@ pub(in crate::services::discord) async fn handle_event(
             // placeholder content is the only visible record of the event;
             // foreground (human) messages keep the legacy delete-on-loss
             // behavior.
-            let notify_bot_id = notify_resolution.user_id();
-            let turn_kind = super::message_handler::classify_turn_kind_from_author(
-                user_id.get(),
-                notify_bot_id,
-            );
+            let turn_kind = admitted_attachment_submission
+                .as_ref()
+                .map(|submission| submission.request.turn_kind)
+                .unwrap_or_else(|| {
+                    super::message_handler::classify_turn_kind_from_author(
+                        user_id.get(),
+                        notify_resolution.user_id(),
+                    )
+                });
 
             let deps = super::message_handler::IntakeDeps {
                 http: &ctx.http,
@@ -1553,33 +1609,50 @@ pub(in crate::services::discord) async fn handle_event(
             } else {
                 upload_records.clone()
             };
-            let submission = super::IntakeSubmission {
-                provider: data.provider.clone(),
-                request: super::IntakeRequest {
-                    channel_id,
-                    user_msg_id: new_message.id,
-                    request_owner: user_id,
-                    request_owner_name: user_name.to_string(),
-                    user_text: text.to_string(),
-                    reply_to_user_message: false,
-                    defer_watcher_resume: false,
-                    wait_for_completion: false,
-                    merge_consecutive,
-                    reply_context,
-                    has_reply_boundary,
-                    dm_hint: Some(is_dm),
-                    turn_kind,
+            let submission = if let Some(mut admitted) = admitted_attachment_submission {
+                admitted.request.user_text = text.to_string();
+                admitted.request.merge_consecutive = merge_consecutive;
+                admitted.request.reply_context = reply_context;
+                admitted.request.has_reply_boundary = has_reply_boundary;
+                admitted.request.turn_kind = turn_kind;
+                admitted.attachments.clear();
+                admitted.preloaded_uploads = preloaded_uploads;
+                admitted.voice_announcement = resolved_voice_announcement;
+                admitted
+            } else {
+                super::IntakeSubmission {
+                    provider: data.provider.clone(),
+                    request: super::IntakeRequest {
+                        channel_id,
+                        user_msg_id: new_message.id,
+                        request_owner: user_id,
+                        request_owner_name: user_name.to_string(),
+                        user_text: text.to_string(),
+                        reply_to_user_message: false,
+                        defer_watcher_resume: false,
+                        wait_for_completion: false,
+                        merge_consecutive,
+                        reply_context,
+                        has_reply_boundary,
+                        dm_hint: Some(is_dm),
+                        turn_kind,
+                        preserve_on_cancel,
+                    },
+                    origin: super::IntakeOrigin::LiveMessage,
                     preserve_on_cancel,
-                },
-                origin: super::IntakeOrigin::LiveMessage,
-                preserve_on_cancel,
-                has_nonportable_uploads: !new_message.attachments.is_empty(),
-                preloaded_uploads,
-                // #3905: carry the gate's already-authorized, non-consuming
-                // voice resolution into direct dispatch.
-                voice_announcement: resolved_voice_announcement,
+                    has_nonportable_uploads: false,
+                    attachments: Vec::new(),
+                    preloaded_uploads,
+                    // #3905: carry the gate's already-authorized, non-consuming
+                    // voice resolution into direct dispatch.
+                    voice_announcement: resolved_voice_announcement,
+                }
             };
-            super::dispatch_text_intake(&deps, submission).await?;
+            if let Some(permit) = attachment_local_permit {
+                super::finish_admitted_text_intake(&deps, permit, submission).await?;
+            } else {
+                super::dispatch_text_intake(&deps, submission).await?;
+            }
         }
         _ => {}
     }
