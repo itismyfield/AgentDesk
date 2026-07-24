@@ -37,7 +37,7 @@ use super::settings::{
 };
 use super::task_notification_delivery::footer_background_marker_session_key;
 use super::tmux_error_detect::{
-    detect_provider_overload_message, is_auth_error_message, is_prompt_too_long_message,
+    detect_structured_provider_overload, is_auth_error_message, is_prompt_too_long_message,
 };
 use super::tmux_overload_retry::{
     PROVIDER_OVERLOAD_MAX_RETRIES, ProviderOverloadDecision, clear_provider_overload_retry_state,

@@ -449,9 +449,9 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
                             outcome.is_auth_error = true;
                             outcome.auth_error_message.get_or_insert(result_str.clone());
                         }
-                        if let Some(message) = detect_provider_overload_message(&result_str) {
+                        if let Some(reason) = detect_structured_provider_overload(&val) {
                             outcome.is_provider_overloaded = true;
-                            outcome.provider_overload_message.get_or_insert(message);
+                            outcome.provider_overload_message.get_or_insert(reason);
                         }
                     }
 
@@ -611,46 +611,6 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
                     kind: SessionTranscriptEventKind::Error,
                     tool_name: None,
                     summary: Some("authentication error".to_string()),
-                    content: trimmed.to_string(),
-                    status: Some("error".to_string()),
-                    is_error: true,
-                },
-            );
-            state.final_result = Some(String::new());
-            // #1216: see `result` arm — stop after a turn-terminating event.
-            break;
-        } else if let Some(message) = detect_provider_overload_message(trimmed) {
-            if let Some(skip) = pre_turn_line_skip(
-                turn_start_offset,
-                line_start_offset,
-                Some(WatcherTerminalKind::ProviderOverload),
-            ) {
-                tracing::info!(
-                    terminal_kind = skip.terminal_kind.as_str(),
-                    evidence_offset = skip.evidence_offset,
-                    turn_start_offset = skip.turn_start_offset,
-                    "tmux watcher skipped terminal evidence before this turn's start offset"
-                );
-                outcome.pre_turn_bytes_skipped =
-                    outcome.pre_turn_bytes_skipped.saturating_add(line_len);
-                continue;
-            }
-            if pre_turn_line {
-                outcome.pre_turn_bytes_skipped =
-                    outcome.pre_turn_bytes_skipped.saturating_add(line_len);
-                continue;
-            }
-            outcome.found_result = true;
-            outcome.terminal_kind = Some(WatcherTerminalKind::ProviderOverload);
-            outcome.terminal_evidence_offset = line_start_offset;
-            outcome.is_provider_overloaded = true;
-            outcome.provider_overload_message.get_or_insert(message);
-            push_transcript_event(
-                &mut tool_state.transcript_events,
-                SessionTranscriptEvent {
-                    kind: SessionTranscriptEventKind::Error,
-                    tool_name: None,
-                    summary: Some("provider overload".to_string()),
                     content: trimmed.to_string(),
                     status: Some("error".to_string()),
                     is_error: true,
@@ -930,6 +890,62 @@ mod tests {
         assert!(!outcome.soft_terminal_candidate);
         assert_eq!(full_response, "using tool after tool");
         assert!(buffer.trim().is_empty());
+    }
+
+    #[test]
+    fn incident_task_notification_review_prose_is_not_provider_overload() {
+        let mut buffer = concat!(
+            "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"reviewer\",\"status\":\"completed\",\"result\":\"코드 리뷰: transient edit 실패(rate limit)도 같은 경로로 처리됩니다\"}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"review complete: rate limit wording is ordinary prose\",\"session_id\":\"sess-incident\"}\n",
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert!(!outcome.is_provider_overloaded);
+        assert_eq!(outcome.provider_overload_message, None);
+        assert_eq!(outcome.terminal_kind, Some(WatcherTerminalKind::HardResult));
+    }
+
+    #[test]
+    fn plaintext_parse_failure_cannot_be_promoted_to_provider_overload() {
+        let mut buffer = "notification suffix says rate limit and overloaded\n".to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(!outcome.found_result);
+        assert!(!outcome.is_provider_overloaded);
+        assert_eq!(outcome.terminal_kind, None);
+    }
+
+    #[test]
+    fn structured_error_status_is_provider_overload() {
+        let mut buffer = concat!(
+            "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"result\":\"request rejected\",\"error\":{\"status\":429},\"session_id\":\"sess-overload\"}\n",
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert!(outcome.is_provider_overloaded);
+        assert_eq!(
+            outcome.provider_overload_message.as_deref(),
+            Some("provider_status_429")
+        );
     }
 
     #[test]
