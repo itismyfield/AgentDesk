@@ -985,7 +985,17 @@ src/
 │   │   │   └── utterance_pipeline.rs
 │   │   ├── watchers/
 │   │   │   ├── lifecycle/
-│   │   │   │   └── activity.rs
+│   │   │   │   ├── activity.rs
+│   │   │   │   ├── claims.rs
+│   │   │   │   ├── claude_restore.rs
+│   │   │   │   ├── liveness.rs
+│   │   │   │   ├── output_policy.rs
+│   │   │   │   ├── ready_failure.rs
+│   │   │   │   ├── recovery_markers.rs
+│   │   │   │   ├── restore.rs
+│   │   │   │   ├── restore_support.rs
+│   │   │   │   ├── restore_tests.rs
+│   │   │   │   └── tests.rs
 │   │   │   ├── codex_tui_restore.rs
 │   │   │   ├── dispatched_origin_ghost.rs
 │   │   │   ├── lifecycle.rs
