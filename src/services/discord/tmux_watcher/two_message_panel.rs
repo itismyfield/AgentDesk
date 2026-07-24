@@ -183,13 +183,17 @@ pub(in crate::services::discord) async fn complete_watcher_status_panel_v2_with_
     turn_is_external_input_for_session: bool,
     generation_superseded: bool,
 ) {
-    let committed = if generation_superseded {
+    let completion = if generation_superseded {
         tracing::debug!(
             "  [tmux_watcher] skipping status-panel-v2 completion edit of msg {:?} in channel {}: a newer panel epoch now owns the panel",
             status_panel_msg_id,
             channel_id.get()
         );
-        true
+        crate::services::discord::turn_bridge::StatusPanelCompletionResult {
+            committed: true,
+            binding_disposition:
+                crate::services::discord::turn_bridge::CompletedBindingDisposition::Superseded,
+        }
     } else {
         complete_watcher_status_panel_v2(
             http,
@@ -205,10 +209,19 @@ pub(in crate::services::discord) async fn complete_watcher_status_panel_v2_with_
         )
         .await
     };
+    let committed = completion.committed;
+    let remove_orphan = committed
+        && crate::services::discord::turn_bridge::completion_commit_allows_orphan_removal(
+            completion.binding_disposition,
+        );
     let Some(panel_msg_id) = status_panel_msg_id else {
         return;
     };
-    if committed {
+    if committed
+        && crate::services::discord::turn_bridge::completion_commit_allows_pending_bind_purge(
+            completion.binding_disposition,
+        )
+    {
         crate::services::discord::status_panel_orphan_store::remove_pending_bind(
             provider,
             &shared.token_hash,
@@ -219,14 +232,14 @@ pub(in crate::services::discord) async fn complete_watcher_status_panel_v2_with_
     if !turn_is_external_input_for_session {
         return;
     }
-    if committed {
+    if remove_orphan {
         crate::services::discord::status_panel_orphan_store::remove(
             provider,
             &shared.token_hash,
             channel_id.get(),
             panel_msg_id.get(),
         );
-    } else {
+    } else if !committed {
         enqueue_watcher_status_panel_orphan(shared.as_ref(), provider, channel_id, panel_msg_id);
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(

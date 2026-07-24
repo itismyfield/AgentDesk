@@ -103,8 +103,13 @@ pub(super) use recovery_text::{
 };
 use single_message_footer::*;
 pub(super) use stale_resume::result_event_has_stale_resume_error;
+pub(in crate::services::discord) use status_panel::singleton::{
+    CompletedBindingDisposition, completion_commit_allows_orphan_removal,
+    completion_commit_allows_pending_bind_purge,
+};
 pub(in crate::services::discord) use status_panel::{
-    complete_status_panel_v2_with_http, normalize_status_panel_message_id,
+    StatusPanelCompletionResult, complete_status_panel_v2_with_http,
+    complete_status_panel_v2_with_http_and_disposition, normalize_status_panel_message_id,
 };
 // #3805 P2 (PR-C): the ONE generation staleness rule shared by the sink (here)
 // and the tmux WATCHER completion guard, so both paths supersede a stale

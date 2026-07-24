@@ -52,13 +52,20 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
             if let Some(warning) = wip_warning {
                 warning.commit();
             }
-            singleton::commit_completed_binding(shared, provider, channel_id, status_panel_msg_id);
-            purge_pending_bind_for_completed_status_panel(
+            let binding_disposition = singleton::commit_completed_binding(
                 shared,
                 provider,
                 channel_id,
                 status_panel_msg_id,
             );
+            if singleton::completion_commit_allows_pending_bind_purge(binding_disposition) {
+                purge_pending_bind_for_completed_status_panel(
+                    shared,
+                    provider,
+                    channel_id,
+                    status_panel_msg_id,
+                );
+            }
             purge_terminal_reconcile_for_completed_status_panel(
                 shared,
                 provider,
@@ -97,19 +104,21 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
                     if let Some(warning) = wip_warning {
                         warning.commit();
                     }
-                    singleton::commit_completed_binding(
+                    let binding_disposition = singleton::commit_completed_binding(
                         shared,
                         provider,
                         channel_id,
                         status_panel_msg_id,
                     );
                     *last_status_panel_text = panel_text;
-                    purge_pending_bind_for_completed_status_panel(
-                        shared,
-                        provider,
-                        channel_id,
-                        status_panel_msg_id,
-                    );
+                    if singleton::completion_commit_allows_pending_bind_purge(binding_disposition) {
+                        purge_pending_bind_for_completed_status_panel(
+                            shared,
+                            provider,
+                            channel_id,
+                            status_panel_msg_id,
+                        );
+                    }
                     purge_terminal_reconcile_for_completed_status_panel(
                         shared,
                         provider,
@@ -281,9 +290,49 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http(
     source: &'static str,
     expected_inflight: (Option<u64>, Option<&super::super::InflightTurnState>),
 ) -> bool {
+    complete_status_panel_v2_with_http_and_disposition(
+        shared,
+        http,
+        channel_id,
+        status_panel_msg_id,
+        provider,
+        started_at_unix,
+        last_status_panel_text,
+        background,
+        background_agent_pending,
+        source,
+        expected_inflight,
+    )
+    .await
+    .committed
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) struct StatusPanelCompletionResult {
+    pub committed: bool,
+    pub binding_disposition: singleton::CompletedBindingDisposition,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::services::discord) async fn complete_status_panel_v2_with_http_and_disposition(
+    shared: &std::sync::Arc<SharedData>,
+    http: &serenity::Http,
+    channel_id: ChannelId,
+    status_panel_msg_id: Option<MessageId>,
+    provider: &ProviderKind,
+    started_at_unix: i64,
+    last_status_panel_text: &mut String,
+    background: bool,
+    background_agent_pending: bool,
+    source: &'static str,
+    expected_inflight: (Option<u64>, Option<&super::super::InflightTurnState>),
+) -> StatusPanelCompletionResult {
     let (expected_user_msg_id, inflight_snapshot) = expected_inflight;
     if !shared.ui.status_panel_v2_enabled {
-        return true;
+        return StatusPanelCompletionResult {
+            committed: true,
+            binding_disposition: singleton::CompletedBindingDisposition::NotApplicable,
+        };
     }
     shared.ui.placeholder_live_events.push_status_event(
         channel_id,
@@ -314,20 +363,30 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http(
             if let Some(warning) = wip_warning {
                 warning.commit();
             }
-            singleton::commit_completed_binding(shared, provider, channel_id, status_panel_msg_id);
-            purge_pending_bind_for_completed_status_panel(
+            let binding_disposition = singleton::commit_completed_binding(
                 shared.as_ref(),
                 provider,
                 channel_id,
                 status_panel_msg_id,
             );
+            if singleton::completion_commit_allows_pending_bind_purge(binding_disposition) {
+                purge_pending_bind_for_completed_status_panel(
+                    shared.as_ref(),
+                    provider,
+                    channel_id,
+                    status_panel_msg_id,
+                );
+            }
             purge_terminal_reconcile_for_completed_status_panel(
                 shared.as_ref(),
                 provider,
                 channel_id,
                 status_panel_msg_id,
             );
-            true
+            StatusPanelCompletionResult {
+                committed: true,
+                binding_disposition,
+            }
         }
         StatusPanelCompletionAction::SendFallback => {
             rate_limit_wait(shared, channel_id).await;
@@ -353,26 +412,31 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http(
                     if let Some(warning) = wip_warning {
                         warning.commit();
                     }
-                    singleton::commit_completed_binding(
+                    let binding_disposition = singleton::commit_completed_binding(
                         shared.as_ref(),
                         provider,
                         channel_id,
                         status_panel_msg_id,
                     );
                     *last_status_panel_text = panel_text;
-                    purge_pending_bind_for_completed_status_panel(
-                        shared.as_ref(),
-                        provider,
-                        channel_id,
-                        status_panel_msg_id,
-                    );
+                    if singleton::completion_commit_allows_pending_bind_purge(binding_disposition) {
+                        purge_pending_bind_for_completed_status_panel(
+                            shared.as_ref(),
+                            provider,
+                            channel_id,
+                            status_panel_msg_id,
+                        );
+                    }
                     purge_terminal_reconcile_for_completed_status_panel(
                         shared.as_ref(),
                         provider,
                         channel_id,
                         status_panel_msg_id,
                     );
-                    true
+                    StatusPanelCompletionResult {
+                        committed: true,
+                        binding_disposition,
+                    }
                 }
                 Err(error) => {
                     let error = error.to_string();
@@ -397,7 +461,10 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http(
                         source,
                         error
                     );
-                    false
+                    StatusPanelCompletionResult {
+                        committed: false,
+                        binding_disposition: singleton::CompletedBindingDisposition::NotApplicable,
+                    }
                 }
             }
         }
@@ -417,7 +484,7 @@ async fn complete_status_panel_v2_fallback_with_http(
         crate::services::discord::turn_end_wip_warning::TurnEndWipWarningReservation,
     >,
     source: &'static str,
-) -> bool {
+) -> StatusPanelCompletionResult {
     match send_status_panel_v2_completion_fallback_http(http, channel_id, &panel_text).await {
         Ok(message_id) => {
             if let Some(warning) = wip_warning {
@@ -430,9 +497,13 @@ async fn complete_status_panel_v2_fallback_with_http(
                 message_id,
                 source,
             );
-            singleton::commit_completed_binding(shared, provider, channel_id, Some(message_id));
+            let binding_disposition =
+                singleton::commit_completed_binding(shared, provider, channel_id, Some(message_id));
             *last_status_panel_text = panel_text;
-            true
+            StatusPanelCompletionResult {
+                committed: true,
+                binding_disposition,
+            }
         }
         Err(error) => {
             tracing::warn!(
@@ -441,14 +512,17 @@ async fn complete_status_panel_v2_fallback_with_http(
                 source,
                 error
             );
-            false
+            StatusPanelCompletionResult {
+                committed: false,
+                binding_disposition: singleton::CompletedBindingDisposition::NotApplicable,
+            }
         }
     }
 }
 
 mod fallback;
 mod purge;
-mod singleton;
+pub(in crate::services::discord) mod singleton;
 use fallback::{
     persist_status_panel_completion_fallback_message_id, send_status_panel_v2_completion_fallback,
     send_status_panel_v2_completion_fallback_http,

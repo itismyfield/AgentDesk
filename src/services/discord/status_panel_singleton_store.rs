@@ -22,6 +22,13 @@ pub(in crate::services::discord) struct StatusPanelSingletonBinding {
     pub generation: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::services::discord) enum CompletedBindingCommitOutcome {
+    CommittedCurrent(StatusPanelSingletonBinding),
+    Superseded,
+    DurabilityFailure(String),
+}
+
 fn provider_dir_in_root(root: &Path, provider: &ProviderKind, token_hash: &str) -> PathBuf {
     root.join(provider.as_str()).join(token_hash)
 }
@@ -106,25 +113,37 @@ pub(in crate::services::discord) fn commit_if_owned_or_current(
     token_hash: &str,
     channel_id: u64,
     panel_message_id: u64,
-) -> Result<StatusPanelSingletonBinding, String> {
-    let inflight_root = runtime_store::discord_inflight_root()
-        .ok_or_else(|| "AgentDesk inflight runtime root unavailable".to_string())?;
+) -> CompletedBindingCommitOutcome {
+    let Some(inflight_root) = runtime_store::discord_inflight_root() else {
+        return CompletedBindingCommitOutcome::DurabilityFailure(
+            "AgentDesk inflight runtime root unavailable".to_string(),
+        );
+    };
     let path = inflight::inflight_state_path(&inflight_root, provider, channel_id);
-    let _guard = inflight::lock_inflight_state_path(&path)?;
-    let root = runtime_store::discord_status_panel_singletons_root()
-        .ok_or_else(|| "AgentDesk runtime root unavailable".to_string())?;
+    let _guard = match inflight::lock_inflight_state_path(&path) {
+        Ok(guard) => guard,
+        Err(error) => return CompletedBindingCommitOutcome::DurabilityFailure(error),
+    };
+    let Some(root) = runtime_store::discord_status_panel_singletons_root() else {
+        return CompletedBindingCommitOutcome::DurabilityFailure(
+            "AgentDesk runtime root unavailable".to_string(),
+        );
+    };
 
     match fs::read_to_string(&path) {
         Ok(raw) => {
-            let state = serde_json::from_str::<inflight::InflightTurnState>(&raw)
-                .map_err(|error| error.to_string())?;
+            let state = match serde_json::from_str::<inflight::InflightTurnState>(&raw) {
+                Ok(state) => state,
+                Err(error) => {
+                    return CompletedBindingCommitOutcome::DurabilityFailure(error.to_string());
+                }
+            };
             if state.status_message_id != Some(panel_message_id) {
                 // #4891: the live inflight row already moved on (next turn, or a
                 // mid-turn re-anchor), but the completed panel can still be the
-                // channel's current durable singleton. Fall back to the same
-                // "is this the current singleton?" check the absent-row branch
-                // uses instead of failing the completion outright.
-                return rebind_current_singleton_in_root(
+                // channel's current durable singleton. Check the durable binding
+                // under the same inflight flock before classifying it superseded.
+                return current_singleton_outcome_in_root(
                     &root,
                     provider,
                     token_hash,
@@ -136,11 +155,13 @@ pub(in crate::services::discord) fn commit_if_owned_or_current(
                 panel_message_id,
                 generation: state.status_panel_generation,
             };
-            bind_in_root(&root, provider, token_hash, channel_id, binding)?;
-            Ok(binding)
+            match bind_in_root(&root, provider, token_hash, channel_id, binding) {
+                Ok(()) => CompletedBindingCommitOutcome::CommittedCurrent(binding),
+                Err(error) => CompletedBindingCommitOutcome::DurabilityFailure(error),
+            }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            rebind_current_singleton_in_root(
+            current_singleton_outcome_in_root(
                 &root,
                 provider,
                 token_hash,
@@ -148,25 +169,29 @@ pub(in crate::services::discord) fn commit_if_owned_or_current(
                 panel_message_id,
             )
         }
-        Err(error) => Err(error.to_string()),
+        Err(error) => CompletedBindingCommitOutcome::DurabilityFailure(error.to_string()),
     }
 }
 
-/// Re-commit `panel_message_id` only when it already is the channel's current
-/// durable singleton binding. Shared by both `commit_if_owned_or_current`
-/// branches that cannot consult an owning inflight row (#4891).
-fn rebind_current_singleton_in_root(
+/// Classify `panel_message_id` against the channel's durable singleton while the
+/// caller holds the inflight flock. A matching binding already carries the
+/// completed panel's durable authority, so no value-identical rewrite is needed.
+fn current_singleton_outcome_in_root(
     root: &Path,
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: u64,
     panel_message_id: u64,
-) -> Result<StatusPanelSingletonBinding, String> {
-    let binding = load_in_root(root, provider, token_hash, channel_id)
-        .filter(|binding| binding.panel_message_id == panel_message_id)
-        .ok_or_else(|| "completed status panel is not the current singleton".to_string())?;
-    bind_in_root(root, provider, token_hash, channel_id, binding)?;
-    Ok(binding)
+) -> CompletedBindingCommitOutcome {
+    match load_in_root(root, provider, token_hash, channel_id) {
+        Some(binding) if binding.panel_message_id == panel_message_id => {
+            CompletedBindingCommitOutcome::CommittedCurrent(binding)
+        }
+        Some(_) => CompletedBindingCommitOutcome::Superseded,
+        None => CompletedBindingCommitOutcome::DurabilityFailure(
+            "completed status panel singleton binding unavailable".to_string(),
+        ),
+    }
 }
 
 fn clear_if_current_in_root(

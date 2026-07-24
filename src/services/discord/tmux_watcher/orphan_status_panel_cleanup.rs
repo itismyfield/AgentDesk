@@ -131,7 +131,7 @@ pub(super) async fn complete_watcher_status_panel_v2(
     background: bool,
     background_agent_pending: bool,
     expected_user_msg_id: Option<u64>,
-) -> bool {
+) -> crate::services::discord::turn_bridge::StatusPanelCompletionResult {
     // #2427 D wire (Codex round 2 HIGH-1): explicit-signal inflight cleanup
     // is intentionally NOT emitted from the watcher path. The watcher is
     // not turn-scoped, so any user_msg_id read here would be the *current*
@@ -141,9 +141,13 @@ pub(super) async fn complete_watcher_status_panel_v2(
     // TurnCompleted still emits the guarded signal (see recovery_engine.rs)
     // because its state snapshot is pinned at recovery entry.
     if !watcher_should_complete_separate_status_panel(shared.ui.status_panel_v2_enabled) {
-        return true;
+        return crate::services::discord::turn_bridge::StatusPanelCompletionResult {
+            committed: true,
+            binding_disposition:
+                crate::services::discord::turn_bridge::CompletedBindingDisposition::NotApplicable,
+        };
     }
-    crate::services::discord::turn_bridge::complete_status_panel_v2_with_http(
+    crate::services::discord::turn_bridge::complete_status_panel_v2_with_http_and_disposition(
         shared,
         http,
         channel_id,
