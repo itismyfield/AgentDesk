@@ -659,6 +659,7 @@ src/
 │   │   │       └── circuit_breaker_apply.rs
 │   │   ├── router/
 │   │   │   ├── intake_dispatch/
+│   │   │   │   ├── attachment.rs
 │   │   │   │   ├── notice.rs
 │   │   │   │   ├── queued.rs
 │   │   │   │   ├── skill.rs

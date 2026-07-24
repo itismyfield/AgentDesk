@@ -26,6 +26,7 @@ EXPECTED_TEST_NON_PG_COMMANDS = (
     "cargo test --lib intake_queue_transaction::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib pending_reaction_failure_adapter_tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib intake_dispatch_invariant_queued_entrypoints_promote_markers -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib intake_dispatch::attachment::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib mailbox_reaction_tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib queue_marker::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib queue_status_presentation::tests -- --skip _pg --skip pg_ --skip postgres",
