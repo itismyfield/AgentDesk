@@ -1098,19 +1098,17 @@
     callers are now child-internal), and the module-internal
     `normalize_transcript_fallback_offset` stays private; below the giant-file
     threshold).
-  - `src/services/discord/idle_recap.rs` (idle-recap card compose/post/clear
-    surface; #3479 extracted the scrollback/summarizer and
-    token-context-display clusters into the two submodules below, but #4079's
-    recap UX/lifecycle fixes pushed the file back over the giant-file threshold
-    and its registered ratchet now tracks 1378 prod lines. Remaining surface:
-    the snapshot/compose/post/clear/CAS lifecycle, per-channel recap
-    superseding via `sessions.idle_recap_message_id`, routine-session
-    suppression, the recap button plan including "맥락 압축", the
-    `channel_has_active_turn` mailbox/inflight probe, and the
-    `post_recheck_action` seam that skips/undoes a recap post when a turn raced
-    the compose window. `src/services/discord/idle_recap_interaction.rs` owns
-    the corresponding button dispatch, suggested-reply enqueue, and `/compact`
-    enqueue response copy).
+  - `src/services/discord/idle_recap.rs` (#4712 D6 de-giant: the card
+    compose/post/delete/persist cluster moved verbatim to
+    `idle_recap/card.rs`, leaving the root below the giant-file threshold.
+    The root retains snapshot loading, relay-integrity probing, generation/CAS
+    coordination, active-turn gating, and test seams. `idle_recap/card.rs` owns
+    recap text/actions, guarded Discord card deletion, per-channel supersession,
+    and pointer persistence; `src/services/discord/idle_recap_interaction.rs`
+    still owns button dispatch, suggested-reply enqueue, and `/compact`
+    enqueue response copy. The former frozen marker is released because both
+    production modules are below 1000 prod lines and the registry entry was
+    removed under the ghost-registration rule.)
   - `src/services/discord/idle_recap/scrollback.rs` (#3479 scrollback: the tmux
     `capture-pane` tail capture, the `claude-e` transcript-tail fallback
     (`capture_transcript_scrollback` + the unit-testable `extract_transcript_tail_text`

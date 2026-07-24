@@ -527,6 +527,7 @@ src/
 │   │   │   ├── stall_verdict.rs
 │   │   │   └── watcher_respawn.rs
 │   │   ├── idle_recap/
+│   │   │   ├── card.rs
 │   │   │   ├── context_display.rs
 │   │   │   ├── relay_integrity.rs
 │   │   │   └── scrollback.rs
