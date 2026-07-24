@@ -18,10 +18,10 @@
 //! unit-tested without Postgres and reused from both the dispatch layer and
 //! the db layer.
 //!
-//! The semantics deliberately mirror
-//! `policies/lib/auto-queue-phase-gate.js::_inferPhaseGatePassVerdict` so the
-//! JS policy hook and the durable Rust path agree while the JS reducer is
-//! still live.
+//! Rust preserves the established finalize-path compatibility contract while
+//! the JavaScript reducer is still live. In particular, non-string values in
+//! explicit verdict fields are ignored for inference, as they were before
+//! #4884; see the known JavaScript deltas below.
 
 use serde_json::Value;
 
@@ -34,12 +34,9 @@ pub const DEFAULT_PASS_VERDICT: &str = "phase_gate_passed";
 const EXPLICIT_VERDICT_KEYS: [&str; 3] = ["verdict", "decision", "phase_gate_verdict"];
 
 /// The canonical result of reducing phase-gate context and result evidence.
-///
-/// `Explicit(None)` is intentional: a truthy non-string value blocks checks
-/// inference but cannot be compared with the gate's string pass verdict.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerdictResolution {
-    Explicit(Option<String>),
+    Explicit(String),
     Inferred(String),
     Missing,
 }
@@ -47,41 +44,54 @@ pub enum VerdictResolution {
 impl VerdictResolution {
     pub fn verdict(&self) -> Option<&str> {
         match self {
-            Self::Explicit(Some(verdict)) | Self::Inferred(verdict) => Some(verdict),
-            Self::Explicit(None) | Self::Missing => None,
+            Self::Explicit(verdict) | Self::Inferred(verdict) => Some(verdict),
+            Self::Missing => None,
         }
     }
 }
 
-/// JS-style truthiness for `result.verdict || result.decision ||
-/// result.phase_gate_verdict`.
+/// Non-empty string form of the first explicit verdict field.
 ///
-/// Any non-falsy value (boolean `true`, non-zero number, non-empty string, any
-/// array/object) counts as an explicit verdict and therefore blocks inference —
-/// including values that are not strings. Matching JS here matters because the
-/// policy hook and the durable path must not disagree about whether a result
-/// "already decided".
-fn has_explicit_verdict(result: &Value) -> bool {
-    first_explicit_value(result).is_some()
+/// Non-string values intentionally do not block inference. This preserves the
+/// pre-#4884 finalize behavior, where `as_str()` treated them as absent and an
+/// all-passing checks payload received the configured pass verdict. Strings are
+/// kept byte-for-byte so blank and whitespace-only values retain the historical
+/// behavior instead of silently changing verdict matching.
+fn explicit_verdict(result: &Value) -> Option<String> {
+    EXPLICIT_VERDICT_KEYS
+        .iter()
+        .filter_map(|key| result.get(*key).and_then(Value::as_str))
+        .find(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
-/// Trimmed, non-empty string form of the first truthy explicit verdict, if it
-/// is a string. A truthy non-string value blocks later keys, matching the JS
-/// `verdict || decision || phase_gate_verdict` precedence chain.
-fn explicit_verdict(result: &Value) -> Option<String> {
-    first_explicit_value(result)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
+fn has_explicit_verdict(result: &Value) -> bool {
+    explicit_verdict(result).is_some()
+}
+
+fn is_js_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::String(text) => !text.is_empty(),
+        Value::Number(number) => number
+            .as_f64()
+            .map(|raw| raw != 0.0 && !raw.is_nan())
+            .unwrap_or(false),
+        Value::Array(_) | Value::Object(_) => true,
+    }
 }
 
 /// Whether a single `result.checks` entry reports a pass.
 ///
 /// Accepts the canonical `{"status": "pass"}` object form, the `{"result":
 /// "pass"}` alias, and a bare `"pass"` string. `status` is only consulted when
-/// it is a non-empty string so an empty `status` falls through to `result`,
-/// mirroring the JS `entry.status || entry.result` chain (#2048 F12).
+/// it is a non-empty string so an empty `status` falls through to `result`
+/// (#2048 F12).
+///
+/// Known JavaScript delta: a truthy non-string `status` blocks the JavaScript
+/// `result` fallback, while Rust ignores non-string status values and may use a
+/// string `result` alias. This reducer preserves the pre-#4884 Rust behavior.
 fn check_entry_is_pass(entry: &Value) -> bool {
     let raw = match entry {
         Value::String(text) => Some(text.as_str()),
@@ -102,8 +112,6 @@ pub fn pass_verdict_of(phase_gate: &Value) -> String {
     phase_gate
         .get("pass_verdict")
         .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
         .unwrap_or(DEFAULT_PASS_VERDICT)
         .to_string()
 }
@@ -115,6 +123,11 @@ pub fn pass_verdict_of(phase_gate: &Value) -> String {
 /// Refuses to infer when the gate context is not an object, when no checks are
 /// reported, when a declared check is missing from `result.checks`, or when any
 /// declared-or-present check does not pass.
+///
+/// Known JavaScript deltas: JavaScript accepts an array as `result.checks`, and
+/// skips falsy declared-check items. Rust requires an object map and rejects any
+/// non-string declared item. The stricter declaration handling prevents a future
+/// descriptor migration from silently dropping the completeness guard (#4882).
 fn infer_pass_verdict_in_gate(phase_gate: &Value, result: &Value) -> Option<String> {
     if !phase_gate.is_object() {
         return None;
@@ -124,17 +137,28 @@ fn infer_pass_verdict_in_gate(phase_gate: &Value, result: &Value) -> Option<Stri
         return None;
     }
 
-    if let Some(declared) = phase_gate.get("checks").and_then(Value::as_array) {
-        for required in declared {
-            let Some(name) = required.as_str() else {
-                continue;
-            };
-            let Some(entry) = checks.get(name) else {
-                return None;
-            };
-            if !check_entry_is_pass(entry) {
-                return None;
-            }
+    let Some(declared) = phase_gate.get("checks").and_then(Value::as_array) else {
+        tracing::warn!(
+            "[phase_gate] refusing verdict inference without an explicit declared-check array"
+        );
+        return None;
+    };
+    if declared.is_empty() {
+        return None;
+    }
+    for required in declared {
+        let Some(name) = required.as_str() else {
+            tracing::warn!(
+                declared_check = %required,
+                "[phase_gate] refusing verdict inference for non-string declared check"
+            );
+            return None;
+        };
+        let Some(entry) = checks.get(name) else {
+            return None;
+        };
+        if !check_entry_is_pass(entry) {
+            return None;
         }
     }
 
@@ -152,25 +176,30 @@ fn infer_pass_verdict_from_checks(context: Option<&Value>, result: &Value) -> Op
     infer_pass_verdict_in_gate(context?.get("phase_gate")?, result)
 }
 
-/// Full inference: never overrides an explicit verdict (even an explicit
-/// failure), otherwise falls back to checks-only inference.
-#[cfg(test)]
-pub(super) fn infer_pass_verdict(context: Option<&Value>, result: &Value) -> Option<String> {
-    if has_explicit_verdict(result) {
-        return None;
-    }
-    infer_pass_verdict_from_checks(context, result)
-}
-
 /// Resolve explicit evidence first, then checks-only inference.
 pub fn resolve_verdict(context: Option<&Value>, result: &Value) -> VerdictResolution {
-    if has_explicit_verdict(result) {
-        return VerdictResolution::Explicit(explicit_verdict(result));
+    if let Some(verdict) = explicit_verdict(result) {
+        return VerdictResolution::Explicit(verdict);
     }
     match infer_pass_verdict_from_checks(context, result) {
         Some(verdict) => VerdictResolution::Inferred(verdict),
         None => VerdictResolution::Missing,
     }
+}
+
+/// Preserve the most useful explicit payload for durable failure diagnostics.
+///
+/// The reducer's inferred/string verdict remains authoritative for matching. If
+/// resolution is missing, a truthy non-string explicit field is serialized so
+/// operators see the supplied payload instead of the lossy `got none` message.
+pub fn diagnostic_verdict(result: &Value, resolution: &VerdictResolution) -> Option<String> {
+    resolution.verdict().map(str::to_string).or_else(|| {
+        EXPLICIT_VERDICT_KEYS
+            .iter()
+            .filter_map(|key| result.get(*key))
+            .find(|value| is_js_truthy(value))
+            .map(Value::to_string)
+    })
 }
 
 /// Whether `actual` satisfies the gate's `expected` pass verdict.
@@ -197,26 +226,6 @@ pub fn verdict_matches(
         .and_then(|result| infer_pass_verdict_from_checks(context, result))
         .as_deref()
         == Some(expected)
-}
-
-fn first_explicit_value(result: &Value) -> Option<&Value> {
-    EXPLICIT_VERDICT_KEYS
-        .iter()
-        .filter_map(|key| result.get(*key))
-        .find(|value| is_js_truthy(value))
-}
-
-fn is_js_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(flag) => *flag,
-        Value::String(text) => !text.is_empty(),
-        Value::Number(number) => number
-            .as_f64()
-            .map(|raw| raw != 0.0 && !raw.is_nan())
-            .unwrap_or(false),
-        Value::Array(_) | Value::Object(_) => true,
-    }
 }
 
 #[cfg(test)]
@@ -246,8 +255,8 @@ mod tests {
                 "{key} should count as explicit"
             );
             assert_eq!(
-                infer_pass_verdict(Some(&context), &result),
-                None,
+                resolve_verdict(Some(&context), &result),
+                VerdictResolution::Explicit("fail".to_string()),
                 "{key} must not be overridden by checks-only inference"
             );
             assert_eq!(explicit_verdict(&result).as_deref(), Some("fail"));
@@ -266,8 +275,11 @@ mod tests {
             "phase_gate_verdict": "phase_gate_failed",
             "checks": { "merge_verified": { "status": "pass" } },
         });
-        assert_eq!(infer_pass_verdict(Some(&context), &result), None);
         let resolution = resolve_verdict(Some(&context), &result);
+        assert_eq!(
+            resolution,
+            VerdictResolution::Explicit("phase_gate_failed".to_string())
+        );
         assert!(!verdict_matches(
             resolution.verdict(),
             "phase_gate_passed",
@@ -277,34 +289,32 @@ mod tests {
     }
 
     #[test]
-    fn non_string_truthy_explicit_verdict_blocks_inference() {
-        let context = gate_context(json!([]), "phase_gate_passed");
+    fn non_string_explicit_fields_preserve_finalize_inference_compatibility() {
+        let context = gate_context(json!(["build_passed"]), "phase_gate_passed");
         for explicit in [json!(true), json!(1), json!({ "nested": 1 })] {
             let result = json!({
                 "verdict": explicit,
                 "checks": { "build_passed": "pass" },
             });
-            assert_eq!(infer_pass_verdict(Some(&context), &result), None);
             assert_eq!(
                 resolve_verdict(Some(&context), &result),
-                VerdictResolution::Explicit(None),
+                VerdictResolution::Inferred("phase_gate_passed".to_string()),
             );
         }
     }
 
     #[test]
-    fn truthy_non_string_verdict_prevents_later_decision_from_winning() {
+    fn non_string_verdict_allows_later_string_decision() {
         let context = gate_context(json!(["build_passed"]), "gate_ok");
         let result = json!({
             "verdict": true,
-            "decision": "gate_ok",
+            "decision": "manual_hold",
             "checks": { "build_passed": "pass" },
         });
 
-        assert_eq!(explicit_verdict(&result), None);
         assert_eq!(
             resolve_verdict(Some(&context), &result),
-            VerdictResolution::Explicit(None),
+            VerdictResolution::Explicit("manual_hold".to_string()),
         );
     }
 
@@ -317,8 +327,8 @@ mod tests {
                 "checks": { "build_passed": "pass" },
             });
             assert_eq!(
-                infer_pass_verdict(Some(&context), &result).as_deref(),
-                Some("phase_gate_passed"),
+                resolve_verdict(Some(&context), &result),
+                VerdictResolution::Inferred("phase_gate_passed".to_string()),
             );
         }
     }
@@ -342,7 +352,7 @@ mod tests {
     fn missing_declared_check_refuses_inference() {
         let context = gate_context(json!(["merge_verified", "issue_closed"]), "gate_ok");
         let result = json!({ "checks": { "merge_verified": { "status": "pass" } } });
-        assert_eq!(infer_pass_verdict(Some(&context), &result), None);
+        assert_eq!(resolve_verdict(Some(&context), &result), VerdictResolution::Missing);
     }
 
     #[test]
@@ -354,44 +364,86 @@ mod tests {
                 "issue_closed": { "status": "fail" },
             }
         });
-        assert_eq!(infer_pass_verdict(Some(&context), &result), None);
+        assert_eq!(resolve_verdict(Some(&context), &result), VerdictResolution::Missing);
+    }
+
+    #[test]
+    fn absent_or_invalid_declared_checks_fail_closed() {
+        let passing = json!({ "checks": { "merge_verified": "pass" } });
+        for declared in [json!(null), json!("merge_verified"), json!([])] {
+            let context = gate_context(declared, "gate_ok");
+            assert_eq!(
+                resolve_verdict(Some(&context), &passing),
+                VerdictResolution::Missing,
+            );
+        }
+    }
+
+    #[test]
+    fn non_string_declared_check_fails_closed() {
+        let context = gate_context(json!([{"name": "merge_verified"}]), "gate_ok");
+        let result = json!({ "checks": { "merge_verified": "pass" } });
+        assert_eq!(
+            resolve_verdict(Some(&context), &result),
+            VerdictResolution::Missing,
+        );
+    }
+
+    #[test]
+    fn truthy_non_string_status_does_not_hide_string_result_alias() {
+        let context = gate_context(json!(["merge_verified"]), "gate_ok");
+        for status in [json!(true), json!(1)] {
+            let result = json!({
+                "checks": {
+                    "merge_verified": { "status": status, "result": "pass" }
+                }
+            });
+            assert_eq!(
+                resolve_verdict(Some(&context), &result),
+                VerdictResolution::Inferred("gate_ok".to_string()),
+            );
+        }
     }
 
     #[test]
     fn empty_or_absent_checks_refuse_inference() {
         let context = gate_context(json!([]), "gate_ok");
         assert_eq!(
-            infer_pass_verdict(Some(&context), &json!({ "checks": {} })),
-            None
+            resolve_verdict(Some(&context), &json!({ "checks": {} })),
+            VerdictResolution::Missing
         );
-        assert_eq!(infer_pass_verdict(Some(&context), &json!({})), None);
         assert_eq!(
-            infer_pass_verdict(Some(&context), &json!({ "checks": [] })),
-            None
+            resolve_verdict(Some(&context), &json!({})),
+            VerdictResolution::Missing
+        );
+        assert_eq!(
+            resolve_verdict(Some(&context), &json!({ "checks": [] })),
+            VerdictResolution::Missing
         );
     }
 
     #[test]
     fn missing_phase_gate_context_refuses_inference() {
         let result = json!({ "checks": { "build_passed": "pass" } });
-        assert_eq!(infer_pass_verdict(None, &result), None);
-        assert_eq!(infer_pass_verdict(Some(&json!({})), &result), None);
+        assert_eq!(resolve_verdict(None, &result), VerdictResolution::Missing);
         assert_eq!(
-            infer_pass_verdict(Some(&json!({ "phase_gate": "nope" })), &result),
-            None
+            resolve_verdict(Some(&json!({})), &result),
+            VerdictResolution::Missing
+        );
+        assert_eq!(
+            resolve_verdict(Some(&json!({ "phase_gate": "nope" })), &result),
+            VerdictResolution::Missing
         );
     }
 
     #[test]
-    fn pass_verdict_defaults_when_absent_or_blank() {
+    fn pass_verdict_defaults_only_when_absent_and_preserves_raw_strings() {
         assert_eq!(pass_verdict_of(&json!({})), DEFAULT_PASS_VERDICT);
+        assert_eq!(pass_verdict_of(&json!({ "pass_verdict": "" })), "");
+        assert_eq!(pass_verdict_of(&json!({ "pass_verdict": "  " })), "  ");
         assert_eq!(
-            pass_verdict_of(&json!({ "pass_verdict": "  " })),
-            DEFAULT_PASS_VERDICT
-        );
-        assert_eq!(
-            pass_verdict_of(&json!({ "pass_verdict": "gate_ok" })),
-            "gate_ok"
+            pass_verdict_of(&json!({ "pass_verdict": " gate_ok " })),
+            " gate_ok "
         );
     }
 
@@ -445,7 +497,7 @@ mod tests {
         let explicit = json!({ "decision": "gate_failed", "checks": { "build_passed": "pass" } });
         assert_eq!(
             resolve_verdict(Some(&context), &explicit),
-            VerdictResolution::Explicit(Some("gate_failed".to_string()))
+            VerdictResolution::Explicit("gate_failed".to_string())
         );
 
         let inferred = json!({ "checks": { "build_passed": "pass" } });

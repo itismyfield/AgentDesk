@@ -6,7 +6,7 @@ use thiserror::Error;
 // module's long-standing local names while the bodies moved to the canonical
 // reducer shared with the dispatch finalize path.
 use super::phase_gate_verdict::{
-    DEFAULT_PASS_VERDICT, pass_verdict_of, resolve_verdict,
+    DEFAULT_PASS_VERDICT, diagnostic_verdict, pass_verdict_of, resolve_verdict,
     verdict_matches as phase_gate_verdict_matches,
 };
 
@@ -553,14 +553,8 @@ async fn reconcile_phase_gate_for_terminal_dispatch_on_pg_tx_inner(
         return Ok(PhaseGateReconciliation::AlreadyFailed);
     }
 
-    let pass_verdict = if gate.pass_verdict.is_empty() {
-        DEFAULT_PASS_VERDICT.to_string()
-    } else {
-        gate.pass_verdict.clone()
-    };
-
-    // Parse JSON once so we can reuse it for both explicit verdict extraction
-    // and checks-only inference.
+    // Parse JSON once so we can reuse it for expected-verdict selection,
+    // explicit verdict extraction, and checks-only inference.
     let result_value: Option<Value> = dispatch_result_json
         .map(str::trim)
         .filter(|raw| !raw.is_empty())
@@ -569,6 +563,21 @@ async fn reconcile_phase_gate_for_terminal_dispatch_on_pg_tx_inner(
         .map(str::trim)
         .filter(|raw| !raw.is_empty())
         .and_then(|raw| serde_json::from_str(raw).ok());
+    // Each dispatch context is the authority for its own expected verdict.
+    // A phase may contain multiple gate groups with different pass verdicts;
+    // using the first persisted gate-row value here makes primary and sibling
+    // reconciliation disagree for the same dispatch.
+    let pass_verdict = context_value
+        .as_ref()
+        .and_then(|context| context.get("phase_gate"))
+        .map(pass_verdict_of)
+        .unwrap_or_else(|| {
+            if gate.pass_verdict.is_empty() {
+                DEFAULT_PASS_VERDICT.to_string()
+            } else {
+                gate.pass_verdict.clone()
+            }
+        });
     // #1980 + #699: legacy / checks-only results do not carry an explicit
     // verdict, so `resolve_verdict` falls back to checks inference — the same
     // fallback the dispatch finalize path applies before persisting a result.
@@ -578,6 +587,10 @@ async fn reconcile_phase_gate_for_terminal_dispatch_on_pg_tx_inner(
     let verdict = verdict_resolution
         .as_ref()
         .and_then(|resolution| resolution.verdict());
+    let diagnostic_verdict = result_value
+        .as_ref()
+        .zip(verdict_resolution.as_ref())
+        .and_then(|(result, resolution)| diagnostic_verdict(result, resolution));
 
     // Treat any non-`completed` terminal status (`failed`/`cancelled`) as a
     // gate failure regardless of verdict — the dispatch never produced a
@@ -593,7 +606,7 @@ async fn reconcile_phase_gate_for_terminal_dispatch_on_pg_tx_inner(
         let failed_reason = compose_failed_reason(
             dispatch_status,
             dispatch_result_json,
-            verdict,
+            diagnostic_verdict.as_deref().or(verdict),
             &pass_verdict,
         );
         mark_phase_gate_row_failed_on_pg_tx(
@@ -601,7 +614,7 @@ async fn reconcile_phase_gate_for_terminal_dispatch_on_pg_tx_inner(
             &gate.run_id,
             gate.phase,
             dispatch_id,
-            verdict,
+            diagnostic_verdict.as_deref().or(verdict),
             &failed_reason,
         )
         .await?;
@@ -1397,6 +1410,10 @@ async fn load_sibling_phase_gate_dispatches_on_pg_tx(
         let actual_verdict = actual_resolution
             .as_ref()
             .and_then(|resolution| resolution.verdict());
+        let diagnostic_verdict = result_value
+            .as_ref()
+            .zip(actual_resolution.as_ref())
+            .and_then(|(result, resolution)| diagnostic_verdict(result, resolution));
         if !phase_gate_verdict_matches(
             actual_verdict,
             &expected_verdict,
@@ -1414,12 +1431,12 @@ async fn load_sibling_phase_gate_dispatches_on_pg_tx(
                 .unwrap_or_else(|| {
                     format!(
                         "expected verdict {expected_verdict}, got {}",
-                        actual_verdict.unwrap_or("none")
+                        diagnostic_verdict.as_deref().or(actual_verdict).unwrap_or("none")
                     )
                 });
             summary.failed_sibling = Some(FailedSibling {
                 dispatch_id,
-                verdict: actual_verdict.map(str::to_string),
+                verdict: diagnostic_verdict.or_else(|| actual_verdict.map(str::to_string)),
                 reason,
             });
             return Ok(summary);
@@ -1797,7 +1814,7 @@ mod reconcile_phase_gate_pg_tests {
         reconcile_phase_gate_for_terminal_dispatch_on_pg_tx, repair_phase_gates_for_run_on_pg,
         save_phase_gate_state_on_pg,
     };
-    use crate::db::auto_queue::phase_gate_verdict::infer_pass_verdict as infer_phase_gate_pass_verdict;
+    use crate::db::auto_queue::phase_gate_verdict::{VerdictResolution, resolve_verdict};
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use serde_json::json;
     use sqlx::PgPool;
@@ -1898,6 +1915,26 @@ mod reconcile_phase_gate_pg_tests {
         .expect("gate status")
     }
 
+    async fn gate_failure_diagnostic(
+        pool: &PgPool,
+        run_id: &str,
+        phase: i64,
+    ) -> (Option<String>, Option<String>) {
+        let row = sqlx::query(
+            "SELECT verdict, failure_reason FROM auto_queue_phase_gates
+             WHERE run_id = $1 AND phase = $2 LIMIT 1",
+        )
+        .bind(run_id)
+        .bind(phase)
+        .fetch_one(pool)
+        .await
+        .expect("gate failure diagnostic");
+        (
+            row.try_get("verdict").expect("decode verdict"),
+            row.try_get("failure_reason").expect("decode failure reason"),
+        )
+    }
+
     fn gate_context() -> serde_json::Value {
         json!({
             "phase_gate": {
@@ -1945,7 +1982,10 @@ mod reconcile_phase_gate_pg_tests {
             }
         });
 
-        assert_eq!(infer_phase_gate_pass_verdict(Some(&context), &result), None);
+        assert_eq!(
+            resolve_verdict(Some(&context), &result),
+            VerdictResolution::Explicit("manual_hold".to_string())
+        );
         assert!(!phase_gate_verdict_matches(
             Some("manual_hold"),
             "phase_gate_passed",
@@ -2231,6 +2271,138 @@ mod reconcile_phase_gate_pg_tests {
         }
         assert_eq!(gate_status(&pool, "run-pg-test", 0).await, "failed");
         assert_eq!(run_status(&pool, "run-pg-test").await, "paused");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_string_explicit_payload_is_preserved_in_failure_diagnostics() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        fixture(&pool).await;
+
+        let context = json!({
+            "phase_gate": {
+                "run_id": "run-pg-test",
+                "batch_phase": 0,
+                "pass_verdict": "gate_ok",
+                "checks": ["build_passed"]
+            }
+        });
+        let result = json!({
+            "verdict": {"blocked_by": "operator"},
+            "checks": {"build_passed": {"status": "fail"}}
+        });
+        insert_dispatch(
+            &pool,
+            "dsp-diagnostic",
+            "completed",
+            context.clone(),
+            Some(result.clone()),
+        )
+        .await;
+        save_phase_gate_state_on_pg(
+            &pool,
+            "run-pg-test",
+            0,
+            &PhaseGateStateWrite {
+                status: "pending".into(),
+                pass_verdict: "gate_ok".into(),
+                dispatch_ids: vec!["dsp-diagnostic".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed gate state");
+
+        let outcome = run_reconcile(
+            &pool,
+            "dsp-diagnostic",
+            "completed",
+            context,
+            Some(result),
+        )
+        .await;
+        assert!(matches!(outcome, PhaseGateReconciliation::MarkedFailed { .. }));
+        let (verdict, reason) = gate_failure_diagnostic(&pool, "run-pg-test", 0).await;
+        assert_eq!(verdict.as_deref(), Some(r#"{"blocked_by":"operator"}"#));
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains(r#"{"blocked_by":"operator"}"#)),
+            "failure reason should retain the original payload: {reason:?}"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mixed_group_pass_verdict_uses_each_dispatch_context() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        fixture(&pool).await;
+
+        let context_a = json!({
+            "phase_gate": {
+                "run_id": "run-pg-test",
+                "batch_phase": 0,
+                "pass_verdict": "gate_ok",
+                "checks": ["tests"]
+            }
+        });
+        let context_b = json!({
+            "phase_gate": {
+                "run_id": "run-pg-test",
+                "batch_phase": 0,
+                "pass_verdict": "phase_gate_passed",
+                "checks": ["tests"]
+            }
+        });
+        for (id, context, verdict) in [
+            ("dsp-group-a", context_a.clone(), "gate_ok"),
+            ("dsp-group-b", context_b.clone(), "phase_gate_passed"),
+        ] {
+            insert_dispatch(
+                &pool,
+                id,
+                "completed",
+                context.clone(),
+                Some(json!({"verdict": verdict, "checks": {"tests": "pass"}})),
+            )
+            .await;
+        }
+        save_phase_gate_state_on_pg(
+            &pool,
+            "run-pg-test",
+            0,
+            &PhaseGateStateWrite {
+                status: "pending".into(),
+                pass_verdict: "gate_ok".into(),
+                dispatch_ids: vec!["dsp-group-a".into(), "dsp-group-b".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed mixed gate groups");
+
+        let outcome = run_reconcile(
+            &pool,
+            "dsp-group-b",
+            "completed",
+            context_b,
+            Some(json!({
+                "verdict": "phase_gate_passed",
+                "checks": {"tests": "pass"}
+            })),
+        )
+        .await;
+        assert!(
+            matches!(outcome, PhaseGateReconciliation::Cleared { .. }),
+            "primary and sibling paths must use each dispatch context: {outcome:?}"
+        );
+        assert_eq!(gate_count(&pool, "run-pg-test", 0).await, 0);
 
         pool.close().await;
         pg_db.drop().await;
@@ -2756,21 +2928,23 @@ mod reconcile_phase_gate_pg_tests {
         pg_db.drop().await;
     }
 
-    /// #1980 + codex v2 MED #5 parity: any truthy explicit `verdict`/`decision`
-    /// (including non-string values like numbers or booleans) must block
-    /// inference, matching JS's `||` operator semantics. The result here has
-    /// `verdict: 1` plus all-passing checks — JS would refuse to infer, so
-    /// Rust must too.
+    /// Preserve the pre-#4884 finalize contract: non-string explicit fields are
+    /// ignored and passing declared checks may still infer the pass verdict.
     #[test]
-    fn truthy_non_string_explicit_verdict_blocks_inference() {
-        let context = json!({"phase_gate": {"pass_verdict": "phase_gate_passed"}});
+    fn non_string_explicit_verdict_preserves_checks_inference() {
+        let context = json!({
+            "phase_gate": {
+                "pass_verdict": "phase_gate_passed",
+                "checks": ["tests"]
+            }
+        });
         let result = json!({
             "verdict": 1,
             "checks": { "tests": "pass" },
         });
-        assert!(
-            infer_phase_gate_pass_verdict(Some(&context), &result).is_none(),
-            "truthy non-string verdict must block inference"
+        assert_eq!(
+            resolve_verdict(Some(&context), &result),
+            VerdictResolution::Inferred("phase_gate_passed".to_string())
         );
     }
 
@@ -2782,8 +2956,9 @@ mod reconcile_phase_gate_pg_tests {
         let context =
             json!({"phase_gate": {"pass_verdict": "phase_gate_passed", "checks": ["tests"]}});
         let result = json!({"checks": {"tests": " pass "}});
-        assert!(
-            infer_phase_gate_pass_verdict(Some(&context), &result).is_none(),
+        assert_eq!(
+            resolve_verdict(Some(&context), &result),
+            VerdictResolution::Missing,
             "whitespace-padded status must not be inferred (JS parity)"
         );
     }

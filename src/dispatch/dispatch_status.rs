@@ -1581,66 +1581,73 @@ mod auto_queue_terminal_sync_policy_tests {
 }
 
 #[cfg(test)]
-mod phase_gate_verdict_path_equivalence_tests {
-    use super::infer_phase_gate_verdict;
-    use crate::db::auto_queue::phase_gate_verdict::{VerdictResolution, resolve_verdict};
+mod phase_gate_finalize_wrapper_tests {
+    use super::{infer_effective_completion_result, infer_phase_gate_verdict};
     use serde_json::json;
 
-    #[test]
-    fn checks_only_completion_resolves_identically_before_and_after_injection() {
-        let gate = json!({
-            "checks": ["merge_verified", "issue_closed"],
-            "pass_verdict": "gate_ok",
-        });
-        let context = json!({ "phase_gate": gate.clone() });
-        let raw = json!({
-            "checks": {
-                "merge_verified": { "status": "pass" },
-                "issue_closed": { "status": "", "result": "passed" },
-            }
-        });
+    fn gate() -> serde_json::Value {
+        json!({
+            "checks": ["merge_verified", "issue_closed", "build_passed"],
+            "pass_verdict": "phase_gate_passed",
+        })
+    }
 
-        let injected = infer_phase_gate_verdict("dsp-path-equivalence", &gate, &raw)
-            .expect("finalize path should persist the reducer's inferred verdict");
-        assert_eq!(
-            resolve_verdict(Some(&context), &raw),
-            VerdictResolution::Inferred("gate_ok".to_string()),
-        );
+    fn passing_checks() -> serde_json::Value {
+        json!({
+            "merge_verified": { "status": "pass" },
+            "issue_closed": { "status": "pass" },
+            "build_passed": { "status": "pass" },
+        })
+    }
+
+    #[test]
+    fn finalize_wrapper_overwrites_truthy_non_string_verdict_for_compatibility() {
+        for explicit in [json!(true), json!({"blocked_by": "operator"})] {
+            let result = json!({ "verdict": explicit, "checks": passing_checks() });
+            let injected = infer_phase_gate_verdict("dsp-finalize-non-string", &gate(), &result)
+                .expect("non-string verdict must preserve checks-based injection");
+            assert_eq!(
+                injected.get("verdict").and_then(|value| value.as_str()),
+                Some("phase_gate_passed")
+            );
+            assert_eq!(
+                injected
+                    .get("verdict_inferred")
+                    .and_then(|value| value.as_bool()),
+                Some(true)
+            );
+        }
+    }
+
+    #[test]
+    fn finalize_wrapper_overwrites_truthy_non_string_decision_for_compatibility() {
+        let result = json!({
+            "decision": {"blocked_by": "operator"},
+            "checks": passing_checks(),
+        });
+        let context = json!({ "phase_gate": gate() }).to_string();
+        let injected = infer_effective_completion_result(
+            "dsp-finalize-decision",
+            "completed",
+            Some(&context),
+            Some(&result),
+        )
+        .expect("non-string decision must preserve checks-based injection");
         assert_eq!(
             injected.get("verdict").and_then(|value| value.as_str()),
-            Some("gate_ok")
-        );
-        assert_eq!(
-            injected
-                .get("verdict_inferred")
-                .and_then(|value| value.as_bool()),
-            Some(true),
-        );
-        assert_eq!(
-            resolve_verdict(Some(&context), &injected),
-            VerdictResolution::Explicit(Some("gate_ok".to_string())),
+            Some("phase_gate_passed")
         );
     }
 
     #[test]
-    fn explicit_failure_is_identical_for_finalize_and_bypass_paths() {
-        let gate = json!({
-            "checks": ["merge_verified"],
-            "pass_verdict": "gate_ok",
-        });
-        let context = json!({ "phase_gate": gate.clone() });
+    fn explicit_string_failure_is_not_overridden() {
         let result = json!({
             "phase_gate_verdict": "manual_hold",
-            "checks": { "merge_verified": { "status": "pass" } },
+            "checks": passing_checks(),
         });
-
         assert_eq!(
-            infer_phase_gate_verdict("dsp-explicit", &gate, &result),
+            infer_phase_gate_verdict("dsp-explicit", &gate(), &result),
             None
-        );
-        assert_eq!(
-            resolve_verdict(Some(&context), &result),
-            VerdictResolution::Explicit(Some("manual_hold".to_string())),
         );
     }
 }
