@@ -611,8 +611,10 @@ pub(super) fn render_status_panel(
     // the request anchor when present, then the start/update TIME fields. Keep the
     // entire header in one section so each field occupies the immediately following
     // physical line and section-wise truncation preserves the header atomically.
-    let activity_line =
-        super::freshness::render_activity_line(&header_status, snapshot.last_tool.as_ref());
+    let activity_line = super::freshness::render_activity_line_with_last_tool(
+        &header_status,
+        snapshot.last_tool.as_ref(),
+    );
     let time_lines = time_line.lines().collect::<Vec<_>>();
     let mut header_lines = std::iter::once(activity_line.as_str())
         .chain(time_lines)
