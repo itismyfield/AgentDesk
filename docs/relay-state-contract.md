@@ -332,6 +332,16 @@ plan.
   producing a duplicate Discord response.
 - Invariant key: `session_terminal_post_lease_required` (enforced structurally by
   the mandatory acquire and production-entry regression tests).
+- Consumer rule: a confirmed fresh-message POST returned by the controller is
+  preserved as a typed exact-sequence terminal resolution through
+  `sym:cluster::stream_relay::RelaySinkOutcome::terminal_fresh_delivered` and the
+  watcher transport-confirmation predicate.
+  `committed_to=None` and `persistence_recorded=false` describe missing frontier
+  authority or retry metadata; neither erases confirmed transport or authorizes
+  the watcher to acquire the released lease and POST the same body again.
+- Violation surface: folding confirmed fresh transport into `RelaySinkError` loses
+  its provenance; §3.2 then sees `committed < end`, reacquires the shared lease,
+  and sends a duplicate full response.
 
 ## I10. idle JSONL cursors consume only classified drops or confirmed commits (#4536)
 
