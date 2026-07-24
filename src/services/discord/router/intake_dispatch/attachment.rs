@@ -140,7 +140,10 @@ mod tests {
         let mut local_sessions = Vec::new();
 
         let outcome = resolve_attachment_admission_with(
-            IntakeAdmission::Local(LocalAdmissionPermit(())),
+            IntakeAdmission::Local(LocalAdmissionPermit {
+                channel_id: serenity::ChannelId::new(1),
+                request_owner: serenity::UserId::new(2),
+            }),
             |permit| {
                 local_sessions.push("session");
                 std::fs::write(&marker, b"upload").expect("write materialization marker");
