@@ -128,6 +128,9 @@ pub(in crate::services::discord) mod rollback_transport_test_hook {
 mod tool_markdown;
 
 use self::tool_markdown::convert_markdown_tables;
+// These facade exports preserve the pre-split module paths even when a given
+// build target has no in-crate consumer.
+#[allow(unused_imports)]
 pub(super) use self::tool_markdown::{
     ALL_TOOLS, BUILTIN_SKILLS, canonical_tool_name, escape_for_code_fence,
     extract_skill_description, filter_codex_tool_logs, format_for_discord_with_provider,
@@ -139,6 +142,7 @@ pub(crate) use self::tool_markdown::{normalize_allowed_tools, redact_sensitive_f
 #[path = "formatting/streaming_status.rs"]
 mod streaming_status;
 
+#[allow(unused_imports)]
 pub(super) use self::streaming_status::{
     LongRunningCloseTrigger, MonitorHandoffReason, MonitorHandoffStatus, StreamingRolloverPlan,
     build_monitor_handoff_placeholder, build_monitor_handoff_placeholder_with_context,
@@ -158,6 +162,7 @@ use self::delivery::send_channel_message_with_optional_reference;
 pub(super) use self::delivery::{
     build_long_message_attachment, send_long_message_ctx, send_long_message_raw, split_message,
 };
+#[allow(unused_imports)]
 pub(in crate::services::discord) use self::delivery::{
     long_message_reply_builders, send_long_message_raw_with_reference,
     send_long_message_raw_with_reference_returning_message_ids, send_long_message_reply_ctx,
