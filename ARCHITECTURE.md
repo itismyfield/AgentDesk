@@ -498,9 +498,14 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   └── registry.rs
 │   │   ├── formatting/
+│   │   │   ├── delivery.rs
 │   │   │   ├── long_send_rollback.rs
 │   │   │   ├── replace_long_message.rs
-│   │   │   └── rollback_journal.rs
+│   │   │   ├── replace_long_message_tests.rs
+│   │   │   ├── rollback_journal.rs
+│   │   │   ├── status_panel_v2_formatter_tests.rs
+│   │   │   ├── streaming_status.rs
+│   │   │   └── tool_markdown.rs
 │   │   ├── gateway/
 │   │   │   └── outbound_messages.rs
 │   │   ├── health/

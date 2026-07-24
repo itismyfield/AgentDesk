@@ -228,7 +228,7 @@
       "count": 1
     },
     {
-      "path": "src/services/discord/formatting.rs",
+      "path": "src/services/discord/formatting/streaming_status.rs",
       "lint": "too_many_arguments",
       "count": 2
     },
