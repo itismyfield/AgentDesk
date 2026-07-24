@@ -117,8 +117,8 @@ pub(super) async fn maybe_create_bridge_separate_status_panel_response<G: TurnGa
     response_sent_offset: usize,
     full_response: &str,
     status_panel_dirty: &mut bool,
-    _shared: &Arc<SharedData>,
-    _provider: &crate::services::provider::ProviderKind,
+    shared: &Arc<SharedData>,
+    provider: &crate::services::provider::ProviderKind,
 ) {
     // #3805 P2 (PR-B): flag ON → create the status panel as a NEW message BELOW
     // the answer (answer-first layout). The ON path is fully mutually exclusive
@@ -134,6 +134,8 @@ pub(super) async fn maybe_create_bridge_separate_status_panel_response<G: TurnGa
         ) {
             super::two_message_panel::create_bridge_two_message_status_panel_below_answer(
                 gateway,
+                shared.as_ref(),
+                provider,
                 channel_id,
                 initial_indicator,
                 *current_msg_id,

@@ -52,6 +52,14 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
             if let Some(warning) = wip_warning {
                 warning.commit();
             }
+            if !singleton::commit_completed_binding(
+                shared,
+                provider,
+                channel_id,
+                status_panel_msg_id,
+            ) {
+                return false;
+            }
             purge_pending_bind_for_completed_status_panel(
                 shared,
                 provider,
@@ -95,6 +103,14 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
                 Ok(()) => {
                     if let Some(warning) = wip_warning {
                         warning.commit();
+                    }
+                    if !singleton::commit_completed_binding(
+                        shared,
+                        provider,
+                        channel_id,
+                        status_panel_msg_id,
+                    ) {
+                        return false;
                     }
                     *last_status_panel_text = panel_text;
                     purge_pending_bind_for_completed_status_panel(
@@ -244,6 +260,10 @@ async fn complete_status_panel_v2_fallback_with_gateway<G: TurnGateway + ?Sized>
                 message_id,
                 source,
             );
+            if !singleton::commit_completed_binding(shared, provider, channel_id, Some(message_id))
+            {
+                return false;
+            }
             *last_status_panel_text = panel_text;
             true
         }
@@ -306,6 +326,14 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http(
             if let Some(warning) = wip_warning {
                 warning.commit();
             }
+            if !singleton::commit_completed_binding(
+                shared,
+                provider,
+                channel_id,
+                status_panel_msg_id,
+            ) {
+                return false;
+            }
             purge_pending_bind_for_completed_status_panel(
                 shared.as_ref(),
                 provider,
@@ -323,6 +351,7 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http(
         StatusPanelCompletionAction::SendFallback => {
             rate_limit_wait(shared, channel_id).await;
             complete_status_panel_v2_fallback_with_http(
+                shared.as_ref(),
                 http,
                 channel_id,
                 provider,
@@ -343,6 +372,14 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http(
                     if let Some(warning) = wip_warning {
                         warning.commit();
                     }
+                    if !singleton::commit_completed_binding(
+                        shared.as_ref(),
+                        provider,
+                        channel_id,
+                        status_panel_msg_id,
+                    ) {
+                        return false;
+                    }
                     *last_status_panel_text = panel_text;
                     purge_pending_bind_for_completed_status_panel(
                         shared.as_ref(),
@@ -362,6 +399,7 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http(
                     let error = error.to_string();
                     if status_panel_message_missing_error(&error) {
                         return complete_status_panel_v2_fallback_with_http(
+                            shared.as_ref(),
                             http,
                             channel_id,
                             provider,
@@ -389,6 +427,7 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http(
 
 #[allow(clippy::too_many_arguments)]
 async fn complete_status_panel_v2_fallback_with_http(
+    shared: &SharedData,
     http: &serenity::Http,
     channel_id: ChannelId,
     provider: &ProviderKind,
@@ -412,6 +451,10 @@ async fn complete_status_panel_v2_fallback_with_http(
                 message_id,
                 source,
             );
+            if !singleton::commit_completed_binding(shared, provider, channel_id, Some(message_id))
+            {
+                return false;
+            }
             *last_status_panel_text = panel_text;
             true
         }
@@ -428,6 +471,7 @@ async fn complete_status_panel_v2_fallback_with_http(
 }
 
 mod purge;
+mod singleton;
 use purge::{
     purge_pending_bind_for_completed_status_panel,
     purge_terminal_reconcile_for_completed_status_panel,
