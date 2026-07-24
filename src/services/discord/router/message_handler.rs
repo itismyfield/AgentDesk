@@ -251,7 +251,8 @@ async fn refresh_claimed_runtime_for_launch(
 }
 
 pub(super) use self::attachments::{
-    LocalAttachmentPreparationPermit, describe_attachments, prepare_admitted_local_attachment,
+    AttachmentDescriptor, LocalAttachmentPreparationPermit, describe_attachments,
+    prepare_admitted_local_attachment,
 };
 pub(super) use self::control::{handle_shell_command_raw, handle_text_command};
 #[allow(unused_imports)]

@@ -2,7 +2,7 @@ use poise::serenity_prelude as serenity;
 use poise::serenity_prelude::{CreateAttachment, CreateMessage};
 use std::sync::Arc;
 
-use super::super::router::{IntakeDeps, IntakeOrigin, dispatch_skill_intake};
+use super::super::router::{IntakeDeps, IntakeOrigin, LocalAdmissionPermit, dispatch_skill_intake};
 use super::super::*;
 use super::build_provider_skill_prompt;
 use crate::services::provider::CancelToken;
@@ -130,7 +130,7 @@ pub(in crate::services::discord) async fn handle_text_command(
     channel_id: serenity::ChannelId,
     text: &str,
 ) -> Result<bool, Error> {
-    handle_text_command_with_uploads(ctx, msg, data, channel_id, text, &[]).await
+    handle_text_command_with_uploads(ctx, msg, data, channel_id, text, &[], &mut None).await
 }
 
 pub(in crate::services::discord) async fn handle_text_command_with_uploads(
@@ -140,6 +140,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
     channel_id: serenity::ChannelId,
     text: &str,
     preloaded_uploads: &[String],
+    admitted_attachment_permit: &mut Option<LocalAdmissionPermit>,
 ) -> Result<bool, Error> {
     let parts: Vec<&str> = text.splitn(3, char::is_whitespace).collect();
     let cmd = parts[0];
@@ -1470,6 +1471,7 @@ Any other message is sent to {p}.
                 skill_prompt,
                 IntakeOrigin::TextSkill,
                 preloaded_uploads.to_vec(),
+                admitted_attachment_permit.take(),
             )
             .await?;
             return Ok(true);

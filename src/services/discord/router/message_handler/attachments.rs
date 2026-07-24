@@ -32,8 +32,8 @@ pub(super) async fn download_discord_attachment(raw_url: &str) -> Result<Vec<u8>
 /// Side-effect-free attachment metadata captured at Discord intake.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::services::discord::router) struct AttachmentDescriptor {
-    filename: String,
-    url: String,
+    pub(in crate::services::discord::router) filename: String,
+    pub(in crate::services::discord::router) url: String,
 }
 
 impl From<&serenity::Attachment> for AttachmentDescriptor {
@@ -53,14 +53,13 @@ pub(in crate::services::discord::router) fn describe_attachments(
 
 /// Opaque capability for the local attachment materialization boundary.
 ///
-/// The current intake site issues this capability at its existing point so this
-/// preparatory slice preserves ordering. The admission coordinator can move
-/// issuance behind local admission without changing the download/save body.
+/// The intake coordinator issues this capability only after central admission
+/// has granted local execution.
 #[derive(Debug)]
 pub(in crate::services::discord::router) struct LocalAttachmentPreparationPermit(());
 
 impl LocalAttachmentPreparationPermit {
-    pub(in crate::services::discord::router) fn preserving_existing_intake_order() -> Self {
+    pub(in crate::services::discord::router) fn after_local_admission() -> Self {
         Self(())
     }
 }
@@ -88,7 +87,7 @@ fn persist_attachment(
 
 /// Download and save attachments at the admitted-local side-effect boundary.
 pub(in crate::services::discord::router) async fn prepare_admitted_local_attachment(
-    ctx: &serenity::Context,
+    http: &Arc<serenity::http::Http>,
     channel_id: serenity::ChannelId,
     attachments: &[AttachmentDescriptor],
     shared: &Arc<SharedData>,
@@ -98,7 +97,7 @@ pub(in crate::services::discord::router) async fn prepare_admitted_local_attachm
     let Some(save_dir) = channel_upload_dir(channel_id) else {
         rate_limit_wait(shared, channel_id).await;
         let _ = channel_id
-            .say(&ctx.http, "Cannot resolve upload directory.")
+            .say(http, "Cannot resolve upload directory.")
             .await;
         return Ok(Vec::new());
     };
@@ -106,10 +105,7 @@ pub(in crate::services::discord::router) async fn prepare_admitted_local_attachm
     if let Err(e) = fs::create_dir_all(&save_dir) {
         rate_limit_wait(shared, channel_id).await;
         let _ = channel_id
-            .say(
-                &ctx.http,
-                format!("Failed to prepare upload directory: {}", e),
-            )
+            .say(http, format!("Failed to prepare upload directory: {}", e))
             .await;
         return Ok(Vec::new());
     }
@@ -128,9 +124,7 @@ pub(in crate::services::discord::router) async fn prepare_admitted_local_attachm
                     "skipping Discord attachment download: {e}"
                 );
                 rate_limit_wait(shared, channel_id).await;
-                let _ = channel_id
-                    .say(&ctx.http, format!("Download failed: {e}"))
-                    .await;
+                let _ = channel_id.say(http, format!("Download failed: {e}")).await;
                 continue;
             }
         };
@@ -142,7 +136,7 @@ pub(in crate::services::discord::router) async fn prepare_admitted_local_attachm
             Err(e) => {
                 rate_limit_wait(shared, channel_id).await;
                 let _ = channel_id
-                    .say(&ctx.http, format!("Failed to save file: {}", e))
+                    .say(http, format!("Failed to save file: {}", e))
                     .await;
                 continue;
             }
@@ -150,7 +144,7 @@ pub(in crate::services::discord::router) async fn prepare_admitted_local_attachm
 
         let msg_text = format!("Saved: {}\n({} bytes)", dest.display(), file_size);
         rate_limit_wait(shared, channel_id).await;
-        let _ = channel_id.say(&ctx.http, &msg_text).await;
+        let _ = channel_id.say(http, &msg_text).await;
         debug_assert!(upload_record.starts_with(&format!("[File uploaded] {file_name} → ")));
         upload_records.push(upload_record);
     }
@@ -209,36 +203,28 @@ mod attachment_tests {
     }
 
     #[test]
-    fn attachment_materialization_requires_opaque_permit_and_keeps_existing_order() {
+    fn attachment_materialization_requires_post_admission_opaque_permit() {
         let source = include_str!("../intake_gate.rs");
-        let restore = source
-            .find("auto_restore_session_with_dm_hint(&data.shared, channel_id")
-            .expect("existing session restore");
         let descriptor = source
             .find("let attachments = super::message_handler::describe_attachments(new_message);")
             .expect("descriptor capture");
-        let permit = source
-            .find("let permit = super::message_handler::LocalAttachmentPreparationPermit::preserving_existing_intake_order();")
-            .expect("opaque permit issuance");
-        let prepare = source
-            .find("super::message_handler::prepare_admitted_local_attachment(")
-            .expect("materialization boundary");
-        let history = source
-            .find("record_upload_history(&data.shared, channel_id, &upload_records).await;")
-            .expect("existing history update");
         let admission = source
-            .find("super::dispatch_text_intake(&deps, submission).await?;")
-            .expect("central admission call");
+            .find("super::admit_text_intake(&deps, &submission).await")
+            .expect("attachment central admission call");
+        let deferred_restore = source
+            .find("if deferred_attachment_unbound_check")
+            .expect("unbound attachment restore guard");
+        let prepare = source
+            .find("super::prepare_admitted_live_attachments(")
+            .expect("post-admission materialization boundary");
 
-        assert!(restore < descriptor);
-        assert!(descriptor < permit && permit < prepare);
-        assert!(prepare < history && history < admission);
+        assert!(
+            descriptor < admission && admission < deferred_restore && deferred_restore < prepare
+        );
         assert_eq!(
-            source
-                .matches("LocalAttachmentPreparationPermit::preserving_existing_intake_order()")
-                .count(),
+            source.matches("prepare_admitted_live_attachments(").count(),
             1,
-            "only the compatibility intake site may issue the preparatory permit"
+            "live attachment materialization has one admitted gate site"
         );
     }
 }

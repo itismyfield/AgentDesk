@@ -285,6 +285,7 @@ async fn run_skill_slash_command(
             full_text,
             IntakeOrigin::SlashSkill,
             Vec::new(),
+            None,
         )
         .await?;
         return Ok(());
@@ -350,6 +351,7 @@ async fn run_skill_slash_command(
         skill_prompt,
         IntakeOrigin::SlashSkill,
         Vec::new(),
+        None,
     )
     .await?;
 

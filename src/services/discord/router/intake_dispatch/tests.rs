@@ -310,6 +310,7 @@ async fn intake_dispatch_invariant_enforce_without_postgres_blocks_owner_unknown
         origin: IntakeOrigin::LiveMessage,
         preserve_on_cancel: false,
         has_nonportable_uploads: false,
+        attachments: Vec::new(),
         preloaded_uploads: Vec::new(),
         voice_announcement: None,
     };
@@ -344,6 +345,7 @@ async fn live_and_skill_producers_forward_to_foreign_owner_pg() {
             origin: IntakeOrigin::LiveMessage,
             preserve_on_cancel: true,
             has_nonportable_uploads: false,
+            attachments: Vec::new(),
             preloaded_uploads: Vec::new(),
             voice_announcement: None,
         },
@@ -362,6 +364,7 @@ async fn live_and_skill_producers_forward_to_foreign_owner_pg() {
         "/unknown-skill".to_string(),
         IntakeOrigin::SlashSkill,
         Vec::new(),
+        None,
     )
     .await
     .expect("slash skill forwards");
@@ -377,6 +380,7 @@ async fn live_and_skill_producers_forward_to_foreign_owner_pg() {
         "Execute /registered-skill".to_string(),
         IntakeOrigin::TextSkill,
         Vec::new(),
+        None,
     )
     .await
     .expect("text skill forwards");
@@ -400,6 +404,57 @@ async fn live_and_skill_producers_forward_to_foreign_owner_pg() {
     assert!(
         shared.core.lock().await.sessions.is_empty(),
         "foreign admission must not create a local session"
+    );
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn raw_attachment_foreign_owner_blocks_before_outbox_or_local_state_pg() {
+    let _env = ScopedIntakeTestEnv::enforce();
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let channel_id = ChannelId::new(4_350_151);
+    seed_foreign_owner(&pool, channel_id, "worker-owner-4350-raw-attachment").await;
+
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let http = Arc::new(serenity::Http::new("Bot intake-dispatch-test"));
+    let deps = deps(&http, &shared);
+    let submission = IntakeSubmission {
+        provider: ProviderKind::Claude,
+        request: request(channel_id, 4_350_161, "inspect the attachment"),
+        origin: IntakeOrigin::LiveMessage,
+        preserve_on_cancel: false,
+        has_nonportable_uploads: false,
+        attachments: vec![super::super::message_handler::AttachmentDescriptor {
+            filename: "report.txt".to_string(),
+            url: "https://cdn.discordapp.com/attachments/1/2/report.txt".to_string(),
+        }],
+        preloaded_uploads: Vec::new(),
+        voice_announcement: None,
+    };
+
+    assert!(matches!(
+        super::admit_text_intake(&deps, &submission).await,
+        super::IntakeAdmission::Blocked {
+            reason: crate::services::cluster::intake_router_hook::IntakeBlockedReason::NonPortableAttachmentForeignOwner { .. }
+        }
+    ));
+    let outbox_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM intake_outbox WHERE channel_id = $1")
+            .bind(channel_id.get().to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("count raw attachment routes");
+    assert_eq!(
+        outbox_count, 0,
+        "raw attachments never enter a foreign outbox"
+    );
+    assert!(
+        shared.core.lock().await.sessions.is_empty(),
+        "blocked raw attachment admission must not create local session state"
     );
 
     pool.close().await;
@@ -551,6 +606,7 @@ async fn distinct_open_route_requeues_queued_successor_pg() {
             origin: IntakeOrigin::LiveMessage,
             preserve_on_cancel: false,
             has_nonportable_uploads: false,
+            attachments: Vec::new(),
             preloaded_uploads: Vec::new(),
             voice_announcement: None,
         },

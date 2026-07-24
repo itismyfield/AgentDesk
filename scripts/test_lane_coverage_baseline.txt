@@ -357,7 +357,6 @@ services::discord::router::intake_gate::queue_effects::merged_placeholder_reuse_
 services::discord::router::intake_gate::queue_effects::schedule_post_enqueue_idle_drain_tests
 services::discord::router::intake_gate::reply_context_tests
 services::discord::router::intake_gate::stale_turn::thread_guard_stale_pure_tests
-services::discord::router::message_handler::attachments::attachment_tests
 services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle_unit_tests
 services::discord::router::message_handler::headless_turn::fresh_routine_tests
 services::discord::router::message_handler::headless_turn::headless_hard_ceiling_tests

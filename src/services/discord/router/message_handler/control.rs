@@ -74,6 +74,7 @@ pub(in crate::services::discord::router) async fn handle_text_command(
     channel_id: serenity::ChannelId,
     text: &str,
     preloaded_uploads: &[String],
+    admitted_attachment_permit: &mut Option<super::super::LocalAdmissionPermit>,
 ) -> Result<bool, Error> {
     super::super::super::commands::handle_text_command_with_uploads(
         ctx,
@@ -82,6 +83,7 @@ pub(in crate::services::discord::router) async fn handle_text_command(
         channel_id,
         text,
         preloaded_uploads,
+        admitted_attachment_permit,
     )
     .await
 }
