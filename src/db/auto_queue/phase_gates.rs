@@ -2,6 +2,14 @@ use serde_json::Value;
 use sqlx::{PgPool, Row as SqlxRow};
 use thiserror::Error;
 
+// #4884: verdict inference lives in exactly one place. The aliases keep this
+// module's long-standing local names while the bodies moved to the canonical
+// reducer shared with the dispatch finalize path.
+use super::phase_gate_verdict::{
+    DEFAULT_PASS_VERDICT, pass_verdict_of, resolve_verdict,
+    verdict_matches as phase_gate_verdict_matches,
+};
+
 pub async fn current_batch_phase_pg(
     pool: &PgPool,
     run_id: &str,
@@ -546,7 +554,7 @@ async fn reconcile_phase_gate_for_terminal_dispatch_on_pg_tx_inner(
     }
 
     let pass_verdict = if gate.pass_verdict.is_empty() {
-        "phase_gate_passed".to_string()
+        DEFAULT_PASS_VERDICT.to_string()
     } else {
         gate.pass_verdict.clone()
     };
@@ -561,15 +569,12 @@ async fn reconcile_phase_gate_for_terminal_dispatch_on_pg_tx_inner(
         .map(str::trim)
         .filter(|raw| !raw.is_empty())
         .and_then(|raw| serde_json::from_str(raw).ok());
-    let mut verdict = result_value.as_ref().and_then(extract_explicit_verdict);
-    if verdict.is_none()
-        && let Some(result) = result_value.as_ref()
-    {
-        // #1980 + #699: legacy / checks-only results do not include an
-        // explicit verdict. Mirror the JS hook's inference so the durable
-        // Rust path does not spuriously fail those gates.
-        verdict = infer_phase_gate_pass_verdict(context_value.as_ref(), result);
-    }
+    // #1980 + #699: legacy / checks-only results do not carry an explicit
+    // verdict, so `resolve_verdict` falls back to checks inference — the same
+    // fallback the dispatch finalize path applies before persisting a result.
+    let verdict = result_value
+        .as_ref()
+        .and_then(|result| resolve_verdict(context_value.as_ref(), result));
 
     // Treat any non-`completed` terminal status (`failed`/`cancelled`) as a
     // gate failure regardless of verdict — the dispatch never produced a
@@ -1209,153 +1214,6 @@ fn numeric_i64(value: &Value) -> Option<i64> {
     None
 }
 
-fn extract_explicit_verdict(result: &Value) -> Option<String> {
-    for key in ["verdict", "decision", "phase_gate_verdict"] {
-        if let Some(text) = result.get(key).and_then(Value::as_str) {
-            let trimmed = text.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    None
-}
-
-/// Mirror of the JS `_inferPhaseGatePassVerdict` helper in
-/// `policies/auto-queue.js`. When a phase-gate dispatch result is missing an
-/// explicit `verdict` / `decision` / `phase_gate_verdict`, but reports check entries that all pass,
-/// fall back to the gate's `pass_verdict` (default `phase_gate_passed`). This
-/// keeps legacy / checks-only results from being reconciled as failures by
-/// the durable Rust path.
-///
-/// Refuses to infer if any check fails, if any declared check is missing, if
-/// no checks are reported, or if `result.verdict` / `result.decision` /
-/// `result.phase_gate_verdict` is
-/// already set to anything truthy (mirroring JS's `||` operator semantics —
-/// numbers, booleans, objects all count as explicit just like in JS).
-fn infer_phase_gate_pass_verdict(context: Option<&Value>, result: &Value) -> Option<String> {
-    if has_js_truthy_explicit_verdict(result) {
-        return None;
-    }
-    infer_phase_gate_pass_verdict_from_checks(context, result)
-}
-
-fn infer_phase_gate_pass_verdict_from_checks(
-    context: Option<&Value>,
-    result: &Value,
-) -> Option<String> {
-    let phase_gate = context?.get("phase_gate")?;
-    if !phase_gate.is_object() {
-        return None;
-    }
-    let checks = result.get("checks")?.as_object()?;
-    if checks.is_empty() {
-        return None;
-    }
-
-    if let Some(declared) = phase_gate.get("checks").and_then(Value::as_array) {
-        for required in declared {
-            let Some(name) = required.as_str() else {
-                continue;
-            };
-            let Some(entry) = checks.get(name) else {
-                return None;
-            };
-            if !js_check_entry_is_pass(entry) {
-                return None;
-            }
-        }
-    }
-
-    for entry in checks.values() {
-        if !js_check_entry_is_pass(entry) {
-            return None;
-        }
-    }
-
-    let pass_verdict = phase_gate
-        .get("pass_verdict")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| "phase_gate_passed".to_string());
-    Some(pass_verdict)
-}
-
-fn phase_gate_verdict_matches(
-    actual_verdict: Option<&str>,
-    expected_verdict: &str,
-    context: Option<&Value>,
-    result: Option<&Value>,
-) -> bool {
-    let Some(actual_verdict) = actual_verdict
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return false;
-    };
-    if actual_verdict == expected_verdict {
-        return true;
-    }
-    if !matches!(actual_verdict, "pass" | "passed") {
-        return false;
-    }
-    result
-        .and_then(|result| infer_phase_gate_pass_verdict_from_checks(context, result))
-        .as_deref()
-        == Some(expected_verdict)
-}
-
-/// JS-style truthiness check for `result.verdict || result.decision || result.phase_gate_verdict`.
-/// Mirrors the `||` short-circuit in `policies/auto-queue.js:47` so any
-/// non-falsy value (boolean true, non-zero number, non-empty string, any
-/// object/array) blocks inference.
-fn has_js_truthy_explicit_verdict(result: &Value) -> bool {
-    for key in ["verdict", "decision", "phase_gate_verdict"] {
-        if let Some(value) = result.get(key)
-            && is_js_truthy(value)
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn is_js_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::String(s) => !s.is_empty(),
-        Value::Number(n) => n.as_f64().map(|f| f != 0.0 && !f.is_nan()).unwrap_or(false),
-        Value::Array(_) | Value::Object(_) => true,
-    }
-}
-
-/// Mirrors `entryIsPass` from `policies/auto-queue.js`. Notably, JS does NOT
-/// trim whitespace before comparing — only lowercases via `String(...)`. We
-/// match that exactly so a status like `" pass "` is rejected here and in JS.
-fn js_check_entry_is_pass(entry: &Value) -> bool {
-    // #2048 F12: mirror JS `entry.status || entry.result` truthiness. JS
-    // treats an empty string as falsy and falls through to `entry.result`;
-    // the previous Rust port short-circuited on `status` key presence even
-    // when its value was `""`, causing a Rust→JS verdict divergence. Now
-    // we ignore empty strings on the `status` side and fall back to
-    // `result` just like JS.
-    let raw = match entry {
-        Value::String(text) => Some(text.as_str()),
-        Value::Object(map) => map
-            .get("status")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .or_else(|| map.get("result").and_then(Value::as_str)),
-        _ => None,
-    };
-    raw.map(|status| {
-        let lower = status.to_ascii_lowercase();
-        lower == "pass" || lower == "passed"
-    })
-    .unwrap_or(false)
-}
-
 fn compose_failed_reason(
     dispatch_status: &str,
     dispatch_result_json: Option<&str>,
@@ -1524,19 +1382,15 @@ async fn load_sibling_phase_gate_dispatches_on_pg_tx(
 
         let expected_verdict = context_value
             .as_ref()
-            .and_then(|v| v.get("phase_gate"))
-            .and_then(|gate| gate.get("pass_verdict"))
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| "phase_gate_passed".to_string());
-        let mut actual_verdict = result_value.as_ref().and_then(extract_explicit_verdict);
-        if actual_verdict.is_none()
-            && let Some(result) = result_value.as_ref()
-        {
-            // Mirror the JS hook's #699-round-2 inference for legacy sibling
-            // rows that completed before the server fix shipped.
-            actual_verdict = infer_phase_gate_pass_verdict(context_value.as_ref(), result);
-        }
+            .and_then(|value| value.get("phase_gate"))
+            .map(pass_verdict_of)
+            .unwrap_or_else(|| DEFAULT_PASS_VERDICT.to_string());
+        // Sibling rows go through the same explicit-or-inferred resolution as
+        // the primary dispatch so an aggregate gate decision cannot disagree
+        // with the per-dispatch one (#699 round 2, #4884).
+        let actual_verdict = result_value
+            .as_ref()
+            .and_then(|result| resolve_verdict(context_value.as_ref(), result));
         if !phase_gate_verdict_matches(
             actual_verdict.as_deref(),
             &expected_verdict,
@@ -1933,10 +1787,11 @@ mod current_batch_phase_pg_tests {
 mod reconcile_phase_gate_pg_tests {
     use super::{
         PhaseGateReconciliation, PhaseGateRepairOptions, PhaseGateStateWrite,
-        infer_phase_gate_pass_verdict, parse_phase_gate_context, phase_gate_verdict_matches,
+        parse_phase_gate_context, phase_gate_verdict_matches,
         reconcile_phase_gate_for_terminal_dispatch_on_pg_tx, repair_phase_gates_for_run_on_pg,
         save_phase_gate_state_on_pg,
     };
+    use crate::db::auto_queue::phase_gate_verdict::infer_pass_verdict as infer_phase_gate_pass_verdict;
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use serde_json::json;
     use sqlx::PgPool;

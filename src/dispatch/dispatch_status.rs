@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde_json::json;
 use sqlx::{PgPool, Row};
 
+use crate::db::auto_queue::phase_gate_verdict;
 use crate::engine::PolicyEngine;
 
 use super::dispatch_query::query_dispatch_row_pg;
@@ -438,7 +439,7 @@ fn infer_effective_completion_result(
     let res = result?;
     context_text
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|ctx| ctx.get("phase_gate").and_then(|v| v.as_object()).cloned())
+        .and_then(|ctx| ctx.get("phase_gate").cloned())
         .and_then(|phase_gate_ctx| infer_phase_gate_verdict(dispatch_id, &phase_gate_ctx, res))
 }
 
@@ -1038,7 +1039,7 @@ async fn maybe_inject_phase_gate_verdict_pg(
     .flatten()
     .flatten()?;
     let ctx = serde_json::from_str::<serde_json::Value>(&context_raw).ok()?;
-    let phase_gate_ctx = ctx.get("phase_gate").and_then(|v| v.as_object())?;
+    let phase_gate_ctx = ctx.get("phase_gate")?;
     infer_phase_gate_verdict(dispatch_id, phase_gate_ctx, result)
 }
 
@@ -1336,75 +1337,28 @@ fn complete_dispatch_inner_with_backends(
     Ok(dispatch)
 }
 
-/// #699: inject `verdict = context.phase_gate.pass_verdict` into a phase-gate
-/// dispatch result when every declared `checks.*` entry passed but the caller
-/// forgot the explicit verdict field.
+/// #699 / #4884: inject `verdict = context.phase_gate.pass_verdict` into a
+/// phase-gate dispatch result when every declared `checks.*` entry passed but
+/// the caller forgot the explicit verdict field.
 ///
 /// Returns `Some(enriched)` only when an injection happened — callers should
-/// fall back to the original `result` otherwise. Never overrides an explicit
-/// verdict/decision (even `"fail"`) and never injects when any check is not
-/// `pass`.
+/// fall back to the original `result` otherwise.
+///
+/// The pass/fail decision itself is delegated to
+/// `crate::db::auto_queue::phase_gate_verdict`, the single Rust authority also
+/// used by the durable reconciler that runs for CRUD / watcher / bridge
+/// recovery completions. This path only owns the *side effect* of persisting
+/// the inferred verdict onto the result payload; it must never reach a
+/// different verdict than the reconciler would for the same evidence.
 fn infer_phase_gate_verdict(
     dispatch_id: &str,
-    phase_gate_ctx: &serde_json::Map<String, serde_json::Value>,
+    phase_gate_ctx: &serde_json::Value,
     result: &serde_json::Value,
 ) -> Option<serde_json::Value> {
-    // Explicit verdict/decision already present — never override, even for
-    // explicit "fail" cases.
-    let has_verdict = result
-        .get("verdict")
-        .and_then(|v| v.as_str())
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
-    let has_decision = result
-        .get("decision")
-        .and_then(|v| v.as_str())
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
-    if has_verdict || has_decision {
+    if phase_gate_verdict::has_explicit_verdict(result) {
         return None;
     }
-
-    let checks_obj = result.get("checks").and_then(|v| v.as_object())?;
-    if checks_obj.is_empty() {
-        return None;
-    }
-
-    // Round-2 fix: when the dispatch context declares a list of required
-    // checks, every one of those keys must be present in `result.checks` and
-    // pass. Missing keys are treated as no-verdict/failure so a partial
-    // payload cannot advance the gate.
-    let declared_checks: Vec<String> = phase_gate_ctx
-        .get("checks")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-    for required in &declared_checks {
-        match checks_obj.get(required) {
-            Some(entry) if check_entry_is_pass(entry) => {}
-            _ => return None,
-        }
-    }
-
-    // Also require every *present* check entry to pass — never infer a pass
-    // on the strength of partial "pass"es when some keys report fail/other.
-    for (_name, entry) in checks_obj.iter() {
-        if !check_entry_is_pass(entry) {
-            return None;
-        }
-    }
-
-    // Resolve `pass_verdict` from the dispatch's own phase_gate context, with
-    // the system default as a last resort.
-    let pass_verdict = phase_gate_ctx
-        .get("pass_verdict")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "phase_gate_passed".to_string());
+    let pass_verdict = phase_gate_verdict::infer_pass_verdict_in_gate(phase_gate_ctx, result)?;
 
     let mut enriched = result.clone();
     if !enriched.is_object() {
@@ -1422,28 +1376,12 @@ fn infer_phase_gate_verdict(
     }
 
     tracing::info!(
-        "[dispatch] #699 inferring phase-gate verdict '{}' for dispatch {} (all {} declared checks passed, {} entries total)",
+        "[dispatch] #699 inferring phase-gate verdict '{}' for dispatch {} (all declared checks passed)",
         pass_verdict,
         dispatch_id,
-        declared_checks.len(),
-        checks_obj.len(),
     );
 
     Some(enriched)
-}
-
-fn check_entry_is_pass(entry: &serde_json::Value) -> bool {
-    // Accept either `{"status": "pass"}` (canonical) or a bare string "pass".
-    if let Some(status) = entry.get("status").and_then(|v| v.as_str()) {
-        return status.eq_ignore_ascii_case("pass") || status.eq_ignore_ascii_case("passed");
-    }
-    if let Some(outcome) = entry.get("result").and_then(|v| v.as_str()) {
-        return outcome.eq_ignore_ascii_case("pass") || outcome.eq_ignore_ascii_case("passed");
-    }
-    if let Some(s) = entry.as_str() {
-        return s.eq_ignore_ascii_case("pass") || s.eq_ignore_ascii_case("passed");
-    }
-    false
 }
 
 #[cfg(test)]
