@@ -554,41 +554,53 @@ pub fn pane_current_path(session_name: &str) -> Option<String> {
 ///
 /// `scroll_back` is the number of lines to capture (negative = from bottom).
 pub fn capture_pane(session_name: &str, scroll_back: i32) -> Option<String> {
-    let scroll = scroll_back.to_string();
-    tmux_command()
-        .args([
-            "capture-pane",
-            "-p",
-            "-t",
-            // `capture-pane` expects a session target here, not an exact-match
-            // pane target, so pass the plain session name.
-            session_name,
-            "-S",
-            &scroll,
-        ])
+    capture_pane_command(session_name, scroll_back, false)
         .output()
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
 }
 
+/// Capture pane content while bounding the tmux subprocess wait.
+pub fn capture_pane_timeout(
+    session_name: &str,
+    scroll_back: i32,
+    timeout: Duration,
+) -> Option<String> {
+    wait_for_tmux_output(
+        capture_pane_command(session_name, scroll_back, false),
+        timeout,
+        "tmux capture-pane",
+    )
+    .ok()
+    .filter(|o| o.status.success())
+    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+}
+
+fn capture_pane_command(session_name: &str, scroll_back: i32, preserve_escapes: bool) -> Command {
+    let scroll = scroll_back.to_string();
+    let mut command = tmux_command();
+    command.arg("capture-pane");
+    if preserve_escapes {
+        command.arg("-e");
+    }
+    command.args([
+        "-p",
+        "-t",
+        // `capture-pane` expects a session target here, not an exact-match
+        // pane target, so pass the plain session name.
+        session_name,
+        "-S",
+        &scroll,
+    ]);
+    command
+}
+
 /// Capture pane content from a tmux session while preserving ANSI attributes.
 ///
 /// `scroll_back` is the number of lines to capture (negative = from bottom).
 pub fn capture_pane_with_escapes(session_name: &str, scroll_back: i32) -> Option<String> {
-    let scroll = scroll_back.to_string();
-    tmux_command()
-        .args([
-            "capture-pane",
-            "-e",
-            "-p",
-            "-t",
-            // `capture-pane` expects a session target here, not an exact-match
-            // pane target, so pass the plain session name.
-            session_name,
-            "-S",
-            &scroll,
-        ])
+    capture_pane_command(session_name, scroll_back, true)
         .output()
         .ok()
         .filter(|o| o.status.success())
