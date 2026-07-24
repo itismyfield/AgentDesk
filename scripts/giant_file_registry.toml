@@ -772,15 +772,10 @@ owner = "discord-finalizer"
 deadline = "2026-08-31"
 decompose_issue = "#4712"
 
-[[entry]]
-# Crossed the 1000-prod-LoC threshold in #4049 S4-a1: the notification-only
-# turn lifecycle reaction reconciler now owns per-target serialization plus
-# durable adder-identity sidecar state. Split persistence/test-heavy support
-# into narrower modules in slice a2 once the reconciler contract is stable.
-file = "src/services/discord/turn_view_reconciler.rs"
-owner = "discord-relay"
-deadline = "2026-08-31"
-decompose_issue = "#4712"
+# RETIRED 2026-07-24 (#4712 D5): turn_view_reconciler.rs dropped below the
+# 1000-production-LoC giant threshold after its API, reaction application,
+# state resolution, and durable target store moved to cohesive child modules.
+# The registry entry is removed to avoid a ghost registration.
 
 # RETIRED 2026-07-24 (#4712 D6): idle_recap.rs dropped below the production
 # giant threshold after the card compose/post/delete/persist cluster moved

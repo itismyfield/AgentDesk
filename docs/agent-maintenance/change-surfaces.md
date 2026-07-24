@@ -1522,17 +1522,13 @@
     `turn_finalizer/finalize.rs` is now 246 prod LoC, `turn_finalizer/finalize_context.rs` 113 prod LoC,
     `turn_finalizer/reconcile.rs` 221 prod LoC, and
     `turn_finalizer/cleanup.rs` 565 prod LoC. No PG lease/schema change.
-  - `src/services/discord/turn_view_reconciler.rs` (frozen giant surface; +55 from #4606 migrating queued-state persistence to schema v3, converging legacy v2 marker+hourglass records, and making queued user-message views marker-only while `Queued*` → `Pending` adds a fresh `⏳` through the target-set diff; +45 from #4248/#4329 review hardening: queued-state schema v2 invalidates v1 queue records while keeping v1 pending-anchor recovery compatible, and multi-reaction transitions compensate already-applied operations on partial failure; #4248 moves
-    the derived reaction mapping into `turn_view_reconciler/reaction_set.rs` and
-    originally made queued user-message views include an immediate `⏳` alongside
-    their queue-kind marker; #4606 supersedes that queue presentation while
-    terminal completion still converges to `✅` through the same persisted adder identity; +104 from
-    #4049 S4-a2 round-9 adding an attempt-scoped clear API/current-generation
-    shim so race-loss stale attempt-1 clears cannot wipe a same-generation
-    attempt-2 Pending marker; #4049 S4-a2 extends the S4-a1 reaction reconciler
-    with persisted queue-marker state for notification-only 📬/⏳/✅/⚠/🛑 updates,
-    queue cancel cleanup, and requeue coalescing; bugfix-only until a follow-up
-    can split persistence/tests from the runtime reconciler).
+  - `src/services/discord/turn_view_reconciler.rs` was decomposed in #4712 D5:
+    the root retains reconciler state and transition coordination, while
+    `turn_view_reconciler/api.rs`, `apply.rs`, `resolution.rs`, and `store.rs`
+    own the existing facade, reaction application, state resolution, and
+    durable target store respectively. The current reaction/queue UI reconciler
+    remains distinct from #4414's `DerivedTurnView`; all production modules are
+    below the giant-file threshold.
   - `src/services/discord/formatting.rs` (frozen giant surface; -536 from #4508 moving the replace/edit continuation implementation and typed deferred edit outcome to `formatting/replace_long_message.rs` while retaining the parent re-export API and inline regressions; -296 from #4055 moving the durable continuation rollback journal into `formatting/rollback_journal.rs`; +41 from #4214 converting every Discord-limit length judgment in the send/chunk paths from UTF-8 byte length to unicode code-point count (Korean answers no longer split ~3x early at ~666 chars) with a safe char-budget→byte-index boundary mapper; code-fence preservation and the #1043 empty-chunk guard unchanged; +14 reconciled to the current module-inventory production surface per #4183 CI-red recovery (post-surgery inventory drift); -2 from #4049 S4-b doc-comment sync on the reconciler-routed reaction path; +25 from #3998 D1 exposing
     raw long-send created message ids and fallback replacement anchors for
     recovery anchor persistence while the existing `send_long_message_raw_with_reference`
