@@ -1,7 +1,7 @@
 use super::*;
 
 /// Check if majority of participants in a given round used CONSENSUS: keyword
-fn check_consensus(transcript: &[MeetingUtterance], round: u32, participant_count: usize) -> bool {
+pub(super) fn check_consensus(transcript: &[MeetingUtterance], round: u32, participant_count: usize) -> bool {
     if participant_count == 0 {
         return false;
     }
@@ -14,7 +14,7 @@ fn check_consensus(transcript: &[MeetingUtterance], round: u32, participant_coun
 }
 
 /// Conclude meeting: summary agent produces minutes
-async fn conclude_meeting(
+pub(super) async fn conclude_meeting(
     http: &serenity::Http,
     channel_id: ChannelId,
     msg_channel: ChannelId,
@@ -289,7 +289,7 @@ async fn conclude_meeting(
 }
 
 /// Save meeting record as Markdown to $AGENTDESK_ROOT_DIR/meetings/
-async fn save_meeting_record(
+pub(super) async fn save_meeting_record(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
     expected_id: Option<&str>,
@@ -308,7 +308,7 @@ async fn save_meeting_record(
         (build_meeting_markdown(m), m.id.clone(), payload)
     };
 
-    let meetings_dir = super::runtime_store::agentdesk_root()
+    let meetings_dir = runtime_store::agentdesk_root()
         .ok_or("Home dir not found")?
         .join("meetings");
     fs::create_dir_all(&meetings_dir)?;
@@ -339,7 +339,7 @@ fn memory_postprocessing_policy() -> serde_json::Value {
 }
 
 /// Build ADK API payload from meeting
-fn build_meeting_status_payload(m: &Meeting) -> Option<serde_json::Value> {
+pub(super) fn build_meeting_status_payload(m: &Meeting) -> Option<serde_json::Value> {
     let status_str = match &m.status {
         MeetingStatus::Completed => "completed",
         MeetingStatus::Cancelled => "cancelled",
@@ -404,11 +404,11 @@ fn build_meeting_status_payload(m: &Meeting) -> Option<serde_json::Value> {
 
 /// Persist meeting data through the internal API without going through
 /// auth-protected HTTP routes.
-async fn persist_meeting_status(
+pub(super) async fn persist_meeting_status(
     payload: serde_json::Value,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let body: super::meeting_artifact_store::UpsertMeetingBody = serde_json::from_value(payload)?;
-    super::internal_api::upsert_meeting(body)
+    let body: meeting_artifact_store::UpsertMeetingBody = serde_json::from_value(payload)?;
+    internal_api::upsert_meeting(body)
         .await
         .map(|_| ())
         .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?;
@@ -497,7 +497,7 @@ fn build_meeting_markdown(m: &Meeting) -> String {
 }
 
 /// Format transcript for inclusion in prompts
-fn format_transcript(transcript: &[MeetingUtterance]) -> String {
+pub(super) fn format_transcript(transcript: &[MeetingUtterance]) -> String {
     if transcript.is_empty() {
         return String::new();
     }
@@ -509,7 +509,7 @@ fn format_transcript(transcript: &[MeetingUtterance]) -> String {
 }
 
 /// Remove meeting from active_meetings
-async fn cleanup_meeting(shared: &Arc<SharedData>, channel_id: ChannelId) {
+pub(super) async fn cleanup_meeting(shared: &Arc<SharedData>, channel_id: ChannelId) {
     let mut core = shared.core.lock().await;
     core.active_meetings.remove(&channel_id);
 }

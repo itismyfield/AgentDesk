@@ -1,6 +1,6 @@
 use super::*;
 
-fn compact_selection_reason(reason: &str) -> Option<String> {
+pub(super) fn compact_selection_reason(reason: &str) -> Option<String> {
     let compact = reason.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut trimmed = compact.trim();
 
@@ -29,11 +29,11 @@ fn compact_selection_reason(reason: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-fn normalize_selection_reason(reason: &str) -> Option<String> {
+pub(super) fn normalize_selection_reason(reason: &str) -> Option<String> {
     compact_selection_reason(reason)
 }
 
-fn build_meeting_start_status_message(
+pub(super) fn build_meeting_start_status_message(
     agenda: &str,
     meeting_hash_display: &str,
     thread_hash_display: Option<&str>,
@@ -60,7 +60,7 @@ fn build_meeting_start_status_message(
     )
 }
 
-fn clamp_max_participants(max_participants: usize) -> usize {
+pub(super) fn clamp_max_participants(max_participants: usize) -> usize {
     max_participants.clamp(MIN_MEETING_PARTICIPANTS, DEFAULT_MAX_PARTICIPANTS)
 }
 
@@ -72,7 +72,7 @@ fn csv_or_missing(values: &[String]) -> String {
     }
 }
 
-fn agent_metadata_card(agent: &MeetingAgentConfig) -> String {
+pub(super) fn agent_metadata_card(agent: &MeetingAgentConfig) -> String {
     let mut missing = Vec::new();
     if agent.keywords.is_empty() {
         missing.push("keywords");
@@ -184,7 +184,7 @@ fn agent_metadata_card(agent: &MeetingAgentConfig) -> String {
     )
 }
 
-fn summary_agent_context(config: &MeetingConfig, resolved_summary_agent: &str) -> String {
+pub(super) fn summary_agent_context(config: &MeetingConfig, resolved_summary_agent: &str) -> String {
     let Some(agent) = config
         .available_agents
         .iter()

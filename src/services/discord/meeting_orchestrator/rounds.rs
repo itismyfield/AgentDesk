@@ -3,7 +3,7 @@ use super::*;
 // ─── Internal Functions ──────────────────────────────────────────────────────
 
 /// Select participants using primary provider + reviewer micro cross-check.
-async fn select_participants(
+pub(super) async fn select_participants(
     config: &MeetingConfig,
     agenda: &str,
     primary_provider: ProviderKind,
@@ -200,7 +200,7 @@ async fn select_participants(
 }
 
 /// Run one round: each participant speaks in order
-async fn run_meeting_round(
+pub(super) async fn run_meeting_round(
     http: &serenity::Http,
     channel_id: ChannelId,
     msg_channel: ChannelId,

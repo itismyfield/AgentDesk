@@ -14,8 +14,11 @@ use crate::services::provider_exec;
 
 use super::agentdesk_config;
 use super::formatting::send_long_message_raw;
-use super::meeting_artifact_store::{MeetingArtifactKind, MeetingArtifactRepo, StoreOutcome};
+use super::meeting_artifact_store::{
+    self, MeetingArtifactKind, MeetingArtifactRepo, StoreOutcome,
+};
 use super::meeting_state_machine::{self as msm, MeetingEvent, MeetingState};
+use super::{internal_api, runtime_store};
 use super::org_schema;
 use super::outbound::delivery::{deliver_outbound, first_raw_message_id};
 use super::outbound::message::{OutboundOperation, OutboundTarget};
@@ -37,11 +40,26 @@ mod selection;
 mod selection_runtime;
 
 pub(super) use lifecycle::{
-    cancel_meeting, handle_meeting_command, load_meeting_config, meeting_status,
-    spawn_direct_start, start_meeting,
+    cancel_meeting, load_meeting_config, meeting_status, spawn_direct_start, start_meeting,
 };
-pub(in crate::services::discord) use selection_runtime::{
-    list_available_agent_options, send_meeting_message,
+pub(in crate::services::discord) use selection_runtime::send_meeting_message;
+pub(crate) use selection_runtime::list_available_agent_options;
+
+use records::{
+    build_meeting_status_payload, check_consensus, cleanup_meeting, conclude_meeting,
+    format_transcript, persist_meeting_status, save_meeting_record,
+};
+use rounds::{run_meeting_round, select_participants};
+use selection::{
+    agent_metadata_card, build_meeting_start_status_message, clamp_max_participants,
+    compact_selection_reason, normalize_selection_reason, summary_agent_context,
+};
+use selection_runtime::{
+    archive_meeting_thread, build_fallback_meeting_summary, build_selection_reason_line,
+    create_meeting_thread, edit_meeting_message, execute_provider_stage,
+    fixed_participant_prompt_lines, meeting_selection_stage_timeout_secs,
+    merge_selected_participants, normalize_role_ids, parse_participant_selection_response,
+    send_meeting_message_with_event, truncate_for_meeting, validate_fixed_participants,
 };
 
 #[derive(Clone, Debug)]

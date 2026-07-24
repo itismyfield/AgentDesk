@@ -26,7 +26,7 @@ pub(crate) fn list_available_agent_options() -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 
-async fn execute_provider_stage(
+pub(super) async fn execute_provider_stage(
     provider: ProviderKind,
     stage_label: &str,
     prompt: String,
@@ -53,7 +53,7 @@ fn resolve_meeting_stage_timeout_secs(raw: Option<&str>, default_secs: u64) -> u
         .unwrap_or(default_secs)
 }
 
-fn meeting_selection_stage_timeout_secs() -> u64 {
+pub(super) fn meeting_selection_stage_timeout_secs() -> u64 {
     resolve_meeting_stage_timeout_secs(
         std::env::var("AGENTDESK_MEETING_SELECTION_TIMEOUT_SECS")
             .ok()
@@ -64,7 +64,7 @@ fn meeting_selection_stage_timeout_secs() -> u64 {
 
 /// Create a Discord thread (without a parent message) for a meeting.
 /// Returns the thread's ChannelId on success, or None on failure.
-async fn create_meeting_thread(
+pub(super) async fn create_meeting_thread(
     http: &serenity::Http,
     parent_channel_id: ChannelId,
     thread_name: &str,
@@ -87,7 +87,7 @@ async fn create_meeting_thread(
 }
 
 /// Archive a meeting thread (set archived=true via Discord REST API).
-async fn archive_meeting_thread(http: &serenity::Http, thread_channel_id: ChannelId) {
+pub(super) async fn archive_meeting_thread(http: &serenity::Http, thread_channel_id: ChannelId) {
     match thread_channel_id
         .edit_thread(http, EditThread::new().archived(true))
         .await
@@ -183,7 +183,7 @@ pub(in crate::services::discord) async fn send_meeting_message(
     deliver_meeting_message(http, shared, message).await
 }
 
-async fn send_meeting_message_with_event(
+pub(super) async fn send_meeting_message_with_event(
     http: &serenity::Http,
     channel_id: ChannelId,
     shared: &Arc<SharedData>,
@@ -249,7 +249,7 @@ fn normalize_meeting_event_key(value: &str) -> String {
     }
 }
 
-async fn edit_meeting_message(
+pub(super) async fn edit_meeting_message(
     http: &serenity::Http,
     channel_id: ChannelId,
     message_id: serenity::MessageId,
@@ -348,7 +348,7 @@ fn parse_string_array_field(value: &serde_json::Value, key: &str) -> Option<Vec<
     })
 }
 
-fn parse_participant_selection_response(
+pub(super) fn parse_participant_selection_response(
     text: &str,
 ) -> Result<ParticipantSelectionDecision, String> {
     if let Ok(value) = parse_json_object_fragment(text) {
@@ -567,7 +567,7 @@ fn build_participant_reason_clause(
     (best_score, clause, focus)
 }
 
-fn build_selection_reason_line(
+pub(super) fn build_selection_reason_line(
     config: &MeetingConfig,
     agenda: &str,
     participants: &[MeetingParticipant],
@@ -660,7 +660,7 @@ fn build_selection_reason_line(
     }
 }
 
-fn normalize_role_ids(role_ids: &[String]) -> Vec<String> {
+pub(super) fn normalize_role_ids(role_ids: &[String]) -> Vec<String> {
     let mut seen = HashSet::new();
     role_ids
         .iter()
@@ -673,7 +673,7 @@ fn normalize_role_ids(role_ids: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn fixed_participant_prompt_lines(fixed_role_ids: &[String]) -> String {
+pub(super) fn fixed_participant_prompt_lines(fixed_role_ids: &[String]) -> String {
     if fixed_role_ids.is_empty() {
         "고정 전문 에이전트: 없음".to_string()
     } else {
@@ -684,7 +684,7 @@ fn fixed_participant_prompt_lines(fixed_role_ids: &[String]) -> String {
     }
 }
 
-fn merge_selected_participants(
+pub(super) fn merge_selected_participants(
     config: &MeetingConfig,
     selected_role_ids: &[String],
     fixed_role_ids: &[String],
@@ -739,7 +739,7 @@ fn merge_selected_participants(
     Ok(participants)
 }
 
-fn validate_fixed_participants(
+pub(super) fn validate_fixed_participants(
     config: &MeetingConfig,
     fixed_role_ids: &[String],
     max_participants: usize,
@@ -769,7 +769,7 @@ fn validate_fixed_participants(
     Ok(())
 }
 
-fn truncate_for_meeting(text: &str, max_chars: usize) -> String {
+pub(super) fn truncate_for_meeting(text: &str, max_chars: usize) -> String {
     let trimmed = text.trim();
     if trimmed.chars().count() <= max_chars {
         return trimmed.to_string();
@@ -798,7 +798,7 @@ fn compact_meeting_note(content: &str) -> Option<String> {
     })
 }
 
-fn build_fallback_meeting_summary(
+pub(super) fn build_fallback_meeting_summary(
     agenda: &str,
     participants_list: &str,
     transcript: &[MeetingUtterance],

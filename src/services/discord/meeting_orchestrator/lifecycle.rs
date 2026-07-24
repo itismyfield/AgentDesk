@@ -3,7 +3,7 @@ use super::*;
 // ─── Config Parsing ──────────────────────────────────────────────────────────
 
 /// Load meeting config from agentdesk.yaml, then org.yaml, then role_map.json.
-pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
+pub(in crate::services::discord) fn load_meeting_config() -> Option<MeetingConfig> {
     if let Some(cfg) = agentdesk_config::load_meeting_config() {
         return Some(cfg);
     }
@@ -19,7 +19,7 @@ pub(super) fn load_meeting_config() -> Option<MeetingConfig> {
 
 /// Start a new meeting: select participants via Claude, then begin rounds.
 /// Returns the meeting ID on success.
-pub(super) async fn start_meeting(
+pub(in crate::services::discord) async fn start_meeting(
     http: &serenity::Http,
     channel_id: ChannelId,
     agenda: &str,
@@ -331,7 +331,7 @@ async fn start_meeting_with_reviewer(
     Ok(Some(meeting_id))
 }
 
-pub(super) async fn spawn_direct_start(
+pub(in crate::services::discord) async fn spawn_direct_start(
     http: Arc<serenity::Http>,
     channel_id: ChannelId,
     agenda: String,
@@ -391,7 +391,7 @@ pub(super) async fn spawn_direct_start(
 }
 
 /// Cancel a running meeting
-pub(super) async fn cancel_meeting(
+pub(in crate::services::discord) async fn cancel_meeting(
     http: &serenity::Http,
     channel_id: ChannelId,
     shared: &Arc<SharedData>,
@@ -440,7 +440,7 @@ fn meeting_cancel_event_key(channel_id: ChannelId, meeting_id: &str) -> String {
 }
 
 /// Get meeting status info
-pub(super) async fn meeting_status(
+pub(in crate::services::discord) async fn meeting_status(
     http: &serenity::Http,
     channel_id: ChannelId,
     shared: &Arc<SharedData>,
