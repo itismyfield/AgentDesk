@@ -514,7 +514,7 @@ pub(super) async fn apply_bridge_long_chunks_legacy(
 ) {
     if matches!(lease_acquire, BridgeLeaseAcquire::Skip) {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
+        tracing::info!(
             channel_id = channel_id.get(),
             "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate long terminal send (channel {})",
             channel_id

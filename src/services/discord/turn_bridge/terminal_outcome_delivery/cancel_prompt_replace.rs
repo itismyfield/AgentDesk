@@ -245,7 +245,7 @@ pub(super) async fn handle_cancel_prompt_replace(
         );
         if matches!(stop_lease_acquire, BridgeLeaseAcquire::Skip) {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
+            tracing::info!(
                 channel_id = channel_id.get(),
                 "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate cancel/stop terminal replace (channel {})",
                 channel_id
@@ -351,7 +351,7 @@ pub(super) async fn handle_cancel_prompt_replace(
         );
         if matches!(plt_lease_acquire, BridgeLeaseAcquire::Skip) {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
+            tracing::info!(
                 channel_id = channel_id.get(),
                 "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate prompt-too-long terminal replace (channel {})",
                 channel_id

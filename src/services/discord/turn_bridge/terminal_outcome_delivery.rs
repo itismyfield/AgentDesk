@@ -665,7 +665,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             };
                         if matches!(lease_acquire, BridgeLeaseAcquire::Skip) {
                             let ts = chrono::Local::now().format("%H:%M:%S");
-                            tracing::warn!(
+                            tracing::info!(
                                 channel_id = channel_id.get(),
                                 "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate terminal replace (channel {})",
                                 channel_id

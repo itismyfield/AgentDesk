@@ -3524,7 +3524,7 @@ async fn mailbox_take_next_soft_intervention(
                 .await
         {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
+            tracing::info!(
                 "  [{ts}] ⏭ DISPATCH-GUARD: dropped queued terminal dispatch {} in channel {} (status={})",
                 stale.dispatch_id,
                 channel_id,

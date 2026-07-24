@@ -209,7 +209,7 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                     }
                     if restart_request_matches(&root, "restart_cancelled", &nonce) {
                         rollback_deferred_restart(&shared_for_deferred);
-                        tracing::warn!(
+                        tracing::info!(
                             provider = provider_for_deferred.as_str(),
                             "restart request cancelled; intake admission restored"
                         );

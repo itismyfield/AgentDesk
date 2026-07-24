@@ -748,7 +748,7 @@ pub(in crate::services::discord) async fn handle_event(
                         .await
             {
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
+                tracing::info!(
                     "  [{ts}] ⏭ DISPATCH-GUARD: skipped terminal dispatch message {} in channel {} (dispatch={}, status={})",
                     new_message.id,
                     channel_id,

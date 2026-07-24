@@ -201,7 +201,7 @@ async fn reregister_active_turn_from_inflight_inner(
         return false;
     };
     if recovery_terminal_delivery_already_committed(state) {
-        tracing::warn!(
+        tracing::info!(
             provider = %provider.as_str(),
             channel_id = state.channel_id,
             finalizer_turn_id,

@@ -38,7 +38,7 @@ pub(super) async fn abort_terminal_dispatch_at_turn_start(
         .await
     {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!(
+        tracing::info!(
             "  [{ts}] ⏭ DISPATCH-GUARD: aborted terminal dispatch at turn start in channel {} (dispatch={}, status={})",
             channel_id,
             stale.dispatch_id,

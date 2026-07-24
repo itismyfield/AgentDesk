@@ -305,7 +305,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             ));
                         } else {
                             let ts = chrono::Local::now().format("%H:%M:%S");
-                            tracing::warn!(
+                            tracing::info!(
                                 "  [{ts}] ⚠ standby relay skipped: no Http source for channel {}",
                                 channel_id
                             );
@@ -878,7 +878,7 @@ fn handle_watcher_runtime_handoff(
                     // delivery suppression for the current turn.
                 } else {
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
+                    tracing::info!(
                         "  [{ts}] ⚠ standby relay skipped: no Http source for channel {}",
                         channel_id
                     );

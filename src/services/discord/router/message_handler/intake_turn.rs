@@ -2030,7 +2030,7 @@ pub(super) async fn handle_text_message(
                         .load(std::sync::atomic::Ordering::Relaxed),
                 ) {
                     (_, _, true) => {
-                        tracing::warn!(
+                        tracing::info!(
                             channel_id = channel_id.get(),
                             user_msg_id = user_msg_id.get(),
                             tmux_session_name = %initial_diagnostic.tmux_session_name,
@@ -2163,7 +2163,7 @@ pub(super) async fn handle_text_message(
                 );
             }
         }
-        tracing::warn!(
+        tracing::info!(
             channel_id = channel_id.get(),
             user_msg_id = user_msg_id.get(),
             diagnostics = %diagnostic_json,
@@ -2535,7 +2535,7 @@ pub(super) async fn handle_text_message(
                 } else {
                     "unknown panic".to_string()
                 };
-                tracing::warn!("  [streaming] PANIC: {}", msg);
+                tracing::error!("  [streaming] PANIC: {}", msg);
                 let _ = tx.send(StreamMessage::Error {
                     message: format!("Internal error (panic): {}", msg),
                     stdout: String::new(),

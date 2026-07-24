@@ -376,7 +376,7 @@ pub(super) async fn run_bot_acquire_gateway_lease(
                     )
                     .await;
                     let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
+                    tracing::info!(
                         "  [{ts}] ⏭ GATEWAY-LEASE: {} launch skipped — singleton lease held elsewhere",
                         provider.display_name()
                     );
@@ -538,7 +538,7 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                         .await
                         {
                             let ts = chrono::Local::now().format("%H:%M:%S");
-                            tracing::warn!(
+                            tracing::info!(
                                 "  [{ts}] 🤝 GATEWAY-LEASE: {} yielding gateway to preferred node {} — self-fencing",
                                 provider_for_lease.display_name(),
                                 pref.preferred_instance_id

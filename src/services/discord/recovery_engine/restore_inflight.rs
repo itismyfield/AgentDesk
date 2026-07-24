@@ -1710,7 +1710,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 continue;
             }
             let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
+            tracing::info!(
                 provider = %provider.as_str(),
                 channel_id = state.channel_id,
                 user_msg_id = state.user_msg_id,
@@ -2199,7 +2199,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     if pane_alive {
                         // Session is alive but idle — hand off to watcher instead of retrying
-                        tracing::warn!(
+                        tracing::info!(
                             "  [{ts}] ↻ Recovery: session idle but pane alive — handing off to watcher (channel {})",
                             retry_channel_id
                         );

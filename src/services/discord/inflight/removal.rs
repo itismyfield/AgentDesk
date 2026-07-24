@@ -268,7 +268,7 @@ pub(super) fn stale_removal_reason(
                     && let Some(name) = state.tmux_session_name.as_deref()
                     && tmux_pane_alive_for_stale_check(name)
                 {
-                    tracing::warn!(
+                    tracing::info!(
                         "  ⚠ inflight stale-age ({age_secs}s > {max_age}s) overridden — tmux pane '{name}' still alive (channel {})",
                         state.channel_id
                     );
@@ -286,7 +286,7 @@ pub(super) fn stale_removal_reason(
                 if let Some(name) = state.tmux_session_name.as_deref()
                     && tmux_pane_alive_for_stale_check(name)
                 {
-                    tracing::warn!(
+                    tracing::info!(
                         "  ⚠ inflight stale-age ({age_secs}s > {INFLIGHT_MAX_AGE_SECS}s) overridden — tmux pane '{name}' still alive (channel {})",
                         state.channel_id
                     );

@@ -203,7 +203,7 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
                 line_start_offset,
                 terminal_kind_for_json_evidence(&val),
             ) {
-                tracing::warn!(
+                tracing::info!(
                     terminal_kind = skip.terminal_kind.as_str(),
                     evidence_offset = skip.evidence_offset,
                     turn_start_offset = skip.turn_start_offset,
@@ -583,7 +583,7 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
                 line_start_offset,
                 Some(WatcherTerminalKind::AuthError),
             ) {
-                tracing::warn!(
+                tracing::info!(
                     terminal_kind = skip.terminal_kind.as_str(),
                     evidence_offset = skip.evidence_offset,
                     turn_start_offset = skip.turn_start_offset,
@@ -625,7 +625,7 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
                 line_start_offset,
                 Some(WatcherTerminalKind::ProviderOverload),
             ) {
-                tracing::warn!(
+                tracing::info!(
                     terminal_kind = skip.terminal_kind.as_str(),
                     evidence_offset = skip.evidence_offset,
                     turn_start_offset = skip.turn_start_offset,
