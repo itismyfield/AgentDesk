@@ -135,6 +135,8 @@ pub(super) async fn handle_terminal_abort_exits(
     let epoch_changed_now = pause_epoch.load(Ordering::Relaxed) != locals.epoch_snapshot;
     let deferred_monitor_ready =
         *state.monitor_auto_turn_claimed && locals.monitor_auto_turn_deferred && !paused_now;
+    let main_orchestration_session =
+        watcher_session_is_main_orchestration(tmux_session_name, channel_id);
     if (locals.was_paused || paused_now || epoch_changed_now) && !deferred_monitor_ready {
         if let Some(msg_id) = locals.placeholder_msg_id {
             if watcher_should_delete_suppressed_placeholder(
@@ -185,44 +187,58 @@ pub(super) async fn handle_terminal_abort_exits(
         return AbortExitOutcome::ContinueWatcherLoop;
     }
 
-    // Handle prompt-too-long: kill session so next message creates a fresh one
+    // Handle prompt-too-long: kill disposable thread sessions so the next message
+    // creates a fresh one; preserve the main orchestration session and detach.
     if locals.is_prompt_too_long {
         clear_provider_overload_retry_state(channel_id);
         let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            "  [{ts}] 👁 Prompt too long detected in watcher for {tmux_session_name}, killing session"
-        );
         *state.prompt_too_long_killed = true;
-        write_watcher_forced_kill_log(
-            shared,
-            channel_id,
-            tmux_session_name,
-            locals.current_offset,
-            "prompt_too_long",
-        );
+        if main_orchestration_session {
+            tracing::error!(
+                tmux_session = %tmux_session_name,
+                channel_id = channel_id.get(),
+                current_offset = locals.current_offset,
+                decision_reason = "prompt_too_long",
+                "watcher blocked automatic kill of main orchestration session; detaching watcher"
+            );
+        } else {
+            tracing::info!(
+                "  [{ts}] 👁 Prompt too long detected in watcher for {tmux_session_name}, killing session"
+            );
+            write_watcher_forced_kill_log(
+                shared,
+                channel_id,
+                tmux_session_name,
+                locals.current_offset,
+                "prompt_too_long",
+            );
+            let sess = (*tmux_session_name).clone();
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                tokio::task::spawn_blocking(move || {
+                    crate::services::termination_audit::record_termination_for_tmux(
+                        &sess,
+                        None,
+                        "tmux_watcher",
+                        "prompt_too_long",
+                        Some("watcher cleanup: prompt too long"),
+                        None,
+                    );
+                    record_tmux_exit_reason(&sess, "watcher cleanup: prompt too long");
+                    crate::services::platform::tmux::kill_session(
+                        &sess,
+                        "watcher cleanup: prompt too long",
+                    );
+                }),
+            )
+            .await;
+        }
 
-        let sess = (*tmux_session_name).clone();
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            tokio::task::spawn_blocking(move || {
-                crate::services::termination_audit::record_termination_for_tmux(
-                    &sess,
-                    None,
-                    "tmux_watcher",
-                    "prompt_too_long",
-                    Some("watcher cleanup: prompt too long"),
-                    None,
-                );
-                record_tmux_exit_reason(&sess, "watcher cleanup: prompt too long");
-                crate::services::platform::tmux::kill_session(
-                    &sess,
-                    "watcher cleanup: prompt too long",
-                );
-            }),
-        )
-        .await;
-
-        let notice = "⚠️ 컨텍스트 한도 초과로 세션을 초기화했습니다. 다음 메시지부터 새 세션으로 처리됩니다.";
+        let notice = if main_orchestration_session {
+            "⚠️ 컨텍스트 한도 초과를 감지했지만 메인 오케스트레이션 세션은 보존했습니다. watcher를 분리합니다."
+        } else {
+            "⚠️ 컨텍스트 한도 초과로 세션을 초기화했습니다. 다음 메시지부터 새 세션으로 처리됩니다."
+        };
         match locals.placeholder_msg_id {
             Some(msg_id) => {
                 rate_limit_wait(shared, channel_id).await;
@@ -237,7 +253,8 @@ pub(super) async fn handle_terminal_abort_exits(
                         .await;
             }
         }
-        // Don't break — let the watcher exit naturally when session-alive check fails
+        // Disposable sessions exit after the kill; main orchestration sessions
+        // remain alive and must detach this watcher immediately.
         finish_monitor_auto_turn_if_claimed(
             shared,
             watcher_provider,
@@ -248,10 +265,15 @@ pub(super) async fn handle_terminal_abort_exits(
             &mut *state.monitor_auto_turn_ledger_generation,
         )
         .await;
-        return AbortExitOutcome::ContinueWatcherLoop;
+        return if main_orchestration_session {
+            AbortExitOutcome::BreakWatcherLoop
+        } else {
+            AbortExitOutcome::ContinueWatcherLoop
+        };
     }
 
-    // Handle auth error: kill session and notify user to re-authenticate
+    // Handle auth error: kill disposable sessions and notify the user; preserve
+    // main orchestration sessions and detach.
     if locals.is_auth_error {
         clear_provider_overload_retry_state(channel_id);
         let inflight_state = crate::services::discord::inflight::load_inflight_state(
@@ -283,39 +305,55 @@ pub(super) async fn handle_terminal_abort_exits(
             fallback_session_id,
         )
         .await;
-        write_watcher_forced_kill_log(
-            shared,
-            channel_id,
-            tmux_session_name,
-            locals.current_offset,
-            "authentication_failed",
-        );
+        if main_orchestration_session {
+            tracing::error!(
+                tmux_session = %tmux_session_name,
+                channel_id = channel_id.get(),
+                current_offset = locals.current_offset,
+                decision_reason = "authentication_failed",
+                "watcher blocked automatic kill of main orchestration session; detaching watcher"
+            );
+        } else {
+            write_watcher_forced_kill_log(
+                shared,
+                channel_id,
+                tmux_session_name,
+                locals.current_offset,
+                "authentication_failed",
+            );
+            let sess = (*tmux_session_name).clone();
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                tokio::task::spawn_blocking(move || {
+                    crate::services::termination_audit::record_termination_for_tmux(
+                        &sess,
+                        None,
+                        "tmux_watcher",
+                        "auth_error",
+                        Some("watcher cleanup: authentication failed"),
+                        None,
+                    );
+                    record_tmux_exit_reason(&sess, "watcher cleanup: authentication failed");
+                    crate::services::platform::tmux::kill_session(
+                        &sess,
+                        "watcher cleanup: authentication failed",
+                    );
+                }),
+            )
+            .await;
+        }
 
-        let sess = (*tmux_session_name).clone();
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            tokio::task::spawn_blocking(move || {
-                crate::services::termination_audit::record_termination_for_tmux(
-                    &sess,
-                    None,
-                    "tmux_watcher",
-                    "auth_error",
-                    Some("watcher cleanup: authentication failed"),
-                    None,
-                );
-                record_tmux_exit_reason(&sess, "watcher cleanup: authentication failed");
-                crate::services::platform::tmux::kill_session(
-                    &sess,
-                    "watcher cleanup: authentication failed",
-                );
-            }),
-        )
-        .await;
-
-        let notice = format!(
-            "⚠️ 인증이 만료되어 현재 dispatch를 실패 처리했습니다. 세션을 종료합니다.\n관리자가 CLI에서 재인증(`/login`)을 완료한 후 다시 디스패치해주세요.\n\n사유: {}",
-            truncate_str(auth_detail, 300)
-        );
+        let notice = if main_orchestration_session {
+            format!(
+                "⚠️ 인증이 만료되어 현재 dispatch를 실패 처리했습니다. 메인 오케스트레이션 세션은 보존하고 watcher를 분리합니다.\n관리자가 CLI에서 재인증(`/login`)을 완료한 후 다시 디스패치해주세요.\n\n사유: {}",
+                truncate_str(auth_detail, 300)
+            )
+        } else {
+            format!(
+                "⚠️ 인증이 만료되어 현재 dispatch를 실패 처리했습니다. 세션을 종료합니다.\n관리자가 CLI에서 재인증(`/login`)을 완료한 후 다시 디스패치해주세요.\n\n사유: {}",
+                truncate_str(auth_detail, 300)
+            )
+        };
         let notice_ok = match locals.placeholder_msg_id {
             Some(msg_id) => {
                 rate_limit_wait(shared, channel_id).await;
@@ -394,7 +432,11 @@ pub(super) async fn handle_terminal_abort_exits(
             &mut *state.monitor_auto_turn_ledger_generation,
         )
         .await;
-        return AbortExitOutcome::ContinueWatcherLoop;
+        return if main_orchestration_session {
+            AbortExitOutcome::BreakWatcherLoop
+        } else {
+            AbortExitOutcome::ContinueWatcherLoop
+        };
     }
 
     if locals.is_provider_overloaded {
@@ -422,8 +464,6 @@ pub(super) async fn handle_terminal_abort_exits(
             .as_deref()
             .map(|text| record_provider_overload_retry(channel_id, text))
             .unwrap_or(ProviderOverloadDecision::Exhausted);
-        let main_orchestration_session =
-            watcher_session_is_main_orchestration(tmux_session_name, channel_id);
         let retry_notice = if main_orchestration_session {
             format!(
                 "⚠️ 모델 capacity 상태를 감지했지만 메인 오케스트레이션 세션은 보존했습니다. 현재 turn을 실패 처리하고 watcher를 분리합니다.\n\n사유: {}",
