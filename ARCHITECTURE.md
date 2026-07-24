@@ -1246,7 +1246,12 @@ src/
 │   ├── slo/
 │   │   └── mod.rs
 │   ├── tui_prompt_dedupe/
-│   │   └── synthetic_prompt.rs
+│   │   ├── extract.rs
+│   │   ├── observation.rs
+│   │   ├── runtime_binding.rs
+│   │   ├── state.rs
+│   │   ├── synthetic_prompt.rs
+│   │   └── tests.rs
 │   ├── tui_turn_state/
 │   │   └── completion_scan.rs
 │   ├── turn_orchestrator/

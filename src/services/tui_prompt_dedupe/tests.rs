@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn reset_state() {
@@ -1475,8 +1474,8 @@ fn local_compact_raw_and_envelope_each_publish_without_time_pairing() {
     let _guard = TEST_LOCK.lock().unwrap();
     reset_state();
     let wrapper = "<command-message>compact</command-message>\n\
-                       <command-name>/compact</command-name>\n\
-                       <command-args></command-args>";
+                   <command-name>/compact</command-name>\n\
+                   <command-args></command-args>";
 
     assert_eq!(
         observe_prompt_by_tmux("claude", "tmux-local-pair", "/compact"),
@@ -1527,8 +1526,7 @@ fn local_note_delivery_ack_does_not_record_nonlocal_entries() {
 fn task_notification_is_status_only_and_next_prompt_keeps_lease_free() {
     let _guard = TEST_LOCK.lock().unwrap();
     reset_state();
-    let task =
-        "<task-notification><status>killed</status><task-id>stop-1</task-id></task-notification>";
+    let task = "<task-notification><status>killed</status><task-id>stop-1</task-id></task-notification>";
     assert_eq!(
         observe_prompt_by_tmux("claude", "tmux-stop-task", task),
         PromptObservation::PublishedTaskNotification
@@ -1647,8 +1645,8 @@ fn suppresses_recent_slash_command_xml_and_invocation_forms() {
     let _guard = TEST_LOCK.lock().unwrap();
     reset_state();
     let wrapper = "<command-message>loop</command-message>\n\
-                       <command-name>/loop</command-name>\n\
-                       <command-args>check relay gaps every 30m</command-args>";
+                   <command-name>/loop</command-name>\n\
+                   <command-args>check relay gaps every 30m</command-args>";
 
     assert_eq!(
         observe_prompt_by_tmux("claude", "tmux-loop", wrapper),
@@ -1665,8 +1663,8 @@ fn slash_command_dedupe_does_not_collapse_raw_args_or_other_commands() {
     let _guard = TEST_LOCK.lock().unwrap();
     reset_state();
     let wrapper = "<command-message>loop</command-message>\n\
-                       <command-name>/loop</command-name>\n\
-                       <command-args>check relay gaps every 30m</command-args>";
+                   <command-name>/loop</command-name>\n\
+                   <command-args>check relay gaps every 30m</command-args>";
 
     assert_eq!(
         observe_prompt_by_tmux("claude", "tmux-loop", wrapper),
@@ -1797,7 +1795,7 @@ fn codex_distinct_message_entry_ids_publish_distinct_direct_prompts() {
         ),
         PromptObservation::PublishedSshDirect,
         "distinct Codex message item ids must not collapse separate direct prompts \
-             even when the top-level response_item id is shared"
+         even when the top-level response_item id is shared"
     );
     assert_eq!(
         observe_prompt_by_tmux_with_entry_id_at(
@@ -1900,7 +1898,7 @@ fn suppresses_transcript_command_xml_after_raw_invocation_echo() {
     let _guard = TEST_LOCK.lock().unwrap();
     reset_state();
     let command_args = "매 주기마다: (1) sonnet 모델 서브에이전트를 스폰해 \
-            **adk-cc 채널(1479671298497183835)만** 조사시키고 보고받는다";
+        **adk-cc 채널(1479671298497183835)만** 조사시키고 보고받는다";
 
     // 1st observation (hook path): raw invocation echo, published normally.
     let invocation_echo = format!("/loop {command_args}");
@@ -1914,8 +1912,8 @@ fn suppresses_transcript_command_xml_after_raw_invocation_echo() {
     // mismatched the echo and published a duplicate synthetic turn.
     let wrapper = format!(
         "<command-message>loop</command-message>\n\
-             <command-name>/loop</command-name>\n\
-             <command-args>{command_args}</command-args>"
+         <command-name>/loop</command-name>\n\
+         <command-args>{command_args}</command-args>"
     );
     let command_json = serde_json::json!({
         "type": "user",
@@ -2022,8 +2020,8 @@ fn extracts_non_meta_claude_array_user_message_after_slash_command() {
     let _guard = TEST_LOCK.lock().unwrap();
     reset_state();
     let wrapper = "<command-message>loop</command-message>\n\
-                       <command-name>/loop</command-name>\n\
-                       <command-args>check relay gaps every 30m</command-args>";
+                   <command-name>/loop</command-name>\n\
+                   <command-args>check relay gaps every 30m</command-args>";
     assert_eq!(
         observe_prompt_by_tmux("claude", "tmux-loop", wrapper),
         PromptObservation::PublishedSshDirect
@@ -2122,7 +2120,7 @@ fn replayed_entry_id_is_suppressed_on_second_observe() {
         ),
         PromptObservation::SuppressedReplayedEntry,
         "the SAME entry uuid re-encountered (watermark reset / head rotation) \
-             is suppressed by identity — no phantom synthetic inflight (#3540)"
+         is suppressed by identity — no phantom synthetic inflight (#3540)"
     );
 }
 
@@ -2155,9 +2153,9 @@ fn new_entry_id_is_never_suppressed() {
         ),
         PromptObservation::PublishedSshDirect,
         "a distinct entry uuid carrying distinct content is a distinct \
-             submission — always relayed (#3459/#3303 missed-prompt regression \
-             guard). The entry-id ledger only suppresses a RE-ENCOUNTER of the \
-             EXACT same uuid; a new uuid never collides."
+         submission — always relayed (#3459/#3303 missed-prompt regression \
+         guard). The entry-id ledger only suppresses a RE-ENCOUNTER of the \
+         EXACT same uuid; a new uuid never collides."
     );
     // A THIRD distinct prompt under a THIRD uuid also relays — the ledger
     // does not accumulate false suppressions across genuinely new prompts.
@@ -2184,13 +2182,25 @@ fn missing_entry_id_falls_back_to_content_dedup() {
     let now = Utc::now();
 
     assert_eq!(
-        observe_prompt_by_tmux_with_entry_id_at("claude", "tmux-3540", "no-uuid prompt", None, now,),
+        observe_prompt_by_tmux_with_entry_id_at(
+            "claude",
+            "tmux-3540",
+            "no-uuid prompt",
+            None,
+            now,
+        ),
         PromptObservation::PublishedSshDirect
     );
     // Same content again with no uuid → the content-keyed recent dedup
     // suppresses it (the existing 30s path), NOT the entry-id path.
     assert_eq!(
-        observe_prompt_by_tmux_with_entry_id_at("claude", "tmux-3540", "no-uuid prompt", None, now,),
+        observe_prompt_by_tmux_with_entry_id_at(
+            "claude",
+            "tmux-3540",
+            "no-uuid prompt",
+            None,
+            now,
+        ),
         PromptObservation::SuppressedRecentDuplicate,
         "with no stable id the legacy content-keyed dedup still applies"
     );
@@ -2235,7 +2245,7 @@ fn dedup_suppressed_candidate_does_not_record_entry_id() {
         ),
         PromptObservation::PublishedSshDirect,
         "a uuid seen only on a dedup-suppressed sighting was not recorded as \
-             relayed, so it does not falsely suppress a later real relay (#3540)"
+         relayed, so it does not falsely suppress a later real relay (#3540)"
     );
 }
 
@@ -2262,7 +2272,8 @@ fn relayed_entry_id_ledger_purges_after_ttl() {
             .get_mut(&PromptKey::new("claude", "tmux-3540"))
         {
             for entry in queue.iter_mut() {
-                entry.recorded_at = Instant::now() - (PROMPT_ANCHOR_TTL + Duration::from_secs(1));
+                entry.recorded_at =
+                    Instant::now() - (PROMPT_ANCHOR_TTL + Duration::from_secs(1));
             }
         }
         state.purge_expired();
@@ -2381,7 +2392,8 @@ fn streaming_activity_restamps_anchor_so_long_turn_never_loses_it() {
             .prompt_anchor_by_tmux
             .get_mut(&PromptKey::new(provider, tmux))
             .expect("anchor present after touch")
-            .recorded_at = Instant::now() - (PROMPT_ANCHOR_SUBMIT_TTL - Duration::from_secs(60));
+            .recorded_at =
+            Instant::now() - (PROMPT_ANCHOR_SUBMIT_TTL - Duration::from_secs(60));
     }
     assert_eq!(
         prompt_anchor_for_response(provider, tmux, channel),
@@ -2586,8 +2598,8 @@ fn extract_returns_stable_top_level_uuid() {
         entry_id.as_deref(),
         Some("6c532800-4c8c-4d1d-9e64-d308fab44a1e"),
         "the stable top-level uuid is extracted; it survives head rotation \
-             (offset shifts, uuid does not) so identity dedup recognizes the \
-             re-encountered entry (#3540)"
+         (offset shifts, uuid does not) so identity dedup recognizes the \
+         re-encountered entry (#3540)"
     );
 }
 
