@@ -312,7 +312,7 @@ fn characterize_rollover_seed_has_no_status_panel_content_s0() {
     let panel = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
     assert!(panel.contains("마지막 도구"));
     assert!(panel.contains("[Bash]"));
-    assert!(panel.contains("cargo test --lib placeholder\_live\_events"));
+    assert!(panel.contains(r"cargo test --lib placeholder\_live\_events"));
 
     let status_block = build_processing_status_block("⠸");
     let current_portion = "relay body ".repeat(250);
