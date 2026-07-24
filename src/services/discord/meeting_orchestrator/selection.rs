@@ -184,7 +184,10 @@ pub(super) fn agent_metadata_card(agent: &MeetingAgentConfig) -> String {
     )
 }
 
-pub(super) fn summary_agent_context(config: &MeetingConfig, resolved_summary_agent: &str) -> String {
+pub(super) fn summary_agent_context(
+    config: &MeetingConfig,
+    resolved_summary_agent: &str,
+) -> String {
     let Some(agent) = config
         .available_agents
         .iter()

@@ -1,7 +1,11 @@
 use super::*;
 
 /// Check if majority of participants in a given round used CONSENSUS: keyword
-pub(super) fn check_consensus(transcript: &[MeetingUtterance], round: u32, participant_count: usize) -> bool {
+pub(super) fn check_consensus(
+    transcript: &[MeetingUtterance],
+    round: u32,
+    participant_count: usize,
+) -> bool {
     if participant_count == 0 {
         return false;
     }

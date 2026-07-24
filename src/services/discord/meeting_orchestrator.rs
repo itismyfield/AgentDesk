@@ -14,11 +14,8 @@ use crate::services::provider_exec;
 
 use super::agentdesk_config;
 use super::formatting::send_long_message_raw;
-use super::meeting_artifact_store::{
-    self, MeetingArtifactKind, MeetingArtifactRepo, StoreOutcome,
-};
+use super::meeting_artifact_store::{self, MeetingArtifactKind, MeetingArtifactRepo, StoreOutcome};
 use super::meeting_state_machine::{self as msm, MeetingEvent, MeetingState};
-use super::{internal_api, runtime_store};
 use super::org_schema;
 use super::outbound::delivery::{deliver_outbound, first_raw_message_id};
 use super::outbound::message::{OutboundOperation, OutboundTarget};
@@ -29,6 +26,7 @@ use super::outbound::{
 use super::role_map::load_meeting_config as load_meeting_config_from_role_map;
 use super::settings::{ResolvedMemorySettings, RoleBinding, load_role_prompt};
 use super::{DispatchProfile, SharedData, rate_limit_wait};
+use super::{internal_api, runtime_store};
 use crate::services::dispatches::discord_delivery::{
     DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
@@ -42,8 +40,8 @@ mod selection_runtime;
 pub(super) use lifecycle::{
     cancel_meeting, load_meeting_config, meeting_status, spawn_direct_start, start_meeting,
 };
-pub(in crate::services::discord) use selection_runtime::send_meeting_message;
 pub(crate) use selection_runtime::list_available_agent_options;
+pub(in crate::services::discord) use selection_runtime::send_meeting_message;
 
 use records::{
     build_meeting_status_payload, check_consensus, cleanup_meeting, conclude_meeting,
