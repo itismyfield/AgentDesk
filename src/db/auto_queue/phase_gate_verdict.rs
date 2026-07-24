@@ -33,6 +33,26 @@ pub const DEFAULT_PASS_VERDICT: &str = "phase_gate_passed";
 /// chain.
 const EXPLICIT_VERDICT_KEYS: [&str; 3] = ["verdict", "decision", "phase_gate_verdict"];
 
+/// The canonical result of reducing phase-gate context and result evidence.
+///
+/// `Explicit(None)` is intentional: a truthy non-string value blocks checks
+/// inference but cannot be compared with the gate's string pass verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerdictResolution {
+    Explicit(Option<String>),
+    Inferred(String),
+    Missing,
+}
+
+impl VerdictResolution {
+    pub fn verdict(&self) -> Option<&str> {
+        match self {
+            Self::Explicit(Some(verdict)) | Self::Inferred(verdict) => Some(verdict),
+            Self::Explicit(None) | Self::Missing => None,
+        }
+    }
+}
+
 /// JS-style truthiness for `result.verdict || result.decision ||
 /// result.phase_gate_verdict`.
 ///
@@ -42,25 +62,18 @@ const EXPLICIT_VERDICT_KEYS: [&str; 3] = ["verdict", "decision", "phase_gate_ver
 /// policy hook and the durable path must not disagree about whether a result
 /// "already decided".
 pub fn has_explicit_verdict(result: &Value) -> bool {
-    EXPLICIT_VERDICT_KEYS
-        .iter()
-        .filter_map(|key| result.get(*key))
-        .any(is_js_truthy)
+    first_explicit_value(result).is_some()
 }
 
-/// Trimmed, non-empty string form of the explicit verdict, if the result
-/// carries one. Non-string explicit values (which still block inference via
-/// [`has_explicit_verdict`]) have no string form and yield `None`.
+/// Trimmed, non-empty string form of the first truthy explicit verdict, if it
+/// is a string. A truthy non-string value blocks later keys, matching the JS
+/// `verdict || decision || phase_gate_verdict` precedence chain.
 pub fn explicit_verdict(result: &Value) -> Option<String> {
-    for key in EXPLICIT_VERDICT_KEYS {
-        if let Some(text) = result.get(key).and_then(Value::as_str) {
-            let trimmed = text.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    None
+    first_explicit_value(result)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 /// Whether a single `result.checks` entry reports a pass.
@@ -148,10 +161,15 @@ pub fn infer_pass_verdict(context: Option<&Value>, result: &Value) -> Option<Str
     infer_pass_verdict_from_checks(context, result)
 }
 
-/// The verdict a dispatch result carries: the explicit one when present,
-/// otherwise the checks-inferred pass verdict.
-pub fn resolve_verdict(context: Option<&Value>, result: &Value) -> Option<String> {
-    explicit_verdict(result).or_else(|| infer_pass_verdict(context, result))
+/// Resolve explicit evidence first, then checks-only inference.
+pub fn resolve_verdict(context: Option<&Value>, result: &Value) -> VerdictResolution {
+    if has_explicit_verdict(result) {
+        return VerdictResolution::Explicit(explicit_verdict(result));
+    }
+    match infer_pass_verdict_from_checks(context, result) {
+        Some(verdict) => VerdictResolution::Inferred(verdict),
+        None => VerdictResolution::Missing,
+    }
 }
 
 /// Whether `actual` satisfies the gate's `expected` pass verdict.
@@ -178,6 +196,13 @@ pub fn verdict_matches(
         .and_then(|result| infer_pass_verdict_from_checks(context, result))
         .as_deref()
         == Some(expected)
+}
+
+fn first_explicit_value(result: &Value) -> Option<&Value> {
+    EXPLICIT_VERDICT_KEYS
+        .iter()
+        .filter_map(|key| result.get(*key))
+        .find(|value| is_js_truthy(value))
 }
 
 fn is_js_truthy(value: &Value) -> bool {
@@ -241,8 +266,9 @@ mod tests {
             "checks": { "merge_verified": { "status": "pass" } },
         });
         assert_eq!(infer_pass_verdict(Some(&context), &result), None);
+        let resolution = resolve_verdict(Some(&context), &result);
         assert!(!verdict_matches(
-            resolve_verdict(Some(&context), &result).as_deref(),
+            resolution.verdict(),
             "phase_gate_passed",
             Some(&context),
             Some(&result),
@@ -258,7 +284,27 @@ mod tests {
                 "checks": { "build_passed": "pass" },
             });
             assert_eq!(infer_pass_verdict(Some(&context), &result), None);
+            assert_eq!(
+                resolve_verdict(Some(&context), &result),
+                VerdictResolution::Explicit(None),
+            );
         }
+    }
+
+    #[test]
+    fn truthy_non_string_verdict_prevents_later_decision_from_winning() {
+        let context = gate_context(json!(["build_passed"]), "gate_ok");
+        let result = json!({
+            "verdict": true,
+            "decision": "gate_ok",
+            "checks": { "build_passed": "pass" },
+        });
+
+        assert_eq!(explicit_verdict(&result), None);
+        assert_eq!(
+            resolve_verdict(Some(&context), &result),
+            VerdictResolution::Explicit(None),
+        );
     }
 
     #[test]
@@ -377,17 +423,20 @@ mod tests {
         let context = gate_context(json!(["build_passed"]), "gate_ok");
         let explicit = json!({ "decision": "gate_failed", "checks": { "build_passed": "pass" } });
         assert_eq!(
-            resolve_verdict(Some(&context), &explicit).as_deref(),
-            Some("gate_failed")
+            resolve_verdict(Some(&context), &explicit),
+            VerdictResolution::Explicit(Some("gate_failed".to_string()))
         );
 
         let inferred = json!({ "checks": { "build_passed": "pass" } });
         assert_eq!(
-            resolve_verdict(Some(&context), &inferred).as_deref(),
-            Some("gate_ok")
+            resolve_verdict(Some(&context), &inferred),
+            VerdictResolution::Inferred("gate_ok".to_string())
         );
 
         let undecided = json!({ "checks": { "build_passed": "fail" } });
-        assert_eq!(resolve_verdict(Some(&context), &undecided), None);
+        assert_eq!(
+            resolve_verdict(Some(&context), &undecided),
+            VerdictResolution::Missing
+        );
     }
 }

@@ -1355,10 +1355,12 @@ fn infer_phase_gate_verdict(
     phase_gate_ctx: &serde_json::Value,
     result: &serde_json::Value,
 ) -> Option<serde_json::Value> {
-    if phase_gate_verdict::has_explicit_verdict(result) {
+    let context = serde_json::json!({ "phase_gate": phase_gate_ctx });
+    let phase_gate_verdict::VerdictResolution::Inferred(pass_verdict) =
+        phase_gate_verdict::resolve_verdict(Some(&context), result)
+    else {
         return None;
-    }
-    let pass_verdict = phase_gate_verdict::infer_pass_verdict_in_gate(phase_gate_ctx, result)?;
+    };
 
     let mut enriched = result.clone();
     if !enriched.is_object() {

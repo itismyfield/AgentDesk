@@ -572,16 +572,19 @@ async fn reconcile_phase_gate_for_terminal_dispatch_on_pg_tx_inner(
     // #1980 + #699: legacy / checks-only results do not carry an explicit
     // verdict, so `resolve_verdict` falls back to checks inference — the same
     // fallback the dispatch finalize path applies before persisting a result.
-    let verdict = result_value
+    let verdict_resolution = result_value
         .as_ref()
-        .and_then(|result| resolve_verdict(context_value.as_ref(), result));
+        .map(|result| resolve_verdict(context_value.as_ref(), result));
+    let verdict = verdict_resolution
+        .as_ref()
+        .and_then(|resolution| resolution.verdict());
 
     // Treat any non-`completed` terminal status (`failed`/`cancelled`) as a
     // gate failure regardless of verdict — the dispatch never produced a
     // verdict so we cannot pretend it passed.
     if dispatch_status != "completed"
         || !phase_gate_verdict_matches(
-            verdict.as_deref(),
+            verdict,
             &pass_verdict,
             context_value.as_ref(),
             result_value.as_ref(),
@@ -590,7 +593,7 @@ async fn reconcile_phase_gate_for_terminal_dispatch_on_pg_tx_inner(
         let failed_reason = compose_failed_reason(
             dispatch_status,
             dispatch_result_json,
-            verdict.as_deref(),
+            verdict,
             &pass_verdict,
         );
         mark_phase_gate_row_failed_on_pg_tx(
@@ -598,7 +601,7 @@ async fn reconcile_phase_gate_for_terminal_dispatch_on_pg_tx_inner(
             &gate.run_id,
             gate.phase,
             dispatch_id,
-            verdict.as_deref(),
+            verdict,
             &failed_reason,
         )
         .await?;
@@ -1388,11 +1391,14 @@ async fn load_sibling_phase_gate_dispatches_on_pg_tx(
         // Sibling rows go through the same explicit-or-inferred resolution as
         // the primary dispatch so an aggregate gate decision cannot disagree
         // with the per-dispatch one (#699 round 2, #4884).
-        let actual_verdict = result_value
+        let actual_resolution = result_value
             .as_ref()
-            .and_then(|result| resolve_verdict(context_value.as_ref(), result));
+            .map(|result| resolve_verdict(context_value.as_ref(), result));
+        let actual_verdict = actual_resolution
+            .as_ref()
+            .and_then(|resolution| resolution.verdict());
         if !phase_gate_verdict_matches(
-            actual_verdict.as_deref(),
+            actual_verdict,
             &expected_verdict,
             context_value.as_ref(),
             result_value.as_ref(),
@@ -1408,12 +1414,12 @@ async fn load_sibling_phase_gate_dispatches_on_pg_tx(
                 .unwrap_or_else(|| {
                     format!(
                         "expected verdict {expected_verdict}, got {}",
-                        actual_verdict.as_deref().unwrap_or("none")
+                        actual_verdict.unwrap_or("none")
                     )
                 });
             summary.failed_sibling = Some(FailedSibling {
                 dispatch_id,
-                verdict: actual_verdict,
+                verdict: actual_verdict.map(str::to_string),
                 reason,
             });
             return Ok(summary);
