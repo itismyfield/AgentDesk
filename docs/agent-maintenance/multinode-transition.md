@@ -451,6 +451,10 @@
   encoding, while watcher lifecycle logic moves verbatim behind the existing facade.
   Gateway ownership, lease ordering, worker placement, and cross-node authority are
   unchanged.
+- 2026-07-24 — #4533 transcript clear fence: `/clear` boundary writes and watcher
+  transcript persistence serialize through the same channel-scoped PostgreSQL
+  advisory transaction lock. The persisted boundary remains cluster-wide authority;
+  this adds no leader election, worker placement, lease, schema, or routing change.
 - 2026-07-24 — #4623 confirmed fresh-delivery cutover: the session sink preserves
   transport-confirmed fresh outcomes through the process-local exact-sequence ring
   and watcher ACK instead of folding them into sink errors. Existing shared delivery
