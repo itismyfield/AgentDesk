@@ -22,6 +22,12 @@ fn retry_present_or_accepted(outcome: &crate::services::discord::MailboxEnqueueO
         )
 }
 
+pub(super) struct FollowupRequeueOutcome {
+    pub(super) requeued: bool,
+    pub(super) retry_capped: bool,
+    pub(super) notice_message_id: MessageId,
+}
+
 pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
     shared_owned: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -30,7 +36,39 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
     dispatch_id: Option<&str>,
     adk_session_key: Option<&str>,
     turn_id: &str,
-) -> bool {
+) -> FollowupRequeueOutcome {
+    let notice_message_id = super::super::busy_followup_retry_store::bind_notice_if_absent(
+        provider,
+        channel_id.get(),
+        inflight_state.user_msg_id,
+        inflight_state.current_msg_id,
+    )
+    .map(|state| MessageId::new(state.notice_message_id))
+    .unwrap_or_else(|error| {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            user_msg_id = inflight_state.user_msg_id,
+            error = %error,
+            "failed to bind busy follow-up notice; using current placeholder"
+        );
+        MessageId::new(inflight_state.current_msg_id)
+    });
+    let retry_decision = super::super::busy_followup_retry_store::record_busy_retry(
+        provider,
+        channel_id.get(),
+        inflight_state.user_msg_id,
+        notice_message_id.get(),
+    )
+    .ok();
+    if retry_decision.is_some_and(|decision| decision.capped) {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            user_msg_id = inflight_state.user_msg_id,
+            "Claude TUI busy follow-up aggregate retry cap reached; preserving entry without kickoff"
+        );
+    }
     let requeue_outcome = super::super::mailbox_requeue_inflight_for_followup_retry(
         shared_owned,
         provider,
@@ -127,14 +165,20 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
                 .await;
             }
         }
-        super::super::schedule_deferred_idle_queue_kickoff(
-            shared_owned.clone(),
-            provider.clone(),
-            channel_id,
-            "claude_tui_followup_requeue_inflight",
-        );
+        if !retry_decision.is_some_and(|decision| decision.capped) {
+            super::super::schedule_deferred_idle_queue_kickoff(
+                shared_owned.clone(),
+                provider.clone(),
+                channel_id,
+                "claude_tui_followup_requeue_inflight",
+            );
+        }
     }
-    retry_present_or_accepted
+    FollowupRequeueOutcome {
+        requeued: retry_present_or_accepted,
+        retry_capped: retry_decision.is_some_and(|decision| decision.capped),
+        notice_message_id,
+    }
 }
 
 #[cfg(test)]
@@ -254,12 +298,63 @@ mod tests {
                 "turn-4248-reaction-failure",
             )
             .await
+            .requeued
         );
 
         assert_eq!(
             crate::services::discord::outbound::reaction_control::take_test_reply_deliveries(),
             vec![crate::services::discord::outbound::reaction_control::ReactionControlReplyReason::QueueReactionFailed],
             "failed follow-up requeue reaction must emit exactly one referenced fallback"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retry_cap_preserves_entry_and_stops_auto_kickoff_4888() {
+        let _root = scoped_runtime_root();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(100_000_004_888_001);
+        let message_id = MessageId::new(100_000_004_888_002);
+        let inflight = inflight(channel_id, message_id);
+
+        let mut outcome = None;
+        for attempt in 1..=super::super::super::busy_followup_retry_store::MAX_BUSY_RETRY_COUNT {
+            let current = requeue_claude_tui_followup_pre_submit_timeout(
+                &shared,
+                &provider,
+                channel_id,
+                &inflight,
+                None,
+                None,
+                "turn-4888-cap",
+            )
+            .await;
+            assert_eq!(
+                current.retry_capped,
+                attempt == super::super::super::busy_followup_retry_store::MAX_BUSY_RETRY_COUNT
+            );
+            outcome = Some(current);
+        }
+
+        let outcome = outcome.expect("retry outcome");
+        assert!(outcome.requeued);
+        assert!(outcome.retry_capped);
+        assert_eq!(
+            outcome.notice_message_id,
+            MessageId::new(inflight.current_msg_id)
+        );
+        let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
+        assert_eq!(snapshot.intervention_queue.len(), 1);
+        assert_eq!(snapshot.intervention_queue[0].message_id, message_id);
+        let retry = super::super::super::busy_followup_retry_store::load(
+            &provider,
+            channel_id.get(),
+            message_id.get(),
+        )
+        .expect("retry state");
+        assert_eq!(
+            retry.busy_retry_count,
+            super::super::super::busy_followup_retry_store::MAX_BUSY_RETRY_COUNT
         );
     }
 

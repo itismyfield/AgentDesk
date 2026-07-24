@@ -28,6 +28,19 @@ pub(super) async fn await_answer_flush_if_queued_notice(
     }
 }
 
+pub(in crate::services::discord) async fn edit_intake_placeholder(
+    http: Arc<serenity::Http>,
+    shared: Arc<SharedData>,
+    channel_id: ChannelId,
+    message_id: MessageId,
+) -> Result<(), String> {
+    let client = SerenityTurnOutboundClient { http, shared };
+    let msg = gateway_outbound_message(channel_id, "...")
+        .with_operation(OutboundOperation::Edit { message_id });
+    outbound_delivery_error(deliver_outbound(&client, shared_outbound_deduper(), msg, None).await)
+        .map(|_| ())
+}
+
 pub(in crate::services::discord) async fn send_intake_placeholder(
     http: Arc<serenity::Http>,
     shared: Arc<SharedData>,

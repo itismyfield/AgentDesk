@@ -855,6 +855,18 @@ pub(super) async fn run_terminal_outcome_delivery(
         )
         .await;
     }
+    // #4888: the busy-notice binding and its aggregate retry budget outlive a
+    // single turn on purpose — the retry kickoff must find the same card and the
+    // same counter. Release them here, once this turn reached a terminal outcome
+    // WITHOUT requeueing for a Claude-TUI busy timeout, so a later turn cannot
+    // edit a card that now holds a delivered answer.
+    if !claude_tui_busy_requeue_pending && inflight_state.user_msg_id != 0 {
+        let _ = super::busy_followup_retry_store::clear_for_input(
+            &provider,
+            channel_id.get(),
+            inflight_state.user_msg_id,
+        );
+    }
     TerminalOutcomeDeliveryOutput {
         outcome: TerminalOutcomeDeliveryOutcome::Completed,
         shared_owned,

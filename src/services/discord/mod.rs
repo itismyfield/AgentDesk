@@ -4,6 +4,7 @@ pub(crate) mod agent_handoff;
 pub(crate) mod agentdesk_config;
 mod answer_flush_barrier;
 pub(crate) mod bot_role;
+mod busy_followup_retry_store;
 // #3479 item-2: restart-gap message recovery extracted to its catch-up sibling.
 mod catch_up;
 mod commands;
@@ -3967,6 +3968,13 @@ async fn mailbox_cancel_soft_intervention(
         )
         .await;
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    if let Some(removed) = result.removed.as_ref() {
+        let _ = busy_followup_retry_store::clear_for_input(
+            provider,
+            channel_id.get(),
+            removed.message_id.get(),
+        );
+    }
     result.removed
 }
 

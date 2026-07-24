@@ -834,6 +834,15 @@ pub(in crate::services::discord) async fn defer_promoted_dispatch_if_hosted_tui_
     if !hosted_tui_promote_readiness_blocked(shared, provider, channel_id).await {
         return false;
     }
+    // #4888: once the aggregate busy-retry budget is spent, stop arming the
+    // fail-open backstop that keeps re-driving the same busy pane. The entry is
+    // still restored at the queue front below — only the automatic re-drive
+    // stops, and the watcher-idle re-drain still delivers it on real TUI idle.
+    let busy_retry_capped = super::super::super::busy_followup_retry_store::is_capped(
+        provider,
+        channel_id.get(),
+        intervention.message_id.get(),
+    );
     let restored = super::super::super::mailbox_restore_dequeued_head(
         shared,
         provider,

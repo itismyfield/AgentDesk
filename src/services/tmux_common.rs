@@ -180,28 +180,37 @@ pub(crate) fn tmux_capture_indicates_claude_tui_ready_for_input(capture: &str) -
         .lines()
         .filter(|l| !l.trim().is_empty())
         .collect::<Vec<_>>();
-    let start = non_empty.len().saturating_sub(CLAUDE_TUI_ACTIVE_SCAN_LINES);
-    let recent_forward = &non_empty[start..];
-    let recent = recent_forward.iter().rev().copied().collect::<Vec<_>>();
+    let active_start = non_empty.len().saturating_sub(CLAUDE_TUI_ACTIVE_SCAN_LINES);
+    let active_forward = &non_empty[active_start..];
+    let active_recent = active_forward.iter().rev().copied().collect::<Vec<_>>();
 
-    if recent.iter().any(|l| l.contains(CLAUDE_TUI_READY_BANNER)) {
+    if active_recent
+        .iter()
+        .any(|line| line.contains(CLAUDE_TUI_READY_BANNER))
+    {
         return true;
     }
-    // `recent` is reverse-ordered for bottom-up prompt lookup below. Restore
-    // screen order inside the active-work helper before evaluating wrapped
-    // spinner head → interrupt-tail adjacency. This predicate is only a prompt-
-    // marker producer; every production readiness acceptance also runs the full
-    // forward capture through `snapshot_allows_prompt_readiness`, whose shared
-    // busy classifier vetoes partial spinner frames this lightweight scan cannot
-    // reconstruct by itself.
-    if tmux_recent_lines_show_claude_tui_active_work(&recent) {
+    // `active_recent` is reverse-ordered for bottom-up lookup. Restore screen
+    // order inside the active-work helper before evaluating wrapped spinner head
+    // → interrupt-tail adjacency. This predicate is only a prompt-marker
+    // producer; every production readiness acceptance also runs the full forward
+    // capture through `snapshot_allows_prompt_readiness`, whose shared busy
+    // classifier remains the final veto.
+    if tmux_recent_lines_show_claude_tui_active_work(&active_recent) {
         return false;
     }
 
-    if recent
+    // Match the empty-composer detector's wider bottom-most lookup. Compact and
+    // background-agent chrome can push a real composer beyond the 24-line active
+    // work window; only the bottom-most prompt in the bounded 36-line window may
+    // qualify, so an older historical prompt cannot make a draft look ready.
+    let composer_start = non_empty.len().saturating_sub(CLAUDE_TUI_DRAFT_SCAN_LINES);
+    let composer_forward = &non_empty[composer_start..];
+    if let Some(line) = composer_forward
         .iter()
-        .take(CLAUDE_TUI_READY_SCAN_LINES)
-        .any(|l| tmux_line_is_claude_tui_ready_prompt(l))
+        .rev()
+        .find(|line| trim_prompt_line(line).starts_with(CLAUDE_TUI_PROMPT_MARKER))
+        && tmux_line_is_claude_tui_ready_prompt(line)
     {
         return true;
     }
@@ -217,11 +226,11 @@ pub(crate) fn tmux_capture_indicates_claude_tui_ready_for_input(capture: &str) -
     // Empty-composer ready panes are already returned above; a finished 0-tool
     // turn (idle suggestion) is intentionally not-ready here but is still
     // reported by `tmux_capture_indicates_claude_tui_idle_suggestion`.
-    if let Some(last_prompt_idx) = recent_forward
+    if let Some(last_prompt_idx) = active_forward
         .iter()
         .rposition(|line| trim_prompt_line(line).starts_with(CLAUDE_TUI_PROMPT_MARKER))
     {
-        let tail = &recent_forward[last_prompt_idx + 1..];
+        let tail = &active_forward[last_prompt_idx + 1..];
         if tmux_lines_after_claude_prompt_show_freshly_submitted_footer(tail)
             && !tmux_lines_after_claude_prompt_show_completed_history(tail)
         {
@@ -229,16 +238,19 @@ pub(crate) fn tmux_capture_indicates_claude_tui_ready_for_input(capture: &str) -
         }
     }
 
-    recent_forward
+    // #4888: scan the whole active window instead of its bottom 12 lines. The
+    // same compact/background-agent chrome that displaces an empty composer also
+    // displaces a DRAFT prompt, and the bottom-most-prompt guard above already
+    // blocks an older historical prompt from flipping a still-running turn.
+    active_forward
         .iter()
         .enumerate()
         .rev()
-        .take(CLAUDE_TUI_READY_SCAN_LINES)
         .any(|(index, line)| {
             if !tmux_line_is_claude_tui_prompt_draft(line) {
                 return false;
             }
-            let after_prompt = &recent_forward[index + 1..];
+            let after_prompt = &active_forward[index + 1..];
             tmux_lines_after_claude_prompt_show_completed_history(after_prompt)
                 || tmux_lines_after_claude_prompt_show_idle_suggestion_chrome(after_prompt)
         })
@@ -2313,6 +2325,40 @@ earlier assistant prose
         assert!(tmux_capture_indicates_claude_tui_busy(
             live_early_spinner_with_stale_prompt
         ));
+    }
+
+    #[test]
+    fn compact_footer_displaced_bottom_composer_is_ready_4888() {
+        let mut lines = vec![
+            "compact summary".to_string(),
+            "────────────────────────".to_string(),
+            "❯".to_string(),
+        ];
+        lines.extend((0..30).map(|index| {
+            if index == 29 {
+                "  ◯ background agent finished 30s".to_string()
+            } else {
+                format!("  footer/status row {index}")
+            }
+        }));
+        let capture = lines.join("\n");
+
+        assert!(tmux_capture_indicates_claude_tui_exact_empty_composer(
+            &capture
+        ));
+        assert!(tmux_capture_indicates_claude_tui_ready_for_input(&capture));
+    }
+
+    #[test]
+    fn displaced_composer_does_not_override_foreground_spinner_veto_4888() {
+        let mut lines = vec!["────────────────────────".to_string(), "❯".to_string()];
+        lines.extend((0..20).map(|index| format!("  footer/status row {index}")));
+        lines.push("✳ Architecting… (12s · esc to interrupt)".to_string());
+        lines.extend((0..10).map(|index| format!("  live status row {index}")));
+        let capture = lines.join("\n");
+
+        assert!(tmux_capture_indicates_claude_tui_busy(&capture));
+        assert!(!tmux_capture_indicates_claude_tui_ready_for_input(&capture));
     }
 
     #[test]

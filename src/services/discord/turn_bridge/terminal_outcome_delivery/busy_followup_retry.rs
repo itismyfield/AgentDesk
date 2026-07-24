@@ -59,7 +59,7 @@ pub(super) async fn apply_busy_requeue_if_pending(
     if !claude_tui_busy_requeue_pending {
         return;
     }
-    let requeued = followup_requeue::requeue_claude_tui_followup_pre_submit_timeout(
+    let outcome = followup_requeue::requeue_claude_tui_followup_pre_submit_timeout(
         shared_owned,
         provider,
         channel_id,
@@ -69,7 +69,9 @@ pub(super) async fn apply_busy_requeue_if_pending(
         turn_id,
     )
     .await;
-    if requeued {
+    if outcome.retry_capped {
+        *delivery_response = "⚠ Claude TUI가 계속 사용 중이라 자동 재시도를 중단했습니다. 메시지는 큐에 보존되어 있습니다. 잠시 후 다시 시도하거나 메시지를 재전송해 주세요.".to_string();
+    } else if outcome.requeued {
         *delivery_response = "⏳ Claude TUI가 이전 턴을 처리 중이라 메시지를 아직 주입하지 못했습니다. 기존 세션은 유지하고 메시지를 큐에 다시 넣어, TUI가 한가해지면 자동으로 처리합니다.".to_string();
     } else {
         *preserve_inflight_for_cleanup_retry = true;
@@ -79,6 +81,21 @@ pub(super) async fn apply_busy_requeue_if_pending(
             channel_id = channel_id.get(),
             user_msg_id = inflight_state.user_msg_id,
             "Claude TUI busy follow-up requeue failed; preserving inflight instead of reporting success"
+        );
+    }
+    // #4888: the bound notice IS this turn's placeholder (intake reuses the
+    // binding, and the first busy binds `current_msg_id`), so the normal
+    // terminal-delivery edit below lands on the same single card. A divergence
+    // means the binding was just dropped as unusable; leave it to the next
+    // attempt rather than editing a card this turn does not own.
+    if outcome.notice_message_id != MessageId::new(inflight_state.current_msg_id) {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            user_msg_id = inflight_state.user_msg_id,
+            notice_message_id = outcome.notice_message_id.get(),
+            current_msg_id = inflight_state.current_msg_id,
+            "busy follow-up notice diverged from the live placeholder; delivering on the placeholder"
         );
     }
 }
