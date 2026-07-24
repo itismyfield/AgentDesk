@@ -36,11 +36,13 @@ mod rounds;
 mod selection;
 mod selection_runtime;
 
-pub(super) use lifecycle::*;
-pub(super) use records::*;
-pub(super) use rounds::*;
-pub(super) use selection::*;
-pub(super) use selection_runtime::*;
+pub(super) use lifecycle::{
+    cancel_meeting, handle_meeting_command, load_meeting_config, meeting_status, spawn_direct_start,
+    start_meeting,
+};
+pub(in crate::services::discord) use selection_runtime::{
+    list_available_agent_options, send_meeting_message,
+};
 
 #[derive(Clone, Debug)]
 pub(super) struct MeetingParticipant {
