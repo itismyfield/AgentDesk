@@ -1356,7 +1356,75 @@ pub(super) async fn handle_text_message(
         .await;
     }
 
-    let placeholder_msg_id = if let Some(existing) = queued_placeholder_handoff {
+    // #4888: a Claude-TUI busy follow-up retry re-enters intake for the SAME
+    // user message. Reuse the notice card bound on the first busy attempt (reset
+    // to the neutral placeholder body so streaming re-anchors on it) instead of
+    // POSTing one card per retry — that is the placeholder spam this fixes.
+    // If the edit fails the card is gone (user-deleted / permanently rejected),
+    // so drop the stale binding and fall through to the normal fresh-anchor
+    // path; keeping it would fail every future kickoff for this input.
+    let busy_notice_binding = super::super::super::busy_followup_retry_store::load(
+        &provider,
+        channel_id.get(),
+        user_msg_id.get(),
+    );
+    let reusable_busy_notice = match busy_notice_binding {
+        Some(binding) => {
+            let existing = MessageId::new(binding.notice_message_id);
+            match super::super::super::gateway::edit_intake_placeholder(
+                http.clone(),
+                shared.clone(),
+                channel_id,
+                existing,
+            )
+            .await
+            {
+                Ok(()) => Some(existing),
+                Err(error) => {
+                    tracing::warn!(
+                        channel_id = channel_id.get(),
+                        user_msg_id = user_msg_id.get(),
+                        notice_message_id = existing.get(),
+                        error = %error,
+                        "busy follow-up notice edit failed; dropping the stale binding and posting a fresh anchor"
+                    );
+                    let _ = super::super::super::busy_followup_retry_store::clear_if_current(
+                        &provider,
+                        channel_id.get(),
+                        user_msg_id.get(),
+                        existing.get(),
+                    );
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    let placeholder_msg_id = if let Some(existing_notice) = reusable_busy_notice {
+        // The dispatch hand-off above already CONSUMED this message's
+        // `queued_placeholders` mapping, so a coexisting `📬` card would be left
+        // with no owner. Tear it down with the same drop+detach invariant the
+        // hand-off branch upholds (`remove_queued_placeholder` clears only the
+        // map; `Queued` controller rows are excluded from `evict_terminal_entries`).
+        if let Some(stale_queued) =
+            queued_placeholder_handoff.filter(|queued| *queued != existing_notice)
+        {
+            let deleted = channel_id.delete_message(http, stale_queued).await;
+            shared
+                .ui
+                .placeholder_controller
+                .detach_by_message(channel_id, stale_queued);
+            tracing::info!(
+                channel_id = channel_id.get(),
+                user_msg_id = user_msg_id.get(),
+                notice_message_id = existing_notice.get(),
+                stale_queued = stale_queued.get(),
+                stale_deleted = deleted.is_ok(),
+                "busy follow-up retry reused its bound notice card; dropped the orphaned queued card"
+            );
+        }
+        existing_notice
+    } else if let Some(existing) = queued_placeholder_handoff {
         // #3480: the queued `📬 대기 중` card is now BURIED under what the active
         // turn streamed while this message waited; reusing it as the live anchor
         // edits that buried card (looks like a relay drop / huge 2000-char gaps).
