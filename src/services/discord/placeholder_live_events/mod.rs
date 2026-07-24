@@ -217,6 +217,34 @@ impl PlaceholderLiveEvents {
         render_events(guard.iter())
     }
 
+    pub(in crate::services::discord) fn live_background_worker_inventory(
+        &self,
+        channel_id: ChannelId,
+    ) -> Vec<String> {
+        let Some(entry) = self.status_by_channel.get(&channel_id) else {
+            return Vec::new();
+        };
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut workers = guard
+            .subagents
+            .iter()
+            .filter(|slot| slot.is_unfinished_background())
+            .map(|slot| {
+                slot.agent_id
+                    .as_deref()
+                    .or(slot.tool_use_id.as_deref())
+                    .unwrap_or(slot.desc.as_str())
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        if guard.background_agent_pending && workers.is_empty() {
+            workers.push("background_agent_pending".to_string());
+        }
+        workers
+    }
+
     pub(in crate::services::discord) fn context_panel_snapshot(
         &self,
         channel_id: ChannelId,

@@ -48,6 +48,59 @@ pub(super) struct TerminalAbortExitLocals<'a> {
     pub(super) provider_overload_message: &'a Option<String>,
 }
 
+#[derive(Debug, serde::Serialize)]
+struct WatcherForcedKillLog<'a> {
+    timestamp: String,
+    session: &'a str,
+    pane_id: Option<String>,
+    pane_pid: Option<u32>,
+    current_offset: u64,
+    decision_reason: &'a str,
+    live_background_workers: Vec<String>,
+}
+
+fn write_watcher_forced_kill_log(
+    shared: &SharedData,
+    channel_id: serenity::ChannelId,
+    tmux_session_name: &str,
+    current_offset: u64,
+    decision_reason: &str,
+) {
+    let record = WatcherForcedKillLog {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        session: tmux_session_name,
+        pane_id: crate::services::platform::tmux::active_pane_id(tmux_session_name),
+        pane_pid: crate::services::platform::tmux::pane_pid(tmux_session_name),
+        current_offset,
+        decision_reason,
+        live_background_workers: shared
+            .ui
+            .placeholder_live_events
+            .live_background_worker_inventory(channel_id),
+    };
+    let path =
+        crate::services::tmux_common::session_temp_path(tmux_session_name, "forced_kill_log");
+    let serialized = match serde_json::to_string(&record) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(
+                tmux_session = %tmux_session_name,
+                error = %error,
+                "failed to serialize watcher forced-kill log"
+            );
+            return;
+        }
+    };
+    if let Err(error) = std::fs::write(&path, format!("{serialized}\n")) {
+        tracing::error!(
+            tmux_session = %tmux_session_name,
+            path = %path,
+            error = %error,
+            "failed to persist watcher forced-kill log"
+        );
+    }
+}
+
 pub(super) struct TerminalAbortExitState<'a> {
     pub(super) placeholder_from_restored_inflight: &'a mut bool,
     pub(super) last_edit_text: &'a mut String,
@@ -140,6 +193,13 @@ pub(super) async fn handle_terminal_abort_exits(
             "  [{ts}] 👁 Prompt too long detected in watcher for {tmux_session_name}, killing session"
         );
         *state.prompt_too_long_killed = true;
+        write_watcher_forced_kill_log(
+            shared,
+            channel_id,
+            tmux_session_name,
+            locals.current_offset,
+            "prompt_too_long",
+        );
 
         let sess = (*tmux_session_name).clone();
         let _ = tokio::time::timeout(
@@ -223,6 +283,13 @@ pub(super) async fn handle_terminal_abort_exits(
             fallback_session_id,
         )
         .await;
+        write_watcher_forced_kill_log(
+            shared,
+            channel_id,
+            tmux_session_name,
+            locals.current_offset,
+            "authentication_failed",
+        );
 
         let sess = (*tmux_session_name).clone();
         let _ = tokio::time::timeout(
@@ -402,6 +469,13 @@ pub(super) async fn handle_terminal_abort_exits(
                 "watcher blocked automatic kill of main orchestration session; detaching watcher"
             );
         } else {
+            write_watcher_forced_kill_log(
+                shared,
+                channel_id,
+                tmux_session_name,
+                locals.current_offset,
+                overload_message,
+            );
             let sess = (*tmux_session_name).clone();
             let termination_reason = match &decision {
                 ProviderOverloadDecision::Retry { .. } => "provider_overload_retry",

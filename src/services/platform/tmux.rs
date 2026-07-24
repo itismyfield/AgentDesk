@@ -201,7 +201,7 @@ fn dead_marker_global_hook_index(session_name: &str) -> u64 {
     hasher.finish() % 1_000_000_000
 }
 
-fn active_pane_id(session_name: &str) -> Option<String> {
+pub(crate) fn active_pane_id(session_name: &str) -> Option<String> {
     tmux_command()
         .args([
             "display-message",
