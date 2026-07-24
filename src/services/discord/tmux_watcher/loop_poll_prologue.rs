@@ -55,6 +55,60 @@ pub(super) struct LoopPollState<'a> {
     pub(super) last_activity_heartbeat_at: &'a mut Option<std::time::Instant>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct JsonlReadChunk {
+    pub(super) data: Vec<u8>,
+    pub(super) start_offset: u64,
+    pub(super) end_offset: u64,
+    pub(super) skipped_partial_record: bool,
+}
+
+pub(super) fn read_jsonl_chunk_aligned(path: &str, offset: u64) -> Result<JsonlReadChunk, String> {
+    let mut file = std::fs::File::open(path).map_err(|e| format!("open: {e}"))?;
+    let file_len = file.metadata().map_err(|e| format!("metadata: {e}"))?.len();
+    let clamped_offset = offset.min(file_len);
+    let on_record_boundary = if clamped_offset == 0 {
+        true
+    } else {
+        file.seek(SeekFrom::Start(clamped_offset - 1))
+            .map_err(|e| format!("boundary seek: {e}"))?;
+        let mut previous = [0u8; 1];
+        file.read_exact(&mut previous)
+            .map_err(|e| format!("boundary read: {e}"))?;
+        previous[0] == b'\n'
+    };
+
+    file.seek(SeekFrom::Start(clamped_offset))
+        .map_err(|e| format!("seek: {e}"))?;
+    let mut discarded = 0u64;
+    if !on_record_boundary {
+        let mut byte = [0u8; 1];
+        loop {
+            let n = file
+                .read(&mut byte)
+                .map_err(|e| format!("align read: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            discarded = discarded.saturating_add(1);
+            if byte[0] == b'\n' {
+                break;
+            }
+        }
+    }
+
+    let start_offset = clamped_offset.saturating_add(discarded);
+    let mut data = vec![0u8; 16384];
+    let n = file.read(&mut data).map_err(|e| format!("read: {e}"))?;
+    data.truncate(n);
+    Ok(JsonlReadChunk {
+        data,
+        start_offset,
+        end_offset: start_offset.saturating_add(n as u64),
+        skipped_partial_record: !on_record_boundary,
+    })
+}
+
 pub(super) struct PostTerminalState<'a> {
     pub(super) turn_result_relayed: bool,
     pub(super) post_terminal_continuation_logged: &'a mut bool,
@@ -62,6 +116,55 @@ pub(super) struct PostTerminalState<'a> {
     pub(super) active_stream_inflight_reacquire_logged: &'a mut bool,
     pub(super) restored_turn: &'a Option<RestoredWatcherTurn>,
     pub(super) restored_injected_prompt_message_id: Option<u64>,
+}
+
+#[cfg(test)]
+mod alignment_tests {
+    use super::read_jsonl_chunk_aligned;
+
+    #[test]
+    fn non_boundary_offset_discards_partial_record_without_classifying_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("incident.jsonl");
+        let partial = serde_json::json!({
+            "type": "system",
+            "subtype": "task_notification",
+            "content": "review mentions rate limit as ordinary prose"
+        })
+        .to_string();
+        let complete = serde_json::json!({
+            "type": "result",
+            "is_error": false,
+            "result": "completed"
+        })
+        .to_string();
+        std::fs::write(&path, format!("{partial}\n{complete}\n")).expect("fixture");
+        let offset = (partial.find("rate limit").expect("phrase") + 2) as u64;
+
+        let chunk = read_jsonl_chunk_aligned(path.to_str().expect("path"), offset).expect("read");
+
+        assert!(chunk.skipped_partial_record);
+        assert_eq!(
+            String::from_utf8(chunk.data).expect("utf8"),
+            format!("{complete}\n")
+        );
+        assert_eq!(chunk.start_offset, partial.len() as u64 + 1);
+    }
+
+    #[test]
+    fn boundary_offset_keeps_complete_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("boundary.jsonl");
+        let first = "{\"type\":\"system\"}\n";
+        let second = "{\"type\":\"result\"}\n";
+        std::fs::write(&path, format!("{first}{second}")).expect("fixture");
+
+        let chunk = read_jsonl_chunk_aligned(path.to_str().expect("path"), first.len() as u64)
+            .expect("read");
+
+        assert!(!chunk.skipped_partial_record);
+        assert_eq!(String::from_utf8(chunk.data).expect("utf8"), second);
+    }
 }
 
 pub(super) async fn poll_watcher_output_or_continue(
@@ -263,21 +366,13 @@ pub(super) async fn poll_watcher_output_or_continue(
         tokio::task::spawn_blocking({
             let path = output_path.to_string();
             let offset = current_offset;
-            move || -> Result<(Vec<u8>, u64), String> {
-                let mut file = std::fs::File::open(&path).map_err(|e| format!("open: {}", e))?;
-                file.seek(SeekFrom::Start(offset))
-                    .map_err(|e| format!("seek: {}", e))?;
-                let mut buf = vec![0u8; 16384];
-                let n = file.read(&mut buf).map_err(|e| format!("read: {}", e))?;
-                buf.truncate(n);
-                Ok((buf, offset + n as u64))
-            }
+            move || read_jsonl_chunk_aligned(&path, offset)
         }),
     )
     .await;
 
-    let (data, new_offset) = match read_result {
-        Ok(Ok(Ok((data, off)))) => (data, off),
+    let read_chunk = match read_result {
+        Ok(Ok(Ok(chunk))) => chunk,
         _ => {
             match tmux_liveness_decision(
                 cancel.load(Ordering::Relaxed),
@@ -325,6 +420,17 @@ pub(super) async fn poll_watcher_output_or_continue(
             }
         }
     };
+    if read_chunk.skipped_partial_record {
+        tracing::warn!(
+            tmux_session = %tmux_session_name,
+            requested_offset = current_offset,
+            aligned_offset = read_chunk.start_offset,
+            "tmux watcher aligned a non-boundary JSONL offset without classifying the partial record"
+        );
+    }
+    let data = read_chunk.data;
+    let data_start_offset = read_chunk.start_offset;
+    let new_offset = read_chunk.end_offset;
 
     let bytes_available = data.len().saturating_add(all_data.len());
     let poll_decision = if bytes_available == 0 {
@@ -390,7 +496,6 @@ pub(super) async fn poll_watcher_output_or_continue(
     }
 
     // We got new data while not paused — this means terminal input triggered a response
-    let data_start_offset = current_offset; // offset where this read batch started
     current_offset = new_offset;
     // #3956: re-stamp the submit prompt anchor on this observed streaming output
     // so a turn streaming continuously past PROMPT_ANCHOR_SUBMIT_TTL (4h) keeps a

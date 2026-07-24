@@ -4,7 +4,6 @@ use crate::services::cluster::relay_producer_registry::RelayProducerRegistry;
 use crate::services::cluster::stream_relay::RelayProducer;
 use crate::services::discord::InflightTurnState;
 use crate::services::discord::task_notification_delivery::merge_context;
-use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
@@ -654,23 +653,23 @@ pub(super) async fn collect_turn_stream_until_terminal(
                 tokio::task::spawn_blocking({
                     let path = output_path.clone();
                     let offset = current_offset;
-                    move || -> Result<(Vec<u8>, u64), String> {
-                        let mut file =
-                            std::fs::File::open(&path).map_err(|e| format!("open: {}", e))?;
-                        file.seek(SeekFrom::Start(offset))
-                            .map_err(|e| format!("seek: {}", e))?;
-                        let mut buf = vec![0u8; 16384];
-                        let n = file.read(&mut buf).map_err(|e| format!("read: {}", e))?;
-                        buf.truncate(n);
-                        Ok((buf, offset + n as u64))
-                    }
+                    move || super::loop_poll_prologue::read_jsonl_chunk_aligned(&path, offset)
                 }),
             )
             .await;
 
             match read_more {
-                Ok(Ok(Ok((chunk, off)))) if !chunk.is_empty() => {
-                    current_offset = off;
+                Ok(Ok(Ok(read_chunk))) if !read_chunk.data.is_empty() => {
+                    if read_chunk.skipped_partial_record {
+                        tracing::warn!(
+                            tmux_session = %tmux_session_name,
+                            requested_offset = current_offset,
+                            aligned_offset = read_chunk.start_offset,
+                            "tmux watcher aligned a non-boundary streaming JSONL offset without classifying the partial record"
+                        );
+                    }
+                    let chunk = read_chunk.data;
+                    current_offset = read_chunk.end_offset;
                     maybe_refresh_watcher_activity_heartbeat(
                         shared.pg_pool.as_ref(),
                         &shared.token_hash,
@@ -680,7 +679,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
                         &mut last_activity_heartbeat_at,
                     );
                     ready_for_input_tracker.record_output();
-                    let chunk_start_offset = current_offset.saturating_sub(chunk.len() as u64);
+                    let chunk_start_offset = read_chunk.start_offset;
                     let decoded_chunk = utf8_decoder.decode(&chunk, chunk_start_offset);
                     // #3041 P1-3 (Part a, B1): DEFER the forward until AFTER the
                     // parse so the RESULT-bearing streaming chunk rides a TERMINAL
@@ -864,8 +863,8 @@ pub(super) async fn collect_turn_stream_until_terminal(
                             .await;
                     }
                 }
-                Ok(Ok(Ok((_, off)))) => {
-                    current_offset = off;
+                Ok(Ok(Ok(read_chunk))) => {
+                    current_offset = read_chunk.end_offset;
                     if should_probe_tmux_liveness(
                         last_liveness_probe_at.elapsed(),
                         tmux_dead_marker_exists(&tmux_session_name),
