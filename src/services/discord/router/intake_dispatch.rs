@@ -25,6 +25,7 @@ pub(crate) enum IntakeOrigin {
     QueuedDrain,
     SlashSkill,
     TextSkill,
+    RawAttachment,
 }
 
 impl IntakeOrigin {
@@ -226,6 +227,14 @@ pub(crate) async fn finish_text_intake_admission(
     match admission {
         IntakeAdmission::Local(permit) => {
             finish_admitted_local(deps, permit, submission).await?;
+        }
+        IntakeAdmission::DeferredOpenRoute {
+            ref target_instance_id,
+        } if matches!(submission.origin, IntakeOrigin::RawAttachment) => {
+            let reason = IntakeBlockedReason::NonPortableAttachmentRoutedTarget {
+                target_instance_id: target_instance_id.clone(),
+            };
+            notify_blocked_intake(deps, &submission, &reason).await;
         }
         IntakeAdmission::DeferredOpenRoute { .. } => {
             defer_live_submission(deps, submission).await;

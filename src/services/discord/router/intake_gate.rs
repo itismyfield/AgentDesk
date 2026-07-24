@@ -835,7 +835,7 @@ pub(in crate::services::discord) async fn handle_event(
                         turn_kind,
                         preserve_on_cancel,
                     },
-                    origin: super::IntakeOrigin::LiveMessage,
+                    origin: super::IntakeOrigin::RawAttachment,
                     preserve_on_cancel,
                     has_nonportable_uploads: true,
                     attachments: attachments.clone(),
@@ -1617,6 +1617,7 @@ pub(in crate::services::discord) async fn handle_event(
                 admitted.request.reply_context = reply_context;
                 admitted.request.has_reply_boundary = has_reply_boundary;
                 admitted.request.turn_kind = turn_kind;
+                admitted.origin = super::IntakeOrigin::LiveMessage;
                 admitted.attachments.clear();
                 admitted.preloaded_uploads = preloaded_uploads;
                 admitted.voice_announcement = resolved_voice_announcement;
