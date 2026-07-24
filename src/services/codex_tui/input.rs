@@ -1426,7 +1426,7 @@ impl Default for CodexPaneBusySignalTracker {
 }
 
 impl CodexPaneBusySignalTracker {
-    fn with_freshness(freshness: std::time::Duration) -> Self {
+    pub(crate) fn with_freshness(freshness: std::time::Duration) -> Self {
         Self {
             last_marker: None,
             last_marker_changed_at: None,
@@ -1445,7 +1445,7 @@ impl CodexPaneBusySignalTracker {
         self.observe_capture_at(&pane, std::time::Instant::now())
     }
 
-    fn observe_capture_at(
+    pub(crate) fn observe_capture_at(
         &mut self,
         pane: &str,
         observed_at: std::time::Instant,
@@ -1455,6 +1455,7 @@ impl CodexPaneBusySignalTracker {
             self.last_marker_changed_at = None;
             return CodexPaneBusySignal::Idle;
         };
+        let marker = normalize_codex_active_turn_marker(&marker);
 
         if self.last_marker.as_deref() != Some(marker.as_str()) {
             self.last_marker = Some(marker);
@@ -1486,6 +1487,47 @@ fn recent_codex_active_turn_marker(pane: &str) -> Option<String> {
         .take(6)
         .find(|line| line_is_codex_active_turn_marker(line))
         .map(|line| line.trim().to_string())
+}
+
+fn normalize_codex_active_turn_marker(marker: &str) -> String {
+    let Some(open_paren) = marker.find('(') else {
+        return marker.to_string();
+    };
+    let elapsed_start = open_paren + 1;
+    let Some(separator_offset) = marker[elapsed_start..].find('•') else {
+        return marker.to_string();
+    };
+    let elapsed_end = elapsed_start + separator_offset;
+    let elapsed = marker[elapsed_start..elapsed_end].trim();
+    if !codex_elapsed_time_component(elapsed) {
+        return marker.to_string();
+    }
+
+    format!("{}(<elapsed> {}", &marker[..open_paren], &marker[elapsed_end..])
+}
+
+fn codex_elapsed_time_component(candidate: &str) -> bool {
+    let mut rest = candidate;
+    let mut components = 0;
+    for suffix in ['h', 'm', 's'] {
+        let digits = rest
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .count();
+        if digits == 0 {
+            continue;
+        }
+        let (number, after_number) = rest.split_at(digits);
+        let Some(after_suffix) = after_number.strip_prefix(suffix) else {
+            continue;
+        };
+        if number.parse::<u64>().is_err() {
+            return false;
+        }
+        components += 1;
+        rest = after_suffix.trim_start();
+    }
+    components > 0 && rest.is_empty()
 }
 
 fn pane_has_dim_legacy_codex_prompt_in_pane(pane: &str) -> bool {
@@ -2514,11 +2556,40 @@ more output\n\
                 "• Working (5m 01s • esc to interrupt)",
                 started_at + std::time::Duration::from_millis(102),
             ),
-            CodexPaneBusySignal::Fresh
+            CodexPaneBusySignal::Expired,
+            "elapsed-only marker changes must not reset freshness"
+        );
+        assert_eq!(
+            tracker.observe_capture_at(
+                "• Running tests (5m 02s • esc to interrupt)",
+                started_at + std::time::Duration::from_millis(103),
+            ),
+            CodexPaneBusySignal::Fresh,
+            "meaningful marker changes must reset freshness"
         );
         assert_eq!(
             tracker.observe_capture_at(CODEX_TUI_READY_PANE, started_at),
             CodexPaneBusySignal::Idle
+        );
+    }
+
+    #[test]
+    fn codex_pane_busy_signal_normalizes_supported_elapsed_formats() {
+        assert_eq!(
+            normalize_codex_active_turn_marker("• Working (12s • esc to interrupt)"),
+            "• Working (<elapsed> • esc to interrupt)"
+        );
+        assert_eq!(
+            normalize_codex_active_turn_marker("• Working (1m03s • esc to interrupt)"),
+            "• Working (<elapsed> • esc to interrupt)"
+        );
+        assert_eq!(
+            normalize_codex_active_turn_marker("• Working (1h 02m 03s • esc to interrupt)"),
+            "• Working (<elapsed> • esc to interrupt)"
+        );
+        assert_eq!(
+            normalize_codex_active_turn_marker("• Working (phase 12s • esc to interrupt)"),
+            "• Working (phase 12s • esc to interrupt)"
         );
     }
 
