@@ -1723,23 +1723,39 @@ mod live_intake_preserve_wiring_tests {
             .find("stale_dispatch_turn_for_text(")
             .map(|offset| guard_pos + offset)
             .expect("stale dispatch lookup remains present for automation");
-        let submission_pos = module_src[stale_lookup_pos..]
-            .find("origin: super::IntakeOrigin::LiveMessage,")
+        let raw_submission_pos = module_src[stale_lookup_pos..]
+            .find("origin: super::IntakeOrigin::RawAttachment,")
             .map(|offset| stale_lookup_pos + offset)
+            .expect("raw-attachment IntakeSubmission construction exists");
+        let live_submission_pos = module_src[raw_submission_pos..]
+            .find("origin: super::IntakeOrigin::LiveMessage,")
+            .map(|offset| raw_submission_pos + offset)
             .expect("live-message IntakeSubmission construction exists");
-        let request_window = &module_src[stale_lookup_pos..submission_pos];
-        let submission_window = &module_src[submission_pos..];
+        let raw_request_window = &module_src[stale_lookup_pos..raw_submission_pos];
+        let raw_submission_window = &module_src[raw_submission_pos..live_submission_pos];
+        let live_request_window = &module_src[raw_submission_pos..live_submission_pos];
+        let live_submission_window = &module_src[live_submission_pos..];
 
         assert!(computation_pos < guard_pos && guard_pos < stale_lookup_pos);
         assert!(
-            request_window.contains("turn_kind,\n                    preserve_on_cancel,"),
-            "IntakeRequest must reuse the precomputed preservation value"
+            raw_request_window.contains("turn_kind,\n                        preserve_on_cancel,"),
+            "raw attachment IntakeRequest must reuse the precomputed preservation value"
         );
         assert!(
-            submission_window.contains(
-                "origin: super::IntakeOrigin::LiveMessage,\n                preserve_on_cancel,"
+            raw_submission_window.contains(
+                "origin: super::IntakeOrigin::RawAttachment,\n                    preserve_on_cancel,"
             ),
-            "IntakeSubmission must reuse the precomputed preservation value"
+            "raw attachment IntakeSubmission must reuse the precomputed preservation value"
+        );
+        assert!(
+            live_request_window.contains("turn_kind,\n                        preserve_on_cancel,"),
+            "live IntakeRequest must reuse the precomputed preservation value"
+        );
+        assert!(
+            live_submission_window.contains(
+                "origin: super::IntakeOrigin::LiveMessage,\n                    preserve_on_cancel,"
+            ),
+            "live IntakeSubmission must reuse the precomputed preservation value"
         );
     }
 }
