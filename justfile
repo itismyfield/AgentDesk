@@ -36,6 +36,11 @@ test-non-pg:
     cargo test --lib formatting -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib delivery_record -- --skip _pg --skip pg_ --skip postgres
     env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::watcher_lifecycle::tests::tests::turn_starts_reuse_healthy_runtime_path_incumbent_after_handoff -- --exact
+    # #4895: structured overload provenance, JSONL alignment, and main-session kill guards.
+    cargo test --lib tmux_error_detect::pure_tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib tmux_output_stream::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib loop_poll_prologue::alignment_tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib terminal_abort_exits::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib server::claude_oauth_usage_tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib tui_task_card::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib server::routes::message_outbox::tests -- --skip _pg --skip pg_ --skip postgres
