@@ -37,8 +37,8 @@ mod selection;
 mod selection_runtime;
 
 pub(super) use lifecycle::{
-    cancel_meeting, handle_meeting_command, load_meeting_config, meeting_status, spawn_direct_start,
-    start_meeting,
+    cancel_meeting, handle_meeting_command, load_meeting_config, meeting_status,
+    spawn_direct_start, start_meeting,
 };
 pub(in crate::services::discord) use selection_runtime::{
     list_available_agent_options, send_meeting_message,
@@ -329,7 +329,6 @@ fn display_query_hash(hash: &str) -> String {
         .unwrap_or_else(|| hash.to_string())
 }
 
-
 fn parse_primary_provider_arg(
     raw: Option<&str>,
     default_provider: ProviderKind,
@@ -446,8 +445,6 @@ async fn cleanup_meeting_if_current(
         core.active_meetings.remove(&channel_id);
     }
 }
-
-
 
 // ─── Command Handler ─────────────────────────────────────────────────────────
 
