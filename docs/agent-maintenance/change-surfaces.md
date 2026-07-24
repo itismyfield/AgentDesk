@@ -212,7 +212,8 @@
 
 ### `tmux_watcher`
 
-- canonical_modules: `src/services/discord/watchers/lifecycle.rs` (watcher
+- canonical_modules: `src/services/discord/watchers/lifecycle.rs` and
+  `src/services/discord/watchers/lifecycle/*.rs` (watcher
   stop/reattach/claim/restore lifecycle, including the #1222 single-owner
   claim path and #1283 cancel-induced reattach contract),
   `src/services/discord/tmux.rs` (watcher loop and remaining tmux relay
@@ -223,22 +224,11 @@
   store-side CAS paths).
 - legacy_modules: none — relay routes are being consolidated, not replaced.
 - do_not_edit_without_migration_plan (giant-file):
-  - `src/services/discord/watchers/lifecycle.rs` (frozen giant surface — canonical
-    lifecycle extraction surface from #1435; split further before adding new
-    lifecycle behavior; #3016 phase-5b2 dropped the `mailbox_finalize_owed`
-    construction from the watcher-spawn handle; #3718 moved runtime mtime
-    heartbeat timestamp selection into `watchers/lifecycle_decision.rs` and
-    keeps lifecycle below its frozen ratchet; -6 from #3736 removing legacy
-    remote-profile restore plumbing while remote SSH is disabled; ±0 from
-    #3815 moving direct Codex TUI resume restore helpers into
-    `watchers/codex_tui_restore.rs` while adding the restore branch; -207 from
-    #3840 moving heartbeat/activity helpers into
-    `watchers/lifecycle/activity.rs`; -32 from #3898 removing the false-positive
-    "session ended … start a new session" tmux-death notice and its
-    `should_send_session_ended_notice`/`session_ended_notice`/
-    `TmuxDeathLifecycleDecision` plumbing; +25 from #4455 adding the explicit
-    force-replace claim action used only when Codex rebind proves that a live
-    same-output watcher still belongs to an earlier provider turn).
+  - `src/services/discord/watchers/lifecycle.rs` retired as a frozen giant in
+    #4712: restore scan, liveness, dispatch failure, claim/reuse ownership,
+    output policy, recovery marker, and test clusters moved verbatim into
+    sub-1000-LoC `watchers/lifecycle/*.rs` modules. The root remains the
+    canonical facade and preserves all prior call paths through re-exports.
   - `src/services/discord/tmux.rs` (frozen giant surface; test-only #4277 re-exports
     the watcher delivery-lease key helper so session-sink production-entry tests
     prove bidirectional contention on the same idle JSONL range; -9 from the #4804

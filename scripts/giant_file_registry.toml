@@ -141,7 +141,6 @@ grandfathered_baseline_paths = [
   # as well as `grandfathered` below (win-locked: a re-expanded tmux_runtime
   # cannot be re-grandfathered — it would have to land as a full [[entry]] or
   # shrink). The split outputs stay sub-threshold and are not ratcheted.
-  "src/services/discord/watchers/lifecycle.rs",
   "src/services/discord_config_audit.rs",
   "src/services/dispatched_sessions.rs",
   "src/services/dispatches/discord_delivery/orchestration.rs",
@@ -689,13 +688,11 @@ owner = "discord-relay"
 deadline = "2026-10-31"
 decompose_issue = "#4712"
 
-[[entry]]
-# #3721 first-batch promotion: watcher lifecycle root still mixes restore scan,
-# liveness, heartbeat, dispatch failure, and claim/reuse ownership.
-file = "src/services/discord/watchers/lifecycle.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4712"
+# RETIRED 2026-07-24 (#4712): watchers/lifecycle.rs dropped below the production
+# giant threshold after the restore scan, liveness, dispatch failure,
+# claim/reuse ownership, output policy, recovery marker, and test clusters moved
+# verbatim into `watchers/lifecycle/` child modules. Remove the [[entry]] and
+# frozen baseline path so future growth cannot be re-grandfathered.
 
 [[entry]]
 # #3721 first-batch promotion: residual tmux relay helper root remains giant
