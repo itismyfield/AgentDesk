@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use poise::serenity_prelude::MessageId;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
 use std::future::Future;
@@ -75,6 +76,10 @@ pub struct PersistSessionTranscript<'a> {
 pub(crate) struct ChannelTranscriptPair {
     pub(crate) user_message: String,
     pub(crate) assistant_message: String,
+}
+
+pub(crate) fn discord_message_started_at_millis(message_id: Option<MessageId>) -> Option<i64> {
+    message_id.map(|message_id| message_id.created_at().timestamp_millis())
 }
 
 pub(crate) async fn record_channel_clear_boundary(
@@ -692,6 +697,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn discord_message_start_millis_uses_serenity_snowflake_timestamp() {
+        let message_id = MessageId::new(1);
+
+        assert_eq!(
+            discord_message_started_at_millis(Some(message_id)),
+            Some(message_id.created_at().timestamp_millis())
+        );
+        assert_eq!(discord_message_started_at_millis(None), None);
+    }
+
+    #[test]
     fn recent_channel_pairs_query_breaks_created_at_ties_by_desc_id() {
         assert!(
             FETCH_RECENT_CHANNEL_PAIRS_SQL
@@ -835,6 +851,16 @@ mod clear_fence_pg_tests {
         }
     }
 
+    fn bridge_owned_entry<'a>(
+        turn_id: &'a str,
+        channel_id: &'a str,
+        user_msg_id: MessageId,
+    ) -> PersistSessionTranscript<'a> {
+        let mut entry = entry(turn_id, channel_id, 0);
+        entry.turn_started_at_millis = discord_message_started_at_millis(Some(user_msg_id));
+        entry
+    }
+
     async fn channel_pairs(pool: &PgPool, channel_id: &str) -> Vec<ChannelTranscriptPair> {
         fetch_recent_channel_pairs(pool, channel_id, 10)
             .await
@@ -870,24 +896,42 @@ mod clear_fence_pg_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn post_clear_turn_persists_and_is_reinjected_pg() {
+    async fn bridge_owned_pre_clear_turn_is_blocked_and_post_clear_turn_is_reinjected_pg() {
         let (db, pool) = create_pool().await;
         let channel_id = "4533002";
+        let pre_clear_user_msg_id = MessageId::new(1);
         record_channel_clear_boundary(Some(&pool), channel_id)
             .await
             .expect("record clear boundary"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
-        let turn_started_at = chrono::Utc::now() + chrono::Duration::seconds(1);
+        let post_clear_user_msg_id = MessageId::new(u64::MAX);
 
-        let stored = persist_turn_db(
+        let pre_clear_stored = persist_turn_db(
             Some(&pool),
-            entry("post-clear", channel_id, turn_started_at.timestamp_millis()),
+            bridge_owned_entry("bridge-pre-clear", channel_id, pre_clear_user_msg_id),
         )
         .await
-        .expect("persist post-clear transcript"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
+        .expect("persist bridge-owned pre-clear transcript"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
+        let post_clear_stored = persist_turn_db(
+            Some(&pool),
+            bridge_owned_entry("bridge-post-clear", channel_id, post_clear_user_msg_id),
+        )
+        .await
+        .expect("persist bridge-owned post-clear transcript"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
 
-        assert!(stored, "turns started after /clear must persist normally");
+        assert!(
+            !pre_clear_stored,
+            "bridge-owned turns anchored before /clear must be rejected"
+        );
+        assert!(
+            post_clear_stored,
+            "bridge-owned turns anchored after /clear must persist normally"
+        );
         let pairs = channel_pairs(&pool, channel_id).await;
-        assert_eq!(pairs.len(), 1, "post-clear turn must remain injectable");
+        assert_eq!(
+            pairs.len(),
+            1,
+            "only the post-clear bridge turn is injectable"
+        );
         assert_eq!(pairs[0].user_message, "secret before clear");
         pool.close().await;
         db.drop().await;
