@@ -1734,7 +1734,11 @@ mod live_intake_preserve_wiring_tests {
         let raw_request_window = &module_src[stale_lookup_pos..raw_submission_pos];
         let raw_submission_window = &module_src[raw_submission_pos..live_submission_pos];
         let live_request_window = &module_src[raw_submission_pos..live_submission_pos];
-        let live_submission_window = &module_src[live_submission_pos..];
+        let production_end = module_src[live_submission_pos..]
+            .find("#[cfg(test)]\nmod reply_context_tests")
+            .map(|offset| live_submission_pos + offset)
+            .expect("production intake gate ends before reply-context tests");
+        let live_submission_window = &module_src[live_submission_pos..production_end];
 
         assert!(computation_pos < guard_pos && guard_pos < stale_lookup_pos);
         assert!(
