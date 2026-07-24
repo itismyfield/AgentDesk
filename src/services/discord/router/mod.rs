@@ -13,8 +13,8 @@ pub(crate) use authorization::TurnKind;
 pub(crate) use intake_dispatch::{
     IntakeOrigin, IntakeSubmission, LocalAdmissionPermit, QueuedAdmissionDisposition,
     admit_queued_intake, admit_text_intake, dispatch_skill_intake, dispatch_text_intake,
-    finish_admitted_queued_intake, finish_admitted_skill_intake, finish_admitted_text_intake,
-    finish_text_intake_admission, prepare_admitted_live_attachments, resolve_attachment_admission,
+    finish_admitted_queued_intake, finish_admitted_text_intake, finish_text_intake_admission,
+    prepare_admitted_live_attachments, resolve_attachment_admission,
 };
 pub(super) use intake_gate::{handle_event, should_process_turn_message};
 #[cfg(test)]

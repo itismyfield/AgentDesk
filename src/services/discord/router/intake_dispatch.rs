@@ -17,7 +17,6 @@ pub(crate) use queued::{
     QueuedAdmissionDisposition, admit_queued_intake, finish_admitted_queued_intake,
 };
 pub(crate) use skill::dispatch_skill_intake;
-pub(crate) use skill::finish_admitted_skill_intake;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IntakeOrigin {

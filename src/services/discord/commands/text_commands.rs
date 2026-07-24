@@ -2,10 +2,7 @@ use poise::serenity_prelude as serenity;
 use poise::serenity_prelude::{CreateAttachment, CreateMessage};
 use std::sync::Arc;
 
-use super::super::router::{
-    IntakeDeps, IntakeOrigin, LocalAdmissionPermit, dispatch_skill_intake,
-    finish_admitted_skill_intake,
-};
+use super::super::router::{IntakeDeps, IntakeOrigin, LocalAdmissionPermit, dispatch_skill_intake};
 use super::super::*;
 use super::build_provider_skill_prompt;
 use crate::services::provider::CancelToken;
@@ -1464,33 +1461,19 @@ Any other message is sent to {p}.
                 shared: &data.shared,
                 token: &data.token,
             };
-            if let Some(permit) = admitted_attachment_permit.take() {
-                finish_admitted_skill_intake(
-                    &deps,
-                    permit,
-                    data.provider.clone(),
-                    channel_id,
-                    confirm.id,
-                    msg.author.id,
-                    msg.author.name.clone(),
-                    skill_prompt,
-                    preloaded_uploads.to_vec(),
-                )
-                .await?;
-            } else {
-                dispatch_skill_intake(
-                    &deps,
-                    data.provider.clone(),
-                    channel_id,
-                    confirm.id,
-                    msg.author.id,
-                    msg.author.name.clone(),
-                    skill_prompt,
-                    IntakeOrigin::TextSkill,
-                    preloaded_uploads.to_vec(),
-                )
-                .await?;
-            }
+            dispatch_skill_intake(
+                &deps,
+                data.provider.clone(),
+                channel_id,
+                confirm.id,
+                msg.author.id,
+                msg.author.name.clone(),
+                skill_prompt,
+                IntakeOrigin::TextSkill,
+                preloaded_uploads.to_vec(),
+                admitted_attachment_permit.take(),
+            )
+            .await?;
             return Ok(true);
         }
 

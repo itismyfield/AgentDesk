@@ -364,6 +364,7 @@ async fn live_and_skill_producers_forward_to_foreign_owner_pg() {
         "/unknown-skill".to_string(),
         IntakeOrigin::SlashSkill,
         Vec::new(),
+        None,
     )
     .await
     .expect("slash skill forwards");
@@ -379,6 +380,7 @@ async fn live_and_skill_producers_forward_to_foreign_owner_pg() {
         "Execute /registered-skill".to_string(),
         IntakeOrigin::TextSkill,
         Vec::new(),
+        None,
     )
     .await
     .expect("text skill forwards");
