@@ -39,10 +39,11 @@ pub(super) async fn handle_empty_response_and_busy_requeue(
 }
 
 /// Requeue a Claude-TUI pre-submit busy timeout, preserving the inflight turn.
-/// Returns the user-facing delivery response and whether the inflight must be
-/// preserved for cleanup retry (only on requeue failure — a failed requeue must
-/// NOT be reported as success, #4605). Called only when the recovery step set
-/// `claude_tui_busy_requeue_pending`, after its state borrow is released.
+/// Returns the requeue outcome so the caller can arm the next kickoff only after
+/// this attempt's terminal card delivery has completed. A requeue failure still
+/// preserves inflight instead of being reported as success (#4605). Called only
+/// when recovery set `claude_tui_busy_requeue_pending`, after its state borrow is
+/// released.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn apply_busy_requeue_if_pending(
     claude_tui_busy_requeue_pending: bool,
@@ -55,9 +56,9 @@ pub(super) async fn apply_busy_requeue_if_pending(
     turn_id: &str,
     delivery_response: &mut String,
     preserve_inflight_for_cleanup_retry: &mut bool,
-) {
+) -> Option<followup_requeue::FollowupRequeueOutcome> {
     if !claude_tui_busy_requeue_pending {
-        return;
+        return None;
     }
     let outcome = followup_requeue::requeue_claude_tui_followup_pre_submit_timeout(
         shared_owned,
@@ -98,4 +99,5 @@ pub(super) async fn apply_busy_requeue_if_pending(
             "busy follow-up notice diverged from the live placeholder; delivering on the placeholder"
         );
     }
+    Some(outcome)
 }

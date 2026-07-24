@@ -218,6 +218,7 @@ pub(super) async fn run_terminal_outcome_delivery(
     // present + matching, so the bridge refreshes it and retry survives.
     let mut bridge_skip_holder_owns_inflight = false;
     let mut claude_tui_busy_requeue_pending = false;
+    let mut busy_requeue_outcome = None;
     let (mut terminal_delivery_committed, mut terminal_body_visible) = (false, false);
     let mut status_panel_terminal_committed = false;
     let mut completion_footer_terminal_text: Option<String> = None;
@@ -439,7 +440,7 @@ pub(super) async fn run_terminal_outcome_delivery(
         // Recovery wrote `claude_tui_busy_requeue_pending` back through its state
         // borrow (now released), so the requeue re-borrows the shared locals here
         // sequentially — never aliased with the recovery call above.
-        apply_busy_requeue_if_pending(
+        busy_requeue_outcome = apply_busy_requeue_if_pending(
             claude_tui_busy_requeue_pending,
             &shared_owned,
             &provider,
@@ -854,6 +855,17 @@ pub(super) async fn run_terminal_outcome_delivery(
             },
         )
         .await;
+    }
+    // The busy notice is shared across attempts. Do not arm attempt N+1 until
+    // every awaited terminal edit for attempt N has completed; otherwise N+1 can
+    // deliver its answer first and then be clobbered by N's late busy edit.
+    if let Some(outcome) = busy_requeue_outcome {
+        outcome.schedule_kickoff_after_terminal_card_delivery(
+            &shared_owned,
+            &provider,
+            channel_id,
+            "claude_tui_followup_requeue_after_terminal_card_delivery",
+        );
     }
     // #4888: the busy-notice binding and its aggregate retry budget outlive a
     // single turn on purpose — the retry kickoff must find the same card and the

@@ -22,10 +22,35 @@ fn retry_present_or_accepted(outcome: &crate::services::discord::MailboxEnqueueO
         )
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct FollowupRequeueOutcome {
     pub(super) requeued: bool,
     pub(super) retry_capped: bool,
     pub(super) notice_message_id: MessageId,
+}
+
+impl FollowupRequeueOutcome {
+    /// Arm the next retry only after the caller has completed this attempt's
+    /// terminal card edit. This sequencing prevents the successor attempt from
+    /// finishing on the shared notice before the predecessor's busy edit lands.
+    pub(super) fn schedule_kickoff_after_terminal_card_delivery(
+        self,
+        shared: &Arc<SharedData>,
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+        reason: &'static str,
+    ) -> bool {
+        if !self.requeued || self.retry_capped {
+            return false;
+        }
+        super::super::schedule_deferred_idle_queue_kickoff(
+            shared.clone(),
+            provider.clone(),
+            channel_id,
+            reason,
+        );
+        true
+    }
 }
 
 pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
@@ -165,14 +190,6 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
                 .await;
             }
         }
-        if !retry_decision.is_some_and(|decision| decision.capped) {
-            super::super::schedule_deferred_idle_queue_kickoff(
-                shared_owned.clone(),
-                provider.clone(),
-                channel_id,
-                "claude_tui_followup_requeue_inflight",
-            );
-        }
     }
     FollowupRequeueOutcome {
         requeued: retry_present_or_accepted,
@@ -309,6 +326,57 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn uncapped_retry_arms_only_after_terminal_card_delivery_4888() {
+        let _root = scoped_runtime_root();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(100_000_004_888_101);
+        let message_id = MessageId::new(100_000_004_888_102);
+        let inflight = inflight(channel_id, message_id);
+
+        let outcome = requeue_claude_tui_followup_pre_submit_timeout(
+            &shared,
+            &provider,
+            channel_id,
+            &inflight,
+            None,
+            None,
+            "turn-4888-delivery-order",
+        )
+        .await;
+        assert!(outcome.requeued);
+        assert!(!outcome.retry_capped);
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "requeue alone must not expose the successor before terminal card delivery"
+        );
+        assert!(outcome.schedule_kickoff_after_terminal_card_delivery(
+            &shared,
+            &provider,
+            channel_id,
+            "test_busy_retry_after_terminal_card_delivery",
+        ));
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the delivery completion edge arms exactly one successor kickoff"
+        );
+        assert!(
+            shared
+                .restart
+                .deferred_hook_channels
+                .contains_key(&channel_id)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn retry_cap_preserves_entry_and_stops_auto_kickoff_4888() {
         let _root = scoped_runtime_root();
         let shared = crate::services::discord::make_shared_data_for_tests();
@@ -347,6 +415,15 @@ mod tests {
         .await;
         assert!(outcome.requeued);
         assert!(outcome.retry_capped);
+        assert!(
+            !outcome.schedule_kickoff_after_terminal_card_delivery(
+                &shared,
+                &provider,
+                channel_id,
+                "test_capped_busy_retry_after_terminal_card_delivery",
+            ),
+            "a capped retry must not arm a successor after terminal delivery"
+        );
         assert_eq!(
             outcome.notice_message_id,
             MessageId::new(inflight.current_msg_id)
