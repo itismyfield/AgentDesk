@@ -247,4 +247,3 @@ pub(super) fn watcher_has_post_work_ready_evidence(
 ) -> bool {
     !full_response.trim().is_empty() || tool_state.any_tool_used
 }
-
