@@ -5,15 +5,15 @@ use axum::{
 
 use super::super::{
     ApiRouter, AppState, auto_queue, cluster, cron_api, dispatched_sessions, dispatches, docs,
-    health_api, idle_recap, maintenance, message_outbox, messages, monitoring, pipeline,
-    prompt_manifest_retention, protected_api_domain, provider_cli_api, queue_api, routines,
-    scheduled_messages, skills_api, termination_events,
+    e2e_control, health_api, idle_recap, maintenance, message_outbox, messages, monitoring,
+    pipeline, prompt_manifest_retention, protected_api_domain, provider_cli_api, queue_api,
+    routines, scheduled_messages, skills_api, termination_events,
 };
 
 // Category: dispatches, queue, and ops
 
 pub(crate) fn router(state: AppState) -> ApiRouter {
-    protected_api_domain(
+    let router = protected_api_domain(
         Router::new()
             .route(
                 "/dispatches",
@@ -43,6 +43,7 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 "/discord/bot-tokens/reload",
                 post(health_api::reload_discord_bot_tokens_handler),
             )
+            // Destructive E2E routes are conditionally mounted in the enabled branch below.
             .route(
                 "/discord/send-to-agent",
                 post(health_api::send_to_agent_handler),
@@ -372,6 +373,26 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 "/provider-cli/{provider}",
                 patch(provider_cli_api::patch_provider_cli),
             ),
-        state,
-    )
+        state.clone(),
+    );
+    // Keep this branch below the ordinary route chain so disabled boots expose no
+    // method router or body extractor for any /e2e/discord path.
+    if crate::services::discord::e2e_control::enabled() {
+        crate::services::discord::e2e_control::sweep_expired();
+        router.merge(protected_api_domain(
+            Router::new()
+                .route(
+                    "/e2e/discord/channels/{channel_id}/messages/{message_id}",
+                    delete(e2e_control::delete_discord_message),
+                )
+                .route(
+                    "/e2e/discord/failures",
+                    post(e2e_control::inject_discord_failure)
+                        .delete(e2e_control::clear_discord_failure),
+                ),
+            state,
+        ))
+    } else {
+        router
+    }
 }

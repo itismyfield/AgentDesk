@@ -275,6 +275,7 @@ src/
 │   │   ├── dispatched_sessions.rs
 │   │   ├── dm_reply.rs
 │   │   ├── docs.rs
+│   │   ├── e2e_control.rs
 │   │   ├── escalation.rs
 │   │   ├── github.rs
 │   │   ├── github_dashboard.rs
@@ -980,6 +981,7 @@ src/
 │   │   ├── destructive_cancel_gate.rs
 │   │   ├── discord_io.rs
 │   │   ├── dispatch_policy.rs
+│   │   ├── e2e_control.rs
 │   │   ├── formatting.rs
 │   │   ├── gateway.rs
 │   │   ├── gateway_voice_queue.rs

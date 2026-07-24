@@ -1,0 +1,31 @@
+id: E-32
+title: two-message follow-up turn keeps older completion off the newer panel
+agent_mode: real_live
+coverage_class: live
+cells: [claude-pipe, claude-tui, claude-e, codex-pipe, codex-tui]
+isolation: required
+destructive: true
+requires_features: [two_message_panel, e2e_discord_control]
+notes: |
+  #4488 PR-F follow-up aliasing coverage. The second prompt is submitted as soon
+  as turn 1's relay marker appears, without an idle delay. The final surface must
+  preserve both answers in order and converge to one panel below turn 2.
+steps:
+  - send_prompt: "응답에 정확히 한 줄로 [E2E:E32:TURN-1] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E32:TURN-1]"
+    timeout_s: 240
+  - send_prompt: "응답에 정확히 한 줄로 [E2E:E32:TURN-2] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E32:TURN-2]"
+    timeout_s: 240
+  - wait_idle_s: 5
+assertions:
+  - ordered_text_present:
+      - "[E2E:E32:TURN-1]"
+      - "[E2E:E32:TURN-2]"
+  - no_duplicate_marker: "[E2E:E32:TURN-1]"
+  - no_duplicate_marker: "[E2E:E32:TURN-2]"
+  - body_not_overwritten: "[E2E:E32:TURN-1]"
+  - body_not_overwritten: "[E2E:E32:TURN-2]"
+  - status_panel_after_body:
+      body_marker: "[E2E:E32:TURN-2]"
+  - single_status_panel: true

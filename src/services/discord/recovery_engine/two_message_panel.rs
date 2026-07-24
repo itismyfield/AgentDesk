@@ -54,6 +54,7 @@ trait RecoveryPanelGateway {
 
 struct SerenityRecoveryPanelGateway<'a> {
     http: &'a Arc<serenity::Http>,
+    provider: &'a ProviderKind,
 }
 
 fn probe_error_is_missing(error: &serenity::Error) -> bool {
@@ -90,6 +91,12 @@ impl RecoveryPanelGateway for SerenityRecoveryPanelGateway<'_> {
         content: &'a str,
     ) -> RecoveryPanelFuture<'a, Result<MessageId, String>> {
         Box::pin(async move {
+            if crate::services::discord::e2e_control::consume_send_failure(
+                self.provider,
+                channel_id,
+            ) {
+                return Err("injected E2E Discord send failure".to_string());
+            }
             crate::services::discord::http::send_channel_message(self.http, channel_id, content)
                 .await
                 .map(|message| message.id)
@@ -103,6 +110,12 @@ impl RecoveryPanelGateway for SerenityRecoveryPanelGateway<'_> {
         panel_id: MessageId,
     ) -> RecoveryPanelFuture<'a, Result<(), String>> {
         Box::pin(async move {
+            if crate::services::discord::e2e_control::consume_delete_failure(
+                self.provider,
+                channel_id,
+            ) {
+                return Err("injected E2E Discord delete failure".to_string());
+            }
             crate::services::discord::http::delete_channel_message(self.http, channel_id, panel_id)
                 .await
                 .map_err(|error| error.to_string())
@@ -285,7 +298,7 @@ pub(super) async fn recover_two_message_panel(
     state: &mut inflight::InflightTurnState,
 ) -> bool {
     recover_two_message_panel_with_gateway(
-        &SerenityRecoveryPanelGateway { http },
+        &SerenityRecoveryPanelGateway { http, provider },
         shared,
         provider,
         state,

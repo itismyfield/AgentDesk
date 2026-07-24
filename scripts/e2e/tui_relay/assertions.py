@@ -458,11 +458,7 @@ def status_panel_after_body(
     if not body_messages:
         raise AssertionError(f"body marker {body_marker!r} not found in raw window")
     newest_body = max(body_messages, key=_message_order_key)
-    panel_messages = [
-        message
-        for message in _raw_assertion_messages(window)
-        if re.search(panel_regex, message.get("content") or "")
-    ]
+    panel_messages = find_status_panels(window, panel_regex=panel_regex)
     if not panel_messages:
         raise AssertionError(
             f"status panel matching {panel_regex!r} not found after body {body_marker!r}"
@@ -475,16 +471,35 @@ def status_panel_after_body(
         )
 
 
+def find_status_panels(
+    window: Window,
+    *,
+    panel_regex: str = r"Processing\.\.\.|진행 중|응답 완료|^🟢|^✅|^🔴|^📦",
+) -> list[dict[str, Any]]:
+    return [
+        message
+        for message in _raw_assertion_messages(window)
+        if re.search(panel_regex, message.get("content") or "")
+    ]
+
+
+def latest_status_panel(
+    window: Window,
+    *,
+    panel_regex: str = r"Processing\.\.\.|진행 중|응답 완료|^🟢|^✅|^🔴|^📦",
+) -> dict[str, Any]:
+    panels = find_status_panels(window, panel_regex=panel_regex)
+    if not panels:
+        raise AssertionError(f"status panel matching {panel_regex!r} not found")
+    return max(panels, key=_message_order_key)
+
+
 def single_status_panel(
     window: Window,
     *,
     panel_regex: str = r"Processing\.\.\.|진행 중|응답 완료|^🟢|^✅|^🔴|^📦",
 ) -> None:
-    panels = [
-        message
-        for message in _raw_assertion_messages(window)
-        if re.search(panel_regex, message.get("content") or "")
-    ]
+    panels = find_status_panels(window, panel_regex=panel_regex)
     if len(panels) != 1:
         raise AssertionError(
             f"expected exactly one status panel matching {panel_regex!r}, got "
