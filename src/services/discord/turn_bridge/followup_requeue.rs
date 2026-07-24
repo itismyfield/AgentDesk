@@ -317,26 +317,34 @@ mod tests {
         let message_id = MessageId::new(100_000_004_888_002);
         let inflight = inflight(channel_id, message_id);
 
-        let mut outcome = None;
-        for attempt in 1..=super::super::super::busy_followup_retry_store::MAX_BUSY_RETRY_COUNT {
-            let current = requeue_claude_tui_followup_pre_submit_timeout(
-                &shared,
+        super::super::super::busy_followup_retry_store::bind_notice_if_absent(
+            &provider,
+            channel_id.get(),
+            message_id.get(),
+            inflight.current_msg_id,
+        )
+        .expect("bind busy notice");
+        for _ in 1..super::super::super::busy_followup_retry_store::MAX_BUSY_RETRY_COUNT {
+            let decision = super::super::super::busy_followup_retry_store::record_busy_retry(
                 &provider,
-                channel_id,
-                &inflight,
-                None,
-                None,
-                "turn-4888-cap",
+                channel_id.get(),
+                message_id.get(),
+                inflight.current_msg_id,
             )
-            .await;
-            assert_eq!(
-                current.retry_capped,
-                attempt == super::super::super::busy_followup_retry_store::MAX_BUSY_RETRY_COUNT
-            );
-            outcome = Some(current);
+            .expect("seed retry budget");
+            assert!(!decision.capped);
         }
 
-        let outcome = outcome.expect("retry outcome");
+        let outcome = requeue_claude_tui_followup_pre_submit_timeout(
+            &shared,
+            &provider,
+            channel_id,
+            &inflight,
+            None,
+            None,
+            "turn-4888-cap",
+        )
+        .await;
         assert!(outcome.requeued);
         assert!(outcome.retry_capped);
         assert_eq!(
@@ -346,6 +354,21 @@ mod tests {
         let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
         assert_eq!(snapshot.intervention_queue.len(), 1);
         assert_eq!(snapshot.intervention_queue[0].message_id, message_id);
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "the cap-reaching call itself must not schedule an automatic kickoff"
+        );
+        assert!(
+            !shared
+                .restart
+                .deferred_hook_channels
+                .contains_key(&channel_id),
+            "the cap-reaching call itself must not register a deferred kickoff task"
+        );
         let retry = super::super::super::busy_followup_retry_store::load(
             &provider,
             channel_id.get(),
