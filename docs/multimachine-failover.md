@@ -274,6 +274,12 @@ running on *some* host; cross-reference `client_addr` to find which.
   - Network-drop recovery time under realistic Postgres TCP keepalive
     settings on the production DB.
   - Outbox dual-drain throughput and audit (no double-send under load).
+- **Active-host loss may lose in-flight relay work.** Relay inflight files,
+  pending queues, delivery frontiers, mailbox handles, parser buffers, and tmux
+  sessions are host-local; the standby does not adopt them. This is an accepted
+  limitation until #4414 decides the residual authoritative state and the
+  multinode track (#876–#884) approves a cross-node ownership contract. See
+  [`relay-live-state-taxonomy.md`](relay-live-state-taxonomy.md).
 - **Network-drop recovery is bounded by PostgreSQL TCP keepalive**, not by
   AgentDesk. Tune PG TCP keepalives if the default detection window is
   unacceptable for your operational SLO.
