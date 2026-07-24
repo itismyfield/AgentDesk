@@ -1,5 +1,7 @@
 # Discord Outbound Migration — Coverage Map (#1006 v3 / #1280 / #1436 / #1457)
 
+> Last refreshed: 2026-07-24 (#4536 — confirmed idle/catch-up ranged POSTs now persist a generation-scoped ordered JSONL frontier before advancing the in-memory watermark. This adds an internal delivery-record commit writer but no Discord transport verb or v3 producer callsite; the coverage map below is unchanged).
+>
 > Last refreshed: 2026-07-23 (#4797 round 4 — test gateway implementations thread the queued-dispatch capability required by the `TurnGateway` trait; outbound controller delivery verbs, production callsite coverage, and delivery semantics are unchanged).
 >
 > Last refreshed: 2026-07-21 (against #4706 lint-debt annotations only; outbound callsite coverage and delivery semantics are unchanged).

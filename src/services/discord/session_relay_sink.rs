@@ -3119,22 +3119,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn idle_range_commit_requires_current_generation_and_persists_frontier() {
-        let _env_lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        struct EnvReset(Option<std::ffi::OsString>);
-        impl Drop for EnvReset {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-                }
-            }
-        }
-        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let temp = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
-
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
         let channel = ChannelId::new(45_360);
         let session = ProviderKind::Claude.build_tmux_session_name(&channel.get().to_string());
         let output_path =
@@ -3202,21 +3188,8 @@ mod tests {
 
     #[test]
     fn same_id0_turn_frame_and_inflight_derive_equal_delivery_lease_key() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        struct EnvReset(Option<std::ffi::OsString>);
-        impl Drop for EnvReset {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-                }
-            }
-        }
-        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let temp = tempfile::TempDir::new().expect("temp runtime root");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
 
         let channel = ChannelId::new(8_041);
         let generation = 17;
@@ -3494,21 +3467,8 @@ mod tests {
     //      `Delivered`/advance and fail.
     #[test]
     fn cutover_short_replace_production_path_advance_is_fresh_identity_gated() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        struct EnvReset(Option<std::ffi::OsString>);
-        impl Drop for EnvReset {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-                }
-            }
-        }
-        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let temp = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
 
         // The sink's `SinkPostHeartbeat` spawns a `DeliveryLeaseHeartbeat` task,
         // which needs a Tokio reactor. Drive the production helper on a local
@@ -3645,21 +3605,8 @@ mod tests {
     // duplicate check miss.
     #[test]
     fn session_sink_short_replace_raw_body_fingerprint_refuses_watcher_rerelay_4081() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        struct EnvReset(Option<std::ffi::OsString>);
-        impl Drop for EnvReset {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-                }
-            }
-        }
-        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let temp = tempfile::TempDir::new().expect("temp runtime root");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
 
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -4256,21 +4203,8 @@ mod tests {
     // even though a snapshot taken before the POST would have matched.
     #[test]
     fn sink_post_post_recheck_blocks_advance_when_inflight_replaced_during_post() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        struct EnvReset(Option<std::ffi::OsString>);
-        impl Drop for EnvReset {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-                }
-            }
-        }
-        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let temp = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
 
         let shared = super::super::make_shared_data_for_tests();
         let channel = ChannelId::new(8_041);
@@ -4733,34 +4667,18 @@ mod tests {
     // RAII guard's Drop STILL released the lease, so the NEXT terminal delivery
     // is NOT blocked for up to ~10 minutes.
     //
-    // SAFETY (await_holding_lock): `shared_test_env_lock()` and the dedupe
-    // `TEST_LOCK` are std test-serialization Mutexes (NOT production locks). They
-    // are held across `deliver_response().await` only to keep this test's
-    // `AGENTDESK_ROOT_DIR` + shared dedupe state isolated from other tests; the
-    // awaited future itself never tries to re-acquire either lock, so there is no
-    // deadlock — this is the established pattern (see `src/reconcile.rs`).
+    // The canonical root guard serializes the process-wide env mutation. The
+    // dedupe lock is also held across the await because the future does not
+    // reacquire it and the lease assertion needs one uninterrupted state window.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn deliver_response_err_path_releases_external_input_lease_via_guard() {
-        let _env_lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        struct EnvReset(Option<std::ffi::OsString>);
-        impl Drop for EnvReset {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(value) => unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", value) },
-                    None => unsafe { std::env::remove_var("AGENTDESK_ROOT_DIR") },
-                }
-            }
-        }
-        let _env_reset = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let temp = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
 
         let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
             .lock()
-            .unwrap();
+            .unwrap_or_else(|poison| poison.into_inner());
         crate::services::tui_prompt_dedupe::reset_state_for_tests();
 
         let channel_id = 8_041_u64;
