@@ -200,6 +200,7 @@ mod confirmed_fresh_delivery {
     use super::super::{
         SessionBoundRelayAckOutcome, SessionBoundRelayAckTarget,
         session_bound_ack_confirms_transport, session_bound_ack_delivery_outcome,
+        session_bound_ack_outcome_after_resolve_time_mirror_check,
         session_bound_relay_ack_snapshot_outcome,
         watcher_should_direct_send_after_session_bound_ack,
     };
@@ -228,6 +229,36 @@ mod confirmed_fresh_delivery {
         assert!(!session_bound_ack_confirms_transport(
             SessionBoundRelayAckOutcome::NotDelivered
         ));
+    }
+
+    #[test]
+    fn resolve_time_span_drop_preserves_confirmed_fresh_transport() {
+        let metrics = Arc::new(RelayMetrics::default());
+        metrics.record_dropped_sequence_for_test(10);
+        let target = target(metrics, 12);
+        let mut turn_fully_mirrored = true;
+        let ack = SessionBoundRelayAckOutcome::FreshDelivered {
+            committed_to: None,
+            persistence_recorded: false,
+        };
+
+        let resolved = session_bound_ack_outcome_after_resolve_time_mirror_check(
+            ack,
+            &mut turn_fully_mirrored,
+            Some(&target),
+            Some(9),
+        );
+
+        assert_eq!(resolved, ack);
+        assert!(
+            !turn_fully_mirrored,
+            "the span drop still degrades mirror completeness"
+        );
+        assert!(session_bound_ack_confirms_transport(resolved));
+        assert!(
+            !watcher_should_direct_send_after_session_bound_ack(true, resolved, true),
+            "a span drop cannot revoke confirmed fresh transport and authorize a duplicate POST"
+        );
     }
 
     #[test]

@@ -1662,6 +1662,10 @@ mod relay_state_contract_refs {
         let _ = super::turn_parser::SessionRelayParser::ingest_frame;
         let _ = super::SessionBoundDiscordRelaySink::deliver_response;
         let _ = super::SessionBoundDiscordRelaySink::advance_idle_range_after_confirmed_post;
+        let _ = crate::services::cluster::stream_relay::RelaySinkOutcome::TerminalFreshDelivered {
+            committed_to: None,
+            persistence_recorded: false,
+        };
         let _ = super::idle_jsonl::idle_jsonl_suppressed_range_action;
         let _ = crate::services::discord::outbound::delivery_record::commit_ordered_jsonl_range;
     }

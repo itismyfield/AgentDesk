@@ -191,7 +191,7 @@ pub(super) fn session_bound_ack_outcome_after_resolve_time_mirror_check(
         return ack_outcome;
     }
     *turn_fully_mirrored = false;
-    if session_bound_ack_confirms_transport(ack_outcome) {
+    if matches!(ack_outcome, SessionBoundRelayAckOutcome::Delivered) {
         SessionBoundRelayAckOutcome::Dropped
     } else {
         ack_outcome

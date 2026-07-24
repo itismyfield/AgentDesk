@@ -334,8 +334,8 @@ plan.
   the mandatory acquire and production-entry regression tests).
 - Consumer rule: a confirmed fresh-message POST returned by the controller is
   preserved as a typed exact-sequence terminal resolution through
-  `RelaySinkOutcome::TerminalFreshDelivered` and
-  `session_bound_ack_confirms_transport`.
+  sym:cluster::stream_relay::RelaySinkOutcome::TerminalFreshDelivered and the
+  watcher transport-confirmation predicate.
   `committed_to=None` and `persistence_recorded=false` describe missing frontier
   authority or retry metadata; neither erases confirmed transport or authorizes
   the watcher to acquire the released lease and POST the same body again.
