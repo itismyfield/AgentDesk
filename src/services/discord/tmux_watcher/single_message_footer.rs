@@ -438,7 +438,7 @@ mod tests {
         assert!(block.starts_with("-# ⠸ 진행 중 — Claude"));
         assert!(!block.contains("계속 처리 중"));
         assert!(!block.contains('🟢'));
-        assert!(block.contains("Subagents\n└ review inspect"));
+        assert!(block.contains("-# Subagents\n-# └ review inspect"));
     }
 
     #[test]

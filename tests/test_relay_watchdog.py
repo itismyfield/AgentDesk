@@ -1272,6 +1272,25 @@ class WatcherStateParserTests(unittest.TestCase):
             ),
         )
 
+    def test_parses_local_inflight_updated_at(self):
+        payload = self.payload()
+        payload["inflight_updated_at"] = "2026-07-24 10:43:58"
+
+        probe = parse_watcher_state_probe(200, payload)
+
+        self.assertEqual(
+            probe.inflight_updated_at,
+            time.mktime(time.strptime("2026-07-24 10:43:58", "%Y-%m-%d %H:%M:%S")),
+        )
+
+    def test_malformed_inflight_updated_at_fails_closed(self):
+        payload = self.payload()
+        payload["inflight_updated_at"] = "2026-07-24T10:43:58Z"
+
+        probe = parse_watcher_state_probe(200, payload)
+
+        self.assertIsNone(probe.inflight_updated_at)
+
     def test_nullable_activity_timestamps_are_valid_schema(self):
         probe = parse_watcher_state_probe(
             200,
@@ -2416,6 +2435,7 @@ class TickChannelTests(unittest.TestCase):
         rt.watcher_probe = probe
 
     def active_foreground_probe(self, **overrides) -> WatcherStateProbe:
+        inflight_updated_at = overrides.pop("inflight_updated_at", None)
         fields = {
             "relay_stall_state": "active_foreground_stream",
             "active_turn": "foreground",
@@ -2434,6 +2454,7 @@ class TickChannelTests(unittest.TestCase):
             attached=True,
             desynced=True,
             relay_activity=CoverageActivityProbe(**fields),
+            inflight_updated_at=inflight_updated_at,
         )
 
     def test_metadata_only_growth_cannot_steal_live_selection(self):
@@ -2911,7 +2932,76 @@ class TickChannelTests(unittest.TestCase):
         self.assertEqual(len(rt.alerts), 1)
         self.assertIn("attached_but_desynced", rt.alerts[0][0])
 
-    def test_growth_with_stale_relay_timestamp_still_alerts(self):
+    def test_growth_with_stale_relay_and_advanced_inflight_update_is_suppressed(self):
+        rt = self.make_rt()
+        tick_at = self.now + 600
+        stale_relay_ms = (
+            int(tick_at * 1000) - COVERAGE_ACTIVITY_FRESH_SECS * 1000
+        )
+        probe = self.active_foreground_probe(
+            queue_depth=1,
+            last_outbound_activity_ms=None,
+            last_relay_ts_ms=stale_relay_ms,
+            inflight_updated_at=tick_at - COVERAGE_ACTIVITY_FRESH_SECS - 1,
+        )
+        self.arm_coverage(rt, probe)
+        state = {
+            "coverage_uncovered_ticks": COVERAGE_CONFIRM_TICKS - 1,
+            "coverage_desync_since": self.now,
+            relay_watchdog.COVERAGE_INFLIGHT_UPDATED_AT_KEY: (
+                tick_at - COVERAGE_ACTIVITY_FRESH_SECS - 2
+            ),
+        }
+
+        tick_coverage(
+            rt,
+            TICK_CHANNEL,
+            state,
+            tick_at,
+            CoverageTranscriptProbe(growing=True, blocks=723, lost=0),
+        )
+
+        self.assertEqual(rt.alerts, [])
+        self.assertNotIn("last_coverage_alert", state)
+        self.assertTrue(
+            any(
+                "live inflight update evidence=advanced" in line
+                for line in rt.log_lines
+            )
+        )
+
+    def test_growth_with_stale_relay_and_stalled_inflight_update_still_alerts(self):
+        rt = self.make_rt()
+        tick_at = self.now + 600
+        stale_relay_ms = (
+            int(tick_at * 1000) - COVERAGE_ACTIVITY_FRESH_SECS * 1000
+        )
+        stalled_inflight = tick_at - COVERAGE_ACTIVITY_FRESH_SECS - 1
+        probe = self.active_foreground_probe(
+            queue_depth=1,
+            last_outbound_activity_ms=None,
+            last_relay_ts_ms=stale_relay_ms,
+            inflight_updated_at=stalled_inflight,
+        )
+        self.arm_coverage(rt, probe)
+        state = {
+            "coverage_uncovered_ticks": COVERAGE_CONFIRM_TICKS - 1,
+            "coverage_desync_since": self.now,
+            relay_watchdog.COVERAGE_INFLIGHT_UPDATED_AT_KEY: stalled_inflight,
+        }
+
+        tick_coverage(
+            rt,
+            TICK_CHANNEL,
+            state,
+            tick_at,
+            CoverageTranscriptProbe(growing=True, blocks=723, lost=0),
+        )
+
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertIn("attached_but_desynced", rt.alerts[0][0])
+
+    def test_growth_with_stale_relay_and_absent_inflight_update_still_alerts(self):
         rt = self.make_rt()
         tick_at = self.now + 600
         stale_relay_ms = (

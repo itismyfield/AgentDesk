@@ -1,11 +1,10 @@
 //! Shared terminal metadata for Discord completion footers.
 
-use poise::serenity_prelude::ChannelId;
 use sqlx::Row;
 
 use super::{ProviderKind, SharedData};
 use crate::services::terminal_status_formatting::{
-    ContextWindowUsage, format_elapsed_status, format_subtext_lines, format_usage_status,
+    format_elapsed_status, format_quota_status, format_subtext_lines,
 };
 
 const ELAPSED_PREFIX: &str = "⏱ ";
@@ -16,26 +15,18 @@ const METADATA_SUFFIX_SEPARATOR: &str = "\u{2063}";
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(in crate::services::discord) struct CompletionFooterMetadata {
     elapsed: Option<String>,
+    context: Option<String>,
     rate_limit: Option<String>,
     host: Option<String>,
 }
 
 pub(in crate::services::discord) async fn load_completion_footer_metadata(
     shared: &SharedData,
-    channel_id: ChannelId,
     provider: &ProviderKind,
     owner_started_at_unix: i64,
     inflight_started_at: Option<&str>,
 ) -> CompletionFooterMetadata {
-    let context = shared
-        .ui
-        .placeholder_live_events
-        .context_panel_snapshot(channel_id);
-    let context = context.map(|context| ContextWindowUsage {
-        used_tokens: context.used_tokens,
-        window_tokens: context.context_window_tokens,
-    });
-    let rate_limit = terminal_rate_limit_summary(shared, provider, context).await;
+    let rate_limit = terminal_rate_limit_summary(shared, provider).await;
     let host = crate::config_live_reload::current()
         .is_some_and(|config| config.cluster.enabled)
         .then(crate::services::cluster::node_registry::resolve_self_instance_id_without_config);
@@ -53,8 +44,10 @@ pub(in crate::services::discord) fn append_completion_footer_metadata(
     metadata: &CompletionFooterMetadata,
 ) -> String {
     let (content, existing) = split_metadata_suffix(&block);
+    let (content, rendered_context) = take_context_section(content);
     let merged = CompletionFooterMetadata {
         elapsed: existing.elapsed.or_else(|| metadata.elapsed.clone()),
+        context: existing.context.or(rendered_context),
         rate_limit: existing.rate_limit.or_else(|| metadata.rate_limit.clone()),
         host: existing.host.or_else(|| metadata.host.clone()),
     };
@@ -93,6 +86,7 @@ impl CompletionFooterMetadata {
             self.elapsed
                 .as_deref()
                 .map(|value| format!("{ELAPSED_PREFIX}{value}")),
+            self.context.clone(),
             self.rate_limit
                 .as_deref()
                 .map(|value| format!("{RATE_LIMIT_PREFIX}{value}")),
@@ -104,6 +98,19 @@ impl CompletionFooterMetadata {
         .flatten()
         .collect()
     }
+}
+
+fn take_context_section(content: &str) -> (String, Option<String>) {
+    let mut sections = content.split("\n\n").collect::<Vec<_>>();
+    let Some(index) = sections.iter().position(|section| is_context_line(section)) else {
+        return (content.to_string(), None);
+    };
+    let context = sections.remove(index).trim().to_string();
+    (sections.join("\n\n"), Some(context))
+}
+
+fn is_context_line(line: &str) -> bool {
+    matches!(line.trim().chars().next(), Some('📦' | '⚠')) && line.contains("auto-compact")
 }
 
 fn split_metadata_suffix(block: &str) -> (&str, CompletionFooterMetadata) {
@@ -118,6 +125,8 @@ fn split_metadata_suffix(block: &str) -> (&str, CompletionFooterMetadata) {
                 metadata
                     .elapsed
                     .get_or_insert_with(|| value.trim().to_string());
+            } else if is_context_line(line) {
+                metadata.context.get_or_insert_with(|| line.to_string());
             } else if let Some(value) = line.strip_prefix(RATE_LIMIT_PREFIX) {
                 metadata
                     .rate_limit
@@ -153,6 +162,7 @@ fn completion_footer_metadata_at(
         .and_then(|line| line.strip_prefix(ELAPSED_PREFIX).map(str::to_string));
     CompletionFooterMetadata {
         elapsed,
+        context: None,
         rate_limit: rate_limit.and_then(|value| nonempty(&value)),
         host: host.and_then(|value| nonempty(&value)),
     }
@@ -166,7 +176,6 @@ fn nonempty(value: &str) -> Option<String> {
 async fn terminal_rate_limit_summary(
     shared: &SharedData,
     provider: &ProviderKind,
-    context: Option<ContextWindowUsage>,
 ) -> Option<String> {
     let data = if let Some(pool) = shared.pg_pool.as_ref() {
         let provider = provider.as_str();
@@ -180,7 +189,7 @@ async fn terminal_rate_limit_summary(
     } else {
         None
     };
-    format_usage_status(data.as_deref(), chrono::Utc::now().timestamp(), context)
+    format_quota_status(data.as_deref(), chrono::Utc::now().timestamp())
 }
 
 #[cfg(test)]
@@ -236,53 +245,46 @@ pub(in crate::services::discord) mod tests {
     }
 
     #[tokio::test]
-    async fn metadata_load_keeps_context_when_quota_cache_is_unavailable_4822() {
+    async fn metadata_load_omits_quota_when_cache_is_unavailable_4822() {
         let shared = crate::services::discord::make_shared_data_for_tests();
-        let channel_id = ChannelId::new(4_822);
-        shared.ui.placeholder_live_events.set_context_panel_usage(
-            channel_id,
-            Some("session-4822"),
-            265_000,
-            0,
-            0,
-            1_000_000,
-            80,
+        let metadata =
+            load_completion_footer_metadata(&shared, &ProviderKind::Claude, 1_800_000_000, None)
+                .await;
+        let block = append_completion_footer_metadata(
+            "📦 265.0k / 1.0M (26%) · auto-compact 80%".to_string(),
+            &metadata,
         );
 
-        let metadata = load_completion_footer_metadata(
-            &shared,
-            channel_id,
-            &ProviderKind::Claude,
-            1_800_000_000,
-            None,
-        )
-        .await;
-        let block = append_completion_footer_metadata("Context".to_string(), &metadata);
-
-        assert!(block.contains("⏳ ctw: 26% (265K/1.0M)"));
-        assert!(!block.contains("5h:"));
+        assert!(block.contains("📦 265.0k / 1.0M (26%) · auto-compact 80%"));
+        assert!(!block.contains("⏳ "));
+        assert!(!block.contains("ctw:"));
     }
 
     #[test]
-    fn quota_metadata_roundtrip_preserves_usage_reset_context_format_4822() {
+    fn completion_footer_fixture_pins_requested_order_and_dedup_4846() {
         let metadata = completion_footer_metadata_at(
             1_800_000_154,
             1_800_000_000,
             None,
-            Some(
-                "5h: 3% (4h39m) │ 7d: 47% (4d20h) │ 7d-F: 34% (4d20h) │ ctw: 26% (265K/1.0M)"
-                    .to_string(),
-            ),
-            None,
+            Some("5h: 3% (4h39m) │ 7d: 47% (4d20h) │ 7d-F: 34% (4d20h)".to_string()),
+            Some("node-a".to_string()),
         );
-        let initial = append_completion_footer_metadata("Context".to_string(), &metadata);
+        let initial = append_completion_footer_metadata(
+            "Background agents\nWaiting for background agents ⠸\n\n📦 265.0k / 1.0M (26%) · auto-compact 80%".to_string(),
+            &metadata,
+        );
         let recovered = completion_footer_metadata_from_block(Some(&initial));
-        let refreshed = append_completion_footer_metadata("Context".to_string(), &recovered);
+        let refreshed = append_completion_footer_metadata(
+            "Background agents\nWaiting for background agents ⠸\n\n📦 265.0k / 1.0M (26%) · auto-compact 80%".to_string(),
+            &recovered,
+        );
 
         assert_eq!(initial, refreshed);
-        assert!(initial.contains(
-            "⏳ 5h: 3% (4h39m) │ 7d: 47% (4d20h) │ 7d-F: 34% (4d20h) │ ctw: 26% (265K/1.0M)"
-        ));
+        assert_eq!(
+            super::super::single_message_panel::completion_footer_subtext(&initial),
+            "-# Background agents\n-# Waiting for background agents ⠸\n\n-# ⏱ 2m 34s\n-# 📦 265.0k / 1.0M (26%) · auto-compact 80%\n-# ⏳ 5h: 3% (4h39m) │ 7d: 47% (4d20h) │ 7d-F: 34% (4d20h)\n-# 🖥️ node-a"
+        );
+        assert!(!initial.contains("ctw:"));
     }
 
     #[test]

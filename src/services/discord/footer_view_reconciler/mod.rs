@@ -204,7 +204,6 @@ async fn prepare_turn_completed_footer(
         .map(|state| state.started_at);
     let metadata = super::completion_footer_metadata::load_completion_footer_metadata(
         shared,
-        channel_id,
         provider,
         owner.started_at_unix,
         inflight_started_at.as_deref(),

@@ -459,6 +459,39 @@ fn status_panel_truncates_long_body_without_processing_tail() {
 }
 
 #[test]
+fn status_panel_subtext_exactly_fits_discord_character_limit_4848() {
+    let first = "x".repeat(1_000 - "-# ".chars().count());
+    let second = "y".repeat(STATUS_PANEL_MAX_CHARS - 1_000 - 1 - "-# ".chars().count());
+    let rendered = format_and_truncate_status_panel_sections(vec![format!("{first}\n{second}")]);
+
+    assert_eq!(rendered.chars().count(), STATUS_PANEL_MAX_CHARS);
+    assert!(
+        rendered
+            .lines()
+            .filter(|line| !line.is_empty())
+            .all(|line| line.starts_with("-# ")),
+        "every boundary line must remain subtext: {rendered:?}"
+    );
+}
+
+#[test]
+fn status_panel_subtext_overflow_clamps_after_prefixing_4848() {
+    let rendered = format_and_truncate_status_panel_sections(vec![format!(
+        "Header\n{}",
+        "x".repeat(STATUS_PANEL_MAX_CHARS)
+    )]);
+
+    assert_eq!(rendered.chars().count(), STATUS_PANEL_MAX_CHARS);
+    assert!(
+        rendered
+            .lines()
+            .filter(|line| !line.is_empty())
+            .all(|line| line.starts_with("-# ")),
+        "clamped output must preserve the subtext contract: {rendered:?}"
+    );
+}
+
+#[test]
 fn status_panel_heartbeat_without_new_events_is_stable() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(176);
@@ -2129,7 +2162,7 @@ fn status_panel_renders_context_usage_severity_levels() {
     assert!(events.set_context_panel_usage(normal_channel_id, None, 740, 0, 0, 1000, 90));
     let normal =
         events.render_status_panel(normal_channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(normal.contains("Context   📦 740 / 1.0k tokens (74%) · auto-compact 90%"));
+    assert!(normal.contains("-# 📦 740 / 1.0k (74%) · auto-compact 90%"));
     assert!(!normal.contains("임박"));
     assert!(!normal.contains("자동 압축 직전"));
 
@@ -2137,16 +2170,13 @@ fn status_panel_renders_context_usage_severity_levels() {
     events.set_context_panel_usage(approaching_channel_id, None, 700, 40, 10, 1000, 90);
     let approaching =
         events.render_status_panel(approaching_channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(approaching.contains("Context   📦 750 / 1.0k tokens (75%) · auto-compact 90% (임박)"));
+    assert!(approaching.contains("📦 750 / 1.0k (75%) · auto-compact 90% (임박)"));
 
     let critical_channel_id = ChannelId::new(184);
     events.set_context_panel_usage(critical_channel_id, None, 700, 100, 50, 1000, 90);
     let critical =
         events.render_status_panel(critical_channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(
-        critical
-            .contains("Context   ⚠️ 850 / 1.0k tokens (85%) · auto-compact 90% — 자동 압축 직전")
-    );
+    assert!(critical.contains("⚠️ 850 / 1.0k (85%) · auto-compact 90% — 자동 압축 직전"));
 }
 
 #[test]
@@ -2157,7 +2187,7 @@ fn status_panel_caps_context_usage_display_at_100_percent() {
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
 
-    assert!(rendered.contains("Context   ⚠️ 4.1k / 1.0k tokens (100%) · auto-compact 60%"));
+    assert!(rendered.contains("⚠️ 4.1k / 1.0k (100%) · auto-compact 60%"));
     assert!(!rendered.contains("(409%)"));
 }
 
@@ -2169,7 +2199,7 @@ fn status_panel_clamps_codex_context_usage_display_to_window() {
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Codex, 1_700_000_000);
 
-    assert!(rendered.contains("Context   ⚠️ 272.0k / 272.0k tokens (100%) · auto-compact 60%"));
+    assert!(rendered.contains("⚠️ 272.0k / 272.0k (100%) · auto-compact 60%"));
     assert!(!rendered.contains("2.3M"));
 }
 
@@ -2182,7 +2212,7 @@ fn completion_footer_context_only_has_no_spinner_and_stops_scheduling() {
     let rendered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
     let block = rendered.block.expect("context line should render");
 
-    assert!(block.contains("Context   📦 154.6k / 1.0M tokens (15%) · auto-compact 60%"));
+    assert!(block.contains("📦 154.6k / 1.0M (15%) · auto-compact 60%"));
     assert!(!block.contains('⠸'));
     assert!(!rendered.has_unfinished_entries);
 }
@@ -2212,6 +2242,97 @@ fn completion_footer_keeps_background_agent_pending_payload_open() {
     assert!(rendered.has_unfinished_entries);
     assert!(block.contains("Background agents"));
     assert!(block.contains("Waiting for background agents ⠸"));
+}
+
+#[test]
+fn completion_footer_prefers_detailed_background_entry_over_generic_waiting_line_4846() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(1902);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({
+                "subagent_type": "reviewer",
+                "description": "Review footer",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu_bg_detailed"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result_with_id(Some("Task"), false, Some("toolu_bg_detailed")),
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::TurnCompleted {
+            background: false,
+            background_agent_pending: true,
+        },
+    );
+
+    let rendered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = rendered.block.expect("detailed background entry");
+
+    assert!(rendered.has_unfinished_entries);
+    assert!(block.contains("reviewer Review footer ⠸"));
+    assert!(!block.contains("Waiting for background agents"));
+}
+
+#[test]
+fn completion_footer_falls_back_to_generic_waiting_when_details_are_clamped_4846() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(1903);
+    for index in 0..STATUS_PANEL_TASK_LIMIT {
+        events.push_status_event(
+            channel_id,
+            StatusEvent::BackgroundTaskStart {
+                name: "Bash".to_string(),
+                summary: format!("job-{index}-{}", "x".repeat(EVENT_LINE_MAX_CHARS)),
+                tool_use_id: format!("tool-{index}"),
+            },
+        );
+        events.push_status_event(
+            channel_id,
+            StatusEvent::BackgroundTaskEnd {
+                tool_use_id: format!("tool-{index}"),
+                success: true,
+            },
+        );
+    }
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use_with_id(
+            "Task",
+            &json!({
+                "subagent_type": "reviewer",
+                "description": "Review footer",
+                "run_in_background": true
+            })
+            .to_string(),
+            Some("toolu-bg-clamped"),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result_with_id(Some("Task"), false, Some("toolu-bg-clamped")),
+    );
+    events.push_status_event(
+        channel_id,
+        StatusEvent::TurnCompleted {
+            background: false,
+            background_agent_pending: true,
+        },
+    );
+
+    let rendered = events.render_completion_footer(channel_id, &ProviderKind::Claude, "⠸");
+    let block = rendered.block.expect("generic pending fallback");
+
+    assert!(rendered.has_unfinished_entries);
+    assert!(block.contains("Waiting for background agents ⠸"));
+    assert!(!block.contains("reviewer Review footer ⠸"));
 }
 
 #[test]
@@ -3234,7 +3355,7 @@ fn footer_residual_entries_carry_to_next_turn_and_finished_entries_do_not() {
     let deduped = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
     let slot_lines = deduped
         .lines()
-        .filter(|line| line.starts_with("└ "))
+        .filter(|line| line.starts_with("-# └ "))
         .collect::<Vec<_>>();
     assert_eq!(deduped.matches("toolu_carry_bash").count(), 0);
     assert_eq!(
@@ -3559,7 +3680,7 @@ fn completion_footer_budget_clamps_task_section_but_keeps_context_line() {
         .map(|(_, task_section)| task_section)
         .expect("context and task sections should be separated");
 
-    assert!(block.contains("Context   📦 154.6k / 1.0M tokens (15%) · auto-compact 60%"));
+    assert!(block.contains("📦 154.6k / 1.0M (15%) · auto-compact 60%"));
     assert!(task_section.len() <= crate::services::discord::single_message_panel::SINGLE_MESSAGE_PANEL_FOOTER_BUDGET_BYTES);
     assert!(task_section.ends_with('…'));
     assert!(rendered.has_unfinished_entries);
@@ -8108,6 +8229,13 @@ fn live_panel_hides_completed_tasks_keeping_running_and_header() {
         "the running entry is always shown: {panel}"
     );
     assert!(
+        panel
+            .lines()
+            .filter(|line| !line.is_empty())
+            .all(|line| line.starts_with("-# ")),
+        "separate live-panel output must keep every Tasks line in subtext: {panel}"
+    );
+    assert!(
         !panel.contains("Completed job"),
         "no completed task line renders in the live panel: {panel}"
     );
@@ -8167,6 +8295,13 @@ fn live_panel_hides_completed_subagents_keeping_running_and_header() {
     assert!(
         panel.contains("Live inspection"),
         "the running subagent stays visible: {panel}"
+    );
+    assert!(
+        panel
+            .lines()
+            .filter(|line| !line.is_empty())
+            .all(|line| line.starts_with("-# ")),
+        "separate live-panel output must keep every Subagents line in subtext: {panel}"
     );
     assert_eq!(
         panel.matches('✓').count(),

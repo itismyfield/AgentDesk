@@ -684,7 +684,6 @@ pub(in crate::services::discord) async fn ensure_card_with_shared(
         Some(provider) => Some(
             super::completion_footer_metadata::load_completion_footer_metadata(
                 shared,
-                event.scope.channel_id.into(),
                 provider,
                 0,
                 inflight.as_ref().map(|state| state.started_at.as_str()),

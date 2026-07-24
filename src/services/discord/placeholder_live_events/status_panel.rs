@@ -677,7 +677,18 @@ pub(super) fn render_status_panel(
         }
     }
 
-    truncate_status_panel_sections(sections)
+    format_and_truncate_status_panel_sections(sections)
+}
+
+pub(super) fn format_and_truncate_status_panel_sections(sections: Vec<String>) -> String {
+    truncate_status_panel_sections(
+        sections
+            .into_iter()
+            .map(|section| {
+                crate::services::terminal_status_formatting::format_subtext_block(&section)
+            })
+            .collect(),
+    )
 }
 
 fn join_status_panel_sections(sections: &[String]) -> String {
@@ -703,7 +714,7 @@ pub(super) fn truncate_status_panel_sections(mut sections: Vec<String>) -> Strin
 }
 
 impl SubagentSlot {
-    fn is_unfinished_background(&self) -> bool {
+    pub(super) fn is_unfinished_background(&self) -> bool {
         self.background && self.finished.is_none()
     }
 
