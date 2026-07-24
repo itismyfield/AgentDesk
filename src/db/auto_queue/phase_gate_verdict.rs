@@ -209,7 +209,7 @@ pub fn verdict_matches(
     context: Option<&Value>,
     result: Option<&Value>,
 ) -> bool {
-    let Some(actual) = actual.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(actual) = actual.filter(|value| !value.is_empty()) else {
         return false;
     };
     if actual == expected {
@@ -469,7 +469,7 @@ mod tests {
             Some(&context),
             None
         ));
-        assert!(verdict_matches(
+        assert!(!verdict_matches(
             Some(" gate_ok "),
             "gate_ok",
             None,
@@ -486,6 +486,32 @@ mod tests {
             "gate_ok",
             Some(&context),
             Some(&passing)
+        ));
+    }
+
+    #[test]
+    fn raw_whitespace_pass_verdict_matches_consistently() {
+        let context = gate_context(json!(["build_passed"]), " gate_ok ");
+        let result = json!({
+            "verdict": " gate_ok ",
+            "checks": {"build_passed": "pass"}
+        });
+        let resolution = resolve_verdict(Some(&context), &result);
+        assert_eq!(
+            resolution,
+            VerdictResolution::Explicit(" gate_ok ".to_string())
+        );
+        assert!(verdict_matches(
+            resolution.verdict(),
+            " gate_ok ",
+            Some(&context),
+            Some(&result)
+        ));
+        assert!(!verdict_matches(
+            resolution.verdict(),
+            "gate_ok",
+            Some(&context),
+            Some(&result)
         ));
     }
 
