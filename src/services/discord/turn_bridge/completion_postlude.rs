@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use super::guards::InflightCleanupGuard;
 use super::*;
 
 mod channel_writeback;

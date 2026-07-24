@@ -146,7 +146,7 @@ use super::watcher_lifecycle_decision::should_resume_watcher_after_turn;
 use crate::db::session_status::{AWAITING_BG, IDLE, TURN_ACTIVE};
 use completion_guard::complete_work_dispatch_on_turn_end;
 use context_window::{apply_context_token_update, persisted_context_tokens, resolve_done_response};
-use guards::{CompletionGuard, InflightCleanupGuard};
+use guards::{make_bridge_guards, resolve_guard_owner_channel};
 use headless_delivery::{
     SYNTHETIC_HEADLESS_RECOVERY_PLACEHOLDER_ID,
     cleanup_headless_streaming_placeholder_after_delivery, enqueue_headless_delivery,
@@ -256,7 +256,7 @@ pub(super) fn spawn_turn_bridge(
     shared_owned: Arc<SharedData>,
     cancel_token: Arc<CancelToken>,
     rx: mpsc::Receiver<StreamMessage>,
-    bridge: TurnBridgeContext,
+    mut bridge: TurnBridgeContext,
 ) {
     use tracing::Instrument;
     let bridge_turn_id = discord_turn_id(
@@ -356,27 +356,8 @@ pub(super) fn spawn_turn_bridge(
                 provider.as_str(),
             );
         }
-        // #3041 P1-2 (codex P1-a): resolve the AUTHORITATIVE owner channel for
-        // this turn's tmux session BEFORE the watcher availability check and the
-        // bridge delivery-lease acquisition. A RECOVERED/restored bridge that
-        // REUSES an existing watcher (without going through the
-        // `TmuxReady`/`RuntimeReady` claim paths, which set
-        // `watcher_owner_channel_id = claim.owner_channel_id()`) would otherwise
-        // keep `watcher_owner_channel_id == channel_id` (the bridge's dispatch
-        // channel Y) while the reused watcher leases + advances on its owner
-        // channel X — different cells, so both could acquire and deliver
-        // (duplicate). Resolving the session's owner channel here makes EVERY
-        // path (normal, claim, recovered/restored) key the availability check
-        // AND the lease acquire+advance on the SAME channel the watcher uses.
-        // When no reused watcher owns the session, this falls back to
-        // `channel_id` (the bridge owns its own channel). The claim paths below
-        // still re-assert `claim.owner_channel_id()` (which equals this resolved
-        // value for the same session) so live truth always wins.
-        let resolved_watcher_owner_channel_id = resolve_bridge_owner_channel(
-            &shared_owned.tmux_watchers,
-            bridge.inflight_state.tmux_session_name.as_deref(),
-            channel_id,
-        );
+        let resolved_watcher_owner_channel_id =
+            resolve_guard_owner_channel(shared_owned.as_ref(), &bridge);
         let mut watcher_owns_assistant_relay =
             matches!(initial_relay_owner_kind, super::inflight::RelayOwnerKind::Watcher);
         let mut watcher_relay_available_for_turn = watcher_owns_assistant_relay
@@ -507,18 +488,8 @@ pub(super) fn spawn_turn_bridge(
         let mut new_raw_provider_session_id: Option<String> = None;
         let defer_watcher_resume = bridge.defer_watcher_resume;
         let is_external_input_tui_direct = bridge.is_external_input_tui_direct;
-        let _completion_guard = CompletionGuard {
-            tx: bridge.completion_tx,
-            broadcaster: shared_owned.inflight_signals.clone(),
-            channel_id,
-            turn_id: bridge.inflight_state.effective_finalizer_turn_id(),
-        };
-        let mut inflight_guard = InflightCleanupGuard {
-            provider: Some(provider.clone()),
-            channel_id: channel_id.get(),
-            user_msg_id: user_msg_id.map(|id| id.get()).unwrap_or(0),
-            token_hash: shared_owned.token_hash.clone(),
-        };
+        let (_completion_guard, mut inflight_guard) =
+            make_bridge_guards(&mut bridge, shared_owned.as_ref(), &provider);
         let mut inflight_state = bridge.inflight_state.clone();
         inflight_state.set_watcher_owner_channel_id(resolved_watcher_owner_channel_id.get());
         // Codex P2: a no-anchor recovery turn (bridge.current_msg_id == None)
