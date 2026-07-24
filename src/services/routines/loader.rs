@@ -55,6 +55,16 @@ pub const MAX_AUTOMATION_INVENTORY_PAYLOAD_BYTES: usize = 32768;
 const LEGACY_AUTOMATION_CANDIDATE_EXECUTOR_REF: &str = "monitoring/automation-executor-v2.js";
 const CANONICAL_AUTOMATION_CANDIDATE_EXECUTOR_REF: &str =
     "monitoring/automation-candidate-executor.js";
+const ROUTINE_LOAD_RETRY_BASE: Duration = Duration::from_secs(30);
+const ROUTINE_LOAD_RETRY_MAX: Duration = Duration::from_secs(60 * 60);
+
+#[derive(Debug, Clone)]
+struct RoutineScriptFailure {
+    source_version: Option<String>,
+    consecutive_failures: u32,
+    retry_at: Instant,
+    warning_emitted: bool,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -122,22 +132,31 @@ pub struct RoutineTickAgent {
 ///
 /// This intentionally does not use the PolicyEngine store or
 /// `agentdesk.registerPolicy()` namespace. Failed loads return an error before
-/// mutating the store, so callers keep the last-known-good registry.
+/// mutating the store, so callers keep the last-known-good registry. Read and
+/// evaluation failures use bounded exponential backoff; unchanged candidates
+/// are always retried within one hour instead of remaining disabled for the
+/// process lifetime.
 pub struct RoutineScriptLoader {
     scripts: RoutineScriptStore,
-    failed_script_versions: Mutex<HashMap<PathBuf, String>>,
+    failed_scripts: Mutex<HashMap<PathBuf, RoutineScriptFailure>>,
+    #[cfg(test)]
+    evaluation_attempts: std::sync::atomic::AtomicUsize,
 }
 
 impl RoutineScriptLoader {
     pub fn new() -> Result<Self> {
         Ok(Self {
             scripts: Arc::new(Mutex::new(HashMap::new())),
-            failed_script_versions: Mutex::new(HashMap::new()),
+            failed_scripts: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            evaluation_attempts: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
     #[cfg(test)]
     pub fn load_script(&self, root: &Path, path: &Path) -> Result<String> {
+        self.evaluation_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let script = load_single_routine_script(root, path)?;
         tracing::debug!(
             routine_script = %script.script_ref,
@@ -217,6 +236,10 @@ impl RoutineScriptLoader {
         }
 
         let existing_refs: HashSet<String> = existing_scripts.keys().cloned().collect();
+        let candidate_paths: HashSet<PathBuf> = candidates_by_ref
+            .values()
+            .flat_map(|candidates| candidates.iter().map(|candidate| candidate.path.clone()))
+            .collect();
 
         let mut loaded = 0;
         let mut loaded_scripts = Vec::new();
@@ -234,41 +257,50 @@ impl RoutineScriptLoader {
                     selected = Some((script.clone(), false));
                     break;
                 }
-                let source_version = match routine_script_source_version(&candidate.path) {
-                    Ok(version) => version,
+
+                let source = match std::fs::read_to_string(&candidate.path) {
+                    Ok(source) => source,
                     Err(e) => {
-                        tracing::error!(
-                            routine_script = %candidate.path.display(),
-                            error = %e,
-                            "failed to read routine script; keeping last-known-good registry"
-                        );
+                        let now = Instant::now();
+                        if self.should_retry_candidate(&candidate.path, None, now, has_existing) {
+                            let retry_delay = self.record_failure(&candidate.path, None, now);
+                            tracing::error!(
+                                routine_script = %candidate.path.display(),
+                                error = %e,
+                                retry_after_seconds = retry_delay.as_secs(),
+                                "failed to read routine script; keeping last-known-good registry"
+                            );
+                        }
                         if has_existing {
                             break;
                         }
                         continue;
                     }
                 };
-                let unchanged_failure = self
-                    .failed_script_versions
-                    .lock()
-                    .unwrap_or_else(recover_poisoned_lock)
-                    .get(&candidate.path)
-                    .is_some_and(|failed_version| failed_version == &source_version);
-                if unchanged_failure {
-                    tracing::debug!(
-                        routine_script = %candidate.path.display(),
-                        script_version = %source_version,
-                        "skipped unchanged routine script after previous load failure"
-                    );
+                let source_version = compute_policy_version(&source);
+                let now = Instant::now();
+                if !self.should_retry_candidate(
+                    &candidate.path,
+                    Some(&source_version),
+                    now,
+                    has_existing,
+                ) {
                     if has_existing {
                         break;
                     }
                     continue;
                 }
 
-                match load_single_routine_script(&candidate.root, &candidate.path) {
+                #[cfg(test)]
+                self.evaluation_attempts
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                match load_single_routine_script_from_source(
+                    &candidate.root,
+                    &candidate.path,
+                    source,
+                ) {
                     Ok(script) => {
-                        self.failed_script_versions
+                        self.failed_scripts
                             .lock()
                             .unwrap_or_else(recover_poisoned_lock)
                             .remove(&candidate.path);
@@ -284,12 +316,12 @@ impl RoutineScriptLoader {
                         break;
                     }
                     Err(e) => {
-                        self.failed_script_versions
-                            .lock()
-                            .unwrap_or_else(recover_poisoned_lock)
-                            .insert(candidate.path.clone(), source_version);
+                        let retry_delay =
+                            self.record_failure(&candidate.path, Some(source_version.clone()), now);
                         tracing::error!(
                             routine_script = %candidate.path.display(),
+                            script_version = %source_version,
+                            retry_after_seconds = retry_delay.as_secs(),
                             error = %e,
                             "failed to load routine script; keeping last-known-good registry"
                         );
@@ -312,12 +344,88 @@ impl RoutineScriptLoader {
             }
         }
 
+        self.failed_scripts
+            .lock()
+            .unwrap_or_else(recover_poisoned_lock)
+            .retain(|path, _| candidate_paths.contains(path));
         let pruned = self.apply_dir_reload(loaded_scripts, &seen_refs)?;
         if pruned > 0 {
             tracing::info!(count = pruned, "pruned missing routine scripts");
         }
 
         Ok(loaded)
+    }
+
+    fn should_retry_candidate(
+        &self,
+        path: &Path,
+        source_version: Option<&String>,
+        now: Instant,
+        has_existing: bool,
+    ) -> bool {
+        let mut failures = self
+            .failed_scripts
+            .lock()
+            .unwrap_or_else(recover_poisoned_lock);
+        let Some(failure) = failures.get_mut(path) else {
+            return true;
+        };
+        if failure.source_version.as_ref() != source_version {
+            return true;
+        }
+        if now >= failure.retry_at {
+            return true;
+        }
+
+        let retry_after = failure.retry_at.saturating_duration_since(now);
+        if !has_existing && !failure.warning_emitted {
+            tracing::warn!(
+                routine_script = %path.display(),
+                retry_after_seconds = retry_after.as_secs(),
+                consecutive_failures = failure.consecutive_failures,
+                "routine script is not loaded; retry deferred by failure backoff"
+            );
+            failure.warning_emitted = true;
+        } else {
+            tracing::debug!(
+                routine_script = %path.display(),
+                retry_after_seconds = retry_after.as_secs(),
+                consecutive_failures = failure.consecutive_failures,
+                "skipped routine script until failure backoff expires"
+            );
+        }
+        false
+    }
+
+    fn record_failure(
+        &self,
+        path: &Path,
+        source_version: Option<String>,
+        now: Instant,
+    ) -> Duration {
+        let mut failures = self
+            .failed_scripts
+            .lock()
+            .unwrap_or_else(recover_poisoned_lock);
+        let consecutive_failures = failures
+            .get(path)
+            .filter(|failure| failure.source_version == source_version)
+            .map_or(1, |failure| failure.consecutive_failures.saturating_add(1));
+        let exponent = consecutive_failures.saturating_sub(1).min(31);
+        let retry_delay = ROUTINE_LOAD_RETRY_BASE
+            .checked_mul(1_u32 << exponent)
+            .unwrap_or(ROUTINE_LOAD_RETRY_MAX)
+            .min(ROUTINE_LOAD_RETRY_MAX);
+        failures.insert(
+            path.to_path_buf(),
+            RoutineScriptFailure {
+                source_version,
+                consecutive_failures,
+                retry_at: now + retry_delay,
+                warning_emitted: false,
+            },
+        );
+        retry_delay
     }
 
     pub fn get_script(&self, script_ref: &str) -> Result<Option<LoadedRoutineScript>> {
@@ -391,6 +499,14 @@ impl Drop for RoutineScriptLoader {
 pub fn load_single_routine_script(root: &Path, path: &Path) -> Result<LoadedRoutineScript> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| anyhow!("read routine script {}: {e}", path.display()))?;
+    load_single_routine_script_from_source(root, path, source)
+}
+
+fn load_single_routine_script_from_source(
+    root: &Path,
+    path: &Path,
+    source: String,
+) -> Result<LoadedRoutineScript> {
     let fallback_name = path
         .file_stem()
         .unwrap_or_default()
@@ -462,10 +578,16 @@ fn evaluate_tick_action(
         let js_context: rquickjs::Value = ctx
             .eval(format!("JSON.parse({context_literal})"))
             .map_err(|e| anyhow!("build routine tick context: {e}"))?;
-        let action_value: rquickjs::Value = registration
-            .tick
-            .call((js_context,))
-            .map_err(|e| anyhow!("routine script {} tick(ctx) failed: {e}", script.script_ref))?;
+        let action_value: rquickjs::Value = match registration.tick.call((js_context,)) {
+            Ok(value) => value,
+            Err(e) => {
+                let detail = quickjs_exception_detail(&ctx, &e);
+                return Err(anyhow!(
+                    "routine script {} tick(ctx) failed: {detail}",
+                    script.script_ref
+                ));
+            }
+        };
         ensure_acyclic_js_value(ctx, action_value.clone(), "routine action")?;
         js_value_to_json(action_value)
     })
@@ -474,6 +596,25 @@ fn evaluate_tick_action(
 fn install_interrupt_handler(runtime: &Runtime, timeout: Duration) {
     let started = Instant::now();
     runtime.set_interrupt_handler(Some(Box::new(move || started.elapsed() > timeout)));
+}
+
+fn quickjs_exception_detail(ctx: &rquickjs::Ctx<'_>, error: &rquickjs::Error) -> String {
+    let caught = ctx.catch();
+    if let Some(exception) = caught.clone().into_exception() {
+        let message = exception.message().unwrap_or_default();
+        let stack = exception.stack().unwrap_or_default();
+        return match (message.is_empty(), stack.is_empty()) {
+            (false, false) => format!("{message}\n{stack}"),
+            (false, true) => message,
+            (true, false) => stack,
+            (true, true) => error.to_string(),
+        };
+    }
+
+    <rquickjs::convert::Coerced<String> as rquickjs::FromJs>::from_js(ctx, caught)
+        .map(|rquickjs::convert::Coerced(detail)| detail)
+        .filter(|detail| !detail.is_empty())
+        .unwrap_or_else(|_| error.to_string())
 }
 
 struct CapturedRoutineRegistration<'js> {
@@ -508,20 +649,7 @@ fn capture_registered_routine<'js>(
     let eval_result: rquickjs::Result<rquickjs::Value> =
         ctx.eval_with_options(source.as_bytes().to_vec(), eval_opts);
     if let Err(e) = eval_result {
-        let exception_detail = ctx
-            .catch()
-            .into_exception()
-            .map(|exception| {
-                let message = exception.message().unwrap_or_default();
-                let stack = exception.stack().unwrap_or_default();
-                if stack.is_empty() {
-                    message
-                } else {
-                    format!("{message}\n{stack}")
-                }
-            })
-            .filter(|detail| !detail.is_empty())
-            .unwrap_or_else(|| e.to_string());
+        let exception_detail = quickjs_exception_detail(&ctx, &e);
         return Err(anyhow!(
             "JS eval error in routine script {}: {exception_detail}",
             path.display()
@@ -674,9 +802,11 @@ fn ensure_acyclic_js_value<'js>(
             "#,
         )
         .map_err(|e| anyhow!("routine action cycle checker init failed: {e}"))?;
-    checker
-        .call::<_, ()>((value,))
-        .map_err(|e| anyhow!("{label} cycle check failed: {e}"))
+    if let Err(e) = checker.call::<_, ()>((value,)) {
+        let detail = quickjs_exception_detail(&ctx, &e);
+        return Err(anyhow!("{label} cycle check failed: {detail}"));
+    }
+    Ok(())
 }
 
 fn script_ref(root: &Path, path: &Path) -> String {
@@ -684,12 +814,6 @@ fn script_ref(root: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/")
-}
-
-fn routine_script_source_version(path: &Path) -> Result<String> {
-    let source = std::fs::read_to_string(path)
-        .map_err(|e| anyhow!("read routine script {}: {e}", path.display()))?;
-    Ok(compute_policy_version(&source))
 }
 
 fn add_cached_candidates_for_root(
@@ -723,16 +847,21 @@ fn collect_routine_script_paths(root: &Path, out: &mut Vec<PathBuf>) -> Result<(
         let path = entry.path();
         if file_type.is_dir() {
             collect_routine_script_paths(&path, out)?;
-        } else if file_type.is_file()
-            && path.extension().is_some_and(|ext| ext == "js")
-            && !is_node_only_helper(&path)
-        {
-            out.push(path);
+        } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "js") {
+            if is_node_only_helper(&path) {
+                tracing::debug!(
+                    routine_script = %path.display(),
+                    "excluded Node-only worktree inventory helper from QuickJS discovery"
+                );
+            } else {
+                out.push(path);
+            }
         }
     }
     Ok(())
 }
 
+// #4900/#4902: `local-worktree-gc.js` executes this read-only helper with Node.
 fn is_node_only_helper(path: &Path) -> bool {
     path.file_name()
         .is_some_and(|name| name == "local_worktree_inventory.js")
@@ -923,21 +1052,47 @@ mod tests {
         let loader = RoutineScriptLoader::new().unwrap();
         assert_eq!(loader.load_dir(dir.path()).unwrap(), 1);
         assert_eq!(loader.script_refs().unwrap(), vec!["inventory-routine.js"]);
+        assert!(loader.failed_scripts.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn unchanged_failed_script_is_retried_only_after_content_changes() {
+    fn failed_script_backoff_skips_eval_until_due_and_content_change_bypasses_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("recoverable.js");
-        let broken =
-            "globalThis.__attempts = (globalThis.__attempts || 0) + 1; throw new Error('broken');";
-        std::fs::write(&path, broken).unwrap();
+        std::fs::write(&path, "throw new Error('broken');").unwrap();
 
         let loader = RoutineScriptLoader::new().unwrap();
         assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
-        assert_eq!(loader.failed_script_versions.lock().unwrap().len(), 1);
+        assert_eq!(
+            loader
+                .evaluation_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
         assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
-        assert_eq!(loader.failed_script_versions.lock().unwrap().len(), 1);
+        assert_eq!(
+            loader
+                .evaluation_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "unchanged script must not be evaluated during backoff"
+        );
+
+        loader
+            .failed_scripts
+            .lock()
+            .unwrap()
+            .get_mut(&path)
+            .unwrap()
+            .retry_at = Instant::now();
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        assert_eq!(
+            loader
+                .evaluation_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "script must be retried after backoff expires"
+        );
 
         std::fs::write(
             &path,
@@ -945,7 +1100,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(loader.load_dir(dir.path()).unwrap(), 1);
-        assert!(loader.failed_script_versions.lock().unwrap().is_empty());
+        assert!(loader.failed_scripts.lock().unwrap().is_empty());
         assert_eq!(
             loader.get_script("recoverable.js").unwrap().unwrap().name,
             "Recovered"
@@ -953,13 +1108,25 @@ mod tests {
     }
 
     #[test]
-    fn quickjs_eval_error_includes_exception_message() {
+    fn quickjs_eval_error_includes_exception_message_and_stack() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("node-only.js");
         std::fs::write(&path, "require('node:fs');").unwrap();
 
         let error = load_single_routine_script(dir.path(), &path).unwrap_err();
-        assert!(error.to_string().contains("require is not defined"));
+        let message = error.to_string();
+        assert!(message.contains("require is not defined"), "{message}");
+        assert!(message.contains("at <eval>"), "{message}");
+    }
+
+    #[test]
+    fn quickjs_eval_error_includes_primitive_throw_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("primitive-throw.js");
+        std::fs::write(&path, "throw 'bad config';").unwrap();
+
+        let error = load_single_routine_script(dir.path(), &path).unwrap_err();
+        assert!(error.to_string().contains("bad config"));
     }
 
     #[test]
@@ -1147,6 +1314,56 @@ mod tests {
 
         assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
         assert_eq!(loader.script_refs().unwrap(), vec!["retained.js"]);
+        assert_eq!(
+            loader
+                .failed_scripts
+                .lock()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![retained]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_script_uses_the_same_bounded_backoff() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unreadable.js");
+        std::fs::write(
+            &path,
+            "agentdesk.routines.register({ name: 'Unreadable', tick() { return { action: 'skip' }; } });",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let loader = RoutineScriptLoader::new().unwrap();
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        let first = loader
+            .failed_scripts
+            .lock()
+            .unwrap()
+            .get(&path)
+            .unwrap()
+            .clone();
+        assert_eq!(first.source_version, None);
+        assert_eq!(first.consecutive_failures, 1);
+
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        let second = loader
+            .failed_scripts
+            .lock()
+            .unwrap()
+            .get(&path)
+            .unwrap()
+            .clone();
+        assert_eq!(second.consecutive_failures, 1);
+        assert_eq!(second.retry_at, first.retry_at);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
     #[test]
