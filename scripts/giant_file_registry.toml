@@ -157,7 +157,6 @@ grandfathered_baseline_paths = [
   "src/services/routines/migrated.rs",
   "src/services/routines/store.rs",
   "src/services/settings.rs",
-  "src/services/tui_prompt_dedupe.rs",
   "src/services/turn_orchestrator.rs",
 ]
 
@@ -598,12 +597,11 @@ owner = "server-runtime"
 deadline = "2027-01-31"
 decompose_issue = "#4710"
 
-[[entry]]
-file = "src/services/tui_prompt_dedupe.rs"
-decision = "shrink"
-owner = "discord-relay"
-deadline = "2027-01-31"
-decompose_issue = "#4712"
+# RETIRED 2026-07-24 (#4712): tui_prompt_dedupe.rs dropped below the production
+# giant threshold after runtime bindings, observation/lease handling, extraction,
+# state maintenance, and inline tests moved verbatim into focused child modules.
+# Remove the frozen baseline path and [[entry]] so future re-expansion cannot be
+# grandfathered and a stale registration cannot survive as a ghost.
 
 [[entry]]
 file = "src/services/turn_orchestrator.rs"
