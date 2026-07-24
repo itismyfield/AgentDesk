@@ -964,7 +964,6 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                             probe()
                         });
                     if busy_signal == super::input::CodexPaneBusySignal::Fresh {
-                        last_output_at = Some(Instant::now());
                         tracing::debug!(
                             rollout_path = %rollout_path.display(),
                             pending_keyed = state.pending_tool_calls.len(),
@@ -2924,6 +2923,45 @@ mod tests {
         cancel_tx.send(()).unwrap();
         let (result, _outcome) = handle.join().unwrap().unwrap();
         assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        assert!(
+            rx.iter()
+                .any(|message| matches!(message, StreamMessage::Done { .. }))
+        );
+    }
+
+    #[test]
+    fn repeated_fresh_pane_signal_expires_on_original_deadline_cadence() {
+        let (_dir, rollout) = pending_tool_rollout();
+        let (tx, rx) = mpsc::channel();
+        let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probe_count = probes.clone();
+        let (result, _outcome) = tail_rollout_file_until_assistant_response_with_pane_busy_probe(
+            &rollout,
+            0,
+            None,
+            &tx,
+            None,
+            || true,
+            RolloutTailOptions {
+                terminal_drain: Duration::from_secs(60),
+                assistant_response_deadline: Some(Duration::from_secs(60)),
+                pending_tool_call_deadline: Some(Duration::from_millis(100)),
+                legacy_terminal_drain: None,
+                pane_busy_probe: Some(Box::new(move || {
+                    if probe_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 3 {
+                        super::super::input::CodexPaneBusySignal::Fresh
+                    } else {
+                        super::super::input::CodexPaneBusySignal::Expired
+                    }
+                })),
+                ..RolloutTailOptions::default()
+            },
+        )
+        .unwrap();
+        drop(tx);
+
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 4);
         assert!(
             rx.iter()
                 .any(|message| matches!(message, StreamMessage::Done { .. }))
