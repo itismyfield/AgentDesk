@@ -677,8 +677,18 @@ pub(super) fn render_status_panel(
         }
     }
 
-    let panel = truncate_status_panel_sections(sections);
-    crate::services::terminal_status_formatting::format_subtext_block(&panel)
+    format_and_truncate_status_panel_sections(sections)
+}
+
+pub(super) fn format_and_truncate_status_panel_sections(sections: Vec<String>) -> String {
+    truncate_status_panel_sections(
+        sections
+            .into_iter()
+            .map(|section| {
+                crate::services::terminal_status_formatting::format_subtext_block(&section)
+            })
+            .collect(),
+    )
 }
 
 fn join_status_panel_sections(sections: &[String]) -> String {

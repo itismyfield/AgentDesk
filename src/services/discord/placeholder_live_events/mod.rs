@@ -59,7 +59,7 @@ use common::{
     STATUS_PANEL_WORKFLOW_LIMIT, STATUS_PANEL_WORKFLOW_PHASE_LIMIT,
 };
 #[cfg(test)]
-use status_panel::truncate_status_panel_sections;
+use status_panel::{format_and_truncate_status_panel_sections, truncate_status_panel_sections};
 
 pub(in crate::services::discord) use recent_events::RecentPlaceholderEvent;
 pub(in crate::services::discord) use status_events::{

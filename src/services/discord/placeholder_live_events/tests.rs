@@ -459,6 +459,39 @@ fn status_panel_truncates_long_body_without_processing_tail() {
 }
 
 #[test]
+fn status_panel_subtext_exactly_fits_discord_character_limit_4848() {
+    let first = "x".repeat(1_000 - "-# ".chars().count());
+    let second = "y".repeat(STATUS_PANEL_MAX_CHARS - 1_000 - 1 - "-# ".chars().count());
+    let rendered = format_and_truncate_status_panel_sections(vec![format!("{first}\n{second}")]);
+
+    assert_eq!(rendered.chars().count(), STATUS_PANEL_MAX_CHARS);
+    assert!(
+        rendered
+            .lines()
+            .filter(|line| !line.is_empty())
+            .all(|line| line.starts_with("-# ")),
+        "every boundary line must remain subtext: {rendered:?}"
+    );
+}
+
+#[test]
+fn status_panel_subtext_overflow_clamps_after_prefixing_4848() {
+    let rendered = format_and_truncate_status_panel_sections(vec![format!(
+        "Header\n{}",
+        "x".repeat(STATUS_PANEL_MAX_CHARS)
+    )]);
+
+    assert_eq!(rendered.chars().count(), STATUS_PANEL_MAX_CHARS);
+    assert!(
+        rendered
+            .lines()
+            .filter(|line| !line.is_empty())
+            .all(|line| line.starts_with("-# ")),
+        "clamped output must preserve the subtext contract: {rendered:?}"
+    );
+}
+
+#[test]
 fn status_panel_heartbeat_without_new_events_is_stable() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(176);
