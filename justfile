@@ -49,8 +49,7 @@ test-non-pg:
     cargo test --lib mailbox_reaction_tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib queue_marker::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib queue_status_presentation::tests -- --skip _pg --skip pg_ --skip postgres
-    cargo test --lib status_panel_singleton_store -- --skip _pg --skip pg_ --skip postgres
-    # #4891: completed-panel visibility must survive singleton bookkeeping failure.
+    # #4891: completed-panel visibility and singleton bookkeeping converge together.
     cargo test --lib status_panel -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::outbound::serenity_reference::tests::lifecycle_notice_nonce_is_stable_and_semantic_event_scoped -- --exact
     cargo test --lib services::discord::outbound::delivery::tests::v3_referenced_send_preserves_reference_and_dedupes -- --exact
