@@ -1931,11 +1931,11 @@ mod reconcile_phase_gate_pg_tests {
         .bind(phase)
         .fetch_one(pool)
         .await
-        .expect("gate failure diagnostic");
+        .expect("gate failure diagnostic"); // agentdesk-audit: allow-unwrap — test-only PG assertion in #[cfg(test)] module
         (
-            row.try_get("verdict").expect("decode verdict"),
+            row.try_get("verdict").expect("decode verdict"), // agentdesk-audit: allow-unwrap — test-only PG assertion in #[cfg(test)] module
             row.try_get("failure_reason")
-                .expect("decode failure reason"),
+                .expect("decode failure reason"), // agentdesk-audit: allow-unwrap — test-only PG assertion in #[cfg(test)] module
         )
     }
 
@@ -2319,7 +2319,7 @@ mod reconcile_phase_gate_pg_tests {
             },
         )
         .await
-        .expect("seed gate state");
+        .expect("seed gate state"); // agentdesk-audit: allow-unwrap — test-only PG fixture in #[cfg(test)] module
 
         let outcome =
             run_reconcile(&pool, "dsp-diagnostic", "completed", context, Some(result)).await;
@@ -2387,7 +2387,7 @@ mod reconcile_phase_gate_pg_tests {
             },
         )
         .await
-        .expect("seed mixed gate groups");
+        .expect("seed mixed gate groups"); // agentdesk-audit: allow-unwrap — test-only PG fixture in #[cfg(test)] module
 
         let outcome = run_reconcile(
             &pool,
@@ -3127,7 +3127,7 @@ mod reconcile_phase_gate_pg_tests {
             },
         )
         .await
-        .expect("seed reducer path fixture");
+        .expect("seed reducer path fixture"); // agentdesk-audit: allow-unwrap — test-only PG fixture in #[cfg(test)] module
 
         let outcome = run_reconcile(
             &pool,

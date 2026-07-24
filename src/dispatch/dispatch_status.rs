@@ -1605,7 +1605,7 @@ mod phase_gate_finalize_wrapper_tests {
         for explicit in [json!(true), json!({"blocked_by": "operator"})] {
             let result = json!({ "verdict": explicit, "checks": passing_checks() });
             let injected = infer_phase_gate_verdict("dsp-finalize-non-string", &gate(), &result)
-                .expect("non-string verdict must preserve checks-based injection");
+                .expect("non-string verdict must preserve checks-based injection"); // agentdesk-audit: allow-unwrap — test-only assertion in #[cfg(test)] module
             assert_eq!(
                 injected.get("verdict").and_then(|value| value.as_str()),
                 Some("phase_gate_passed")
@@ -1632,7 +1632,7 @@ mod phase_gate_finalize_wrapper_tests {
             Some(&context),
             Some(&result),
         )
-        .expect("non-string decision must preserve checks-based injection");
+        .expect("non-string decision must preserve checks-based injection"); // agentdesk-audit: allow-unwrap — test-only assertion in #[cfg(test)] module
         assert_eq!(
             injected.get("verdict").and_then(|value| value.as_str()),
             Some("phase_gate_passed")
