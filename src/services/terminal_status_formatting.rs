@@ -27,6 +27,30 @@ pub(crate) fn format_subtext_lines<'a>(lines: impl IntoIterator<Item = &'a str>)
         .collect()
 }
 
+/// Format a multiline status block as Discord subtext while preserving blank
+/// section separators. Already-formatted lines remain unchanged.
+pub(crate) fn format_subtext_block(block: &str) -> String {
+    block
+        .lines()
+        .filter(|line| line.trim() != "\u{2063}")
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else {
+                format!("{SUBTEXT_PREFIX}{}", strip_subtext_prefix(line))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn strip_subtext_prefix(mut line: &str) -> &str {
+    while let Some(rest) = line.trim_start().strip_prefix(SUBTEXT_PREFIX) {
+        line = rest;
+    }
+    line
+}
+
 pub(crate) fn format_elapsed_status(total_secs: i64) -> Option<String> {
     (total_secs > 0).then(|| format!("⏱ {}", format_turn_duration(total_secs)))
 }
@@ -252,5 +276,15 @@ mod tests {
             format_subtext_lines(["⠙ 진행 중", "-# 턴 시작 : now", ""]),
             vec!["-# ⠙ 진행 중", "-# 턴 시작 : now"]
         );
+    }
+
+    #[test]
+    fn shared_subtext_block_preserves_sections_and_is_idempotent_4848() {
+        let expected = "-# 🟢 진행 중\n\n-# Tasks\n-# └ cargo test";
+        assert_eq!(
+            format_subtext_block("-# 🟢 진행 중\n\nTasks\n└ cargo test"),
+            expected
+        );
+        assert_eq!(format_subtext_block(expected), expected);
     }
 }

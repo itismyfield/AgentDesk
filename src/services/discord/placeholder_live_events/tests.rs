@@ -2129,7 +2129,7 @@ fn status_panel_renders_context_usage_severity_levels() {
     assert!(events.set_context_panel_usage(normal_channel_id, None, 740, 0, 0, 1000, 90));
     let normal =
         events.render_status_panel(normal_channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(normal.contains("📦 740 / 1.0k (74%) · auto-compact 90%"));
+    assert!(normal.contains("-# 📦 740 / 1.0k (74%) · auto-compact 90%"));
     assert!(!normal.contains("임박"));
     assert!(!normal.contains("자동 압축 직전"));
 
@@ -3322,7 +3322,7 @@ fn footer_residual_entries_carry_to_next_turn_and_finished_entries_do_not() {
     let deduped = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
     let slot_lines = deduped
         .lines()
-        .filter(|line| line.starts_with("└ "))
+        .filter(|line| line.starts_with("-# └ "))
         .collect::<Vec<_>>();
     assert_eq!(deduped.matches("toolu_carry_bash").count(), 0);
     assert_eq!(
@@ -8196,6 +8196,13 @@ fn live_panel_hides_completed_tasks_keeping_running_and_header() {
         "the running entry is always shown: {panel}"
     );
     assert!(
+        panel
+            .lines()
+            .filter(|line| !line.is_empty())
+            .all(|line| line.starts_with("-# ")),
+        "separate live-panel output must keep every Tasks line in subtext: {panel}"
+    );
+    assert!(
         !panel.contains("Completed job"),
         "no completed task line renders in the live panel: {panel}"
     );
@@ -8255,6 +8262,13 @@ fn live_panel_hides_completed_subagents_keeping_running_and_header() {
     assert!(
         panel.contains("Live inspection"),
         "the running subagent stays visible: {panel}"
+    );
+    assert!(
+        panel
+            .lines()
+            .filter(|line| !line.is_empty())
+            .all(|line| line.starts_with("-# ")),
+        "separate live-panel output must keep every Subagents line in subtext: {panel}"
     );
     assert_eq!(
         panel.matches('✓').count(),

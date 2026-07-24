@@ -677,7 +677,8 @@ pub(super) fn render_status_panel(
         }
     }
 
-    truncate_status_panel_sections(sections)
+    let panel = truncate_status_panel_sections(sections);
+    crate::services::terminal_status_formatting::format_subtext_block(&panel)
 }
 
 fn join_status_panel_sections(sections: &[String]) -> String {

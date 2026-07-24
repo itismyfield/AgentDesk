@@ -99,18 +99,7 @@ pub(in crate::services::discord) fn compose_footer_status_block(
 /// Render terminal relay context as Discord subtext. Every non-empty line is
 /// explicitly prefixed because Discord does not carry a multiline subtext span.
 pub(in crate::services::discord) fn completion_footer_subtext(block: &str) -> String {
-    block
-        .lines()
-        .filter(|line| line.trim() != "\u{2063}")
-        .map(|line| {
-            if line.trim().is_empty() {
-                String::new()
-            } else {
-                format!("-# {line}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    crate::services::terminal_status_formatting::format_subtext_block(block)
 }
 
 pub(in crate::services::discord) fn compose_completion_footer_text(
@@ -257,7 +246,7 @@ fn clamp_footer_panel_text(panel_text: &str) -> String {
         return panel_text.to_string();
     }
 
-    const TRUNCATION_MARKER: &str = "…";
+    const TRUNCATION_MARKER: &str = "-# …";
     if SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES <= TRUNCATION_MARKER.len() {
         let safe_end = super::formatting::floor_char_boundary(
             TRUNCATION_MARKER,
@@ -1058,7 +1047,7 @@ mod tests {
 
         assert_eq!(header, "-# ⠸ 진행 중 — Claude (<t:1700000000:R>)");
         assert!(panel.len() <= super::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES);
-        assert!(panel.ends_with("\n…") || panel == "…");
+        assert!(panel.ends_with("\n-# …") || panel == "-# …");
         assert!(block.len() > panel.len());
     }
 
@@ -1309,6 +1298,35 @@ mod tests {
     }
 
     #[test]
+    fn footer_panel_clamp_keeps_marker_inside_subtext_at_exact_boundary_4848() {
+        let first_line = format!(
+            "-# {}",
+            "x".repeat(
+                super::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES - "-# ".len() - 1 - "-# …".len()
+            )
+        );
+        let panel = format!("🟢 진행 중 — Claude (<t:1700000000:R>)\n{first_line}\n-# overflow");
+        let block = super::compose_footer_status_block("⠸", &panel);
+        let panel = panel_portion(&block);
+
+        assert_eq!(
+            panel.len(),
+            super::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES
+        );
+        assert!(
+            panel.ends_with("\n-# …"),
+            "marker escaped subtext: {panel:?}"
+        );
+        assert!(
+            panel
+                .lines()
+                .filter(|line| !line.is_empty())
+                .all(|line| line.starts_with("-# ")),
+            "every non-empty clamped line must remain subtext: {panel:?}"
+        );
+    }
+
+    #[test]
     fn footer_panel_truncates_on_line_boundaries_s3() {
         let second = "a".repeat(500);
         let third = "b".repeat(500);
@@ -1322,7 +1340,12 @@ mod tests {
         let expected_third = format!("-# {third}");
         assert_eq!(
             truncated_lines,
-            vec!["", expected_second.as_str(), expected_third.as_str(), "…"]
+            vec![
+                "",
+                expected_second.as_str(),
+                expected_third.as_str(),
+                "-# …"
+            ]
         );
         assert!(!panel_portion(&block).contains(fourth.as_str()));
         assert!(panel_portion(&block).len() <= super::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES);
@@ -1340,7 +1363,7 @@ mod tests {
 
         assert!(std::str::from_utf8(panel.as_bytes()).is_ok());
         assert!(panel.len() <= super::SINGLE_MESSAGE_PANEL_LIVE_BODY_BUDGET_BYTES);
-        assert_eq!(panel_lines.last().copied(), Some("…"));
+        assert_eq!(panel_lines.last().copied(), Some("-# …"));
         assert_eq!(panel_lines.len(), 2);
         assert!(!panel.contains("Subagents"));
     }
