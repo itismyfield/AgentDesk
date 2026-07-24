@@ -10,7 +10,7 @@ pub(super) fn commit_completed_binding(
         return true;
     }
     let Some(panel_message_id) = normalize_status_panel_message_id(panel_message_id) else {
-        return false;
+        return true;
     };
     let generation =
         crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())

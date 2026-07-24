@@ -146,10 +146,11 @@ fn status_panel_v2_disables_long_running_placeholder_controller() {
 
 fn make_status_panel_v2_shared_for_tests() -> Arc<crate::services::discord::SharedData> {
     let mut shared = super::super::make_shared_data_for_tests();
-    Arc::get_mut(&mut shared)
+    let ui = &mut Arc::get_mut(&mut shared)
         .expect("fresh test shared data should be uniquely owned")
-        .ui
-        .status_panel_v2_enabled = true;
+        .ui;
+    ui.status_panel_v2_enabled = true;
+    ui.two_message_panel_enabled = true;
     shared
 }
 
