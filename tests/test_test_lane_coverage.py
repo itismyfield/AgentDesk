@@ -148,6 +148,26 @@ class LaneFilterTests(unittest.TestCase):
         lanes = (coverage.LaneFilter(("service::tests::one_case",), ()),)
         self.assertEqual(coverage.uncovered_modules(modules, lanes), modules)
 
+    def test_discovers_main_push_recipe_after_pr_test_moves(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".github/workflows").mkdir(parents=True)
+            (root / "justfile").write_text(
+                "test-non-pg:\n    cargo test --lib retained_tests\n",
+                encoding="utf-8",
+            )
+            (root / ".github/workflows/ci-main.yml").write_text(
+                "run: just test-non-pg\n", encoding="utf-8"
+            )
+            (root / ".github/workflows/ci-pr.yml").write_text(
+                "run: cargo check --workspace\n", encoding="utf-8"
+            )
+
+            self.assertEqual(
+                coverage.discover_lane_filters(root),
+                (coverage.LaneFilter(("retained_tests",), ()),),
+            )
+
     def test_module_filter_covers_nested_module(self) -> None:
         modules = {"service::tests", "other::tests"}
         lanes = (coverage.LaneFilter(("service",), ()),)
@@ -202,6 +222,9 @@ class RatchetTests(unittest.TestCase):
         )
         (root / "justfile").write_text(
             "test-non-pg:\n    cargo test --lib covered_tests\n", encoding="utf-8"
+        )
+        (root / ".github/workflows/ci-main.yml").write_text(
+            "run: just test-non-pg\n", encoding="utf-8"
         )
         (root / ".github/workflows/ci-pr.yml").write_text(
             "run: cargo test --lib targeted_tests\n", encoding="utf-8"

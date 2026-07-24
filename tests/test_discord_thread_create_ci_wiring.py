@@ -12,8 +12,14 @@ class DiscordThreadCreateCiWiringTests(unittest.TestCase):
         self.assertEqual(justfile.count(FOCUSED_COMMAND), 1)
         self.assertNotIn("cargo test --lib cli::discord_thread_create", justfile)
 
-    def test_windows_job_has_non_advisory_runtime_step(self) -> None:
+    def test_pr_windows_job_is_compile_only(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-pr.yml").read_text(encoding="utf-8")
+        self.assertNotIn("Discord thread-create cross-process lock", workflow)
+
+    def test_nightly_windows_job_has_non_advisory_runtime_step(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci-nightly.yml").read_text(
+            encoding="utf-8"
+        )
         marker = "      - name: Discord thread-create cross-process lock\n"
         start = workflow.index(marker)
         end = workflow.index("\n      - name:", start + len(marker))
@@ -25,10 +31,10 @@ class DiscordThreadCreateCiWiringTests(unittest.TestCase):
         self.assertIn('CARGO_PROFILE_DEV_DEBUG: "0"', step)
         self.assertIn('CARGO_PROFILE_TEST_DEBUG: "0"', step)
 
-    def test_whole_job_guard_registers_the_runtime_step(self) -> None:
+    def test_whole_job_guard_tracks_compile_only_pr_lane(self) -> None:
         guard = (ROOT / "scripts/check-ci-runner-hardening.sh").read_text(encoding="utf-8")
-        self.assertIn('"Discord thread-create cross-process lock" => {', guard)
-        self.assertIn(f'"commands" => ["{FOCUSED_COMMAND}"]', guard)
+        self.assertNotIn('"Discord thread-create cross-process lock" => {', guard)
+        self.assertNotIn('"cargo test (non-PG, targeted subset)" => {', guard)
 
 
 if __name__ == "__main__":

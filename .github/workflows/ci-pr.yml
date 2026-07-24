@@ -366,13 +366,14 @@ jobs:
         shell: bash
         run: sccache --show-stats || true
 
-  # Cross-OS Rust compile lanes: macOS + Windows. Gated on the narrower
-  # rust_compile filter so docs-only, dashboard-only, JS-policy-only,
-  # script-only, workflow-metadata-only, and Node-package-only PRs skip the
-  # ~25 min macOS lane and the ~30 min Windows lane entirely. Nightly still
-  # exercises the full matrix daily, so cross-OS Rust drift cannot land
+  # Cross-OS Rust compile lane. Gated on the narrower rust_compile filter so
+  # docs-only, dashboard-only, JS-policy-only, script-only, workflow-metadata-
+  # only, and Node-package-only PRs skip Windows compilation. Nightly retains
+  # the full macOS/Windows test matrix, so cross-OS Rust drift cannot land
   # silently.
   check_fast_cross_os:
+    # Keep this advisory job name stable: the infrastructure-failure classifier
+    # identifies its non-blocking diagnostics by this exact context string.
     name: Fast check + non-PG tests (${{ matrix.os }})
     needs: changes
     # Advisory (non-required) cross-OS lane. Run only when a Rust-compile
@@ -439,10 +440,11 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # Stage 1 keeps Windows inline and default-feature-only instead of
-      # `just check`: this lane's job is cross-OS compile and targeted test
-      # signal, while fmt/staged clippy and full workspace checks are
-      # authoritative in the Ubuntu jobs above.
+      # Keep Windows inline and default-feature-only instead of `just check`.
+      # This PR lane provides cross-OS compile signal only; main-push and
+      # nightly retain the Windows runtime and non-PG test coverage outside the
+      # PR critical path (#4747 option 2). Ubuntu fmt/staged clippy and full
+      # workspace checks remain authoritative in the jobs above.
       - name: cargo check
         shell: bash
         env:
@@ -450,40 +452,6 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: cargo check --workspace --all-targets
-
-      # #4466: compile-only coverage cannot prove Win32 named-mutex ownership
-      # or cross-process blocking. This non-advisory step runs the real child
-      # process proof on the Windows runner.
-      - name: Discord thread-create cross-process lock
-        shell: bash
-        env:
-          BASH_ENV: /dev/null
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-        run: cargo test --lib discord_thread_create -- --test-threads=1
-
-      - name: cargo test (non-PG, targeted subset)
-        # Windows is an advisory anti-rot lane for this Unix-only project; its
-        # known test/runner flakes must not paint the PR red. See #4202/#4423.
-        continue-on-error: true
-        shell: bash
-        env:
-          BASH_ENV: /dev/null
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-        run: |
-          set -euo pipefail
-          cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1
-          cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres
-          cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
-          cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
-          cargo test --all-targets stall_recovery -- --skip _pg --skip pg_ --skip postgres
-          # Health must precede relay_recovery: fail-fast recipes otherwise hide
-          # health regressions whenever the earlier recovery filter also fails.
-          python3 scripts/ci-timeout.py 900 env -u AGENTDESK_ROOT_DIR cargo test --lib health -- --skip _pg --skip pg_ --skip postgres
-          env -u AGENTDESK_ROOT_DIR cargo test --lib relay_recovery -- --skip _pg --skip pg_ --skip postgres
-          cargo test --all-targets routines -- --skip _pg --skip pg_ --skip postgres
-          cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
 
       - name: sccache stats
         if: always() && runner.os != 'macOS'
