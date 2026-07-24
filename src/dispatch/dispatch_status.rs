@@ -1579,3 +1579,60 @@ mod auto_queue_terminal_sync_policy_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod phase_gate_verdict_path_equivalence_tests {
+    use super::infer_phase_gate_verdict;
+    use crate::db::auto_queue::phase_gate_verdict::{VerdictResolution, resolve_verdict};
+    use serde_json::json;
+
+    #[test]
+    fn checks_only_completion_resolves_identically_before_and_after_injection() {
+        let gate = json!({
+            "checks": ["merge_verified", "issue_closed"],
+            "pass_verdict": "gate_ok",
+        });
+        let context = json!({ "phase_gate": gate.clone() });
+        let raw = json!({
+            "checks": {
+                "merge_verified": { "status": "pass" },
+                "issue_closed": { "status": "", "result": "passed" },
+            }
+        });
+
+        let injected = infer_phase_gate_verdict("dsp-path-equivalence", &gate, &raw)
+            .expect("finalize path should persist the reducer's inferred verdict");
+        assert_eq!(
+            resolve_verdict(Some(&context), &raw),
+            VerdictResolution::Inferred("gate_ok".to_string()),
+        );
+        assert_eq!(injected.get("verdict").and_then(|value| value.as_str()), Some("gate_ok"));
+        assert_eq!(
+            injected.get("verdict_inferred").and_then(|value| value.as_bool()),
+            Some(true),
+        );
+        assert_eq!(
+            resolve_verdict(Some(&context), &injected),
+            VerdictResolution::Explicit(Some("gate_ok".to_string())),
+        );
+    }
+
+    #[test]
+    fn explicit_failure_is_identical_for_finalize_and_bypass_paths() {
+        let gate = json!({
+            "checks": ["merge_verified"],
+            "pass_verdict": "gate_ok",
+        });
+        let context = json!({ "phase_gate": gate.clone() });
+        let result = json!({
+            "phase_gate_verdict": "manual_hold",
+            "checks": { "merge_verified": { "status": "pass" } },
+        });
+
+        assert_eq!(infer_phase_gate_verdict("dsp-explicit", &gate, &result), None);
+        assert_eq!(
+            resolve_verdict(Some(&context), &result),
+            VerdictResolution::Explicit(Some("manual_hold".to_string())),
+        );
+    }
+}
