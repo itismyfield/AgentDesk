@@ -146,7 +146,7 @@ use super::watcher_lifecycle_decision::should_resume_watcher_after_turn;
 use crate::db::session_status::{AWAITING_BG, IDLE, TURN_ACTIVE};
 use completion_guard::complete_work_dispatch_on_turn_end;
 use context_window::{apply_context_token_update, persisted_context_tokens, resolve_done_response};
-use guards::{CompletionGuard, InflightCleanupGuard};
+use guards::make_bridge_guards;
 use headless_delivery::{
     SYNTHETIC_HEADLESS_RECOVERY_PLACEHOLDER_ID,
     cleanup_headless_streaming_placeholder_after_delivery, enqueue_headless_delivery,
@@ -507,18 +507,13 @@ pub(super) fn spawn_turn_bridge(
         let mut new_raw_provider_session_id: Option<String> = None;
         let defer_watcher_resume = bridge.defer_watcher_resume;
         let is_external_input_tui_direct = bridge.is_external_input_tui_direct;
-        let _completion_guard = CompletionGuard {
-            tx: bridge.completion_tx,
-            broadcaster: shared_owned.inflight_signals.clone(),
+        let (_completion_guard, mut inflight_guard) = make_bridge_guards(
+            &bridge,
+            shared_owned.as_ref(),
+            &provider,
             channel_id,
-            turn_id: bridge.inflight_state.effective_finalizer_turn_id(),
-        };
-        let mut inflight_guard = InflightCleanupGuard {
-            provider: Some(provider.clone()),
-            channel_id: channel_id.get(),
-            user_msg_id: user_msg_id.map(|id| id.get()).unwrap_or(0),
-            token_hash: shared_owned.token_hash.clone(),
-        };
+            user_msg_id,
+        );
         let mut inflight_state = bridge.inflight_state.clone();
         inflight_state.set_watcher_owner_channel_id(resolved_watcher_owner_channel_id.get());
         // Codex P2: a no-anchor recovery turn (bridge.current_msg_id == None)

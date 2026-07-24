@@ -10,11 +10,12 @@ use super::*;
 // — if no subscriber is registered, `send` returns Err and we
 // ignore it.
 pub(super) struct CompletionGuard {
-    pub(super) tx: Option<tokio::sync::oneshot::Sender<()>>,
-    pub(super) broadcaster: tokio::sync::broadcast::Sender<super::super::inflight::InflightSignal>,
-    pub(super) channel_id: ChannelId,
-    pub(super) turn_id: u64,
+    tx: Option<tokio::sync::oneshot::Sender<()>>,
+    broadcaster: tokio::sync::broadcast::Sender<super::super::inflight::InflightSignal>,
+    channel_id: ChannelId,
+    turn_id: u64,
 }
+
 impl Drop for CompletionGuard {
     fn drop(&mut self) {
         if let Some(tx) = self.tx.take() {
@@ -44,11 +45,34 @@ impl Drop for CompletionGuard {
 // turn (non-zero) or is a genuine zero-id-owned row (zero). A newer
 // owner yields `UserMsgMismatch` and is preserved.
 pub(super) struct InflightCleanupGuard {
-    pub(super) provider: Option<ProviderKind>,
-    pub(super) channel_id: u64,
-    pub(super) user_msg_id: u64,
-    pub(super) token_hash: String,
+    provider: Option<ProviderKind>,
+    channel_id: u64,
+    user_msg_id: u64,
+    token_hash: String,
 }
+
+pub(super) fn make_bridge_guards(
+    bridge: &TurnBridgeContext,
+    shared_owned: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    user_msg_id: Option<MessageId>,
+) -> (CompletionGuard, InflightCleanupGuard) {
+    let completion_guard = CompletionGuard {
+        tx: bridge.completion_tx,
+        broadcaster: shared_owned.inflight_signals.clone(),
+        channel_id,
+        turn_id: bridge.inflight_state.effective_finalizer_turn_id(),
+    };
+    let inflight_guard = InflightCleanupGuard {
+        provider: Some(provider.clone()),
+        channel_id: channel_id.get(),
+        user_msg_id: user_msg_id.map(|id| id.get()).unwrap_or(0),
+        token_hash: shared_owned.token_hash.clone(),
+    };
+    (completion_guard, inflight_guard)
+}
+
 impl Drop for InflightCleanupGuard {
     fn drop(&mut self) {
         if let Some(ref provider) = self.provider {
