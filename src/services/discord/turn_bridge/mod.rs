@@ -256,7 +256,7 @@ pub(super) fn spawn_turn_bridge(
     shared_owned: Arc<SharedData>,
     cancel_token: Arc<CancelToken>,
     rx: mpsc::Receiver<StreamMessage>,
-    bridge: TurnBridgeContext,
+    mut bridge: TurnBridgeContext,
 ) {
     use tracing::Instrument;
     let bridge_turn_id = discord_turn_id(
@@ -489,7 +489,7 @@ pub(super) fn spawn_turn_bridge(
         let defer_watcher_resume = bridge.defer_watcher_resume;
         let is_external_input_tui_direct = bridge.is_external_input_tui_direct;
         let (_completion_guard, mut inflight_guard) =
-            make_bridge_guards(&bridge, shared_owned.as_ref(), &provider);
+            make_bridge_guards(&mut bridge, shared_owned.as_ref(), &provider);
         let mut inflight_state = bridge.inflight_state.clone();
         inflight_state.set_watcher_owner_channel_id(resolved_watcher_owner_channel_id.get());
         // Codex P2: a no-anchor recovery turn (bridge.current_msg_id == None)

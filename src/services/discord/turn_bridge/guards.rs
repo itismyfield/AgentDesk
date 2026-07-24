@@ -45,19 +45,19 @@ impl Drop for CompletionGuard {
 // turn (non-zero) or is a genuine zero-id-owned row (zero). A newer
 // owner yields `UserMsgMismatch` and is preserved.
 pub(super) struct InflightCleanupGuard {
-    provider: Option<ProviderKind>,
+    pub(super) provider: Option<ProviderKind>,
     channel_id: u64,
     user_msg_id: u64,
     token_hash: String,
 }
 
 pub(super) fn make_bridge_guards(
-    bridge: &TurnBridgeContext,
+    bridge: &mut TurnBridgeContext,
     shared_owned: &SharedData,
     provider: &ProviderKind,
 ) -> (CompletionGuard, InflightCleanupGuard) {
     let completion_guard = CompletionGuard {
-        tx: bridge.completion_tx,
+        tx: bridge.completion_tx.take(),
         broadcaster: shared_owned.inflight_signals.clone(),
         channel_id: bridge.channel_id,
         turn_id: bridge.inflight_state.effective_finalizer_turn_id(),
