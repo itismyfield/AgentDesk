@@ -811,6 +811,8 @@ def load_scenarios(scenarios_dir: Path, *, cell: str) -> list[dict[str, Any]]:
 
 
 def is_destructive(scenario: dict[str, Any]) -> bool:
+    if scenario.get("destructive") is True:
+        return True
     for step in scenario.get("steps") or []:
         if not isinstance(step, dict):
             continue

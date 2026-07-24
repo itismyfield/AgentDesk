@@ -100,7 +100,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "DELETE",
             "/api/e2e/discord/channels/{channel_id}/messages/{message_id}",
             "health",
-            "Delete one exact Discord message through its provider bot for an explicitly enabled destructive E2E run. Returns 404 while AGENTDESK_E2E_CONTROL is disabled.",
+            "Delete one exact Discord message through its provider bot for an explicitly enabled destructive E2E run. The route subtree returns 404 unless AGENTDESK_E2E_CONTROL=1, and channel_id must be in the boot-bound AGENTDESK_E2E_CHANNEL_IDS allowlist.",
         )
         .with_params([
             ("channel_id", path_param("Positive Discord channel or thread snowflake.")),
@@ -111,7 +111,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/e2e/discord/failures",
             "health",
-            "Arm a durable, TTL-bounded send or delete failure for one provider/channel recovery operation. Returns 404 while AGENTDESK_E2E_CONTROL is disabled.",
+            "Arm a durable, TTL-bounded send or delete failure for one provider/channel recovery operation. The subtree returns 404 unless AGENTDESK_E2E_CONTROL=1, and channel_id must be in AGENTDESK_E2E_CHANNEL_IDS.",
         )
         .with_params([
             ("provider", body_param("string", true, "Provider bot: claude or codex.")),
@@ -123,7 +123,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "DELETE",
             "/api/e2e/discord/failures",
             "health",
-            "Clear one provider/channel/operation destructive E2E failure injection. Returns 404 while AGENTDESK_E2E_CONTROL is disabled.",
+            "Clear one provider/channel/operation destructive E2E failure injection. The subtree returns 404 unless AGENTDESK_E2E_CONTROL=1, and channel_id must be in AGENTDESK_E2E_CHANNEL_IDS.",
         )
         .with_params([
             ("provider", body_param("string", true, "Provider bot: claude or codex.")),

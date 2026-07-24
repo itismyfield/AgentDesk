@@ -247,6 +247,54 @@ assertions: []
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["failure_attribution"]["source"], "agent_mode_gate")
 
+    def test_declared_destructive_scenarios_require_full_opt_in_chain(self):
+        class FakeClient:
+            base_url = "http://agentdesk.test"
+
+        enabled_features = "two_message_panel,e2e_discord_control"
+        for scenario_id in ("E-32", "E-33", "E-34"):
+            scenario = {
+                "id": scenario_id,
+                "agent_mode": "real_live",
+                "coverage_class": "live",
+                "destructive": True,
+                "requires_features": ["two_message_panel", "e2e_discord_control"],
+                "steps": [{"send_prompt": "never"}],
+                "assertions": [],
+            }
+            for allow_flag, allow_env in ((False, "1"), (True, None)):
+                args = Namespace(
+                    cell="claude-tui",
+                    channel_id="42",
+                    thread_channel_id=None,
+                    reset_before_each=False,
+                    dry_run=False,
+                    queue_runtime_root="/tmp/agentdesk-e2e-test-runtime",
+                    hard_reset_session_each=False,
+                    allow_destructive=allow_flag,
+                    required_agent_mode=None,
+                    required_coverage_class=None,
+                )
+                environment = {"AGENTDESK_E2E_FEATURES": enabled_features}
+                if allow_env is not None:
+                    environment["AGENTDESK_E2E_ALLOW_DESTRUCTIVE"] = allow_env
+                with self.subTest(
+                    scenario=scenario_id,
+                    allow_flag=allow_flag,
+                    allow_env=allow_env,
+                ), patch.dict("run_tui_relay.os.environ", environment, clear=True):
+                    result = driver.run_scenario(
+                        scenario,
+                        args=args,
+                        run_id="run-1",
+                        client=FakeClient(),  # type: ignore[arg-type]
+                    )
+
+                self.assertEqual(result["status"], "skipped")
+                self.assertEqual(
+                    result["failure_attribution"]["source"], "destructive_gate"
+                )
+
     def test_required_feature_gate_skips_destructive_scenario_by_default(self):
         class FakeClient:
             base_url = "http://agentdesk.test"
