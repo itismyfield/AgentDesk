@@ -424,7 +424,7 @@ async fn run_codex_idle_response_tail(
         .name("codex_idle_response_tail_reader".to_string())
         .spawn(move || {
             let read_result =
-                crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset(
+                crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset_for_tmux(
                     &rollout_for_reader,
                     start_offset,
                     None,
@@ -435,6 +435,7 @@ async fn run_codex_idle_response_tail(
                             &tmux_for_reader,
                         )
                     },
+                    &tmux_for_reader,
                 )
                 .map(|result| match result {
                     ReadOutputResult::Completed { offset }
@@ -571,14 +572,16 @@ fn collect_codex_idle_response(
     tmux_session_name: String,
 ) -> Result<(String, u64), String> {
     let (tx, rx) = mpsc::channel();
-    let read_result = crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset(
-        &rollout_path,
-        start_offset,
-        None,
-        tx,
-        None,
-        || crate::services::tmux_diagnostics::tmux_session_has_live_pane(&tmux_session_name),
-    )?;
+    let read_result =
+        crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset_for_tmux(
+            &rollout_path,
+            start_offset,
+            None,
+            tx,
+            None,
+            || crate::services::tmux_diagnostics::tmux_session_has_live_pane(&tmux_session_name),
+            &tmux_session_name,
+        )?;
 
     let mut streamed = String::new();
     let mut done_result: Option<String> = None;
