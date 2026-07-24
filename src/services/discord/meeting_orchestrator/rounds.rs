@@ -624,4 +624,3 @@ async fn execute_agent_turn(
         Err(_) => Ok(truncate_for_meeting(&draft, 1500)),
     }
 }
-

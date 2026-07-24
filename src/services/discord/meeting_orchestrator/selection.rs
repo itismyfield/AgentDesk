@@ -220,4 +220,3 @@ fn summary_agent_context(config: &MeetingConfig, resolved_summary_agent: &str) -
         )
     })
 }
-
