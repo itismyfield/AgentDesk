@@ -1181,6 +1181,35 @@ mod tests {
     }
 
     #[test]
+    fn gc_adopts_legacy_idle_queue_before_later_retirement() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let queue_dir = temp_dir.path().join("legacy-idle");
+        std::fs::create_dir_all(queue_dir.join("ingress")).unwrap();
+        std::fs::write(queue_dir.join("worker.lock"), b"").unwrap();
+        std::fs::write(queue_dir.join("completed-high-water"), b"1").unwrap();
+        age_queue_tree(&queue_dir, LEDGER_RETENTION + Duration::from_secs(1));
+
+        gc_ordered_hook_relay_queue(&queue_dir);
+
+        assert!(
+            queue_dir.exists(),
+            "legacy adoption must preserve the queue"
+        );
+        assert!(
+            queue_dir.join("producer.lock").exists(),
+            "legacy adoption must materialize the producer lock"
+        );
+
+        age_queue_tree(&queue_dir, LEDGER_RETENTION + Duration::from_secs(1));
+        gc_ordered_hook_relay_queue(&queue_dir);
+
+        assert!(
+            !queue_dir.exists(),
+            "an adopted idle queue must retire after the shared retention age"
+        );
+    }
+
+    #[test]
     fn gc_preserves_recently_emptied_queue() {
         let temp_dir = tempfile::tempdir().unwrap();
         let queue_dir = temp_dir.path().join("recent");
@@ -1405,8 +1434,12 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let provider_root = temp_dir.path().join(relay_queue_subdir("claude"));
         std::fs::create_dir_all(&provider_root).unwrap();
-        for queue_index in 0..1_000 {
-            std::fs::create_dir(provider_root.join(format!("queue-{queue_index:04}"))).unwrap();
+        let queue_dirs = (0..1_000)
+            .map(|queue_index| provider_root.join(format!("queue-{queue_index:04}")))
+            .collect::<Vec<_>>();
+        for queue_dir in &queue_dirs {
+            std::fs::create_dir(queue_dir).unwrap();
+            std::fs::write(queue_dir.join("worker.lock"), b"").unwrap();
         }
 
         let started = Instant::now();
@@ -1423,6 +1456,30 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(5),
             "1,000 idle queue scan exceeded the bounded-time budget: {elapsed:?}"
+        );
+        assert!(queue_dirs.iter().all(|queue_dir| queue_dir.exists()));
+        assert!(
+            queue_dirs
+                .iter()
+                .all(|queue_dir| queue_dir.join("producer.lock").exists()),
+            "the first scan must safely adopt every legacy queue"
+        );
+
+        for queue_dir in &queue_dirs {
+            age_queue_tree(queue_dir, LEDGER_RETENTION + Duration::from_secs(1));
+        }
+        let later_stats = scan_ordered_hook_relay_queues_once(temp_dir.path()).unwrap();
+
+        assert_eq!(
+            later_stats,
+            OrderedHookRelayScanStats {
+                queue_count: 1_000,
+                active_queue_count: 0,
+            }
+        );
+        assert!(
+            queue_dirs.iter().all(|queue_dir| !queue_dir.exists()),
+            "a later aged scan must retire every adopted idle queue"
         );
     }
 
