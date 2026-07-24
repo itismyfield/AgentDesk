@@ -1,3 +1,21 @@
+macro_rules! log_command_received {
+    ($channel_id:expr, $user_name:expr, $command:expr $(, $($fields:tt)+)?) => {
+        log_info_event!(
+            "discord_command_received",
+            channel_id = $channel_id,
+            user_name = %$user_name,
+            command = %$command,
+            $($($fields)+,)?
+        );
+    };
+}
+
+macro_rules! log_info_event {
+    ($event:literal, $($fields:tt)*) => {
+        tracing::info!(event = $event, $($fields)* $event)
+    };
+}
+
 mod command_policy;
 mod config;
 mod control;
@@ -231,13 +249,15 @@ pub(in crate::services::discord) async fn enforce_slash_command_policy(
     let high_risk_enabled = high_risk_enabled_via_env();
     let decision = evaluate_policy(risk, is_owner, high_risk_enabled);
     if let Some(reply) = decision.denial_message(slash_cmd) {
-        let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
-            "  [{ts}] ⛔ CommandPolicy denied {} for {} (id:{}) — risk={:?}",
-            slash_cmd,
-            ctx.author().name,
-            ctx.author().id.get(),
-            risk,
+            event = "discord_command_denied",
+            channel_id = ctx.channel_id().get(),
+            user_id = ctx.author().id.get(),
+            user_name = %ctx.author().name,
+            command = slash_cmd,
+            reason = "command_policy",
+            risk = ?risk,
+            "discord_command_denied"
         );
         ctx.say(reply).await?;
         return Ok(false);

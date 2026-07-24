@@ -234,8 +234,7 @@ async fn run_claude_passthrough(
         return Ok(());
     }
 
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!("  [{ts}] ◀ [{user_name}] {}", command.prompt());
+    log_command_received!(ctx.channel_id().get(), user_name, command.prompt());
 
     let (effective_provider, tmux_name) = resolve_effective_provider_and_tmux_name(ctx).await;
     if let Some(notice) = provider_preflight_notice(&effective_provider, command) {

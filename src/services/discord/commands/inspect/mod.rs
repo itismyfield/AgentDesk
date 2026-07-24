@@ -68,8 +68,12 @@ async fn cmd_adk_inspect(
     #[description = "View: last / session / prompt / context / recovery"] view: InspectView,
 ) -> Result<(), Error> {
     let user_name = &ctx.author().name;
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!("  [{ts}] ◀ [{user_name}] /adk inspect {}", view.as_str());
+    log_command_received!(
+        ctx.channel_id().get(),
+        user_name,
+        "/adk inspect",
+        view = view.as_str()
+    );
 
     ctx.defer().await?;
 

@@ -36,8 +36,7 @@ pub(in crate::services::discord) async fn cmd_fast(ctx: Context<'_>) -> Result<(
         return Ok(());
     }
 
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!("  [{ts}] ◀ [{user_name}] /fast");
+    log_command_received!(ctx.channel_id().get(), user_name, "/fast");
 
     let channel_id = ctx.channel_id();
     let channel_name_hint = fallback_channel_name_for_feature_toggle(ctx, channel_id).await;

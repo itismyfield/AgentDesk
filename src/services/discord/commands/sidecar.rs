@@ -15,8 +15,7 @@ pub(in crate::services::discord) async fn cmd_sidecar(ctx: Context<'_>) -> Resul
         return Ok(());
     }
 
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!("  [{ts}] ◀ [{user_name}] /sidecar");
+    log_command_received!(ctx.channel_id().get(), user_name, "/sidecar");
 
     // Start with the host Mac pre-selected and its device list; selecting a
     // different Mac re-queries that Mac and re-renders the device dropdown.

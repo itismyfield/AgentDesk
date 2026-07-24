@@ -504,8 +504,7 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
         return Ok(());
     }
 
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!("  [{ts}] ◀ [{user_name}] /stop");
+    log_command_received!(ctx.channel_id().get(), user_name, "/stop");
 
     let channel_id = ctx.channel_id();
     let forward_context =
@@ -522,7 +521,12 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
     {
         Ok(Some(_)) => {
             ctx.say(super::STOPPING_RESPONSE).await?;
-            tracing::info!("  [{ts}] ■ Remote cancel acknowledged");
+            log_info_event!(
+                "discord_cancel_acknowledged",
+                channel_id = channel_id.get(),
+                provider = ctx.data().provider.as_str(),
+                status = "acknowledged",
+            );
             return Ok(());
         }
         Ok(None) => {}
@@ -571,7 +575,12 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
                 "/stop",
             )
             .await;
-            tracing::info!("  [{ts}] ■ Cancel signal sent");
+            log_info_event!(
+                "discord_cancel_signal_sent",
+                channel_id = channel_id.get(),
+                provider = ctx.data().provider.as_str(),
+                status = "sent",
+            );
         }
         None => {
             ctx.say(super::NO_ACTIVE_TURN_RESPONSE).await?;
@@ -645,8 +654,7 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
         return Ok(());
     }
 
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!("  [{ts}] ◀ [{user_name}] /clear");
+    log_command_received!(ctx.channel_id().get(), user_name, "/clear");
 
     let http = ctx.serenity_context().http.clone();
     clear_channel_session_state(
@@ -660,7 +668,13 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
     .await?;
 
     ctx.say(super::SESSION_CLEARED_RESPONSE).await?;
-    tracing::info!("  [{ts}] ▶ [{user_name}] Session cleared");
+    log_info_event!(
+        "discord_session_cleared",
+        channel_id = ctx.channel_id().get(),
+        provider = ctx.data().provider.as_str(),
+        user_name = %user_name,
+        status = "cleared",
+    );
     Ok(())
 }
 
@@ -744,8 +758,7 @@ pub(in crate::services::discord) async fn cmd_down(
         return Ok(());
     }
 
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!("  [{ts}] ◀ [{user_name}] /down {file}");
+    log_command_received!(ctx.channel_id().get(), user_name, "/down", path = %file);
 
     let file_path = file.trim();
     if file_path.is_empty() {
@@ -810,9 +823,8 @@ pub(in crate::services::discord) async fn cmd_shell(
         return Ok(());
     }
 
-    let ts = chrono::Local::now().format("%H:%M:%S");
     let preview = truncate_str(&command, 60);
-    tracing::info!("  [{ts}] ◀ [{user_name}] /shell {preview}");
+    log_command_received!(ctx.channel_id().get(), user_name, "/shell", command_preview = %preview);
 
     // Defer for potentially long-running commands
     ctx.defer().await?;
@@ -877,7 +889,12 @@ pub(in crate::services::discord) async fn cmd_shell(
     };
 
     send_long_message_ctx(ctx, &response).await?;
-    tracing::info!("  [{ts}] ▶ [{user_name}] Shell done");
+    log_info_event!(
+        "discord_shell_command_completed",
+        channel_id = ctx.channel_id().get(),
+        user_name = %user_name,
+        status = "completed",
+    );
     Ok(())
 }
 

@@ -248,10 +248,11 @@ async fn run_recovery(
         return Ok(());
     }
 
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!(
-        "  [{ts}] ◀ [{user_name}] {command_label} kind={:?}",
-        kind.name()
+    log_command_received!(
+        ctx.channel_id().get(),
+        user_name,
+        command_label,
+        recovery_kind = kind.name()
     );
 
     ctx.defer().await?;
@@ -314,7 +315,14 @@ async fn run_recovery(
     };
 
     send_long_message_ctx(ctx, &response).await?;
-    tracing::info!("  [{ts}] ▶ [{user_name}] {command_label} done");
+    log_info_event!(
+        "discord_recovery_command_completed",
+        channel_id = ctx.channel_id().get(),
+        user_name = %user_name,
+        command = %command_label,
+        recovery_kind = kind.name(),
+        status = "completed",
+    );
     Ok(())
 }
 
