@@ -1,4 +1,3 @@
-
 use super::{
     MonitorHandoffReason, MonitorHandoffStatus, build_monitor_handoff_placeholder,
     build_monitor_handoff_placeholder_with_live_events, build_placeholder_status_block,

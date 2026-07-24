@@ -12,11 +12,11 @@ pub(in crate::services::discord) fn floor_char_boundary(s: &str, index: usize) -
     }
 }
 
-fn char_count(s: &str) -> usize {
+pub(super) fn char_count(s: &str) -> usize {
     s.chars().count()
 }
 
-fn byte_index_at_char_limit(s: &str, max_chars: usize) -> usize {
+pub(super) fn byte_index_at_char_limit(s: &str, max_chars: usize) -> usize {
     if max_chars == 0 {
         0
     } else {
@@ -51,7 +51,7 @@ pub(in crate::services::discord) fn streaming_split_boundary(
 
     let preferred = paragraph_split
         .or(newline_split)
-        .or_else(|| super::semantic_boundaries::semantic_sentence_split_boundary(window))
+        .or_else(|| super::super::semantic_boundaries::semantic_sentence_split_boundary(window))
         .or(whitespace_split)
         .unwrap_or(safe_end);
     let preferred_chars = char_count(&text[..preferred]);
@@ -118,7 +118,7 @@ pub(in crate::services::discord) fn build_streaming_placeholder_text(
 /// Remove ephemeral placeholder lines (e.g. "⏳ 대기 중...") from the final
 /// delivered response.  These lines are useful during streaming but should not
 /// persist in the channel.
-fn strip_placeholder_lines(s: &str) -> String {
+pub(super) fn strip_placeholder_lines(s: &str) -> String {
     let mut lines = Vec::new();
     for line in s.lines() {
         let t = line.trim();

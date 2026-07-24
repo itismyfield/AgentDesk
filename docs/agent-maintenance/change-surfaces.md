@@ -84,8 +84,8 @@
 - legacy_modules: none; `src/services/discord/outbound/legacy.rs` was removed
   in #2535.
 - do_not_edit_without_migration_plan:
-  - `src/services/discord/formatting.rs::send_long_message_raw` (line 1971,
-    ordered-chunk continuation contract not yet modelled in v3).
+  - `src/services/discord/formatting/delivery.rs::send_long_message_raw`
+    (ordered-chunk continuation contract not yet modelled in v3).
   - `src/services/discord/outbound/delivery_record.rs` (frozen giant surface; +47 from
     #4046 S1r-1 adding the isolated `discord_fresh_send_records` path,
     Result-returning fresh-send fingerprint writer, and dedicated current-generation
@@ -1521,38 +1521,14 @@
     durable target store respectively. The current reaction/queue UI reconciler
     remains distinct from #4414's `DerivedTurnView`; all production modules are
     below the giant-file threshold.
-  - `src/services/discord/formatting.rs` (frozen giant surface; -536 from #4508 moving the replace/edit continuation implementation and typed deferred edit outcome to `formatting/replace_long_message.rs` while retaining the parent re-export API and inline regressions; -296 from #4055 moving the durable continuation rollback journal into `formatting/rollback_journal.rs`; +41 from #4214 converting every Discord-limit length judgment in the send/chunk paths from UTF-8 byte length to unicode code-point count (Korean answers no longer split ~3x early at ~666 chars) with a safe char-budget→byte-index boundary mapper; code-fence preservation and the #1043 empty-chunk guard unchanged; +14 reconciled to the current module-inventory production surface per #4183 CI-red recovery (post-surgery inventory drift); -2 from #4049 S4-b doc-comment sync on the reconciler-routed reaction path; +25 from #3998 D1 exposing
-    raw long-send created message ids and fallback replacement anchors for
-    recovery anchor persistence while the existing `send_long_message_raw_with_reference`
-    surface remains a unit-returning wrapper; presentation/chunking behavior unchanged. -25 from #4019 R1 moving
-    shared reaction lifecycle helpers to `reaction_lifecycle.rs` while keeping
-    the formatting re-export surface; #3805 P1 adds the watcher
-    completion-footer re-anchor machinery here — the `ReplaceLastChunkAnchor`
-    struct, the `&mut Option<..>` last-chunk out-param on
-    `replace_long_message_raw_with_outcome`, and the pure
-    `watcher_completion_footer_anchor` selection helper + its regression tests —
-    worker-local presentation logic only, no relay ownership/lease change. #3807
-    wires semantic
-    sentence-boundary callsites while keeping the shared boundary classifier
-    and compact continuation-context helper in `semantic_boundaries.rs`;
-    worker-local presentation logic only, no relay ownership/lease change.
-    #3818 keeps only the placeholder-status subagent-notification summary hook
-    here while moving the shared streaming-rollover predicate to
-    `subagent_notification_card.rs`. Historical freeze notes: net +0 from #3034
-    scoped
-    dead-code allows on the `MonitorHandoffReason::InlineTimeout` /
-    `MonitorHandoffStatus::Failed` reserved variants — the two added `#[allow]`
-    lines were offset by collapsing the adjacent reason comments back to inline
-    form, so the file stays at its frozen baseline; +46 from #3082
-    answer-flush-barrier guards (+11 around the plain multi-chunk send loops;
-    +24 from the #3082 codex follow-up that also guards the edit/replace path
-    `replace_long_message_raw_with_outcome` and bumps `note_progress` after each
-    delivered chunk for the progress-aware flush wait; +11 from the codex P1-2
-    residual that bumps `note_progress` after the FIRST edited chunk too, on the
-    multi-chunk path only, so the queued-card waiter's inactivity grace cannot
-    expire between the first edit and the first continuation); +37 from #3104
-    `finalize_stale_streaming_footer` / `text_ends_with_streaming_footer` shared
-    terminal-idle reconciliation helpers + their unit tests).
+  - `src/services/discord/formatting.rs` was decomposed in #4712: the root is a
+    sub-200-line facade that preserves the existing API through re-exports;
+    `formatting/tool_markdown.rs`, `formatting/streaming_status.rs`, and
+    `formatting/delivery.rs` own the cohesive formatting, status-panel, and
+    ordered-chunk delivery clusters, while the two large in-file test clusters
+    moved to dedicated child test modules. Every production module is below the
+    giant threshold; ordered continuation semantics remain unchanged and the
+    transport contract is still migration-sensitive.
   - `src/services/discord/prompt_builder/` (directory, refactored).
   - `src/services/discord/runtime_bootstrap.rs` (285 production lines after #3479 item-3 grouped the 20 builder args into 6 param structs; was 274 after
     #3038 run_bot S0/S5; characterization tests pin the startup-doctor barrier,

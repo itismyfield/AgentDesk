@@ -98,7 +98,6 @@ grandfathered_baseline_paths = [
   # `grandfathered` (win-locked: a re-expanded diagnostics cannot be
   # re-grandfathered — it would have to land as a full [[entry]] or shrink).
   "src/services/discord/commands/text_commands.rs",
-  "src/services/discord/formatting.rs",
   # health.rs was decomposed in #3038 Phase A (2293 prod LoC -> 402-line module
   # root + 6 sub-1000-LoC directory modules under health/); no longer a
   # prod-giant. Removed from the frozen baseline as well as `grandfathered`
@@ -469,13 +468,6 @@ decompose_issue = "#4710"
 
 [[entry]]
 file = "src/services/discord/commands/text_commands.rs"
-decision = "shrink"
-owner = "discord-relay"
-deadline = "2027-01-31"
-decompose_issue = "#4712"
-
-[[entry]]
-file = "src/services/discord/formatting.rs"
 decision = "shrink"
 owner = "discord-relay"
 deadline = "2027-01-31"

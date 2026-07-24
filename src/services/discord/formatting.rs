@@ -127,13 +127,13 @@ pub(in crate::services::discord) mod rollback_transport_test_hook {
 #[path = "formatting/tool_markdown.rs"]
 mod tool_markdown;
 
+use self::tool_markdown::convert_markdown_tables;
 pub(super) use self::tool_markdown::{
-    ALL_TOOLS, BUILTIN_SKILLS, escape_for_code_fence, extract_skill_description,
-    filter_codex_tool_logs, floor_char_boundary, format_for_discord_with_provider,
+    ALL_TOOLS, BUILTIN_SKILLS, canonical_tool_name, escape_for_code_fence,
+    extract_skill_description, filter_codex_tool_logs, format_for_discord_with_provider,
     format_for_discord_with_status_panel, format_tool_input, normalize_empty_lines, risk_badge,
     shorten_path, strip_codex_tool_log_lines, tool_info, truncate_str,
 };
-use self::tool_markdown::{byte_index_at_char_limit, char_count};
 pub(crate) use self::tool_markdown::{normalize_allowed_tools, redact_sensitive_for_placeholder};
 
 #[path = "formatting/streaming_status.rs"]
@@ -145,10 +145,11 @@ pub(super) use self::streaming_status::{
     build_monitor_handoff_placeholder_with_live_events, build_placeholder_status_block,
     build_processing_status_block, build_status_panel_streaming_edit_text,
     build_streaming_placeholder_text, classify_long_running_tool, finalize_in_progress_tool_status,
-    finalize_stale_streaming_footer, format_for_discord, humanize_tool_status,
+    finalize_stale_streaming_footer, floor_char_boundary, format_for_discord, humanize_tool_status,
     is_streaming_placeholder_status_line, plan_streaming_rollover, preserve_previous_tool_status,
     resolve_raw_tool_status, streaming_split_boundary, text_ends_with_streaming_footer,
 };
+use self::streaming_status::{byte_index_at_char_limit, char_count, strip_placeholder_lines};
 
 #[path = "formatting/delivery.rs"]
 mod delivery;

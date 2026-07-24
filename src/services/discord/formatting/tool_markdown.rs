@@ -518,7 +518,7 @@ pub(in crate::services::discord) fn format_tool_input(name: &str, input: &str) -
 
 /// Convert markdown tables to Discord-friendly list format.
 /// Each data row becomes a bullet with "Header: Value" pairs.
-fn convert_markdown_tables(input: &str) -> String {
+pub(super) fn convert_markdown_tables(input: &str) -> String {
     let raw_lines: Vec<&str> = input.lines().collect();
     let mut out: Vec<String> = Vec::new();
     let mut i = 0;
@@ -668,7 +668,7 @@ pub(in crate::services::discord) fn format_for_discord_with_provider(
     s: &str,
     provider: &crate::services::provider::ProviderKind,
 ) -> String {
-    let sanitized = super::response_sanitizer::sanitize_provider_response(s, provider);
+    let sanitized = super::super::response_sanitizer::sanitize_provider_response(s, provider);
     let filtered;
     let input = if matches!(provider, crate::services::provider::ProviderKind::Codex) {
         filtered = filter_codex_tool_logs(&sanitized);
@@ -676,7 +676,7 @@ pub(in crate::services::discord) fn format_for_discord_with_provider(
     } else {
         &sanitized
     };
-    let cleaned = strip_placeholder_lines(input);
+    let cleaned = super::strip_placeholder_lines(input);
     format_for_discord(&cleaned)
 }
 
@@ -685,7 +685,7 @@ pub(in crate::services::discord) fn format_for_discord_with_status_panel(
     s: &str,
     provider: &crate::services::provider::ProviderKind,
 ) -> String {
-    let sanitized = super::response_sanitizer::sanitize_provider_response(s, provider);
+    let sanitized = super::super::response_sanitizer::sanitize_provider_response(s, provider);
     let filtered;
     let input = if matches!(provider, crate::services::provider::ProviderKind::Codex) {
         filtered = strip_codex_tool_log_lines(&sanitized);
@@ -693,6 +693,6 @@ pub(in crate::services::discord) fn format_for_discord_with_status_panel(
     } else {
         &sanitized
     };
-    let cleaned = strip_placeholder_lines(input);
+    let cleaned = super::strip_placeholder_lines(input);
     format_for_discord(&cleaned)
 }

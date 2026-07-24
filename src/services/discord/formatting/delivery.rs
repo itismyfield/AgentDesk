@@ -248,9 +248,9 @@ pub(super) async fn send_channel_message_with_optional_reference(
     reference: Option<(ChannelId, MessageId)>,
 ) -> serenity::Result<serenity::Message> {
     let Some((reference_channel_id, reference_message_id)) = reference else {
-        return super::http::send_channel_message(http, channel_id, content).await;
+        return super::super::http::send_channel_message(http, channel_id, content).await;
     };
-    match super::http::send_channel_message_with_reference(
+    match super::super::http::send_channel_message_with_reference(
         http,
         channel_id,
         content,
@@ -268,7 +268,7 @@ pub(super) async fn send_channel_message_with_optional_reference(
                 error = %error,
                 "discord referenced send failed; falling back to plain message"
             );
-            super::http::send_channel_message(http, channel_id, content).await
+            super::super::http::send_channel_message(http, channel_id, content).await
         }
     }
 }
@@ -342,7 +342,11 @@ pub(in crate::services::discord) fn split_message(text: &str) -> Vec<String> {
         // `safe_end` is also 0 due to a multi-byte char on the boundary).
         let safe_end = byte_index_at_char_limit(remaining, effective_limit);
         let (mut split_at, mut boundary_kind) =
-            super::semantic_boundaries::message_split_boundary(remaining, safe_end, in_code_block);
+            super::super::semantic_boundaries::message_split_boundary(
+                remaining,
+                safe_end,
+                in_code_block,
+            );
         if split_at == 0 {
             if safe_end > 0 {
                 split_at = safe_end;
