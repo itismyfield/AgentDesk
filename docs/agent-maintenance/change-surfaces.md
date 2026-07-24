@@ -98,8 +98,10 @@
     from #4130 cfg(test) shadow_test_seam — per-thread override so default-OFF
     tests ignore developer-shell AGENTDESK_DELIVERY_RECORD_SHADOW; production
     paths untouched; durable delivery lease/frontier/owner-context sidecar, plus
-    the #4081 bounded recent-content fingerprint guard; bugfix only until split
-    under #3405).
+    the #4081 bounded recent-content fingerprint guard; +133 from #4508 adding the
+    edit-failure stable pre-edit path/generation identity plus locked,
+    double-validated EOF/frontier snapshot seam and fail-open rotate regression
+    coverage; bugfix only until split under #3405).
   - `src/services/message_outbox.rs` is the PG-backed message outbox
     enqueue/claim/accounting surface. #4465 adds a deduplicated `held` staging
     state that workers cannot claim; callers activate it to `pending` only
@@ -1529,7 +1531,7 @@
     with persisted queue-marker state for notification-only 📬/⏳/✅/⚠/🛑 updates,
     queue cancel cleanup, and requeue coalescing; bugfix-only until a follow-up
     can split persistence/tests from the runtime reconciler).
-  - `src/services/discord/formatting.rs` (frozen giant surface; -296 from #4055 moving the durable continuation rollback journal into `formatting/rollback_journal.rs`; +41 from #4214 converting every Discord-limit length judgment in the send/chunk paths from UTF-8 byte length to unicode code-point count (Korean answers no longer split ~3x early at ~666 chars) with a safe char-budget→byte-index boundary mapper; code-fence preservation and the #1043 empty-chunk guard unchanged; +14 reconciled to the current module-inventory production surface per #4183 CI-red recovery (post-surgery inventory drift); -2 from #4049 S4-b doc-comment sync on the reconciler-routed reaction path; +25 from #3998 D1 exposing
+  - `src/services/discord/formatting.rs` (frozen giant surface; -536 from #4508 moving the replace/edit continuation implementation and typed deferred edit outcome to `formatting/replace_long_message.rs` while retaining the parent re-export API and inline regressions; -296 from #4055 moving the durable continuation rollback journal into `formatting/rollback_journal.rs`; +41 from #4214 converting every Discord-limit length judgment in the send/chunk paths from UTF-8 byte length to unicode code-point count (Korean answers no longer split ~3x early at ~666 chars) with a safe char-budget→byte-index boundary mapper; code-fence preservation and the #1043 empty-chunk guard unchanged; +14 reconciled to the current module-inventory production surface per #4183 CI-red recovery (post-surgery inventory drift); -2 from #4049 S4-b doc-comment sync on the reconciler-routed reaction path; +25 from #3998 D1 exposing
     raw long-send created message ids and fallback replacement anchors for
     recovery anchor persistence while the existing `send_long_message_raw_with_reference`
     surface remains a unit-returning wrapper; presentation/chunking behavior unchanged. -25 from #4019 R1 moving

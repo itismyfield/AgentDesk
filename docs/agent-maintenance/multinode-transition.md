@@ -452,6 +452,13 @@
   leases and durable frontier authority remain unchanged; this adds no PostgreSQL
   schema, leader election, worker placement, or cross-node adoption rule.
 - #4488 PR-F destructive E2E controls are worker-local and opt-in: exact-message deletion and one-shot send/delete failure injection resolve the provider runtime registered on the receiving dcserver; the route subtree remains unmounted unless `AGENTDESK_E2E_CONTROL=1`, and every target must be in the boot-bound `AGENTDESK_E2E_CHANNEL_IDS` allowlist. They add no PostgreSQL authority, leader election, lease, worker placement, or cross-node routing rule; the harness targets the node-local loopback control plane for the owning E2E cell.
+- 2026-07-24 — #4508 edit-failure fallback authority: controller and legacy
+  watcher owners capture the worker-local transcript path/generation before the
+  edit await, then re-read a locked, double-validated EOF/frontier snapshot while
+  retaining the same process-local delivery lease. Committed reconciliation uses
+  delivered-anchor-aware guarded placeholder cleanup. This adds no cross-node
+  adoption authority, leader election, PG lease, or routing change; rotated or
+  otherwise unverifiable worker-local sidecars remain fail-open for delivery.
 - 2026-07-24 — #4536 idle JSONL cursor/commit boundary: temporary active/grace
   suppression now holds uncommitted ordered ranges, and only generation/EOF-checked
   confirmed delivery advances the durable and in-memory frontiers. No inflight

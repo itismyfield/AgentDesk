@@ -499,6 +499,7 @@ src/
 │   │   │   └── registry.rs
 │   │   ├── formatting/
 │   │   │   ├── long_send_rollback.rs
+│   │   │   ├── replace_long_message.rs
 │   │   │   └── rollback_journal.rs
 │   │   ├── gateway/
 │   │   │   └── outbound_messages.rs
@@ -777,6 +778,7 @@ src/
 │   │   │   ├── streaming_status_tick/
 │   │   │   │   └── types.rs
 │   │   │   ├── commit_decisions.rs
+│   │   │   ├── committed_placeholder_cleanup.rs
 │   │   │   ├── completion_gate.rs
 │   │   │   ├── completion_gate_tests.rs
 │   │   │   ├── completion_producer.rs
