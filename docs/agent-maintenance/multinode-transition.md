@@ -446,6 +446,11 @@
   before merging.
 
 ### Audited touches
+- 2026-07-24 — #4712 lifecycle de-giant rebase: `runtime_bootstrap.rs` changes only
+  update the restart-marker characterization fixture to the current nonce/version
+  encoding, while watcher lifecycle logic moves verbatim behind the existing facade.
+  Gateway ownership, lease ordering, worker placement, and cross-node authority are
+  unchanged.
 - 2026-07-24 — #4623 confirmed fresh-delivery cutover: the session sink preserves
   transport-confirmed fresh outcomes through the process-local exact-sequence ring
   and watcher ACK instead of folding them into sink errors. Existing shared delivery
