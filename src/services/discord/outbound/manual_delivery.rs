@@ -155,6 +155,7 @@ async fn record_manual_message_transcript(
         assistant_message,
         events: &[],
         duration_ms: None,
+        turn_started_at_millis: None,
     };
     if let Err(error) = persist_turn_db(pg_pool, entry).await {
         tracing::warn!(
