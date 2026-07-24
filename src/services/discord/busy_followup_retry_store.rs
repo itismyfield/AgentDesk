@@ -13,6 +13,7 @@ use crate::services::provider::ProviderKind;
 pub(in crate::services::discord) const MAX_BUSY_RETRY_COUNT: u32 = 6;
 pub(in crate::services::discord) const MAX_BUSY_RETRY_ELAPSED: Duration =
     Duration::from_secs(5 * 60);
+const BUSY_RETRY_STORE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 static STORE_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -63,6 +64,66 @@ fn load_in_root(
     ))
     .ok()?;
     serde_json::from_str(&raw).ok()
+}
+
+fn remove_empty_ancestors(path: &Path, root: &Path) {
+    let mut current = path.parent();
+    while let Some(directory) = current {
+        if directory == root {
+            break;
+        }
+        if fs::remove_dir(directory).is_err() {
+            break;
+        }
+        current = directory.parent();
+    }
+}
+
+fn sweep_expired_in_root_at(root: &Path, now_ms: u64) -> usize {
+    let mut removed = 0usize;
+    let Ok(providers) = fs::read_dir(root) else {
+        return 0;
+    };
+    for provider in providers.flatten() {
+        let Ok(channels) = fs::read_dir(provider.path()) else {
+            continue;
+        };
+        for channel in channels.flatten() {
+            let Ok(entries) = fs::read_dir(channel.path()) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                    continue;
+                }
+                let timestamp_ms = fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<BusyFollowupRetryState>(&raw).ok())
+                    .map(|state| state.first_busy_retry_at_ms)
+                    .filter(|timestamp| *timestamp != 0)
+                    .or_else(|| {
+                        fs::metadata(&path)
+                            .ok()?
+                            .modified()
+                            .ok()?
+                            .duration_since(UNIX_EPOCH)
+                            .ok()?
+                            .as_millis()
+                            .try_into()
+                            .ok()
+                    });
+                if timestamp_ms.is_some_and(|timestamp| {
+                    now_ms.saturating_sub(timestamp) >= BUSY_RETRY_STORE_TTL.as_millis() as u64
+                }) && fs::remove_file(&path).is_ok()
+                {
+                    removed = removed.saturating_add(1);
+                    remove_empty_ancestors(&path, root);
+                }
+            }
+        }
+    }
+    removed
 }
 
 fn save_in_root(
@@ -180,6 +241,19 @@ fn record_busy_retry_at(
     Ok(BusyRetryDecision { state, capped })
 }
 
+/// Remove retry bindings older than the bounded retention window. The
+/// placeholder sweeper calls this periodically; mtime covers bindings that were
+/// created but never reached their first busy retry before a crash.
+pub(in crate::services::discord) fn sweep_expired() -> usize {
+    let Some(root) = runtime_store::discord_busy_followup_retries_root() else {
+        return 0;
+    };
+    let _guard = STORE_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    sweep_expired_in_root_at(&root, now_ms())
+}
+
 pub(in crate::services::discord) fn clear_for_input(
     provider: &ProviderKind,
     channel_id: u64,
@@ -267,6 +341,46 @@ mod tests {
             }
             let persisted = load(&provider, channel_id, user_msg_id).expect("persisted state");
             assert_eq!(persisted.busy_retry_count, MAX_BUSY_RETRY_COUNT);
+        });
+    }
+
+    #[test]
+    fn stale_bindings_are_swept_by_retry_timestamp_or_file_age_4888() {
+        with_root(|| {
+            let provider = ProviderKind::Claude;
+            let root = runtime_store::discord_busy_followup_retries_root().expect("store root");
+            let stale_at = 1_000;
+            save_in_root(
+                &root,
+                &provider,
+                48_884,
+                48_885,
+                BusyFollowupRetryState {
+                    notice_message_id: 900,
+                    busy_retry_count: 1,
+                    first_busy_retry_at_ms: stale_at,
+                },
+            )
+            .expect("save stale retry");
+            save_in_root(
+                &root,
+                &provider,
+                48_884,
+                48_886,
+                BusyFollowupRetryState {
+                    notice_message_id: 901,
+                    busy_retry_count: 1,
+                    first_busy_retry_at_ms: stale_at + BUSY_RETRY_STORE_TTL.as_millis() as u64 + 1,
+                },
+            )
+            .expect("save current retry");
+
+            assert_eq!(
+                sweep_expired_in_root_at(&root, stale_at + BUSY_RETRY_STORE_TTL.as_millis() as u64,),
+                1
+            );
+            assert!(load_in_root(&root, &provider, 48_884, 48_885).is_none());
+            assert!(load_in_root(&root, &provider, 48_884, 48_886).is_some());
         });
     }
 
