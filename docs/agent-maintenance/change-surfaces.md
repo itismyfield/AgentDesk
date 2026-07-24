@@ -1362,9 +1362,13 @@
     `min(now+timeout, ceiling)` cap + one-shot ceiling warn and the auto-extend
     `clamp_auto_extend_deadline_ms` clamp, reusing the shared discord/mod.rs
     helpers, so headless Codex honors its 4h ceiling end to end).
-  - `src/services/discord/meeting_orchestrator.rs` (frozen giant surface; +1 from #4055
-    preserving the typed transient delivery result; #3034 dead-code sweep
-    removed `is_meeting_channel`).
+  - `src/services/discord/meeting_orchestrator.rs` (#4712 de-giant: cohesive
+    participant-selection, lifecycle, meeting-round, record-persistence, and
+    selection-runtime clusters moved verbatim into `meeting_orchestrator/`
+    child modules, leaving the root and every child below 1000 production lines.
+    The root retains shared domain types, state-machine/artifact seams, command
+    parsing, and explicit API re-exports; the former frozen marker is released
+    and its registry entry removed under the ghost-registration rule).
   - `src/services/discord/turn_bridge/tmux_runtime.rs` (below the giant threshold; provider
     stop-token/tmux binding runtime + the async interrupt/cancel/hard-stop
     orchestration + session-teardown. #3169: the claude-anonymous-teardown
