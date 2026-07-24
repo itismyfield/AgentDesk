@@ -65,10 +65,6 @@ fn explicit_verdict(result: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn has_explicit_verdict(result: &Value) -> bool {
-    explicit_verdict(result).is_some()
-}
-
 fn is_js_truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -250,10 +246,6 @@ mod tests {
                 key: "fail",
                 "checks": { "merge_verified": { "status": "pass" } },
             });
-            assert!(
-                has_explicit_verdict(&result),
-                "{key} should count as explicit"
-            );
             assert_eq!(
                 resolve_verdict(Some(&context), &result),
                 VerdictResolution::Explicit("fail".to_string()),
