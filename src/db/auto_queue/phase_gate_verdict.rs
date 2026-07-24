@@ -352,7 +352,10 @@ mod tests {
     fn missing_declared_check_refuses_inference() {
         let context = gate_context(json!(["merge_verified", "issue_closed"]), "gate_ok");
         let result = json!({ "checks": { "merge_verified": { "status": "pass" } } });
-        assert_eq!(resolve_verdict(Some(&context), &result), VerdictResolution::Missing);
+        assert_eq!(
+            resolve_verdict(Some(&context), &result),
+            VerdictResolution::Missing
+        );
     }
 
     #[test]
@@ -364,7 +367,10 @@ mod tests {
                 "issue_closed": { "status": "fail" },
             }
         });
-        assert_eq!(resolve_verdict(Some(&context), &result), VerdictResolution::Missing);
+        assert_eq!(
+            resolve_verdict(Some(&context), &result),
+            VerdictResolution::Missing
+        );
     }
 
     #[test]

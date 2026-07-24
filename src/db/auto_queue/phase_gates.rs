@@ -1947,6 +1947,7 @@ mod reconcile_phase_gate_pg_tests {
                 "pass_verdict": "phase_gate_passed",
                 "next_phase": 1,
                 "final_phase": false,
+                "checks": ["merge_verified", "issue_closed", "build_passed"],
             }
         })
     }
