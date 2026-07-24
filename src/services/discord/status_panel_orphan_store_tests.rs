@@ -409,6 +409,76 @@ fn flag_off_status_panel_orphan_enqueue_preserves_original_store_behavior() {
     );
 }
 
+#[tokio::test]
+async fn watcher_orphan_drain_does_not_delete_completed_current_singleton_4891() {
+    let _env_lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let runtime_root = tempfile::tempdir().expect("runtime root");
+    let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        runtime_root.path(),
+    );
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let token = "tok";
+    let channel_id = 48_913;
+    let completed_panel = 5001;
+    let next_panel = 5002;
+
+    let completed = test_inflight(
+        &provider,
+        channel_id,
+        7001,
+        Some(completed_panel),
+        6001,
+        Some(10),
+    );
+    crate::services::discord::inflight::save_inflight_state(&completed)
+        .expect("persist completed owner");
+    crate::services::discord::status_panel_singleton_store::bind_if_owned(
+        &provider,
+        token,
+        channel_id,
+        completed_panel,
+        None,
+    )
+    .expect("bind completed singleton");
+    let next_turn = test_inflight(
+        &provider,
+        channel_id,
+        7002,
+        Some(next_panel),
+        6002,
+        Some(20),
+    );
+    crate::services::discord::inflight::save_inflight_state(&next_turn)
+        .expect("move inflight to next panel");
+    enqueue(&provider, token, channel_id, completed_panel);
+    assert!(is_queued(&provider, token, channel_id, completed_panel));
+
+    let deletes = Arc::new(Mutex::new(Vec::new()));
+    let observed = deletes.clone();
+    let cleared = drain_with_delete(&shared, &provider, token, move |channel, message| {
+        let observed = observed.clone();
+        async move {
+            observed
+                .lock()
+                .expect("delete observations lock")
+                .push((channel.get(), message.get()));
+            Ok(())
+        }
+    })
+    .await;
+
+    assert_eq!(cleared, 0);
+    assert!(deletes.lock().expect("delete observations lock").is_empty());
+    assert!(
+        is_queued(&provider, token, channel_id, completed_panel),
+        "the completed current singleton must stay queued for the next turn's bind-then-retire convergence"
+    );
+}
+
 #[test]
 fn drain_committed_delete_emits_relay_delete() {
     let _guard = crate::services::observability::test_runtime_lock();

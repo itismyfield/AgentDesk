@@ -718,10 +718,29 @@ fn prepare_pending_bind_for_drain(
 /// for the next pass. Returns the number of records cleared this pass.
 pub(in crate::services::discord) async fn drain(
     http: &Arc<serenity::Http>,
-    _shared: &Arc<crate::services::discord::SharedData>,
+    shared: &Arc<crate::services::discord::SharedData>,
     provider: &ProviderKind,
     token_hash: &str,
 ) -> usize {
+    drain_with_delete(
+        shared,
+        provider,
+        token_hash,
+        |channel, message| async move { channel.delete_message(http, message).await },
+    )
+    .await
+}
+
+async fn drain_with_delete<D, DeleteFuture>(
+    _shared: &Arc<crate::services::discord::SharedData>,
+    provider: &ProviderKind,
+    token_hash: &str,
+    mut delete_message: D,
+) -> usize
+where
+    D: FnMut(serenity::ChannelId, serenity::MessageId) -> DeleteFuture,
+    DeleteFuture: std::future::Future<Output = Result<(), serenity::Error>>,
+{
     let pending = {
         let Some(root) = runtime_store::discord_status_panel_orphans_root() else {
             return 0;
@@ -798,7 +817,7 @@ pub(in crate::services::discord) async fn drain(
         }
         let channel = serenity::ChannelId::new(channel_id);
         let message = serenity::MessageId::new(panel_msg_id);
-        let delete_result = channel.delete_message(http, message).await;
+        let delete_result = delete_message(channel, message).await;
         // #3607: durable observability for the sweeper-class retry delete — classify
         // committed / already_gone (permanent 404/403/410) / failed using the SAME
         // `delete_error_is_permanent` match the convergence below uses (emit-only; no
