@@ -328,7 +328,9 @@ mod tests {
     /// "pass"}` read as a failure there and as a pass in the reconciler.
     #[test]
     fn empty_status_falls_back_to_result_alias() {
-        assert!(check_entry_is_pass(&json!({ "status": "", "result": "pass" })));
+        assert!(check_entry_is_pass(
+            &json!({ "status": "", "result": "pass" })
+        ));
         assert!(check_entry_is_pass(&json!({ "status": "PASSED" })));
         assert!(check_entry_is_pass(&json!("pass")));
         assert!(!check_entry_is_pass(&json!({ "status": "fail" })));
@@ -387,7 +389,10 @@ mod tests {
             pass_verdict_of(&json!({ "pass_verdict": "  " })),
             DEFAULT_PASS_VERDICT
         );
-        assert_eq!(pass_verdict_of(&json!({ "pass_verdict": "gate_ok" })), "gate_ok");
+        assert_eq!(
+            pass_verdict_of(&json!({ "pass_verdict": "gate_ok" })),
+            "gate_ok"
+        );
     }
 
     #[test]
@@ -408,15 +413,30 @@ mod tests {
             Some(&context),
             Some(&failing)
         ));
-        assert!(!verdict_matches(Some("pass"), "gate_ok", Some(&context), None));
+        assert!(!verdict_matches(
+            Some("pass"),
+            "gate_ok",
+            Some(&context),
+            None
+        ));
         assert!(verdict_matches(
             Some(" gate_ok "),
             "gate_ok",
             None,
             Some(&passing)
         ));
-        assert!(!verdict_matches(None, "gate_ok", Some(&context), Some(&passing)));
-        assert!(!verdict_matches(Some("   "), "gate_ok", Some(&context), Some(&passing)));
+        assert!(!verdict_matches(
+            None,
+            "gate_ok",
+            Some(&context),
+            Some(&passing)
+        ));
+        assert!(!verdict_matches(
+            Some("   "),
+            "gate_ok",
+            Some(&context),
+            Some(&passing)
+        ));
     }
 
     #[test]

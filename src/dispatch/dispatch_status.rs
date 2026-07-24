@@ -1606,9 +1606,14 @@ mod phase_gate_verdict_path_equivalence_tests {
             resolve_verdict(Some(&context), &raw),
             VerdictResolution::Inferred("gate_ok".to_string()),
         );
-        assert_eq!(injected.get("verdict").and_then(|value| value.as_str()), Some("gate_ok"));
         assert_eq!(
-            injected.get("verdict_inferred").and_then(|value| value.as_bool()),
+            injected.get("verdict").and_then(|value| value.as_str()),
+            Some("gate_ok")
+        );
+        assert_eq!(
+            injected
+                .get("verdict_inferred")
+                .and_then(|value| value.as_bool()),
             Some(true),
         );
         assert_eq!(
@@ -1629,7 +1634,10 @@ mod phase_gate_verdict_path_equivalence_tests {
             "checks": { "merge_verified": { "status": "pass" } },
         });
 
-        assert_eq!(infer_phase_gate_verdict("dsp-explicit", &gate, &result), None);
+        assert_eq!(
+            infer_phase_gate_verdict("dsp-explicit", &gate, &result),
+            None
+        );
         assert_eq!(
             resolve_verdict(Some(&context), &result),
             VerdictResolution::Explicit(Some("manual_hold".to_string())),
