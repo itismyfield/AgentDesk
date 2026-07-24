@@ -864,13 +864,15 @@ pub(in crate::services::discord) async fn defer_promoted_dispatch_if_hosted_tui_
         );
         return false;
     }
-    super::super::super::arm_slow_idle_queue_backstop_if_queue_nonempty(
-        shared,
-        provider,
-        channel_id,
-        "hosted_tui_busy_pre_drain_defer",
-    )
-    .await;
+    if !busy_retry_capped {
+        super::super::super::arm_slow_idle_queue_backstop_if_queue_nonempty(
+            shared,
+            provider,
+            channel_id,
+            "hosted_tui_busy_pre_drain_defer",
+        )
+        .await;
+    }
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
         "  [{ts}] 📬 #4270 promote gate: hosted TUI busy — queued turn re-preserved at queue front without teardown (channel {}, msg {})",
