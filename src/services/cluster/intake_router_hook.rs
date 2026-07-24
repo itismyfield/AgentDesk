@@ -319,16 +319,6 @@ pub(crate) async fn try_route_intake(
                 IntakeRouterDecision::SkippedDuplicate { resolved_owner },
             );
         }
-        Ok(Some((target_instance_id, _))) if ctx.has_nonportable_uploads => {
-            return apply_observe_mode(
-                ctx.mode,
-                IntakeRouterDecision::Blocked {
-                    reason: IntakeBlockedReason::NonPortableAttachmentRoutedTarget {
-                        target_instance_id,
-                    },
-                },
-            );
-        }
         Ok(Some((target_instance_id, _))) => {
             return apply_observe_mode(
                 ctx.mode,
@@ -2538,28 +2528,6 @@ mod pg_tests {
                 .await
                 .expect("count");
         assert_eq!(count, 0, "non-consuming /node target must not insert");
-
-        pool.close().await;
-        pg_db.drop().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn raw_attachment_with_distinct_open_route_is_blocked_instead_of_deferred_pg() {
-        let pg_db = TestPostgresDb::create().await;
-        let pool = pg_db.connect_and_migrate().await;
-        seed_open_route(&pool, "ch-attachment-open-route", "worker-open-route").await;
-
-        let mut ctx = ctx_for_channel(IntakeRoutingMode::Enforce, "ch-attachment-open-route");
-        ctx.has_nonportable_uploads = true;
-        let decision = try_route_intake(&pool, &ctx).await;
-        assert_eq!(
-            decision,
-            IntakeRouterDecision::Blocked {
-                reason: IntakeBlockedReason::NonPortableAttachmentRoutedTarget {
-                    target_instance_id: "worker-open-route".to_string(),
-                },
-            }
-        );
 
         pool.close().await;
         pg_db.drop().await;

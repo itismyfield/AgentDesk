@@ -142,10 +142,7 @@ mod tests {
         let outcome = resolve_attachment_admission_with(
             IntakeAdmission::Local(LocalAdmissionPermit {
                 channel_id: serenity::ChannelId::new(1),
-                user_msg_id: serenity::MessageId::new(2),
-                request_owner: serenity::UserId::new(3),
-                origin: super::super::IntakeOrigin::LiveMessage,
-                preserve_on_cancel: true,
+                request_owner: serenity::UserId::new(2),
                 has_nonportable_uploads: true,
             }),
             |permit| {

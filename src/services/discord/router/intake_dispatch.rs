@@ -52,10 +52,7 @@ pub(crate) struct IntakeSubmission {
 #[derive(Debug)]
 pub(crate) struct LocalAdmissionPermit {
     channel_id: serenity::ChannelId,
-    user_msg_id: serenity::MessageId,
     request_owner: serenity::UserId,
-    origin: IntakeOrigin,
-    preserve_on_cancel: bool,
     has_nonportable_uploads: bool,
 }
 
@@ -63,10 +60,7 @@ impl LocalAdmissionPermit {
     fn for_submission(submission: &IntakeSubmission) -> Self {
         Self {
             channel_id: submission.request.channel_id,
-            user_msg_id: submission.request.user_msg_id,
             request_owner: submission.request.request_owner,
-            origin: submission.origin,
-            preserve_on_cancel: submission.preserve_on_cancel,
             has_nonportable_uploads: submission.has_nonportable_uploads
                 || !submission.attachments.is_empty()
                 || !submission.preloaded_uploads.is_empty(),
@@ -75,10 +69,7 @@ impl LocalAdmissionPermit {
 
     fn permits_submission(&self, submission: &IntakeSubmission) -> bool {
         self.channel_id == submission.request.channel_id
-            && self.user_msg_id == submission.request.user_msg_id
             && self.request_owner == submission.request.request_owner
-            && self.origin == submission.origin
-            && self.preserve_on_cancel == submission.preserve_on_cancel
             && self.has_nonportable_uploads
                 == (submission.has_nonportable_uploads
                     || !submission.attachments.is_empty()
@@ -268,8 +259,6 @@ pub(crate) async fn finish_admitted_local(
         tracing::error!(
             admitted_channel_id = permit.channel_id.get(),
             submitted_channel_id = submission.request.channel_id.get(),
-            admitted_user_msg_id = permit.user_msg_id.get(),
-            submitted_user_msg_id = submission.request.user_msg_id.get(),
             admitted_request_owner = permit.request_owner.get(),
             submitted_request_owner = submission.request.request_owner.get(),
             "local admission permit does not match intake submission"
