@@ -109,8 +109,8 @@ pub fn pass_verdict_of(phase_gate: &Value) -> String {
 }
 
 /// Checks-only inference against an already-extracted `phase_gate` context
-/// object. Ignores any explicit verdict on `result` — callers that must honour
-/// an explicit verdict use [`infer_pass_verdict`] instead.
+/// object. Ignores any explicit verdict on `result`; the canonical
+/// [`resolve_verdict`] entry point checks explicit evidence first.
 ///
 /// Refuses to infer when the gate context is not an object, when no checks are
 /// reported, when a declared check is missing from `result.checks`, or when any
