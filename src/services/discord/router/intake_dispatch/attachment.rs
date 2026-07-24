@@ -143,7 +143,6 @@ mod tests {
             IntakeAdmission::Local(LocalAdmissionPermit {
                 channel_id: serenity::ChannelId::new(1),
                 request_owner: serenity::UserId::new(2),
-                has_nonportable_uploads: true,
             }),
             |permit| {
                 local_sessions.push("session");

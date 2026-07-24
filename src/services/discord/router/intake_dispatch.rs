@@ -54,7 +54,6 @@ pub(crate) struct IntakeSubmission {
 pub(crate) struct LocalAdmissionPermit {
     channel_id: serenity::ChannelId,
     request_owner: serenity::UserId,
-    has_nonportable_uploads: bool,
 }
 
 impl LocalAdmissionPermit {
@@ -62,19 +61,12 @@ impl LocalAdmissionPermit {
         Self {
             channel_id: submission.request.channel_id,
             request_owner: submission.request.request_owner,
-            has_nonportable_uploads: submission.has_nonportable_uploads
-                || !submission.attachments.is_empty()
-                || !submission.preloaded_uploads.is_empty(),
         }
     }
 
     fn permits_submission(&self, submission: &IntakeSubmission) -> bool {
         self.channel_id == submission.request.channel_id
             && self.request_owner == submission.request.request_owner
-            && self.has_nonportable_uploads
-                == (submission.has_nonportable_uploads
-                    || !submission.attachments.is_empty()
-                    || !submission.preloaded_uploads.is_empty())
     }
 }
 
