@@ -3085,6 +3085,68 @@ mod reconcile_phase_gate_pg_tests {
         pg_db.drop().await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn primary_and_sibling_checks_only_evidence_use_same_reducer() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        fixture(&pool).await;
+
+        let context = json!({
+            "phase_gate": {
+                "run_id": "run-pg-test",
+                "batch_phase": 0,
+                "pass_verdict": "gate_ok",
+                "checks": ["merge_verified", "issue_closed"]
+            }
+        });
+        let checks_only = json!({
+            "checks": {
+                "merge_verified": {"status": "pass"},
+                "issue_closed": {"status": "", "result": "passed"}
+            }
+        });
+        for id in ["dsp-reducer-primary", "dsp-reducer-sibling"] {
+            insert_dispatch(
+                &pool,
+                id,
+                "completed",
+                context.clone(),
+                Some(checks_only.clone()),
+            )
+            .await;
+        }
+        save_phase_gate_state_on_pg(
+            &pool,
+            "run-pg-test",
+            0,
+            &PhaseGateStateWrite {
+                status: "pending".into(),
+                pass_verdict: "gate_ok".into(),
+                dispatch_ids: vec!["dsp-reducer-primary".into(), "dsp-reducer-sibling".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed reducer path fixture");
+
+        let outcome = run_reconcile(
+            &pool,
+            "dsp-reducer-primary",
+            "completed",
+            context,
+            Some(checks_only),
+        )
+        .await;
+        assert!(
+            matches!(outcome, PhaseGateReconciliation::Cleared { .. }),
+            "primary and sibling checks-only rows must both infer gate_ok: {outcome:?}"
+        );
+        assert_eq!(gate_count(&pool, "run-pg-test", 0).await, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
     /// #1980 fix #2: callers may write `status='completed'` without a `result`
     /// (CRUD route). Reconciliation must fall back to the persisted dispatch
     /// row's result so a previously-recorded passing verdict is honored.
