@@ -876,7 +876,11 @@ mod restart_lifecycle_characterization_tests {
             let root = crate::agentdesk_runtime_root().expect("runtime root override");
             std::fs::create_dir_all(&root).unwrap();
             let marker = root.join("restart_pending");
-            std::fs::write(&marker, "v0.0.0-s3-characterization").unwrap();
+            std::fs::write(
+                &marker,
+                "nonce=s3-characterization\nversion=v0.0.0-s3-characterization\n",
+            )
+            .unwrap();
 
             spawns::run_bot_spawn_deferred_restart_poller(&shared, &ProviderKind::Claude);
 

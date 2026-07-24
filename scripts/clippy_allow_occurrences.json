@@ -718,9 +718,14 @@
       "count": 1
     },
     {
-      "path": "src/services/discord/watchers/lifecycle.rs",
+      "path": "src/services/discord/watchers/lifecycle/liveness.rs",
       "lint": "too_many_arguments",
-      "count": 2
+      "count": 1
+    },
+    {
+      "path": "src/services/discord/watchers/lifecycle/output_policy.rs",
+      "lint": "too_many_arguments",
+      "count": 1
     },
     {
       "path": "src/services/dispatches/discord_delivery/orchestration.rs",
