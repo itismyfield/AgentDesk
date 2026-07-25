@@ -162,6 +162,14 @@ class FastCheckCiWiringTests(unittest.TestCase):
         )
         self.assertEqual(workflow.count(command), 2)
 
+    def test_macos_pr_lane_runs_placeholder_live_events_tests(self) -> None:
+        workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
+        command = (
+            "env -u AGENTDESK_ROOT_DIR cargo test --lib "
+            "placeholder_live_events -- --skip _pg --skip pg_ --skip postgres"
+        )
+        self.assertEqual(workflow.count(command), 2)
+
     def test_main_and_nightly_retain_non_pg_test_coverage(self) -> None:
         justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
         self.assertIn("check: fmt-check lint cargo-check test", justfile)
