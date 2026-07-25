@@ -88,6 +88,13 @@ fn infer_pass_verdict_from_checks(context: Option<&Value>, result: &Value) -> Op
     infer_pass_verdict_in_gate(context?.get("phase_gate")?, result)
 }
 
+pub fn authoritative_context(
+    context: Option<&Value>,
+    persisted_legacy_default: bool,
+) -> Option<Value> {
+    crate::phase_gate::authoritative_evaluation_context(context?, persisted_legacy_default)
+}
+
 pub fn resolve_verdict(context: Option<&Value>, result: &Value) -> VerdictResolution {
     if let Some(verdict) = explicit_verdict(result) {
         return VerdictResolution::Explicit(verdict);

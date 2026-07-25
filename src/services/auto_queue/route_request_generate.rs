@@ -317,10 +317,9 @@ mod tests {
         assert!(!text.contains("allowed_gate_kinds:"));
     }
 
-    /// Regression for codex review P1 on #2126: when allowed_gate_kinds
-    /// excludes the catalog default (`pr-confirm`), the synthesised call
-    /// example must not bleed the default back into the prompt and the
-    /// guide must explicitly forbid kinds outside the restriction.
+    /// Regression for codex review P1 on #2126: the synthesised call example
+    /// must use only an available kind from the restriction, and the guide must
+    /// explicitly forbid kinds outside it.
     #[test]
     fn instruction_example_kind_respects_allowed_restriction() {
         let issues = vec![42i64];
@@ -335,6 +334,10 @@ mod tests {
         assert!(
             text.contains("\"phase_gate_kind\": \"pr-confirm\""),
             "call example should use the first allowed kind: {text}"
+        );
+        assert!(
+            !text.contains("\"phase_gate_kind\": \"deploy-gate\""),
+            "unavailable deploy-gate must not appear outside the allowed restriction: {text}"
         );
         assert!(
             text.contains("반드시 allowed_gate_kinds"),

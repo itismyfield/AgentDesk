@@ -241,6 +241,53 @@ pub fn dispatch_result_checks(phase_gate: &Value) -> Option<Vec<&str>> {
         .collect()
 }
 
+/// Return an evaluation context whose declaration fields come only from this registry.
+///
+/// Current dispatches must carry an exact declaration snapshot. The sole compatibility case is a
+/// pre-snapshot context whose persisted run/phase entries were independently proven to all have a
+/// NULL/blank kind. Only that closed provenance may reconstruct the current `pr-confirm`
+/// declaration; partial/stale snapshots never fall back through this path.
+pub fn authoritative_evaluation_context(
+    context: &Value,
+    persisted_legacy_default: bool,
+) -> Option<Value> {
+    let phase_gate = context.get("phase_gate")?;
+    if snapshot_matches_current(phase_gate) {
+        return Some(context.clone());
+    }
+    if !persisted_legacy_default || !legacy_context_lacks_declaration_snapshot(phase_gate) {
+        return None;
+    }
+
+    let declaration = resolve_declaration_value(DEFAULT_PHASE_GATE_KIND)?;
+    let mut normalized = context.clone();
+    let normalized_gate = normalized.get_mut("phase_gate")?.as_object_mut()?;
+    for field in [
+        "kind",
+        "declaration_version",
+        "pass_verdict",
+        "evidence_requirement",
+        "required_checks",
+    ] {
+        normalized_gate.insert(field.to_string(), declaration.get(field)?.clone());
+    }
+    Some(normalized)
+}
+
+fn legacy_context_lacks_declaration_snapshot(phase_gate: &Value) -> bool {
+    let Some(object) = phase_gate.as_object() else {
+        return false;
+    };
+    [
+        "kind",
+        "declaration_version",
+        "required_checks",
+        "evidence_requirement",
+    ]
+    .iter()
+    .all(|field| !object.contains_key(*field))
+}
+
 #[cfg(test)]
 mod auto_queue_phase_gate_tests {
     use super::*;
@@ -281,6 +328,38 @@ mod auto_queue_phase_gate_tests {
             required.check == PhaseGateCheck::DeployVerified
                 && required.authority == PhaseGateCheckAuthority::TrustedDeploymentEvidence
         }));
+    }
+
+    #[test]
+    fn authoritative_context_reconstructs_only_proven_pre_snapshot_legacy_default() {
+        let legacy = json!({
+            "phase_gate": {
+                "run_id": "run-legacy",
+                "batch_phase": 0,
+                "checks": ["attacker_override"],
+                "pass_verdict": "attacker_pass",
+            }
+        });
+        assert!(authoritative_evaluation_context(&legacy, false).is_none());
+        let normalized =
+            authoritative_evaluation_context(&legacy, true).expect("proven legacy default"); // agentdesk-audit: allow-unwrap — test-only canonical compatibility fixture
+        assert_eq!(normalized["phase_gate"]["kind"], "pr-confirm");
+        assert_eq!(
+            normalized["phase_gate"]["required_checks"],
+            resolve_declaration_value("pr-confirm").expect("pr-confirm declaration")["required_checks"] // agentdesk-audit: allow-unwrap — immutable built-in declaration fixture
+        );
+        assert_eq!(
+            normalized["phase_gate"]["pass_verdict"],
+            "phase_gate_passed"
+        );
+
+        for incompatible in [
+            json!({"phase_gate": {"kind": "ship-it"}}),
+            json!({"phase_gate": {"kind": "deploy-gate"}}),
+            json!({"phase_gate": {"declaration_version": 1}}),
+        ] {
+            assert!(authoritative_evaluation_context(&incompatible, true).is_none());
+        }
     }
 
     #[test]

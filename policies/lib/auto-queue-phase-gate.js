@@ -104,6 +104,46 @@ function _phaseGateDeclarationMatches(phaseGate) {
   return true;
 }
 
+function _phaseGateLegacySnapshotMissing(phaseGate) {
+  if (!phaseGate || typeof phaseGate !== "object") return false;
+  var fields = ["kind", "declaration_version", "required_checks", "evidence_requirement"];
+  for (var i = 0; i < fields.length; i++) {
+    if (Object.prototype.hasOwnProperty.call(phaseGate, fields[i])) return false;
+  }
+  return true;
+}
+
+function authoritativePhaseGateContext(runId, phase, context) {
+  var gate = context && context.phase_gate;
+  if (_phaseGateDeclarationMatches(gate)) return context;
+  if (!_phaseGateLegacySnapshotMissing(gate)) return null;
+
+  var rows = agentdesk.db.query(
+    "SELECT COUNT(*) as entry_count, " +
+    "SUM(CASE WHEN phase_gate_kind IS NULL OR BTRIM(phase_gate_kind) = '' THEN 1 ELSE 0 END) as legacy_default_count " +
+    "FROM auto_queue_entries WHERE run_id = ? AND COALESCE(batch_phase, 0) = ?",
+    [runId, phase]
+  );
+  var entryCount = rows.length > 0 ? Number(rows[0].entry_count || 0) : 0;
+  var legacyCount = rows.length > 0 ? Number(rows[0].legacy_default_count || 0) : 0;
+  if (entryCount <= 0 || legacyCount !== entryCount) return null;
+
+  var declaration = agentdesk.pipeline.resolvePhaseGateDeclaration("pr-confirm");
+  if (!declaration || declaration.available !== true) return null;
+  var normalized = JSON.parse(JSON.stringify(context));
+  var fields = [
+    "kind",
+    "declaration_version",
+    "pass_verdict",
+    "evidence_requirement",
+    "required_checks"
+  ];
+  for (var i = 0; i < fields.length; i++) {
+    normalized.phase_gate[fields[i]] = declaration[fields[i]];
+  }
+  return normalized;
+}
+
 function _dispatchResultCheckNames(phaseGate) {
   if (!_phaseGateDeclarationMatches(phaseGate) || !Array.isArray(phaseGate.required_checks)) {
     return null;
@@ -852,6 +892,7 @@ module.exports = {
   phaseGateDiagnosticVerdict: _phaseGateDiagnosticVerdict,
   phaseGateFailureReason: _phaseGateFailureReason,
   phaseGateGroupKey: _phaseGateGroupKey,
+  authoritativePhaseGateContext: authoritativePhaseGateContext,
   phaseGateFailureKey: phaseGateFailureKey,
   incrementPhaseGateFailureCount: incrementPhaseGateFailureCount,
   resetPhaseGateFailureCount: resetPhaseGateFailureCount,

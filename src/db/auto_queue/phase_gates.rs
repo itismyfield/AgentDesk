@@ -563,27 +563,27 @@ async fn reconcile_phase_gate_for_terminal_dispatch_on_pg_tx_inner(
         .map(str::trim)
         .filter(|raw| !raw.is_empty())
         .and_then(|raw| serde_json::from_str(raw).ok());
-    // Each dispatch context is the authority for its own expected verdict.
-    // A phase may contain multiple gate groups with different pass verdicts;
-    // using the first persisted gate-row value here makes primary and sibling
-    // reconciliation disagree for the same dispatch.
-    let pass_verdict = context_value
+    let authoritative_context = authoritative_phase_gate_context_on_pg_tx(
+        tx,
+        &gate.run_id,
+        gate.phase,
+        context_value.as_ref(),
+    )
+    .await?;
+    // Each dispatch context is the authority for selecting a registry snapshot,
+    // but never for declaration contents. Legacy contexts are reconstructed only
+    // after the persisted entries for this run/phase prove NULL/blank kinds.
+    let pass_verdict = authoritative_context
         .as_ref()
         .and_then(|context| context.get("phase_gate"))
         .map(pass_verdict_of)
-        .unwrap_or_else(|| {
-            if gate.pass_verdict.is_empty() {
-                DEFAULT_PASS_VERDICT.to_string()
-            } else {
-                gate.pass_verdict.clone()
-            }
-        });
+        .unwrap_or_else(|| DEFAULT_PASS_VERDICT.to_string());
     // #1980 + #699: legacy / checks-only results do not carry an explicit
     // verdict, so `resolve_verdict` falls back to checks inference — the same
     // fallback the dispatch finalize path applies before persisting a result.
     let verdict_resolution = result_value
         .as_ref()
-        .map(|result| resolve_verdict(context_value.as_ref(), result));
+        .map(|result| resolve_verdict(authoritative_context.as_ref(), result));
     let verdict = verdict_resolution
         .as_ref()
         .and_then(|resolution| resolution.verdict());
@@ -599,7 +599,7 @@ async fn reconcile_phase_gate_for_terminal_dispatch_on_pg_tx_inner(
         || !phase_gate_verdict_matches(
             verdict,
             &pass_verdict,
-            context_value.as_ref(),
+            authoritative_context.as_ref(),
             result_value.as_ref(),
         )
     {
@@ -1288,6 +1288,43 @@ async fn load_phase_gate_row_for_dispatch_on_pg_tx(
     Ok(row.map(|status| PhaseGateRow { status }))
 }
 
+async fn phase_gate_run_phase_uses_legacy_default_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+    phase: i64,
+) -> Result<bool, String> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT COALESCE(
+             BOOL_AND(NULLIF(BTRIM(phase_gate_kind), '') IS NULL),
+             FALSE
+         )
+         FROM auto_queue_entries
+         WHERE run_id = $1
+           AND COALESCE(batch_phase, 0) = $2",
+    )
+    .bind(run_id)
+    .bind(phase)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| {
+        format!("load persisted phase-gate kind provenance for {run_id}/{phase}: {error}")
+    })
+}
+
+async fn authoritative_phase_gate_context_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+    phase: i64,
+    context: Option<&Value>,
+) -> Result<Option<Value>, String> {
+    let legacy_default =
+        phase_gate_run_phase_uses_legacy_default_on_pg_tx(tx, run_id, phase).await?;
+    Ok(super::phase_gate_verdict::authoritative_context(
+        context,
+        legacy_default,
+    ))
+}
+
 #[derive(Debug, Default)]
 struct SiblingSummary {
     pending: i64,
@@ -1361,6 +1398,9 @@ async fn load_sibling_phase_gate_dispatches_on_pg_tx(
                 })
             })
             .transpose()?;
+        let authoritative_context =
+            authoritative_phase_gate_context_on_pg_tx(tx, run_id, phase, context_value.as_ref())
+                .await?;
         match status.as_str() {
             "pending" | "dispatched" => {
                 summary.pending += 1;
@@ -1370,7 +1410,7 @@ async fn load_sibling_phase_gate_dispatches_on_pg_tx(
             _ => {
                 let resolution = result_value
                     .as_ref()
-                    .map(|result| resolve_verdict(context_value.as_ref(), result));
+                    .map(|result| resolve_verdict(authoritative_context.as_ref(), result));
                 let verdict = result_value
                     .as_ref()
                     .zip(resolution.as_ref())
@@ -1395,7 +1435,7 @@ async fn load_sibling_phase_gate_dispatches_on_pg_tx(
             }
         }
 
-        let expected_verdict = context_value
+        let expected_verdict = authoritative_context
             .as_ref()
             .and_then(|value| value.get("phase_gate"))
             .map(pass_verdict_of)
@@ -1405,7 +1445,7 @@ async fn load_sibling_phase_gate_dispatches_on_pg_tx(
         // with the per-dispatch one (#699 round 2, #4884).
         let actual_resolution = result_value
             .as_ref()
-            .map(|result| resolve_verdict(context_value.as_ref(), result));
+            .map(|result| resolve_verdict(authoritative_context.as_ref(), result));
         let actual_verdict = actual_resolution
             .as_ref()
             .and_then(|resolution| resolution.verdict());
@@ -1416,7 +1456,7 @@ async fn load_sibling_phase_gate_dispatches_on_pg_tx(
         if !phase_gate_verdict_matches(
             actual_verdict,
             &expected_verdict,
-            context_value.as_ref(),
+            authoritative_context.as_ref(),
             result_value.as_ref(),
         ) {
             let reason = result_value
@@ -2357,7 +2397,14 @@ mod reconcile_phase_gate_pg_tests {
         fixture(&pool).await;
 
         let context_a = gate_context();
-        let context_b = gate_context();
+        let mut deploy = crate::phase_gate::resolve_declaration_value("deploy-gate")
+            .expect("deploy declaration"); // agentdesk-audit: allow-unwrap — immutable built-in fixture in #[cfg(test)] module
+        let deploy_gate = deploy.as_object_mut().expect("declaration object"); // agentdesk-audit: allow-unwrap — registry declaration is always a JSON object
+        deploy_gate.insert("run_id".to_string(), json!("run-pg-test"));
+        deploy_gate.insert("batch_phase".to_string(), json!(0));
+        deploy_gate.insert("next_phase".to_string(), json!(1));
+        deploy_gate.insert("final_phase".to_string(), json!(false));
+        let context_b = json!({"phase_gate": deploy});
         for (id, context) in [
             ("dsp-group-a", context_a.clone()),
             ("dsp-group-b", context_b.clone()),
@@ -2394,9 +2441,9 @@ mod reconcile_phase_gate_pg_tests {
 
         let outcome = run_reconcile(
             &pool,
-            "dsp-group-b",
+            "dsp-group-a",
             "completed",
-            context_b,
+            context_a,
             Some(json!({
                 "verdict": "phase_gate_passed",
                 "checks": {
@@ -2408,10 +2455,10 @@ mod reconcile_phase_gate_pg_tests {
         )
         .await;
         assert!(
-            matches!(outcome, PhaseGateReconciliation::Cleared { .. }),
-            "primary and sibling paths must use each dispatch context: {outcome:?}"
+            matches!(outcome, PhaseGateReconciliation::MarkedFailed { .. }),
+            "the deploy sibling's authoritative unavailable context must not be replaced by the primary pr-confirm context: {outcome:?}"
         );
-        assert_eq!(gate_count(&pool, "run-pg-test", 0).await, 0);
+        assert_eq!(gate_status(&pool, "run-pg-test", 0).await, "failed");
 
         pool.close().await;
         pg_db.drop().await;
@@ -2533,6 +2580,138 @@ mod reconcile_phase_gate_pg_tests {
         assert!(matches!(outcome, PhaseGateReconciliation::AlreadyFailed));
         assert_eq!(gate_status(&pool, "run-pg-test", 0).await, "failed");
         assert_eq!(run_status(&pool, "run-pg-test").await, "paused");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_null_kind_context_reconciles_and_repairs_from_registry() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        fixture(&pool).await;
+        seed_pending_entry(&pool, "run-pg-test", "entry-legacy-gate", 0).await;
+        seed_pending_entry(&pool, "run-pg-test", "entry-next-legacy", 1).await;
+
+        let legacy_context = json!({
+            "phase_gate": {
+                "run_id": "run-pg-test",
+                "batch_phase": 0,
+                "next_phase": 1,
+                "final_phase": false,
+                "pass_verdict": "attacker_override",
+                "checks": ["attacker_override"]
+            }
+        });
+        let passing = json!({
+            "verdict": "phase_gate_passed",
+            "checks": {
+                "merge_verified": "pass",
+                "issue_closed": "pass",
+                "build_passed": "pass"
+            }
+        });
+        insert_dispatch(
+            &pool,
+            "dsp-legacy-repair",
+            "completed",
+            legacy_context.clone(),
+            Some(passing.clone()),
+        )
+        .await;
+        save_phase_gate_state_on_pg(
+            &pool,
+            "run-pg-test",
+            0,
+            &PhaseGateStateWrite {
+                status: "failed".into(),
+                pass_verdict: "attacker_override".into(),
+                dispatch_ids: vec!["dsp-legacy-repair".into()],
+                next_phase: Some(1),
+                failure_reason: Some("pre-deploy strict reducer failure".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed legacy failed gate"); // agentdesk-audit: allow-unwrap — test-only PG fixture in #[cfg(test)] module
+        sqlx::query("UPDATE auto_queue_runs SET status='paused' WHERE id='run-pg-test'")
+            .execute(&pool)
+            .await
+            .expect("pause run"); // agentdesk-audit: allow-unwrap — test-only PG fixture in #[cfg(test)] module
+
+        let summary = repair_phase_gates_for_run_on_pg(
+            &pool,
+            "run-pg-test",
+            PhaseGateRepairOptions::default(),
+        )
+        .await
+        .expect("repair legacy gate"); // agentdesk-audit: allow-unwrap — test-only PG assertion in #[cfg(test)] module
+        assert_eq!(summary.cleared_gates, 1);
+        assert_eq!(summary.blocking_gates_remaining, 0);
+        assert_eq!(summary.run_status.as_deref(), Some("active"));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_context_with_nonblank_persisted_kind_remains_failed_closed() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        fixture(&pool).await;
+        seed_pending_entry(&pool, "run-pg-test", "entry-explicit-kind", 0).await;
+        sqlx::query(
+            "UPDATE auto_queue_entries SET phase_gate_kind = 'deploy-gate' WHERE id = 'entry-explicit-kind'",
+        )
+        .execute(&pool)
+        .await
+        .expect("set explicit deploy kind"); // agentdesk-audit: allow-unwrap — test-only PG fixture in #[cfg(test)] module
+
+        let legacy_context = json!({
+            "phase_gate": {"run_id": "run-pg-test", "batch_phase": 0}
+        });
+        let passing = json!({
+            "verdict": "phase_gate_passed",
+            "checks": {
+                "merge_verified": "pass",
+                "issue_closed": "pass",
+                "build_passed": "pass"
+            }
+        });
+        insert_dispatch(
+            &pool,
+            "dsp-explicit-kind",
+            "completed",
+            legacy_context.clone(),
+            Some(passing.clone()),
+        )
+        .await;
+        save_phase_gate_state_on_pg(
+            &pool,
+            "run-pg-test",
+            0,
+            &PhaseGateStateWrite {
+                status: "pending".into(),
+                dispatch_ids: vec!["dsp-explicit-kind".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed explicit-kind gate"); // agentdesk-audit: allow-unwrap — test-only PG fixture in #[cfg(test)] module
+
+        let outcome = run_reconcile(
+            &pool,
+            "dsp-explicit-kind",
+            "completed",
+            legacy_context,
+            Some(passing),
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            PhaseGateReconciliation::MarkedFailed { .. }
+        ));
+        assert_eq!(gate_status(&pool, "run-pg-test", 0).await, "failed");
 
         pool.close().await;
         pg_db.drop().await;

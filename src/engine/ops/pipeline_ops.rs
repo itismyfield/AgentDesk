@@ -199,6 +199,37 @@ pub(super) fn register_pipeline_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
     Ok(())
 }
 
+#[cfg(test)]
+mod auto_queue_phase_gate_js_contract_tests {
+    use super::register_pipeline_ops;
+    use rquickjs::{Context, Runtime};
+
+    #[test]
+    fn quickjs_phase_gate_declarations_match_rust_registry_serialization() {
+        let runtime = Runtime::new().expect("create QuickJS runtime"); // agentdesk-audit: allow-unwrap — test-only QuickJS fixture
+        let context = Context::full(&runtime).expect("create QuickJS context"); // agentdesk-audit: allow-unwrap — test-only QuickJS fixture
+        context.with(|ctx| {
+            let agentdesk = rquickjs::Object::new(ctx.clone()).expect("agentdesk object"); // agentdesk-audit: allow-unwrap — test-only QuickJS fixture
+            ctx.globals()
+                .set("agentdesk", agentdesk)
+                .expect("install agentdesk"); // agentdesk-audit: allow-unwrap — test-only QuickJS fixture
+            register_pipeline_ops(&ctx, None).expect("register pipeline ops"); // agentdesk-audit: allow-unwrap — test-only host contract setup
+
+            for kind in ["pr-confirm", "deploy-gate"] {
+                let script = format!(
+                    "JSON.stringify(agentdesk.pipeline.resolvePhaseGateDeclaration({kind:?}))"
+                );
+                let serialized: String = ctx.eval(script).expect("evaluate declaration"); // agentdesk-audit: allow-unwrap — test-only QuickJS assertion
+                let from_js: serde_json::Value =
+                    serde_json::from_str(&serialized).expect("decode declaration"); // agentdesk-audit: allow-unwrap — host operation must emit valid JSON
+                let from_rust =
+                    crate::phase_gate::resolve_declaration_value(kind).expect("Rust declaration"); // agentdesk-audit: allow-unwrap — immutable built-in declaration fixture
+                assert_eq!(from_js, from_rust, "serialization drift for {kind}");
+            }
+        });
+    }
+}
+
 fn resolve_for_card_raw_pg(pool: &PgPool, card_id: &str) -> String {
     let card_id = card_id.to_string();
     match crate::utils::async_bridge::block_on_pg_result(
