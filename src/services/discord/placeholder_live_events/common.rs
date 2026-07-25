@@ -93,7 +93,8 @@ pub(super) fn is_harness_task_tool_name(name: &str) -> bool {
 }
 
 pub(super) fn tool_prefix(name: &str) -> String {
-    let lower = name.trim().to_ascii_lowercase();
+    let trimmed = name.trim();
+    let lower = trimmed.to_ascii_lowercase();
     let prefix = match lower.as_str() {
         "bash" | "bashoutput" | "killbash" | "command_execution" => Some("Bash"),
         "edit" | "multiedit" | "write" | "notebookedit" => Some("Edit"),
@@ -107,14 +108,23 @@ pub(super) fn tool_prefix(name: &str) -> String {
         | "taskstop" => Some("Task"),
         "webfetch" => Some("WebFetch"),
         "websearch" => Some("WebSearch"),
-        _ => canonical_tool_name(name),
+        _ => canonical_tool_name(trimmed),
     };
     if let Some(prefix) = prefix {
         return format!("[{prefix}]");
     }
-    sanitized_tool_name(name)
-        .map(|name| format!("[{name}]"))
-        .unwrap_or_else(|| "[Tool]".to_string())
+
+    // MCP server namespaces can identify private infrastructure. Keep only the
+    // operation class after the final `__`; every other unknown name fails closed.
+    if lower.starts_with("mcp__") {
+        return trimmed
+            .rsplit("__")
+            .next()
+            .and_then(sanitized_tool_name)
+            .map(|operation| format!("[{operation}]"))
+            .unwrap_or_else(|| "[Tool]".to_string());
+    }
+    "[Tool]".to_string()
 }
 
 pub(super) fn sanitized_tool_name(name: &str) -> Option<String> {

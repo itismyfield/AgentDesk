@@ -41,16 +41,23 @@ pub(in crate::services::discord) fn status_events_from_tool_use_with_id_for_foot
     tool_use_id: Option<&str>,
     footer_mode_enabled: bool,
 ) -> Vec<StatusEvent> {
-    let args_summary = format_tool_input(name, input)
-        .trim()
-        .is_empty()
-        .then(|| first_content_line(input))
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            let summary = format_tool_input(name, input);
-            (!summary.trim().is_empty()).then_some(summary)
+    // Subagent inputs are arbitrary prompts and may contain credentials or
+    // private endpoints. Keep them out of status state entirely; the lifecycle
+    // is represented only by explicitly allowlisted description fields instead.
+    let args_summary = (!is_task_tool(name))
+        .then(|| {
+            format_tool_input(name, input)
+                .trim()
+                .is_empty()
+                .then(|| first_content_line(input))
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| {
+                    let summary = format_tool_input(name, input);
+                    (!summary.trim().is_empty()).then_some(summary)
+                })
+                .map(|summary| truncate_chars(&summary, EVENT_LINE_MAX_CHARS))
         })
-        .map(|summary| truncate_chars(&summary, EVENT_LINE_MAX_CHARS));
+        .flatten();
 
     let mut events = vec![StatusEvent::ToolStart {
         name: name.to_string(),
@@ -97,7 +104,7 @@ pub(in crate::services::discord) fn status_events_from_tool_use_with_id_for_foot
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .or_else(|| Some(name.to_string())),
-            desc: subagent_description(&value).or(args_summary.clone()),
+            desc: subagent_description(&value),
             agent_id: subagent_agent_id(&value),
             tool_use_id: tool_use_id.map(str::to_string),
             background,
@@ -418,18 +425,11 @@ pub(super) fn is_schedule_wakeup_tool(name: &str) -> bool {
 }
 
 fn subagent_description(value: &Value) -> Option<String> {
-    [
-        "description",
-        "desc",
-        "prompt",
-        "task",
-        "message",
-        "request",
-    ]
-    .into_iter()
-    .find_map(|key| value.get(key).and_then(Value::as_str))
-    .map(normalize_summary)
-    .filter(|summary| !summary.is_empty())
+    ["description", "desc"]
+        .into_iter()
+        .find_map(|key| value.get(key).and_then(Value::as_str))
+        .map(normalize_summary)
+        .filter(|summary| !summary.is_empty())
 }
 
 fn subagent_agent_id(value: &Value) -> Option<String> {

@@ -117,9 +117,10 @@ fn render_last_tool(last_tool: Option<&LastToolCall>) -> String {
 /// #4892: tool inputs are untrusted and may contain credentials, signed URLs,
 /// private paths, or arbitrary payloads. This channel-visible surface therefore
 /// renders only the allowlisted tool class produced by `tool_prefix`; new tools
-/// fail closed to a sanitized class name and never render their arguments.
+/// fail closed and never render their arguments.
 fn render_tool_activity(name: &str) -> String {
-    format!("🔧 마지막 도구 ({})", tool_prefix(name))
+    let class = escape_status_panel_markdown(&tool_prefix(name));
+    format!("🔧 마지막 도구 ({})", truncate_chars(&class, 140))
 }
 
 #[cfg(test)]
@@ -208,6 +209,57 @@ mod tests {
     #[test]
     fn last_tool_hides_non_json_payload() {
         assert_raw_tool_input_hidden("Monitor", "non-json payload hvs.CAES... secret/prod/db");
+    }
+
+    #[test]
+    fn unknown_tool_names_fail_closed_without_namespace_disclosure() {
+        let rendered = render_activity_line_with_last_tool(
+            &DerivedStatus::ToolRunning {
+                name: "internal_prod_deploy_secret".to_string(),
+                summary: None,
+            },
+            None,
+        );
+
+        assert_eq!(rendered, "🔧 마지막 도구 ([Tool])");
+        assert!(
+            !rendered.contains("internal_prod"),
+            "unknown tool identity must fail closed: {rendered}"
+        );
+    }
+
+    #[test]
+    fn mcp_tool_hides_server_namespace_and_escapes_operation_markdown() {
+        let rendered = render_activity_line_with_last_tool(
+            &DerivedStatus::ToolRunning {
+                name: "mcp__vault_prod__read_secret".to_string(),
+                summary: None,
+            },
+            None,
+        );
+
+        assert_eq!(rendered, r"🔧 마지막 도구 ([read\_secret])");
+        assert!(
+            !rendered.contains("vault_prod") && !rendered.contains("mcp__"),
+            "MCP server namespace must not reach the status panel: {rendered}"
+        );
+    }
+
+    #[test]
+    fn tool_activity_restores_defensive_class_clamp() {
+        let rendered = render_activity_line_with_last_tool(
+            &DerivedStatus::ToolRunning {
+                name: format!("mcp__private_server__{}", "a".repeat(300)),
+                summary: None,
+            },
+            None,
+        );
+
+        assert!(
+            rendered.chars().count() <= "🔧 마지막 도구 ()".chars().count() + 140,
+            "tool class must remain defensively clamped: {rendered}"
+        );
+        assert!(!rendered.contains("private_server"));
     }
 
     #[test]

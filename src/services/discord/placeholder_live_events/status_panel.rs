@@ -588,7 +588,12 @@ pub(super) fn render_status_panel(
 ) -> String {
     let codex_subagent_projection = matches!(provider, ProviderKind::Codex)
         && matches!(snapshot.status, DerivedStatus::SubagentRunning { .. });
-    let header_status = if codex_subagent_projection {
+    let codex_task_projection = matches!(provider, ProviderKind::Codex)
+        && snapshot
+            .last_tool
+            .as_ref()
+            .is_some_and(|tool| super::status_events::is_task_tool(&tool.name));
+    let header_status = if codex_subagent_projection || codex_task_projection {
         DerivedStatus::Running
     } else {
         snapshot.status.clone()
@@ -597,10 +602,10 @@ pub(super) fn render_status_panel(
     // the request anchor when present, then the start/update TIME fields. Keep the
     // entire header in one section so each field occupies the immediately following
     // physical line and section-wise truncation preserves the header atomically.
-    // #4367: projecting Codex subagent activity to generic Running must also
-    // suppress the Task-derived last tool; otherwise the hidden description is
-    // reintroduced through a sibling header field.
-    let visible_last_tool = (!codex_subagent_projection)
+    // #4367: Codex subagent evidence stays hidden after launch acknowledgement,
+    // terminal completion, and later turns. Status alone cannot provide the gate
+    // because `last_tool` persists for the provider session.
+    let visible_last_tool = (!codex_task_projection)
         .then_some(snapshot.last_tool.as_ref())
         .flatten();
     let activity_line =

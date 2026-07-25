@@ -6327,6 +6327,133 @@ fn status_panel_renders_plan_but_hides_subagents_for_codex() {
 }
 
 #[test]
+fn codex_task_class_stays_hidden_after_subagent_terminal_result() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_892_301);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Task",
+            &json!({"description": "Private deployment review"}).to_string(),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result(Some("Task"), true),
+    );
+
+    assert_eq!(status_for(&events, channel_id), DerivedStatus::Running);
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Codex, 1_700_000_000);
+    assert!(
+        !rendered.contains("[Task]"),
+        "Codex must not reveal the Task class after subagent termination: {rendered}"
+    );
+    assert!(
+        !rendered.contains("Private deployment review"),
+        "Codex must not reveal terminated subagent input: {rendered}"
+    );
+}
+
+#[test]
+fn codex_task_class_stays_hidden_after_background_launch_ack() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_892_302);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Task",
+            &json!({
+                "description": "Private background review",
+                "run_in_background": true
+            })
+            .to_string(),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result(Some("Task"), false),
+    );
+
+    assert_eq!(status_for(&events, channel_id), DerivedStatus::Running);
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Codex, 1_700_000_000);
+    assert!(
+        !rendered.contains("[Task]"),
+        "Codex must not reveal the Task class while a background subagent remains active: {rendered}"
+    );
+    assert!(
+        !rendered.contains("Private background review"),
+        "Codex must not reveal acknowledged background subagent input: {rendered}"
+    );
+}
+
+#[test]
+fn subagent_tool_inputs_never_become_channel_visible_descriptions() {
+    let secret = "hvs.CAES.private-token";
+    let endpoint = "https://vault-prod.internal.example";
+
+    for (index, name, input) in [
+        (
+            0_u64,
+            "Task",
+            json!({"prompt": format!("inspect {secret} at {endpoint}")}),
+        ),
+        (
+            1,
+            "Agent",
+            json!({"request": format!("inspect {secret} at {endpoint}")}),
+        ),
+        (
+            2,
+            "SpawnAgent",
+            json!({
+                "credentials": {"token": secret},
+                "endpoint": endpoint
+            }),
+        ),
+    ] {
+        let events = PlaceholderLiveEvents::default();
+        let channel_id = ChannelId::new(4_892_310 + index);
+        events.push_status_events(
+            channel_id,
+            status_events_from_tool_use(name, &input.to_string()),
+        );
+
+        let status_entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = status_entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            guard
+                .last_tool
+                .as_ref()
+                .and_then(|tool| tool.summary.as_deref()),
+            None,
+            "subagent tool input must not be retained as args_summary for {name}"
+        );
+        assert_eq!(
+            guard.subagents.first().map(|slot| slot.desc.as_str()),
+            Some("subagent"),
+            "non-allowlisted subagent input must not become a slot description for {name}"
+        );
+        drop(guard);
+        drop(status_entry);
+
+        let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+        assert!(
+            !rendered.contains(secret) && !rendered.contains(endpoint),
+            "subagent tool input must not reach status descriptions for {name}: {rendered}"
+        );
+        assert!(
+            !rendered.contains("credentials") && !rendered.contains("private-token"),
+            "subagent input structure must not reach status descriptions for {name}: {rendered}"
+        );
+    }
+}
+
+#[test]
 fn status_events_from_json_keeps_tool_result_visibility() {
     let events = status_events_from_json(&json!({
         "type": "user",
