@@ -5618,6 +5618,27 @@ fn status_panel_async_completion_agent_id_e2e_pairs_launch_ack_and_task_notifica
 }
 
 #[test]
+fn forced_kill_inventory_never_falls_back_to_user_description() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_895_003);
+    let private_desc = "customer-secret worker description";
+    events.push_status_event(
+        channel_id,
+        StatusEvent::SubagentStart {
+            subagent_type: Some("agent".to_string()),
+            desc: Some(private_desc.to_string()),
+            agent_id: None,
+            tool_use_id: None,
+            background: true,
+        },
+    );
+
+    let inventory = events.live_background_worker_inventory(channel_id);
+    assert_eq!(inventory, vec!["unnamed_worker".to_string()]);
+    assert!(inventory.iter().all(|label| !label.contains(private_desc)));
+}
+
+#[test]
 fn status_panel_unmatched_completion_ambiguous_auxiliary_match_is_noop() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(4_177_011);

@@ -284,7 +284,6 @@ services::discord::placeholder_live_events::freshness::tests
 services::discord::placeholder_live_events::slot_rehydration::tests
 services::discord::placeholder_live_events::subagent_panel::tests
 services::discord::placeholder_live_events::subagent_rollout::tests
-services::discord::placeholder_live_events::tests
 services::discord::placeholder_live_events::turn_anchor::tests
 services::discord::placeholder_sweeper::abandon_guard::tests
 services::discord::placeholder_sweeper::is_message_still_placeholder_tests
@@ -614,7 +613,6 @@ services::provider::prompt_reuse_tests
 services::provider::ready_input_prompt_tests
 services::provider_auth::tests
 services::provider_cli::smoke::tests
-services::provider_error_transcript::tests
 services::provider_hosting::tests
 services::provider_output_guard_tests
 services::queue::tests

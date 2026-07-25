@@ -23,7 +23,7 @@ pub(super) fn live_background_worker_inventory(
             slot.agent_id
                 .as_deref()
                 .or(slot.tool_use_id.as_deref())
-                .unwrap_or(slot.desc.as_str())
+                .unwrap_or("unnamed_worker")
                 .to_string()
         })
         .collect::<Vec<_>>();

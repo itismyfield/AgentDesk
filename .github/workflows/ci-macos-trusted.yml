@@ -139,10 +139,14 @@ jobs:
           cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
           cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
           cargo test --all-targets stall_recovery -- --skip _pg --skip pg_ --skip postgres
+          env -u AGENTDESK_ROOT_DIR cargo test --lib provider_error_transcript::tests -- --skip _pg --skip pg_ --skip postgres
           env -u AGENTDESK_ROOT_DIR cargo test --lib tmux_error_detect::pure_tests -- --skip _pg --skip pg_ --skip postgres
           env -u AGENTDESK_ROOT_DIR cargo test --lib tmux_output_stream::tests -- --skip _pg --skip pg_ --skip postgres
           env -u AGENTDESK_ROOT_DIR cargo test --lib tmux::tmux_watcher::jsonl_read::tests -- --skip _pg --skip pg_ --skip postgres
+          env -u AGENTDESK_ROOT_DIR cargo test --lib tmux::tmux_watcher::loop_poll_prologue::tests -- --skip _pg --skip pg_ --skip postgres
+          env -u AGENTDESK_ROOT_DIR cargo test --lib tmux::tmux_watcher::terminal_abort_exits::tests -- --skip _pg --skip pg_ --skip postgres
           env -u AGENTDESK_ROOT_DIR cargo test --lib tmux::tmux_watcher::forced_kill::tests -- --skip _pg --skip pg_ --skip postgres
+          env -u AGENTDESK_ROOT_DIR cargo test --lib placeholder_live_events::tests -- --skip _pg --skip pg_ --skip postgres
           env -u AGENTDESK_ROOT_DIR cargo test --lib turn_bridge::stale_resume::tests -- --skip _pg --skip pg_ --skip postgres
           # Health must precede relay_recovery so fail-fast reports both surfaces.
           python3 scripts/ci-timeout.py 900 env -u AGENTDESK_ROOT_DIR cargo test --lib health -- --skip _pg --skip pg_ --skip postgres
@@ -263,10 +267,14 @@ jobs:
           nice -n 10 cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
           nice -n 10 cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
           nice -n 10 cargo test --all-targets stall_recovery -- --skip _pg --skip pg_ --skip postgres
+          nice -n 10 env -u AGENTDESK_ROOT_DIR cargo test --lib provider_error_transcript::tests -- --skip _pg --skip pg_ --skip postgres
           nice -n 10 env -u AGENTDESK_ROOT_DIR cargo test --lib tmux_error_detect::pure_tests -- --skip _pg --skip pg_ --skip postgres
           nice -n 10 env -u AGENTDESK_ROOT_DIR cargo test --lib tmux_output_stream::tests -- --skip _pg --skip pg_ --skip postgres
           nice -n 10 env -u AGENTDESK_ROOT_DIR cargo test --lib tmux::tmux_watcher::jsonl_read::tests -- --skip _pg --skip pg_ --skip postgres
+          nice -n 10 env -u AGENTDESK_ROOT_DIR cargo test --lib tmux::tmux_watcher::loop_poll_prologue::tests -- --skip _pg --skip pg_ --skip postgres
+          nice -n 10 env -u AGENTDESK_ROOT_DIR cargo test --lib tmux::tmux_watcher::terminal_abort_exits::tests -- --skip _pg --skip pg_ --skip postgres
           nice -n 10 env -u AGENTDESK_ROOT_DIR cargo test --lib tmux::tmux_watcher::forced_kill::tests -- --skip _pg --skip pg_ --skip postgres
+          nice -n 10 env -u AGENTDESK_ROOT_DIR cargo test --lib placeholder_live_events::tests -- --skip _pg --skip pg_ --skip postgres
           nice -n 10 env -u AGENTDESK_ROOT_DIR cargo test --lib turn_bridge::stale_resume::tests -- --skip _pg --skip pg_ --skip postgres
           # Health must precede relay_recovery so fail-fast reports both surfaces.
           nice -n 10 python3 scripts/ci-timeout.py 900 env -u AGENTDESK_ROOT_DIR cargo test --lib health -- --skip _pg --skip pg_ --skip postgres

@@ -6,7 +6,7 @@
 pub(crate) fn is_strong_provider_error_transcript(message: &str) -> bool {
     let trimmed = message.trim();
     let lower = trimmed.to_ascii_lowercase();
-    is_single_api_error_envelope(trimmed, &lower)
+    single_api_error_envelope_detail(trimmed).is_some()
         || [
             "error: unknown opencode error",
             "error: unknown codex error",
@@ -18,18 +18,20 @@ pub(crate) fn is_strong_provider_error_transcript(message: &str) -> bool {
         .any(|prefix| has_explicit_suffix_boundary(&lower, prefix))
 }
 
-fn is_single_api_error_envelope(trimmed: &str, lower: &str) -> bool {
-    let Some(inner) = trimmed
-        .strip_prefix('[')
-        .and_then(|value| value.strip_suffix(']'))
-    else {
-        return false;
-    };
-    lower.starts_with("[api error:")
-        && !inner
+pub(crate) fn single_api_error_envelope_detail(message: &str) -> Option<&str> {
+    let trimmed = message.trim();
+    let inner = trimmed.strip_prefix('[')?.strip_suffix(']')?;
+    let prefix_len = "api error:".len();
+    let prefix = inner.get(..prefix_len)?;
+    if !prefix.eq_ignore_ascii_case("api error:") {
+        return None;
+    }
+    let detail = inner.get(prefix_len..)?.trim();
+    (!detail.is_empty()
+        && !detail
             .chars()
-            .any(|character| matches!(character, '[' | ']' | '\n' | '\r'))
-        && !inner.trim().is_empty()
+            .any(|character| matches!(character, '[' | ']' | '\n' | '\r')))
+    .then_some(detail)
 }
 
 fn has_explicit_suffix_boundary(message: &str, prefix: &str) -> bool {
@@ -54,6 +56,7 @@ mod tests {
     fn recognizes_narrow_provider_error_envelopes() {
         for message in [
             "[API Error: 400 status code (no body)]",
+            "[api error: 529 overloaded_error]",
             "Error: Unknown OpenCode error",
             "Error: Unknown Codex error: provider exited",
             "Error: Unknown Codex error (exit code 1)",

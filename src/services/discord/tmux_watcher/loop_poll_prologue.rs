@@ -55,6 +55,19 @@ pub(super) struct LoopPollState<'a> {
     pub(super) align_next_read: &'a mut bool,
 }
 
+fn consume_resume_offset(
+    resume_offset: &Arc<std::sync::Mutex<Option<u64>>>,
+    current_offset: &mut u64,
+    align_next_read: &mut bool,
+) -> bool {
+    let Some(new_offset) = resume_offset.lock().ok().and_then(|mut guard| guard.take()) else {
+        return false;
+    };
+    *current_offset = new_offset;
+    *align_next_read = true;
+    true
+}
+
 pub(super) struct PostTerminalState<'a> {
     pub(super) turn_result_relayed: bool,
     pub(super) post_terminal_continuation_logged: &'a mut bool,
@@ -129,8 +142,12 @@ pub(super) async fn poll_watcher_output_or_continue(
     // Always consume resume_offset first — the turn bridge may have set it
     // between the previous paused check and now, so reading it here prevents
     // the watcher from using a stale current_offset after unpausing.
-    if let Some(new_offset) = resume_offset.lock().ok().and_then(|mut g| g.take()) {
-        current_offset = new_offset;
+    if consume_resume_offset(
+        resume_offset,
+        &mut current_offset,
+        loop_poll_state.align_next_read,
+    ) {
+        let new_offset = current_offset;
         let bridge_delivered_turn = turn_delivered.load(Ordering::Acquire);
         terminal_delivery_observed = watcher_lifecycle_terminal_delivery_observed(
             terminal_delivery_observed,
@@ -619,5 +636,30 @@ pub(super) async fn poll_watcher_output_or_continue(
         data,
         data_start_offset,
         epoch_snapshot,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::consume_resume_offset;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn consuming_resume_offset_rearms_record_boundary_alignment() {
+        let resume_offset = Arc::new(Mutex::new(Some(16_384)));
+        let mut current_offset = 40_000;
+        let mut align_next_read = false;
+
+        assert!(consume_resume_offset(
+            &resume_offset,
+            &mut current_offset,
+            &mut align_next_read,
+        ));
+        assert_eq!(current_offset, 16_384);
+        assert!(
+            align_next_read,
+            "a bridge-supplied offset may be mid-record and must not use a contiguous read"
+        );
+        assert_eq!(*resume_offset.lock().expect("resume lock"), None);
     }
 }

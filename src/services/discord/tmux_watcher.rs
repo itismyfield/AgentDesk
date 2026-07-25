@@ -692,10 +692,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             )
             .await
         };
-        match abort_exit_outcome {
-            AbortExitOutcome::ContinueWatcherLoop => continue,
-            AbortExitOutcome::BreakWatcherLoop => break 'watcher_loop,
-            AbortExitOutcome::Fallthrough => {}
+        if !should_run_post_stream_exit(abort_exit_outcome) {
+            continue;
         }
 
         // Final guard: re-check epoch and turn_delivered right before relay.

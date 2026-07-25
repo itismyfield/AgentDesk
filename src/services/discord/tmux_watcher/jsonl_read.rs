@@ -112,13 +112,13 @@ mod tests {
     }
 
     #[test]
-    fn contiguous_read_preserves_a_record_larger_than_the_read_cap() {
+    fn contiguous_reads_preserve_a_record_across_three_or_more_chunks() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("large-record.jsonl");
         let record = serde_json::json!({
             "type": "system",
             "subtype": "task_notification",
-            "content": format!("review discusses oauth and unauthorized handling: {}", "x".repeat(20_000))
+            "content": format!("review discusses oauth and unauthorized handling: {}", "x".repeat(40_000))
         })
         .to_string();
         let result = serde_json::json!({
@@ -128,20 +128,98 @@ mod tests {
             "result": "completed"
         })
         .to_string();
-        std::fs::write(&path, format!("{record}\n{result}\n")).expect("fixture");
+        let expected = format!("{record}\n{result}\n");
+        std::fs::write(&path, &expected).expect("fixture");
 
+        let mut chunks = Vec::new();
         let first = read_jsonl_chunk_at_attach(path.to_str().expect("path"), 0).expect("first");
-        assert_eq!(first.data.len(), 16_384);
-        let second = read_jsonl_chunk_contiguous(path.to_str().expect("path"), first.end_offset)
-            .expect("second");
+        let mut offset = first.end_offset;
+        chunks.push(first);
+        while offset < expected.len() as u64 {
+            let chunk = read_jsonl_chunk_contiguous(path.to_str().expect("path"), offset)
+                .expect("contiguous read");
+            assert_eq!(
+                chunk.start_offset, offset,
+                "contiguous reads must have no gap"
+            );
+            assert!(chunk.end_offset >= chunk.start_offset);
+            assert!(!chunk.skipped_partial_record);
+            offset = chunk.end_offset;
+            chunks.push(chunk);
+        }
 
-        assert!(!second.skipped_partial_record);
-        let joined = format!(
-            "{}{}",
-            String::from_utf8(first.data).expect("first utf8"),
-            String::from_utf8(second.data).expect("second utf8")
+        assert!(chunks.len() >= 3, "fixture must span at least three reads");
+        assert_eq!(offset, expected.len() as u64);
+        let joined = chunks
+            .into_iter()
+            .flat_map(|chunk| chunk.data)
+            .collect::<Vec<_>>();
+        assert_eq!(joined, expected.as_bytes());
+    }
+
+    #[test]
+    fn resumed_mid_record_offset_realigns_then_reads_remaining_bytes_contiguously() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("resume-offset.jsonl");
+        let partial = serde_json::json!({
+            "type": "system",
+            "subtype": "task_notification",
+            "content": "x".repeat(20_000)
+        })
+        .to_string();
+        let assistant = serde_json::json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "y".repeat(40_000)}]}
+        })
+        .to_string();
+        let result = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "completed"
+        })
+        .to_string();
+        let expected_tail = format!("{assistant}\n{result}\n");
+        std::fs::write(&path, format!("{partial}\n{expected_tail}")).expect("fixture");
+        let resume_offset = (partial.find("xxxx").expect("payload") + 4) as u64;
+
+        let first = read_jsonl_chunk_at_attach(path.to_str().expect("path"), resume_offset)
+            .expect("aligned resume read");
+        assert!(first.skipped_partial_record);
+        assert_eq!(first.start_offset, partial.len() as u64 + 1);
+        let mut chunks = vec![first];
+        while chunks.last().expect("chunk").end_offset
+            < (partial.len() + 1 + expected_tail.len()) as u64
+        {
+            let prior_end = chunks.last().expect("chunk").end_offset;
+            let next = read_jsonl_chunk_contiguous(path.to_str().expect("path"), prior_end)
+                .expect("contiguous read");
+            assert_eq!(next.start_offset, prior_end);
+            chunks.push(next);
+        }
+
+        assert!(
+            chunks.len() >= 3,
+            "resumed fixture must span at least three reads"
         );
-        assert_eq!(joined, format!("{record}\n{result}\n"));
+        let mut buffer = String::from_utf8(
+            chunks
+                .into_iter()
+                .flat_map(|chunk| chunk.data)
+                .collect::<Vec<_>>(),
+        )
+        .expect("utf8");
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+        assert!(
+            outcome.found_result,
+            "terminal result must survive resumed chunking"
+        );
+        assert_eq!(full_response, "y".repeat(40_000));
+        assert!(buffer.is_empty());
     }
 
     #[test]

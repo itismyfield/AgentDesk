@@ -40,7 +40,40 @@ const OVERLOAD_ERROR_CODES: [&str; 7] = [
     "provider_overloaded",
 ];
 
-pub(super) fn detect_structured_provider_overload(value: &serde_json::Value) -> Option<String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProviderOverloadReason {
+    HttpStatus(u16),
+    ErrorCode(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DetectedProviderOverload {
+    pub(super) reason: ProviderOverloadReason,
+    pub(super) display_reason: String,
+}
+
+fn detected_status(status: u64) -> Option<DetectedProviderOverload> {
+    let status = u16::try_from(status).ok()?;
+    Some(DetectedProviderOverload {
+        reason: ProviderOverloadReason::HttpStatus(status),
+        display_reason: format!("Provider HTTP {status} capacity response"),
+    })
+}
+
+fn detected_code(code: &str) -> Option<DetectedProviderOverload> {
+    let code = OVERLOAD_ERROR_CODES
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == code)?;
+    Some(DetectedProviderOverload {
+        reason: ProviderOverloadReason::ErrorCode(code),
+        display_reason: format!("Provider capacity error ({code})"),
+    })
+}
+
+pub(super) fn detect_structured_provider_overload(
+    value: &serde_json::Value,
+) -> Option<DetectedProviderOverload> {
     if value.get("type").and_then(serde_json::Value::as_str) != Some("result") {
         return None;
     }
@@ -58,14 +91,14 @@ pub(super) fn detect_structured_provider_overload(value: &serde_json::Value) -> 
                 if let Some(status) = object.get(key).and_then(structured_status_code)
                     && OVERLOAD_STATUS_CODES.contains(&status)
                 {
-                    return Some(format!("provider_status_{status}"));
+                    return detected_status(status);
                 }
             }
             for key in ["code", "error_code", "errorCode", "type"] {
                 if let Some(code) = object.get(key).and_then(serde_json::Value::as_str) {
                     let normalized = code.trim().to_ascii_lowercase().replace(['-', ' '], "_");
                     if OVERLOAD_ERROR_CODES.contains(&normalized.as_str()) {
-                        return Some(format!("provider_code_{normalized}"));
+                        return detected_code(&normalized);
                     }
                 }
             }
@@ -84,27 +117,21 @@ fn result_error_texts(value: &serde_json::Value) -> impl Iterator<Item = &str> {
         .chain(value.get("result").and_then(serde_json::Value::as_str))
 }
 
-fn detect_api_error_overload_envelope(text: &str) -> Option<String> {
-    let trimmed = text.trim();
-    let inner = trimmed.strip_prefix('[')?.strip_suffix(']')?;
-    let detail = inner.strip_prefix("API Error:")?.trim();
-    if detail.contains(['[', ']', '\n', '\r']) {
-        return None;
-    }
-
+fn detect_api_error_overload_envelope(text: &str) -> Option<DetectedProviderOverload> {
+    let detail =
+        crate::services::provider_error_transcript::single_api_error_envelope_detail(text)?;
     let lower = detail.to_ascii_lowercase();
     let status = lower
         .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
         .find_map(|token| token.parse::<u64>().ok())
         .filter(|status| OVERLOAD_STATUS_CODES.contains(status));
     if let Some(status) = status {
-        return Some(format!("provider_status_{status}"));
+        return detected_status(status);
     }
 
     lower
         .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-        .find(|token| OVERLOAD_ERROR_CODES.contains(token))
-        .map(|code| format!("provider_code_{code}"))
+        .find_map(detected_code)
 }
 
 fn structured_status_code(value: &serde_json::Value) -> Option<u64> {
@@ -128,7 +155,10 @@ fn structured_error_objects(
 
 #[cfg(test)]
 mod pure_tests {
-    use super::{detect_structured_provider_overload, is_auth_error_message};
+    use super::{
+        DetectedProviderOverload, ProviderOverloadReason, detect_structured_provider_overload,
+        is_auth_error_message,
+    };
 
     #[test]
     fn auth_error_detects_expired_refresh_token_variants() {
@@ -168,12 +198,18 @@ mod pure_tests {
             "errors": ["[API Error: 429 status code (no body)]"]
         });
         assert_eq!(
-            detect_structured_provider_overload(&claude).as_deref(),
-            Some("provider_status_529")
+            detect_structured_provider_overload(&claude),
+            Some(DetectedProviderOverload {
+                reason: ProviderOverloadReason::HttpStatus(529),
+                display_reason: "Provider HTTP 529 capacity response".to_string(),
+            })
         );
         assert_eq!(
-            detect_structured_provider_overload(&wrapper).as_deref(),
-            Some("provider_status_429")
+            detect_structured_provider_overload(&wrapper),
+            Some(DetectedProviderOverload {
+                reason: ProviderOverloadReason::HttpStatus(429),
+                display_reason: "Provider HTTP 429 capacity response".to_string(),
+            })
         );
     }
 
@@ -186,5 +222,32 @@ mod pure_tests {
             "errors": ["child review quoted [API Error: 529 overloaded_error] before recovery"]
         });
         assert_eq!(detect_structured_provider_overload(&quoted), None);
+    }
+
+    #[test]
+    fn overload_requires_result_provenance_even_for_exact_envelope() {
+        let system = serde_json::json!({
+            "type": "system",
+            "subtype": "task_notification",
+            "is_error": true,
+            "result": "[API Error: 529 overloaded_error]"
+        });
+        assert_eq!(detect_structured_provider_overload(&system), None);
+    }
+
+    #[test]
+    fn overload_api_error_prefix_is_case_insensitive() {
+        let value = serde_json::json!({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": true,
+            "errors": ["[api error: 529 overloaded_error]"]
+        });
+        assert_eq!(
+            detect_structured_provider_overload(&value)
+                .as_ref()
+                .map(|detected| detected.reason),
+            Some(ProviderOverloadReason::HttpStatus(529))
+        );
     }
 }

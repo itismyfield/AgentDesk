@@ -447,11 +447,15 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
                         }
                         if is_auth_error_message(&result_str) {
                             outcome.is_auth_error = true;
+                            outcome.terminal_kind = Some(WatcherTerminalKind::AuthError);
                             outcome.auth_error_message.get_or_insert(result_str.clone());
                         }
-                        if let Some(reason) = detect_structured_provider_overload(&val) {
+                        if let Some(overload) = detect_structured_provider_overload(&val) {
                             outcome.is_provider_overloaded = true;
-                            outcome.provider_overload_message.get_or_insert(reason);
+                            outcome.terminal_kind = Some(WatcherTerminalKind::ProviderOverload);
+                            outcome
+                                .provider_overload_message
+                                .get_or_insert(overload.display_reason);
                         }
                     }
 
@@ -503,7 +507,9 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
                     state.final_result = Some(String::new());
                     strip_leading_tui_response_chrome_in_place(full_response, &mut outcome);
                     outcome.found_result = true;
-                    outcome.terminal_kind = Some(WatcherTerminalKind::HardResult);
+                    outcome
+                        .terminal_kind
+                        .get_or_insert(WatcherTerminalKind::HardResult);
                     outcome.terminal_evidence_offset = line_start_offset;
                     // #1216: stop after the first turn-terminating event so a
                     // buffer containing multiple completed turns (post-deploy
@@ -889,6 +895,24 @@ mod tests {
     }
 
     #[test]
+    fn auth_error_result_uses_typed_terminal_kind() {
+        let mut buffer = concat!(
+            "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"result\":\"Please run /login\",\"session_id\":\"sess-auth\"}\n",
+        )
+        .to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(outcome.found_result);
+        assert!(outcome.is_auth_error);
+        assert_eq!(outcome.terminal_kind, Some(WatcherTerminalKind::AuthError));
+    }
+
+    #[test]
     fn provider_api_error_envelope_is_provider_overload() {
         let mut buffer = concat!(
             "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"errors\":[\"[API Error: 429 status code (no body)]\"],\"session_id\":\"sess-overload\"}\n",
@@ -905,7 +929,11 @@ mod tests {
         assert!(outcome.is_provider_overloaded);
         assert_eq!(
             outcome.provider_overload_message.as_deref(),
-            Some("provider_status_429")
+            Some("Provider HTTP 429 capacity response")
+        );
+        assert_eq!(
+            outcome.terminal_kind,
+            Some(WatcherTerminalKind::ProviderOverload)
         );
     }
 
