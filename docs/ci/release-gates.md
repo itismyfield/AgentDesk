@@ -20,7 +20,7 @@
 | --- | --- | --- |
 | Full tests | `cargo test --all-targets -- --skip _pg --skip pg_ --skip postgres` | 동일 |
 | PostgreSQL tests | `cargo test _pg / pg_ / postgres -- --test-threads=1` (3회) | `DATABASE_URL=... cargo test _pg -- --test-threads=1` |
-| High-risk recovery | `cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1` | 동일 |
+| High-risk recovery | `cargo test --lib high_risk_recovery:: -- --test-threads=1` | 동일 |
 
 ## 2. Path Filter Policy
 
@@ -108,7 +108,7 @@ high_risk_recovery:
 ### Serial execution
 
 - `postgres` job: `cargo test _pg -- --test-threads=1` / `cargo test pg_ -- --test-threads=1` / `cargo test postgres -- --test-threads=1` — 모두 **단일 스레드** 강제.
-- `high-risk-recovery` job: `cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1` — 동일.
+- `high-risk-recovery` job: `cargo test --lib high_risk_recovery:: -- --test-threads=1` — 동일.
 - 이유: PG 테스트는 같은 `postgres` DB 인스턴스 위에서 CREATE/DROP DATABASE 로 격리하므로, parallel 실행 시 테스트 간 lifecycle race 가 재현되는 사고가 #973/#974 에서 확인됨.
 
 ### Fixture isolation

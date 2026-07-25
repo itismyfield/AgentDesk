@@ -10,14 +10,14 @@
 | --- | --- | --- | --- |
 | `unit` | 파일 단위 직렬화/저장 규약, mailbox state, handoff roundtrip | `src/services/discord/inflight.rs`, `src/services/discord/handoff.rs`, `src/services/discord/channel_mailbox.rs` | 모듈별 `cargo test --bin agentdesk <filter>` |
 | `state-transition integration` | DB + policy engine + dispatch 상태 전이 | `src/integration_tests.rs` | 기본 gate: `cargo test --all-targets` |
-| `failure-recovery` | restart / reconcile / outbox delivery / delayed-worker recovery 경계 | `src/integration_tests/tests/high_risk_recovery.rs` | `cargo test --bin agentdesk high_risk_recovery::` |
+| `failure-recovery` | restart / reconcile / outbox delivery / delayed-worker recovery 경계 | `src/integration_tests/tests/high_risk_recovery.rs` | `cargo test --lib high_risk_recovery::` |
 
 ## Recovery Lane Commands
 
-- 전체 recovery gate: `cargo test --bin agentdesk high_risk_recovery::`
-- restart / boot reconcile: `cargo test --bin agentdesk high_risk_recovery::failure_recovery::`
-- outbox delivery boundary: `cargo test --bin agentdesk high_risk_recovery::outbox_boundary::`
-- delayed worker / watchdog: `cargo test --bin agentdesk high_risk_recovery::delayed_worker::`
+- 전체 recovery gate: `cargo test --lib high_risk_recovery::`
+- restart / boot reconcile: `cargo test --lib high_risk_recovery::failure_recovery::`
+- outbox delivery boundary: `cargo test --lib high_risk_recovery::outbox_boundary::`
+- delayed worker / watchdog: `cargo test --lib high_risk_recovery::delayed_worker::`
 
 ## Curated Scenarios
 

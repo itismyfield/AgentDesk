@@ -11,15 +11,15 @@
 | --- | --- | --- | --- |
 | `unit` | 직렬화, 저장, mailbox state 같은 로컬 불변식 검증 | `src/services/discord/*` 개별 테스트 모듈 | 모듈별 `cargo test --bin agentdesk <filter>` |
 | `state-transition integration` | DB + policy + dispatch 상태 전이 검증 | `src/integration_tests.rs` | 기본 gate는 `cargo test --all-targets` |
-| `failure-recovery` | restart / reconcile / outbox / delayed-worker 복구 경계 검증 | `src/integration_tests/tests/high_risk_recovery.rs` | `cargo test --bin agentdesk high_risk_recovery::` |
+| `failure-recovery` | restart / reconcile / outbox / delayed-worker 복구 경계 검증 | `src/integration_tests/tests/high_risk_recovery.rs` | `cargo test --lib high_risk_recovery::` |
 
 ### 현재 고정 실행 경로
 
 - broad regression: `cargo test --all-targets`
-- high-risk recovery gate: `cargo test --bin agentdesk high_risk_recovery::`
-- restart / boot reconcile만 재현: `cargo test --bin agentdesk high_risk_recovery::failure_recovery::`
-- outbox boundary만 재현: `cargo test --bin agentdesk high_risk_recovery::outbox_boundary::`
-- delayed worker / watchdog만 재현: `cargo test --bin agentdesk high_risk_recovery::delayed_worker::`
+- high-risk recovery gate: `cargo test --lib high_risk_recovery::`
+- restart / boot reconcile만 재현: `cargo test --lib high_risk_recovery::failure_recovery::`
+- outbox boundary만 재현: `cargo test --lib high_risk_recovery::outbox_boundary::`
+- delayed worker / watchdog만 재현: `cargo test --lib high_risk_recovery::delayed_worker::`
 
 고위험 coverage inventory와 `existing vs missing` 매핑은 `docs/high-risk-recovery-lane.md`가 기준 문서다.
 

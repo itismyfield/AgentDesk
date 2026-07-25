@@ -21,6 +21,7 @@ class Lane(Protocol):
     skips: tuple[str, ...]
     exact: bool
     provenance: str
+    target: str
 
     def is_applicable_to(self, changed_paths: Iterable[str]) -> bool: ...
 
@@ -179,6 +180,11 @@ def ensure_non_vacuous_filters(
         all_tests = set().union(*inventory.values()) if inventory else set()
     failures: list[str] = []
     for lane in lanes:
+        if lane.target.startswith("bin:"):
+            failures.append(
+                f"{lane.provenance}: target {lane.target!r} exposes no lib.rs tests"
+            )
+            continue
         for positive in lane.positives:
             selected = [
                 name

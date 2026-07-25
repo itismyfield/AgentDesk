@@ -504,6 +504,15 @@ jobs:
         self.assertIn("witness .github/workflows/ci-macos-trusted.yml", manifest)
         self.assertIn("witness .github/workflows/ci-pr.yml", manifest)
         self.assertIn("lane postgres ::", manifest)
+        self.assertIn("lane high-risk-recovery ::", manifest)
+        command = "cargo test --lib high_risk_recovery:: -- --test-threads=1"
+        pr_workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        self.assertEqual(pr_workflow.count(command), 1)
+        self.assertEqual(MAIN_WORKFLOW.read_text(encoding="utf-8").count(command), 1)
+        self.assertEqual(NIGHTLY_WORKFLOW.read_text(encoding="utf-8").count(command), 1)
+        self.assertNotIn(
+            "cargo test --bin agentdesk high_risk_recovery::", pr_workflow
+        )
 
     def test_ci_script_checks_runs_this_contract(self) -> None:
         script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(

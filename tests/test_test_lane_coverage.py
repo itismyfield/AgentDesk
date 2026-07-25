@@ -139,9 +139,15 @@ class LaneFilterTests(unittest.TestCase):
             lane,
             coverage.LaneFilter(("relay_recovery",), ("postgres",), True),
         )
-        self.assertIsNone(
+        self.assertEqual(
             coverage.cargo_test_filter(
                 "cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1"
+            ),
+            coverage.LaneFilter(("high_risk_recovery::",), ()),
+        )
+        self.assertIsNone(
+            coverage.cargo_test_filter(
+                "cargo test --bin unrelated high_risk_recovery::"
             )
         )
 
@@ -241,6 +247,51 @@ class LaneFilterTests(unittest.TestCase):
         self.assertEqual(len(failures), 2)
         self.assertIn("positive filter 'missing' selects zero tests", failures[0])
         self.assertIn("exact filter 'tests::renamed' selects zero tests", failures[1])
+
+    def test_binary_lane_is_rejected_as_vacuous_for_library_inventory(self) -> None:
+        lane = coverage.cargo_test_filter(
+            "cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1",
+            provenance="historical-high-risk-lane",
+        )
+        inventory = coverage.discover_source_inventory(REPO_ROOT)
+
+        self.assertIsNotNone(lane)
+        assert lane is not None
+        self.assertEqual(lane.target, "bin:agentdesk")
+        self.assertEqual(
+            coverage.ensure_non_vacuous_filters((lane,), inventory),
+            (
+                "historical-high-risk-lane: target 'bin:agentdesk' exposes no lib.rs tests",
+            ),
+        )
+        self.assertFalse(
+            lane.selects(
+                "high_risk_recovery::boot_reconcile_pg_resets_stale_runtime_rows"
+            )
+        )
+
+    def test_repository_high_risk_lane_selects_real_library_tests(self) -> None:
+        manifest = coverage.verify_pr_lane_manifest(
+            REPO_ROOT, REPO_ROOT / coverage.PR_LANE_MANIFEST_REL
+        )
+        lanes = {lane.provenance: lane for lane in manifest.lanes}
+        lane = lanes["pr-ci:high-risk-recovery"]
+        inventory = coverage.discover_source_inventory(REPO_ROOT)
+
+        self.assertEqual(
+            lane.command,
+            "cargo test --lib high_risk_recovery:: -- --test-threads=1",
+        )
+        self.assertEqual(
+            coverage.ensure_non_vacuous_filters((lane,), inventory), ()
+        )
+        selected = {
+            name for name in inventory.test_fingerprints if lane.selects(name)
+        }
+        self.assertEqual(len(selected), 5)
+        self.assertTrue(
+            all(name.startswith("high_risk_recovery::") for name in selected)
+        )
 
 
 class CandidateProvenanceTests(unittest.TestCase):

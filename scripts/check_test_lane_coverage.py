@@ -80,6 +80,7 @@ _CARGO_VALUE_OPTIONS = {
     "--target-dir",
     "--manifest-path",
     "--color",
+    "--bin",
     "--config",
 }
 _LIBTEST_VALUE_OPTIONS = {"--test-threads", "--format", "--color"}
@@ -108,9 +109,12 @@ class LaneFilter:
     changed_paths: tuple[str, ...] = field(
         default=DEFAULT_PR_TEST_PATHS, compare=False
     )
+    target: str = field(default="lib", compare=False)
 
     def selects(self, test_name: str) -> bool:
         """Model libtest's union of positives, exactness, and skip vetoes."""
+        if self.target.startswith("bin:"):
+            return False
         positive_match = not self.positives or any(
             test_name == positive if self.exact else positive in test_name
             for positive in self.positives
@@ -125,7 +129,7 @@ class LaneFilter:
         and any matching skip makes the module only partially covered.
         Changed-test provenance uses ``selects`` directly at full-name level.
         """
-        if self.exact:
+        if self.target.startswith("bin:") or self.exact:
             return False
         positive_match = not self.positives or any(
             positive in module for positive in self.positives
@@ -727,8 +731,20 @@ def cargo_test_filter(
     if "--" in args:
         split = args.index("--")
         before, after = args[:split], args[split + 1 :]
-    if any(option in before for option in _NON_LIB_TARGET_OPTIONS) and "--all-targets" not in before:
-        return None
+    # The package's `agentdesk` binary has no unit-test modules of its own; its
+    # historical high-risk command therefore selected zero tests. Model that target so
+    # the manifest can prove the real PR lane is non-vacuous; reject unrelated
+    # target-specific commands because this inventory only describes lib.rs.
+    target = "all" if "--all-targets" in before else "lib"
+    target_options = [option for option in before if option in _NON_LIB_TARGET_OPTIONS]
+    if target_options and "--all-targets" not in before:
+        if "--bin" not in before:
+            return None
+        binary_index = before.index("--bin")
+        binary = before[binary_index + 1 : binary_index + 2]
+        if binary != ["agentdesk"]:
+            return None
+        target = "bin:agentdesk"
 
     positives: list[str] = []
     skip_next = False
@@ -772,6 +788,7 @@ def cargo_test_filter(
         command,
         provenance,
         changed_paths,
+        target,
     )
 
 
