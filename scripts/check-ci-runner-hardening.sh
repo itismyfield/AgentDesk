@@ -241,7 +241,9 @@ require "yaml"
 
 path, pr_path = ARGV
 begin
-  document = YAML.load_file(path)
+  # Workflow aliases are intentionally unsupported. Rejecting them keeps every
+  # audited job definition local and explicit instead of expanding YAML graphs.
+  document = YAML.safe_load(File.read(path), aliases: false, filename: path)
 rescue StandardError => error
   warn "#{path}: cannot parse YAML: #{error.message}"
   exit 1
@@ -261,9 +263,12 @@ jobs.each do |job_id, job|
   required_context_jobs << job_id.to_s if name.to_s.strip == required_context
   next unless name.is_a?(String) && name.include?("${{")
 
-  # Do not evaluate Actions expressions. Permit only one matrix substitution
+  # Do not evaluate Actions expressions. Permit exactly one matrix substitution
   # whose static prefix/suffix make the required context impossible to render.
-  matrix_name = /\A(.*)\$\{\{\s*matrix\.[A-Za-z_][A-Za-z0-9_.-]*\s*\}\}(.*)\z/.match(name)
+  expression_shape_valid = name.scan("${{").length == 1 && name.scan("}}").length == 1
+  matrix_name = if expression_shape_valid
+    /\A([^{}]*)\$\{\{\s*matrix\.[A-Za-z_][A-Za-z0-9_.-]*\s*\}\}([^{}]*)\z/.match(name)
+  end
   can_render_required = if matrix_name
     static_fragments = [matrix_name[1], matrix_name[2]]
     static_fragments.any? { |fragment| fragment.include?(required_context) } ||

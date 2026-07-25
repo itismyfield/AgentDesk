@@ -417,6 +417,56 @@ jobs:
         self.assertIn("dynamic job names must not be able to publish", result.stderr)
         self.assertIn("matrix-bypass.yml", result.stderr)
 
+    def test_hardening_rejects_multiple_job_name_expressions(self) -> None:
+        names = (
+            "${{ matrix.a }}${{ matrix.b }}",
+            "${{ matrix.a }} ${{ matrix.b }}",
+            "${{ 'Script' }} ${{ matrix.b }}",
+            "${{ matrix.a }} ${{ github.event_name }}",
+        )
+        for index, name in enumerate(names):
+            with self.subTest(name=name):
+                workflow = f"""\
+name: Multiple expression bypass
+on: workflow_dispatch
+jobs:
+  bypass:
+    name: {name}
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+"""
+                filename = f"multiple-expression-{index}.yaml"
+                result = self.run_hardening_fixture(
+                    PR_WORKFLOW.read_text(encoding="utf-8"),
+                    {filename: workflow},
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "dynamic job names must not be able to publish", result.stderr
+                )
+                self.assertIn(filename, result.stderr)
+
+    def test_hardening_rejects_yaml_aliases_by_policy(self) -> None:
+        workflow = """\
+name: Aliased workflow
+on: push
+jobs:
+  first: &shared_job
+    name: Documentation check
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+  second: *shared_job
+"""
+        result = self.run_hardening_fixture(
+            PR_WORKFLOW.read_text(encoding="utf-8"),
+            {"aliased.yaml": workflow},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Unknown alias", result.stderr)
+        self.assertIn("aliased.yaml", result.stderr)
+
     def test_hardening_rejects_workflow_symlink(self) -> None:
         result = self.run_hardening_fixture(
             PR_WORKFLOW.read_text(encoding="utf-8"),
