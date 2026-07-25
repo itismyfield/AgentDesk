@@ -122,6 +122,12 @@ fi
 "$PYTHON" scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"
 "$PYTHON" -m unittest tests.test_test_lane_coverage
 
+# The tracked compiler manifest is reviewed baseline data. Script checks exercise
+# its deterministic generator with fixtures but deliberately do not regenerate
+# it from candidate source; candidate provenance enforcement is a later phase.
+echo "=== Compiler test manifest generator fixtures (#4906) ==="
+"$PYTHON" -m unittest tests.test_compiler_test_manifest
+
 echo "=== Scheduled-message PG path-filter wiring contract ==="
 "$PYTHON" -m unittest tests.test_scheduled_messages_ci_wiring
 
