@@ -223,6 +223,12 @@ workflow_files() {
     \( -name '*.yml' -o -name '*.yaml' \) -print0
 }
 
+validate_workflow_entries() {
+  while IFS= read -r -d '' workflow; do
+    error "$workflow must not be a symlink; workflow hardening requires regular files"
+  done < <(find .github/workflows -type l -print0)
+}
+
 validate_required_context_uniqueness() {
   if ! command -v ruby >/dev/null 2>&1; then
     error "ruby is required to validate required workflow contexts structurally"
@@ -245,18 +251,45 @@ unless jobs.is_a?(Hash)
   warn "#{path}: jobs must be a YAML mapping"
   exit 1
 end
-script_check_jobs = jobs.each_with_object([]) do |(job_id, job), matches|
-  if job.is_a?(Hash) && job["name"].to_s.strip == "Script checks"
-    matches << job_id.to_s
+required_context = "Script checks"
+required_context_jobs = []
+unsafe_dynamic_name_jobs = []
+jobs.each do |job_id, job|
+  next unless job.is_a?(Hash)
+
+  name = job["name"]
+  required_context_jobs << job_id.to_s if name.to_s.strip == required_context
+  next unless name.is_a?(String) && name.include?("${{")
+
+  # Do not evaluate Actions expressions. Permit only one matrix substitution
+  # whose static prefix/suffix make the required context impossible to render.
+  matrix_name = /\A(.*)\$\{\{\s*matrix\.[A-Za-z_][A-Za-z0-9_.-]*\s*\}\}(.*)\z/.match(name)
+  can_render_required = if matrix_name
+    static_fragments = [matrix_name[1], matrix_name[2]]
+    static_fragments.any? { |fragment| fragment.include?(required_context) } ||
+      (required_context.start_with?(matrix_name[1]) && required_context.end_with?(matrix_name[2]))
+  else
+    true
   end
+  unsafe_dynamic_name_jobs << job_id.to_s if can_render_required
 end
 if path == pr_path
-  unless script_check_jobs == ["scripts"]
+  scripts = jobs["scripts"]
+  unless scripts.is_a?(Hash) && scripts["name"] == required_context
+    warn "#{path}: required Script checks context must be the exact literal name of jobs.scripts"
+    exit 1
+  end
+  unexpected_required = required_context_jobs - ["scripts"]
+  if unexpected_required.any?
     warn "#{path}: required Script checks context must belong only to jobs.scripts"
     exit 1
   end
-elsif script_check_jobs.any?
-  warn "#{path}: must not publish required Script checks context (jobs: #{script_check_jobs.join(', ')})"
+elsif required_context_jobs.any?
+  warn "#{path}: must not publish required Script checks context (jobs: #{required_context_jobs.join(', ')})"
+  exit 1
+end
+if unsafe_dynamic_name_jobs.any?
+  warn "#{path}: dynamic job names must not be able to publish required Script checks context (jobs: #{unsafe_dynamic_name_jobs.join(', ')})"
   exit 1
 end
 RUBY
@@ -272,6 +305,8 @@ fi
 if [ ! -f "$pr_workflow" ]; then
   error "missing $pr_workflow"
 fi
+
+validate_workflow_entries
 
 while IFS= read -r -d '' workflow; do
   if grep -Eq '^[[:space:]]+pull_request(_target)?:' "$workflow"; then

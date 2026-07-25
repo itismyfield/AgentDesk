@@ -253,25 +253,27 @@ class FastCheckCiWiringTests(unittest.TestCase):
         )
 
     def run_hardening_fixture(
-        self, pr_workflow: str, extra_workflows: dict[str, str] | None = None
+        self,
+        pr_workflow: str,
+        extra_workflows: dict[str, str] | None = None,
+        workflow_symlinks: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            (root / ".github/workflows").mkdir(parents=True)
+            workflows = root / ".github/workflows"
+            workflows.mkdir(parents=True)
             (root / "scripts").mkdir()
-            (root / ".github/workflows/ci-pr.yml").write_text(
-                pr_workflow, encoding="utf-8"
-            )
+            (workflows / "ci-pr.yml").write_text(pr_workflow, encoding="utf-8")
             trusted = (REPO_ROOT / ".github/workflows/ci-macos-trusted.yml").read_text(
                 encoding="utf-8"
             )
-            (root / ".github/workflows/ci-macos-trusted.yml").write_text(
+            (workflows / "ci-macos-trusted.yml").write_text(
                 trusted, encoding="utf-8"
             )
             for name, content in (extra_workflows or {}).items():
-                (root / ".github/workflows" / name).write_text(
-                    content, encoding="utf-8"
-                )
+                (workflows / name).write_text(content, encoding="utf-8")
+            for name, target in (workflow_symlinks or {}).items():
+                (workflows / name).symlink_to(target)
             script = (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_text(
                 encoding="utf-8"
             )
@@ -317,6 +319,111 @@ jobs:
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must not publish required Script checks context", result.stderr)
         self.assertIn("manual-bypass.yaml", result.stderr)
+
+    def test_hardening_accepts_clean_yaml_workflow(self) -> None:
+        workflow = """\
+name: Clean workflow
+on: push
+jobs:
+  clean:
+    name: Documentation check
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+"""
+        result = self.run_hardening_fixture(
+            PR_WORKFLOW.read_text(encoding="utf-8"),
+            {"clean.yaml": workflow},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_hardening_accepts_unrelated_matrix_job_name(self) -> None:
+        workflow = """\
+name: Matrix workflow
+on: push
+jobs:
+  matrix:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+    steps:
+      - run: true
+"""
+        result = self.run_hardening_fixture(
+            PR_WORKFLOW.read_text(encoding="utf-8"),
+            {"matrix.yaml": workflow},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_hardening_rejects_full_expression_script_context(self) -> None:
+        workflow = """\
+name: Dynamic bypass
+on: workflow_dispatch
+jobs:
+  bypass:
+    name: ${{ 'Script checks' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+"""
+        result = self.run_hardening_fixture(
+            PR_WORKFLOW.read_text(encoding="utf-8"),
+            {"dynamic-bypass.yaml": workflow},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("dynamic job names must not be able to publish", result.stderr)
+        self.assertIn("dynamic-bypass.yaml", result.stderr)
+
+    def test_hardening_rejects_split_expression_script_context(self) -> None:
+        workflow = """\
+name: Split dynamic bypass
+on: workflow_dispatch
+jobs:
+  bypass:
+    name: Script check${{ 's' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+"""
+        result = self.run_hardening_fixture(
+            PR_WORKFLOW.read_text(encoding="utf-8"),
+            {"split-bypass.yml": workflow},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("dynamic job names must not be able to publish", result.stderr)
+        self.assertIn("split-bypass.yml", result.stderr)
+
+    def test_hardening_rejects_matrix_name_with_required_static_context(self) -> None:
+        workflow = """\
+name: Matrix suffix bypass
+on: workflow_dispatch
+jobs:
+  bypass:
+    name: Script checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+    steps:
+      - run: true
+"""
+        result = self.run_hardening_fixture(
+            PR_WORKFLOW.read_text(encoding="utf-8"),
+            {"matrix-bypass.yml": workflow},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("dynamic job names must not be able to publish", result.stderr)
+        self.assertIn("matrix-bypass.yml", result.stderr)
+
+    def test_hardening_rejects_workflow_symlink(self) -> None:
+        result = self.run_hardening_fixture(
+            PR_WORKFLOW.read_text(encoding="utf-8"),
+            workflow_symlinks={"linked.yaml": "ci-pr.yml"},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("linked.yaml must not be a symlink", result.stderr)
 
     def test_ci_script_checks_runs_this_contract(self) -> None:
         script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(
