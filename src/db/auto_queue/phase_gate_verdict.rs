@@ -183,18 +183,26 @@ pub fn resolve_verdict(context: Option<&Value>, result: &Value) -> VerdictResolu
     }
 }
 
-/// Preserve the most useful explicit payload for durable failure diagnostics.
+/// Preserve the most useful explicit class for durable failure diagnostics.
 ///
 /// The reducer's inferred/string verdict remains authoritative for matching. If
-/// resolution is missing, a truthy non-string explicit field is serialized so
-/// operators see the supplied payload instead of the lossy `got none` message.
+/// resolution is missing, a truthy non-string explicit field is represented by
+/// a closed JSON-type label. Never serialize the payload itself: verdict values
+/// can contain credentials or other untrusted data that reaches DB and logs.
 pub fn diagnostic_verdict(result: &Value, resolution: &VerdictResolution) -> Option<String> {
     resolution.verdict().map(str::to_string).or_else(|| {
         EXPLICIT_VERDICT_KEYS
             .iter()
             .filter_map(|key| result.get(*key))
             .find(|value| is_js_truthy(value))
-            .map(Value::to_string)
+            .map(|value| match value {
+                Value::Bool(_) => "<non-string:boolean>",
+                Value::Number(_) => "<non-string:number>",
+                Value::Array(_) => "<non-string:array>",
+                Value::Object(_) => "<non-string:object>",
+                Value::Null | Value::String(_) => "<non-string:unknown>",
+            })
+            .map(str::to_string)
     })
 }
 
@@ -293,6 +301,26 @@ mod tests {
                 VerdictResolution::Inferred("phase_gate_passed".to_string()),
             );
         }
+    }
+
+    #[test]
+    fn non_string_diagnostic_reports_only_closed_json_type() {
+        let context = gate_context(json!(["build_passed"]), "phase_gate_passed");
+        let result = json!({
+            "verdict": {"authorization": "Bearer secret"},
+            "checks": {"build_passed": "fail"},
+        });
+        let resolution = resolve_verdict(Some(&context), &result);
+
+        assert_eq!(resolution, VerdictResolution::Missing);
+        let diagnostic = diagnostic_verdict(&result, &resolution);
+        assert_eq!(diagnostic.as_deref(), Some("<non-string:object>"));
+        assert!(
+            diagnostic.as_deref().is_none_or(|value| {
+                !value.contains("authorization") && !value.contains("Bearer secret")
+            }),
+            "diagnostic must not contain arbitrary verdict payload: {diagnostic:?}"
+        );
     }
 
     #[test]

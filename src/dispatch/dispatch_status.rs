@@ -1592,7 +1592,9 @@ mod auto_queue_terminal_sync_policy_tests {
 
 #[cfg(test)]
 mod auto_queue_phase_gate_finalize_wrapper_tests {
-    use super::{infer_effective_completion_result, infer_phase_gate_verdict};
+    use super::{
+        infer_effective_completion_result, infer_phase_gate_verdict, log_phase_gate_reconciliation,
+    };
     use serde_json::json;
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
@@ -1700,6 +1702,47 @@ mod auto_queue_phase_gate_finalize_wrapper_tests {
                 .and_then(|value| value.get("verdict"))
                 .and_then(|value| value.as_str()),
             Some("phase_gate_passed")
+        );
+    }
+
+    #[test]
+    fn failed_reconciliation_log_does_not_emit_verdict_payload() {
+        let result = json!({
+            "verdict": {"authorization": "Bearer secret"},
+            "checks": {"build_passed": "fail"},
+        });
+        let resolution = crate::db::auto_queue::phase_gate_verdict::resolve_verdict(None, &result);
+        assert_eq!(
+            resolution,
+            crate::db::auto_queue::phase_gate_verdict::VerdictResolution::Missing
+        );
+        let failed_reason = match crate::db::auto_queue::phase_gate_verdict::diagnostic_verdict(
+            &result,
+            &resolution,
+        ) {
+            Some(diagnostic) => format!("expected verdict gate_ok, got {diagnostic}"),
+            None => "expected verdict gate_ok, got none".to_string(),
+        };
+        let outcome = crate::db::auto_queue::PhaseGateReconciliation::MarkedFailed {
+            run_id: "run-log-redaction".to_string(),
+            phase: 0,
+            failed_dispatch_id: "dsp-log-redaction".to_string(),
+            failed_reason,
+        };
+        let logs = capture_info_logs(|| {
+            log_phase_gate_reconciliation("dsp-log-redaction", &outcome);
+        });
+
+        assert!(
+            logs.as_ref()
+                .is_ok_and(|logs| logs.contains("<non-string:object>")),
+            "{logs:?}"
+        );
+        assert!(
+            logs.as_ref().is_ok_and(|logs| {
+                !logs.contains("authorization") && !logs.contains("Bearer secret")
+            }),
+            "failed reconciliation log leaked verdict payload: {logs:?}"
         );
     }
 

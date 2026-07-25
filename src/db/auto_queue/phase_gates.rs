@@ -2282,7 +2282,7 @@ mod reconcile_phase_gate_pg_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn non_string_explicit_payload_is_preserved_in_failure_diagnostics() {
+    async fn non_string_explicit_payload_is_redacted_in_failure_diagnostics() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         fixture(&pool).await;
@@ -2296,7 +2296,7 @@ mod reconcile_phase_gate_pg_tests {
             }
         });
         let result = json!({
-            "verdict": {"blocked_by": "operator"},
+            "verdict": {"authorization": "Bearer secret"},
             "checks": {"build_passed": {"status": "fail"}}
         });
         insert_dispatch(
@@ -2323,18 +2323,43 @@ mod reconcile_phase_gate_pg_tests {
 
         let outcome =
             run_reconcile(&pool, "dsp-diagnostic", "completed", context, Some(result)).await;
-        assert!(matches!(
-            outcome,
-            PhaseGateReconciliation::MarkedFailed { .. }
-        ));
+        let outcome_reason = match &outcome {
+            PhaseGateReconciliation::MarkedFailed { failed_reason, .. } => Some(failed_reason),
+            _ => None,
+        };
+        assert!(
+            outcome_reason.is_some_and(|reason| reason.contains("<non-string:object>")),
+            "outcome should retain only the verdict class: {outcome:?}"
+        );
+        assert!(
+            outcome_reason.is_some_and(|reason| {
+                !reason.contains("authorization") && !reason.contains("Bearer secret")
+            }),
+            "outcome must redact verdict keys and values: {outcome:?}"
+        );
+
         let (verdict, reason) = gate_failure_diagnostic(&pool, "run-pg-test", 0).await;
-        assert_eq!(verdict.as_deref(), Some(r#"{"blocked_by":"operator"}"#));
+        assert_eq!(verdict.as_deref(), Some("<non-string:object>"));
         assert!(
             reason
                 .as_deref()
-                .is_some_and(|reason| reason.contains(r#"{"blocked_by":"operator"}"#)),
-            "failure reason should retain the original payload: {reason:?}"
+                .is_some_and(|reason| reason.contains("<non-string:object>")),
+            "failure reason should retain only the verdict class: {reason:?}"
         );
+        for forbidden in ["authorization", "Bearer secret"] {
+            assert!(
+                verdict
+                    .as_deref()
+                    .is_none_or(|verdict| !verdict.contains(forbidden)),
+                "persisted verdict leaked {forbidden}: {verdict:?}"
+            );
+            assert!(
+                reason
+                    .as_deref()
+                    .is_none_or(|reason| !reason.contains(forbidden)),
+                "persisted failure reason leaked {forbidden}: {reason:?}"
+            );
+        }
 
         pool.close().await;
         pg_db.drop().await;
