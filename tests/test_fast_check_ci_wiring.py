@@ -464,7 +464,7 @@ jobs:
             {"aliased.yaml": workflow},
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Unknown alias", result.stderr)
+        self.assertIn("cannot parse YAML", result.stderr)
         self.assertIn("aliased.yaml", result.stderr)
 
     def test_hardening_rejects_workflow_symlink(self) -> None:
