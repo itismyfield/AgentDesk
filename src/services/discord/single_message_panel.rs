@@ -845,6 +845,7 @@ fn is_panel_activity_status_label(status: &str) -> bool {
         "진행 중" | "monitor 대기" | "완료" | "백그라운드 완료" | "scheduled wakeup"
     ) || status.starts_with("응답 지연")
         || parenthesized_status_label(status, "scheduled wakeup")
+        || parenthesized_status_label(status, "마지막 도구")
         || parenthesized_status_label(status, "도구 실행 중")
         || parenthesized_status_label(status, "subagent 실행 중")
         || parenthesized_status_label(status, "workflow 실행 중")
@@ -1009,6 +1010,18 @@ mod tests {
         assert!(!footer_header(&block).contains('🟢'));
         assert!(!block.contains("계속 처리 중"));
         assert!(block.contains("\n\n-# Subagents\n-# └ review inspect"));
+    }
+
+    #[test]
+    fn latest_tool_footer_header_is_recognized_after_spinner_merge() {
+        let panel = "🔧 마지막 도구 ([Read] · src/lib.rs)\n턴 시작 : 07-25 09:00:00";
+        let block = super::compose_footer_status_block("⠸", panel);
+
+        assert_eq!(
+            footer_header(&block),
+            "-# ⠸ 마지막 도구 ([Read] · src/lib.rs)"
+        );
+        assert!(super::is_merged_footer_status_line(footer_header(&block)));
     }
 
     #[test]

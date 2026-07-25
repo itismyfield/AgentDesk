@@ -5,9 +5,11 @@
 //! derived-status activity label and the store-facing time-line builder live here
 //! with their tests.
 //!
-//! While a turn is active, the footer header shows the latest observed tool call
-//! (`🔧 마지막 도구 (…)`) or a non-progress fallback when no tool has run yet.
-//! Completed turns retain their existing completion label. The spinner merge
+//! While a turn is actively processing, the footer header shows the latest
+//! observed tool call (`🔧 마지막 도구 (…)`) or a non-progress fallback when no
+//! tool has run yet. Distinct wait states retain their specific labels because
+//! those details are not represented by the spinner. Completed turns retain
+//! their existing completion label. The spinner merge
 //! (`single_message_panel::merged_footer_header_line`) swaps the leading status
 //! emoji for the animated spinner, so the marker set there must stay in sync with
 //! the emojis this label can start with. The request anchor follows the activity
@@ -66,10 +68,11 @@ pub(super) fn render_time_line(last_activity_unix: Option<i64>, started_at_unix:
     )
 }
 
-/// #3983/#4892: the panel's first (activity) line. Active and waiting turns
+/// #3983/#4892: the panel's first (activity) line. Generic running/tool states
 /// render the latest observed tool instead of duplicating the answer message's
-/// spinner/progress state. Completed turns deliberately retain the pre-#4892
-/// labels so the completion-only follow-up can replace that path independently.
+/// spinner/progress state. Wait states retain their specific labels because the
+/// spinner does not communicate monitor, wakeup, subagent, or workflow details.
+/// Completed turns retain the pre-#4892 labels.
 pub(super) fn render_activity_line(status: &DerivedStatus) -> String {
     render_activity_line_with_last_tool(status, None)
 }
@@ -85,13 +88,22 @@ pub(super) fn render_activity_line_with_last_tool(
         DerivedStatus::Completed {
             kind: CompletedKind::Foreground,
         } => "✅ 완료".to_string(),
-        DerivedStatus::Running
-        | DerivedStatus::MonitorWait
-        | DerivedStatus::ScheduleWakeup(_)
-        | DerivedStatus::SubagentRunning { .. }
-        | DerivedStatus::WorkflowRunning { .. } => render_last_tool(last_tool),
+        DerivedStatus::Running => render_last_tool(last_tool),
+        DerivedStatus::MonitorWait => "💤 monitor 대기".to_string(),
+        DerivedStatus::ScheduleWakeup(Some(eta_secs)) => {
+            format!("⏰ scheduled wakeup ({eta_secs}s 후)")
+        }
+        DerivedStatus::ScheduleWakeup(None) => "⏰ scheduled wakeup".to_string(),
         DerivedStatus::ToolRunning { name, summary } => {
             render_tool_activity(name, summary.as_deref())
+        }
+        DerivedStatus::SubagentRunning { desc } => {
+            let desc = escape_status_panel_markdown(desc);
+            format!("🧵 subagent 실행 중 ({})", truncate_chars(&desc, 120))
+        }
+        DerivedStatus::WorkflowRunning { label } => {
+            let label = escape_status_panel_markdown(label);
+            format!("🧬 workflow 실행 중 ({})", truncate_chars(&label, 120))
         }
     }
 }
@@ -165,26 +177,75 @@ mod tests {
     }
 
     #[test]
-    fn waiting_states_keep_the_last_tool_instead_of_progress_copy() {
+    fn monitor_wait_keeps_specific_label_instead_of_last_tool() {
         let last_tool = LastToolCall {
             name: "Monitor".to_string(),
             summary: Some("wait for build".to_string()),
         };
 
-        for status in [
-            DerivedStatus::MonitorWait,
-            DerivedStatus::ScheduleWakeup(Some(30)),
-            DerivedStatus::SubagentRunning {
-                desc: "review".to_string(),
-            },
-            DerivedStatus::WorkflowRunning {
-                label: "CI".to_string(),
-            },
-        ] {
-            let rendered = render_activity_line_with_last_tool(&status, Some(&last_tool));
-            assert_eq!(rendered, "🔧 마지막 도구 ([Monitor] · wait for build)");
-            assert!(!rendered.contains("진행 중"));
-        }
+        assert_eq!(
+            render_activity_line_with_last_tool(&DerivedStatus::MonitorWait, Some(&last_tool),),
+            "💤 monitor 대기"
+        );
+    }
+
+    #[test]
+    fn schedule_wakeup_keeps_eta_label_instead_of_last_tool() {
+        let last_tool = LastToolCall {
+            name: "ScheduleWakeup".to_string(),
+            summary: Some("30 seconds".to_string()),
+        };
+
+        assert_eq!(
+            render_activity_line_with_last_tool(
+                &DerivedStatus::ScheduleWakeup(Some(30)),
+                Some(&last_tool),
+            ),
+            "⏰ scheduled wakeup (30s 후)"
+        );
+        assert_eq!(
+            render_activity_line_with_last_tool(
+                &DerivedStatus::ScheduleWakeup(None),
+                Some(&last_tool),
+            ),
+            "⏰ scheduled wakeup"
+        );
+    }
+
+    #[test]
+    fn subagent_running_keeps_description_label_instead_of_last_tool() {
+        let last_tool = LastToolCall {
+            name: "Task".to_string(),
+            summary: Some("review".to_string()),
+        };
+
+        assert_eq!(
+            render_activity_line_with_last_tool(
+                &DerivedStatus::SubagentRunning {
+                    desc: "review_status".to_string(),
+                },
+                Some(&last_tool),
+            ),
+            r"🧵 subagent 실행 중 (review\_status)"
+        );
+    }
+
+    #[test]
+    fn workflow_running_keeps_label_instead_of_last_tool() {
+        let last_tool = LastToolCall {
+            name: "Workflow".to_string(),
+            summary: Some("CI".to_string()),
+        };
+
+        assert_eq!(
+            render_activity_line_with_last_tool(
+                &DerivedStatus::WorkflowRunning {
+                    label: "CI_review".to_string(),
+                },
+                Some(&last_tool),
+            ),
+            r"🧬 workflow 실행 중 (CI\_review)"
+        );
     }
 
     #[test]
@@ -220,11 +281,11 @@ mod tests {
         };
         for (status, last_tool, expected_prefix) in [
             (DerivedStatus::Running, None, "🔧"),
-            (DerivedStatus::MonitorWait, Some(&last_tool), "🔧"),
+            (DerivedStatus::MonitorWait, Some(&last_tool), "💤"),
             (
                 DerivedStatus::ScheduleWakeup(Some(30)),
                 Some(&last_tool),
-                "🔧",
+                "⏰",
             ),
             (
                 DerivedStatus::ToolRunning {
@@ -239,14 +300,14 @@ mod tests {
                     desc: "explore".to_string(),
                 },
                 Some(&last_tool),
-                "🔧",
+                "🧵",
             ),
             (
                 DerivedStatus::WorkflowRunning {
                     label: "review".to_string(),
                 },
                 Some(&last_tool),
-                "🔧",
+                "🧬",
             ),
             (
                 DerivedStatus::Completed {

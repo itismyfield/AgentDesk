@@ -4146,11 +4146,13 @@ fn status_panel_shows_live_subagent_activity_by_parent_id() {
         !rendered.contains("grep ERROR app.log"),
         "subagent activity must not leak raw command args, got: {rendered}"
     );
-    // Nested activity must not replace the top-level Task launch remembered by
-    // the panel header; the nested Bash step belongs only to the subagent slot.
     assert!(
-        rendered.contains("🔧 마지막 도구 ([Task] · [general-purpose] Audit logs)"),
-        "top-level Task launch must remain the panel's latest tool, got: {rendered}"
+        rendered.contains("🧵 subagent 실행 중 (Audit logs)"),
+        "subagent wait state must retain its specific header, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("🔧 마지막 도구"),
+        "subagent wait state must not collapse into the latest-tool header: {rendered}"
     );
 }
 
@@ -6314,7 +6316,7 @@ fn status_panel_renders_plan_but_hides_subagents_for_codex() {
     assert!(!rendered.contains("Subagents"));
     assert!(
         rendered.contains("🔧 마지막 도구 ([Task] · Hidden subagent)"),
-        "Codex must omit the subagent section while retaining the latest tool header: {rendered}"
+        "Codex's hidden-subagent header projection must retain the latest tool: {rendered}"
     );
 }
 
