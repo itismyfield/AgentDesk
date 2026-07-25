@@ -30,6 +30,12 @@ pub(in crate::services::discord) struct BusyRetryDecision {
     pub capped: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) struct BusyFollowupRetryIdentity {
+    pub user_msg_id: u64,
+    pub state: Option<BusyFollowupRetryState>,
+}
+
 fn input_file_path_in_root(
     root: &Path,
     provider: &ProviderKind,
@@ -155,18 +161,61 @@ pub(in crate::services::discord) fn load(
     load_in_root(&root, provider, channel_id, user_msg_id)
 }
 
-pub(in crate::services::discord) fn is_capped(
+pub(in crate::services::discord) fn resolve_identity(
     provider: &ProviderKind,
     channel_id: u64,
     user_msg_id: u64,
-) -> bool {
-    let Some(state) = load(provider, channel_id, user_msg_id) else {
+    source_message_ids: &[serenity::model::id::MessageId],
+) -> BusyFollowupRetryIdentity {
+    let Some(root) = runtime_store::discord_busy_followup_retries_root() else {
+        return BusyFollowupRetryIdentity {
+            user_msg_id,
+            state: None,
+        };
+    };
+    let _guard = STORE_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(state) = load_in_root(&root, provider, channel_id, user_msg_id) {
+        return BusyFollowupRetryIdentity {
+            user_msg_id,
+            state: Some(state),
+        };
+    }
+    for source_message_id in source_message_ids {
+        let source_message_id = source_message_id.get();
+        if source_message_id == user_msg_id {
+            continue;
+        }
+        if let Some(state) = load_in_root(&root, provider, channel_id, source_message_id) {
+            return BusyFollowupRetryIdentity {
+                user_msg_id: source_message_id,
+                state: Some(state),
+            };
+        }
+    }
+    BusyFollowupRetryIdentity {
+        user_msg_id,
+        state: None,
+    }
+}
+
+pub(in crate::services::discord) fn state_is_capped(state: Option<BusyFollowupRetryState>) -> bool {
+    let Some(state) = state else {
         return false;
     };
     let elapsed_ms = now_ms().saturating_sub(state.first_busy_retry_at_ms);
     state.busy_retry_count >= MAX_BUSY_RETRY_COUNT
         || (state.first_busy_retry_at_ms != 0
             && elapsed_ms >= MAX_BUSY_RETRY_ELAPSED.as_millis() as u64)
+}
+
+pub(in crate::services::discord) fn is_capped(
+    provider: &ProviderKind,
+    channel_id: u64,
+    user_msg_id: u64,
+) -> bool {
+    state_is_capped(load(provider, channel_id, user_msg_id))
 }
 
 /// Bind the first posted placeholder. A stale attempt cannot replace an existing
@@ -345,6 +394,69 @@ mod tests {
     }
 
     #[test]
+    fn merged_head_inherits_source_retry_identity_and_unrelated_head_does_not_4888() {
+        with_root(|| {
+            let provider = ProviderKind::Claude;
+            let channel_id = 48_889;
+            let source_id = 48_890;
+            let merged_head_id = 48_891;
+            let unrelated_head_id = 48_892;
+            bind_notice_if_absent(&provider, channel_id, source_id, 903).expect("bind source");
+            for count in 1..=MAX_BUSY_RETRY_COUNT {
+                record_busy_retry_at(
+                    &provider,
+                    channel_id,
+                    source_id,
+                    903,
+                    1_000 + u64::from(count),
+                )
+                .expect("record source retry");
+            }
+
+            let merged = resolve_identity(
+                &provider,
+                channel_id,
+                merged_head_id,
+                &[
+                    serenity::model::id::MessageId::new(merged_head_id),
+                    serenity::model::id::MessageId::new(source_id),
+                ],
+            );
+            assert_eq!(merged.user_msg_id, source_id);
+            assert_eq!(merged.state.expect("source state").notice_message_id, 903);
+            assert!(state_is_capped(merged.state));
+
+            bind_notice_if_absent(&provider, channel_id, merged_head_id, 904)
+                .expect("bind merged head");
+            let head_owned = resolve_identity(
+                &provider,
+                channel_id,
+                merged_head_id,
+                &[
+                    serenity::model::id::MessageId::new(merged_head_id),
+                    serenity::model::id::MessageId::new(source_id),
+                ],
+            );
+            assert_eq!(head_owned.user_msg_id, merged_head_id);
+            assert_eq!(
+                head_owned.state.expect("head state").notice_message_id,
+                904,
+                "an existing head state must not inherit an older source binding"
+            );
+
+            let unrelated = resolve_identity(
+                &provider,
+                channel_id,
+                unrelated_head_id,
+                &[serenity::model::id::MessageId::new(unrelated_head_id)],
+            );
+            assert_eq!(unrelated.user_msg_id, unrelated_head_id);
+            assert!(unrelated.state.is_none());
+            assert!(!state_is_capped(unrelated.state));
+        });
+    }
+
+    #[test]
     fn stale_bindings_are_swept_by_retry_timestamp_4888() {
         with_root(|| {
             let provider = ProviderKind::Claude;
@@ -404,10 +516,10 @@ mod tests {
             )
             .expect("save crash-before-retry binding");
             let path = input_file_path_in_root(&root, &provider, channel_id, user_msg_id);
-            let stale_mtime_ms = 2_000;
+            let stale_mtime_ms = 2_000_u64;
             filetime::set_file_mtime(
                 &path,
-                filetime::FileTime::from_unix_time(stale_mtime_ms / 1_000, 0),
+                filetime::FileTime::from_unix_time((stale_mtime_ms / 1_000) as i64, 0),
             )
             .expect("age crash-before-retry binding");
 

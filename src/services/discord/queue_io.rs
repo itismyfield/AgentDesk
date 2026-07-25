@@ -629,7 +629,7 @@ pub(in crate::services::discord) fn spawn_turn_completion_idle_queue_listener(
                             target: "agentdesk::discord::turn_completion_events",
                             provider = provider.as_str(),
                             channel_id = event.channel_id.get(),
-                            "mailbox release observed before terminal card commit; queue kick withheld"
+                            "mailbox release observed before terminal projection settled; queue kick withheld"
                         );
                         continue;
                     }

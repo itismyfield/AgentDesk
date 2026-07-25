@@ -29,46 +29,58 @@ pub(super) struct FollowupRequeueOutcome {
     pub(super) notice_message_id: MessageId,
 }
 
-/// Proof produced only after the completion-postlude card write future returns.
-/// Both the direct retry arm and the completion listener consume this boundary;
-/// callers cannot synthesize a pre-write `true` flag.
-pub(super) struct TerminalCardDeliveryCommitted;
+/// Proof produced only after the bounded terminal projection future settles.
+/// The private field prevents callers from fabricating the ordering boundary.
+pub(super) struct TerminalProjectionSettled {
+    _private: (),
+}
 
-impl TerminalCardDeliveryCommitted {
-    pub(super) async fn after<F, T>(delivery: F) -> (Self, T)
+impl TerminalProjectionSettled {
+    pub(super) async fn after<F, T>(projection: F) -> (Self, T)
     where
         F: std::future::Future<Output = T>,
     {
-        let output = delivery.await;
-        (Self, output)
+        let output = projection.await;
+        (Self { _private: () }, output)
     }
 
-    pub(super) fn publish_and_arm_retry(
+    pub(super) fn release_completion_admission(
         self,
+        completion_guard: &super::guards::CompletionGuard,
         outcome: Option<FollowupRequeueOutcome>,
         shared: &Arc<SharedData>,
         provider: &ProviderKind,
         channel_id: ChannelId,
-        turn_id: Option<u64>,
         reason: &'static str,
     ) -> bool {
-        super::super::turn_completion_events::publish_queue_eligible_completion_event(
-            shared, channel_id, turn_id,
-        );
-        let Some(outcome) = outcome else {
-            return false;
-        };
-        if !outcome.requeued || outcome.retry_capped {
-            return false;
-        }
-        super::super::schedule_deferred_idle_queue_kickoff(
-            shared.clone(),
-            provider.clone(),
-            channel_id,
-            reason,
-        );
-        true
+        let queue_eligible =
+            outcome.is_none_or(|outcome| outcome.requeued && !outcome.retry_capped);
+        completion_guard.note_terminal_projection_settled(true);
+        completion_guard.note_terminal_disposition_settled(queue_eligible);
+        schedule_retry_if_eligible(outcome, shared, provider, channel_id, reason)
     }
+}
+
+fn schedule_retry_if_eligible(
+    outcome: Option<FollowupRequeueOutcome>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    reason: &'static str,
+) -> bool {
+    let Some(outcome) = outcome else {
+        return false;
+    };
+    if !outcome.requeued || outcome.retry_capped {
+        return false;
+    }
+    super::super::schedule_deferred_idle_queue_kickoff(
+        shared.clone(),
+        provider.clone(),
+        channel_id,
+        reason,
+    );
+    true
 }
 
 pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
@@ -83,7 +95,7 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
     let notice_message_id = super::super::busy_followup_retry_store::bind_notice_if_absent(
         provider,
         channel_id.get(),
-        inflight_state.user_msg_id,
+        inflight_state.effective_busy_followup_retry_user_msg_id(),
         inflight_state.current_msg_id,
     )
     .map(|state| MessageId::new(state.notice_message_id))
@@ -91,7 +103,7 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
         tracing::warn!(
             provider = %provider.as_str(),
             channel_id = channel_id.get(),
-            user_msg_id = inflight_state.user_msg_id,
+            user_msg_id = inflight_state.effective_busy_followup_retry_user_msg_id(),
             error = %error,
             "failed to bind busy follow-up notice; using current placeholder"
         );
@@ -100,7 +112,7 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
     let retry_decision = super::super::busy_followup_retry_store::record_busy_retry(
         provider,
         channel_id.get(),
-        inflight_state.user_msg_id,
+        inflight_state.effective_busy_followup_retry_user_msg_id(),
         notice_message_id.get(),
     )
     .ok();
@@ -108,7 +120,7 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
         tracing::warn!(
             provider = %provider.as_str(),
             channel_id = channel_id.get(),
-            user_msg_id = inflight_state.user_msg_id,
+            user_msg_id = inflight_state.effective_busy_followup_retry_user_msg_id(),
             "Claude TUI busy follow-up aggregate retry cap reached; preserving entry without kickoff"
         );
     }
@@ -123,7 +135,7 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
     tracing::info!(
         provider = %provider.as_str(),
         channel_id = channel_id.get(),
-        user_msg_id = inflight_state.user_msg_id,
+        user_msg_id = inflight_state.effective_busy_followup_retry_user_msg_id(),
         requeue_enqueued = requeue_outcome.enqueued,
         requeue_merged = requeue_outcome.merged,
         requeue_refusal_reason = requeue_refusal_reason.unwrap_or("none"),
@@ -138,7 +150,7 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
         Some(turn_id),
         "claude_tui_followup_pre_submit_requeue",
         serde_json::json!({
-            "user_msg_id": inflight_state.user_msg_id,
+            "user_msg_id": inflight_state.effective_busy_followup_retry_user_msg_id(),
             "requeue_enqueued": requeue_outcome.enqueued,
             "requeue_merged": requeue_outcome.merged,
             "requeue_refusal_reason": requeue_refusal_reason,
@@ -151,7 +163,8 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
         if should_publish_queue_marker(&requeue_outcome)
             && let Some(http) = shared_owned.serenity_http_or_token_fallback()
         {
-            let message_id = MessageId::new(inflight_state.user_msg_id);
+            let message_id =
+                MessageId::new(inflight_state.effective_busy_followup_retry_user_msg_id());
             let queued_generation = super::super::mailbox_snapshot(shared_owned, channel_id)
                 .await
                 .intervention_queue
@@ -344,7 +357,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn uncapped_retry_arms_only_after_terminal_card_delivery_4888() {
+    async fn uncapped_retry_arms_only_after_terminal_projection_settles_4888() {
         let _root = scoped_runtime_root();
         let shared = crate::services::discord::make_shared_data_for_tests();
         let provider = ProviderKind::Claude;
@@ -370,7 +383,7 @@ mod tests {
                 .deferred_hook_backlog
                 .load(std::sync::atomic::Ordering::Relaxed),
             0,
-            "requeue alone must not expose the successor before terminal card delivery"
+            "requeue alone must not expose the successor before terminal projection settles"
         );
         let mut completion_events =
             super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
@@ -389,7 +402,7 @@ mod tests {
             "mailbox release must not make the successor queue-eligible"
         );
         let (delivery_tx, delivery_rx) = tokio::sync::oneshot::channel::<()>();
-        let boundary = TerminalCardDeliveryCommitted::after(async move {
+        let boundary = TerminalProjectionSettled::after(async move {
             let _ = delivery_rx.await;
         });
         tokio::pin!(boundary);
@@ -400,7 +413,7 @@ mod tests {
                 std::future::Future::poll(boundary.as_mut(), &mut cx),
                 std::task::Poll::Pending
             ),
-            "the production commit token must remain unavailable while the final edit is pending"
+            "the settled token must remain unavailable while the final projection is pending"
         );
         assert_eq!(
             shared
@@ -412,20 +425,22 @@ mod tests {
         );
         delivery_tx.send(()).expect("release final edit");
         let (boundary, ()) = boundary.await;
-        assert!(boundary.publish_and_arm_retry(
+        let completion_guard = super::guards::CompletionGuard::for_completion_test(
+            shared.clone(),
+            channel_id,
+            message_id.get(),
+        );
+        assert!(boundary.release_completion_admission(
+            &completion_guard,
             Some(outcome),
             &shared,
             &provider,
             channel_id,
-            Some(message_id.get()),
-            "test_busy_retry_after_completion_postlude_card_delivery",
+            "test_busy_retry_after_completion_postlude_projection",
         ));
         assert!(
-            completion_events
-                .try_recv()
-                .expect("queue-eligible completion event")
-                .queue_is_eligible(),
-            "the listener receives eligibility only from the post-edit commit token"
+            completion_events.try_recv().is_err(),
+            "retry scheduling must not fabricate queue admission"
         );
         assert_eq!(
             shared
@@ -482,15 +497,20 @@ mod tests {
         .await;
         assert!(outcome.requeued);
         assert!(outcome.retry_capped);
-        let (boundary, ()) = TerminalCardDeliveryCommitted::after(async {}).await;
+        let (boundary, ()) = TerminalProjectionSettled::after(async {}).await;
+        let completion_guard = super::guards::CompletionGuard::for_completion_test(
+            shared.clone(),
+            channel_id,
+            message_id.get(),
+        );
         assert!(
-            !boundary.publish_and_arm_retry(
+            !boundary.release_completion_admission(
+                &completion_guard,
                 Some(outcome),
                 &shared,
                 &provider,
                 channel_id,
-                Some(message_id.get()),
-                "test_capped_busy_retry_after_terminal_card_delivery",
+                "test_capped_busy_retry_after_terminal_projection",
             ),
             "a capped retry must not arm a successor after terminal delivery"
         );

@@ -21,7 +21,7 @@ fn apply_bound_notice_edit_result(
                 error = %error,
                 "busy follow-up notice is confirmed missing; clearing its binding before replacement"
             );
-            let _ = super::super::super::super::busy_followup_retry_store::clear_if_current(
+            let _ = crate::services::discord::busy_followup_retry_store::clear_if_current(
                 provider,
                 channel_id.get(),
                 user_msg_id.get(),
@@ -50,7 +50,7 @@ pub(super) async fn reuse_bound_busy_notice(
     user_msg_id: MessageId,
     queued_placeholder_handoff: Option<MessageId>,
 ) -> Option<MessageId> {
-    let binding = super::super::super::super::busy_followup_retry_store::load(
+    let binding = crate::services::discord::busy_followup_retry_store::load(
         provider,
         channel_id.get(),
         user_msg_id.get(),
@@ -95,8 +95,8 @@ pub(super) async fn reuse_bound_busy_notice(
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::super::gateway::ClassifiedOutboundEditError;
     use super::*;
+    use crate::services::discord::gateway::ClassifiedOutboundEditError;
 
     #[test]
     fn only_confirmed_missing_replaces_bound_busy_notice_4888() {
@@ -112,14 +112,14 @@ mod tests {
         let channel_id = ChannelId::new(100_000_004_888_401);
         let user_msg_id = MessageId::new(100_000_004_888_402);
         let notice = MessageId::new(100_000_004_888_403);
-        super::super::super::super::busy_followup_retry_store::bind_notice_if_absent(
+        crate::services::discord::busy_followup_retry_store::bind_notice_if_absent(
             &provider,
             channel_id.get(),
             user_msg_id.get(),
             notice.get(),
         )
         .expect("bind notice");
-        super::super::super::super::busy_followup_retry_store::record_busy_retry(
+        crate::services::discord::busy_followup_retry_store::record_busy_retry(
             &provider,
             channel_id.get(),
             user_msg_id.get(),
@@ -143,7 +143,7 @@ mod tests {
                 ),
                 Err(Some(notice))
             );
-            let preserved = super::super::super::super::busy_followup_retry_store::load(
+            let preserved = crate::services::discord::busy_followup_retry_store::load(
                 &provider,
                 channel_id.get(),
                 user_msg_id.get(),
@@ -166,7 +166,7 @@ mod tests {
             Err(None)
         );
         assert!(
-            super::super::super::super::busy_followup_retry_store::load(
+            crate::services::discord::busy_followup_retry_store::load(
                 &provider,
                 channel_id.get(),
                 user_msg_id.get(),

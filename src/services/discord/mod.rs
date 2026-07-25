@@ -3689,10 +3689,13 @@ pub(in crate::services::discord) async fn mailbox_requeue_inflight_for_followup_
     inflight_state: &InflightTurnState,
 ) -> MailboxEnqueueOutcome {
     let user_msg_id = inflight_state.user_msg_id;
+    let busy_followup_retry_user_msg_id =
+        inflight_state.effective_busy_followup_retry_user_msg_id();
     if user_msg_id == 0 || inflight_state.user_text.trim().is_empty() {
         return MailboxEnqueueOutcome::default();
     }
     let message_id = MessageId::new(user_msg_id);
+    let busy_followup_retry_message_id = MessageId::new(busy_followup_retry_user_msg_id);
     // FIX #6 (Codex P2): rebuild the retry Intervention from the persisted
     // follow-up requeue context instead of hardcoding empty values, so a
     // PRE-submit busy-timeout requeue preserves the originating turn's reply
@@ -3717,7 +3720,11 @@ pub(in crate::services::discord) async fn mailbox_requeue_inflight_for_followup_
         author_is_bot: false,
         message_id,
         queued_generation,
-        source_message_ids: vec![message_id],
+        source_message_ids: if busy_followup_retry_message_id == message_id {
+            vec![message_id]
+        } else {
+            vec![message_id, busy_followup_retry_message_id]
+        },
         source_message_queued_generations,
         source_text_segments: Vec::new(),
         text: inflight_state.user_text.clone(),
@@ -3801,7 +3808,9 @@ mod followup_retry_requeue_tests {
             let provider = ProviderKind::Claude;
             let channel_id = ChannelId::new(3_752_001);
             let user_msg_id = MessageId::new(3_752_101);
-            let state = followup_inflight(channel_id, user_msg_id, false);
+            let retry_user_msg_id = MessageId::new(3_752_100);
+            let mut state = followup_inflight(channel_id, user_msg_id, false);
+            state.busy_followup_retry_user_msg_id = retry_user_msg_id.get();
 
             let outcome =
                 mailbox_requeue_inflight_for_followup_retry(&shared, &provider, channel_id, &state)
@@ -3817,7 +3826,11 @@ mod followup_retry_requeue_tests {
             let intervention = &snapshot.intervention_queue[0];
             assert_eq!(intervention.author_id, UserId::new(42));
             assert_eq!(intervention.message_id, user_msg_id);
-            assert_eq!(intervention.source_message_ids, vec![user_msg_id]);
+            assert_eq!(
+                intervention.source_message_ids,
+                vec![user_msg_id, retry_user_msg_id],
+                "retry requeue must preserve the canonical source identity across another drain"
+            );
             assert_eq!(intervention.text, "please continue");
             assert_eq!(intervention.reply_context.as_deref(), Some("reply context"));
             assert!(intervention.has_reply_boundary);
@@ -3969,11 +3982,20 @@ async fn mailbox_cancel_soft_intervention(
         .await;
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
     if let Some(removed) = result.removed.as_ref() {
-        let _ = busy_followup_retry_store::clear_for_input(
+        let retry_identity = busy_followup_retry_store::resolve_identity(
             provider,
             channel_id.get(),
             removed.message_id.get(),
+            &removed.source_message_ids,
         );
+        if let Some(state) = retry_identity.state {
+            let _ = busy_followup_retry_store::clear_if_current(
+                provider,
+                channel_id.get(),
+                retry_identity.user_msg_id,
+                state.notice_message_id,
+            );
+        }
     }
     result.removed
 }

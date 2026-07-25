@@ -2273,6 +2273,14 @@ async fn release_restored_watcher_active_turn_before_panel_edit(
     let Some(token) = finish.removed_token.as_ref() else {
         return false;
     };
+    shared.turn_finalizer.note_mailbox_released(
+        super::turn_finalizer::TurnKey::new(
+            channel_id,
+            finalizer_turn_id,
+            shared.restart.current_generation,
+        ),
+        shared.clone(),
+    );
 
     // #4106 review-fix: cancel the removed token, decrement the counter, AND run
     // the finalizer's D-side channel cleanup here. Hoisting the release ahead of

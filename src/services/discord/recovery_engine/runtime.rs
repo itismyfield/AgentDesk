@@ -33,16 +33,19 @@ fn reseed_watcher_owned_finalizer_ledger(
     if finalizer_turn_id == 0 {
         return;
     }
-    shared.turn_finalizer.register_start(
-        super::turn_finalizer::TurnKey::new(
-            channel_id,
-            finalizer_turn_id,
-            shared.restart.current_generation,
-        ),
-        provider.clone(),
-        super::inflight::RelayOwnerKind::Watcher,
-        shared, // #3016 phase-5a: prime the reconcile cache at register time.
-    );
+    shared
+        .turn_finalizer
+        .register_start_with_completion_admission(
+            super::turn_finalizer::TurnKey::new(
+                channel_id,
+                finalizer_turn_id,
+                shared.restart.current_generation,
+            ),
+            provider.clone(),
+            super::inflight::RelayOwnerKind::Watcher,
+            super::turn_finalizer::CompletionAdmissionPlan::AfterTerminalProjectionSettled,
+            shared, // #3016 phase-5a: prime the reconcile cache at register time.
+        );
 }
 
 /// #4370 (review r3): may THIS re-adopted row own a ledger entry / on-disk marker?

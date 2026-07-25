@@ -35,6 +35,7 @@ use super::SharedData;
 use super::{DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome};
 
 pub(in crate::services::discord) mod cleanup;
+mod completion_admission;
 pub(in crate::services::discord) mod completion_signal;
 mod delivery_lease;
 mod finalize;
@@ -46,6 +47,8 @@ pub(in crate::services::discord) use cleanup::SyntheticClaimSnapshot;
 // #3479 r9: completion-signal enum + pure derivation extracted; re-exported so
 // the `completion_signal_state` method and the watcher-backstop re-check below
 // reference them unqualified, byte-identical.
+pub(in crate::services::discord) use self::completion_admission::CompletionAdmissionPlan;
+use self::completion_admission::{CompletionAdmission, publish_claimed_queue_eligible};
 pub(in crate::services::discord) use self::completion_signal::{
     CompletionSignal, completion_signal_from_transcript,
 };
@@ -303,6 +306,8 @@ struct LedgerEntry {
     /// #3277 codex r1 — true while `watcher_backstop_deadline` is the fast-path
     /// PULLED one (its re-check stays STRICT); false on the natural horizon.
     watcher_backstop_deadline_pulled: bool,
+    /// Turn-level queue-admission barrier shared by every terminal submitter.
+    completion_admission: CompletionAdmission,
     /// When the entry reached `Finalized`, for TTL-based GC.
     finalized_at: Option<Instant>,
 }
@@ -322,7 +327,22 @@ enum FinalizeMsg {
         key: TurnKey,
         provider: ProviderKind,
         relay_owner: RelayOwnerKind,
+        completion_admission_plan: CompletionAdmissionPlan,
         shared: std::sync::Weak<SharedData>,
+    },
+    MailboxReleased {
+        key: TurnKey,
+        shared: Arc<SharedData>,
+    },
+    TerminalProjectionSettled {
+        key: TurnKey,
+        allow_queue: bool,
+        shared: Arc<SharedData>,
+    },
+    TerminalDispositionSettled {
+        key: TurnKey,
+        allow_queue: bool,
+        shared: Arc<SharedData>,
     },
     Terminal {
         key: TurnKey,
@@ -424,14 +444,63 @@ impl TurnFinalizer {
         relay_owner: RelayOwnerKind,
         shared: &Arc<SharedData>,
     ) {
-        // UnboundedSender::send only fails if the actor task is gone (process
-        // teardown); dropping the Start there is harmless because no terminal
-        // will be awaited either.
+        self.register_start_with_completion_admission(
+            key,
+            provider,
+            relay_owner,
+            CompletionAdmissionPlan::Immediate,
+            shared,
+        );
+    }
+
+    pub(in crate::services::discord) fn register_start_with_completion_admission(
+        &self,
+        key: TurnKey,
+        provider: ProviderKind,
+        relay_owner: RelayOwnerKind,
+        completion_admission_plan: CompletionAdmissionPlan,
+        shared: &Arc<SharedData>,
+    ) {
         let _ = self.tx.send(FinalizeMsg::Start {
             key,
             provider,
             relay_owner,
+            completion_admission_plan,
             shared: Arc::downgrade(shared),
+        });
+    }
+
+    pub(in crate::services::discord) fn note_mailbox_released(
+        &self,
+        key: TurnKey,
+        shared: Arc<SharedData>,
+    ) {
+        let _ = self.tx.send(FinalizeMsg::MailboxReleased { key, shared });
+    }
+
+    pub(in crate::services::discord) fn note_terminal_projection_settled(
+        &self,
+        key: TurnKey,
+        allow_queue: bool,
+        shared: Arc<SharedData>,
+    ) {
+        let _ = self.tx.send(FinalizeMsg::TerminalProjectionSettled {
+            key,
+            allow_queue,
+            shared,
+        });
+    }
+
+    pub(in crate::services::discord) fn note_terminal_disposition_settled(
+        &self,
+        key: TurnKey,
+        allow_queue: bool,
+        shared: Arc<SharedData>,
+    ) {
+        let _ = self.tx.send(FinalizeMsg::TerminalDispositionSettled {
+            key,
+            allow_queue,
+            shared,
         });
     }
 
@@ -671,6 +740,7 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         key,
                         provider,
                         relay_owner,
+                        completion_admission_plan,
                         shared,
                     } => {
                         // #3016 phase-5a: prime the reconcile cache from the very
@@ -700,6 +770,8 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                                     e.relay_owner = relay_owner;
                                     e.provider = provider.clone();
                                     e.turn_key = key;
+                                    e.completion_admission
+                                        .update_plan(completion_admission_plan);
                                     if arm_watcher_backstop {
                                         e.watcher_backstop_deadline.get_or_insert_with(|| {
                                             Instant::now() + WATCHER_REGISTER_BACKSTOP
@@ -718,8 +790,44 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                                 watcher_backstop_probe_at: None,
                                 watcher_backstop_terminal_streak: 0,
                                 watcher_backstop_deadline_pulled: false,
+                                completion_admission: CompletionAdmission::new(
+                                    completion_admission_plan,
+                                ),
                                 finalized_at: None,
                             });
+                    }
+                    FinalizeMsg::MailboxReleased { key, shared } => {
+                        let ledger_key = resolve_ledger_key(&ledger, key);
+                        if let Some(entry) = ledger.get_mut(&ledger_key) {
+                            entry.completion_admission.note_mailbox_released();
+                            publish_claimed_queue_eligible(&shared, entry);
+                        }
+                    }
+                    FinalizeMsg::TerminalProjectionSettled {
+                        key,
+                        allow_queue,
+                        shared,
+                    } => {
+                        let ledger_key = resolve_ledger_key(&ledger, key);
+                        if let Some(entry) = ledger.get_mut(&ledger_key) {
+                            entry
+                                .completion_admission
+                                .note_terminal_projection_settled(allow_queue);
+                            publish_claimed_queue_eligible(&shared, entry);
+                        }
+                    }
+                    FinalizeMsg::TerminalDispositionSettled {
+                        key,
+                        allow_queue,
+                        shared,
+                    } => {
+                        let ledger_key = resolve_ledger_key(&ledger, key);
+                        if let Some(entry) = ledger.get_mut(&ledger_key) {
+                            entry
+                                .completion_admission
+                                .note_terminal_disposition_settled(allow_queue);
+                            publish_claimed_queue_eligible(&shared, entry);
+                        }
                     }
                     FinalizeMsg::Terminal {
                         key,
@@ -968,6 +1076,7 @@ async fn handle_terminal(
         watcher_backstop_probe_at: None,
         watcher_backstop_terminal_streak: 0,
         watcher_backstop_deadline_pulled: false,
+        completion_admission: CompletionAdmission::new(CompletionAdmissionPlan::Immediate),
         finalized_at: None,
     });
 
@@ -1069,7 +1178,27 @@ async fn handle_terminal(
     .catch_unwind()
     .await
     {
-        Ok(outcome) => outcome,
+        Ok(outcome) => {
+            if matches!(
+                outcome,
+                FinalizeOutcome::Finalized {
+                    removed_token: Some(_),
+                    ..
+                }
+            ) {
+                entry.completion_admission.note_mailbox_released();
+                if entry.relay_owner == RelayOwnerKind::None {
+                    entry
+                        .completion_admission
+                        .note_terminal_projection_settled(true);
+                    entry
+                        .completion_admission
+                        .note_terminal_disposition_settled(true);
+                }
+                publish_claimed_queue_eligible(shared, entry);
+            }
+            outcome
+        }
         Err(payload) => {
             tracing::error!(
                 panic = %panic_payload_summary(payload.as_ref()),
@@ -1169,6 +1298,165 @@ mod tests {
                 )
                 .await;
             assert!(matches!(second, FinalizeOutcome::AlreadyFinalized));
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn early_deferred_registration_survives_later_immediate_refresh_4888() {
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None);
+            let mut completion_events =
+                super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+            let ch = ChannelId::new(4_888_101);
+            let tid = 4_888_102;
+            shared.restart.global_active.store(1, Ordering::Relaxed);
+            let _token = seed_active_turn(&shared, ch, tid).await;
+            let fin = TurnFinalizer::spawn();
+            let k = TurnKey::new(ch, tid, 0);
+            fin.register_start_with_completion_admission(
+                k,
+                ProviderKind::Claude,
+                RelayOwnerKind::Watcher,
+                CompletionAdmissionPlan::AfterTerminalProjectionSettled,
+                &shared,
+            );
+            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
+
+            let watcher = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(matches!(watcher, FinalizeOutcome::Finalized { .. }));
+            let released = completion_events
+                .try_recv()
+                .expect("mailbox release must publish its non-eligible edge");
+            assert!(!released.queue_is_eligible());
+            assert!(completion_events.try_recv().is_err());
+
+            let bridge = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::bridge(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(matches!(bridge, FinalizeOutcome::AlreadyFinalized));
+            fin.note_terminal_projection_settled(k, true, shared.clone());
+            fin.note_terminal_projection_settled(k, true, shared.clone());
+            assert!(fin.has_live_watcher_pending(ch, 0).await == false);
+
+            let eligible = completion_events
+                .try_recv()
+                .expect("settled edge must release deferred queue admission");
+            assert_eq!(eligible.channel_id, ch);
+            assert_eq!(eligible.turn_id, Some(tid));
+            assert!(eligible.queue_is_eligible());
+            assert!(
+                completion_events.try_recv().is_err(),
+                "duplicate settled edges must not republish QueueEligible"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn denied_projection_settlement_cannot_be_upgraded_by_duplicate_owner_4888() {
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None);
+            let mut completion_events =
+                super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+            let ch = ChannelId::new(4_888_111);
+            let tid = 4_888_112;
+            shared.restart.global_active.store(1, Ordering::Relaxed);
+            let _token = seed_active_turn(&shared, ch, tid).await;
+            let fin = TurnFinalizer::spawn();
+            let k = TurnKey::new(ch, tid, 0);
+            fin.register_start_with_completion_admission(
+                k,
+                ProviderKind::Claude,
+                RelayOwnerKind::Watcher,
+                CompletionAdmissionPlan::AfterTerminalProjectionAndDispositionSettled,
+                &shared,
+            );
+
+            let outcome = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(matches!(outcome, FinalizeOutcome::Finalized { .. }));
+            let released = completion_events
+                .try_recv()
+                .expect("mailbox release must publish its non-eligible edge");
+            assert!(!released.queue_is_eligible());
+
+            fin.note_terminal_projection_settled(k, true, shared.clone());
+            fin.note_terminal_disposition_settled(k, false, shared.clone());
+            fin.note_terminal_disposition_settled(k, true, shared.clone());
+            assert!(!fin.has_live_watcher_pending(ch, 0).await);
+            assert!(
+                completion_events.try_recv().is_err(),
+                "a capped or failed retry decision must remain a permanent queue-admission veto"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn projection_settlement_before_mailbox_release_is_not_lost_4888() {
+        with_isolated_runtime_root(|| async move {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None);
+            let mut completion_events =
+                super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+            let ch = ChannelId::new(4_888_121);
+            let tid = 4_888_122;
+            shared.restart.global_active.store(1, Ordering::Relaxed);
+            let _token = seed_active_turn(&shared, ch, tid).await;
+            let fin = TurnFinalizer::spawn();
+            let k = TurnKey::new(ch, tid, 0);
+            fin.register_start_with_completion_admission(
+                k,
+                ProviderKind::Claude,
+                RelayOwnerKind::Watcher,
+                CompletionAdmissionPlan::AfterTerminalProjectionSettled,
+                &shared,
+            );
+            fin.note_terminal_projection_settled(k, true, shared.clone());
+            assert!(fin.has_live_watcher_pending(ch, 0).await);
+            assert!(completion_events.try_recv().is_err());
+
+            let outcome = fin
+                .submit_terminal(
+                    k,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(matches!(outcome, FinalizeOutcome::Finalized { .. }));
+            let released = completion_events
+                .try_recv()
+                .expect("mailbox release must publish its non-eligible edge");
+            assert!(!released.queue_is_eligible());
+            let eligible = completion_events
+                .try_recv()
+                .expect("mailbox release must consume the previously settled projection edge");
+            assert!(eligible.queue_is_eligible());
+            assert_eq!(eligible.turn_id, Some(tid));
+            assert!(completion_events.try_recv().is_err());
         })
         .await;
     }

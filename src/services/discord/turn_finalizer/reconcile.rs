@@ -40,7 +40,7 @@ async fn run_backstop_finalize(
     // `Finalizing`, and a stuck `Finalizing` entry would never be GC'd (GC reaps
     // only `Finalized`) nor re-finalized (backstops/probes gate on `Pending`),
     // leaking forever. Resetting it to `Finalized` lets GC reap it normally.
-    if let Err(payload) = AssertUnwindSafe(do_finalize(
+    let finalized = AssertUnwindSafe(do_finalize(
         turn_key,
         provider,
         &TerminalEvent::GateTimeout {
@@ -51,8 +51,23 @@ async fn run_backstop_finalize(
         shared,
     ))
     .catch_unwind()
-    .await
+    .await;
+    if let Ok(FinalizeOutcome::Finalized {
+        removed_token: Some(_),
+        ..
+    }) = &finalized
+        && let Some(entry) = ledger.get_mut(&ledger_key)
     {
+        entry.completion_admission.note_mailbox_released();
+        entry
+            .completion_admission
+            .note_terminal_projection_settled(true);
+        entry
+            .completion_admission
+            .note_terminal_disposition_settled(true);
+        publish_claimed_queue_eligible(shared, entry);
+    }
+    if let Err(payload) = finalized {
         tracing::error!(
             panic = %panic_payload_summary(payload.as_ref()),
             channel_id = ledger_key.channel_id.get(),

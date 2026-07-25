@@ -12,8 +12,47 @@ use super::*;
 pub(super) struct CompletionGuard {
     tx: Option<tokio::sync::oneshot::Sender<()>>,
     broadcaster: tokio::sync::broadcast::Sender<super::super::inflight::InflightSignal>,
-    channel_id: ChannelId,
-    turn_id: u64,
+    turn_finalizer: Arc<super::super::turn_finalizer::TurnFinalizer>,
+    shared: Arc<SharedData>,
+    turn_key: super::super::turn_finalizer::TurnKey,
+}
+
+impl CompletionGuard {
+    pub(super) fn note_terminal_projection_settled(&self, allow_queue: bool) {
+        self.turn_finalizer.note_terminal_projection_settled(
+            self.turn_key,
+            allow_queue,
+            self.shared.clone(),
+        );
+    }
+
+    pub(super) fn note_terminal_disposition_settled(&self, allow_queue: bool) {
+        self.turn_finalizer.note_terminal_disposition_settled(
+            self.turn_key,
+            allow_queue,
+            self.shared.clone(),
+        );
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_completion_test(
+        shared: Arc<SharedData>,
+        channel_id: ChannelId,
+        turn_id: u64,
+    ) -> Self {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        Self {
+            tx: Some(tx),
+            broadcaster: shared.inflight_signals.clone(),
+            turn_finalizer: shared.turn_finalizer.clone(),
+            turn_key: super::super::turn_finalizer::TurnKey::new(
+                channel_id,
+                turn_id,
+                shared.restart.current_generation,
+            ),
+            shared,
+        }
+    }
 }
 
 impl Drop for CompletionGuard {
@@ -24,8 +63,8 @@ impl Drop for CompletionGuard {
         let _ = self
             .broadcaster
             .send(super::super::inflight::InflightSignal::Completed {
-                channel_id: self.channel_id.get(),
-                turn_id: self.turn_id,
+                channel_id: self.turn_key.channel_id.get(),
+                turn_id: self.turn_key.user_msg_id,
             });
     }
 }
@@ -53,14 +92,29 @@ pub(super) struct InflightCleanupGuard {
 
 pub(super) fn make_bridge_guards(
     bridge: &mut TurnBridgeContext,
-    shared_owned: &SharedData,
+    shared_owned: &Arc<SharedData>,
     provider: &ProviderKind,
 ) -> (CompletionGuard, InflightCleanupGuard) {
+    let key = super::super::turn_finalizer::TurnKey::new(
+        bridge.channel_id,
+        bridge.inflight_state.effective_finalizer_turn_id(),
+        shared_owned.restart.current_generation,
+    );
+    shared_owned
+        .turn_finalizer
+        .register_start_with_completion_admission(
+            key,
+            provider.clone(),
+            bridge.inflight_state.effective_relay_owner_kind(),
+            super::super::turn_finalizer::CompletionAdmissionPlan::AfterTerminalProjectionAndDispositionSettled,
+            shared_owned,
+        );
     let completion_guard = CompletionGuard {
         tx: bridge.completion_tx.take(),
         broadcaster: shared_owned.inflight_signals.clone(),
-        channel_id: bridge.channel_id,
-        turn_id: bridge.inflight_state.effective_finalizer_turn_id(),
+        turn_finalizer: shared_owned.turn_finalizer.clone(),
+        shared: shared_owned.clone(),
+        turn_key: key,
     };
     let inflight_guard = InflightCleanupGuard {
         provider: Some(provider.clone()),

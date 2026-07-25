@@ -69,6 +69,7 @@ pub(in crate::services::discord::turn_bridge) struct CompletionPostludeState {
     pub(in crate::services::discord::turn_bridge) cancelled: bool,
     pub(in crate::services::discord::turn_bridge) restart_followup_pending: bool,
     pub(in crate::services::discord::turn_bridge) bridge_skip_holder_owns_inflight: bool,
+    pub(in crate::services::discord::turn_bridge) completion_guard: CompletionGuard,
     pub(in crate::services::discord::turn_bridge) inflight_guard: InflightCleanupGuard,
     pub(in crate::services::discord::turn_bridge) inflight_state: InflightTurnState,
 }

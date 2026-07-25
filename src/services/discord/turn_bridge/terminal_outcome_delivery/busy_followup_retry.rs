@@ -61,7 +61,7 @@ pub(super) async fn handle_empty_response_and_busy_requeue(
 
 /// Requeue a Claude-TUI pre-submit busy timeout, preserving the inflight turn.
 /// Returns the requeue outcome so the caller can arm the next kickoff only after
-/// this attempt's terminal card delivery has completed. A requeue failure still
+/// this attempt's bounded terminal projection settles. A requeue failure still
 /// preserves inflight instead of being reported as success (#4605). Called only
 /// when recovery set `claude_tui_busy_requeue_pending`, after its state borrow is
 /// released.

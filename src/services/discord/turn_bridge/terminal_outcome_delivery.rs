@@ -762,6 +762,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 terminal_full_replay_cleanup_msg_ids: &mut terminal_full_replay_cleanup_msg_ids,
                 bridge_should_emit_completion: &mut bridge_should_emit_completion,
                 status_panel_terminal_committed: &mut status_panel_terminal_committed,
+                busy_requeue_outcome: &mut busy_requeue_outcome,
             },
         )
         .await;
@@ -771,11 +772,13 @@ pub(super) async fn run_terminal_outcome_delivery(
     // same counter. Release them here, once this turn reached a terminal outcome
     // WITHOUT requeueing for a Claude-TUI busy timeout, so a later turn cannot
     // edit a card that now holds a delivered answer.
-    if !claude_tui_busy_requeue_pending && inflight_state.user_msg_id != 0 {
+    if busy_requeue_outcome.is_none()
+        && inflight_state.effective_busy_followup_retry_user_msg_id() != 0
+    {
         let _ = super::busy_followup_retry_store::clear_for_input(
             &provider,
             channel_id.get(),
-            inflight_state.user_msg_id,
+            inflight_state.effective_busy_followup_retry_user_msg_id(),
         );
     }
     TerminalOutcomeDeliveryOutput {

@@ -838,11 +838,14 @@ pub(in crate::services::discord) async fn defer_promoted_dispatch_if_hosted_tui_
     // fail-open backstop that keeps re-driving the same busy pane. The entry is
     // still restored at the queue front below — only the automatic re-drive
     // stops, and the watcher-idle re-drain still delivers it on real TUI idle.
-    let busy_retry_capped = super::super::super::busy_followup_retry_store::is_capped(
+    let retry_identity = super::super::super::busy_followup_retry_store::resolve_identity(
         provider,
         channel_id.get(),
         intervention.message_id.get(),
+        &intervention.source_message_ids,
     );
+    let busy_retry_capped =
+        super::super::super::busy_followup_retry_store::state_is_capped(retry_identity.state);
     let restored = super::super::super::mailbox_restore_dequeued_head(
         shared,
         provider,

@@ -95,7 +95,6 @@ async fn mailbox_finish_turn_if_matches_inner(
     provider: &ProviderKind,
     channel_id: ChannelId,
     expected_user_message_id: serenity::model::id::MessageId,
-    defer_queue_completion: bool,
 ) -> FinishTurnResult {
     let result = shared
         .mailbox(channel_id)
@@ -112,18 +111,13 @@ async fn mailbox_finish_turn_if_matches_inner(
     if result.removed_token.is_some() {
         shared.mailboxes.recovery_done(channel_id).mark_done();
     }
-    if defer_queue_completion {
-        turn_completion_events::publish_deferred_mailbox_release_completion_event(
+    if result.removed_token.is_some() {
+        turn_completion_events::publish_turn_completion_event(
             shared,
-            channel_id,
-            Some(expected_user_message_id.get()),
-            &result,
-        );
-    } else if result.removed_token.is_some() {
-        turn_completion_events::publish_queue_eligible_completion_event(
-            shared,
-            channel_id,
-            Some(expected_user_message_id.get()),
+            turn_completion_events::TurnCompletionEvent::mailbox_released(
+                channel_id,
+                Some(expected_user_message_id.get()),
+            ),
         );
     }
     result
@@ -135,30 +129,8 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches(
     channel_id: ChannelId,
     expected_user_message_id: serenity::model::id::MessageId,
 ) -> FinishTurnResult {
-    mailbox_finish_turn_if_matches_inner(
-        shared,
-        provider,
-        channel_id,
-        expected_user_message_id,
-        false,
-    )
-    .await
-}
-
-pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches_before_terminal_card_commit(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    expected_user_message_id: serenity::model::id::MessageId,
-) -> FinishTurnResult {
-    mailbox_finish_turn_if_matches_inner(
-        shared,
-        provider,
-        channel_id,
-        expected_user_message_id,
-        true,
-    )
-    .await
+    mailbox_finish_turn_if_matches_inner(shared, provider, channel_id, expected_user_message_id)
+        .await
 }
 
 async fn mailbox_finish_turn_if_matches_episode_started_before_inner(

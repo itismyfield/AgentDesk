@@ -48,6 +48,7 @@ pub(super) async fn handle_text_message(
     deps: &IntakeDeps<'_>,
     channel_id: ChannelId,
     user_msg_id: MessageId,
+    busy_followup_retry_user_msg_id: MessageId,
     request_owner: UserId,
     request_owner_name: &str,
     user_text: &str,
@@ -1350,7 +1351,7 @@ pub(super) async fn handle_text_message(
         shared,
         &provider,
         channel_id,
-        user_msg_id,
+        busy_followup_retry_user_msg_id,
         queued_placeholder_handoff,
     )
     .await;
@@ -2259,6 +2260,7 @@ pub(super) async fn handle_text_message(
         inflight_input_fifo.clone(),
         inflight_offset,
     );
+    inflight_state.busy_followup_retry_user_msg_id = busy_followup_retry_user_msg_id.get();
     inflight_state.turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
     apply_prelaunch_runtime_kind(&mut inflight_state, prelaunch_runtime_kind);
     let (worktree_path, worktree_branch, base_commit) = {

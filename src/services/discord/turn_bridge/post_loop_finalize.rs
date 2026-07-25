@@ -305,7 +305,6 @@ pub(super) async fn run_post_loop_finalize(
         full_response = CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE.to_string();
         inflight_state.full_response = full_response.clone();
     }
-
     let is_prompt_too_long = full_response.contains("__prompt too long__");
     let review_dispatch_warning = if !cancelled && !is_prompt_too_long {
         guard_review_dispatch_completion(
@@ -536,11 +535,7 @@ pub(super) async fn run_post_loop_finalize(
                     } else {
                         super::super::turn_finalizer::TerminalEvent::Complete
                     },
-                    if claude_tui_followup_pre_submit_requeue_candidate {
-                        super::super::turn_finalizer::FinalizeContext::bridge_before_terminal_card_commit()
-                    } else {
-                        super::super::turn_finalizer::FinalizeContext::bridge()
-                    },
+                    super::super::turn_finalizer::FinalizeContext::bridge(),
                     shared_owned.clone(),
                 )
                 .await;
@@ -621,11 +616,7 @@ pub(super) async fn run_post_loop_finalize(
                 } else {
                     super::super::turn_finalizer::TerminalEvent::Complete
                 },
-                if claude_tui_followup_pre_submit_requeue_candidate {
-                    super::super::turn_finalizer::FinalizeContext::bridge_before_terminal_card_commit()
-                } else {
-                    super::super::turn_finalizer::FinalizeContext::bridge()
-                },
+                super::super::turn_finalizer::FinalizeContext::bridge(),
                 shared_owned.clone(),
             )
             .await;

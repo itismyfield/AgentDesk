@@ -488,8 +488,8 @@ pub(super) fn spawn_turn_bridge(
         let mut new_raw_provider_session_id: Option<String> = None;
         let defer_watcher_resume = bridge.defer_watcher_resume;
         let is_external_input_tui_direct = bridge.is_external_input_tui_direct;
-        let (_completion_guard, mut inflight_guard) =
-            make_bridge_guards(&mut bridge, shared_owned.as_ref(), &provider);
+        let (completion_guard, mut inflight_guard) =
+            make_bridge_guards(&mut bridge, &shared_owned, &provider);
         let mut inflight_state = bridge.inflight_state.clone();
         inflight_state.set_watcher_owner_channel_id(resolved_watcher_owner_channel_id.get());
         // Codex P2: a no-anchor recovery turn (bridge.current_msg_id == None)
@@ -958,7 +958,7 @@ pub(super) fn spawn_turn_bridge(
                 cancelled,
                 restart_followup_pending,
                 bridge_skip_holder_owns_inflight,
-                inflight_guard,
+                completion_guard, inflight_guard,
                 inflight_state,
             },
         )

@@ -36,10 +36,6 @@ pub(in crate::services::discord) struct FinalizeContext {
     /// The real reconcile backstop is intentionally quiet on misses; recovery
     /// submitters with the same side-effect knobs must still warn.
     pub(in crate::services::discord) expected_idempotent_guard_miss: bool,
-    /// Bridge busy-retry attempts release mailbox ownership before their final
-    /// Discord card write, but queue admission must wait for that write's typed
-    /// completion edge. Other finalizers publish an immediately eligible edge.
-    pub(in crate::services::discord) defer_queue_completion: bool,
 }
 
 impl FinalizeContext {
@@ -53,14 +49,6 @@ impl FinalizeContext {
             drain_voice: true,
             kickoff_queue: false,
             expected_idempotent_guard_miss: false,
-            defer_queue_completion: false,
-        }
-    }
-
-    pub(in crate::services::discord) fn bridge_before_terminal_card_commit() -> Self {
-        Self {
-            defer_queue_completion: true,
-            ..Self::bridge()
         }
     }
 
@@ -76,7 +64,6 @@ impl FinalizeContext {
             drain_voice: false,
             kickoff_queue: false,
             expected_idempotent_guard_miss: false,
-            defer_queue_completion: false,
         }
     }
 
@@ -108,7 +95,6 @@ impl FinalizeContext {
             drain_voice: false,
             kickoff_queue: true,
             expected_idempotent_guard_miss: false,
-            defer_queue_completion: false,
         }
     }
 
@@ -123,7 +109,6 @@ impl FinalizeContext {
             drain_voice: false,
             kickoff_queue: true,
             expected_idempotent_guard_miss: true,
-            defer_queue_completion: false,
         }
     }
 
@@ -138,7 +123,6 @@ impl FinalizeContext {
             drain_voice: false,
             kickoff_queue: true,
             expected_idempotent_guard_miss: true,
-            defer_queue_completion: false,
         }
     }
 
@@ -154,7 +138,6 @@ impl FinalizeContext {
             drain_voice: false,
             kickoff_queue: false,
             expected_idempotent_guard_miss: false,
-            defer_queue_completion: false,
         }
     }
 

@@ -94,23 +94,13 @@ pub(super) async fn do_finalize(
     //     keeps the channel-scoped finish (ledger gate + id-0 no-op bound it).
     let owned_role_override = super::cleanup::snapshot_role_override(shared, channel_id);
     let finish = if key.user_msg_id != 0 {
-        if ctx.defer_queue_completion {
-            crate::services::discord::mailbox_finish_turn_if_matches_before_terminal_card_commit(
-                shared,
-                &provider,
-                channel_id,
-                serenity::model::id::MessageId::new(key.user_msg_id),
-            )
-            .await
-        } else {
-            crate::services::discord::mailbox_finish_turn_if_matches(
-                shared,
-                &provider,
-                channel_id,
-                serenity::model::id::MessageId::new(key.user_msg_id),
-            )
-            .await
-        }
+        crate::services::discord::mailbox_finish_turn_if_matches(
+            shared,
+            &provider,
+            channel_id,
+            serenity::model::id::MessageId::new(key.user_msg_id),
+        )
+        .await
     } else {
         crate::services::discord::mailbox_finish_turn(shared, &provider, channel_id).await
     };

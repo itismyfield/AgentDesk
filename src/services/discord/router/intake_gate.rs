@@ -822,6 +822,7 @@ pub(in crate::services::discord) async fn handle_event(
                     request: super::IntakeRequest {
                         channel_id,
                         user_msg_id: new_message.id,
+                        busy_followup_retry_user_msg_id: new_message.id,
                         request_owner: user_id,
                         request_owner_name: user_name.to_string(),
                         user_text: text.to_string(),
@@ -1628,6 +1629,7 @@ pub(in crate::services::discord) async fn handle_event(
                     request: super::IntakeRequest {
                         channel_id,
                         user_msg_id: new_message.id,
+                        busy_followup_retry_user_msg_id: new_message.id,
                         request_owner: user_id,
                         request_owner_name: user_name.to_string(),
                         user_text: text.to_string(),

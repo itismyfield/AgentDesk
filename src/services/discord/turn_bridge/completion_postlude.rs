@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use super::guards::InflightCleanupGuard;
+use super::guards::{CompletionGuard, InflightCleanupGuard};
 use super::*;
 
 mod channel_writeback;
@@ -83,6 +83,7 @@ pub(super) async fn run_completion_postlude(
     let cancelled = state.cancelled;
     let restart_followup_pending = state.restart_followup_pending;
     let bridge_skip_holder_owns_inflight = state.bridge_skip_holder_owns_inflight;
+    let completion_guard = state.completion_guard;
     let mut inflight_guard = state.inflight_guard;
     let inflight_state = state.inflight_state;
 
@@ -134,8 +135,8 @@ pub(super) async fn run_completion_postlude(
         }
         let indicator =
             super::super::single_message_panel::single_message_panel_spinner_frame(spin_idx);
-        let (terminal_card_commit, committed) =
-            followup_requeue::TerminalCardDeliveryCommitted::after(
+        let (terminal_projection_settled, committed) =
+            followup_requeue::TerminalProjectionSettled::after(
                 complete_bridge_terminal_footer_or_status_panel(
                     shared_owned.as_ref(),
                     gateway.as_ref(),
@@ -156,31 +157,27 @@ pub(super) async fn run_completion_postlude(
             )
             .await;
         status_panel_completion_committed = committed;
-        if let Some(outcome) = busy_requeue_outcome.take() {
-            terminal_card_commit.publish_and_arm_retry(
-                Some(outcome),
-                &shared_owned,
-                &provider,
-                channel_id,
-                user_msg_id.map(MessageId::get),
-                "claude_tui_followup_requeue_after_completion_postlude_card_delivery",
-            );
-        }
+        terminal_projection_settled.release_completion_admission(
+            &completion_guard,
+            busy_requeue_outcome.take(),
+            &shared_owned,
+            &provider,
+            channel_id,
+            "claude_tui_followup_requeue_after_completion_postlude_projection",
+        );
     } else {
-        // No completion-card write is needed, so entry to this branch is itself
-        // the terminal-card boundary consumed by both queue-admission paths.
-        let (terminal_card_commit, ()) =
-            followup_requeue::TerminalCardDeliveryCommitted::after(async {}).await;
-        if let Some(outcome) = busy_requeue_outcome.take() {
-            terminal_card_commit.publish_and_arm_retry(
-                Some(outcome),
-                &shared_owned,
-                &provider,
-                channel_id,
-                user_msg_id.map(MessageId::get),
-                "claude_tui_followup_requeue_after_completion_postlude_card_delivery",
-            );
-        }
+        // No terminal projection is needed, so entry to this branch is itself
+        // the settled boundary consumed by both queue-admission paths.
+        let (terminal_projection_settled, ()) =
+            followup_requeue::TerminalProjectionSettled::after(async {}).await;
+        terminal_projection_settled.release_completion_admission(
+            &completion_guard,
+            busy_requeue_outcome.take(),
+            &shared_owned,
+            &provider,
+            channel_id,
+            "claude_tui_followup_requeue_after_completion_postlude_projection",
+        );
     }
 
     if status_panel_terminal_committed

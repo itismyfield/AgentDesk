@@ -133,6 +133,7 @@ services::auto_queue::tests
 services::automation_candidate_contract::tests
 services::automation_candidate_materializer::allowed_path_tests
 services::automation_candidate_materializer::iteration_result_tests
+services::claude::claude_tui_followup_requeue_flag_tests
 services::claude::claude_tui_ready_probe_tests
 services::claude::claude_tui_session_resolution_tests
 services::claude::launch_env_tests
@@ -156,7 +157,6 @@ services::claude_tui::hook_server::tests
 services::claude_tui::hook_server_memento_tests
 services::claude_tui::hosting::followup_support::busy_followup_notice_tests
 services::claude_tui::hosting::followup_support::claude_tui_prompt_buffer_tests
-services::claude::claude_tui_followup_requeue_flag_tests
 services::claude_tui::hosting::warm_followup::followup_wait_error_requeue_tests
 services::claude_tui::input::active_turn_wait_extension_tests
 services::claude_tui::memento_feedback::tests
