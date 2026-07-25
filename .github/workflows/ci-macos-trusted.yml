@@ -139,6 +139,8 @@ jobs:
           cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
           cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
           cargo test --all-targets stall_recovery -- --skip _pg --skip pg_ --skip postgres
+          env -u AGENTDESK_ROOT_DIR cargo test --lib placeholder_live_events -- --skip _pg --skip pg_ --skip postgres
+          env -u AGENTDESK_ROOT_DIR cargo test --lib single_message_panel::tests -- --skip _pg --skip pg_ --skip postgres
           # Health must precede relay_recovery so fail-fast reports both surfaces.
           python3 scripts/ci-timeout.py 900 env -u AGENTDESK_ROOT_DIR cargo test --lib health -- --skip _pg --skip pg_ --skip postgres
           env -u AGENTDESK_ROOT_DIR cargo test --lib relay_recovery -- --skip _pg --skip pg_ --skip postgres
@@ -258,6 +260,8 @@ jobs:
           nice -n 10 cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
           nice -n 10 cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
           nice -n 10 cargo test --all-targets stall_recovery -- --skip _pg --skip pg_ --skip postgres
+          nice -n 10 env -u AGENTDESK_ROOT_DIR cargo test --lib placeholder_live_events -- --skip _pg --skip pg_ --skip postgres
+          nice -n 10 env -u AGENTDESK_ROOT_DIR cargo test --lib single_message_panel::tests -- --skip _pg --skip pg_ --skip postgres
           # Health must precede relay_recovery so fail-fast reports both surfaces.
           nice -n 10 python3 scripts/ci-timeout.py 900 env -u AGENTDESK_ROOT_DIR cargo test --lib health -- --skip _pg --skip pg_ --skip postgres
           nice -n 10 env -u AGENTDESK_ROOT_DIR cargo test --lib relay_recovery -- --skip _pg --skip pg_ --skip postgres
