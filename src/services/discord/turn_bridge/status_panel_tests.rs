@@ -1016,7 +1016,7 @@ fn status_panel_wip_completion_uses_preloaded_recovery_snapshot_after_cleanup() 
 }
 
 #[tokio::test]
-async fn unknown_message_fallback_atomically_replaces_exact_missing_authority_4891() {
+async fn unknown_message_response_never_replaces_without_fresh_absence_proof_4891() {
     let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
     let shared = make_two_message_status_panel_shared_for_tests();
     let gateway = StatusPanelFallbackGateway::with_edit_error("Unknown Message 10008");
@@ -1024,7 +1024,6 @@ async fn unknown_message_fallback_atomically_replaces_exact_missing_authority_48
     let channel_id = ChannelId::new(1_509_350_490_461_180_105);
     let user_msg_id = 1_510_319_194_921_504_929;
     let stale_status_msg_id = MessageId::new(1_500_000_000_000_111);
-    let fallback_panel = gateway.send_id;
     let mut owner = InflightTurnState::new(
         provider.clone(),
         channel_id.get(),
@@ -1067,15 +1066,20 @@ async fn unknown_message_fallback_atomically_replaces_exact_missing_authority_48
     )
     .await;
 
-    assert!(completion.committed);
+    assert!(!completion.committed);
     assert_eq!(
-        completion.binding_disposition,
-        super::singleton::CompletedBindingDisposition::CommittedCurrent
+        gateway
+            .sent_messages
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .len(),
+        0,
+        "a 10008 response has no operation epoch and therefore cannot authorize a fallback send"
     );
     assert_eq!(
         load_inflight_state(&provider, channel_id.get()).and_then(|state| state.status_message_id),
-        Some(fallback_panel.get()),
-        "confirmed 10008 must replace only the exact missing inflight panel"
+        Some(stale_status_msg_id.get()),
+        "a stale 10008 response must preserve the exact panel authority"
     );
     assert_eq!(
         crate::services::discord::status_panel_singleton_store::load(
@@ -1084,17 +1088,16 @@ async fn unknown_message_fallback_atomically_replaces_exact_missing_authority_48
             channel_id.get(),
         )
         .map(|binding| binding.panel_message_id),
-        Some(fallback_panel.get()),
-        "confirmed 10008 must move singleton authority to the fallback"
+        Some(stale_status_msg_id.get()),
+        "a stale 10008 response must not CAS the singleton to a fallback"
     );
     assert!(
-        !crate::services::discord::status_panel_orphan_store::is_queued(
-            &provider,
-            &shared.token_hash,
-            channel_id.get(),
-            fallback_panel.get(),
-        ),
-        "adopted Unknown Message fallback must not be retired"
+        !gateway
+            .deleted_message_ids
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .contains(&stale_status_msg_id),
+        "a stale 10008 response must never delete the panel that may have been edited concurrently"
     );
 }
 

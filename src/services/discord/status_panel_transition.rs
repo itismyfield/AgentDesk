@@ -37,7 +37,6 @@ pub(in crate::services::discord) enum StatusPanelTransitionState {
     CandidateSent,
     PendingBindDurable,
     OwnershipCommitted,
-    RetirementDurable,
     Unreconciled,
 }
 
@@ -45,7 +44,6 @@ pub(in crate::services::discord) enum StatusPanelTransitionState {
 #[serde(rename_all = "snake_case")]
 pub(in crate::services::discord) enum StatusPanelTransitionEvent {
     CandidateObserved,
-    SingletonCommitted,
     PendingBindCleanup,
     CandidateNotOwned,
     Retry,
@@ -58,6 +56,13 @@ pub(in crate::services::discord) enum StatusPanelTransitionAction {
     RetireCandidate,
     DeferDurability { error: String },
     RecoverUnreconciled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum StatusPanelRetirementOutcome {
+    Removed,
+    PermanentAbsent,
+    Deferred,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,7 +142,11 @@ pub(in crate::services::discord) fn record_candidate_intent(
         identity,
         state: StatusPanelTransitionState::CandidateSent,
     };
-    save_in_root(&path, &intent)
+    match load_in_root(&path)? {
+        Some(existing) if existing == intent => Ok(()),
+        Some(_) => Err("status panel transition candidate intent conflicts".to_string()),
+        None => save_in_root(&path, &intent),
+    }
 }
 
 pub(in crate::services::discord) fn begin_candidate(
@@ -292,19 +301,28 @@ pub(in crate::services::discord) fn resolve_after_singleton_commit(
     }
 }
 
-pub(in crate::services::discord) fn mark_retirement_durable(
+pub(in crate::services::discord) fn finalize_retirement(
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: u64,
     candidate_panel_id: u64,
-) -> Result<(), String> {
-    update_state(
+    outcome: StatusPanelRetirementOutcome,
+) -> Result<bool, String> {
+    if outcome == StatusPanelRetirementOutcome::Deferred {
+        return Ok(false);
+    }
+    let _guard = TRANSITION_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = root()?;
+    remove_in_root(&path_in_root(
+        &root,
         provider,
         token_hash,
         channel_id,
         candidate_panel_id,
-        StatusPanelTransitionState::RetirementDurable,
-    )
+    ))?;
+    Ok(true)
 }
 
 fn update_state(
@@ -335,7 +353,7 @@ pub(in crate::services::discord) async fn recover_unreconciled_with_delete<D, De
 ) -> usize
 where
     D: FnMut(u64, u64) -> DeleteFuture,
-    DeleteFuture: std::future::Future<Output = bool>,
+    DeleteFuture: std::future::Future<Output = StatusPanelRetirementOutcome>,
 {
     let intents = match load_unreconciled(provider, token_hash) {
         Ok(intents) => intents,
@@ -343,51 +361,55 @@ where
     };
     let mut resolved = 0;
     for intent in intents {
-        let action = match intent.state {
-            StatusPanelTransitionState::OwnershipCommitted => intent
-                .identity
-                .as_ref()
-                .map(|identity| {
-                    resolve_after_singleton_commit(
-                        provider,
-                        token_hash,
-                        intent.channel_id,
-                        intent.candidate_panel_id,
-                        identity,
-                        intent.generation,
-                    )
-                })
-                .unwrap_or(StatusPanelTransitionAction::RecoverUnreconciled),
-            StatusPanelTransitionState::RetirementDurable => {
-                StatusPanelTransitionAction::RetireCandidate
+        let action = match (intent.state, intent.identity.as_ref()) {
+            (StatusPanelTransitionState::OwnershipCommitted, Some(identity)) => {
+                resolve_after_singleton_commit(
+                    provider,
+                    token_hash,
+                    intent.channel_id,
+                    intent.candidate_panel_id,
+                    identity,
+                    intent.generation,
+                )
             }
-            StatusPanelTransitionState::CandidateSent
-            | StatusPanelTransitionState::PendingBindDurable
-            | StatusPanelTransitionState::Unreconciled => {
+            (StatusPanelTransitionState::PendingBindDurable, Some(identity)) => {
+                commit_bound_candidate(
+                    provider,
+                    token_hash,
+                    intent.channel_id,
+                    intent.candidate_panel_id,
+                    identity,
+                    intent.generation,
+                    None,
+                )
+            }
+            (StatusPanelTransitionState::CandidateSent, _)
+            | (StatusPanelTransitionState::Unreconciled, _)
+            | (StatusPanelTransitionState::PendingBindDurable, None)
+            | (StatusPanelTransitionState::OwnershipCommitted, None) => {
                 StatusPanelTransitionAction::RecoverUnreconciled
             }
         };
         match action {
             StatusPanelTransitionAction::KeepCurrent { .. } => resolved += 1,
-            StatusPanelTransitionAction::RetireCandidate
-            | StatusPanelTransitionAction::RecoverUnreconciled => {
-                if delete_candidate(intent.channel_id, intent.candidate_panel_id).await {
-                    if let Ok(root) = root() {
-                        let path = path_in_root(
-                            &root,
-                            provider,
-                            token_hash,
-                            intent.channel_id,
-                            intent.candidate_panel_id,
-                        );
-                        if remove_in_root(&path).is_ok() {
-                            resolved += 1;
-                        }
-                    }
+            StatusPanelTransitionAction::RetireCandidate => {
+                let retirement =
+                    delete_candidate(intent.channel_id, intent.candidate_panel_id).await;
+                if finalize_retirement(
+                    provider,
+                    token_hash,
+                    intent.channel_id,
+                    intent.candidate_panel_id,
+                    retirement,
+                )
+                .unwrap_or(false)
+                {
+                    resolved += 1;
                 }
             }
             StatusPanelTransitionAction::AdoptFallback { .. }
-            | StatusPanelTransitionAction::DeferDurability { .. } => {}
+            | StatusPanelTransitionAction::DeferDurability { .. }
+            | StatusPanelTransitionAction::RecoverUnreconciled => {}
         }
     }
     resolved
@@ -457,6 +479,62 @@ pub(in crate::services::discord) fn reducer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::discord::inflight;
+
+    fn test_root() -> tempfile::TempDir {
+        match tempfile::tempdir() {
+            Ok(root) => root,
+            Err(error) => {
+                assert!(false, "create isolated runtime root: {error}");
+                std::process::abort()
+            }
+        }
+    }
+
+    fn persist_owner(state: &inflight::InflightTurnState) {
+        assert!(
+            inflight::save_inflight_state(state).is_ok(),
+            "persist transition replay owner"
+        );
+    }
+
+    fn replay_intents(
+        provider: &ProviderKind,
+        token_hash: &str,
+    ) -> Vec<StatusPanelTransitionIntent> {
+        match load_unreconciled(provider, token_hash) {
+            Ok(intents) => intents,
+            Err(error) => {
+                assert!(false, "load transition replay intents: {error}");
+                Vec::new()
+            }
+        }
+    }
+
+    fn test_owner(
+        channel_id: u64,
+        user_msg_id: u64,
+        panel_message_id: u64,
+        generation: u64,
+    ) -> inflight::InflightTurnState {
+        let mut state = inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            channel_id,
+            None,
+            1,
+            user_msg_id,
+            user_msg_id + 1,
+            "transition replay test".to_string(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        state.status_message_id = Some(panel_message_id);
+        state.status_panel_generation = generation;
+        state
+    }
 
     #[test]
     fn reducer_never_turns_durability_uncertainty_into_retirement_4891() {
@@ -491,5 +569,243 @@ mod tests {
         assert_eq!(load_in_root(&path).expect("replay"), Some(intent));
         remove_in_root(&path).expect("terminal remove");
         assert_eq!(load_in_root(&path).expect("removed"), None);
+    }
+
+    #[test]
+    fn per_candidate_intents_are_idempotent_and_never_overwrite_4891() -> Result<(), String> {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
+        let provider = ProviderKind::Claude;
+
+        record_candidate_intent(&provider, "tok", 42, 99, Some(98), 7, None)?;
+        record_candidate_intent(&provider, "tok", 42, 99, Some(98), 7, None)?;
+        record_candidate_intent(&provider, "tok", 42, 100, Some(99), 8, None)?;
+        assert!(
+            record_candidate_intent(&provider, "tok", 42, 99, Some(97), 9, None).is_err(),
+            "the same candidate key must reject a conflicting intent"
+        );
+
+        let mut candidates: Vec<_> = load_unreconciled(&provider, "tok")?
+            .into_iter()
+            .map(|intent| intent.candidate_panel_id)
+            .collect();
+        candidates.sort_unstable();
+        assert_eq!(candidates, vec![99, 100]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_bind_restart_replay_commits_exact_owner_without_retirement_4891() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = test_root();
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let token_hash = "tok";
+        let channel_id = 42;
+        let panel_id = 99;
+        let generation = 7;
+        let owner = test_owner(channel_id, 70, panel_id, generation);
+        let identity = InflightTurnIdentity::from_state(&owner);
+        persist_owner(&owner);
+        assert!(matches!(
+            begin_candidate(
+                &provider,
+                token_hash,
+                channel_id,
+                panel_id,
+                Some(98),
+                generation,
+                Some(identity),
+            ),
+            StatusPanelTransitionAction::KeepCurrent { .. }
+        ));
+        let delete_count = std::sync::atomic::AtomicUsize::new(0);
+
+        assert_eq!(
+            recover_unreconciled_with_delete(&provider, token_hash, |_, _| {
+                delete_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                async { StatusPanelRetirementOutcome::Removed }
+            })
+            .await,
+            1
+        );
+        assert_eq!(
+            delete_count.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "exact-owner replay must commit rather than retire the live candidate"
+        );
+        assert_eq!(
+            status_panel_singleton_store::load(&provider, token_hash, channel_id),
+            Some(status_panel_singleton_store::StatusPanelSingletonBinding {
+                panel_message_id: panel_id,
+                generation,
+            })
+        );
+        assert!(replay_intents(&provider, token_hash).is_empty());
+    }
+
+    #[tokio::test]
+    async fn pending_bind_restart_replay_retires_only_not_owned_candidate_4891() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = test_root();
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let token_hash = "tok";
+        let channel_id = 42;
+        let panel_id = 99;
+        let stale_owner = test_owner(channel_id, 70, panel_id, 7);
+        assert!(matches!(
+            begin_candidate(
+                &provider,
+                token_hash,
+                channel_id,
+                panel_id,
+                Some(98),
+                7,
+                Some(InflightTurnIdentity::from_state(&stale_owner)),
+            ),
+            StatusPanelTransitionAction::KeepCurrent { .. }
+        ));
+        let replacement = test_owner(channel_id, 71, 100, 8);
+        persist_owner(&replacement);
+        let delete_count = std::sync::atomic::AtomicUsize::new(0);
+
+        assert_eq!(
+            recover_unreconciled_with_delete(&provider, token_hash, |channel, candidate| {
+                assert_eq!((channel, candidate), (channel_id, panel_id));
+                delete_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                async { StatusPanelRetirementOutcome::PermanentAbsent }
+            })
+            .await,
+            1
+        );
+        assert_eq!(delete_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(replay_intents(&provider, token_hash).is_empty());
+    }
+
+    #[tokio::test]
+    async fn pending_bind_restart_replay_defers_singleton_io_failure_without_delete_4891() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = test_root();
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let token_hash = "tok";
+        let channel_id = 42;
+        let panel_id = 99;
+        let generation = 7;
+        let owner = test_owner(channel_id, 70, panel_id, generation);
+        assert!(matches!(
+            begin_candidate(
+                &provider,
+                token_hash,
+                channel_id,
+                panel_id,
+                Some(98),
+                generation,
+                Some(InflightTurnIdentity::from_state(&owner)),
+            ),
+            StatusPanelTransitionAction::KeepCurrent { .. }
+        ));
+        persist_owner(&owner);
+        let singleton_path = match runtime_store::discord_status_panel_singletons_root() {
+            Some(path) => path,
+            None => {
+                assert!(false, "singleton root must be available");
+                return;
+            }
+        };
+        assert!(
+            fs::write(&singleton_path, "block singleton writes").is_ok(),
+            "block singleton writes for fault injection"
+        );
+        let delete_count = std::sync::atomic::AtomicUsize::new(0);
+
+        assert_eq!(
+            recover_unreconciled_with_delete(&provider, token_hash, |_, _| {
+                delete_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                async { StatusPanelRetirementOutcome::Removed }
+            })
+            .await,
+            0
+        );
+        assert_eq!(
+            delete_count.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "singleton durability ambiguity must keep the candidate"
+        );
+        assert_eq!(replay_intents(&provider, token_hash).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn retirement_transport_deferral_survives_restart_replay_4891() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = test_root();
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let token_hash = "tok";
+        let channel_id = 42;
+        let panel_id = 99;
+        let stale_owner = test_owner(channel_id, 70, panel_id, 7);
+        assert!(matches!(
+            begin_candidate(
+                &provider,
+                token_hash,
+                channel_id,
+                panel_id,
+                Some(98),
+                7,
+                Some(InflightTurnIdentity::from_state(&stale_owner)),
+            ),
+            StatusPanelTransitionAction::KeepCurrent { .. }
+        ));
+        let replacement = test_owner(channel_id, 71, 100, 8);
+        persist_owner(&replacement);
+
+        assert_eq!(
+            recover_unreconciled_with_delete(&provider, token_hash, |_, _| async {
+                StatusPanelRetirementOutcome::Deferred
+            })
+            .await,
+            0
+        );
+        assert_eq!(
+            replay_intents(&provider, token_hash).len(),
+            1,
+            "transient delete ambiguity must survive process restart replay"
+        );
+        assert_eq!(
+            recover_unreconciled_with_delete(&provider, token_hash, |_, _| async {
+                StatusPanelRetirementOutcome::PermanentAbsent
+            })
+            .await,
+            1
+        );
+        assert!(replay_intents(&provider, token_hash).is_empty());
     }
 }

@@ -3,18 +3,11 @@
 
 use super::super::*;
 
-#[derive(Debug, Clone, Copy)]
-pub(super) struct ConfirmedMissingPriorPanel {
-    pub message_id: MessageId,
-    pub generation: u64,
-}
-
 pub(super) struct CompletionFallbackRequest<'a> {
     pub shared: &'a SharedData,
     pub channel_id: ChannelId,
     pub provider: &'a ProviderKind,
     pub expected_user_msg_id: Option<u64>,
-    pub confirmed_missing_prior_panel: Option<ConfirmedMissingPriorPanel>,
     pub last_status_panel_text: &'a mut String,
     pub panel_text: String,
     pub wip_warning:
@@ -32,9 +25,6 @@ fn persist_status_panel_completion_fallback_message_id(
     let Some(expected_user_msg_id) = request.expected_user_msg_id else {
         return super::inflight::StatusPanelBindOutcome::Missing;
     };
-    if request.confirmed_missing_prior_panel.is_some() {
-        return super::inflight::StatusPanelBindOutcome::Missing;
-    }
     let guard = super::inflight::StatusPanelBindGuard {
         require_user_msg_id: Some(expected_user_msg_id),
         skip_if_panel_already_set: true,
@@ -85,33 +75,12 @@ fn finalize_fallback_binding(
     message_id: MessageId,
 ) -> super::StatusPanelCompletionResult {
     let bind_outcome = persist_status_panel_completion_fallback_message_id(request, message_id);
-    let binding_disposition = match (
-        request.confirmed_missing_prior_panel,
-        request.expected_user_msg_id,
-    ) {
-        (Some(missing), Some(expected_user_msg_id)) => {
-            super::singleton::classify_completed_binding_commit(
-                request.provider,
-                request.channel_id,
-                message_id,
-                crate::services::discord::status_panel_singleton_store::commit_confirmed_missing_replacement(
-                    request.provider,
-                    &request.shared.token_hash,
-                    request.channel_id.get(),
-                    expected_user_msg_id,
-                    missing.message_id.get(),
-                    missing.generation,
-                    message_id.get(),
-                ),
-            )
-        }
-        _ => super::singleton::commit_completed_binding(
-            request.shared,
-            request.provider,
-            request.channel_id,
-            Some(message_id),
-        ),
-    };
+    let binding_disposition = super::singleton::commit_completed_binding(
+        request.shared,
+        request.provider,
+        request.channel_id,
+        Some(message_id),
+    );
     match binding_disposition {
         super::singleton::CompletedBindingDisposition::NotApplicable
         | super::singleton::CompletedBindingDisposition::CommittedCurrent => {
@@ -185,13 +154,8 @@ pub(super) async fn complete_status_panel_v2_fallback_with_http(
                 &request.shared.token_hash,
                 request.channel_id.get(),
                 message.id.get(),
-                request
-                    .confirmed_missing_prior_panel
-                    .map(|prior| prior.message_id.get()),
-                request
-                    .confirmed_missing_prior_panel
-                    .map(|prior| prior.generation)
-                    .unwrap_or_default(),
+                None,
+                0,
                 identity,
             );
             if !matches!(
@@ -247,13 +211,8 @@ pub(super) async fn complete_status_panel_v2_fallback_with_gateway<G: TurnGatewa
                 &request.shared.token_hash,
                 request.channel_id.get(),
                 message_id.get(),
-                request
-                    .confirmed_missing_prior_panel
-                    .map(|prior| prior.message_id.get()),
-                request
-                    .confirmed_missing_prior_panel
-                    .map(|prior| prior.generation)
-                    .unwrap_or_default(),
+                None,
+                0,
                 identity,
             );
             if !matches!(

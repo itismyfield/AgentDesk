@@ -81,15 +81,8 @@ pub(crate) const SWEEP_INTERVAL_SECS: u64 = 30;
 /// found. This keeps ops from confusing "healthy but idle" with "sweeper died".
 pub(crate) const SWEEP_HEARTBEAT_INTERVAL_SWEEPS: u64 = 120;
 
-/// Initial delay before the first sweep runs after dcserver bootstrap. Skips
-/// the boot-up window where active turns from the previous generation are
-/// still being recovered and may legitimately appear stalled while
-/// inflight-state migration is in progress.
-///
-/// #2438 (#2427 final): bumped 90 → 180 to absorb the recovery-engine
-/// retry budget (#2428 H5) at boot. Recovery now needs more time to
-/// settle before the sweeper can safely classify a row as stalled
-/// without racing the recovery sweep itself.
+/// Delay full stale-placeholder classification until boot recovery has settled.
+/// Status-panel transition intents are replayed separately before this delay.
 pub(crate) const INITIAL_DELAY_SECS: u64 = 180;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -909,18 +902,47 @@ fn should_log_sweep_report(report: SweepPassReport, sweeps_since_heartbeat: u64)
         || sweeps_since_heartbeat >= SWEEP_HEARTBEAT_INTERVAL_SWEEPS
 }
 
-/// Spawn the long-lived background task that runs the stall sweeper at the
-/// configured interval until the runtime exits. Should be called once per
-/// provider during dcserver bootstrap.
+async fn recover_status_panel_transition_intents(
+    http: &serenity::Http,
+    shared: &SharedData,
+    provider: &ProviderKind,
+) -> usize {
+    super::status_panel_transition::recover_unreconciled_with_delete(
+        provider,
+        &shared.token_hash,
+        |channel_id, message_id| async move {
+            match serenity::ChannelId::new(channel_id)
+                .delete_message(http, serenity::MessageId::new(message_id))
+                .await
+            {
+                Ok(()) => super::status_panel_transition::StatusPanelRetirementOutcome::Removed,
+                Err(error)
+                    if super::status_panel_orphan_store::delete_error_is_permanent(&error) =>
+                {
+                    super::status_panel_transition::StatusPanelRetirementOutcome::PermanentAbsent
+                }
+                Err(_) => super::status_panel_transition::StatusPanelRetirementOutcome::Deferred,
+            }
+        },
+    )
+    .await
+}
+
+/// Spawn the long-lived background task that replays status-panel transition
+/// intents immediately, then runs the stall sweeper at the configured interval.
+/// Should be called once per provider during dcserver bootstrap.
 pub(super) fn spawn_placeholder_sweeper(
     http: Arc<serenity::Http>,
     shared: Arc<SharedData>,
     provider: ProviderKind,
 ) {
     tokio::spawn(async move {
+        let recovered_panel_transitions =
+            recover_status_panel_transition_intents(&http, &shared, &provider).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(INITIAL_DELAY_SECS)).await;
         let mut stalled_tracker = StalledEditTracker::default();
         let mut sweeps_since_heartbeat = 0u64;
-        tokio::time::sleep(tokio::time::Duration::from_secs(INITIAL_DELAY_SECS)).await;
+        let mut startup_recovered_panel_transitions = recovered_panel_transitions;
         loop {
             let report =
                 run_placeholder_sweep_pass(&http, &shared, &provider, &mut stalled_tracker).await;
@@ -934,21 +956,10 @@ pub(super) fn spawn_placeholder_sweeper(
                 &shared.token_hash,
             )
             .await;
-            let recovered_panel_transitions =
-                super::status_panel_transition::recover_unreconciled_with_delete(
-                    &provider,
-                    &shared.token_hash,
-                    |channel_id, message_id| {
-                        let http = http.clone();
-                        async move {
-                            serenity::ChannelId::new(channel_id)
-                                .delete_message(&http, serenity::MessageId::new(message_id))
-                                .await
-                                .is_ok()
-                        }
-                    },
-                )
-                .await;
+            let recovered_panel_transitions = startup_recovered_panel_transitions.saturating_add(
+                recover_status_panel_transition_intents(&http, &shared, &provider).await,
+            );
+            startup_recovered_panel_transitions = 0;
             // #3296: reconcile durable aborted-anchor markers — retry the ✅ for
             // markers a terminal commit already covered, and apply the TTL'd
             // `⏳ → ⚠` fallback for anchors nothing ever covered (held while a
@@ -1233,8 +1244,7 @@ mod safety_net_threshold_tests {
     //! explicit-signal wire (D / A / B / C) must have time to fire
     //! before the sweeper does anything destructive.
     use super::{
-        ABANDON_THRESHOLD_SECS, INITIAL_DELAY_SECS, STALL_THRESHOLD_SECS, SWEEP_INTERVAL_SECS,
-        panel_reclaim_target,
+        ABANDON_THRESHOLD_SECS, STALL_THRESHOLD_SECS, SWEEP_INTERVAL_SECS, panel_reclaim_target,
     };
     use crate::services::provider::ProviderKind;
 
@@ -1278,14 +1288,6 @@ mod safety_net_threshold_tests {
     fn abandon_strictly_greater_than_stall() {
         // The stall → abandoned ladder must remain monotonic.
         assert!(ABANDON_THRESHOLD_SECS > STALL_THRESHOLD_SECS);
-    }
-
-    #[test]
-    fn initial_delay_lets_recovery_settle() {
-        // Recovery retries (#2428 H5) burn up to ~120s on retry
-        // backoff alone. Boot recovery needs at least that plus
-        // headroom before the sweeper starts judging staleness.
-        assert!(INITIAL_DELAY_SECS >= 180);
     }
 
     #[test]

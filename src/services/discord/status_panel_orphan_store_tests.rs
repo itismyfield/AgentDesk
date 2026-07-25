@@ -253,6 +253,51 @@ fn pending_bind_exact_owner_remove_keeps_record_after_reownership() {
 }
 
 #[test]
+fn pending_bind_read_failure_is_durability_failure_not_mismatch_4891() -> Result<(), String> {
+    let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let orphan_root = root.path().join("orphans");
+    let inflight_root = root.path().join("inflight");
+    let provider = ProviderKind::Claude;
+    let token = "tok";
+    let channel_id = 100;
+    let panel_id = 5001;
+    let live = test_inflight(&provider, channel_id, 7001, Some(panel_id), 6001, Some(10));
+    enqueue_pending_bind_in_root(
+        &orphan_root,
+        &provider,
+        token,
+        channel_id,
+        panel_id,
+        Some(InflightTurnIdentity::from_state(&live)),
+    )?;
+    let inflight_path = crate::services::discord::inflight::inflight_state_path(
+        &inflight_root,
+        &provider,
+        channel_id,
+    );
+    fs::create_dir_all(&inflight_path).map_err(|error| error.to_string())?;
+
+    assert!(matches!(
+        remove_pending_bind_if_owned_in_root(
+            &orphan_root,
+            &inflight_root,
+            &provider,
+            token,
+            channel_id,
+            panel_id,
+            &InflightTurnIdentity::from_state(&live),
+        ),
+        PendingBindOwnedRemovalOutcome::DurabilityFailure(_)
+    ));
+    assert_eq!(
+        load_pending_in_root(&orphan_root, &provider, token),
+        vec![(channel_id, panel_id)],
+        "orphan read IO ambiguity must retain pending-bind protection"
+    );
+    Ok(())
+}
+
+#[test]
 fn pending_bind_exact_owner_remove_clears_matching_record() {
     let root = tempfile::tempdir().expect("tempdir");
     let orphan_root = root.path().join("orphans");

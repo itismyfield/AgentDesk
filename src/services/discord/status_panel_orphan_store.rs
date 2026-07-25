@@ -583,7 +583,7 @@ pub(in crate::services::discord) fn is_queued(
     is_queued_in_root(&root, provider, token_hash, channel_id, panel_msg_id)
 }
 
-fn delete_error_is_permanent(err: &serenity::Error) -> bool {
+pub(in crate::services::discord) fn delete_error_is_permanent(err: &serenity::Error) -> bool {
     matches!(err, serenity::Error::Http(http_err)
         if http_err
             .status_code()
