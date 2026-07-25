@@ -519,6 +519,7 @@ where
         this_turn_user_msg_id,
     )
     .await
+    .committed
 }
 
 #[cfg(test)]

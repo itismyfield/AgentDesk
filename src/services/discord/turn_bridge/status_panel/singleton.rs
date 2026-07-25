@@ -74,3 +74,27 @@ pub(in crate::services::discord) fn completion_commit_allows_orphan_removal(
         CompletedBindingDisposition::NotApplicable | CompletedBindingDisposition::CommittedCurrent
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completion_disposition_keeps_superseded_or_durability_orphans_4891() {
+        assert!(completion_commit_allows_orphan_removal(
+            CompletedBindingDisposition::CommittedCurrent
+        ));
+        assert!(!completion_commit_allows_orphan_removal(
+            CompletedBindingDisposition::Superseded
+        ));
+        assert!(!completion_commit_allows_orphan_removal(
+            CompletedBindingDisposition::DurabilityFailure
+        ));
+        assert!(completion_commit_allows_pending_bind_purge(
+            CompletedBindingDisposition::Superseded
+        ));
+        assert!(!completion_commit_allows_pending_bind_purge(
+            CompletedBindingDisposition::DurabilityFailure
+        ));
+    }
+}

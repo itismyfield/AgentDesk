@@ -28,6 +28,7 @@ struct StatusPanelFallbackGateway {
     sent_messages: Arc<Mutex<Vec<String>>>,
     edited_message_ids: Arc<Mutex<Vec<MessageId>>>,
     live_messages: Arc<Mutex<HashMap<MessageId, String>>>,
+    deleted_message_ids: Arc<Mutex<Vec<MessageId>>>,
     edit_error: Option<String>,
     send_id: MessageId,
     can_chain_locally: bool,
@@ -48,6 +49,7 @@ impl Default for StatusPanelFallbackGateway {
             sent_messages: Arc::new(Mutex::new(Vec::new())),
             edited_message_ids: Arc::new(Mutex::new(Vec::new())),
             live_messages: Arc::new(Mutex::new(HashMap::new())),
+            deleted_message_ids: Arc::new(Mutex::new(Vec::new())),
             edit_error: None,
             send_id: MessageId::new(1_500_000_000_000_999),
             can_chain_locally: true,
@@ -101,6 +103,26 @@ impl TurnGateway for StatusPanelFallbackGateway {
                     Ok(())
                 }
             }
+        })
+    }
+
+    fn delete_message<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        message_id: MessageId,
+    ) -> TestGatewayFuture<'a, Result<(), String>> {
+        let deleted_message_ids = self.deleted_message_ids.clone();
+        let live_messages = self.live_messages.clone();
+        Box::pin(async move {
+            deleted_message_ids
+                .lock()
+                .expect("deleted message ids lock")
+                .push(message_id);
+            live_messages
+                .lock()
+                .expect("live messages lock")
+                .remove(&message_id);
+            Ok(())
         })
     }
 
@@ -602,7 +624,7 @@ async fn status_panel_fallback_completion_is_blocked_until_body_visible() {
             1510319194921504929,
         )
         .await;
-        assert!(committed);
+        assert!(committed.committed);
     }
 
     let sent_messages = gateway
@@ -638,7 +660,7 @@ async fn bridge_status_panel_completion_emits_background_agent_pending_payload()
     )
     .await;
 
-    assert!(committed);
+    assert!(committed.committed);
     let rendered = shared
         .ui
         .placeholder_live_events
@@ -737,7 +759,7 @@ async fn status_panel_completion_fallback_posts_when_message_id_is_synthetic() {
     )
     .await;
 
-    assert!(committed);
+    assert!(committed.committed);
     assert!(
         gateway
             .edited_message_ids
@@ -770,7 +792,7 @@ async fn status_panel_completion_fallback_posts_when_message_id_is_synthetic() {
     )
     .await;
 
-    assert!(committed);
+    assert!(committed.committed);
     assert_eq!(
         gateway
             .sent_messages
@@ -820,7 +842,7 @@ async fn status_panel_completion_merges_korean_wip_warning_into_completion_surfa
     )
     .await;
 
-    assert!(committed);
+    assert!(committed.committed);
     let sent_messages = gateway
         .sent_messages
         .lock()
@@ -851,7 +873,7 @@ async fn status_panel_completion_merges_korean_wip_warning_into_completion_surfa
     )
     .await;
 
-    assert!(committed_retry);
+    assert!(committed_retry.committed);
     assert_eq!(
         gateway
             .sent_messages
@@ -924,6 +946,7 @@ async fn multiple_completion_paths_render_wip_warning_exactly_once() {
             user_msg_id,
         )
         .await
+        .committed
     );
 
     let footer_edits = footer_sink.edits();
@@ -1011,7 +1034,7 @@ async fn status_panel_completion_fallback_posts_after_unknown_message_edit() {
     )
     .await;
 
-    assert!(committed);
+    assert!(committed.committed);
     assert_eq!(
         gateway
             .edited_message_ids
@@ -1028,6 +1051,146 @@ async fn status_panel_completion_fallback_posts_after_unknown_message_edit() {
     assert_eq!(sent_messages.len(), 1);
     assert!(sent_messages[0].contains("완료"));
     assert_eq!(last_status_panel_text, sent_messages[0]);
+}
+
+#[tokio::test]
+async fn status_panel_direct_fallback_binds_real_message_id_for_retirement_4891() {
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+    let shared = make_two_message_status_panel_shared_for_tests();
+    let gateway = StatusPanelFallbackGateway::default();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_891_301);
+    let prior_panel = MessageId::new(1_500_000_000_489_302);
+    let fallback_panel = gateway.send_id;
+    let mut current_owner = InflightTurnState::new(
+        provider.clone(),
+        channel_id.get(),
+        Some("direct-fallback-bind-test".to_string()),
+        42,
+        4_891_303,
+        4_891_304,
+        "newer turn".to_string(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    current_owner.status_message_id = Some(prior_panel.get());
+    current_owner.status_panel_generation = 2;
+    save_inflight_state(&current_owner).expect("persist newer panel owner");
+    crate::services::discord::status_panel_singleton_store::bind_if_owned(
+        &provider,
+        &shared.token_hash,
+        channel_id.get(),
+        prior_panel.get(),
+        None,
+    )
+    .expect("bind prior current singleton");
+    let mut last_status_panel_text = String::new();
+
+    let completion = complete_status_panel_v2(
+        shared.as_ref(),
+        &gateway,
+        channel_id,
+        None,
+        &provider,
+        1_700_000_000,
+        &mut last_status_panel_text,
+        false,
+        false,
+        "test_direct_fallback_bind",
+        4_891_303,
+    )
+    .await;
+
+    assert!(completion.committed);
+    assert_eq!(
+        completion.binding_disposition,
+        super::singleton::CompletedBindingDisposition::CommittedCurrent
+    );
+    assert_eq!(completion.completed_panel_message_id, Some(fallback_panel));
+    assert_eq!(
+        load_inflight_state(&provider, channel_id.get()).and_then(|state| state.status_message_id),
+        Some(fallback_panel.get()),
+        "direct fallback send must atomically publish its real message id to inflight"
+    );
+    assert!(
+        !crate::services::discord::status_panel_orphan_store::is_queued(
+            &provider,
+            &shared.token_hash,
+            channel_id.get(),
+            fallback_panel.get(),
+        ),
+        "a durably bound fallback panel must leave no stranded retirement record"
+    );
+    assert_eq!(
+        crate::services::discord::status_panel_singleton_store::load(
+            &provider,
+            &shared.token_hash,
+            channel_id.get(),
+        )
+        .map(|binding| binding.panel_message_id),
+        Some(fallback_panel.get()),
+        "singleton authority must move from the stale panel to the fallback message id"
+    );
+
+    let next_panel = MessageId::new(1_500_000_000_489_305);
+    let next_gateway = StatusPanelFallbackGateway {
+        send_id: next_panel,
+        ..StatusPanelFallbackGateway::default()
+    };
+    let mut next_turn = InflightTurnState::new(
+        provider.clone(),
+        channel_id.get(),
+        Some("next-turn-retirement-test".to_string()),
+        42,
+        4_891_305,
+        4_891_306,
+        "next turn".to_string(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    save_inflight_state(&next_turn).expect("persist next turn owner");
+    let mut next_status_panel_msg_id = None;
+    let mut next_generation = next_turn.status_panel_generation;
+    let mut next_dirty = true;
+    super::super::two_message_panel::create_bridge_two_message_status_panel_below_answer(
+        &next_gateway,
+        shared.as_ref(),
+        &provider,
+        channel_id,
+        "⠸",
+        MessageId::new(next_turn.current_msg_id),
+        &mut next_status_panel_msg_id,
+        &mut next_turn,
+        &mut next_generation,
+        &mut next_dirty,
+    )
+    .await;
+
+    assert_eq!(next_status_panel_msg_id, Some(next_panel));
+    assert_eq!(
+        next_gateway
+            .deleted_message_ids
+            .lock()
+            .expect("deleted message ids lock")
+            .as_slice(),
+        &[fallback_panel],
+        "the next turn must retire the direct-fallback panel through singleton authority"
+    );
+    assert_eq!(
+        crate::services::discord::status_panel_singleton_store::load(
+            &provider,
+            &shared.token_hash,
+            channel_id.get(),
+        )
+        .map(|binding| binding.panel_message_id),
+        Some(next_panel.get())
+    );
 }
 
 #[tokio::test]
@@ -1078,7 +1241,7 @@ async fn status_panel_completion_purges_pending_bind_for_final_panel() {
     )
     .await;
 
-    assert!(committed);
+    assert!(committed.committed);
     assert_eq!(
         gateway
             .edited_message_ids
@@ -1164,7 +1327,7 @@ async fn completion_keeps_completed_panel_when_singleton_bookkeeping_fails_4891(
     .await;
 
     assert!(
-        committed,
+        committed.committed,
         "a successful Discord completion edit must stay committed when singleton bookkeeping fails"
     );
     let live_messages = gateway.live_messages.lock().expect("live messages lock");
@@ -1174,15 +1337,6 @@ async fn completion_keeps_completed_panel_when_singleton_bookkeeping_fails_4891(
     assert!(
         completed_text.contains("완료"),
         "the surviving panel must contain the completed footer state"
-    );
-    assert!(
-        crate::services::discord::status_panel_orphan_store::is_queued(
-            &provider,
-            &shared.token_hash,
-            channel_id.get(),
-            completed_panel.get(),
-        ),
-        "a superseded completion must retain its orphan retirement intent"
     );
     assert_eq!(
         crate::services::discord::status_panel_singleton_store::load(
@@ -1250,7 +1404,7 @@ async fn singleton_panel_state_transitions_edit_the_same_message() {
         4_860_102,
     )
     .await;
-    assert!(committed);
+    assert!(committed.committed);
 
     // The panel content changes (fresh context usage arrived) …
     assert!(
@@ -1275,7 +1429,7 @@ async fn singleton_panel_state_transitions_edit_the_same_message() {
         4_860_102,
     )
     .await;
-    assert!(committed);
+    assert!(committed.committed);
 
     assert_eq!(
         gateway
@@ -1341,7 +1495,7 @@ async fn single_message_mode_completion_leaves_singleton_store_untouched() {
     )
     .await;
 
-    assert!(committed);
+    assert!(committed.committed);
     assert_eq!(
         gateway
             .edited_message_ids

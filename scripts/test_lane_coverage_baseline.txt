@@ -319,7 +319,6 @@ services::discord::recovery_engine::manual_rebind_override::tests
 services::discord::recovery_engine::phase_policy::tests
 services::discord::recovery_engine::rebind_runtime::tests
 services::discord::recovery_engine::recovery_retry_backoff_tests
-services::discord::recovery_engine::recovery_status_panel::tests
 services::discord::recovery_engine::recovery_two_message_panel::tests
 services::discord::recovery_engine::restore_inflight::tests
 services::discord::recovery_engine::routing_orphan::tests
@@ -402,7 +401,6 @@ services::discord::shared_state::restart_lifecycle_tests
 services::discord::single_message_panel::tests
 services::discord::standby_relay::tests
 services::discord::startup_reclaim::tests
-services::discord::status_panel_orphan_store::tests
 services::discord::streaming_finalizer::tests
 services::discord::task_supervisor::tests
 services::discord::terminal_ui_obligation::tests
@@ -490,7 +488,6 @@ services::discord::turn_bridge::runtime_handoff_loop::guarded_save::tests
 services::discord::turn_bridge::runtime_handoff_loop::tests
 services::discord::turn_bridge::single_message_footer::tests
 services::discord::turn_bridge::stale_resume::tests
-services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests
 services::discord::turn_bridge::stream_loop::content_arms::provider_error_presentation::tests
 services::discord::turn_bridge::stream_loop::content_arms::tests
 services::discord::turn_bridge::stream_loop::content_arms::tui_error_classification::tests

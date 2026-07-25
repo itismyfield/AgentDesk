@@ -189,10 +189,11 @@ pub(in crate::services::discord) async fn complete_watcher_status_panel_v2_with_
             status_panel_msg_id,
             channel_id.get()
         );
-        crate::services::discord::turn_bridge::StatusPanelCompletionResult {
+        crate::services::discord::turn_bridge::status_panel::StatusPanelCompletionResult {
             committed: true,
             binding_disposition:
-                crate::services::discord::turn_bridge::CompletedBindingDisposition::Superseded,
+                crate::services::discord::turn_bridge::status_panel::singleton::CompletedBindingDisposition::Superseded,
+            completed_panel_message_id: status_panel_msg_id,
         }
     } else {
         complete_watcher_status_panel_v2(
@@ -209,18 +210,34 @@ pub(in crate::services::discord) async fn complete_watcher_status_panel_v2_with_
         )
         .await
     };
-    let committed = completion.committed;
-    let remove_orphan = committed
-        && crate::services::discord::turn_bridge::completion_commit_allows_orphan_removal(
-            completion.binding_disposition,
-        );
-    let Some(panel_msg_id) = status_panel_msg_id else {
+    reconcile_watcher_status_panel_completion(
+        shared,
+        provider,
+        channel_id,
+        status_panel_msg_id,
+        turn_is_external_input_for_session,
+        completion,
+    );
+}
+
+fn reconcile_watcher_status_panel_completion(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    original_panel_msg_id: Option<serenity::MessageId>,
+    turn_is_external_input_for_session: bool,
+    completion: crate::services::discord::turn_bridge::status_panel::StatusPanelCompletionResult,
+) {
+    use crate::services::discord::turn_bridge::status_panel::singleton;
+
+    let completed_panel_msg_id = completion
+        .completed_panel_message_id
+        .or(original_panel_msg_id);
+    let Some(panel_msg_id) = completed_panel_msg_id else {
         return;
     };
-    if committed
-        && crate::services::discord::turn_bridge::completion_commit_allows_pending_bind_purge(
-            completion.binding_disposition,
-        )
+    if completion.committed
+        && singleton::completion_commit_allows_pending_bind_purge(completion.binding_disposition)
     {
         crate::services::discord::status_panel_orphan_store::remove_pending_bind(
             provider,
@@ -232,14 +249,16 @@ pub(in crate::services::discord) async fn complete_watcher_status_panel_v2_with_
     if !turn_is_external_input_for_session {
         return;
     }
-    if remove_orphan {
+    if completion.committed
+        && singleton::completion_commit_allows_orphan_removal(completion.binding_disposition)
+    {
         crate::services::discord::status_panel_orphan_store::remove(
             provider,
             &shared.token_hash,
             channel_id.get(),
             panel_msg_id.get(),
         );
-    } else if !committed {
+    } else if !completion.committed {
         enqueue_watcher_status_panel_orphan(shared.as_ref(), provider, channel_id, panel_msg_id);
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(

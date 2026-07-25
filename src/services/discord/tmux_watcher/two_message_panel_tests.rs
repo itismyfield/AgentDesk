@@ -215,27 +215,45 @@ fn reanchor_bind_bumps_epoch_atomically_and_guard_stale_skips_old_epoch() {
 }
 
 #[test]
-fn completion_disposition_keeps_superseded_or_durability_orphans_4891() {
-    use crate::services::discord::turn_bridge::{
-        CompletedBindingDisposition, completion_commit_allows_orphan_removal,
-        completion_commit_allows_pending_bind_purge,
-    };
+fn status_panel_watcher_reconcile_retains_superseded_orphan_4891() {
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root_for_two_message_tests();
+    let mut shared = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut shared)
+        .expect("fresh shared data should be uniquely owned")
+        .ui
+        .two_message_panel_enabled = true;
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_891_201);
+    let completed_panel = serenity::MessageId::new(1_500_000_000_489_201);
+    crate::services::discord::status_panel_orphan_store::enqueue(
+        &provider,
+        &shared.token_hash,
+        channel_id.get(),
+        completed_panel.get(),
+    );
 
-    assert!(completion_commit_allows_orphan_removal(
-        CompletedBindingDisposition::CommittedCurrent
-    ));
-    assert!(!completion_commit_allows_orphan_removal(
-        CompletedBindingDisposition::Superseded
-    ));
-    assert!(!completion_commit_allows_orphan_removal(
-        CompletedBindingDisposition::DurabilityFailure
-    ));
-    assert!(completion_commit_allows_pending_bind_purge(
-        CompletedBindingDisposition::Superseded
-    ));
-    assert!(!completion_commit_allows_pending_bind_purge(
-        CompletedBindingDisposition::DurabilityFailure
-    ));
+    reconcile_watcher_status_panel_completion(
+        &shared,
+        &provider,
+        channel_id,
+        Some(completed_panel),
+        true,
+        crate::services::discord::turn_bridge::status_panel::StatusPanelCompletionResult {
+            committed: true,
+            binding_disposition: crate::services::discord::turn_bridge::status_panel::singleton::CompletedBindingDisposition::Superseded,
+            completed_panel_message_id: Some(completed_panel),
+        },
+    );
+
+    assert!(
+        crate::services::discord::status_panel_orphan_store::is_queued(
+            &provider,
+            &shared.token_hash,
+            channel_id.get(),
+            completed_panel.get(),
+        ),
+        "watcher completion reconcile must retain a superseded panel's orphan retirement intent"
+    );
 }
 
 #[test]
