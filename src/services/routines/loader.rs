@@ -141,6 +141,8 @@ pub struct RoutineScriptLoader {
     failed_scripts: Mutex<HashMap<PathBuf, RoutineScriptFailure>>,
     #[cfg(test)]
     evaluation_attempts: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    source_read_hook: Mutex<Option<Arc<dyn Fn(&Path) + Send + Sync>>>,
 }
 
 impl RoutineScriptLoader {
@@ -150,6 +152,8 @@ impl RoutineScriptLoader {
             failed_scripts: Mutex::new(HashMap::new()),
             #[cfg(test)]
             evaluation_attempts: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            source_read_hook: Mutex::new(None),
         })
     }
 
@@ -203,7 +207,7 @@ impl RoutineScriptLoader {
             }
 
             let mut entries = Vec::new();
-            if let Err(e) = collect_routine_script_paths(root, &mut entries) {
+            if let Err(e) = collect_routine_script_paths(root, root_index == 0, &mut entries) {
                 tracing::warn!(
                     routines_dir = %root.display(),
                     error = %e,
@@ -278,6 +282,15 @@ impl RoutineScriptLoader {
                     }
                 };
                 let source_version = compute_policy_version(&source);
+                #[cfg(test)]
+                if let Some(hook) = self
+                    .source_read_hook
+                    .lock()
+                    .unwrap_or_else(recover_poisoned_lock)
+                    .clone()
+                {
+                    hook(&candidate.path);
+                }
                 let now = Instant::now();
                 if !self.should_retry_candidate(
                     &candidate.path,
@@ -841,15 +854,28 @@ fn add_cached_candidates_for_root(
     }
 }
 
-fn collect_routine_script_paths(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in std::fs::read_dir(root)? {
+fn collect_routine_script_paths(
+    root: &Path,
+    exclude_bundled_node_helpers: bool,
+    out: &mut Vec<PathBuf>,
+) -> Result<()> {
+    collect_routine_script_paths_inner(root, root, exclude_bundled_node_helpers, out)
+}
+
+fn collect_routine_script_paths_inner(
+    root: &Path,
+    current_dir: &Path,
+    exclude_bundled_node_helpers: bool,
+    out: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for entry in std::fs::read_dir(current_dir)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
         let path = entry.path();
         if file_type.is_dir() {
-            collect_routine_script_paths(&path, out)?;
+            collect_routine_script_paths_inner(root, &path, exclude_bundled_node_helpers, out)?;
         } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "js") {
-            if is_node_only_helper(&path) {
+            if exclude_bundled_node_helpers && is_bundled_node_only_helper(root, &path) {
                 tracing::debug!(
                     routine_script = %path.display(),
                     "excluded Node-only worktree inventory helper from QuickJS discovery"
@@ -862,20 +888,60 @@ fn collect_routine_script_paths(root: &Path, out: &mut Vec<PathBuf>) -> Result<(
     Ok(())
 }
 
-// #4900/#4902: `local-worktree-gc.js` executes this read-only helper with Node.
-fn is_node_only_helper(path: &Path) -> bool {
-    path.file_name()
-        .is_some_and(|name| name == "local_worktree_inventory.js")
-        && path
-            .parent()
-            .and_then(Path::file_name)
-            .is_some_and(|name| name == "monitoring")
+// #4900/#4902: `local-worktree-gc.js` executes this bundled read-only helper with Node.
+fn is_bundled_node_only_helper(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root).is_ok_and(|relative| {
+        relative == Path::new("monitoring").join("local_worktree_inventory.js")
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{self, Write};
     use std::thread;
+    use tracing_subscriber::fmt::writer::MakeWriter;
+
+    #[derive(Clone)]
+    struct CapturingWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_debug_logs<F>(emit: F) -> String
+    where
+        F: FnOnce(),
+    {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(CapturingWriter {
+                buffer: buffer.clone(),
+            })
+            .finish();
+        tracing::subscriber::with_default(subscriber, emit);
+        String::from_utf8(buffer.lock().unwrap().clone()).unwrap()
+    }
 
     fn fixture_routines_root() -> PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1051,9 +1117,85 @@ mod tests {
         .unwrap();
 
         let loader = RoutineScriptLoader::new().unwrap();
-        assert_eq!(loader.load_dir(dir.path()).unwrap(), 1);
+        let logs = capture_debug_logs(|| {
+            assert_eq!(loader.load_dir(dir.path()).unwrap(), 1);
+        });
         assert_eq!(loader.script_refs().unwrap(), vec!["inventory-routine.js"]);
         assert!(loader.failed_scripts.lock().unwrap().is_empty());
+        assert!(
+            logs.contains("excluded Node-only worktree inventory helper from QuickJS discovery"),
+            "logs={logs}"
+        );
+    }
+
+    #[test]
+    fn load_dir_hashes_and_evaluates_the_same_source_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("atomic-source.js");
+        std::fs::write(&path, "throw new Error('broken snapshot');").unwrap();
+
+        let loader = RoutineScriptLoader::new().unwrap();
+        let replacement_path = path.clone();
+        *loader.source_read_hook.lock().unwrap() = Some(Arc::new(move |candidate| {
+            if candidate == replacement_path {
+                std::fs::write(
+                    candidate,
+                    "agentdesk.routines.register({ name: 'Replacement', tick() { return { action: 'skip' }; } });",
+                )
+                .unwrap();
+            }
+        }));
+
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        assert_eq!(
+            loader
+                .failed_scripts
+                .lock()
+                .unwrap()
+                .get(&path)
+                .unwrap()
+                .source_version,
+            Some(compute_policy_version(
+                "throw new Error('broken snapshot');"
+            ))
+        );
+        assert!(!loader.has_script("atomic-source.js").unwrap());
+    }
+
+    #[test]
+    fn operator_root_can_define_the_bundled_helper_relative_path_as_a_routine() {
+        let bundled = tempfile::tempdir().unwrap();
+        let operator = tempfile::tempdir().unwrap();
+        let bundled_monitoring = bundled.path().join("monitoring");
+        let operator_monitoring = operator.path().join("monitoring");
+        std::fs::create_dir_all(&bundled_monitoring).unwrap();
+        std::fs::create_dir_all(&operator_monitoring).unwrap();
+        std::fs::write(
+            bundled_monitoring.join("local_worktree_inventory.js"),
+            "const fs = require('node:fs'); module.exports = { fs };",
+        )
+        .unwrap();
+        std::fs::write(
+            operator_monitoring.join("local_worktree_inventory.js"),
+            "agentdesk.routines.register({ name: 'Operator Inventory', tick() { return { action: 'skip' }; } });",
+        )
+        .unwrap();
+
+        let loader = RoutineScriptLoader::new().unwrap();
+        assert_eq!(
+            loader
+                .load_dirs(&[bundled.path().to_path_buf(), operator.path().to_path_buf()])
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            loader
+                .get_script("monitoring/local_worktree_inventory.js")
+                .unwrap()
+                .unwrap()
+                .name,
+            "Operator Inventory"
+        );
     }
 
     #[test]
@@ -1137,6 +1279,24 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("require is not defined"), "{message}");
         assert!(message.contains("at <eval>"), "{message}");
+    }
+
+    #[test]
+    fn quickjs_eval_error_with_empty_message_starts_with_stack() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty-message.js");
+        std::fs::write(&path, "const error = new Error(''); throw error;").unwrap();
+
+        let error = load_single_routine_script(dir.path(), &path).unwrap_err();
+        let message = error.to_string();
+        let detail = message
+            .strip_prefix(&format!(
+                "JS eval error in routine script {}: ",
+                path.display()
+            ))
+            .unwrap();
+        assert!(detail.starts_with("Error"), "{detail:?}");
+        assert!(!detail.starts_with('\n'), "{detail:?}");
     }
 
     #[test]
@@ -1342,8 +1502,12 @@ mod tests {
                 .keys()
                 .cloned()
                 .collect::<Vec<_>>(),
-            vec![retained]
+            vec![retained.clone()]
         );
+
+        std::fs::remove_file(&retained).unwrap();
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        assert!(loader.failed_scripts.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1436,6 +1600,52 @@ mod tests {
             }
             other => panic!("unexpected action: {other:?}"),
         }
+    }
+
+    #[test]
+    fn tick_error_includes_primitive_throw_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("primitive-tick.js");
+        std::fs::write(
+            &path,
+            "agentdesk.routines.register({ name: 'Primitive Tick', tick() { throw 'tick unavailable'; } });",
+        )
+        .unwrap();
+
+        let loader = RoutineScriptLoader::new().unwrap();
+        loader.load_script(dir.path(), &path).unwrap();
+        let error = loader
+            .execute_tick(
+                "primitive-tick.js",
+                RoutineTickContext {
+                    routine: RoutineTickRoutine {
+                        id: "routine-1".to_string(),
+                        agent_id: None,
+                        script_ref: "primitive-tick.js".to_string(),
+                        name: "Primitive Tick".to_string(),
+                        execution_strategy: "fresh".to_string(),
+                        fresh_context_guaranteed: false,
+                    },
+                    run: RoutineTickRun {
+                        id: "run-1".to_string(),
+                        lease_expires_at: chrono::Utc::now(),
+                    },
+                    agent: None,
+                    checkpoint: None,
+                    now: chrono::Utc::now(),
+                    observations: None,
+                    automation_inventory: None,
+                    limits: ObservationLimits::default(),
+                },
+            )
+            .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("tick unavailable"), "{message}");
+        assert!(
+            !message.contains("Exception generated by QuickJS"),
+            "{message}"
+        );
     }
 
     #[test]
