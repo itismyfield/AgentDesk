@@ -383,6 +383,23 @@ cluster:
     default_preferred_labels: [example-worker]
     opt_out_dispatch_types: ["create-pr", "github-sync"]
     constraints: [noop]
+  # Operator-owned trust roots for authenticated cross-node session forwarding.
+  # Each origin must exactly match that node's advertised cluster.api_base_url.
+  # Missing or mismatched entries return a typed 503; advertisements are never
+  # accepted as fallback trust configuration.
+  nodes:
+    example-main-node:
+      trusted_forward_origin: "https://main.example.net:8791"
+    example-worker-node:
+      trusted_forward_origin: "https://worker.tailnet.example:8791"
+      # Required only when DNS resolves to RFC1918, IPv6 ULA, or Tailscale CGNAT.
+      # Deprecated IPv6 site-local fec0::/10 remains blocked on every transport,
+      # even with this opt-in.
+      allow_private_forwarding: true
+      # HTTPS is the default. If this origin must use cleartext HTTP in a private
+      # development network, set this separate flag too and accept bearer exposure
+      # on that network. HTTP to public or mixed DNS is always rejected.
+      # allow_insecure_http_forwarding: true
 
 # Optional file/MCP memory configuration. Omit the section entirely to use defaults.
 memory:
@@ -412,6 +429,8 @@ review:
 ```
 
 For canonical edit paths across runtime config, prompts, policies, memory, `CLAUDE.md`, and MCP mirrors, see [`docs/source-of-truth.md`](docs/source-of-truth.md). Legacy config snapshots (`*.pre-*`, `*.bak`, `*.migrated`) are archival only and belong under `~/.adk/release/config/.backups/YYYY-MM-DD/`; use `scripts/archive-config-backups.sh` instead of leaving them beside canonical files.
+
+Authenticated session forwarding uses the configured node origin only after exact advertised-origin, capability, lease freshness, URL, and DNS-address validation. Connections are pinned to the validated DNS answers, preserve hostname-based TLS SNI, ignore environment proxies, and do not follow redirects. HTTPS is required by default. Cleartext HTTP is rejected unless the node enables both `allow_private_forwarding` and the independent `allow_insecure_http_forwarding`; even then every answer must be RFC1918, IPv6 ULA, or Tailscale CGNAT, so public, mixed, loopback, link-local, metadata, multicast, and unspecified targets remain blocked. Deprecated IPv6 site-local (`fec0::/10`) targets are blocked on both HTTP and HTTPS, regardless of either opt-in. The second flag explicitly acknowledges that the shared bearer is visible on the private network and is intended only for constrained development deployments; it is not implied by private-address consent. Roll out without an availability gap in this order: configure `cluster.nodes.<instance>.trusted_forward_origin` on every node (and private-address/cleartext opt-ins only where strictly required), then upgrade workers until they advertise matching origins and forwarding capabilities, and upgrade the gateway/leader last. Existing configurations remain loadable because both opt-ins default to false; a pre-existing HTTP origin starts returning a typed 503 until it is migrated to HTTPS or explicitly restricted to private HTTP with both flags. During the mixed-version interval, a missing trust entry intentionally returns a typed 503 instead of falling back to discovery. Draft PR #4916 must integrate `resume-candidates` through the shared `forward_resume_candidates` helper and receiver fence rather than restoring raw URL concatenation or independent authorization-header logic.
 
 ### Runtime Configuration
 
