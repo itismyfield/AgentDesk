@@ -130,11 +130,20 @@ mod terminal_readiness;
 #[path = "tmux_watcher/utf8_chunk_decoder.rs"]
 mod utf8_chunk_decoder;
 
+#[path = "tmux_watcher/forced_kill.rs"]
+mod forced_kill;
+
 #[path = "tmux_watcher/jsonl_rotation.rs"]
 mod jsonl_rotation;
 
+#[path = "tmux_watcher/jsonl_read.rs"]
+mod jsonl_read;
+
 #[path = "tmux_watcher/loop_poll_prologue.rs"]
 mod loop_poll_prologue;
+
+#[path = "tmux_watcher/stale_resume_exit.rs"]
+mod stale_resume_exit;
 
 #[path = "tmux_watcher/stall_exit.rs"]
 mod stall_exit;
@@ -161,6 +170,8 @@ pub(in crate::services::discord) use self::completion_gate::{
     TuiCompletionGateOutcome, run_tui_completion_gate,
 };
 use self::completion_producer::*;
+use self::forced_kill::*;
+use self::jsonl_read::*;
 use self::jsonl_rotation::*;
 use self::loop_poll_prologue::*;
 use self::no_result_exits::*;
@@ -168,6 +179,7 @@ use self::placeholder_reclaim::*;
 use self::post_stream_exit::*;
 use self::session_bound_ack::*;
 use self::single_message_footer::*;
+use self::stale_resume_exit::*;
 use self::stall_exit::*;
 use self::streaming_status_tick::*;
 use self::supervisor_relay::*;
@@ -289,6 +301,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &watcher_channel_name,
         );
     let mut current_offset = initial_offset;
+    let mut align_next_read = true;
     let input_fifo_path =
         crate::services::discord::turn_bridge::tmux_runtime_paths(&tmux_session_name).1;
     // #1216: leftover JSONL bytes from a buffer that contained more than one
@@ -442,6 +455,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 utf8_decoder: &mut utf8_decoder,
                 completion_footer_idle: &mut completion_footer_idle,
                 last_activity_heartbeat_at: &mut last_activity_heartbeat_at,
+                align_next_read: &mut align_next_read,
             };
             let mut post_terminal_state = PostTerminalState {
                 turn_result_relayed,
@@ -895,115 +909,20 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
         }
 
-        // Detect stale session resume failure in watcher output
-        let is_stale_resume = stale_resume_detected;
-        if is_stale_resume {
-            clear_provider_overload_retry_state(channel_id);
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                "  [{ts}] ⚠ Watcher detected stale session resume failure (channel {}), clearing session_id",
-                channel_id
-            );
-            let stale_sid = {
-                let mut data = shared.core.lock().await;
-                let old = data
-                    .sessions
-                    .get(&channel_id)
-                    .and_then(|s| s.session_id.clone());
-                if let Some(session) = data.sessions.get_mut(&channel_id) {
-                    session.clear_provider_session();
-                }
-                old
-            };
-            // Clear DB session_id
-            {
-                let hostname = crate::services::platform::hostname_short();
-                let session_key = format!("{}:{}", hostname, tmux_session_name);
-                crate::services::discord::adk_session::clear_provider_session_id(
-                    &session_key,
-                    shared.api_port,
-                )
-                .await;
-            }
-            if let Some(ref sid) = stale_sid {
-                let _ = crate::services::discord::internal_api::clear_stale_session_id(sid).await;
-            }
-            crate::services::termination_audit::record_termination_for_tmux(
-                &tmux_session_name,
-                None,
-                "tmux_watcher",
-                "stale_resume_retry",
-                Some("stale session resume detected — forcing fresh session before auto-retry"),
-                None,
-            );
-            record_tmux_exit_reason(
-                &tmux_session_name,
-                "stale session resume detected — forcing fresh session before auto-retry",
-            );
-            crate::services::platform::tmux::kill_session(
-                &tmux_session_name,
-                "stale session resume detected — forcing fresh session before auto-retry",
-            );
-            // Replace placeholder with recovery notice (don't delete — avoids visual gap)
-            if let Some(msg_id) = placeholder_msg_id {
-                let _ = crate::services::discord::http::edit_channel_message(
-                    &http,
-                    channel_id,
-                    msg_id,
-                    "↻ 세션 복구 중... 잠시 후 자동으로 이어갑니다.",
-                )
-                .await;
-            }
-            // Auto-retry: persist Discord history for LLM injection, then queue the
-            // original user message as an internal follow-up instead of self-routing
-            // through /api/discord/send announce.
-            //
-            // #897 round-4 Medium: a `rebind_origin` inflight has no real
-            // user message or text to retry with (`user_msg_id=0`,
-            // user_text="/api/inflight/rebind"), so auto-retry would
-            // enqueue a garbage internal follow-up. Skip the retry; the
-            // operator is expected to re-invoke `/api/inflight/rebind`
-            // once the tmux session is healthy again.
-            match crate::services::discord::inflight::load_inflight_state(
-                &watcher_provider,
-                channel_id.get(),
-            ) {
-                Some(state) if state.rebind_origin || state.user_msg_id == 0 => {
-                    // rebind_origin and user_msg_id == 0 (e.g. a TUI-direct
-                    // turn) both have no anchored user message to retry against;
-                    // `MessageId::new(0)` would panic.
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
-                        "  [{ts}] ⚠ Watcher auto-retry skipped for channel {} — inflight has no user message to retry",
-                        channel_id
-                    );
-                }
-                Some(state) => {
-                    crate::services::discord::tmux_overload_retry::schedule_discord_retry_with_history_completion_release(
-                        shared.clone(),
-                        http.clone(),
-                        watcher_provider.clone(),
-                        channel_id,
-                        serenity::MessageId::new(state.user_msg_id),
-                        state.user_text,
-                    );
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
-                        "  [{ts}] ↻ Watcher auto-retry queued for channel {}",
-                        channel_id
-                    );
-                }
-                None => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::warn!(
-                        "  [{ts}] ⚠ Watcher auto-retry skipped: inflight state missing for channel {}",
-                        channel_id
-                    );
-                }
-            }
-            // Skip normal response relay
-            full_response = String::new();
-        }
+        handle_stale_resume_exit(
+            StaleResumeExitContext {
+                shared: &shared,
+                http: &http,
+                watcher_provider: &watcher_provider,
+                channel_id,
+                tmux_session_name: &tmux_session_name,
+                current_offset,
+                placeholder_msg_id,
+            },
+            stale_resume_detected,
+            &mut full_response,
+        )
+        .await;
 
         let prompt_anchor_present_before_relay =
             crate::services::tui_prompt_dedupe::prompt_anchor_for_response(

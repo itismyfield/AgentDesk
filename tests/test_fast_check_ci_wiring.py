@@ -11,6 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
 NIGHTLY_WORKFLOW = REPO_ROOT / ".github/workflows/ci-nightly.yml"
+MACOS_TRUSTED_WORKFLOW = REPO_ROOT / ".github/workflows/ci-macos-trusted.yml"
 
 # This manifest is intentionally exact: changing the retained test recipe must also
 # update this test deliberately. The duplication is a drift-prevention gate, not an
@@ -26,8 +27,8 @@ EXPECTED_TEST_NON_PG_COMMANDS = (
     "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::watcher_lifecycle::tests::tests::turn_starts_reuse_healthy_runtime_path_incumbent_after_handoff -- --exact",
     "cargo test --lib tmux_error_detect::pure_tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib tmux_output_stream::tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib loop_poll_prologue::alignment_tests -- --skip _pg --skip pg_ --skip postgres",
-    "cargo test --lib terminal_abort_exits::tests -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib tmux::tmux_watcher::jsonl_read::tests -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib tmux::tmux_watcher::forced_kill::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib server::claude_oauth_usage_tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib tui_task_card::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib server::routes::message_outbox::tests -- --skip _pg --skip pg_ --skip postgres",
@@ -155,6 +156,19 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertNotRegex(job, r"(?m)^\s*cargo test\b")
         self.assertNotIn("- name: cargo test", job)
         self.assertNotIn("Discord thread-create cross-process lock", job)
+
+    def test_macos_pr_lane_runs_watcher_incident_tests(self) -> None:
+        workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
+        commands = (
+            "env -u AGENTDESK_ROOT_DIR cargo test --lib tmux_error_detect::pure_tests -- --skip _pg --skip pg_ --skip postgres",
+            "env -u AGENTDESK_ROOT_DIR cargo test --lib tmux_output_stream::tests -- --skip _pg --skip pg_ --skip postgres",
+            "env -u AGENTDESK_ROOT_DIR cargo test --lib tmux::tmux_watcher::jsonl_read::tests -- --skip _pg --skip pg_ --skip postgres",
+            "env -u AGENTDESK_ROOT_DIR cargo test --lib tmux::tmux_watcher::forced_kill::tests -- --skip _pg --skip pg_ --skip postgres",
+            "env -u AGENTDESK_ROOT_DIR cargo test --lib turn_bridge::stale_resume::tests -- --skip _pg --skip pg_ --skip postgres",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(workflow.count(command), 2)
 
     def test_main_and_nightly_retain_non_pg_test_coverage(self) -> None:
         justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")

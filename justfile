@@ -39,8 +39,8 @@ test-non-pg:
     # #4895: structured overload provenance, JSONL alignment, and main-session kill guards.
     cargo test --lib tmux_error_detect::pure_tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib tmux_output_stream::tests -- --skip _pg --skip pg_ --skip postgres
-    cargo test --lib loop_poll_prologue::alignment_tests -- --skip _pg --skip pg_ --skip postgres
-    cargo test --lib terminal_abort_exits::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib tmux::tmux_watcher::jsonl_read::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib tmux::tmux_watcher::forced_kill::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib server::claude_oauth_usage_tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib tui_task_card::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib server::routes::message_outbox::tests -- --skip _pg --skip pg_ --skip postgres

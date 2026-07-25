@@ -653,7 +653,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
                 tokio::task::spawn_blocking({
                     let path = output_path.clone();
                     let offset = current_offset;
-                    move || super::loop_poll_prologue::read_jsonl_chunk_aligned(&path, offset)
+                    move || super::jsonl_read::read_jsonl_chunk_contiguous(&path, offset)
                 }),
             )
             .await;

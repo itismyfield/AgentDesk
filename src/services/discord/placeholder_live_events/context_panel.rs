@@ -1,4 +1,11 @@
+use std::sync::Mutex;
+
+use dashmap::DashMap;
+use poise::serenity_prelude::ChannelId;
+
+use super::LiveContextPanelSnapshot;
 use super::common::{CONTEXT_PANEL_LINE_MAX_CHARS, truncate_chars};
+use super::status_panel::StatusPanelState;
 use crate::services::provider::ProviderKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9,6 +16,22 @@ pub(super) struct ContextPanelSnapshot {
     pub(super) cache_read_tokens: u64,
     pub(super) context_window_tokens: u64,
     pub(super) compact_percent: u64,
+}
+
+pub(super) fn live_context_panel_snapshot(
+    states: &DashMap<ChannelId, Mutex<StatusPanelState>>,
+    channel_id: ChannelId,
+) -> Option<LiveContextPanelSnapshot> {
+    let entry = states.get(&channel_id)?;
+    let guard = entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let context = guard.context.as_ref()?;
+    Some(LiveContextPanelSnapshot {
+        provider_session_id: context.provider_session_id.clone(),
+        used_tokens: context.used_tokens(),
+        context_window_tokens: context.context_window_tokens,
+    })
 }
 
 impl ContextPanelSnapshot {

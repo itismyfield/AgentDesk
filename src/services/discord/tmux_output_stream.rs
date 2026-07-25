@@ -577,48 +577,6 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
                 }
                 _ => {}
             }
-        } else if is_auth_error_message(trimmed) {
-            if let Some(skip) = pre_turn_line_skip(
-                turn_start_offset,
-                line_start_offset,
-                Some(WatcherTerminalKind::AuthError),
-            ) {
-                tracing::info!(
-                    terminal_kind = skip.terminal_kind.as_str(),
-                    evidence_offset = skip.evidence_offset,
-                    turn_start_offset = skip.turn_start_offset,
-                    "tmux watcher skipped terminal evidence before this turn's start offset"
-                );
-                outcome.pre_turn_bytes_skipped =
-                    outcome.pre_turn_bytes_skipped.saturating_add(line_len);
-                continue;
-            }
-            if pre_turn_line {
-                outcome.pre_turn_bytes_skipped =
-                    outcome.pre_turn_bytes_skipped.saturating_add(line_len);
-                continue;
-            }
-            outcome.found_result = true;
-            outcome.terminal_kind = Some(WatcherTerminalKind::AuthError);
-            outcome.terminal_evidence_offset = line_start_offset;
-            outcome.is_auth_error = true;
-            outcome
-                .auth_error_message
-                .get_or_insert(trimmed.to_string());
-            push_transcript_event(
-                &mut tool_state.transcript_events,
-                SessionTranscriptEvent {
-                    kind: SessionTranscriptEventKind::Error,
-                    tool_name: None,
-                    summary: Some("authentication error".to_string()),
-                    content: trimmed.to_string(),
-                    status: Some("error".to_string()),
-                    is_error: true,
-                },
-            );
-            state.final_result = Some(String::new());
-            // #1216: see `result` arm — stop after a turn-terminating event.
-            break;
         } else if pre_turn_line {
             outcome.pre_turn_bytes_skipped =
                 outcome.pre_turn_bytes_skipped.saturating_add(line_len);
@@ -913,8 +871,10 @@ mod tests {
     }
 
     #[test]
-    fn plaintext_parse_failure_cannot_be_promoted_to_provider_overload() {
-        let mut buffer = "notification suffix says rate limit and overloaded\n".to_string();
+    fn plaintext_parse_failure_cannot_be_promoted_to_terminal_provider_error() {
+        let mut buffer =
+            "the oauth handler returns unauthorized after token expired; rate limit follows\n"
+                .to_string();
         let mut state = StreamLineState::new();
         let mut full_response = String::new();
         let mut tool_state = WatcherToolState::new();
@@ -923,14 +883,15 @@ mod tests {
             process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
 
         assert!(!outcome.found_result);
+        assert!(!outcome.is_auth_error);
         assert!(!outcome.is_provider_overloaded);
         assert_eq!(outcome.terminal_kind, None);
     }
 
     #[test]
-    fn structured_error_status_is_provider_overload() {
+    fn provider_api_error_envelope_is_provider_overload() {
         let mut buffer = concat!(
-            "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"result\":\"request rejected\",\"error\":{\"status\":429},\"session_id\":\"sess-overload\"}\n",
+            "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"errors\":[\"[API Error: 429 status code (no body)]\"],\"session_id\":\"sess-overload\"}\n",
         )
         .to_string();
         let mut state = StreamLineState::new();

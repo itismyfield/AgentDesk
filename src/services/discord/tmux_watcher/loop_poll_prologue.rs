@@ -1,5 +1,4 @@
 use super::*;
-use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
@@ -53,60 +52,7 @@ pub(super) struct LoopPollState<'a> {
     pub(super) utf8_decoder: &'a mut Utf8ChunkDecoder,
     pub(super) completion_footer_idle: &'a mut WatcherCompletionFooterIdleState,
     pub(super) last_activity_heartbeat_at: &'a mut Option<std::time::Instant>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct JsonlReadChunk {
-    pub(super) data: Vec<u8>,
-    pub(super) start_offset: u64,
-    pub(super) end_offset: u64,
-    pub(super) skipped_partial_record: bool,
-}
-
-pub(super) fn read_jsonl_chunk_aligned(path: &str, offset: u64) -> Result<JsonlReadChunk, String> {
-    let mut file = std::fs::File::open(path).map_err(|e| format!("open: {e}"))?;
-    let file_len = file.metadata().map_err(|e| format!("metadata: {e}"))?.len();
-    let clamped_offset = offset.min(file_len);
-    let on_record_boundary = if clamped_offset == 0 {
-        true
-    } else {
-        file.seek(SeekFrom::Start(clamped_offset - 1))
-            .map_err(|e| format!("boundary seek: {e}"))?;
-        let mut previous = [0u8; 1];
-        file.read_exact(&mut previous)
-            .map_err(|e| format!("boundary read: {e}"))?;
-        previous[0] == b'\n'
-    };
-
-    file.seek(SeekFrom::Start(clamped_offset))
-        .map_err(|e| format!("seek: {e}"))?;
-    let mut discarded = 0u64;
-    if !on_record_boundary {
-        let mut byte = [0u8; 1];
-        loop {
-            let n = file
-                .read(&mut byte)
-                .map_err(|e| format!("align read: {e}"))?;
-            if n == 0 {
-                break;
-            }
-            discarded = discarded.saturating_add(1);
-            if byte[0] == b'\n' {
-                break;
-            }
-        }
-    }
-
-    let start_offset = clamped_offset.saturating_add(discarded);
-    let mut data = vec![0u8; 16384];
-    let n = file.read(&mut data).map_err(|e| format!("read: {e}"))?;
-    data.truncate(n);
-    Ok(JsonlReadChunk {
-        data,
-        start_offset,
-        end_offset: start_offset.saturating_add(n as u64),
-        skipped_partial_record: !on_record_boundary,
-    })
+    pub(super) align_next_read: &'a mut bool,
 }
 
 pub(super) struct PostTerminalState<'a> {
@@ -116,55 +62,6 @@ pub(super) struct PostTerminalState<'a> {
     pub(super) active_stream_inflight_reacquire_logged: &'a mut bool,
     pub(super) restored_turn: &'a Option<RestoredWatcherTurn>,
     pub(super) restored_injected_prompt_message_id: Option<u64>,
-}
-
-#[cfg(test)]
-mod alignment_tests {
-    use super::read_jsonl_chunk_aligned;
-
-    #[test]
-    fn non_boundary_offset_discards_partial_record_without_classifying_it() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("incident.jsonl");
-        let partial = serde_json::json!({
-            "type": "system",
-            "subtype": "task_notification",
-            "content": "review mentions rate limit as ordinary prose"
-        })
-        .to_string();
-        let complete = serde_json::json!({
-            "type": "result",
-            "is_error": false,
-            "result": "completed"
-        })
-        .to_string();
-        std::fs::write(&path, format!("{partial}\n{complete}\n")).expect("fixture");
-        let offset = (partial.find("rate limit").expect("phrase") + 2) as u64;
-
-        let chunk = read_jsonl_chunk_aligned(path.to_str().expect("path"), offset).expect("read");
-
-        assert!(chunk.skipped_partial_record);
-        assert_eq!(
-            String::from_utf8(chunk.data).expect("utf8"),
-            format!("{complete}\n")
-        );
-        assert_eq!(chunk.start_offset, partial.len() as u64 + 1);
-    }
-
-    #[test]
-    fn boundary_offset_keeps_complete_record() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("boundary.jsonl");
-        let first = "{\"type\":\"system\"}\n";
-        let second = "{\"type\":\"result\"}\n";
-        std::fs::write(&path, format!("{first}{second}")).expect("fixture");
-
-        let chunk = read_jsonl_chunk_aligned(path.to_str().expect("path"), first.len() as u64)
-            .expect("read");
-
-        assert!(!chunk.skipped_partial_record);
-        assert_eq!(String::from_utf8(chunk.data).expect("utf8"), second);
-    }
 }
 
 pub(super) async fn poll_watcher_output_or_continue(
@@ -360,19 +257,31 @@ pub(super) async fn poll_watcher_output_or_continue(
     // Snapshot pause epoch — if this changes later, a Discord turn claimed this data
     let epoch_snapshot = pause_epoch.load(Ordering::Relaxed);
 
-    // Try to read new data from output file
+    // Only the first read after attach/restore may start from a persisted
+    // mid-record offset. Every later offset is the exact end of our own prior
+    // read, so it must stay contiguous even when a JSONL record spans chunks.
+    let align_persisted_offset = *loop_poll_state.align_next_read;
     let read_result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         tokio::task::spawn_blocking({
             let path = output_path.to_string();
             let offset = current_offset;
-            move || read_jsonl_chunk_aligned(&path, offset)
+            move || {
+                if align_persisted_offset {
+                    read_jsonl_chunk_at_attach(&path, offset)
+                } else {
+                    read_jsonl_chunk_contiguous(&path, offset)
+                }
+            }
         }),
     )
     .await;
 
     let read_chunk = match read_result {
-        Ok(Ok(Ok(chunk))) => chunk,
+        Ok(Ok(Ok(chunk))) => {
+            *loop_poll_state.align_next_read = false;
+            chunk
+        }
         _ => {
             match tmux_liveness_decision(
                 cancel.load(Ordering::Relaxed),

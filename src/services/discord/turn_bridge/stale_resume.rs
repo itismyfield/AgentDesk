@@ -64,6 +64,24 @@ pub(super) fn contains_stale_resume_error_text(text: &str) -> bool {
     STALE_PHRASES.iter().any(|p| lower.contains(p))
 }
 
+fn is_direct_stale_resume_error_envelope(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || !contains_stale_resume_error_text(trimmed) {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    lower.starts_with("error:")
+        || lower.starts_with("no conversation found")
+        || lower.starts_with("conversation not found")
+        || lower.starts_with("could not find session")
+        || lower.starts_with("could not find conversation")
+        || lower.starts_with("session does not exist")
+        || lower.starts_with("no session with id")
+        || lower.starts_with("no saved session found with id")
+        || lower.starts_with("no rollout found for conversation id")
+        || lower.starts_with("timeout waiting for codex resumed rollout transcript")
+}
+
 pub(in crate::services::discord) fn result_event_has_stale_resume_error(
     value: &serde_json::Value,
 ) -> bool {
@@ -81,26 +99,19 @@ pub(in crate::services::discord) fn result_event_has_stale_resume_error(
         return false;
     }
 
-    if value
+    value
         .get("result")
         .and_then(|v| v.as_str())
-        .map(contains_stale_resume_error_text)
-        .unwrap_or(false)
-    {
-        return true;
-    }
-
-    value
-        .get("errors")
-        .and_then(|v| v.as_array())
-        .map(|errors| {
-            errors.iter().any(|err| {
-                err.as_str()
-                    .map(contains_stale_resume_error_text)
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
+        .into_iter()
+        .chain(
+            value
+                .get("errors")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|error| error.as_str()),
+        )
+        .any(is_direct_stale_resume_error_envelope)
 }
 
 pub(super) fn output_file_has_stale_resume_error_after_offset(
@@ -275,12 +286,19 @@ mod tests {
     }
 
     #[test]
-    fn result_event_ignores_unrelated_errors() {
-        let value: serde_json::Value = serde_json::from_str(
+    fn result_event_ignores_unrelated_or_quoted_child_errors() {
+        let unrelated: serde_json::Value = serde_json::from_str(
             r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Permission denied"}"#,
         )
         .unwrap();
-        assert!(!result_event_has_stale_resume_error(&value));
+        let quoted_child = serde_json::json!({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": true,
+            "result": "child failed: No conversation found with session ID abc"
+        });
+        assert!(!result_event_has_stale_resume_error(&unrelated));
+        assert!(!result_event_has_stale_resume_error(&quoted_child));
     }
 
     #[test]

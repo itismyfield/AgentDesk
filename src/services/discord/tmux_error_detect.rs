@@ -52,24 +52,59 @@ pub(super) fn detect_structured_provider_overload(value: &serde_json::Value) -> 
         return None;
     }
 
-    structured_error_objects(value).find_map(|object| {
-        for key in ["status", "status_code", "statusCode", "http_status"] {
-            if let Some(status) = object.get(key).and_then(structured_status_code)
-                && OVERLOAD_STATUS_CODES.contains(&status)
-            {
-                return Some(format!("provider_status_{status}"));
-            }
-        }
-        for key in ["code", "error_code", "errorCode", "type"] {
-            if let Some(code) = object.get(key).and_then(serde_json::Value::as_str) {
-                let normalized = code.trim().to_ascii_lowercase().replace(['-', ' '], "_");
-                if OVERLOAD_ERROR_CODES.contains(&normalized.as_str()) {
-                    return Some(format!("provider_code_{normalized}"));
+    structured_error_objects(value)
+        .find_map(|object| {
+            for key in ["status", "status_code", "statusCode", "http_status"] {
+                if let Some(status) = object.get(key).and_then(structured_status_code)
+                    && OVERLOAD_STATUS_CODES.contains(&status)
+                {
+                    return Some(format!("provider_status_{status}"));
                 }
             }
-        }
-        None
-    })
+            for key in ["code", "error_code", "errorCode", "type"] {
+                if let Some(code) = object.get(key).and_then(serde_json::Value::as_str) {
+                    let normalized = code.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+                    if OVERLOAD_ERROR_CODES.contains(&normalized.as_str()) {
+                        return Some(format!("provider_code_{normalized}"));
+                    }
+                }
+            }
+            None
+        })
+        .or_else(|| result_error_texts(value).find_map(detect_api_error_overload_envelope))
+}
+
+fn result_error_texts(value: &serde_json::Value) -> impl Iterator<Item = &str> {
+    value
+        .get("errors")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .chain(value.get("result").and_then(serde_json::Value::as_str))
+}
+
+fn detect_api_error_overload_envelope(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let inner = trimmed.strip_prefix('[')?.strip_suffix(']')?;
+    let detail = inner.strip_prefix("API Error:")?.trim();
+    if detail.contains(['[', ']', '\n', '\r']) {
+        return None;
+    }
+
+    let lower = detail.to_ascii_lowercase();
+    let status = lower
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .find_map(|token| token.parse::<u64>().ok())
+        .filter(|status| OVERLOAD_STATUS_CODES.contains(status));
+    if let Some(status) = status {
+        return Some(format!("provider_status_{status}"));
+    }
+
+    lower
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .find(|token| OVERLOAD_ERROR_CODES.contains(token))
+        .map(|code| format!("provider_code_{code}"))
 }
 
 fn structured_status_code(value: &serde_json::Value) -> Option<u64> {
@@ -119,26 +154,37 @@ mod pure_tests {
     }
 
     #[test]
-    fn overload_accepts_explicit_provider_status_or_code() {
-        let status = serde_json::json!({
+    fn overload_accepts_real_provider_error_envelopes() {
+        let claude = serde_json::json!({
             "type": "result",
+            "subtype": "error_during_execution",
             "is_error": true,
-            "result": "request failed",
-            "error": {"status": 529}
+            "result": "[API Error: 529 overloaded_error]"
         });
-        let code = serde_json::json!({
+        let wrapper = serde_json::json!({
             "type": "result",
+            "subtype": "error_during_execution",
             "is_error": true,
-            "result": "request failed",
-            "provider_error": {"code": "rate_limit_error"}
+            "errors": ["[API Error: 429 status code (no body)]"]
         });
         assert_eq!(
-            detect_structured_provider_overload(&status).as_deref(),
+            detect_structured_provider_overload(&claude).as_deref(),
             Some("provider_status_529")
         );
         assert_eq!(
-            detect_structured_provider_overload(&code).as_deref(),
-            Some("provider_code_rate_limit_error")
+            detect_structured_provider_overload(&wrapper).as_deref(),
+            Some("provider_status_429")
         );
+    }
+
+    #[test]
+    fn overload_rejects_api_error_envelope_embedded_in_review_prose() {
+        let quoted = serde_json::json!({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": true,
+            "errors": ["child review quoted [API Error: 529 overloaded_error] before recovery"]
+        });
+        assert_eq!(detect_structured_provider_overload(&quoted), None);
     }
 }
