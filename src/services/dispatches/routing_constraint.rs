@@ -534,6 +534,7 @@ mod tests {
                     (*node).to_string(),
                     ClusterNodeConfig {
                         max_concurrent_dispatches: Some(*cap),
+                        ..ClusterNodeConfig::default()
                     },
                 )
             })

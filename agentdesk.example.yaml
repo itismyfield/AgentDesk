@@ -4,13 +4,23 @@ server:
 
 cluster:
   enabled: false
-  # Optional per-worker concurrency caps for dispatch routing.
-  # Keys match worker `instance_id` first, then hostname.
+  # Optional operator-owned settings per node. Keys match worker `instance_id`
+  # first, then hostname for dispatch caps. Authenticated session forwarding is
+  # fail-closed: `trusted_forward_origin` must exactly match the worker's
+  # advertised `cluster.api_base_url`; advertisements never become a trust root.
+  # Configure every node before enabling forwarding capabilities. Origins must
+  # be http(s), have path `/`, and contain no userinfo, query, or fragment.
   nodes:
     example-main-node:
       max_concurrent_dispatches: 4
+      trusted_forward_origin: "https://main.example.net:8791"
     example-worker-node:
       max_concurrent_dispatches: 4
+      # Private RFC1918, IPv6 ULA, and Tailscale CGNAT addresses require this
+      # node-specific opt-in. Loopback, link-local, metadata, unspecified, and
+      # multicast targets remain blocked even when the opt-in is true.
+      trusted_forward_origin: "https://worker.tailnet.example:8791"
+      allow_private_forwarding: true
   blackout_windows:
     example-main-node:
       - start: "23:00"
