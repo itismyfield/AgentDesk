@@ -115,6 +115,48 @@ mod tests {
         assert!(!watchers.contains_key(&channel_a));
     }
 
+    #[test]
+    fn turn_starts_reuse_healthy_runtime_path_incumbent_after_handoff() {
+        let watchers = TmuxWatcherRegistry::new();
+        let owner = ChannelId::new(1_485_506_232_256_168_134);
+        let tmux_name = "AgentDesk-claude-adk-cc-respawn";
+        let runtime_path = "/tmp/claude-runtime-after-respawn.jsonl";
+        let provisional_path = "/tmp/agentdesk-wrapper-before-handoff.jsonl";
+        let incumbent = test_watcher_handle(tmux_name, runtime_path);
+        let incumbent_cancel = incumbent.cancel.clone();
+        assert!(try_claim_watcher(&watchers, owner, incumbent));
+        let mut spawn_count = 1;
+
+        for source in [
+            "turn_start_message",
+            "turn_start_headless",
+            "turn_start_message",
+        ] {
+            let outcome = claim_or_reuse_watcher(
+                &watchers,
+                owner,
+                test_watcher_handle(tmux_name, provisional_path),
+                &ProviderKind::Claude,
+                source,
+            );
+            spawn_count += usize::from(outcome.should_spawn());
+            assert_eq!(outcome.action, WatcherClaimAction::ReuseExisting);
+            assert_eq!(outcome.owner_channel_id(), owner);
+            assert!(!incumbent_cancel.load(Ordering::Relaxed));
+            assert_eq!(
+                watchers.get(&owner).expect("healthy incumbent").output_path,
+                runtime_path
+            );
+        }
+
+        assert_eq!(spawn_count, 1, "turn starts must not respawn the watcher");
+        assert_eq!(
+            watchers.len(),
+            1,
+            "the incumbent remains the only registry slot"
+        );
+    }
+
     /// #4455: a crossed-provider-turn Codex rebind must replace even a live
     /// same-session/same-output incumbent. Reuse would leave its stale
     /// `current_msg_id` render seed and converter generation in authority.
