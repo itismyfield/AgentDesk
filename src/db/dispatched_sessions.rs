@@ -122,8 +122,15 @@ pub(crate) async fn load_session_channel_id_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> Result<Option<(u64, Option<String>)>, String> {
+    let resolved_key =
+        crate::db::dispatched_session_canonical_identity::resolve_session_key_pg(pool, session_key)
+            .await
+            .map_err(|error| format!("resolve session locator {session_key}: {error:?}"))?;
+    let Some(resolved_key) = resolved_key else {
+        return Ok(None);
+    };
     let row = sqlx::query("SELECT channel_id, instance_id FROM sessions WHERE session_key = $1")
-        .bind(session_key)
+        .bind(&resolved_key)
         .fetch_optional(pool)
         .await
         .map_err(|error| {

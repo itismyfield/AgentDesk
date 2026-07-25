@@ -74,6 +74,34 @@ The reverse function `parse_provider_and_channel_from_tmux_name` recovers
 sanitize+truncate unchanged. That is the round-trip property unit tests assert
 in `src/services/cluster/session_matcher.rs`.
 
+## PostgreSQL canonical Discord identity
+
+The deterministic tmux name remains a runtime locator; it is not semantic
+Discord ownership. PostgreSQL-capable session hooks may additionally identify an
+ordinary Discord channel or thread with this tuple:
+
+```text
+(provider, discord_token_hash, channel_id, identity_kind=discord_channel)
+```
+
+`channel_id` is the exact Discord snowflake receiving the turn. A thread uses
+its own snowflake, never its parent's. `discord_token_hash` is AgentDesk's
+existing `discord_<16 lowercase hex>` bot namespace; raw Discord bot tokens are
+never persisted or sent in a session hook.
+
+Current and previous `session_key` locators remain attached to one durable
+`sessions.id` through `session_key_aliases`. Resolution checks the exact current
+key, then an exact alias, then a supplied unique canonical identity. Every piece
+of evidence must converge on the same row. Sanitization/truncation collisions or
+ambiguous legacy rows therefore return a typed conflict instead of selecting,
+merging, deleting, renaming, or killing a session.
+
+Scheduled snapshots use the explicit `scheduled_snapshot` identity kind and are
+excluded from ordinary-channel uniqueness. The columns are nullable and hook
+fields optional so older binaries continue using exact locator behavior. This
+foundation does not rename live tmux sessions or change the operator-facing
+naming convention above.
+
 ## Provider fingerprint
 
 Name matching is necessary but not sufficient. A session is fully matched only

@@ -510,6 +510,11 @@
       "path": "migrations/postgres/0099_dispatched_origin_turn_marker.sql",
       "sha256": "737bf8d3fa5a05cdd51b041bed6e94825bd7829f79c3b4366c823097cf4f9c14",
       "version": 99
+    },
+    {
+      "path": "migrations/postgres/0100_canonical_discord_session_identity.sql",
+      "sha256": "239d109bf7a987f19fb0ea8787457a1043c70f09c2c3d0be2b9b9e427db5ba48",
+      "version": 100
     }
   ],
   "version": 1

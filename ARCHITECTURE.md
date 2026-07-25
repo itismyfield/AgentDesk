@@ -76,6 +76,8 @@ src/
 │   ├── automation_candidates/
 │   │   └── verdict_tests.rs
 │   ├── dispatched_sessions/
+│   │   ├── canonical_identity.rs
+│   │   ├── canonical_identity_pg_tests.rs
 │   │   └── rebind_override.rs
 │   ├── dispatches/
 │   │   ├── outbox/
@@ -1081,9 +1083,11 @@ src/
 │   │   ├── runtime_store.rs
 │   │   ├── semantic_boundaries.rs
 │   │   ├── session_banner.rs
+│   │   ├── session_canonical_identity.rs
 │   │   ├── session_identity.rs
 │   │   ├── session_relay_sink.rs
 │   │   ├── session_runtime.rs
+│   │   ├── session_status_hook.rs
 │   │   ├── settings.rs
 │   │   ├── shared_memory.rs
 │   │   ├── shared_state.rs
@@ -1125,6 +1129,8 @@ src/
 │   │   ├── voice_lifecycle.rs
 │   │   ├── voice_routing.rs
 │   │   └── voice_sensitivity.rs
+│   ├── dispatched_sessions/
+│   │   └── canonical_identity.rs
 │   ├── dispatches/
 │   │   ├── discord_delivery/
 │   │   │   ├── guard.rs

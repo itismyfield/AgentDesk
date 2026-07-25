@@ -133,6 +133,21 @@ Production session-key call sites that need host/tmux identity route through
 raw colon splitting uses are non-session string parsing, the parser
 implementation itself, or explicitly out-of-scope compatibility surfaces.
 
+The namespaced key is a **locator**, not the durable Discord channel identity.
+GO-A1 (#4913) adds an optional semantic identity tuple on PostgreSQL session
+rows: `(provider, discord_token_hash, channel_id, identity_kind)`. Ordinary
+channels and threads use their exact Discord snowflake (a thread never reuses
+its parent id); `scheduled_snapshot` is explicit and excluded from the unique
+`discord_channel` authority. Raw bot tokens are never persisted.
+
+`session_key_aliases` maps prior locators to the durable `sessions.id` row.
+Resolution is ordered exact primary locator, exact alias, then unique canonical
+identity when that tuple is supplied. If two evidence sources point to different
+rows, or multiple legacy rows claim a tuple, write/destructive paths return a
+typed conflict instead of selecting, merging, deleting, renaming, or killing a
+session. New hooks dual-write identity fields; omitted fields preserve
+mixed-version compatibility with old binaries.
+
 ## Inflight Cleanup SSoT
 
 **Canonical owner**: `src/services/discord/inflight.rs`
