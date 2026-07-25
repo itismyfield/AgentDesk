@@ -327,27 +327,53 @@ fn validate_addresses(
 fn address_is_allowed(address: IpAddr, allow_private: bool) -> bool {
     match address {
         IpAddr::V4(address) => ipv4_is_allowed(address, allow_private),
-        IpAddr::V6(address) => address.to_ipv4_mapped().map_or_else(
-            || ipv6_is_allowed(address, allow_private),
-            |address| ipv4_is_allowed(address, allow_private),
-        ),
+        IpAddr::V6(address) => {
+            if ipv6_uses_local_nat64_prefix(address) {
+                return false;
+            }
+            ipv4_embedded_ipv6(address).map_or_else(
+                || ipv6_is_allowed(address, allow_private),
+                |address| ipv4_is_allowed(address, allow_private),
+            )
+        }
     }
 }
 
 fn address_is_configured_private(address: IpAddr) -> bool {
     match address {
-        IpAddr::V4(address) => {
-            let octets = address.octets();
-            address.is_private() || octets[0] == 100 && (64..=127).contains(&octets[1])
+        IpAddr::V4(address) => ipv4_is_configured_private(address),
+        IpAddr::V6(address) => {
+            if ipv6_uses_local_nat64_prefix(address) {
+                return false;
+            }
+            ipv4_embedded_ipv6(address).map_or_else(
+                || (address.segments()[0] & 0xfe00) == 0xfc00,
+                ipv4_is_configured_private,
+            )
         }
-        IpAddr::V6(address) => address.to_ipv4_mapped().map_or_else(
-            || (address.segments()[0] & 0xfe00) == 0xfc00,
-            |address| {
-                let octets = address.octets();
-                address.is_private() || octets[0] == 100 && (64..=127).contains(&octets[1])
-            },
-        ),
     }
+}
+
+fn ipv6_uses_local_nat64_prefix(address: Ipv6Addr) -> bool {
+    address.octets()[..6] == [0x00, 0x64, 0xff, 0x9b, 0, 1]
+}
+
+fn ipv4_embedded_ipv6(address: Ipv6Addr) -> Option<Ipv4Addr> {
+    let octets = address.octets();
+    if address.to_ipv4_mapped().is_some()
+        || octets[..12] == [0; 12] && !address.is_unspecified() && !address.is_loopback()
+        || octets[..12] == [0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0]
+    {
+        return Some(Ipv4Addr::new(
+            octets[12], octets[13], octets[14], octets[15],
+        ));
+    }
+    None
+}
+
+fn ipv4_is_configured_private(address: Ipv4Addr) -> bool {
+    let octets = address.octets();
+    address.is_private() || octets[0] == 100 && (64..=127).contains(&octets[1])
 }
 
 fn ipv4_is_allowed(address: Ipv4Addr, allow_private: bool) -> bool {
@@ -520,6 +546,11 @@ mod tests {
             "[::]:8791",
             "[::ffff:127.0.0.1]:8791",
             "[::ffff:169.254.169.254]:80",
+            "[::127.0.0.1]:8791",
+            "[::169.254.169.254]:80",
+            "[64:ff9b::127.0.0.1]:8791",
+            "[64:ff9b::169.254.169.254]:80",
+            "[64:ff9b:1::cb00:710a]:8791",
             "[fd00:ec2::254]:80",
             "[fe80::1]:8791",
             "[ff02::1]:8791",
@@ -556,8 +587,18 @@ mod tests {
                 vec![parsed]
             );
         }
-        assert!(validate_addresses(vec!["127.0.0.1:8791".parse().unwrap()], true).is_err());
-        assert!(validate_addresses(vec!["169.254.169.254:80".parse().unwrap()], true).is_err());
+        for address in [
+            "127.0.0.1:8791",
+            "169.254.169.254:80",
+            "100.100.100.200:80",
+            "192.0.0.192:80",
+        ] {
+            assert_eq!(
+                validate_addresses(vec![address.parse().unwrap()], true).unwrap_err(),
+                TrustedTargetError::UnsafeAddress,
+                "address={address}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -568,6 +609,21 @@ mod tests {
                 &cluster_with_transport(Some("http://worker.example:8791"), true, true),
                 "http://worker.example:8791",
                 public,
+            )
+            .await
+            .unwrap_err(),
+            TrustedTargetError::InsecureTransport
+        );
+
+        let mixed = vec![
+            "10.0.0.2:8791".parse().unwrap(),
+            "203.0.113.10:8791".parse().unwrap(),
+        ];
+        assert_eq!(
+            resolve(
+                &cluster_with_transport(Some("http://worker.example:8791"), true, true),
+                "http://worker.example:8791",
+                mixed,
             )
             .await
             .unwrap_err(),

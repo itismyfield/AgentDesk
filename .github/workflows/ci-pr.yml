@@ -577,6 +577,15 @@ jobs:
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Trusted session forwarding tests
+        timeout-minutes: 10
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: env -u AGENTDESK_ROOT_DIR cargo test --lib services::session_forwarding -- --skip _pg --skip pg_ --skip postgres
+
       - name: just test-postgres
         timeout-minutes: 20
         shell: bash
@@ -787,12 +796,6 @@ jobs:
           # Required Script checks only run on protected PR candidates. Their
           # synthetic merge first parent is the exact immutable base snapshot.
           TEST_LANE_BASELINE_REF: HEAD^1
-
-      # #4913: run the trusted-target behavior module in the PR lane selected by
-      # its source directory; main still retains the exact test-non-pg manifest.
-      - name: Trusted session forwarding tests
-        if: needs.changes.outputs.pg_db == 'true'
-        run: env -u AGENTDESK_ROOT_DIR cargo test --lib services::session_forwarding -- --skip _pg --skip pg_ --skip postgres
 
       # Keep high-value relay ratchets as explicit named steps as well as in the
       # aggregate script suite so their failure surface is immediately visible.

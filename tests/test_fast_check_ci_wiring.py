@@ -153,6 +153,13 @@ class FastCheckCiWiringTests(unittest.TestCase):
             test_job,
             r"(?m)^    if: needs\.changes\.outputs\.pg_db == 'true'$",
         )
+        command = (
+            "env -u AGENTDESK_ROOT_DIR cargo test --lib "
+            "services::session_forwarding -- --skip _pg --skip pg_ --skip postgres"
+        )
+        self.assertEqual(test_job.count("- name: Trusted session forwarding tests"), 1)
+        self.assertEqual(test_job.count(command), 1)
+        self.assertNotIn(command, job_block(workflow, "scripts"))
 
     def test_pr_cross_os_lane_is_compile_only(self) -> None:
         job = job_block(PR_WORKFLOW.read_text(encoding="utf-8"), "check_fast_cross_os")
