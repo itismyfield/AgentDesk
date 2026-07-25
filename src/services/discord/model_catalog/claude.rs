@@ -14,6 +14,7 @@ use crate::services::provider::ProviderKind;
 
 const GATEWAY_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const REFRESH_STANDBY_INTERVAL: Duration = Duration::from_secs(1);
 const CLOCK_SKEW_ALLOWANCE: Duration = Duration::from_secs(5 * 60);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -189,15 +190,11 @@ impl RefreshOutcome {
 struct RefreshTaskGuard;
 
 impl RefreshTaskGuard {
-    fn claim(provider: &ProviderKind) -> Option<Self> {
-        if !matches!(provider, ProviderKind::Claude)
-            || REFRESH_TASK_RUNNING
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
-        {
-            return None;
-        }
-        Some(Self)
+    fn claim() -> Option<Self> {
+        REFRESH_TASK_RUNNING
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+            .then_some(Self)
     }
 }
 
@@ -419,16 +416,6 @@ fn catalog_candidate_from_disk_paths(
     }
 }
 
-fn publish_initial_catalog_if_empty(cache: &RwLock<CatalogCache>, candidate: DiskCatalogCandidate) {
-    if let Ok(mut cached) = cache.write()
-        && cached.entries.is_empty()
-    {
-        cached.gateway_entries = candidate.gateway_entries;
-        cached.api_entries = candidate.api_entries;
-        cached.entries = merge_entries(cached.gateway_entries.clone(), cached.api_entries.clone());
-    }
-}
-
 fn publish_fresh_catalog_candidate(cache: &RwLock<CatalogCache>, candidate: &DiskCatalogCandidate) {
     if let Ok(mut cached) = cache.write() {
         if !candidate.gateway_entries.is_empty() {
@@ -437,6 +424,16 @@ fn publish_fresh_catalog_candidate(cache: &RwLock<CatalogCache>, candidate: &Dis
         if candidate.api_cache_fresh {
             cached.api_entries = candidate.api_entries.clone();
         }
+        cached.entries = merge_entries(cached.gateway_entries.clone(), cached.api_entries.clone());
+    }
+}
+
+fn publish_api_models(cache: &RwLock<CatalogCache>, models: Vec<ApiModel>) {
+    if let Ok(mut cached) = cache.write() {
+        cached.api_entries = usable_api_models(models)
+            .into_iter()
+            .map(|model| model_entry(model.id, model.display_name, "Anthropic Models API"))
+            .collect();
         cached.entries = merge_entries(cached.gateway_entries.clone(), cached.api_entries.clone());
     }
 }
@@ -585,14 +582,32 @@ async fn fetch_api_models(api_key: &str) -> Result<Vec<ApiModel>, FetchFailure> 
     .await
 }
 
+fn usable_api_models(models: Vec<ApiModel>) -> Vec<ApiModel> {
+    let mut seen = HashSet::new();
+    models
+        .into_iter()
+        .take(MAX_MODELS_PER_SOURCE)
+        .filter_map(|model| {
+            let id = model.id.trim().to_string();
+            if !is_safe_model_selector(&id) || !seen.insert(id.to_ascii_lowercase()) {
+                return None;
+            }
+            Some(ApiModel {
+                display_name: truncate_catalog_text(&model.display_name, &id),
+                id,
+            })
+        })
+        .collect()
+}
+
 fn cache_is_fresh(path: &Path, current_ms: u64) -> bool {
     file_cache_key(path)
         .and_then(|key| bounded_read(path, &key))
         .and_then(|raw| serde_json::from_slice::<ApiCache>(&raw).ok())
         .is_some_and(|cache| {
             cache.version == API_CACHE_VERSION
-                && !cache.models.is_empty()
                 && is_fresh(cache.fetched_at_ms, current_ms)
+                && !usable_api_models(cache.models).is_empty()
         })
 }
 
@@ -601,7 +616,7 @@ async fn refresh_cache_with<F, Fut>(
     current_ms: u64,
     api_key: Option<&str>,
     fetch: F,
-) -> RefreshOutcome
+) -> (RefreshOutcome, Option<Vec<ApiModel>>)
 where
     F: FnOnce(String) -> Fut,
     Fut: Future<Output = Result<Vec<ApiModel>, FetchFailure>>,
@@ -611,33 +626,33 @@ where
         .await
         .unwrap_or(false)
     {
-        return RefreshOutcome::Fresh;
+        return (RefreshOutcome::Fresh, None);
     }
     let Some(api_key) = api_key.map(str::trim).filter(|key| !key.is_empty()) else {
-        return RefreshOutcome::MissingApiKey;
+        return (RefreshOutcome::MissingApiKey, None);
     };
     let models = match fetch(api_key.to_string()).await {
-        Ok(models) => models,
-        Err(error) => return RefreshOutcome::FetchFailed(error),
+        Ok(models) => usable_api_models(models),
+        Err(error) => return (RefreshOutcome::FetchFailed(error), None),
     };
     if models.is_empty() {
-        return RefreshOutcome::Empty;
+        return (RefreshOutcome::Empty, None);
     }
 
     let cache = ApiCache {
         version: API_CACHE_VERSION,
         fetched_at_ms: current_ms,
-        models: models.into_iter().take(MAX_MODELS_PER_SOURCE).collect(),
+        models: models.clone(),
     };
     let Ok(serialized) = serde_json::to_string(&cache) else {
-        return RefreshOutcome::CacheWriteFailed;
+        return (RefreshOutcome::CacheWriteFailed, None);
     };
     let write_path = path.to_path_buf();
     match tokio::task::spawn_blocking(move || runtime_store::atomic_write(&write_path, &serialized))
         .await
     {
-        Ok(Ok(())) => RefreshOutcome::Updated,
-        Ok(Err(_)) | Err(_) => RefreshOutcome::CacheWriteFailed,
+        Ok(Ok(())) => (RefreshOutcome::Updated, Some(models)),
+        Ok(Err(_)) | Err(_) => (RefreshOutcome::CacheWriteFailed, None),
     }
 }
 
@@ -652,21 +667,17 @@ where
     F: FnOnce(String) -> Fut,
     Fut: Future<Output = Result<Vec<ApiModel>, FetchFailure>>,
 {
-    let candidate =
-        load_catalog_candidate(gateway_path.clone(), api_path.clone(), current_ms).await;
+    let candidate = load_catalog_candidate(gateway_path, api_path.clone(), current_ms).await;
     let cache = CATALOG_CACHE.get_or_init(|| RwLock::new(CatalogCache::default()));
-    publish_initial_catalog_if_empty(cache, candidate.clone());
+    publish_fresh_catalog_candidate(cache, &candidate);
 
     let Some(path) = api_path else {
-        publish_fresh_catalog_candidate(cache, &candidate);
         return RefreshOutcome::CachePathUnavailable;
     };
-    let outcome = refresh_cache_with(&path, current_ms, api_key, fetch).await;
-    if matches!(outcome, RefreshOutcome::Updated) {
-        let refreshed = load_catalog_candidate(gateway_path, Some(path), current_ms).await;
-        publish_fresh_catalog_candidate(cache, &refreshed);
-    } else {
-        publish_fresh_catalog_candidate(cache, &candidate);
+    let (outcome, refreshed_api_models) =
+        refresh_cache_with(&path, current_ms, api_key, fetch).await;
+    if let Some(models) = refreshed_api_models {
+        publish_api_models(cache, models);
     }
     outcome
 }
@@ -688,21 +699,47 @@ async fn refresh_and_log() {
     );
 }
 
+async fn run_refresh_owner<F, Fut>(refresh_interval: Duration, refresh: &mut F)
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    refresh().await;
+    let start = tokio::time::Instant::now() + refresh_interval;
+    let mut interval = tokio::time::interval_at(start, refresh_interval);
+    loop {
+        interval.tick().await;
+        refresh().await;
+    }
+}
+
+async fn supervise_background_refresh<F, Fut>(
+    standby_interval: Duration,
+    refresh_interval: Duration,
+    mut refresh: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    loop {
+        if let Some(_guard) = RefreshTaskGuard::claim() {
+            run_refresh_owner(refresh_interval, &mut refresh).await;
+            unreachable!("refresh owner runs until its supervisor is cancelled")
+        }
+        tokio::time::sleep(standby_interval).await;
+    }
+}
+
 pub(super) fn spawn_background_refresh(
     provider: &ProviderKind,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    let guard = RefreshTaskGuard::claim(provider)?;
-
-    Some(tokio::spawn(async move {
-        let _guard = guard;
-        refresh_and_log().await;
-        let start = tokio::time::Instant::now() + REFRESH_CHECK_INTERVAL;
-        let mut interval = tokio::time::interval_at(start, REFRESH_CHECK_INTERVAL);
-        loop {
-            interval.tick().await;
-            refresh_and_log().await;
-        }
-    }))
+    matches!(provider, ProviderKind::Claude).then(|| {
+        tokio::spawn(supervise_background_refresh(
+            REFRESH_STANDBY_INTERVAL,
+            REFRESH_CHECK_INTERVAL,
+            refresh_and_log,
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -725,19 +762,75 @@ mod tests {
     }
 
     #[test]
-    fn invariant_claude_model_catalog_refresh_claim_is_claude_only_singleflight() {
+    fn invariant_claude_model_catalog_refresh_claim_is_singleflight() {
         REFRESH_TASK_RUNNING.store(false, Ordering::Release);
-        assert!(RefreshTaskGuard::claim(&ProviderKind::Codex).is_none());
-        assert!(!REFRESH_TASK_RUNNING.load(Ordering::Acquire));
-
-        let guard =
-            RefreshTaskGuard::claim(&ProviderKind::Claude).expect("first Claude task claim");
-        assert!(RefreshTaskGuard::claim(&ProviderKind::Claude).is_none());
+        let guard = RefreshTaskGuard::claim().expect("first Claude task claim");
+        assert!(RefreshTaskGuard::claim().is_none());
         drop(guard);
-        let reclaimed =
-            RefreshTaskGuard::claim(&ProviderKind::Claude).expect("claim reset after drop");
+        let reclaimed = RefreshTaskGuard::claim().expect("claim reset after drop");
         drop(reclaimed);
         assert!(!REFRESH_TASK_RUNNING.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn invariant_claude_model_catalog_non_claude_provider_has_no_supervisor() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            assert!(spawn_background_refresh(&ProviderKind::Codex).is_none());
+            let handle = spawn_background_refresh(&ProviderKind::Claude)
+                .expect("Claude gateway must keep a refresh supervisor");
+            handle.abort();
+            let _ = handle.await;
+        });
+    }
+
+    #[test]
+    fn invariant_claude_model_catalog_owner_exit_hands_off_to_live_supervisor() {
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        REFRESH_TASK_RUNNING.store(false, Ordering::Release);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            tokio::time::pause();
+            let refreshes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let spawn_supervisor = |refreshes: Arc<std::sync::atomic::AtomicUsize>| {
+                tokio::spawn(supervise_background_refresh(
+                    Duration::from_secs(1),
+                    Duration::from_secs(60),
+                    move || {
+                        let refreshes = Arc::clone(&refreshes);
+                        async move {
+                            refreshes.fetch_add(1, Ordering::AcqRel);
+                            std::future::pending::<()>().await;
+                        }
+                    },
+                ))
+            };
+
+            let first = spawn_supervisor(Arc::clone(&refreshes));
+            let second = spawn_supervisor(Arc::clone(&refreshes));
+            tokio::task::yield_now().await;
+            assert_eq!(refreshes.load(Ordering::Acquire), 1);
+            tokio::time::advance(Duration::from_millis(500)).await;
+            tokio::task::yield_now().await;
+
+            first.abort();
+            let _ = first.await;
+            assert!(!REFRESH_TASK_RUNNING.load(Ordering::Acquire));
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+            assert_eq!(refreshes.load(Ordering::Acquire), 2);
+            assert!(REFRESH_TASK_RUNNING.load(Ordering::Acquire));
+
+            second.abort();
+            let _ = second.await;
+            assert!(!REFRESH_TASK_RUNNING.load(Ordering::Acquire));
+        });
     }
 
     #[test]
@@ -1206,6 +1299,86 @@ mod tests {
         });
     }
 
+    #[test]
+    fn invariant_claude_model_catalog_successful_api_refresh_preserves_gateway_memory_source() {
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let directory = tempdir().unwrap();
+            let gateway_path = directory.path().join("gateway.json");
+            let api_path = directory.path().join("api.json");
+            let current_ms = 55_000;
+            let stale_ms = current_ms + GATEWAY_CACHE_TTL.as_millis() as u64 + 1;
+            std::fs::write(
+                &gateway_path,
+                serde_json::json!({
+                    "fetchedAt": current_ms,
+                    "models": [{"id": "gateway-memory", "display_name": "Memory gateway"}],
+                })
+                .to_string(),
+            )
+            .unwrap();
+            std::fs::write(
+                &api_path,
+                api_cache_json(
+                    current_ms,
+                    serde_json::json!([{"id": "claude-old-api", "display_name": "Old API"}]),
+                ),
+            )
+            .unwrap();
+            let cache = CATALOG_CACHE.get_or_init(|| RwLock::new(CatalogCache::default()));
+            if let Ok(mut cached) = cache.write() {
+                *cached = CatalogCache::default();
+            }
+            let initial = refresh_and_log_with(
+                Some(gateway_path.clone()),
+                Some(api_path.clone()),
+                current_ms,
+                None,
+                |_| async { unreachable!("fresh cache must not fetch") },
+            )
+            .await;
+            assert_eq!(initial, RefreshOutcome::Fresh);
+
+            let updated = refresh_and_log_with(
+                Some(gateway_path.clone()),
+                Some(api_path),
+                stale_ms,
+                Some("key"),
+                move |_| async move {
+                    std::fs::write(
+                        &gateway_path,
+                        serde_json::json!({
+                            "fetchedAt": stale_ms,
+                            "models": [{"id": "gateway-disk-race", "display_name": "Disk race"}],
+                        })
+                        .to_string(),
+                    )
+                    .unwrap();
+                    Ok(vec![ApiModel {
+                        id: "claude-new-api".to_string(),
+                        display_name: "New API".to_string(),
+                    }])
+                },
+            )
+            .await;
+
+            assert_eq!(updated, RefreshOutcome::Updated);
+            let resolved = resolved_models();
+            assert!(resolved.iter().any(|entry| entry.value == "gateway-memory"));
+            assert!(
+                !resolved
+                    .iter()
+                    .any(|entry| entry.value == "gateway-disk-race")
+            );
+            assert!(resolved.iter().any(|entry| entry.value == "claude-new-api"));
+            assert!(!resolved.iter().any(|entry| entry.value == "claude-old-api"));
+        });
+    }
+
     #[tokio::test]
     async fn invariant_claude_model_catalog_fresh_cache_skips_refresh_fetch() {
         let directory = tempdir().unwrap();
@@ -1221,7 +1394,7 @@ mod tests {
         .unwrap();
         let fetch_called = Arc::new(AtomicBool::new(false));
 
-        let outcome = refresh_cache_with(&path, current_ms, Some("key"), {
+        let (outcome, published) = refresh_cache_with(&path, current_ms, Some("key"), {
             let fetch_called = Arc::clone(&fetch_called);
             move |_| {
                 fetch_called.store(true, Ordering::Release);
@@ -1231,7 +1404,45 @@ mod tests {
         .await;
 
         assert_eq!(outcome, RefreshOutcome::Fresh);
+        assert!(published.is_none());
         assert!(!fetch_called.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn invariant_claude_model_catalog_invalid_only_fresh_cache_triggers_fetch() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("cache.json");
+        let current_ms = 55_000;
+        std::fs::write(
+            &path,
+            api_cache_json(
+                current_ms,
+                serde_json::json!([
+                    {"id": "bad selector!", "display_name": "Invalid"},
+                    {"id": "x".repeat(65), "display_name": "Oversize"}
+                ]),
+            ),
+        )
+        .unwrap();
+        let fetch_called = Arc::new(AtomicBool::new(false));
+
+        let (outcome, published) = refresh_cache_with(&path, current_ms, Some("key"), {
+            let fetch_called = Arc::clone(&fetch_called);
+            move |_| {
+                fetch_called.store(true, Ordering::Release);
+                async {
+                    Ok(vec![ApiModel {
+                        id: "claude-valid-refresh".to_string(),
+                        display_name: "Valid refresh".to_string(),
+                    }])
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(outcome, RefreshOutcome::Updated);
+        assert!(fetch_called.load(Ordering::Acquire));
+        assert_eq!(published.unwrap()[0].id, "claude-valid-refresh");
     }
 
     #[tokio::test]
@@ -1244,7 +1455,7 @@ mod tests {
         );
         std::fs::write(&path, &original).unwrap();
 
-        let outcome = refresh_cache_with(
+        let (outcome, published) = refresh_cache_with(
             &path,
             GATEWAY_CACHE_TTL.as_millis() as u64 + 2,
             Some("key"),
@@ -1256,6 +1467,7 @@ mod tests {
             outcome,
             RefreshOutcome::FetchFailed(FetchFailure::Transport)
         );
+        assert!(published.is_none());
         assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
@@ -1269,7 +1481,7 @@ mod tests {
         );
         std::fs::write(&path, &original).unwrap();
 
-        let outcome = refresh_cache_with(
+        let (outcome, published) = refresh_cache_with(
             &path,
             GATEWAY_CACHE_TTL.as_millis() as u64 + 2,
             Some("key"),
@@ -1278,6 +1490,7 @@ mod tests {
         .await;
 
         assert_eq!(outcome, RefreshOutcome::Empty);
+        assert!(published.is_none());
         assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
@@ -1286,7 +1499,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let path = directory.path().join("nested").join("cache.json");
         let current_ms = 55_000;
-        let outcome = refresh_cache_with(&path, current_ms, Some("key"), |_| async {
+        let (outcome, published) = refresh_cache_with(&path, current_ms, Some("key"), |_| async {
             Ok(vec![ApiModel {
                 id: "claude-new".to_string(),
                 display_name: "New model".to_string(),
@@ -1295,6 +1508,7 @@ mod tests {
         .await;
 
         assert_eq!(outcome, RefreshOutcome::Updated);
+        assert_eq!(published.unwrap()[0].id, "claude-new");
         let cache: ApiCache = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(cache.fetched_at_ms, current_ms);
         assert_eq!(cache.models[0].id, "claude-new");
