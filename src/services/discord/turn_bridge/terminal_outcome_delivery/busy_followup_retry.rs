@@ -3,6 +3,27 @@ use super::empty_response_recovery::{
 };
 use super::*;
 
+fn busy_requeue_delivery_policy(
+    outcome: followup_requeue::FollowupRequeueOutcome,
+) -> (bool, &'static str) {
+    if !outcome.requeued {
+        (
+            true,
+            "⚠ Claude TUI가 이전 턴을 처리 중이라 메시지 재큐에 실패했습니다. 기존 세션은 유지했으니 잠시 후 다시 보내 주세요.",
+        )
+    } else if outcome.retry_capped {
+        (
+            false,
+            "⚠ Claude TUI가 계속 사용 중이라 자동 재시도를 중단했습니다. 메시지는 큐에 보존되어 있습니다. 잠시 후 다시 시도하거나 메시지를 재전송해 주세요.",
+        )
+    } else {
+        (
+            false,
+            "⏳ Claude TUI가 이전 턴을 처리 중이라 메시지를 아직 주입하지 못했습니다. 기존 세션은 유지하고 메시지를 큐에 다시 넣어, TUI가 한가해지면 자동으로 처리합니다.",
+        )
+    }
+}
+
 /// Run empty-response recovery and normalize its outcome into the tuple the
 /// terminal-delivery loop consumes. The recovery call writes
 /// `claude_tui_busy_requeue_pending` back through its state borrow, so the
@@ -70,13 +91,10 @@ pub(super) async fn apply_busy_requeue_if_pending(
         turn_id,
     )
     .await;
-    if outcome.retry_capped {
-        *delivery_response = "⚠ Claude TUI가 계속 사용 중이라 자동 재시도를 중단했습니다. 메시지는 큐에 보존되어 있습니다. 잠시 후 다시 시도하거나 메시지를 재전송해 주세요.".to_string();
-    } else if outcome.requeued {
-        *delivery_response = "⏳ Claude TUI가 이전 턴을 처리 중이라 메시지를 아직 주입하지 못했습니다. 기존 세션은 유지하고 메시지를 큐에 다시 넣어, TUI가 한가해지면 자동으로 처리합니다.".to_string();
-    } else {
+    let (preserve_inflight, response) = busy_requeue_delivery_policy(outcome);
+    *delivery_response = response.to_string();
+    if preserve_inflight {
         *preserve_inflight_for_cleanup_retry = true;
-        *delivery_response = "⚠ Claude TUI가 이전 턴을 처리 중이라 메시지 재큐에 실패했습니다. 기존 세션은 유지했으니 잠시 후 다시 보내 주세요.".to_string();
         tracing::warn!(
             provider = %provider.as_str(),
             channel_id = channel_id.get(),
@@ -100,4 +118,30 @@ pub(super) async fn apply_busy_requeue_if_pending(
         );
     }
     Some(outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capped_requeue_failure_preserves_inflight_without_false_queue_claim_4888() {
+        let outcome = followup_requeue::FollowupRequeueOutcome {
+            requeued: false,
+            retry_capped: true,
+            notice_message_id: MessageId::new(100_000_004_888_301),
+        };
+
+        let (preserve_inflight, response) = busy_requeue_delivery_policy(outcome);
+
+        assert!(
+            preserve_inflight,
+            "capped requeue refusal must preserve inflight for cleanup retry"
+        );
+        assert!(response.contains("재큐에 실패"));
+        assert!(
+            !response.contains("메시지는 큐에 보존되어 있습니다"),
+            "capped requeue refusal must not claim the message is queued"
+        );
+    }
 }

@@ -20,6 +20,10 @@ use cancel_prompt_replace::{
     CancelPromptReplaceContext, CancelPromptReplaceMessage, CancelPromptReplaceOutcome,
     CancelPromptReplaceState, handle_cancel_prompt_replace,
 };
+pub(super) use contracts::{
+    TerminalOutcomeDeliveryContext, TerminalOutcomeDeliveryOutcome, TerminalOutcomeDeliveryOutput,
+    TerminalOutcomeDeliveryState,
+};
 use delivery_epilogue::{
     DeliveryEpilogueContext, DeliveryEpilogueMessage, DeliveryEpilogueState,
     handle_delivery_epilogue,
@@ -34,6 +38,7 @@ use recovery_retry::{
 
 mod busy_followup_retry;
 mod cancel_prompt_replace;
+mod contracts;
 mod delivery_epilogue;
 mod empty_response_recovery;
 mod prompt_too_long_guidance;
@@ -41,101 +46,6 @@ mod queue_retry_silence;
 mod recovery_retry;
 
 use crate::services::discord::session_banner::DiscordTurnSessionBanner;
-
-pub(super) struct TerminalOutcomeDeliveryContext {
-    pub(super) channel_id: ChannelId,
-    pub(super) user_msg_id: Option<MessageId>,
-    pub(super) current_msg_id: MessageId,
-    pub(super) status_panel_msg_id: Option<MessageId>,
-    pub(super) cancelled: bool,
-    pub(super) transport_error: bool,
-    pub(super) recovery_retry: bool,
-    pub(super) rx_disconnected: bool,
-    pub(super) tmux_last_offset: Option<u64>,
-    pub(super) watcher_owner_channel_id: ChannelId,
-    pub(super) watcher_handoff_claim_outcome: WatcherHandoffClaimOutcome,
-    pub(super) bridge_created_response_placeholder_msg_id: Option<MessageId>,
-    pub(super) bridge_relay_delegated_to_watcher: bool,
-    pub(super) bridge_output_owner: Option<BridgeOutputOwner>,
-    pub(super) should_complete_work_dispatch_after_delivery: bool,
-    pub(super) should_fail_dispatch_after_delivery: bool,
-    pub(super) can_chain_locally: bool,
-    pub(super) single_message_panel_footer_mode: bool,
-    pub(super) is_prompt_too_long: bool,
-    pub(super) claude_tui_followup_pre_submit_requeue_candidate: bool,
-    pub(super) tui_error_classification: TuiErrorClassification,
-    pub(super) had_prior_session_id_at_turn_start: bool,
-    pub(super) session_handshake_seen: bool,
-    pub(super) turn_start: std::time::Instant,
-    #[cfg(unix)]
-    pub(super) bridge_tui_gate_outcome_early: Option<super::super::tmux::TuiCompletionGateOutcome>,
-}
-
-pub(super) struct TerminalOutcomeDeliveryState {
-    pub(super) shared_owned: Arc<SharedData>,
-    pub(super) gateway: Arc<dyn TurnGateway>,
-    pub(super) provider: ProviderKind,
-    pub(super) cancel_token: Arc<crate::services::provider::CancelToken>,
-    pub(super) turn_id: String,
-    pub(super) user_text_owned: String,
-    pub(super) adk_session_key: Option<String>,
-    pub(super) adk_cwd: Option<String>,
-    pub(super) dispatch_id: Option<String>,
-    pub(super) new_session_id: Option<String>,
-    pub(super) new_raw_provider_session_id: Option<String>,
-    pub(super) full_response: String,
-    pub(super) active_background_child_session_ids: Vec<i64>,
-    pub(super) pending_long_running_open_after_state_save: PendingLongRunningOpenAfterStateSave,
-    pub(super) pending_long_running_retarget_after_state_save:
-        PendingLongRunningRetargetAfterStateSave,
-    pub(super) long_running_placeholder_active: LongRunningPlaceholderActive,
-    pub(super) inflight_state: InflightTurnState,
-    pub(super) api_friction_reports: Vec<crate::services::api_friction::ApiFrictionReport>,
-    pub(super) review_dispatch_warning: Option<String>,
-    pub(super) last_edit_text: String,
-    pub(super) terminal_empty_response_notice: Option<String>,
-    pub(super) terminal_full_replay_cleanup_msg_ids: Vec<MessageId>,
-    pub(super) resume_failure_detected: bool,
-    pub(super) response_sent_offset: usize,
-}
-
-pub(super) enum TerminalOutcomeDeliveryOutcome {
-    Completed,
-}
-
-pub(super) struct TerminalOutcomeDeliveryOutput {
-    pub(super) outcome: TerminalOutcomeDeliveryOutcome,
-    pub(super) shared_owned: Arc<SharedData>,
-    pub(super) gateway: Arc<dyn TurnGateway>,
-    pub(super) provider: ProviderKind,
-    pub(super) cancel_token: Arc<crate::services::provider::CancelToken>,
-    pub(super) turn_id: String,
-    pub(super) user_text_owned: String,
-    pub(super) adk_session_key: Option<String>,
-    pub(super) adk_cwd: Option<String>,
-    pub(super) dispatch_id: Option<String>,
-    pub(super) new_session_id: Option<String>,
-    pub(super) new_raw_provider_session_id: Option<String>,
-    pub(super) full_response: String,
-    pub(super) active_background_child_session_ids: Vec<i64>,
-    pub(super) pending_long_running_open_after_state_save: PendingLongRunningOpenAfterStateSave,
-    pub(super) pending_long_running_retarget_after_state_save:
-        PendingLongRunningRetargetAfterStateSave,
-    pub(super) long_running_placeholder_active: LongRunningPlaceholderActive,
-    pub(super) inflight_state: InflightTurnState,
-    pub(super) api_friction_reports: Vec<crate::services::api_friction::ApiFrictionReport>,
-    pub(super) status_panel_terminal_committed: bool,
-    pub(super) bridge_should_emit_completion: bool,
-    pub(super) completion_footer_terminal_text: Option<String>,
-    pub(super) preserve_inflight_for_cleanup_retry: bool,
-    pub(super) bridge_skip_holder_owns_inflight: bool,
-    pub(super) terminal_delivery_committed: bool,
-    pub(super) resume_failure_detected: bool,
-    pub(super) terminal_empty_response_notice: Option<String>,
-    pub(super) terminal_full_replay_cleanup_msg_ids: Vec<MessageId>,
-    pub(super) response_sent_offset: usize,
-    pub(super) turn_start: std::time::Instant,
-}
 
 pub(super) async fn run_terminal_outcome_delivery(
     ctx: TerminalOutcomeDeliveryContext,
@@ -856,17 +766,6 @@ pub(super) async fn run_terminal_outcome_delivery(
         )
         .await;
     }
-    // The busy notice is shared across attempts. Do not arm attempt N+1 until
-    // every awaited terminal edit for attempt N has completed; otherwise N+1 can
-    // deliver its answer first and then be clobbered by N's late busy edit.
-    if let Some(outcome) = busy_requeue_outcome {
-        outcome.schedule_kickoff_after_terminal_card_delivery(
-            &shared_owned,
-            &provider,
-            channel_id,
-            "claude_tui_followup_requeue_after_terminal_card_delivery",
-        );
-    }
     // #4888: the busy-notice binding and its aggregate retry budget outlive a
     // single turn on purpose — the retry kickoff must find the same card and the
     // same counter. Release them here, once this turn reached a terminal outcome
@@ -902,6 +801,7 @@ pub(super) async fn run_terminal_outcome_delivery(
         status_panel_terminal_committed,
         bridge_should_emit_completion,
         completion_footer_terminal_text,
+        busy_requeue_outcome,
         preserve_inflight_for_cleanup_retry,
         bridge_skip_holder_owns_inflight,
         terminal_delivery_committed,

@@ -31,16 +31,17 @@ pub(super) struct FollowupRequeueOutcome {
 
 impl FollowupRequeueOutcome {
     /// Arm the next retry only after the caller has completed this attempt's
-    /// terminal card edit. This sequencing prevents the successor attempt from
-    /// finishing on the shared notice before the predecessor's busy edit lands.
+    /// final completion-postlude card edit. This sequencing prevents the successor
+    /// from finishing on the shared notice before the predecessor's last edit.
     pub(super) fn schedule_kickoff_after_terminal_card_delivery(
         self,
         shared: &Arc<SharedData>,
         provider: &ProviderKind,
         channel_id: ChannelId,
+        completion_card_boundary_crossed: bool,
         reason: &'static str,
     ) -> bool {
-        if !self.requeued || self.retry_capped {
+        if !completion_card_boundary_crossed || !self.requeued || self.retry_capped {
             return false;
         }
         super::super::schedule_deferred_idle_queue_kickoff(
@@ -354,10 +355,21 @@ mod tests {
             0,
             "requeue alone must not expose the successor before terminal card delivery"
         );
+        assert!(
+            !outcome.schedule_kickoff_after_terminal_card_delivery(
+                &shared,
+                &provider,
+                channel_id,
+                false,
+                "test_busy_retry_before_completion_postlude_card_delivery",
+            ),
+            "the successor must remain hidden before the completion-postlude card boundary"
+        );
         assert!(outcome.schedule_kickoff_after_terminal_card_delivery(
             &shared,
             &provider,
             channel_id,
+            true,
             "test_busy_retry_after_terminal_card_delivery",
         ));
         assert_eq!(
@@ -420,6 +432,7 @@ mod tests {
                 &shared,
                 &provider,
                 channel_id,
+                true,
                 "test_capped_busy_retry_after_terminal_card_delivery",
             ),
             "a capped retry must not arm a successor after terminal delivery"

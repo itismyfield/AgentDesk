@@ -12,75 +12,9 @@ use super::guards::InflightCleanupGuard;
 use super::*;
 
 mod channel_writeback;
+mod contracts;
 
-pub(super) struct CompletionPostludeContext {
-    pub(super) shared_owned: Arc<SharedData>,
-    pub(super) gateway: Arc<dyn TurnGateway>,
-    pub(super) channel_id: ChannelId,
-    pub(super) provider: ProviderKind,
-    pub(super) cancel_token: Arc<crate::services::provider::CancelToken>,
-    pub(super) user_msg_id: Option<MessageId>,
-    pub(super) turn_id: String,
-    pub(super) request_owner_name: String,
-    pub(super) final_session_status: &'static str,
-    pub(super) status_panel_started_at: i64,
-    pub(super) has_queued_turns: bool,
-    pub(super) defer_watcher_resume: bool,
-    pub(super) can_chain_locally: bool,
-    pub(super) single_message_panel_footer_mode: bool,
-    pub(super) is_external_input_tui_direct: bool,
-    pub(super) context_window_tokens: u64,
-    pub(super) context_compact_percent: u64,
-    pub(super) turn_start: std::time::Instant,
-}
-
-pub(super) struct CompletionPostludeState {
-    pub(super) full_response: String,
-    pub(super) user_text_owned: String,
-    pub(super) role_binding: Option<RoleBinding>,
-    pub(super) adk_session_key: Option<String>,
-    pub(super) adk_session_name: Option<String>,
-    pub(super) adk_session_info: Option<String>,
-    pub(super) adk_cwd: Option<String>,
-    pub(super) dispatch_id: Option<String>,
-    pub(super) dispatch_kind: Option<String>,
-    pub(super) new_session_id: Option<String>,
-    pub(super) new_raw_provider_session_id: Option<String>,
-    pub(super) status_panel_terminal_committed: bool,
-    pub(super) bridge_should_emit_completion: bool,
-    pub(super) current_msg_id: MessageId,
-    pub(super) status_panel_msg_id: Option<MessageId>,
-    pub(super) last_status_panel_text: String,
-    pub(super) completion_footer_terminal_text: Option<String>,
-    pub(super) spin_idx: usize,
-    pub(super) status_panel_generation: u64,
-    pub(super) preserve_inflight_for_cleanup_retry: bool,
-    pub(super) tmux_last_offset: Option<u64>,
-    pub(super) watcher_owner_channel_id: ChannelId,
-    pub(super) bridge_relay_delegated_to_watcher: bool,
-    pub(super) is_prompt_too_long: bool,
-    pub(super) resume_failure_detected: bool,
-    pub(super) recovery_retry: bool,
-    pub(super) rx_disconnected: bool,
-    pub(super) tmux_handed_off: bool,
-    pub(super) bridge_output_owner: Option<BridgeOutputOwner>,
-    pub(super) terminal_delivery_committed: bool,
-    pub(super) terminal_session_reset_required: bool,
-    pub(super) transcript_events: Vec<SessionTranscriptEvent>,
-    pub(super) accumulated_input_tokens: u64,
-    pub(super) accumulated_cache_create_tokens: u64,
-    pub(super) accumulated_cache_read_tokens: u64,
-    pub(super) accumulated_output_tokens: u64,
-    pub(super) accumulated_memory_input_tokens: u64,
-    pub(super) accumulated_memory_output_tokens: u64,
-    pub(super) transport_error: bool,
-    pub(super) api_friction_reports: Vec<crate::services::api_friction::ApiFrictionReport>,
-    pub(super) cancelled: bool,
-    pub(super) restart_followup_pending: bool,
-    pub(super) bridge_skip_holder_owns_inflight: bool,
-    pub(super) inflight_guard: InflightCleanupGuard,
-    pub(super) inflight_state: InflightTurnState,
-}
+pub(super) use contracts::{CompletionPostludeContext, CompletionPostludeState};
 
 pub(super) async fn run_completion_postlude(
     ctx: CompletionPostludeContext,
@@ -122,6 +56,7 @@ pub(super) async fn run_completion_postlude(
     let status_panel_msg_id = state.status_panel_msg_id;
     let mut last_status_panel_text = state.last_status_panel_text;
     let completion_footer_terminal_text = state.completion_footer_terminal_text;
+    let busy_requeue_outcome = state.busy_requeue_outcome;
     let spin_idx = state.spin_idx;
     let status_panel_generation = state.status_panel_generation;
     let preserve_inflight_for_cleanup_retry = state.preserve_inflight_for_cleanup_retry;
@@ -217,6 +152,19 @@ pub(super) async fn run_completion_postlude(
             inflight_state.tmux_session_name.as_deref(),
         )
         .await;
+    }
+
+    // The busy notice is shared across attempts. Arm N+1 only after N's final
+    // awaited footer/status-panel edit, so a delayed predecessor cannot overwrite
+    // its successor. This function has no early return before this boundary.
+    if let Some(outcome) = busy_requeue_outcome {
+        outcome.schedule_kickoff_after_terminal_card_delivery(
+            &shared_owned,
+            &provider,
+            channel_id,
+            true,
+            "claude_tui_followup_requeue_after_completion_postlude_card_delivery",
+        );
     }
 
     if status_panel_terminal_committed

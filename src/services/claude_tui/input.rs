@@ -9,7 +9,8 @@ use crate::services::provider::{CancelToken, cancel_requested};
 
 const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
 const PROMPT_READY_CAPTURE_SCROLLBACK: i32 = -80;
-const PROMPT_READY_DEBUG_TAIL_LINES: usize = 24;
+const PROMPT_READY_DEBUG_TAIL_LINES: usize =
+    crate::services::tmux_common::CLAUDE_TUI_READINESS_SCAN_LINES;
 const PROMPT_READY_DEBUG_TAIL_BYTES: usize = 4096;
 pub const FRESH_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(120);
 pub const FOLLOWUP_PROMPT_READY_TIMEOUT: Duration = Duration::from_secs(45);
@@ -3144,7 +3145,31 @@ line 9
 line 10
 line 11
 line 12
-line 13";
+line 13
+line 14
+line 15
+line 16
+line 17
+line 18
+line 19
+line 20
+line 21
+line 22
+line 23
+line 24
+line 25
+line 26
+line 27
+line 28
+line 29
+line 30
+line 31
+line 32
+line 33
+line 34
+line 35
+line 36
+line 37";
 
         assert!(!pane_looks_ready_for_prompt(pane));
     }
@@ -3368,6 +3393,33 @@ line 13";
             PromptReadinessKind::Followup,
             &snapshot,
             Some(file.path()),
+        ));
+    }
+
+    #[test]
+    fn suffix_free_spinner_at_depth_31_vetoes_prompt_readiness_4888() {
+        let mut lines = vec![
+            "✳ Compacting conversation…".to_string(),
+            "────────────────────────────────────────────────────".to_string(),
+            "❯".to_string(),
+        ];
+        lines.extend((0..29).map(|index| format!("  footer/status row {index}")));
+        let pane = lines.join("\n");
+        let snapshot = prompt_readiness_snapshot_from_capture(Some(&pane), true);
+
+        assert_eq!(
+            pane.lines()
+                .rev()
+                .position(|line| line.starts_with('✳'))
+                .expect("spinner depth"),
+            31,
+            "fixture must place the suffix-free spinner beyond the former 24-line tail"
+        );
+        assert!(snapshot.prompt_marker_detected);
+        assert!(snapshot.pane_tail.contains("✳ Compacting conversation…"));
+        assert!(!prompt_marker_confirms_prompt_ready(
+            PromptReadinessKind::Followup,
+            &snapshot,
         ));
     }
 

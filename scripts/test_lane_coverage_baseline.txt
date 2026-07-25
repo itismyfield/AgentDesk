@@ -159,7 +159,6 @@ services::claude_tui::hosting::followup_support::busy_followup_notice_tests
 services::claude_tui::hosting::followup_support::claude_tui_prompt_buffer_tests
 services::claude_tui::hosting::warm_followup::followup_wait_error_requeue_tests
 services::claude_tui::input::active_turn_wait_extension_tests
-services::claude_tui::input::tests
 services::claude_tui::memento_feedback::tests
 services::claude_tui::prompt_readiness::tests
 services::claude_tui::session::tests
@@ -228,7 +227,6 @@ services::discord::followup_retry_requeue_tests
 services::discord::footer_view_reconciler::tests
 services::discord::gateway::answer_flush_gate_tests
 services::discord::gateway::outbound_messages::classified_post_tests
-services::discord::gateway::tests
 services::discord::gateway_voice_queue::tests
 services::discord::global_active_counter_tests
 services::discord::hard_ceiling_tests
@@ -473,7 +471,6 @@ services::discord::turn_bridge::completion_guard::tests
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests
 services::discord::turn_bridge::context_window::tests
 services::discord::turn_bridge::finalize_epilogue::tests
-services::discord::turn_bridge::followup_requeue::tests
 services::discord::turn_bridge::headless_delivery::headless_delivery_tests
 services::discord::turn_bridge::memory_lifecycle::background_memory_task_tests
 services::discord::turn_bridge::output_lifecycle::tests
@@ -639,7 +636,6 @@ services::stale_turn_reconciler::tests
 services::tmux_common::channel_binding_tests
 services::tmux_common::mcp_auth_required_tests
 services::tmux_common::selector_overlay_tests
-services::tmux_common::sentinel_tests
 services::tmux_diagnostics::tests
 services::tmux_wrapper::marker_one_hop_tests
 services::tmux_wrapper::stderr_redaction_tests

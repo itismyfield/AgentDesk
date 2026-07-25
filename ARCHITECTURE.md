@@ -698,6 +698,7 @@ src/
 │   │   │   │   │   ├── adk_thread.rs
 │   │   │   │   │   ├── claim_bootstrap.rs
 │   │   │   │   │   ├── inflight_create_log.rs
+│   │   │   │   │   ├── placeholder_handoff.rs
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── stale_dispatch_guard.rs
 │   │   │   │   │   ├── steering_hook.rs
@@ -874,7 +875,8 @@ src/
 │   │   │   │   ├── completion_context.rs
 │   │   │   │   └── completion_postgres.rs
 │   │   │   ├── completion_postlude/
-│   │   │   │   └── channel_writeback.rs
+│   │   │   │   ├── channel_writeback.rs
+│   │   │   │   └── contracts.rs
 │   │   │   ├── runtime_handoff_loop/
 │   │   │   │   ├── claude_e.rs
 │   │   │   │   ├── guarded_save.rs
@@ -900,6 +902,7 @@ src/
 │   │   │   │   │   └── handler.rs
 │   │   │   │   ├── busy_followup_retry.rs
 │   │   │   │   ├── cancel_prompt_replace.rs
+│   │   │   │   ├── contracts.rs
 │   │   │   │   ├── delivery_epilogue.rs
 │   │   │   │   ├── empty_response_recovery.rs
 │   │   │   │   ├── prompt_too_long_guidance.rs

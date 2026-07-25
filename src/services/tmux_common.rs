@@ -6,10 +6,11 @@ use std::path::{Path, PathBuf};
 use crate::services::tmux_diagnostics::clear_tmux_exit_reason;
 
 const CLAUDE_TUI_READY_SCAN_LINES: usize = 12;
-const CLAUDE_TUI_DRAFT_SCAN_LINES: usize = 36;
+pub(crate) const CLAUDE_TUI_READINESS_SCAN_LINES: usize = 36;
+const CLAUDE_TUI_DRAFT_SCAN_LINES: usize = CLAUDE_TUI_READINESS_SCAN_LINES;
 // Readiness must never accept a composer from deeper scrollback than the busy
 // classifiers can veto. Keep the acceptance window inside the veto window.
-const CLAUDE_TUI_ACTIVE_SCAN_LINES: usize = CLAUDE_TUI_DRAFT_SCAN_LINES;
+const CLAUDE_TUI_ACTIVE_SCAN_LINES: usize = CLAUDE_TUI_READINESS_SCAN_LINES;
 const _: () = assert!(CLAUDE_TUI_DRAFT_SCAN_LINES <= CLAUDE_TUI_ACTIVE_SCAN_LINES);
 /// Recent non-empty pane lines scanned for the MCP-authentication-required
 /// cold-boot banner. The warning renders just above the composer on a fresh

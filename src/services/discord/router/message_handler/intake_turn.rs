@@ -9,6 +9,7 @@ use super::*;
 mod adk_thread;
 mod claim_bootstrap;
 pub(crate) mod inflight_create_log;
+mod placeholder_handoff;
 pub(super) mod race_loss;
 mod stale_dispatch_guard;
 mod steering_hook;
@@ -1254,22 +1255,7 @@ pub(super) async fn handle_text_message(
     )
     .await;
 
-    // #1332 dispatch hand-off: if this turn was previously enqueued and is now
-    // being dispatched, reuse the Queued placeholder card so the user sees a
-    // single message transition `📬 → 🔄` instead of two distinct placeholders.
-    //
-    // codex review P2 (round-after-#1332): merged interventions accumulate
-    // multiple `source_message_ids`; each lost a separate race and registered
-    // its own queued placeholder. Drain mappings for ALL of them — the head
-    // (intervention.message_id) becomes the live Active card, and any
-    // additional source ids' Discord cards must be tidied up so the user does
-    // not see duplicate `📬` cards left behind for the merged tail.
     let queued_placeholder_handoff = if started {
-        // Use the write-through helper so the on-disk snapshot stays in sync
-        // with the in-memory map (codex review round-3 P2). Round-5 P2: the
-        // helper now takes the per-channel async persistence mutex, so this
-        // dispatch hand-off serializes against any concurrent race-loss
-        // render path on the same channel.
         shared
             .remove_queued_placeholder(channel_id, user_msg_id)
             .await
@@ -1356,73 +1342,19 @@ pub(super) async fn handle_text_message(
         .await;
     }
 
-    // #4888: a Claude-TUI busy follow-up retry re-enters intake for the SAME
-    // user message. Reuse the notice card bound on the first busy attempt (reset
-    // to the neutral placeholder body so streaming re-anchors on it) instead of
-    // POSTing one card per retry — that is the placeholder spam this fixes.
-    // If the edit fails the card is gone (user-deleted / permanently rejected),
-    // so drop the stale binding and fall through to the normal fresh-anchor
-    // path; keeping it would fail every future kickoff for this input.
-    let busy_notice_binding = super::super::super::busy_followup_retry_store::load(
+    // #4888: retry the same input on its bound busy notice instead of posting a
+    // card per attempt. A failed reset drops the stale binding and falls through
+    // to the normal fresh-anchor path.
+    let reusable_busy_notice = placeholder_handoff::reuse_bound_busy_notice(
+        http,
+        shared,
         &provider,
-        channel_id.get(),
-        user_msg_id.get(),
-    );
-    let reusable_busy_notice = match busy_notice_binding {
-        Some(binding) => {
-            let existing = MessageId::new(binding.notice_message_id);
-            match super::super::super::gateway::edit_intake_placeholder(
-                http.clone(),
-                shared.clone(),
-                channel_id,
-                existing,
-            )
-            .await
-            {
-                Ok(()) => Some(existing),
-                Err(error) => {
-                    tracing::warn!(
-                        channel_id = channel_id.get(),
-                        user_msg_id = user_msg_id.get(),
-                        notice_message_id = existing.get(),
-                        error = %error,
-                        "busy follow-up notice edit failed; dropping the stale binding and posting a fresh anchor"
-                    );
-                    let _ = super::super::super::busy_followup_retry_store::clear_if_current(
-                        &provider,
-                        channel_id.get(),
-                        user_msg_id.get(),
-                        existing.get(),
-                    );
-                    None
-                }
-            }
-        }
-        None => None,
-    };
+        channel_id,
+        user_msg_id,
+        queued_placeholder_handoff,
+    )
+    .await;
     let placeholder_msg_id = if let Some(existing_notice) = reusable_busy_notice {
-        // The dispatch hand-off above already CONSUMED this message's
-        // `queued_placeholders` mapping, so a coexisting `📬` card would be left
-        // with no owner. Tear it down with the same drop+detach invariant the
-        // hand-off branch upholds (`remove_queued_placeholder` clears only the
-        // map; `Queued` controller rows are excluded from `evict_terminal_entries`).
-        if let Some(stale_queued) =
-            queued_placeholder_handoff.filter(|queued| *queued != existing_notice)
-        {
-            let deleted = channel_id.delete_message(http, stale_queued).await;
-            shared
-                .ui
-                .placeholder_controller
-                .detach_by_message(channel_id, stale_queued);
-            tracing::info!(
-                channel_id = channel_id.get(),
-                user_msg_id = user_msg_id.get(),
-                notice_message_id = existing_notice.get(),
-                stale_queued = stale_queued.get(),
-                stale_deleted = deleted.is_ok(),
-                "busy follow-up retry reused its bound notice card; dropped the orphaned queued card"
-            );
-        }
         existing_notice
     } else if let Some(existing) = queued_placeholder_handoff {
         // #3480: the queued `📬 대기 중` card is now BURIED under what the active
