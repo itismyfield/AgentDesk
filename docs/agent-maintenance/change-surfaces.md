@@ -1729,7 +1729,11 @@
     reconciliation, production LoC; PG-backed tests for `current_batch_phase_pg`
     + `reconcile_phase_gate_for_terminal_dispatch_on_pg_tx` live in a
     `#[cfg(test)] mod`. Split the test module out into a sibling
-    `phase_gates_tests.rs` before adding new feature logic).
+    `phase_gates_tests.rs` before adding new feature logic). Verdict extraction,
+    checks inference, expected-verdict selection, and diagnostic preservation are
+    owned by the split-friendly sibling `src/db/auto_queue/phase_gate_verdict.rs`;
+    changes to either surface require reducer unit coverage plus PG reconciler
+    coverage for primary and sibling dispatches.
   - `src/db/dispatches/mod.rs` (frozen giant surface; dispatch slot/thread binding and
     outbox-adjacent PG helpers, pushed over the giant-file threshold by
     #2778/#2783 slot-isolation recovery. Split slot allocation helpers before

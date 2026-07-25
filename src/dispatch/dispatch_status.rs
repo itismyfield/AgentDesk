@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde_json::json;
 use sqlx::{PgPool, Row};
 
+use crate::db::auto_queue::phase_gate_verdict;
 use crate::engine::PolicyEngine;
 
 use super::dispatch_query::query_dispatch_row_pg;
@@ -438,7 +439,7 @@ fn infer_effective_completion_result(
     let res = result?;
     context_text
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|ctx| ctx.get("phase_gate").and_then(|v| v.as_object()).cloned())
+        .and_then(|ctx| ctx.get("phase_gate").cloned())
         .and_then(|phase_gate_ctx| infer_phase_gate_verdict(dispatch_id, &phase_gate_ctx, res))
 }
 
@@ -1038,7 +1039,7 @@ async fn maybe_inject_phase_gate_verdict_pg(
     .flatten()
     .flatten()?;
     let ctx = serde_json::from_str::<serde_json::Value>(&context_raw).ok()?;
-    let phase_gate_ctx = ctx.get("phase_gate").and_then(|v| v.as_object())?;
+    let phase_gate_ctx = ctx.get("phase_gate")?;
     infer_phase_gate_verdict(dispatch_id, phase_gate_ctx, result)
 }
 
@@ -1336,75 +1337,30 @@ fn complete_dispatch_inner_with_backends(
     Ok(dispatch)
 }
 
-/// #699: inject `verdict = context.phase_gate.pass_verdict` into a phase-gate
-/// dispatch result when every declared `checks.*` entry passed but the caller
-/// forgot the explicit verdict field.
+/// #699 / #4884: inject `verdict = context.phase_gate.pass_verdict` into a
+/// phase-gate dispatch result when every declared `checks.*` entry passed but
+/// the caller forgot the explicit verdict field.
 ///
 /// Returns `Some(enriched)` only when an injection happened — callers should
-/// fall back to the original `result` otherwise. Never overrides an explicit
-/// verdict/decision (even `"fail"`) and never injects when any check is not
-/// `pass`.
+/// fall back to the original `result` otherwise.
+///
+/// The pass/fail decision itself is delegated to
+/// `crate::db::auto_queue::phase_gate_verdict`, the single Rust authority also
+/// used by the durable reconciler that runs for CRUD / watcher / bridge
+/// recovery completions. This path only owns the *side effect* of persisting
+/// the inferred verdict onto the result payload; it must never reach a
+/// different verdict than the reconciler would for the same evidence.
 fn infer_phase_gate_verdict(
     dispatch_id: &str,
-    phase_gate_ctx: &serde_json::Map<String, serde_json::Value>,
+    phase_gate_ctx: &serde_json::Value,
     result: &serde_json::Value,
 ) -> Option<serde_json::Value> {
-    // Explicit verdict/decision already present — never override, even for
-    // explicit "fail" cases.
-    let has_verdict = result
-        .get("verdict")
-        .and_then(|v| v.as_str())
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
-    let has_decision = result
-        .get("decision")
-        .and_then(|v| v.as_str())
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
-    if has_verdict || has_decision {
+    let context = serde_json::json!({ "phase_gate": phase_gate_ctx });
+    let phase_gate_verdict::VerdictResolution::Inferred(pass_verdict) =
+        phase_gate_verdict::resolve_verdict(Some(&context), result)
+    else {
         return None;
-    }
-
-    let checks_obj = result.get("checks").and_then(|v| v.as_object())?;
-    if checks_obj.is_empty() {
-        return None;
-    }
-
-    // Round-2 fix: when the dispatch context declares a list of required
-    // checks, every one of those keys must be present in `result.checks` and
-    // pass. Missing keys are treated as no-verdict/failure so a partial
-    // payload cannot advance the gate.
-    let declared_checks: Vec<String> = phase_gate_ctx
-        .get("checks")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-    for required in &declared_checks {
-        match checks_obj.get(required) {
-            Some(entry) if check_entry_is_pass(entry) => {}
-            _ => return None,
-        }
-    }
-
-    // Also require every *present* check entry to pass — never infer a pass
-    // on the strength of partial "pass"es when some keys report fail/other.
-    for (_name, entry) in checks_obj.iter() {
-        if !check_entry_is_pass(entry) {
-            return None;
-        }
-    }
-
-    // Resolve `pass_verdict` from the dispatch's own phase_gate context, with
-    // the system default as a last resort.
-    let pass_verdict = phase_gate_ctx
-        .get("pass_verdict")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "phase_gate_passed".to_string());
+    };
 
     let mut enriched = result.clone();
     if !enriched.is_object() {
@@ -1421,29 +1377,23 @@ fn infer_phase_gate_verdict(
         );
     }
 
+    let declared_check_count = phase_gate_ctx
+        .get("checks")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let reported_check_count = result
+        .get("checks")
+        .and_then(serde_json::Value::as_object)
+        .map_or(0, serde_json::Map::len);
     tracing::info!(
-        "[dispatch] #699 inferring phase-gate verdict '{}' for dispatch {} (all {} declared checks passed, {} entries total)",
-        pass_verdict,
         dispatch_id,
-        declared_checks.len(),
-        checks_obj.len(),
+        pass_verdict = %pass_verdict,
+        declared_check_count,
+        reported_check_count,
+        "[dispatch] #699 inferred phase-gate verdict because all declared checks passed",
     );
 
     Some(enriched)
-}
-
-fn check_entry_is_pass(entry: &serde_json::Value) -> bool {
-    // Accept either `{"status": "pass"}` (canonical) or a bare string "pass".
-    if let Some(status) = entry.get("status").and_then(|v| v.as_str()) {
-        return status.eq_ignore_ascii_case("pass") || status.eq_ignore_ascii_case("passed");
-    }
-    if let Some(outcome) = entry.get("result").and_then(|v| v.as_str()) {
-        return outcome.eq_ignore_ascii_case("pass") || outcome.eq_ignore_ascii_case("passed");
-    }
-    if let Some(s) = entry.as_str() {
-        return s.eq_ignore_ascii_case("pass") || s.eq_ignore_ascii_case("passed");
-    }
-    false
 }
 
 #[cfg(test)]
@@ -1637,5 +1587,204 @@ mod auto_queue_terminal_sync_policy_tests {
                 "{dispatch_type} is a side-path and must skip terminal sync"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod auto_queue_phase_gate_finalize_wrapper_tests {
+    use super::{
+        infer_effective_completion_result, infer_phase_gate_verdict, log_phase_gate_reconciliation,
+    };
+    use serde_json::json;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::writer::MakeWriter;
+
+    #[derive(Clone)]
+    struct CapturingWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for CapturingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            match self.buffer.lock() {
+                Ok(mut buffer) => buffer.extend_from_slice(bytes),
+                Err(poisoned) => poisoned.into_inner().extend_from_slice(bytes),
+            }
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_info_logs(emit: impl FnOnce()) -> Result<String, std::string::FromUtf8Error> {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .with_writer(CapturingWriter {
+                buffer: buffer.clone(),
+            })
+            .finish();
+        tracing::subscriber::with_default(subscriber, emit);
+        let bytes = match buffer.lock() {
+            Ok(buffer) => buffer.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        String::from_utf8(bytes)
+    }
+
+    fn gate() -> serde_json::Value {
+        json!({
+            "checks": ["merge_verified", "issue_closed", "build_passed"],
+            "pass_verdict": "phase_gate_passed",
+        })
+    }
+
+    fn passing_checks() -> serde_json::Value {
+        json!({
+            "merge_verified": { "status": "pass" },
+            "issue_closed": { "status": "pass" },
+            "build_passed": { "status": "pass" },
+        })
+    }
+
+    #[test]
+    fn finalize_wrapper_overwrites_truthy_non_string_verdict_for_compatibility() {
+        for explicit in [json!(true), json!({"blocked_by": "operator"})] {
+            let result = json!({ "verdict": explicit, "checks": passing_checks() });
+            let injected = infer_phase_gate_verdict("dsp-finalize-non-string", &gate(), &result);
+            assert_eq!(
+                injected
+                    .as_ref()
+                    .and_then(|value| value.get("verdict"))
+                    .and_then(|value| value.as_str()),
+                Some("phase_gate_passed")
+            );
+            assert_eq!(
+                injected
+                    .as_ref()
+                    .and_then(|value| value.get("verdict_inferred"))
+                    .and_then(|value| value.as_bool()),
+                Some(true)
+            );
+        }
+    }
+
+    #[test]
+    fn finalize_wrapper_overwrites_truthy_non_string_decision_for_compatibility() {
+        let result = json!({
+            "decision": {"blocked_by": "operator"},
+            "checks": passing_checks(),
+        });
+        let context = json!({ "phase_gate": gate() }).to_string();
+        let injected = infer_effective_completion_result(
+            "dsp-finalize-decision",
+            "completed",
+            Some(&context),
+            Some(&result),
+        );
+        assert_eq!(
+            injected
+                .as_ref()
+                .and_then(|value| value.get("verdict"))
+                .and_then(|value| value.as_str()),
+            Some("phase_gate_passed")
+        );
+    }
+
+    #[test]
+    fn failed_reconciliation_log_does_not_emit_verdict_payload() {
+        let result = json!({
+            "verdict": {"authorization": "Bearer secret"},
+            "checks": {"build_passed": "fail"},
+        });
+        let resolution = crate::db::auto_queue::phase_gate_verdict::resolve_verdict(None, &result);
+        assert_eq!(
+            resolution,
+            crate::db::auto_queue::phase_gate_verdict::VerdictResolution::Missing
+        );
+        let failed_reason = match crate::db::auto_queue::phase_gate_verdict::diagnostic_verdict(
+            &result,
+            &resolution,
+        ) {
+            Some(diagnostic) => format!("expected verdict gate_ok, got {diagnostic}"),
+            None => "expected verdict gate_ok, got none".to_string(),
+        };
+        let outcome = crate::db::auto_queue::PhaseGateReconciliation::MarkedFailed {
+            run_id: "run-log-redaction".to_string(),
+            phase: 0,
+            failed_dispatch_id: "dsp-log-redaction".to_string(),
+            failed_reason,
+        };
+        let logs = capture_info_logs(|| {
+            log_phase_gate_reconciliation("dsp-log-redaction", &outcome);
+        });
+
+        assert!(
+            logs.as_ref()
+                .is_ok_and(|logs| logs.contains("<non-string:object>")),
+            "{logs:?}"
+        );
+        assert!(
+            logs.as_ref().is_ok_and(|logs| {
+                !logs.contains("authorization") && !logs.contains("Bearer secret")
+            }),
+            "failed reconciliation log leaked verdict payload: {logs:?}"
+        );
+    }
+
+    #[test]
+    fn inferred_verdict_log_preserves_check_cardinality_fields() {
+        let result = json!({ "checks": passing_checks() });
+        let logs = capture_info_logs(|| {
+            let injected = infer_phase_gate_verdict("dsp-log-fields", &gate(), &result);
+            assert!(injected.is_some());
+        });
+
+        assert!(
+            logs.as_ref()
+                .is_ok_and(|logs| logs.contains("dispatch_id=\"dsp-log-fields\"")),
+            "{logs:?}"
+        );
+        assert!(
+            logs.as_ref()
+                .is_ok_and(|logs| logs.contains("pass_verdict=phase_gate_passed")),
+            "{logs:?}"
+        );
+        assert!(
+            logs.as_ref()
+                .is_ok_and(|logs| logs.contains("declared_check_count=3")),
+            "{logs:?}"
+        );
+        assert!(
+            logs.as_ref()
+                .is_ok_and(|logs| logs.contains("reported_check_count=3")),
+            "{logs:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_string_failure_is_not_overridden() {
+        let result = json!({
+            "phase_gate_verdict": "manual_hold",
+            "checks": passing_checks(),
+        });
+        assert_eq!(
+            infer_phase_gate_verdict("dsp-explicit", &gate(), &result),
+            None
+        );
     }
 }

@@ -65,6 +65,7 @@ src/
 │   │   ├── consultation.rs
 │   │   ├── entries.rs
 │   │   ├── mod.rs
+│   │   ├── phase_gate_verdict.rs
 │   │   ├── phase_gates.rs
 │   │   ├── queries.rs
 │   │   ├── runs.rs
