@@ -2,9 +2,11 @@
 """Reject new Rust library test modules that no curated CI lane fully selects.
 
 AgentDesk's main-push ``test-non-pg`` recipe intentionally uses libtest name
-filters instead of running every library test. This source-only guard finds
-``#[cfg(test)] mod ...`` declarations, derives their logical Rust module paths
-(including ``#[path = "..."]`` aliases), and compares them with each curated
+filters instead of running every library test. The debt ratchet scans
+``#[cfg(test)] mod ...`` declarations and logical Rust module paths. PR
+changed-test provenance separately uses target-specific
+compiler/libtest ``cargo test --list`` output as execution authority, then
+compares those executable names with explicit source ownership and each reviewed
 ``cargo test`` command's positive and ``--skip`` filters.
 
 The existing uncovered set is recorded as sorted names in the baseline file.
@@ -545,7 +547,7 @@ def _include_mounts(
 ) -> tuple[dict[Path, SourceMount], tuple[str, ...]]:
     mounts: dict[Path, SourceMount] = {}
     unsupported: list[str] = []
-    include_re = re.compile(r'\binclude!\s*\(\s*"(?P<path>[^"]+)"\s*\)')
+    include_re = re.compile(r"\binclude!\s*\(\s*(?P<literal>\"(?P<path>[^\"]+)\")\s*\)")
     for parent in sorted(src_root.rglob("*.rs")):
         rel = parent.relative_to(src_root)
         if rel.name == "main.rs" or (rel.parts and rel.parts[0] == "bin"):
@@ -557,7 +559,11 @@ def _include_mounts(
             (match.start(), match.end(), match.group("name"), match.group("term"))
             for match in MOD_RE.finditer(clean)
         ]
-        include_matches = list(include_re.finditer(source))
+        include_matches = [
+            match
+            for match in include_re.finditer(source)
+            if clean[match.start() : match.start() + len("include!")] == "include!"
+        ]
         events = sorted(
             [(start, "mod", (end, name, term)) for start, end, name, term in declarations]
             + [(match.start(), "include", match) for match in include_matches],
@@ -757,11 +763,9 @@ def cargo_test_filter(
     if "--" in args:
         split = args.index("--")
         before, after = args[:split], args[split + 1 :]
-    # The package's `agentdesk` binary has no unit-test modules of its own; its
-    # historical high-risk command therefore selected zero tests. Model that target so
-    # the manifest can prove the real PR lane is non-vacuous; reject unrelated
-    # target-specific commands because this inventory only describes lib.rs.
-    target = "all" if "--all-targets" in before else "lib"
+    # Keep Cargo's target selection explicit: compiler-derived inventory is
+    # generated separately for each of these selections.
+    target = "all" if "--all-targets" in before else "lib" if "--lib" in before else "default"
     target_options = [option for option in before if option in _NON_LIB_TARGET_OPTIONS]
     if target_options and "--all-targets" not in before:
         if "--bin" not in before:

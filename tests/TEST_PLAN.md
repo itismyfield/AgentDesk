@@ -9,7 +9,7 @@
 
 | Layer | 목적 | 기준 파일/경계 | 실행 명령 |
 | --- | --- | --- | --- |
-| `unit` | 직렬화, 저장, mailbox state 같은 로컬 불변식 검증 | `src/services/discord/*` 개별 테스트 모듈 | 모듈별 `cargo test --bin agentdesk <filter>` |
+| `unit` | 직렬화, 저장, mailbox state 같은 로컬 불변식 검증 | `src/services/discord/*` 개별 테스트 모듈 | 모듈별 `cargo test --lib <filter>` |
 | `state-transition integration` | DB + policy + dispatch 상태 전이 검증 | `src/integration_tests.rs` | 기본 gate는 `cargo test --all-targets` |
 | `failure-recovery` | PostgreSQL restart / reconcile / outbox 복구 경계 검증 | `src/high_risk_recovery.rs` | `cargo test --lib high_risk_recovery::` |
 

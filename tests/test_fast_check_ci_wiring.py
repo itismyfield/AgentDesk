@@ -143,6 +143,29 @@ class FastCheckCiWiringTests(unittest.TestCase):
             lint_job,
         )
 
+    def test_high_risk_upstream_job_publishes_protected_context(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        job = job_block(workflow, "high-risk-recovery")
+        manifest = (REPO_ROOT / "scripts/pr_test_lane_manifest.txt").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("name: High-risk recovery", job)
+        self.assertRegex(
+            job,
+            r"(?m)^    if: needs\.changes\.outputs\.high_risk_recovery == 'true'$",
+        )
+        self.assertIn("runs-on: ubuntu-latest", job)
+        self.assertIn(
+            ":: upstream :: high-risk-recovery :: High-risk recovery",
+            manifest,
+        )
+        self.assertNotIn(
+            ":: high_risk_recovery_required_context :: "
+            "High-risk recovery required context (ubuntu-latest)",
+            manifest,
+        )
+
     def test_required_targeted_context_mirrors_test_fast_pg_db_gate(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         job = job_block(workflow, "fast_targeted_tests_required_context")

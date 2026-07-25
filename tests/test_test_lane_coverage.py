@@ -371,7 +371,7 @@ class CandidateProvenanceTests(unittest.TestCase):
         return (
             "authority fixture :: .github/workflows/ci-pr.yml :: check_fast :: "
             "ubuntu-latest :: rust_or_policy :: "
-            "needs.changes.outputs.rust_or_policy == 'true' :: "
+            "needs.changes.outputs.rust_or_policy == 'true' :: mirror :: "
             "fast_check_required_context :: Fast check (ubuntu-latest)\n"
             f"lane fixture :: fixture :: {path_pattern} :: {command}\n"
             "witness fixture :: .github/workflows/ci-pr.yml :: 1 :: "
@@ -382,6 +382,10 @@ class CandidateProvenanceTests(unittest.TestCase):
         (root / "src").mkdir()
         (root / ".github/workflows").mkdir(parents=True)
         (root / "scripts").mkdir()
+        (root / "Cargo.toml").write_text(
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+            encoding="utf-8",
+        )
         (root / "src/lib.rs").write_text(
             "#[cfg(test)] mod legacy_tests {\n"
             "    #[test] fn existing_case() { assert_eq!(1, 1); }\n"
@@ -403,7 +407,15 @@ class CandidateProvenanceTests(unittest.TestCase):
             self.manifest_source(command), encoding="utf-8"
         )
         self.git(root, "init", "-q")
-        self.git(root, "add", "src/lib.rs", "justfile", ".github", "scripts")
+        self.git(
+            root,
+            "add",
+            "Cargo.toml",
+            "src/lib.rs",
+            "justfile",
+            ".github",
+            "scripts",
+        )
         self.git(root, "commit", "-qm", "base")
         return self.git(root, "rev-parse", "HEAD")
 
@@ -516,6 +528,36 @@ class CandidateProvenanceTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "protected ci-pr workflow"):
+                coverage.verify_pr_lane_manifest(root, manifest)
+
+    def test_upstream_protected_context_rename_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            command = "cargo test --lib legacy_tests"
+            self.make_repo(root, lane_filter="legacy_tests")
+            workflow = root / ".github/workflows/ci-pr.yml"
+            workflow.write_text(
+                self.workflow_source(command)
+                .replace("  check_fast:\n", "  high-risk-recovery:\n")
+                .replace(
+                    "    name: Fast compile check (ubuntu-latest)\n",
+                    "    name: Renamed recovery context\n",
+                ),
+                encoding="utf-8",
+            )
+            manifest = root / "scripts/pr_test_lane_manifest.txt"
+            manifest.write_text(
+                "authority fixture :: .github/workflows/ci-pr.yml :: "
+                "high-risk-recovery :: ubuntu-latest :: rust_or_policy :: "
+                "needs.changes.outputs.rust_or_policy == 'true' :: upstream :: "
+                "high-risk-recovery :: High-risk recovery\n"
+                "lane fixture :: fixture :: src/** :: cargo test --lib legacy_tests\n"
+                "witness fixture :: .github/workflows/ci-pr.yml :: 1 :: "
+                "cargo test --lib legacy_tests\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "protected upstream context drift"):
                 coverage.verify_pr_lane_manifest(root, manifest)
 
     def test_command_in_unrelated_pr_job_cannot_witness_lane(self) -> None:
@@ -645,40 +687,37 @@ class CandidateProvenanceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "base commit is inaccessible"):
                 self.check(root, "0" * 40)
 
-    def test_changed_unmounted_generated_test_file_fails_closed(self) -> None:
+    def test_changed_unmounted_ghost_test_is_not_executable(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            base = self.make_repo(root, lane_filter="generated_case")
-            (root / "src/generated_tests.rs").write_text(
-                "#[test] fn generated_case() {}\n", encoding="utf-8"
+            base = self.make_repo(root, lane_filter="legacy_tests")
+            (root / "src/ghost.rs").write_text(
+                "#[test] fn ghost_case() {}\n", encoding="utf-8"
             )
-            self.git(root, "add", "src/generated_tests.rs")
-            self.git(root, "commit", "-qm", "generated test")
-            result = self.check(root, base)
-            self.assertIn(
-                "unsupported changed test source has no logical cfg(test) module mount: "
-                "generated_tests::generated_case",
-                result.failures,
-            )
+            self.git(root, "add", "src/ghost.rs")
+            self.git(root, "commit", "-qm", "unmounted ghost test")
 
-    def test_nested_unmounted_test_source_fails_closed(self) -> None:
+            result = self.check(root, base)
+
+            self.assertEqual(result.changed_tests, ())
+            self.assertFalse(any("ghost_case" in failure for failure in result.failures))
+
+    def test_nested_unmounted_ghost_test_is_not_executable(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            base = self.make_repo(root, lane_filter="nested_case")
+            base = self.make_repo(root, lane_filter="legacy_tests")
             nested = root / "src/services/observability"
             nested.mkdir(parents=True)
             (nested / "metrics.rs").write_text(
                 "#[test] fn nested_case() {}\n", encoding="utf-8"
             )
             self.git(root, "add", "src/services/observability/metrics.rs")
-            self.git(root, "commit", "-qm", "nested generated test")
+            self.git(root, "commit", "-qm", "nested ghost test")
 
             result = self.check(root, base)
-            self.assertIn(
-                "unsupported changed test source has no logical cfg(test) module mount: "
-                "services::observability::metrics::nested_case",
-                result.failures,
-            )
+
+            self.assertEqual(result.changed_tests, ())
+            self.assertFalse(any("nested_case" in failure for failure in result.failures))
 
     def test_nested_unmounted_test_uses_physical_source_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -715,6 +754,111 @@ class CandidateProvenanceTests(unittest.TestCase):
             lane.is_applicable_to(("src/services/discord/live/events.rs",))
         )
         self.assertTrue(lane.is_applicable_to(("src/services/discord/mod.rs",)))
+
+    def test_deleted_module_mount_reports_executable_test_loss(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self.make_repo(root, lane_filter="child_case")
+            (root / "src/lib.rs").write_text(
+                "#[cfg(test)] mod legacy_tests {\n"
+                "    #[test] fn existing_case() {}\n"
+                "}\n"
+                "#[cfg(test)] mod child_tests;\n",
+                encoding="utf-8",
+            )
+            (root / "src/child_tests.rs").write_text(
+                "#[test] fn child_case() {}\n", encoding="utf-8"
+            )
+            self.git(root, "add", "src")
+            self.git(root, "commit", "-qm", "mount child tests")
+            base = self.git(root, "rev-parse", "HEAD")
+            (root / "src/lib.rs").write_text(
+                "#[cfg(test)] mod legacy_tests {\n"
+                "    #[test] fn existing_case() {}\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            self.git(root, "add", "src/lib.rs")
+            self.git(root, "commit", "-qm", "remove child mount")
+
+            result = self.check(root, base)
+
+            self.assertIn(
+                "removed executable test child_tests::child_case "
+                "(mount/configuration loss is forbidden)",
+                result.failures,
+            )
+
+    def test_macro_generated_test_without_source_owner_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self.make_repo(root, lane_filter="macro_case")
+            self.commit_candidate(
+                root,
+                "macro_rules! generated_test {\n"
+                "    ($name:ident) => { #[test] fn $name() {} };\n"
+                "}\n"
+                "#[cfg(test)] mod legacy_tests {\n"
+                "    #[test] fn existing_case() {}\n"
+                "    generated_test!(macro_case);\n"
+                "}\n",
+            )
+
+            result = self.check(root, base)
+
+            self.assertIn(
+                "compiler-listed changed test has no unambiguous source owner: "
+                "legacy_tests::macro_case",
+                result.failures,
+            )
+
+    def test_cfg_any_disabled_test_is_not_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self.make_repo(root, lane_filter="legacy_tests")
+            self.commit_candidate(
+                root,
+                "#[cfg(test)] mod legacy_tests {\n"
+                "    #[test] fn existing_case() {}\n"
+                "    #[cfg(any())]\n"
+                "    #[test] fn disabled_case() {}\n"
+                "}\n",
+            )
+
+            result = self.check(root, base)
+
+            self.assertNotIn(
+                "legacy_tests::disabled_case",
+                [item.name for item in result.changed_tests],
+            )
+
+    def test_commented_include_does_not_mount_ghost_test(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self.make_repo(root, lane_filter="legacy_tests")
+            (root / "src/lib.rs").write_text(
+                "#[cfg(test)] mod legacy_tests {\n"
+                "    #[test] fn existing_case() {}\n"
+                "    // include!(\"ghost_include.rs\");\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            (root / "src/ghost_include.rs").write_text(
+                "#[test] fn ghost_include_case() {}\n", encoding="utf-8"
+            )
+            self.git(root, "add", "src")
+            self.git(root, "commit", "-qm", "commented include")
+
+            result = self.check(root, base)
+            inventory = coverage.discover_source_inventory(root)
+
+            self.assertNotIn(
+                "legacy_tests::ghost_include_case",
+                [item.name for item in result.changed_tests],
+            )
+            self.assertNotIn(
+                "legacy_tests::ghost_include_case", inventory.test_fingerprints
+            )
 
     def test_changed_include_generated_test_uses_logical_mount(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

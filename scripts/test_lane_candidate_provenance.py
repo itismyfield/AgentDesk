@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import re
 import subprocess
 import tarfile
@@ -39,6 +40,23 @@ class Inventory(Protocol):
 
 
 @dataclass(frozen=True)
+class CompilerInventory:
+    """Tests emitted by rustc/libtest for each Cargo target selection."""
+
+    tests_by_target: dict[str, frozenset[str]]
+
+    def tests_for(self, target: str) -> frozenset[str]:
+        try:
+            return self.tests_by_target[target]
+        except KeyError as exc:
+            raise ValueError(f"compiler inventory is missing target {target!r}") from exc
+
+    @property
+    def all_tests(self) -> frozenset[str]:
+        return frozenset().union(*self.tests_by_target.values())
+
+
+@dataclass(frozen=True)
 class ChangedTest:
     name: str
     module: str
@@ -53,6 +71,7 @@ class PrLaneAuthority:
     runner: str
     path_filter: str
     job_if: str
+    protected_by: str
     required_job: str
     required_context: str
 
@@ -98,7 +117,7 @@ def load_pr_lane_manifest(
         if not line or line.startswith("#"):
             continue
         parts = line.split(" :: ")
-        if line.startswith("authority ") and len(parts) == 8:
+        if line.startswith("authority ") and len(parts) == 9:
             (
                 raw_name,
                 workflow,
@@ -106,6 +125,7 @@ def load_pr_lane_manifest(
                 runner,
                 path_filter,
                 job_if,
+                protected_by,
                 required_job,
                 context,
             ) = parts
@@ -117,6 +137,7 @@ def load_pr_lane_manifest(
                 runner,
                 path_filter,
                 job_if,
+                protected_by,
                 required_job,
                 context,
             )
@@ -130,6 +151,7 @@ def load_pr_lane_manifest(
                     runner.strip(),
                     path_filter.strip(),
                     job_if.strip(),
+                    protected_by.strip(),
                     required_job.strip(),
                     context.strip(),
                 )
@@ -246,6 +268,74 @@ def source_tree_at_commit(
     return temp
 
 
+def repository_tree_at_commit(
+    repo_root: Path, commit: str
+) -> tempfile.TemporaryDirectory:
+    """Extract one immutable tracked repository snapshot for Cargo/rustc."""
+    archive = _git(repo_root, ["archive", "--format=tar", commit], binary=True)
+    if archive.returncode != 0:
+        detail = archive.stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(f"cannot read repository tree at {commit}: {detail}")
+    temp = tempfile.TemporaryDirectory()
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as bundle:
+        try:
+            bundle.extractall(temp.name, filter="data")
+        except TypeError:  # Python <3.12 compatibility for local tooling.
+            bundle.extractall(temp.name)
+    return temp
+
+
+def _compiler_list_command(target: str) -> list[str]:
+    if target == "lib":
+        return ["cargo", "test", "--lib", "--", "--list", "--format", "terse"]
+    if target == "all":
+        return ["cargo", "test", "--all-targets", "--", "--list", "--format", "terse"]
+    if target == "default":
+        return ["cargo", "test", "--", "--list", "--format", "terse"]
+    if target.startswith("bin:"):
+        return [
+            "cargo",
+            "test",
+            "--bin",
+            target.removeprefix("bin:"),
+            "--",
+            "--list",
+            "--format",
+            "terse",
+        ]
+    raise ValueError(f"unsupported Cargo test target {target!r}")
+
+
+def discover_compiler_inventory(
+    repo_root: Path, targets: Iterable[str]
+) -> CompilerInventory:
+    """List rustc-enabled tests for each target, serially and without target override."""
+    if os.environ.get("CARGO_TARGET_DIR"):
+        raise ValueError("CARGO_TARGET_DIR must be unset for compiler test inventory")
+    listed: dict[str, frozenset[str]] = {}
+    for target in dict.fromkeys(targets):
+        command = _compiler_list_command(target)
+        result = subprocess.run(
+            command,
+            cwd=repo_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise ValueError(
+                f"compiler test inventory failed for {target!r}: {detail}"
+            )
+        listed[target] = frozenset(
+            line.removesuffix(": test")
+            for line in result.stdout.splitlines()
+            if line.endswith(": test")
+        )
+    return CompilerInventory(listed)
+
+
 def changed_tests_between(
     base: Inventory, candidate: Inventory
 ) -> tuple[ChangedTest, ...]:
@@ -263,24 +353,139 @@ def changed_tests_between(
     return tuple(sorted(changed, key=lambda item: item.name))
 
 
+def _compiler_source_owners(
+    inventory: Inventory, executable: Iterable[str]
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Map compiler names to explicit source test items or report ambiguity.
+
+    rustc can insert logical parents that are not recoverable from a physical
+    file name (notably a child of a ``#[path]`` module).  An exact source name is
+    preferred; otherwise the unique longest structural suffix, including at
+    least the test module and function, proves the owner.  Generated tests have
+    no explicit item and therefore remain unsupported.
+    """
+    source_names = tuple(inventory.test_fingerprints)
+    owners: dict[str, str] = {}
+    unsupported: list[str] = []
+    for compiler_name in executable:
+        if compiler_name in inventory.test_fingerprints:
+            owners[compiler_name] = compiler_name
+            continue
+        compiler_parts = compiler_name.split("::")
+        ranked: list[tuple[int, str]] = []
+        for source_name in source_names:
+            source_parts = source_name.split("::")
+            common = 0
+            for left, right in zip(reversed(compiler_parts), reversed(source_parts)):
+                if left != right:
+                    break
+                common += 1
+            if common >= 3:
+                ranked.append((common, source_name))
+        if not ranked:
+            unsupported.append(compiler_name)
+            continue
+        best = max(common for common, _ in ranked)
+        matches = [name for common, name in ranked if common == best]
+        if len(matches) != 1:
+            unsupported.append(compiler_name)
+            continue
+        owners[compiler_name] = matches[0]
+    return owners, tuple(sorted(unsupported))
+
+
+def _compiler_changes(
+    base_source: Inventory,
+    base_compiler: CompilerInventory,
+    candidate_source: Inventory,
+    candidate_compiler: CompilerInventory,
+) -> tuple[tuple[ChangedTest, ...], tuple[str, ...]]:
+    base_tests = base_compiler.all_tests
+    candidate_tests = candidate_compiler.all_tests
+    base_owners, base_unsupported = _compiler_source_owners(base_source, base_tests)
+    candidate_owners, candidate_unsupported = _compiler_source_owners(
+        candidate_source, candidate_tests
+    )
+    failures: list[str] = []
+    changed: list[ChangedTest] = []
+
+    for name in sorted(candidate_tests):
+        candidate_owner = candidate_owners.get(name)
+        if name not in base_tests:
+            if candidate_owner is None:
+                failures.append(
+                    f"compiler-listed changed test has no unambiguous source owner: {name}"
+                )
+                continue
+            module = candidate_source.test_modules.get(candidate_owner)
+            if module is None:
+                failures.append(
+                    f"compiler-listed changed test has no logical source module: {name}"
+                )
+                continue
+            changed.append(ChangedTest(name, module, "added"))
+            continue
+        base_owner = base_owners.get(name)
+        if candidate_owner is None or base_owner is None:
+            # Existing unsupported generated items are not newly admitted. A
+            # changed compiler identity is handled by the add/remove branches.
+            continue
+        if (
+            candidate_source.test_fingerprints[candidate_owner]
+            != base_source.test_fingerprints[base_owner]
+        ):
+            module = candidate_source.test_modules.get(candidate_owner)
+            if module is None:
+                failures.append(
+                    f"compiler-listed changed test has no logical source module: {name}"
+                )
+                continue
+            changed.append(ChangedTest(name, module, "modified"))
+
+    for name in sorted(base_tests - candidate_tests):
+        owner = base_owners.get(name)
+        module = base_source.test_modules.get(owner, "<unknown>") if owner else "<unknown>"
+        changed.append(ChangedTest(name, module, "removed"))
+        failures.append(
+            f"removed executable test {name} (mount/configuration loss is forbidden)"
+        )
+
+    # A source item that materially changed but cannot be associated with the
+    # current compiler list is disabled/unmounted rather than executable. It is
+    # deliberately not promoted to changed-test provenance.
+    _ = base_unsupported, candidate_unsupported
+    return tuple(sorted(changed, key=lambda item: item.name)), tuple(failures)
+
+
 def ensure_non_vacuous_filters(
-    lanes: Iterable[Lane], inventory: dict[str, set[str]] | Inventory
+    lanes: Iterable[Lane],
+    inventory: dict[str, set[str]] | Inventory | CompilerInventory,
 ) -> tuple[str, ...]:
-    if hasattr(inventory, "test_fingerprints"):
+    compiler_inventory = (
+        inventory if isinstance(inventory, CompilerInventory) else None
+    )
+    if compiler_inventory is not None:
+        all_tests: set[str] = set()
+    elif hasattr(inventory, "test_fingerprints"):
         all_tests = set(inventory.test_fingerprints)
     else:
         all_tests = set().union(*inventory.values()) if inventory else set()
     failures: list[str] = []
     for lane in lanes:
-        if lane.target.startswith("bin:"):
+        if compiler_inventory is None and lane.target.startswith("bin:"):
             failures.append(
                 f"{lane.provenance}: target {lane.target!r} exposes no lib.rs tests"
             )
             continue
+        lane_tests = (
+            set(compiler_inventory.tests_for(lane.target))
+            if compiler_inventory is not None
+            else all_tests
+        )
         for positive in lane.positives:
             selected = [
                 name
-                for name in all_tests
+                for name in lane_tests
                 if (name == positive if lane.exact else positive in name)
                 and not any(
                     name == skip if lane.exact else skip in name
@@ -371,22 +576,31 @@ def _require_authority(
     ):
         raise ValueError(f"PR lane authority matrix must be hosted Ubuntu: {authority.name}")
 
-    required = _mapping_block(source, authority.required_job, 2)
-    context = re.search(r"(?m)^    name:\s*(.+?)\s*$", required)
-    if context is None or _yaml_scalar(context.group(1)) != authority.required_context:
-        raise ValueError(f"PR lane required context drift: {authority.name}")
-    needs = re.search(
-        rf"(?m)^      - {re.escape(authority.job)}\s*$", required
-    )
-    if needs is None or not re.search(r"(?m)^    if:\s*always\(\)\s*$", required):
-        raise ValueError(f"PR lane required mirror is not fail-closed: {authority.name}")
-    if f"UPSTREAM_JOB_NAME: {authority.job}" not in required:
-        raise ValueError(f"PR lane required mirror upstream drift: {authority.name}")
-    filter_output = (
-        f"FILTER_OUTPUT: ${{{{ needs.changes.outputs.{authority.path_filter} }}}}"
-    )
-    if filter_output not in required:
-        raise ValueError(f"PR lane required mirror filter drift: {authority.name}")
+    if authority.protected_by == "upstream":
+        if authority.required_job != authority.job:
+            raise ValueError(f"PR lane upstream protected job drift: {authority.name}")
+        context = re.search(r"(?m)^    name:\s*(.+?)\s*$", job)
+        if context is None or _yaml_scalar(context.group(1)) != authority.required_context:
+            raise ValueError(f"PR lane protected upstream context drift: {authority.name}")
+    elif authority.protected_by == "mirror":
+        required = _mapping_block(source, authority.required_job, 2)
+        context = re.search(r"(?m)^    name:\s*(.+?)\s*$", required)
+        if context is None or _yaml_scalar(context.group(1)) != authority.required_context:
+            raise ValueError(f"PR lane required context drift: {authority.name}")
+        needs = re.search(
+            rf"(?m)^      - {re.escape(authority.job)}\s*$", required
+        )
+        if needs is None or not re.search(r"(?m)^    if:\s*always\(\)\s*$", required):
+            raise ValueError(f"PR lane required mirror is not fail-closed: {authority.name}")
+        if f"UPSTREAM_JOB_NAME: {authority.job}" not in required:
+            raise ValueError(f"PR lane required mirror upstream drift: {authority.name}")
+        filter_output = (
+            f"FILTER_OUTPUT: ${{{{ needs.changes.outputs.{authority.path_filter} }}}}"
+        )
+        if filter_output not in required:
+            raise ValueError(f"PR lane required mirror filter drift: {authority.name}")
+    else:
+        raise ValueError(f"unknown PR lane protection mode: {authority.name}")
     return job, _path_filter_patterns(source, authority.path_filter)
 
 
@@ -479,17 +693,22 @@ def check_pr_candidate(
     discover_source_inventory: Callable[[Path], Inventory],
     cargo_test_filter: Callable[..., Lane | None],
     just_recipe_commands: Callable[[str, str], tuple[str, ...]],
+    discover_compiler_inventory_fn: Callable[
+        [Path, Iterable[str]], CompilerInventory
+    ] = discover_compiler_inventory,
     manifest_path: Path | None = None,
 ) -> CheckResult:
-    """Verify changed candidate tests against executable PR-time lane provenance."""
+    """Verify changed tests against compiler-derived PR-time lane provenance."""
     base = resolve_commit(repo_root, base_sha)
     candidate = resolve_commit(repo_root, "HEAD")
     manifest_path = manifest_path or repo_root / PR_LANE_MANIFEST_REL
     manifest = verify_pr_lane_manifest(
         repo_root, manifest_path, cargo_test_filter, just_recipe_commands
     )
+    targets = tuple(dict.fromkeys(lane.target for lane in manifest.lanes))
     candidate_inventory = discover_source_inventory(repo_root)
-    failures = list(ensure_non_vacuous_filters(manifest.lanes, candidate_inventory))
+    candidate_compiler = discover_compiler_inventory_fn(repo_root, targets)
+    failures = list(ensure_non_vacuous_filters(manifest.lanes, candidate_compiler))
     if base == candidate:
         return CheckResult((), tuple(failures), {})
 
@@ -503,34 +722,33 @@ def check_pr_candidate(
         if reason.split(":", 1)[0] in changed_rust
     )
 
-    with source_tree_at_commit(repo_root, base) as base_root:
-        base_inventory = discover_source_inventory(Path(base_root))
-    changed = changed_tests_between(base_inventory, candidate_inventory)
-    unmounted_changed_tests = sorted(
-        name
-        for name, source_path in candidate_inventory.test_sources.items()
-        if name not in candidate_inventory.test_modules
-        and source_path in changed_rust
-        and (
-            name not in base_inventory.test_fingerprints
-            or base_inventory.test_fingerprints[name]
-            != candidate_inventory.test_fingerprints[name]
-        )
+    with repository_tree_at_commit(repo_root, base) as base_root:
+        base_root_path = Path(base_root)
+        base_inventory = discover_source_inventory(base_root_path)
+        base_compiler = discover_compiler_inventory_fn(base_root_path, targets)
+
+    # rustc/libtest owns execution truth. Explicit source items are only an
+    # ownership/change witness; missing or ambiguous ownership fails closed.
+    changed, compiler_failures = _compiler_changes(
+        base_inventory,
+        base_compiler,
+        candidate_inventory,
+        candidate_compiler,
     )
-    failures.extend(
-        f"unsupported changed test source has no logical cfg(test) module mount: {name}"
-        for name in unmounted_changed_tests
-    )
+    failures.extend(compiler_failures)
 
     coverage: dict[str, tuple[str, ...]] = {}
     for test in changed:
         owners = tuple(
             lane.provenance
             for lane in manifest.lanes
-            if lane.is_applicable_to(paths) and lane.selects(test.name)
+            if test.change != "removed"
+            and test.name in candidate_compiler.tests_for(lane.target)
+            and lane.is_applicable_to(paths)
+            and lane.selects(test.name)
         )
         coverage[test.name] = owners
-        if not owners:
+        if test.change != "removed" and not owners:
             failures.append(
                 f"{test.change} test {test.name} is not selected by an applicable PR lane"
             )

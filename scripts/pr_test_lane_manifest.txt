@@ -1,13 +1,13 @@
 # Reviewed PR-time Rust test invocations and their path conditions.
-# Format: authority <name> :: <workflow> :: <job> :: <runner> :: <path-filter> :: <job-if> :: <required-job> :: <required-context>
+# Format: authority <name> :: <workflow> :: <job> :: <runner> :: <path-filter> :: <job-if> :: <mirror|upstream> :: <required-job> :: <required-context>
 # Format: lane <label> :: <authority> :: <comma-separated changed-path globs> :: <cargo command>
 # Workflow witnesses pin each command to its authority's exact job; post-merge-only
 # justfile test-non-pg commands are deliberately absent.
 # Format: witness <authority> :: <repo-relative source> :: <exact count> :: <exact text>
 
-authority fast :: .github/workflows/ci-pr.yml :: check_fast :: ${{ matrix.os }} :: rust_or_policy :: needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true' :: fast_check_required_context :: Fast check (ubuntu-latest)
-authority postgres :: .github/workflows/ci-pr.yml :: test_fast :: ubuntu-latest :: pg_db :: needs.changes.outputs.pg_db == 'true' :: fast_targeted_tests_required_context :: Fast targeted tests (ubuntu-latest)
-authority high-risk-recovery :: .github/workflows/ci-pr.yml :: high-risk-recovery :: ubuntu-latest :: high_risk_recovery :: needs.changes.outputs.high_risk_recovery == 'true' :: high_risk_recovery_required_context :: High-risk recovery required context (ubuntu-latest)
+authority fast :: .github/workflows/ci-pr.yml :: check_fast :: ${{ matrix.os }} :: rust_or_policy :: needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true' :: mirror :: fast_check_required_context :: Fast check (ubuntu-latest)
+authority postgres :: .github/workflows/ci-pr.yml :: test_fast :: ubuntu-latest :: pg_db :: needs.changes.outputs.pg_db == 'true' :: mirror :: fast_targeted_tests_required_context :: Fast targeted tests (ubuntu-latest)
+authority high-risk-recovery :: .github/workflows/ci-pr.yml :: high-risk-recovery :: ubuntu-latest :: high_risk_recovery :: needs.changes.outputs.high_risk_recovery == 'true' :: upstream :: high-risk-recovery :: High-risk recovery
 
 lane transition :: fast :: src/**,tests/**,migrations/**,Cargo.toml,Cargo.lock,.cargo/**,rust-toolchain*,build.rs,defaults.json,routines/** :: cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1
 lane auto_queue :: fast :: src/**,tests/**,migrations/**,Cargo.toml,Cargo.lock,.cargo/**,rust-toolchain*,build.rs,defaults.json,routines/** :: cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres
