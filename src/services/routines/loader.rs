@@ -613,8 +613,9 @@ fn quickjs_exception_detail(ctx: &rquickjs::Ctx<'_>, error: &rquickjs::Error) ->
 
     <rquickjs::convert::Coerced<String> as rquickjs::FromJs>::from_js(ctx, caught)
         .map(|rquickjs::convert::Coerced(detail)| detail)
+        .ok()
         .filter(|detail| !detail.is_empty())
-        .unwrap_or_else(|_| error.to_string())
+        .unwrap_or_else(|| error.to_string())
 }
 
 struct CapturedRoutineRegistration<'js> {
