@@ -11,6 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
 NIGHTLY_WORKFLOW = REPO_ROOT / ".github/workflows/ci-nightly.yml"
+MACOS_TRUSTED_WORKFLOW = REPO_ROOT / ".github/workflows/ci-macos-trusted.yml"
 
 # This manifest is intentionally exact: changing the retained test recipe must also
 # update this test deliberately. The duplication is a drift-prevention gate, not an
@@ -37,6 +38,7 @@ EXPECTED_TEST_NON_PG_COMMANDS = (
     "cargo test --lib queue_status_presentation::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib status_panel_singleton_store -- --skip _pg --skip pg_ --skip postgres",
     "env -u AGENTDESK_ROOT_DIR cargo test --lib placeholder_live_events -- --skip _pg --skip pg_ --skip postgres",
+    "env -u AGENTDESK_ROOT_DIR cargo test --lib single_message_panel::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::discord::outbound::serenity_reference::tests::lifecycle_notice_nonce_is_stable_and_semantic_event_scoped -- --exact",
     "cargo test --lib services::discord::outbound::delivery::tests::v3_referenced_send_preserves_reference_and_dedupes -- --exact",
     "cargo test --lib cli::args::tests::legacy_queue_help_directs_users_to_query_without_changing_compatibility_contract",
@@ -151,6 +153,14 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertNotRegex(job, r"(?m)^\s*cargo test\b")
         self.assertNotIn("- name: cargo test", job)
         self.assertNotIn("Discord thread-create cross-process lock", job)
+
+    def test_macos_pr_lane_runs_single_message_panel_tests(self) -> None:
+        workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
+        command = (
+            "env -u AGENTDESK_ROOT_DIR cargo test --lib "
+            "single_message_panel::tests -- --skip _pg --skip pg_ --skip postgres"
+        )
+        self.assertEqual(workflow.count(command), 2)
 
     def test_main_and_nightly_retain_non_pg_test_coverage(self) -> None:
         justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")

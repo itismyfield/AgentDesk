@@ -54,24 +54,10 @@ pub(super) struct SubagentSlot {
     /// silent longer than `STUCK_BACKGROUND_TASK_TTL`.
     pub(super) started_at: std::time::Instant,
 }
+mod completed_kind;
 mod derived_status;
+pub(super) use completed_kind::CompletedKind;
 pub(super) use derived_status::DerivedStatus;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CompletedKind {
-    Foreground,
-    Background,
-}
-
-impl CompletedKind {
-    fn from_background(background: bool) -> Self {
-        if background {
-            Self::Background
-        } else {
-            Self::Foreground
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct LastToolCall {

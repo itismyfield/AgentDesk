@@ -393,7 +393,6 @@ services::discord::settings::content::shared_prompt_profile_tests
 services::discord::settings::memory::tests
 services::discord::settings::validation::voice_channel_guard_tests
 services::discord::shared_state::restart_lifecycle_tests
-services::discord::single_message_panel::tests
 services::discord::standby_relay::tests
 services::discord::startup_reclaim::tests
 services::discord::status_panel_orphan_store::tests
