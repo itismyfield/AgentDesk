@@ -2642,17 +2642,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     );
                     completion_chrome_timed_out = true;
                 }
-                if let Some(finalizer_turn_id) = terminal_projection_settled_turn_id {
-                    shared.turn_finalizer.note_terminal_projection_settled(
-                        crate::services::discord::turn_finalizer::TurnKey::new(
-                            channel_id,
-                            finalizer_turn_id,
-                            shared.restart.current_generation,
-                        ),
-                        true,
-                        shared.clone(),
-                    );
-                }
+                note_watcher_terminal_projection_settled(
+                    &shared,
+                    channel_id,
+                    terminal_projection_settled_turn_id,
+                );
             } // #3142: end `if !inflight_before_relay_is_stale_newer_turn` (EDIT/finalize gate)
             // #3003 single-chokepoint reclaim safety: after completion the turn
             // frame ends and the next frame re-seeds `status_panel_msg_id`, so the
