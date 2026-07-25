@@ -280,12 +280,6 @@ services::discord::placeholder_cleanup::permanent_failure_tests
 services::discord::placeholder_cleanup::terminal_anchor_guard_tests
 services::discord::placeholder_controller::edit_retry_tests
 services::discord::placeholder_controller::live_events_tests
-services::discord::placeholder_live_events::freshness::tests
-services::discord::placeholder_live_events::slot_rehydration::tests
-services::discord::placeholder_live_events::subagent_panel::tests
-services::discord::placeholder_live_events::subagent_rollout::tests
-services::discord::placeholder_live_events::tests
-services::discord::placeholder_live_events::turn_anchor::tests
 services::discord::placeholder_sweeper::abandon_guard::tests
 services::discord::placeholder_sweeper::is_message_still_placeholder_tests
 services::discord::placeholder_sweeper::panel_shape::tests
@@ -398,7 +392,6 @@ services::discord::settings::content::shared_prompt_profile_tests
 services::discord::settings::memory::tests
 services::discord::settings::validation::voice_channel_guard_tests
 services::discord::shared_state::restart_lifecycle_tests
-services::discord::single_message_panel::tests
 services::discord::standby_relay::tests
 services::discord::startup_reclaim::tests
 services::discord::streaming_finalizer::tests

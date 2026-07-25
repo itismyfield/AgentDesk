@@ -92,29 +92,39 @@ pub(super) fn is_harness_task_tool_name(name: &str) -> bool {
     )
 }
 
-pub(super) fn tool_prefix(name: &str) -> String {
-    let lower = name.trim().to_ascii_lowercase();
-    let prefix = match lower.as_str() {
-        "bash" | "bashoutput" | "killbash" | "command_execution" => Some("Bash"),
-        "edit" | "multiedit" | "write" | "notebookedit" => Some("Edit"),
-        "read" => Some("Read"),
-        "grep" => Some("Grep"),
-        "glob" => Some("Glob"),
-        "monitor" => Some("Monitor"),
-        "schedulewakeup" | "schedule_wakeup" => Some("ScheduleWakeup"),
-        "toolsearch" | "tool_search" | "tool_search_tool" => Some("ToolSearch"),
-        "task" | "agent" | "taskcreate" | "taskget" | "taskupdate" | "tasklist" | "taskoutput"
-        | "taskstop" => Some("Task"),
-        "webfetch" => Some("WebFetch"),
-        "websearch" => Some("WebSearch"),
-        _ => canonical_tool_name(name),
-    };
-    if let Some(prefix) = prefix {
-        return format!("[{prefix}]");
+/// Classifies an untrusted tool name into a closed set of static display labels.
+/// No caller-controlled bytes can enter the returned value.
+pub(super) fn tool_prefix(name: &str) -> &'static str {
+    let trimmed = name.trim();
+    let lower = trimmed.to_ascii_lowercase();
+
+    if lower.starts_with("mcp__") {
+        return "[MCP]";
     }
-    sanitized_tool_name(name)
-        .map(|name| format!("[{name}]"))
-        .unwrap_or_else(|| "[Tool]".to_string())
+
+    match lower.as_str() {
+        "bash" | "bashoutput" | "killbash" | "command_execution" | "exec" | "exec_command"
+        | "run_cmd" => "[Bash]",
+        "edit" | "multiedit" | "write" | "notebookedit" => "[Edit]",
+        "read" => "[Read]",
+        "grep" => "[Grep]",
+        "glob" => "[Glob]",
+        "monitor" => "[Monitor]",
+        "schedulewakeup" | "schedule_wakeup" => "[ScheduleWakeup]",
+        "toolsearch" | "tool_search" | "tool_search_tool" => "[ToolSearch]",
+        "task" | "agent" | "taskcreate" | "taskget" | "taskupdate" | "tasklist" | "taskoutput"
+        | "taskstop" => "[Task]",
+        "webfetch" => "[WebFetch]",
+        "websearch" => "[WebSearch]",
+        _ => match canonical_tool_name(trimmed) {
+            Some("Skill") => "[Skill]",
+            Some("SlashCommand") => "[SlashCommand]",
+            Some("AskUserQuestion") => "[AskUserQuestion]",
+            Some("EnterPlanMode") => "[EnterPlanMode]",
+            Some("ExitPlanMode") => "[ExitPlanMode]",
+            _ => "[Tool]",
+        },
+    }
 }
 
 pub(super) fn sanitized_tool_name(name: &str) -> Option<String> {

@@ -5,8 +5,12 @@
 //! derived-status activity label and the store-facing time-line builder live here
 //! with their tests.
 //!
-//! The footer header starts with the derived-status ACTIVITY label (`🟢 진행 중` /
-//! `🔧 도구 실행 중 (…)` / `✅ 완료`). The spinner merge
+//! While a turn is actively processing, the footer header shows only the latest
+//! observed tool class (`🔧 마지막 도구 ([Read])`) or a non-progress fallback when
+//! no tool has run yet. Raw tool arguments are intentionally excluded from this
+//! channel-visible surface. Distinct wait states retain their specific labels
+//! because those details are not represented by the spinner. Completed turns
+//! retain their existing completion label. The spinner merge
 //! (`single_message_panel::merged_footer_header_line`) swaps the leading status
 //! emoji for the animated spinner, so the marker set there must stay in sync with
 //! the emojis this label can start with. The request anchor follows the activity
@@ -24,7 +28,7 @@
 use poise::serenity_prelude::ChannelId;
 
 use super::common::{escape_status_panel_markdown, tool_prefix, truncate_chars};
-use super::status_panel::{CompletedKind, DerivedStatus};
+use super::status_panel::{CompletedKind, DerivedStatus, LastToolCall};
 
 impl super::PlaceholderLiveEvents {
     /// #3983: builds the panel's time line from the channel's STABLE last-activity
@@ -65,28 +69,33 @@ pub(super) fn render_time_line(last_activity_unix: Option<i64>, started_at_unix:
     )
 }
 
-/// #3983: the panel's first (activity) line — the derived-status label alone (no
-/// provider, no timestamp; those moved to the time line). The final confidence
-/// class is absorbed into the emoji here (item B): a clean completion reads
-/// `✅ 완료`.
+/// #3983/#4892: the panel's first (activity) line. Generic running/tool states
+/// render the latest observed tool instead of duplicating the answer message's
+/// spinner/progress state. Wait states retain their specific labels because the
+/// spinner does not communicate monitor, wakeup, subagent, or workflow details.
+/// Completed turns retain the pre-#4892 labels.
 pub(super) fn render_activity_line(status: &DerivedStatus) -> String {
+    render_activity_line_with_last_tool(status, None)
+}
+
+pub(super) fn render_activity_line_with_last_tool(
+    status: &DerivedStatus,
+    last_tool: Option<&LastToolCall>,
+) -> String {
     match status {
-        DerivedStatus::Running => "🟢 진행 중".to_string(),
-        DerivedStatus::MonitorWait => "💤 monitor 대기".to_string(),
-        DerivedStatus::ScheduleWakeup(Some(eta_secs)) => {
-            format!("⏰ scheduled wakeup ({eta_secs}s 후)")
-        }
-        DerivedStatus::ScheduleWakeup(None) => "⏰ scheduled wakeup".to_string(),
         DerivedStatus::Completed {
             kind: CompletedKind::Background,
         } => "✅ 백그라운드 완료".to_string(),
         DerivedStatus::Completed {
             kind: CompletedKind::Foreground,
         } => "✅ 완료".to_string(),
-        DerivedStatus::ToolRunning { name, summary: _ } => {
-            let rendered = tool_prefix(name);
-            format!("🔧 도구 실행 중 ({})", truncate_chars(&rendered, 140))
+        DerivedStatus::Running => render_last_tool(last_tool),
+        DerivedStatus::MonitorWait => "💤 monitor 대기".to_string(),
+        DerivedStatus::ScheduleWakeup(Some(eta_secs)) => {
+            format!("⏰ scheduled wakeup ({eta_secs}s 후)")
         }
+        DerivedStatus::ScheduleWakeup(None) => "⏰ scheduled wakeup".to_string(),
+        DerivedStatus::ToolRunning { name, summary: _ } => render_tool_activity(name),
         DerivedStatus::SubagentRunning { desc } => {
             let desc = escape_status_panel_markdown(desc);
             format!("🧵 subagent 실행 중 ({})", truncate_chars(&desc, 120))
@@ -96,6 +105,21 @@ pub(super) fn render_activity_line(status: &DerivedStatus) -> String {
             format!("🧬 workflow 실행 중 ({})", truncate_chars(&label, 120))
         }
     }
+}
+
+fn render_last_tool(last_tool: Option<&LastToolCall>) -> String {
+    last_tool.map_or_else(
+        || "🔧 마지막 도구 (아직 없음)".to_string(),
+        |tool| render_tool_activity(&tool.name),
+    )
+}
+
+/// #4892: tool inputs and names are untrusted and may contain credentials,
+/// tenant identifiers, signed URLs, private paths, or arbitrary payloads. The
+/// classifier returns only static labels, so no caller-controlled bytes reach
+/// this channel-visible surface.
+fn render_tool_activity(name: &str) -> String {
+    format!("🔧 마지막 도구 ({})", tool_prefix(name))
 }
 
 #[cfg(test)]
@@ -108,18 +132,224 @@ mod tests {
     // ---- render_activity_line: the derived-status labels ------------------
 
     #[test]
-    fn running_turn_renders_green_activity_label() {
-        assert_eq!(render_activity_line(&DerivedStatus::Running), "🟢 진행 중");
+    fn running_turn_without_tool_uses_non_duplicate_fallback() {
+        let rendered = render_activity_line_with_last_tool(&DerivedStatus::Running, None);
+
+        assert_eq!(rendered, "🔧 마지막 도구 (아직 없음)");
+        assert!(!rendered.contains("진행 중"));
     }
 
     #[test]
-    fn tool_running_renders_wrench_activity_label() {
-        assert_eq!(
-            render_activity_line(&DerivedStatus::ToolRunning {
+    fn running_turn_renders_only_last_tool_class() {
+        let raw_path = "src/services/discord/status_panel.rs";
+        let last_tool = LastToolCall {
+            name: "Read".to_string(),
+            summary: Some(raw_path.to_string()),
+        };
+        let rendered =
+            render_activity_line_with_last_tool(&DerivedStatus::Running, Some(&last_tool));
+
+        assert_eq!(rendered, "🔧 마지막 도구 ([Read])");
+        assert!(!rendered.contains(raw_path));
+        assert!(!rendered.contains("진행 중"));
+    }
+
+    #[test]
+    fn tool_running_uses_same_class_only_format() {
+        let raw_summary = "check status";
+        let rendered = render_activity_line_with_last_tool(
+            &DerivedStatus::ToolRunning {
                 name: "Bash".to_string(),
+                summary: Some(raw_summary.to_string()),
+            },
+            None,
+        );
+
+        assert_eq!(rendered, "🔧 마지막 도구 ([Bash])");
+        assert!(!rendered.contains(raw_summary));
+    }
+
+    fn assert_raw_tool_input_hidden(name: &str, raw: &str) {
+        let last_tool = LastToolCall {
+            name: name.to_string(),
+            summary: Some(raw.to_string()),
+        };
+        let rendered =
+            render_activity_line_with_last_tool(&DerivedStatus::Running, Some(&last_tool));
+
+        assert!(
+            !rendered.contains(raw),
+            "raw tool input must not reach the status panel: {rendered}"
+        );
+        assert!(
+            !rendered.contains("Hunter2")
+                && !rendered.contains("hvs.CAES")
+                && !rendered.contains("secret/prod/db"),
+            "sensitive tool detail must not reach the status panel: {rendered}"
+        );
+    }
+
+    #[test]
+    fn last_tool_hides_bash_database_url() {
+        assert_raw_tool_input_hidden(
+            "Bash",
+            "psql postgresql://svc:Hunter2@db.prod:5432/main -c SELECT",
+        );
+    }
+
+    #[test]
+    fn last_tool_hides_vault_json() {
+        assert_raw_tool_input_hidden(
+            "mcp__vault__read",
+            r#"read: {"path":"secret/prod/db","token":"hvs.CAES..."}"#,
+        );
+    }
+
+    #[test]
+    fn last_tool_hides_non_json_payload() {
+        assert_raw_tool_input_hidden("Monitor", "non-json payload hvs.CAES... secret/prod/db");
+    }
+
+    #[test]
+    fn unknown_tool_names_fail_closed_without_namespace_disclosure() {
+        let rendered = render_activity_line_with_last_tool(
+            &DerivedStatus::ToolRunning {
+                name: "internal_prod_deploy_secret".to_string(),
                 summary: None,
-            }),
-            "🔧 도구 실행 중 ([Bash])"
+            },
+            None,
+        );
+
+        assert_eq!(rendered, "🔧 마지막 도구 ([Tool])");
+        assert!(
+            !rendered.contains("internal_prod"),
+            "unknown tool identity must fail closed: {rendered}"
+        );
+    }
+
+    #[test]
+    fn mcp_tool_names_collapse_to_one_static_label() {
+        for name in [
+            "mcp__vault-prod",
+            "mcp__a__b__c",
+            "mcp__hr__lookup_employee_alice",
+        ] {
+            let rendered = render_activity_line_with_last_tool(
+                &DerivedStatus::ToolRunning {
+                    name: name.to_string(),
+                    summary: None,
+                },
+                None,
+            );
+
+            assert_eq!(rendered, "🔧 마지막 도구 ([MCP])", "input: {name}");
+            for private_fragment in ["vault-prod", "a__b__c", "hr", "lookup_employee_alice"] {
+                assert!(
+                    !rendered.contains(private_fragment),
+                    "MCP names and operations must never reach the status panel: {rendered}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tool_activity_output_is_bounded_by_the_static_label_set() {
+        let rendered = render_activity_line_with_last_tool(
+            &DerivedStatus::ToolRunning {
+                name: format!("mcp__private_server__{}", "a".repeat(300)),
+                summary: None,
+            },
+            None,
+        );
+
+        assert_eq!(rendered, "🔧 마지막 도구 ([MCP])");
+        assert!(!rendered.contains("private_server"));
+    }
+
+    #[test]
+    fn codex_execution_function_names_map_to_bash() {
+        for name in ["command_execution", "exec", "exec_command", "run_cmd"] {
+            let rendered = render_activity_line_with_last_tool(
+                &DerivedStatus::ToolRunning {
+                    name: name.to_string(),
+                    summary: None,
+                },
+                None,
+            );
+
+            assert_eq!(rendered, "🔧 마지막 도구 ([Bash])", "input: {name}");
+        }
+    }
+
+    #[test]
+    fn monitor_wait_keeps_specific_label_instead_of_last_tool() {
+        let last_tool = LastToolCall {
+            name: "Monitor".to_string(),
+            summary: Some("wait for build".to_string()),
+        };
+
+        assert_eq!(
+            render_activity_line_with_last_tool(&DerivedStatus::MonitorWait, Some(&last_tool),),
+            "💤 monitor 대기"
+        );
+    }
+
+    #[test]
+    fn schedule_wakeup_keeps_eta_label_instead_of_last_tool() {
+        let last_tool = LastToolCall {
+            name: "ScheduleWakeup".to_string(),
+            summary: Some("30 seconds".to_string()),
+        };
+
+        assert_eq!(
+            render_activity_line_with_last_tool(
+                &DerivedStatus::ScheduleWakeup(Some(30)),
+                Some(&last_tool),
+            ),
+            "⏰ scheduled wakeup (30s 후)"
+        );
+        assert_eq!(
+            render_activity_line_with_last_tool(
+                &DerivedStatus::ScheduleWakeup(None),
+                Some(&last_tool),
+            ),
+            "⏰ scheduled wakeup"
+        );
+    }
+
+    #[test]
+    fn subagent_running_keeps_description_label_instead_of_last_tool() {
+        let last_tool = LastToolCall {
+            name: "Task".to_string(),
+            summary: Some("review".to_string()),
+        };
+
+        assert_eq!(
+            render_activity_line_with_last_tool(
+                &DerivedStatus::SubagentRunning {
+                    desc: "review_status".to_string(),
+                },
+                Some(&last_tool),
+            ),
+            r"🧵 subagent 실행 중 (review\_status)"
+        );
+    }
+
+    #[test]
+    fn workflow_running_keeps_label_instead_of_last_tool() {
+        let last_tool = LastToolCall {
+            name: "Workflow".to_string(),
+            summary: Some("CI".to_string()),
+        };
+
+        assert_eq!(
+            render_activity_line_with_last_tool(
+                &DerivedStatus::WorkflowRunning {
+                    label: "CI_review".to_string(),
+                },
+                Some(&last_tool),
+            ),
+            r"🧬 workflow 실행 중 (CI\_review)"
         );
     }
 
@@ -127,15 +357,21 @@ mod tests {
     fn completed_turn_renders_final_check_label() {
         // #3983 item B: `final` is absorbed into the ✅ activity emoji.
         assert_eq!(
-            render_activity_line(&DerivedStatus::Completed {
-                kind: CompletedKind::Foreground
-            }),
+            render_activity_line_with_last_tool(
+                &DerivedStatus::Completed {
+                    kind: CompletedKind::Foreground
+                },
+                None,
+            ),
             "✅ 완료"
         );
         assert_eq!(
-            render_activity_line(&DerivedStatus::Completed {
-                kind: CompletedKind::Background
-            }),
+            render_activity_line_with_last_tool(
+                &DerivedStatus::Completed {
+                    kind: CompletedKind::Background
+                },
+                None,
+            ),
             "✅ 백그라운드 완료"
         );
     }
@@ -144,29 +380,52 @@ mod tests {
     fn activity_labels_lead_with_a_spinner_swap_marker() {
         // Every actively-rendered label must lead with a status emoji so the
         // spinner-merge swaps it for the animation cleanly (spinner-prefix parity).
-        for status in [
-            DerivedStatus::Running,
-            DerivedStatus::MonitorWait,
-            DerivedStatus::ScheduleWakeup(Some(30)),
-            DerivedStatus::ToolRunning {
-                name: "Bash".to_string(),
-                summary: None,
-            },
-            DerivedStatus::SubagentRunning {
-                desc: "explore".to_string(),
-            },
-            DerivedStatus::WorkflowRunning {
-                label: "review".to_string(),
-            },
-            DerivedStatus::Completed {
-                kind: CompletedKind::Foreground,
-            },
+        let last_tool = LastToolCall {
+            name: "Read".to_string(),
+            summary: None,
+        };
+        for (status, last_tool, expected_prefix) in [
+            (DerivedStatus::Running, None, "🔧"),
+            (DerivedStatus::MonitorWait, Some(&last_tool), "💤"),
+            (
+                DerivedStatus::ScheduleWakeup(Some(30)),
+                Some(&last_tool),
+                "⏰",
+            ),
+            (
+                DerivedStatus::ToolRunning {
+                    name: "Bash".to_string(),
+                    summary: None,
+                },
+                None,
+                "🔧",
+            ),
+            (
+                DerivedStatus::SubagentRunning {
+                    desc: "explore".to_string(),
+                },
+                Some(&last_tool),
+                "🧵",
+            ),
+            (
+                DerivedStatus::WorkflowRunning {
+                    label: "review".to_string(),
+                },
+                Some(&last_tool),
+                "🧬",
+            ),
+            (
+                DerivedStatus::Completed {
+                    kind: CompletedKind::Foreground,
+                },
+                None,
+                "✅",
+            ),
         ] {
-            let line = render_activity_line(&status);
-            let first = line.chars().next().expect("non-empty label");
+            let line = render_activity_line_with_last_tool(&status, last_tool);
             assert!(
-                ['🟢', '💤', '⏰', '🔧', '🧵', '🧬', '✅'].contains(&first),
-                "label {line:?} must lead with a spinner-swap marker"
+                line.starts_with(expected_prefix),
+                "label {line:?} must lead with spinner-swap marker {expected_prefix:?}"
             );
         }
     }
