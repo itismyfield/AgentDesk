@@ -36,7 +36,16 @@ struct FileCacheKey {
 
 #[derive(Clone, Debug, Default)]
 struct CatalogCache {
+    gateway_entries: Vec<ModelCatalogEntry>,
+    api_entries: Vec<ModelCatalogEntry>,
     entries: Vec<ModelCatalogEntry>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct DiskCatalogCandidate {
+    gateway_entries: Vec<ModelCatalogEntry>,
+    api_entries: Vec<ModelCatalogEntry>,
+    api_cache_fresh: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -383,28 +392,65 @@ fn catalog_from_raw_sources(
     )
 }
 
-fn reload_catalog_cache_from_disk() {
-    let gateway_path = gateway_cache_path();
-    let api_path = api_cache_path();
-    let gateway_key = gateway_path.as_deref().and_then(file_cache_key);
-    let api_key = api_path.as_deref().and_then(file_cache_key);
-    let cache = CATALOG_CACHE.get_or_init(|| RwLock::new(CatalogCache::default()));
+fn catalog_candidate_from_disk_paths(
+    gateway_path: Option<&Path>,
+    api_path: Option<&Path>,
+    current_ms: u64,
+) -> DiskCatalogCandidate {
+    let gateway_key = gateway_path.and_then(file_cache_key);
+    let api_key = api_path.and_then(file_cache_key);
     let gateway_raw = gateway_path
-        .as_deref()
         .zip(gateway_key.as_ref())
         .and_then(|(path, expected)| bounded_read(path, expected));
     let api_raw = api_path
-        .as_deref()
         .zip(api_key.as_ref())
         .and_then(|(path, expected)| bounded_read(path, expected));
-    let entries = catalog_from_raw_sources(gateway_raw.as_deref(), api_raw.as_deref(), now_ms());
-    if let Ok(mut cached) = cache.write() {
-        cached.entries = entries;
+    let api_entries = api_raw
+        .as_deref()
+        .map(|raw| api_entries_from_raw(raw, current_ms))
+        .unwrap_or_default();
+    DiskCatalogCandidate {
+        gateway_entries: gateway_raw
+            .as_deref()
+            .map(|raw| gateway_entries_from_raw(raw, current_ms))
+            .unwrap_or_default(),
+        api_cache_fresh: !api_entries.is_empty(),
+        api_entries,
     }
 }
 
-async fn reload_catalog_cache() {
-    let _ = tokio::task::spawn_blocking(reload_catalog_cache_from_disk).await;
+fn publish_initial_catalog_if_empty(cache: &RwLock<CatalogCache>, candidate: DiskCatalogCandidate) {
+    if let Ok(mut cached) = cache.write()
+        && cached.entries.is_empty()
+    {
+        cached.gateway_entries = candidate.gateway_entries;
+        cached.api_entries = candidate.api_entries;
+        cached.entries = merge_entries(cached.gateway_entries.clone(), cached.api_entries.clone());
+    }
+}
+
+fn publish_fresh_catalog_candidate(cache: &RwLock<CatalogCache>, candidate: &DiskCatalogCandidate) {
+    if let Ok(mut cached) = cache.write() {
+        if !candidate.gateway_entries.is_empty() {
+            cached.gateway_entries = candidate.gateway_entries.clone();
+        }
+        if candidate.api_cache_fresh {
+            cached.api_entries = candidate.api_entries.clone();
+        }
+        cached.entries = merge_entries(cached.gateway_entries.clone(), cached.api_entries.clone());
+    }
+}
+
+async fn load_catalog_candidate(
+    gateway_path: Option<PathBuf>,
+    api_path: Option<PathBuf>,
+    current_ms: u64,
+) -> DiskCatalogCandidate {
+    tokio::task::spawn_blocking(move || {
+        catalog_candidate_from_disk_paths(gateway_path.as_deref(), api_path.as_deref(), current_ms)
+    })
+    .await
+    .unwrap_or_default()
 }
 
 pub(super) fn resolved_models() -> Vec<ModelCatalogEntry> {
@@ -595,23 +641,46 @@ where
     }
 }
 
-async fn refresh_once() -> RefreshOutcome {
-    let Some(path) = api_cache_path() else {
+async fn refresh_and_log_with<F, Fut>(
+    gateway_path: Option<PathBuf>,
+    api_path: Option<PathBuf>,
+    current_ms: u64,
+    api_key: Option<&str>,
+    fetch: F,
+) -> RefreshOutcome
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = Result<Vec<ApiModel>, FetchFailure>>,
+{
+    let candidate =
+        load_catalog_candidate(gateway_path.clone(), api_path.clone(), current_ms).await;
+    let cache = CATALOG_CACHE.get_or_init(|| RwLock::new(CatalogCache::default()));
+    publish_initial_catalog_if_empty(cache, candidate.clone());
+
+    let Some(path) = api_path else {
+        publish_fresh_catalog_candidate(cache, &candidate);
         return RefreshOutcome::CachePathUnavailable;
     };
-    let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
-    refresh_cache_with(&path, now_ms(), api_key.as_deref(), |api_key| async move {
-        fetch_api_models(&api_key).await
-    })
-    .await
+    let outcome = refresh_cache_with(&path, current_ms, api_key, fetch).await;
+    if matches!(outcome, RefreshOutcome::Updated) {
+        let refreshed = load_catalog_candidate(gateway_path, Some(path), current_ms).await;
+        publish_fresh_catalog_candidate(cache, &refreshed);
+    } else {
+        publish_fresh_catalog_candidate(cache, &candidate);
+    }
+    outcome
 }
 
 async fn refresh_and_log() {
-    reload_catalog_cache().await;
-    let outcome = refresh_once().await;
-    if matches!(outcome, RefreshOutcome::Updated) {
-        reload_catalog_cache().await;
-    }
+    let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
+    let outcome = refresh_and_log_with(
+        gateway_cache_path(),
+        api_cache_path(),
+        now_ms(),
+        api_key.as_deref(),
+        |api_key| async move { fetch_api_models(&api_key).await },
+    )
+    .await;
     tracing::info!(
         target: "agentdesk::claude_model_catalog",
         status = outcome.category(),
@@ -1028,6 +1097,113 @@ mod tests {
             model.display_name.chars().count() <= MAX_CATALOG_TEXT_CHARS
                 && !model.display_name.chars().any(char::is_control)
         }));
+    }
+
+    #[test]
+    fn invariant_claude_model_catalog_failed_and_empty_refreshes_preserve_memory_lkg() {
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let directory = tempdir().unwrap();
+            let api_path = directory.path().join("cache.json");
+            let fresh_ms = 55_000;
+            let stale_ms = fresh_ms + GATEWAY_CACHE_TTL.as_millis() as u64 + 1;
+            let original = api_cache_json(
+                fresh_ms,
+                serde_json::json!([{"id": "claude-memory-lkg", "display_name": "Memory LKG"}]),
+            );
+            std::fs::write(&api_path, &original).unwrap();
+            let cache = CATALOG_CACHE.get_or_init(|| RwLock::new(CatalogCache::default()));
+            if let Ok(mut cached) = cache.write() {
+                *cached = CatalogCache::default();
+            }
+
+            let initial =
+                refresh_and_log_with(None, Some(api_path.clone()), fresh_ms, None, |_| async {
+                    unreachable!("fresh cache must not fetch")
+                })
+                .await;
+            assert_eq!(initial, RefreshOutcome::Fresh);
+            assert!(
+                resolved_models()
+                    .iter()
+                    .any(|entry| entry.value == "claude-memory-lkg")
+            );
+
+            let missing_key =
+                refresh_and_log_with(None, Some(api_path.clone()), stale_ms, None, |_| async {
+                    unreachable!("missing key must not fetch")
+                })
+                .await;
+            assert_eq!(missing_key, RefreshOutcome::MissingApiKey);
+            assert!(
+                resolved_models()
+                    .iter()
+                    .any(|entry| entry.value == "claude-memory-lkg")
+            );
+            assert_eq!(std::fs::read(&api_path).unwrap(), original);
+
+            let failed = refresh_and_log_with(
+                None,
+                Some(api_path.clone()),
+                stale_ms,
+                Some("key"),
+                |_| async { Err(FetchFailure::Transport) },
+            )
+            .await;
+            assert_eq!(failed, RefreshOutcome::FetchFailed(FetchFailure::Transport));
+            assert!(
+                resolved_models()
+                    .iter()
+                    .any(|entry| entry.value == "claude-memory-lkg")
+            );
+            assert_eq!(std::fs::read(&api_path).unwrap(), original);
+
+            let empty = refresh_and_log_with(
+                None,
+                Some(api_path.clone()),
+                stale_ms,
+                Some("key"),
+                |_| async { Ok(Vec::new()) },
+            )
+            .await;
+            assert_eq!(empty, RefreshOutcome::Empty);
+            assert_eq!(std::fs::read(&api_path).unwrap(), original);
+            assert!(
+                resolved_models()
+                    .iter()
+                    .any(|entry| entry.value == "claude-memory-lkg")
+            );
+
+            let updated = refresh_and_log_with(
+                None,
+                Some(api_path.clone()),
+                stale_ms,
+                Some("key"),
+                |_| async {
+                    Ok(vec![ApiModel {
+                        id: "claude-replacement".to_string(),
+                        display_name: "Replacement".to_string(),
+                    }])
+                },
+            )
+            .await;
+            assert_eq!(updated, RefreshOutcome::Updated);
+            let resolved = resolved_models();
+            assert!(
+                resolved
+                    .iter()
+                    .any(|entry| entry.value == "claude-replacement")
+            );
+            assert!(
+                !resolved
+                    .iter()
+                    .any(|entry| entry.value == "claude-memory-lkg")
+            );
+        });
     }
 
     #[tokio::test]
