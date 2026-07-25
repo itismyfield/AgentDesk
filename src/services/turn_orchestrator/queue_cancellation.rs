@@ -38,6 +38,7 @@ pub(crate) fn dequeue_next_soft_intervention(queue: &mut Vec<Intervention>) -> T
         queue_len_after: queue.len(),
         queue_exit_events,
         persistence_error: None,
+        held_for_resume_transition: false,
     }
 }
 

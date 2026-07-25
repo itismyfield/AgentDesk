@@ -394,6 +394,7 @@ pub(super) fn reconcile_pending_dispatch_marker_before_take_next(
             queue_len_after: state.intervention_queue.len(),
             queue_exit_events: Vec::new(),
             persistence_error: None,
+            held_for_resume_transition: false,
         });
     }
 
@@ -468,6 +469,7 @@ pub(super) fn reconcile_pending_dispatch_marker_before_take_next(
             queue_len_after: state.intervention_queue.len(),
             queue_exit_events: Vec::new(),
             persistence_error: Some(error),
+            held_for_resume_transition: false,
         });
     }
     None

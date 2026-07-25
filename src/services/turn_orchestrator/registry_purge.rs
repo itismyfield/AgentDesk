@@ -102,6 +102,7 @@ pub(super) fn gate_closed_arm(
             let _ = reply.send(RecoveryKickoffResult {
                 activated_turn: false,
                 refused_closed: true,
+                refused_resume_transition: false,
             });
             None
         }
@@ -115,6 +116,23 @@ pub(super) fn gate_closed_arm(
                 queue_exit_events: Vec::new(),
                 persistence_error: None,
             });
+            None
+        }
+        ChannelMailboxMsg::BeginResumeTransition { reply, .. } => {
+            let _ = reply.send(super::BeginResumeTransitionResult::MailboxClosed);
+            None
+        }
+        ChannelMailboxMsg::AdvanceResumeTransition { reply, .. } => {
+            let _ = reply.send(super::AdvanceResumeTransitionResult::Refused(
+                super::ResumeTransitionMutationRefusal::MailboxClosed,
+            ));
+            None
+        }
+        ChannelMailboxMsg::CompleteResumeTransition { reply, .. }
+        | ChannelMailboxMsg::AbortResumeTransition { reply, .. } => {
+            let _ = reply.send(super::EndResumeTransitionResult::Refused(
+                super::ResumeTransitionMutationRefusal::MailboxClosed,
+            ));
             None
         }
         other => Some(other),

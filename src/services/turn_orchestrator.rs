@@ -20,6 +20,7 @@ mod overflow;
 mod pending_queue_persistence;
 mod queue_cancellation;
 pub(crate) mod registry_purge;
+mod resume_transition;
 mod source_generation;
 mod turn_finished_signal;
 use active_source_dedup::{
@@ -59,6 +60,7 @@ use queue_cancellation::{
     cancel_soft_intervention_by_message_id, cancel_soft_intervention_by_primary_message_id,
     dequeue_next_soft_intervention, has_soft_intervention,
 };
+pub(crate) use resume_transition::*;
 pub(crate) use source_generation::SourceMessageQueuedGeneration;
 pub(crate) use turn_finished_signal::TurnFinishedSignal;
 use turn_finished_signal::{
@@ -552,6 +554,7 @@ pub(crate) struct PurgeQueueResult {
     /// (only possible when `clear_cancelled_active_anchor` was requested and
     /// the anchored token was already cancelled).
     pub(crate) cleared_active_anchor: bool,
+    pub(crate) refused_resume_transition: bool,
 }
 
 pub(crate) struct HasPendingSoftQueueResult {
@@ -567,6 +570,7 @@ pub(crate) struct RecoveryKickoffResult {
     pub(crate) activated_turn: bool,
     /// #3297 r3 — kickoff refused by a purge tombstone (`state.closed`).
     pub(crate) refused_closed: bool,
+    pub(crate) refused_resume_transition: bool,
 }
 
 #[derive(Default)]
@@ -574,6 +578,7 @@ pub(crate) struct TryStartTurnResult {
     pub(crate) started: bool,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
     pub(crate) persistence_error: Option<String>,
+    pub(crate) refused_resume_transition: bool,
 }
 
 pub(crate) struct RestartDrainResult {
@@ -667,6 +672,7 @@ pub(crate) struct TakeNextSoftResult {
     pub(crate) queue_len_after: usize,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
     pub(crate) persistence_error: Option<String>,
+    pub(crate) held_for_resume_transition: bool,
 }
 
 pub(crate) struct RequeueInterventionResult {
@@ -1020,6 +1026,7 @@ impl ChannelMailboxHandle {
             RecoveryKickoffResult {
                 activated_turn: false,
                 refused_closed: false,
+                refused_resume_transition: false,
             },
         )
         .await
@@ -1081,6 +1088,7 @@ impl ChannelMailboxHandle {
                 queue_len_after: 0,
                 queue_exit_events: Vec::new(),
                 persistence_error: None,
+                held_for_resume_transition: false,
             },
         )
         .await
@@ -1718,6 +1726,22 @@ enum ChannelMailboxMsg {
     ClearRecoveryMarker {
         reply: oneshot::Sender<()>,
     },
+    BeginResumeTransition {
+        transition_id: uuid::Uuid,
+        reply: oneshot::Sender<BeginResumeTransitionResult>,
+    },
+    AdvanceResumeTransition {
+        key: ResumeTransitionKey,
+        reply: oneshot::Sender<AdvanceResumeTransitionResult>,
+    },
+    CompleteResumeTransition {
+        key: ResumeTransitionKey,
+        reply: oneshot::Sender<EndResumeTransitionResult>,
+    },
+    AbortResumeTransition {
+        key: ResumeTransitionKey,
+        reply: oneshot::Sender<EndResumeTransitionResult>,
+    },
     Enqueue {
         intervention: Intervention,
         persistence: QueuePersistenceContext,
@@ -1943,6 +1967,7 @@ struct ChannelMailboxState {
     recently_valve_cleared_dispatch: Option<(MessageId, Instant)>,
     last_persistence: Option<QueuePersistenceContext>,
     recovery_started_at: Option<Instant>,
+    resume_transition: ResumeTransitionState,
     /// #3297 r2 — purge tombstone set by `CloseIfIdle`; see `registry_purge.rs`.
     closed: bool,
     /// #1031: see `ChannelMailboxSnapshot::turn_started_at`. Mirrors the
@@ -2200,6 +2225,9 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
         while let Some(msg) = rx.recv().await {
             // #3297 r3 — tombstoned actor refuses start-like arms (enum docs).
             let Some(msg) = registry_purge::gate_closed_arm(&state, msg) else {
+                continue;
+            };
+            let Some(msg) = resume_transition::gate_reserved_arm(&state, msg) else {
                 continue;
             };
             match msg {
@@ -2471,6 +2499,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         },
                         queue_exit_events,
                         persistence_error,
+                        refused_resume_transition: false,
                     });
                 }
                 ChannelMailboxMsg::RestoreActiveTurn {
@@ -2523,11 +2552,31 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     let _ = reply.send(RecoveryKickoffResult {
                         activated_turn,
                         refused_closed: false,
+                        refused_resume_transition: false,
                     });
                 }
                 ChannelMailboxMsg::ClearRecoveryMarker { reply } => {
                     state.recovery_started_at = None;
                     let _ = reply.send(());
+                }
+                ChannelMailboxMsg::BeginResumeTransition {
+                    transition_id,
+                    reply,
+                } => {
+                    let result = state.resume_transition.begin(transition_id);
+                    let _ = reply.send(result);
+                }
+                ChannelMailboxMsg::AdvanceResumeTransition { key, reply } => {
+                    let result = state.resume_transition.advance(key);
+                    let _ = reply.send(result);
+                }
+                ChannelMailboxMsg::CompleteResumeTransition { key, reply } => {
+                    let result = state.resume_transition.complete(key);
+                    let _ = reply.send(result);
+                }
+                ChannelMailboxMsg::AbortResumeTransition { key, reply } => {
+                    let result = state.resume_transition.abort(key);
+                    let _ = reply.send(result);
                 }
                 ChannelMailboxMsg::Enqueue {
                     mut intervention,
@@ -2666,6 +2715,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             queue_len_after: state.intervention_queue.len(),
                             queue_exit_events: Vec::new(),
                             persistence_error: Some(error),
+                            held_for_resume_transition: false,
                         }
                     } else if let Err(error) = persist_queue_or_restore(
                         &mut state,
@@ -2689,6 +2739,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             queue_len_after: state.intervention_queue.len(),
                             queue_exit_events: Vec::new(),
                             persistence_error: Some(error),
+                            held_for_resume_transition: false,
                         }
                     } else {
                         // #3167 BLOCKER-2 — a head was handed out for dispatch but
@@ -2703,6 +2754,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                                 queue_len_after,
                                 queue_exit_events: next_result.queue_exit_events,
                                 persistence_error: None,
+                                held_for_resume_transition: false,
                             }
                         } else {
                             TakeNextSoftResult {
@@ -2712,6 +2764,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                                 queue_len_after,
                                 queue_exit_events: next_result.queue_exit_events,
                                 persistence_error: None,
+                                held_for_resume_transition: false,
                             }
                         }
                     };
@@ -3101,6 +3154,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         drained,
                         disk_files_removed,
                         cleared_active_anchor,
+                        refused_resume_transition: false,
                     });
                 }
                 #[cfg(test)]
