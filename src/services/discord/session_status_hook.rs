@@ -6,7 +6,6 @@ use super::session_canonical_identity::HookCanonicalIdentity;
 use super::{RoleBinding, SharedData};
 use crate::services::provider::ProviderKind;
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn post_status(
     session_key: &str,
     name: Option<&str>,
@@ -57,7 +56,6 @@ fn clean_nonempty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn post_canonical(
     session_key: Option<&str>,
     name: Option<&str>,
@@ -102,7 +100,6 @@ pub(super) async fn post_canonical(
     .await;
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn post_channel_turn(
     shared: &Arc<SharedData>,
     channel_id: serenity::ChannelId,
@@ -136,7 +133,6 @@ pub(super) async fn post_channel_turn(
     .await;
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn post_legacy(
     session_key: Option<&str>,
     name: Option<&str>,
