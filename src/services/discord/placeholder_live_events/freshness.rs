@@ -5,11 +5,12 @@
 //! derived-status activity label and the store-facing time-line builder live here
 //! with their tests.
 //!
-//! While a turn is actively processing, the footer header shows the latest
-//! observed tool call (`🔧 마지막 도구 (…)`) or a non-progress fallback when no
-//! tool has run yet. Distinct wait states retain their specific labels because
-//! those details are not represented by the spinner. Completed turns retain
-//! their existing completion label. The spinner merge
+//! While a turn is actively processing, the footer header shows only the latest
+//! observed tool class (`🔧 마지막 도구 ([Read])`) or a non-progress fallback when
+//! no tool has run yet. Raw tool arguments are intentionally excluded from this
+//! channel-visible surface. Distinct wait states retain their specific labels
+//! because those details are not represented by the spinner. Completed turns
+//! retain their existing completion label. The spinner merge
 //! (`single_message_panel::merged_footer_header_line`) swaps the leading status
 //! emoji for the animated spinner, so the marker set there must stay in sync with
 //! the emojis this label can start with. The request anchor follows the activity
@@ -94,9 +95,7 @@ pub(super) fn render_activity_line_with_last_tool(
             format!("⏰ scheduled wakeup ({eta_secs}s 후)")
         }
         DerivedStatus::ScheduleWakeup(None) => "⏰ scheduled wakeup".to_string(),
-        DerivedStatus::ToolRunning { name, summary } => {
-            render_tool_activity(name, summary.as_deref())
-        }
+        DerivedStatus::ToolRunning { name, summary: _ } => render_tool_activity(name),
         DerivedStatus::SubagentRunning { desc } => {
             let desc = escape_status_panel_markdown(desc);
             format!("🧵 subagent 실행 중 ({})", truncate_chars(&desc, 120))
@@ -111,22 +110,16 @@ pub(super) fn render_activity_line_with_last_tool(
 fn render_last_tool(last_tool: Option<&LastToolCall>) -> String {
     last_tool.map_or_else(
         || "🔧 마지막 도구 (아직 없음)".to_string(),
-        |tool| render_tool_activity(&tool.name, tool.summary.as_deref()),
+        |tool| render_tool_activity(&tool.name),
     )
 }
 
-fn render_tool_activity(name: &str, summary: Option<&str>) -> String {
-    let name = tool_prefix(name);
-    let detail = summary
-        .map(str::trim)
-        .filter(|summary| !summary.is_empty())
-        .map(escape_status_panel_markdown)
-        .map(|summary| truncate_chars(&summary, 100));
-    let rendered = match detail {
-        Some(detail) => format!("{name} · {detail}"),
-        None => name,
-    };
-    format!("🔧 마지막 도구 ({})", truncate_chars(&rendered, 140))
+/// #4892: tool inputs are untrusted and may contain credentials, signed URLs,
+/// private paths, or arbitrary payloads. This channel-visible surface therefore
+/// renders only the allowlisted tool class produced by `tool_prefix`; new tools
+/// fail closed to a sanitized class name and never render their arguments.
+fn render_tool_activity(name: &str) -> String {
+    format!("🔧 마지막 도구 ({})", tool_prefix(name))
 }
 
 #[cfg(test)]
@@ -147,33 +140,74 @@ mod tests {
     }
 
     #[test]
-    fn running_turn_renders_last_tool_name_and_short_target() {
+    fn running_turn_renders_only_last_tool_class() {
+        let raw_path = "src/services/discord/status_panel.rs";
         let last_tool = LastToolCall {
             name: "Read".to_string(),
-            summary: Some("src/services/discord/status_panel.rs".to_string()),
+            summary: Some(raw_path.to_string()),
         };
         let rendered =
             render_activity_line_with_last_tool(&DerivedStatus::Running, Some(&last_tool));
 
-        assert_eq!(
-            rendered,
-            r"🔧 마지막 도구 ([Read] · src/services/discord/status\_panel.rs)"
-        );
+        assert_eq!(rendered, "🔧 마지막 도구 ([Read])");
+        assert!(!rendered.contains(raw_path));
         assert!(!rendered.contains("진행 중"));
     }
 
     #[test]
-    fn tool_running_uses_same_last_tool_format() {
-        assert_eq!(
-            render_activity_line_with_last_tool(
-                &DerivedStatus::ToolRunning {
-                    name: "Bash".to_string(),
-                    summary: Some("check status".to_string()),
-                },
-                None,
-            ),
-            "🔧 마지막 도구 ([Bash] · check status)"
+    fn tool_running_uses_same_class_only_format() {
+        let raw_summary = "check status";
+        let rendered = render_activity_line_with_last_tool(
+            &DerivedStatus::ToolRunning {
+                name: "Bash".to_string(),
+                summary: Some(raw_summary.to_string()),
+            },
+            None,
         );
+
+        assert_eq!(rendered, "🔧 마지막 도구 ([Bash])");
+        assert!(!rendered.contains(raw_summary));
+    }
+
+    fn assert_raw_tool_input_hidden(name: &str, raw: &str) {
+        let last_tool = LastToolCall {
+            name: name.to_string(),
+            summary: Some(raw.to_string()),
+        };
+        let rendered =
+            render_activity_line_with_last_tool(&DerivedStatus::Running, Some(&last_tool));
+
+        assert!(
+            !rendered.contains(raw),
+            "raw tool input must not reach the status panel: {rendered}"
+        );
+        assert!(
+            !rendered.contains("Hunter2")
+                && !rendered.contains("hvs.CAES")
+                && !rendered.contains("secret/prod/db"),
+            "sensitive tool detail must not reach the status panel: {rendered}"
+        );
+    }
+
+    #[test]
+    fn last_tool_hides_bash_database_url() {
+        assert_raw_tool_input_hidden(
+            "Bash",
+            "psql postgresql://svc:Hunter2@db.prod:5432/main -c SELECT",
+        );
+    }
+
+    #[test]
+    fn last_tool_hides_vault_json() {
+        assert_raw_tool_input_hidden(
+            "mcp__vault__read",
+            r#"read: {"path":"secret/prod/db","token":"hvs.CAES..."}"#,
+        );
+    }
+
+    #[test]
+    fn last_tool_hides_non_json_payload() {
+        assert_raw_tool_input_hidden("Monitor", "non-json payload hvs.CAES... secret/prod/db");
     }
 
     #[test]

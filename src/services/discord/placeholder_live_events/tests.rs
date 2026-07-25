@@ -261,8 +261,8 @@ fn status_panel_renders_derived_tool_state_under_limit() {
     assert!(rendered.contains("마지막 도구"));
     assert!(rendered.contains("[Bash]"));
     assert!(
-        rendered.contains("cargo test"),
-        "status header should show the latest tool's short target: {rendered}"
+        !rendered.contains("cargo test"),
+        "status header should show the tool class, not raw command text: {rendered}"
     );
     assert!(!rendered.contains("진행 중"));
     assert!(rendered.chars().count() <= STATUS_PANEL_MAX_CHARS);
@@ -282,13 +282,14 @@ fn status_panel_recent_compacts_raw_command_details() {
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
     // #3983 item 5a: the footer no longer echoes the compact 🖥️ Recent block;
-    // #4892 instead exposes the formatter's bounded target as the latest tool.
+    // #4892 shows only the tool class and keeps arguments on explicit debug surfaces.
     assert!(rendered.contains("🔧 마지막 도구"));
     assert!(!rendered.contains("🖥️ Recent"));
     assert!(!rendered.contains("```text"));
     assert!(
-        rendered.contains(r"cargo test --lib placeholder\_live\_events -- --nocapture"),
-        "normal status panel must render the escaped latest-tool target: {rendered}"
+        !rendered.contains(raw_command)
+            && !rendered.contains(r"cargo test --lib placeholder\_live\_events -- --nocapture"),
+        "normal status panel must not render raw command detail: {rendered}"
     );
 
     let raw_debug_block = events.render_raw_block_for_tests(channel_id).unwrap();
@@ -312,7 +313,8 @@ fn characterize_rollover_seed_has_no_status_panel_content_s0() {
     let panel = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
     assert!(panel.contains("마지막 도구"));
     assert!(panel.contains("[Bash]"));
-    assert!(panel.contains(r"cargo test --lib placeholder\_live\_events"));
+    assert!(!panel.contains("cargo test --lib placeholder_live_events"));
+    assert!(!panel.contains(r"cargo test --lib placeholder\_live\_events"));
 
     let status_block = build_processing_status_block("⠸");
     let current_portion = "relay body ".repeat(250);
@@ -3813,11 +3815,11 @@ fn background_bash_command_only_slot_hides_raw_command_3806() {
     );
     assert!(
         rendered.contains("🔧 마지막 도구 ([Bash]"),
-        "background Bash launch must remain visible as the latest tool: {rendered}"
+        "background Bash class must remain visible as the latest tool: {rendered}"
     );
     assert!(
-        rendered.contains("codex exec --skip-git-repo-check -m gpt-5.5"),
-        "the latest-tool header must reuse the bounded formatter summary: {rendered}"
+        !rendered.contains(raw_command),
+        "background Bash slot must not leak raw command detail: {rendered}"
     );
 }
 
@@ -6315,8 +6317,12 @@ fn status_panel_renders_plan_but_hides_subagents_for_codex() {
     assert!(rendered.contains("Hidden for Codex"));
     assert!(!rendered.contains("Subagents"));
     assert!(
-        rendered.contains("🔧 마지막 도구 ([Task] · Hidden subagent)"),
-        "Codex's hidden-subagent header projection must retain the latest tool: {rendered}"
+        !rendered.contains("Hidden subagent"),
+        "Codex's hidden-subagent projection must suppress header detail too: {rendered}"
+    );
+    assert!(
+        !rendered.contains("[Task]"),
+        "Codex's hidden-subagent projection must not reintroduce the Task class: {rendered}"
     );
 }
 

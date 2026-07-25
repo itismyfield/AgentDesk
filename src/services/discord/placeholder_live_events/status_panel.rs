@@ -586,9 +586,9 @@ pub(super) fn render_status_panel(
     // activity line (or `None` for headless/synthetic/id-0 turns).
     turn_trigger_line: Option<String>,
 ) -> String {
-    let header_status = if matches!(provider, ProviderKind::Codex)
-        && matches!(snapshot.status, DerivedStatus::SubagentRunning { .. })
-    {
+    let codex_subagent_projection = matches!(provider, ProviderKind::Codex)
+        && matches!(snapshot.status, DerivedStatus::SubagentRunning { .. });
+    let header_status = if codex_subagent_projection {
         DerivedStatus::Running
     } else {
         snapshot.status.clone()
@@ -597,10 +597,14 @@ pub(super) fn render_status_panel(
     // the request anchor when present, then the start/update TIME fields. Keep the
     // entire header in one section so each field occupies the immediately following
     // physical line and section-wise truncation preserves the header atomically.
-    let activity_line = super::freshness::render_activity_line_with_last_tool(
-        &header_status,
-        snapshot.last_tool.as_ref(),
-    );
+    // #4367: projecting Codex subagent activity to generic Running must also
+    // suppress the Task-derived last tool; otherwise the hidden description is
+    // reintroduced through a sibling header field.
+    let visible_last_tool = (!codex_subagent_projection)
+        .then_some(snapshot.last_tool.as_ref())
+        .flatten();
+    let activity_line =
+        super::freshness::render_activity_line_with_last_tool(&header_status, visible_last_tool);
     let time_lines = time_line.lines().collect::<Vec<_>>();
     let mut header_lines = std::iter::once(activity_line.as_str())
         .chain(time_lines)
