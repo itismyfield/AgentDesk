@@ -1378,7 +1378,7 @@ fn infer_phase_gate_verdict(
     }
 
     let declared_check_count = phase_gate_ctx
-        .get("checks")
+        .get("required_checks")
         .and_then(serde_json::Value::as_array)
         .map_or(0, Vec::len);
     let reported_check_count = result
@@ -1647,10 +1647,7 @@ mod auto_queue_phase_gate_finalize_wrapper_tests {
     }
 
     fn gate() -> serde_json::Value {
-        json!({
-            "checks": ["merge_verified", "issue_closed", "build_passed"],
-            "pass_verdict": "phase_gate_passed",
-        })
+        crate::phase_gate::resolve_declaration_value("pr-confirm").expect("pr-confirm declaration")
     }
 
     fn passing_checks() -> serde_json::Value {

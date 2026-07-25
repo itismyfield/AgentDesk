@@ -3,91 +3,293 @@ const assert = require("node:assert/strict");
 
 const { createSqlRouter, defaultPipelineConfig, loadPolicy, toPlain } = require("./support/harness");
 
-test("auto-queue infers phase_gate_passed when every declared check passes", () => {
-  const { module } = loadPolicy("policies/auto-queue.js");
+function prConfirmDeclaration() {
+  return {
+    kind: "pr-confirm",
+    declaration_version: 1,
+    pass_verdict: "phase_gate_passed",
+    evidence_requirement: "dispatch_result_checks",
+    required_checks: [
+      { check: "merge_verified", authority: "dispatch_result" },
+      { check: "issue_closed", authority: "dispatch_result" },
+      { check: "build_passed", authority: "dispatch_result" }
+    ],
+    available: true,
+    unavailable_reason: null
+  };
+}
 
+function deployGateDeclaration() {
+  return {
+    kind: "deploy-gate",
+    declaration_version: 1,
+    pass_verdict: "phase_gate_passed",
+    evidence_requirement: "trusted_deployment_evidence",
+    required_checks: [
+      { check: "build_passed", authority: "dispatch_result" },
+      { check: "deploy_verified", authority: "trusted_deployment_evidence" }
+    ],
+    available: false,
+    unavailable_reason: "deploy-gate unavailable: trusted deployment evidence capability is not configured"
+  };
+}
+
+function phaseGateDeclaration(kind) {
+  if (!kind || kind === "pr-confirm") return prConfirmDeclaration();
+  if (kind === "deploy-gate") return deployGateDeclaration();
+  return null;
+}
+
+function passingPrChecks() {
+  return {
+    merge_verified: { status: "pass" },
+    issue_closed: { result: "passed" },
+    build_passed: "pass"
+  };
+}
+
+test("auto-queue infers phase_gate_passed when every registry check passes", () => {
+  const { module } = loadPolicy("policies/auto-queue.js", { phaseGateDeclaration });
   const verdict = module.__test.inferPhaseGatePassVerdict(
-    {
-      phase_gate: {
-        pass_verdict: "phase_gate_passed",
-        checks: ["lint", "tests"]
-      }
-    },
-    {
-      checks: {
-        lint: { status: "pass" },
-        tests: { result: "passed" }
-      }
-    }
+    { phase_gate: prConfirmDeclaration() },
+    { checks: passingPrChecks() }
   );
-
   assert.equal(verdict, "phase_gate_passed");
 });
 
-test("auto-queue does not infer a phase gate verdict when the result already carries an explicit verdict", () => {
-  const { module } = loadPolicy("policies/auto-queue.js");
-
+test("auto-queue does not infer a phase gate verdict when result carries explicit failure", () => {
+  const { module } = loadPolicy("policies/auto-queue.js", { phaseGateDeclaration });
   const verdict = module.__test.inferPhaseGatePassVerdict(
-    {
-      phase_gate: {
-        pass_verdict: "phase_gate_passed",
-        checks: ["lint"]
-      }
-    },
-    {
-      verdict: "manual_override",
-      checks: {
-        lint: { status: "pass" }
-      }
-    }
+    { phase_gate: prConfirmDeclaration() },
+    { verdict: "manual_override", checks: passingPrChecks() }
   );
-
   assert.equal(verdict, null);
 });
 
 test("auto-queue treats phase_gate_verdict as explicit phase gate verdict", () => {
-  const { module } = loadPolicy("policies/auto-queue.js");
-
+  const { module } = loadPolicy("policies/auto-queue.js", { phaseGateDeclaration });
   const verdict = module.__test.inferPhaseGatePassVerdict(
-    {
-      phase_gate: {
-        pass_verdict: "phase_gate_passed",
-        checks: ["lint"]
-      }
-    },
-    {
-      phase_gate_verdict: "manual_hold",
-      checks: {
-        lint: { status: "pass" }
-      }
-    }
+    { phase_gate: prConfirmDeclaration() },
+    { phase_gate_verdict: "manual_hold", checks: passingPrChecks() }
   );
-
   assert.equal(verdict, null);
 });
 
-test("auto-queue accepts pass alias for phase gate when checks pass", () => {
-  const { module } = loadPolicy("policies/auto-queue.js");
-
+test("auto-queue accepts pass alias only when registry checks pass", () => {
+  const { module } = loadPolicy("policies/auto-queue.js", { phaseGateDeclaration });
   const matches = module.__test.phaseGateVerdictMatches(
     "pass",
     "phase_gate_passed",
+    { phase_gate: prConfirmDeclaration() },
+    { verdict: "pass", checks: passingPrChecks() }
+  );
+  assert.equal(matches, true);
+});
+
+test("auto-queue explicit phase_gate_passed cannot bypass registry checks", () => {
+  const { module } = loadPolicy("policies/auto-queue.js", { phaseGateDeclaration });
+  assert.equal(module.__test.phaseGateVerdictMatches(
+    "phase_gate_passed",
+    "phase_gate_passed",
+    { phase_gate: prConfirmDeclaration() },
+    { verdict: "phase_gate_passed", checks: {} }
+  ), false);
+});
+
+test("auto-queue agent-supplied deploy_verified cannot satisfy authoritative evidence", () => {
+  const { module } = loadPolicy("policies/auto-queue.js", { phaseGateDeclaration });
+  assert.equal(module.__test.phaseGateVerdictMatches(
+    "phase_gate_passed",
+    "phase_gate_passed",
+    { phase_gate: deployGateDeclaration() },
+    { verdict: "phase_gate_passed", checks: { build_passed: "pass", deploy_verified: "pass" } }
+  ), false);
+});
+
+test("auto-queue malformed and stale declaration snapshots fail closed", () => {
+  const { module } = loadPolicy("policies/auto-queue.js", { phaseGateDeclaration });
+  const stale = prConfirmDeclaration();
+  stale.declaration_version = 99;
+  assert.equal(module.__test.inferPhaseGatePassVerdict(
+    { phase_gate: stale },
+    { checks: passingPrChecks() }
+  ), null);
+});
+
+test("auto-queue production completion persists only closed non-string verdict labels", () => {
+  const context = {
+    phase_gate: Object.assign(prConfirmDeclaration(), {
+      run_id: "run-private",
+      batch_phase: 0,
+      card_ids: ["card-private"]
+    })
+  };
+  const rawResult = {
+    verdict: { authorization: "Bearer secret" },
+    checks: { build_passed: "fail" }
+  };
+  const { policy, state } = loadPolicy("policies/auto-queue.js", {
+    phaseGateDeclaration,
+    dbQuery: createSqlRouter([
+      {
+        match: "SELECT id, kanban_card_id, dispatch_type, result, context FROM task_dispatches",
+        result: [{
+          id: "dsp-private",
+          kanban_card_id: "card-private",
+          dispatch_type: "phase-gate",
+          context: JSON.stringify(context),
+          result: JSON.stringify(rawResult)
+        }]
+      },
+      {
+        match: "FROM auto_queue_phase_gates",
+        result: [{
+          dispatch_id: "dsp-private",
+          status: "pending",
+          verdict: null,
+          pass_verdict: "phase_gate_passed",
+          next_phase: 1,
+          final_phase: false,
+          anchor_card_id: "card-private",
+          failure_reason: null,
+          created_at: "2026-07-25T00:00:00Z"
+        }]
+      },
+      { match: "FROM kanban_cards WHERE id = ?", result: [] },
+      { match: "FROM task_dispatches td LEFT JOIN auto_queue_entries", result: [] }
+    ]),
+    globals: { notifyCardOwner() {} }
+  });
+
+  policy.onDispatchCompleted({ dispatch_id: "dsp-private" });
+
+  assert.equal(state.autoQueueSavedPhaseGates.length, 1);
+  const saved = state.autoQueueSavedPhaseGates[0].state;
+  assert.equal(saved.verdict, "<non-string:object>");
+  assert.equal(saved.failure_reason, "expected phase_gate_passed, got <non-string:object>");
+  assert.doesNotMatch(JSON.stringify(saved), /authorization|Bearer secret/);
+});
+
+test("auto-queue group keys split distinct kind and declaration snapshots", () => {
+  const { module } = loadPolicy("policies/auto-queue.js", { phaseGateDeclaration });
+  const pr = prConfirmDeclaration();
+  const stalePr = prConfirmDeclaration();
+  stalePr.declaration_version = 2;
+  const deploy = deployGateDeclaration();
+  const key = (declaration) => module.__test.phaseGateGroupKey(
+    "agent-a",
+    "agent-a",
+    "phase-gate",
+    declaration
+  );
+  assert.notEqual(key(pr), key(stalePr));
+  assert.notEqual(key(pr), key(deploy));
+});
+
+test("auto-queue groups persisted legacy defaults and explicit kinds by canonical declaration", () => {
+  const rows = [
     {
-      phase_gate: {
-        pass_verdict: "phase_gate_passed",
-        checks: ["lint", "tests"]
-      }
+      entry_id: "entry-legacy",
+      kanban_card_id: "card-legacy",
+      agent_id: "agent-a",
+      status: "done",
+      priority_rank: 0,
+      phase_gate_kind: null,
+      title: "Legacy",
+      github_issue_number: 1,
+      repo_id: "repo",
+      latest_result: "{}"
     },
     {
-      verdict: "pass",
-      checks: {
-        lint: { status: "pass" },
-        tests: { result: "passed" }
-      }
+      entry_id: "entry-pr",
+      kanban_card_id: "card-pr",
+      agent_id: "agent-a",
+      status: "done",
+      priority_rank: 1,
+      phase_gate_kind: "pr-confirm",
+      title: "PR",
+      github_issue_number: 2,
+      repo_id: "repo",
+      latest_result: "{}"
     }
-  );
+  ];
+  const { module, state } = loadPolicy("policies/auto-queue.js", {
+    phaseGateDeclaration,
+    dbQuery: createSqlRouter([{ match: "e.phase_gate_kind", result: rows }])
+  });
+  const groups = module.__test.buildPhaseGateGroups("run-1", 0);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].declaration.kind, "pr-confirm");
+  assert.deepEqual(toPlain(groups[0].card_ids), ["card-legacy", "card-pr"]);
+  assert.ok(state.queries[0].sql.includes("e.phase_gate_kind"));
+});
 
-  assert.equal(matches, true);
+test("auto-queue pipeline checks cannot override canonical declaration", () => {
+  const pipelineConfig = defaultPipelineConfig();
+  pipelineConfig.phase_gate = {
+    checks: ["attacker_override"],
+    pass_verdict: "attacker_pass"
+  };
+  const { module } = loadPolicy("policies/auto-queue.js", {
+    pipelineConfig,
+    phaseGateDeclaration,
+    dbQuery: createSqlRouter([{
+      match: "e.phase_gate_kind",
+      result: [{
+        entry_id: "entry-pr",
+        kanban_card_id: "card-pr",
+        agent_id: "agent-a",
+        status: "done",
+        priority_rank: 0,
+        phase_gate_kind: "pr-confirm",
+        title: "PR",
+        github_issue_number: 2,
+        repo_id: "repo",
+        latest_result: "{}"
+      }]
+    }])
+  });
+  const groups = module.__test.buildPhaseGateGroups("run-1", 0);
+  assert.deepEqual(toPlain(groups[0].declaration.required_checks), prConfirmDeclaration().required_checks);
+  assert.equal(groups[0].declaration.pass_verdict, "phase_gate_passed");
+});
+
+test("auto-queue unknown persisted phase-gate kind fails closed", () => {
+  const { module } = loadPolicy("policies/auto-queue.js", {
+    phaseGateDeclaration,
+    dbQuery: createSqlRouter([{
+      match: "e.phase_gate_kind",
+      result: [{
+        entry_id: "entry-unknown", kanban_card_id: "card-unknown", agent_id: "agent-a",
+        status: "done", priority_rank: 0, phase_gate_kind: "ship-it", title: "Unknown",
+        github_issue_number: 3, repo_id: "repo", latest_result: "{}"
+      }]
+    }])
+  });
+  const groups = module.__test.buildPhaseGateGroups("run-1", 0);
+  assert.equal(groups.length, 0);
+  assert.match(groups.error, /requires reconciliation/);
+});
+
+test("auto-queue unavailable deploy gate creates no runnable dispatch", () => {
+  const row = {
+    entry_id: "entry-deploy", kanban_card_id: "card-deploy", agent_id: "agent-a",
+    status: "done", priority_rank: 0, phase_gate_kind: "deploy-gate", title: "Deploy",
+    github_issue_number: 4, repo_id: "repo", latest_result: "{}"
+  };
+  const { module, state } = loadPolicy("policies/auto-queue.js", {
+    phaseGateDeclaration,
+    dbQuery: createSqlRouter([
+      { match: "FROM auto_queue_phase_gates", result: [] },
+      { match: "e.phase_gate_kind", result: [row] }
+    ]),
+    globals: { notifyCardOwner() {} }
+  });
+  const result = module.__test.createPhaseGateDispatches("run-deploy", 0, 1, false, "card-deploy");
+  assert.equal(result.status, "failed");
+  assert.equal(result.failed_reason, deployGateDeclaration().unavailable_reason);
+  assert.equal(state.dispatchCreates.length, 0);
+  assert.equal(state.autoQueueSavedPhaseGates.length, 1);
 });
 
 test("auto-queue dispatchable targets prioritize requested and keep unique dispatch anchors", () => {

@@ -24,6 +24,22 @@ pub(super) fn register_pipeline_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
         })?,
     )?;
 
+    // __resolvePhaseGateDeclarationRaw(kind): returns the canonical immutable declaration.
+    pipeline_obj.set(
+        "__resolvePhaseGateDeclarationRaw",
+        Function::new(ctx.clone(), move |kind: String| -> String {
+            let kind = kind.trim();
+            let kind = if kind.is_empty() {
+                crate::phase_gate::DEFAULT_PHASE_GATE_KIND
+            } else {
+                kind
+            };
+            crate::phase_gate::resolve_declaration_value(kind)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_string())
+        })?,
+    )?;
+
     // __resolveForCardRaw(cardId): returns the effective pipeline for a card
     let pg_resolve = pg_pool;
     pipeline_obj.set(
@@ -54,22 +70,24 @@ pub(super) fn register_pipeline_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
                 return JSON.parse(agentdesk.pipeline.__resolveForCardRaw(cardId));
             };
 
-            agentdesk.pipeline.resolvePhaseGate = function(config) {
+            agentdesk.pipeline.resolvePhaseGateDeclaration = function(kind) {
+                return JSON.parse(agentdesk.pipeline.__resolvePhaseGateDeclarationRaw(kind || ""));
+            };
+
+            agentdesk.pipeline.resolvePhaseGate = function(config, kind) {
                 var cfg = config || agentdesk.pipeline.getConfig();
                 var gate = (cfg && cfg.phase_gate) ? cfg.phase_gate : {};
-                var checks = Array.isArray(gate.checks) && gate.checks.length > 0
-                    ? gate.checks.slice()
-                    : ["merge_verified", "issue_closed", "build_passed"];
+                var declaration = agentdesk.pipeline.resolvePhaseGateDeclaration(kind);
+                if (!declaration) return null;
                 return {
                     dispatch_to: gate.dispatch_to || "self",
                     dispatch_type: gate.dispatch_type || "phase-gate",
-                    pass_verdict: gate.pass_verdict || "phase_gate_passed",
-                    checks: checks
+                    declaration: declaration
                 };
             };
 
-            agentdesk.pipeline.resolvePhaseGateForCard = function(cardId) {
-                return agentdesk.pipeline.resolvePhaseGate(agentdesk.pipeline.resolveForCard(cardId));
+            agentdesk.pipeline.resolvePhaseGateForCard = function(cardId, kind) {
+                return agentdesk.pipeline.resolvePhaseGate(agentdesk.pipeline.resolveForCard(cardId), kind);
             };
 
             agentdesk.pipeline.isTerminal = function(state, config) {

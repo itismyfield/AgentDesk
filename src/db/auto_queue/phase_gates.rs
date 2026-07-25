@@ -1368,14 +1368,13 @@ async fn load_sibling_phase_gate_dispatches_on_pg_tx(
             }
             "completed" => {}
             _ => {
+                let resolution = result_value
+                    .as_ref()
+                    .map(|result| resolve_verdict(context_value.as_ref(), result));
                 let verdict = result_value
                     .as_ref()
-                    .and_then(|v| {
-                        v.get("verdict")
-                            .or_else(|| v.get("decision"))
-                            .and_then(Value::as_str)
-                    })
-                    .map(str::to_string);
+                    .zip(resolution.as_ref())
+                    .and_then(|(result, resolution)| diagnostic_verdict(result, resolution));
                 let reason = result_value
                     .as_ref()
                     .and_then(|v| {
@@ -1940,16 +1939,14 @@ mod reconcile_phase_gate_pg_tests {
     }
 
     fn gate_context() -> serde_json::Value {
-        json!({
-            "phase_gate": {
-                "run_id": "run-pg-test",
-                "batch_phase": 0,
-                "pass_verdict": "phase_gate_passed",
-                "next_phase": 1,
-                "final_phase": false,
-                "checks": ["merge_verified", "issue_closed", "build_passed"],
-            }
-        })
+        let mut declaration = crate::phase_gate::resolve_declaration_value("pr-confirm")
+            .expect("pr-confirm declaration");
+        let gate = declaration.as_object_mut().expect("declaration object");
+        gate.insert("run_id".to_string(), json!("run-pg-test"));
+        gate.insert("batch_phase".to_string(), json!(0));
+        gate.insert("next_phase".to_string(), json!(1));
+        gate.insert("final_phase".to_string(), json!(false));
+        json!({"phase_gate": declaration})
     }
 
     #[test]
@@ -2044,7 +2041,7 @@ mod reconcile_phase_gate_pg_tests {
             "dsp-stale",
             "completed",
             gate_context(),
-            Some(json!({"verdict":"phase_gate_passed"})),
+            Some(json!({"verdict":"phase_gate_passed","checks":{"merge_verified":"pass","issue_closed":"pass","build_passed":"pass"}})),
         )
         .await;
         assert!(matches!(outcome, PhaseGateReconciliation::StaleRow));
@@ -2094,7 +2091,7 @@ mod reconcile_phase_gate_pg_tests {
             "dsp-pass",
             "completed",
             gate_context(),
-            Some(json!({"verdict":"phase_gate_passed"})),
+            Some(json!({"verdict":"phase_gate_passed","checks":{"merge_verified":"pass","issue_closed":"pass","build_passed":"pass"}})),
         )
         .await;
         save_phase_gate_state_on_pg(
@@ -2122,7 +2119,7 @@ mod reconcile_phase_gate_pg_tests {
             "dsp-pass",
             "completed",
             gate_context(),
-            Some(json!({"verdict":"phase_gate_passed"})),
+            Some(json!({"verdict":"phase_gate_passed","checks":{"merge_verified":"pass","issue_closed":"pass","build_passed":"pass"}})),
         )
         .await;
         match outcome {
@@ -2159,20 +2156,14 @@ mod reconcile_phase_gate_pg_tests {
         fixture(&pool).await;
 
         // No pending entries — drained run, ready to finalize.
-        let final_context = json!({
-            "phase_gate": {
-                "run_id": "run-pg-test",
-                "batch_phase": 0,
-                "pass_verdict": "phase_gate_passed",
-                "final_phase": true,
-            }
-        });
+        let mut final_context = gate_context();
+        final_context["phase_gate"]["final_phase"] = json!(true);
         insert_dispatch(
             &pool,
             "dsp-final",
             "completed",
             final_context.clone(),
-            Some(json!({"verdict":"phase_gate_passed"})),
+            Some(json!({"verdict":"phase_gate_passed","checks":{"merge_verified":"pass","issue_closed":"pass","build_passed":"pass"}})),
         )
         .await;
         save_phase_gate_state_on_pg(
@@ -2196,7 +2187,7 @@ mod reconcile_phase_gate_pg_tests {
             "dsp-final",
             "completed",
             final_context,
-            Some(json!({"verdict":"phase_gate_passed"})),
+            Some(json!({"verdict":"phase_gate_passed","checks":{"merge_verified":"pass","issue_closed":"pass","build_passed":"pass"}})),
         )
         .await;
         match outcome {
@@ -2287,14 +2278,7 @@ mod reconcile_phase_gate_pg_tests {
         let pool = pg_db.connect_and_migrate().await;
         fixture(&pool).await;
 
-        let context = json!({
-            "phase_gate": {
-                "run_id": "run-pg-test",
-                "batch_phase": 0,
-                "pass_verdict": "gate_ok",
-                "checks": ["build_passed"]
-            }
-        });
+        let context = gate_context();
         let result = json!({
             "verdict": {"authorization": "Bearer secret"},
             "checks": {"build_passed": {"status": "fail"}}
@@ -2313,7 +2297,7 @@ mod reconcile_phase_gate_pg_tests {
             0,
             &PhaseGateStateWrite {
                 status: "pending".into(),
-                pass_verdict: "gate_ok".into(),
+                pass_verdict: "phase_gate_passed".into(),
                 dispatch_ids: vec!["dsp-diagnostic".into()],
                 ..Default::default()
             },
@@ -2371,32 +2355,25 @@ mod reconcile_phase_gate_pg_tests {
         let pool = pg_db.connect_and_migrate().await;
         fixture(&pool).await;
 
-        let context_a = json!({
-            "phase_gate": {
-                "run_id": "run-pg-test",
-                "batch_phase": 0,
-                "pass_verdict": "gate_ok",
-                "checks": ["tests"]
-            }
-        });
-        let context_b = json!({
-            "phase_gate": {
-                "run_id": "run-pg-test",
-                "batch_phase": 0,
-                "pass_verdict": "phase_gate_passed",
-                "checks": ["tests"]
-            }
-        });
-        for (id, context, verdict) in [
-            ("dsp-group-a", context_a.clone(), "gate_ok"),
-            ("dsp-group-b", context_b.clone(), "phase_gate_passed"),
+        let context_a = gate_context();
+        let context_b = gate_context();
+        for (id, context) in [
+            ("dsp-group-a", context_a.clone()),
+            ("dsp-group-b", context_b.clone()),
         ] {
             insert_dispatch(
                 &pool,
                 id,
                 "completed",
                 context.clone(),
-                Some(json!({"verdict": verdict, "checks": {"tests": "pass"}})),
+                Some(json!({
+                    "verdict": "phase_gate_passed",
+                    "checks": {
+                        "merge_verified": "pass",
+                        "issue_closed": "pass",
+                        "build_passed": "pass"
+                    }
+                })),
             )
             .await;
         }
@@ -2406,7 +2383,7 @@ mod reconcile_phase_gate_pg_tests {
             0,
             &PhaseGateStateWrite {
                 status: "pending".into(),
-                pass_verdict: "gate_ok".into(),
+                pass_verdict: "phase_gate_passed".into(),
                 dispatch_ids: vec!["dsp-group-a".into(), "dsp-group-b".into()],
                 ..Default::default()
             },
@@ -2421,7 +2398,11 @@ mod reconcile_phase_gate_pg_tests {
             context_b,
             Some(json!({
                 "verdict": "phase_gate_passed",
-                "checks": {"tests": "pass"}
+                "checks": {
+                    "merge_verified": "pass",
+                    "issue_closed": "pass",
+                    "build_passed": "pass"
+                }
             })),
         )
         .await;
@@ -2430,6 +2411,76 @@ mod reconcile_phase_gate_pg_tests {
             "primary and sibling paths must use each dispatch context: {outcome:?}"
         );
         assert_eq!(gate_count(&pool, "run-pg-test", 0).await, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn noncompleted_sibling_redacts_non_string_verdict_payload() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        fixture(&pool).await;
+
+        let context = gate_context();
+        let passing = json!({
+            "verdict": "phase_gate_passed",
+            "checks": {
+                "merge_verified": "pass",
+                "issue_closed": "pass",
+                "build_passed": "pass"
+            }
+        });
+        insert_dispatch(
+            &pool,
+            "dsp-primary-private",
+            "completed",
+            context.clone(),
+            Some(passing.clone()),
+        )
+        .await;
+        insert_dispatch(
+            &pool,
+            "dsp-sibling-private",
+            "failed",
+            context.clone(),
+            Some(json!({"verdict": {"authorization": "Bearer secret"}})),
+        )
+        .await;
+        save_phase_gate_state_on_pg(
+            &pool,
+            "run-pg-test",
+            0,
+            &PhaseGateStateWrite {
+                status: "pending".into(),
+                pass_verdict: "phase_gate_passed".into(),
+                dispatch_ids: vec!["dsp-primary-private".into(), "dsp-sibling-private".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed sibling privacy gate");
+
+        let outcome = run_reconcile(
+            &pool,
+            "dsp-primary-private",
+            "completed",
+            context,
+            Some(passing),
+        )
+        .await;
+        let PhaseGateReconciliation::MarkedFailed { failed_reason, .. } = outcome else {
+            panic!("expected sibling failure");
+        };
+        assert!(!failed_reason.contains("authorization"));
+        assert!(!failed_reason.contains("Bearer secret"));
+        let (verdict, reason) = gate_failure_diagnostic(&pool, "run-pg-test", 0).await;
+        assert_eq!(verdict.as_deref(), Some("<non-string:object>"));
+        assert!(
+            reason.as_deref().is_none_or(
+                |text| !text.contains("authorization") && !text.contains("Bearer secret")
+            )
+        );
 
         pool.close().await;
         pg_db.drop().await;
@@ -2446,7 +2497,7 @@ mod reconcile_phase_gate_pg_tests {
             "dsp-already",
             "completed",
             gate_context(),
-            Some(json!({"verdict":"phase_gate_passed"})),
+            Some(json!({"verdict":"phase_gate_passed","checks":{"merge_verified":"pass","issue_closed":"pass","build_passed":"pass"}})),
         )
         .await;
         save_phase_gate_state_on_pg(
@@ -2475,7 +2526,7 @@ mod reconcile_phase_gate_pg_tests {
             "dsp-already",
             "completed",
             gate_context(),
-            Some(json!({"verdict":"phase_gate_passed"})),
+            Some(json!({"verdict":"phase_gate_passed","checks":{"merge_verified":"pass","issue_closed":"pass","build_passed":"pass"}})),
         )
         .await;
         assert!(matches!(outcome, PhaseGateReconciliation::AlreadyFailed));
@@ -2498,7 +2549,7 @@ mod reconcile_phase_gate_pg_tests {
             "dsp-repair-idempotent",
             "completed",
             gate_context(),
-            Some(json!({"verdict":"phase_gate_passed"})),
+            Some(json!({"verdict":"phase_gate_passed","checks":{"merge_verified":"pass","issue_closed":"pass","build_passed":"pass"}})),
         )
         .await;
         save_phase_gate_state_on_pg(
@@ -2625,7 +2676,7 @@ mod reconcile_phase_gate_pg_tests {
             "dsp-repair-concurrent",
             "completed",
             gate_context(),
-            Some(json!({"verdict":"phase_gate_passed"})),
+            Some(json!({"verdict":"phase_gate_passed","checks":{"merge_verified":"pass","issue_closed":"pass","build_passed":"pass"}})),
         )
         .await;
         save_phase_gate_state_on_pg(
@@ -2719,7 +2770,7 @@ mod reconcile_phase_gate_pg_tests {
             "dsp-repair-vs-patch",
             "completed",
             gate_context(),
-            Some(json!({"verdict":"phase_gate_passed"})),
+            Some(json!({"verdict":"phase_gate_passed","checks":{"merge_verified":"pass","issue_closed":"pass","build_passed":"pass"}})),
         )
         .await;
         save_phase_gate_state_on_pg(
@@ -2769,7 +2820,7 @@ mod reconcile_phase_gate_pg_tests {
                  SET result = CAST($1 AS jsonb), updated_at = NOW()
                  WHERE id = 'dsp-repair-vs-patch'",
             )
-            .bind(r#"{"verdict":"phase_gate_passed","note":"post-patch"}"#)
+            .bind(r#"{"verdict":"phase_gate_passed","note":"post-patch","checks":{"merge_verified":"pass","issue_closed":"pass","build_passed":"pass"}}"#)
             .execute(&mut *tx)
             .await
             .expect("patch task_dispatches");
@@ -2816,7 +2867,7 @@ mod reconcile_phase_gate_pg_tests {
             "dsp-pass-1",
             "completed",
             gate_context(),
-            Some(json!({"verdict":"phase_gate_passed"})),
+            Some(json!({"verdict":"phase_gate_passed","checks":{"merge_verified":"pass","issue_closed":"pass","build_passed":"pass"}})),
         )
         .await;
         insert_dispatch(&pool, "dsp-pending-2", "dispatched", gate_context(), None).await;
@@ -2841,7 +2892,7 @@ mod reconcile_phase_gate_pg_tests {
             "dsp-pass-1",
             "completed",
             gate_context(),
-            Some(json!({"verdict":"phase_gate_passed"})),
+            Some(json!({"verdict":"phase_gate_passed","checks":{"merge_verified":"pass","issue_closed":"pass","build_passed":"pass"}})),
         )
         .await;
         match outcome {
@@ -2902,20 +2953,12 @@ mod reconcile_phase_gate_pg_tests {
         let pool = pg_db.connect_and_migrate().await;
         fixture(&pool).await;
 
-        let context = json!({
-            "phase_gate": {
-                "run_id": "run-pg-test",
-                "batch_phase": 0,
-                "pass_verdict": "phase_gate_passed",
-                "next_phase": 1,
-                "final_phase": false,
-                "checks": ["lint", "tests"],
-            }
-        });
+        let context = gate_context();
         let result = json!({
             "checks": {
-                "lint": { "status": "pass" },
-                "tests": "passed",
+                "merge_verified": { "status": "pass" },
+                "issue_closed": "passed",
+                "build_passed": "pass",
             }
         });
 
@@ -2959,15 +3002,14 @@ mod reconcile_phase_gate_pg_tests {
     /// ignored and passing declared checks may still infer the pass verdict.
     #[test]
     fn non_string_explicit_verdict_preserves_checks_inference() {
-        let context = json!({
-            "phase_gate": {
-                "pass_verdict": "phase_gate_passed",
-                "checks": ["tests"]
-            }
-        });
+        let context = gate_context();
         let result = json!({
             "verdict": 1,
-            "checks": { "tests": "pass" },
+            "checks": {
+                "merge_verified": "pass",
+                "issue_closed": "pass",
+                "build_passed": "pass"
+            },
         });
         assert_eq!(
             resolve_verdict(Some(&context), &result),
@@ -2980,9 +3022,14 @@ mod reconcile_phase_gate_pg_tests {
     /// in JS).
     #[test]
     fn whitespace_padded_check_status_is_not_inferred_as_pass() {
-        let context =
-            json!({"phase_gate": {"pass_verdict": "phase_gate_passed", "checks": ["tests"]}});
-        let result = json!({"checks": {"tests": " pass "}});
+        let context = gate_context();
+        let result = json!({
+            "checks": {
+                "merge_verified": "pass",
+                "issue_closed": "pass",
+                "build_passed": " pass "
+            }
+        });
         assert_eq!(
             resolve_verdict(Some(&context), &result),
             VerdictResolution::Missing,
@@ -2998,20 +3045,12 @@ mod reconcile_phase_gate_pg_tests {
         let pool = pg_db.connect_and_migrate().await;
         fixture(&pool).await;
 
-        let context = json!({
-            "phase_gate": {
-                "run_id": "run-pg-test",
-                "batch_phase": 0,
-                "pass_verdict": "phase_gate_passed",
-                "next_phase": 1,
-                "final_phase": false,
-                "checks": ["lint", "tests"],
-            }
-        });
+        let context = gate_context();
         let result = json!({
             "checks": {
-                "lint": { "status": "pass" },
-                "tests": { "status": "fail" },
+                "merge_verified": { "status": "pass" },
+                "issue_closed": { "status": "pass" },
+                "build_passed": { "status": "fail" },
             }
         });
 
@@ -3072,7 +3111,7 @@ mod reconcile_phase_gate_pg_tests {
                 id,
                 "completed",
                 gate_context(),
-                Some(json!({"verdict":"phase_gate_passed"})),
+                Some(json!({"verdict":"phase_gate_passed","checks":{"merge_verified":"pass","issue_closed":"pass","build_passed":"pass"}})),
             )
             .await;
         }
@@ -3097,7 +3136,7 @@ mod reconcile_phase_gate_pg_tests {
             "dsp-pass-b",
             "completed",
             gate_context(),
-            Some(json!({"verdict":"phase_gate_passed"})),
+            Some(json!({"verdict":"phase_gate_passed","checks":{"merge_verified":"pass","issue_closed":"pass","build_passed":"pass"}})),
         )
         .await;
         assert!(
@@ -3116,18 +3155,12 @@ mod reconcile_phase_gate_pg_tests {
         let pool = pg_db.connect_and_migrate().await;
         fixture(&pool).await;
 
-        let context = json!({
-            "phase_gate": {
-                "run_id": "run-pg-test",
-                "batch_phase": 0,
-                "pass_verdict": "gate_ok",
-                "checks": ["merge_verified", "issue_closed"]
-            }
-        });
+        let context = gate_context();
         let checks_only = json!({
             "checks": {
                 "merge_verified": {"status": "pass"},
-                "issue_closed": {"status": "", "result": "passed"}
+                "issue_closed": {"status": "", "result": "passed"},
+                "build_passed": {"status": "pass"}
             }
         });
         for id in ["dsp-reducer-primary", "dsp-reducer-sibling"] {
@@ -3146,7 +3179,7 @@ mod reconcile_phase_gate_pg_tests {
             0,
             &PhaseGateStateWrite {
                 status: "pending".into(),
-                pass_verdict: "gate_ok".into(),
+                pass_verdict: "phase_gate_passed".into(),
                 dispatch_ids: vec!["dsp-reducer-primary".into(), "dsp-reducer-sibling".into()],
                 ..Default::default()
             },
@@ -3164,7 +3197,7 @@ mod reconcile_phase_gate_pg_tests {
         .await;
         assert!(
             matches!(outcome, PhaseGateReconciliation::Cleared { .. }),
-            "primary and sibling checks-only rows must both infer gate_ok: {outcome:?}"
+            "primary and sibling checks-only rows must both infer the canonical verdict: {outcome:?}"
         );
         assert_eq!(gate_count(&pool, "run-pg-test", 0).await, 0);
 
@@ -3187,7 +3220,7 @@ mod reconcile_phase_gate_pg_tests {
             "dsp-status-only",
             "completed",
             gate_context(),
-            Some(json!({"verdict":"phase_gate_passed"})),
+            Some(json!({"verdict":"phase_gate_passed","checks":{"merge_verified":"pass","issue_closed":"pass","build_passed":"pass"}})),
         )
         .await;
         save_phase_gate_state_on_pg(

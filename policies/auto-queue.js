@@ -59,6 +59,9 @@ var PHASE_GATE_AUTOCLOSE_TTL_SEC = _autoQueuePhaseGateLib.PHASE_GATE_AUTOCLOSE_T
 var PHASE_GATE_GRACE_WINDOW_MS = _autoQueuePhaseGateLib.PHASE_GATE_GRACE_WINDOW_MS;
 var _inferPhaseGatePassVerdict = _autoQueuePhaseGateLib.inferPhaseGatePassVerdict;
 var _phaseGateVerdictMatches = _autoQueuePhaseGateLib.phaseGateVerdictMatches;
+var _phaseGateDiagnosticVerdict = _autoQueuePhaseGateLib.phaseGateDiagnosticVerdict;
+var _phaseGateFailureReason = _autoQueuePhaseGateLib.phaseGateFailureReason;
+var _phaseGateGroupKey = _autoQueuePhaseGateLib.phaseGateGroupKey;
 var phaseGateFailureKey = _autoQueuePhaseGateLib.phaseGateFailureKey;
 var incrementPhaseGateFailureCount = _autoQueuePhaseGateLib.incrementPhaseGateFailureCount;
 var resetPhaseGateFailureCount = _autoQueuePhaseGateLib.resetPhaseGateFailureCount;
@@ -289,8 +292,8 @@ var autoQueue = {
       }
       state.status = "failed";
       state.failed_dispatch_id = dispatch.id;
-      state.failed_verdict = verdict;
-      state.failed_reason = result.summary || result.reason || ("expected " + passVerdict + ", got " + (verdict || "none"));
+      state.failed_verdict = _phaseGateDiagnosticVerdict(result, verdict);
+      state.failed_reason = _phaseGateFailureReason(result, passVerdict, state.failed_verdict);
       savePhaseGateState(gate.run_id, phase, state);
       pauseRun(gate.run_id);
       // #2035: surface verdict mismatch as a discord alert (debounced 1/hr).
@@ -401,8 +404,12 @@ var autoQueue = {
         }
         state.status = "failed";
         state.failed_dispatch_id = gateDispatch.id;
-        state.failed_verdict = gateVerdict;
-        state.failed_reason = gateResult.summary || gateResult.reason || ("gate verdict mismatch for dispatch " + gateDispatch.id);
+        state.failed_verdict = _phaseGateDiagnosticVerdict(gateResult, gateVerdict);
+        state.failed_reason = _phaseGateFailureReason(
+          gateResult,
+          expectedVerdict,
+          state.failed_verdict
+        );
         savePhaseGateState(gate.run_id, phase, state);
         pauseRun(gate.run_id);
         _maybeAlertPhaseGateVerdictMismatch(
@@ -596,8 +603,13 @@ if (typeof module !== "undefined" && module.exports) {
     __test: {
       inferPhaseGatePassVerdict: _inferPhaseGatePassVerdict,
       phaseGateVerdictMatches: _phaseGateVerdictMatches,
+      phaseGateDiagnosticVerdict: _phaseGateDiagnosticVerdict,
+      phaseGateFailureReason: _phaseGateFailureReason,
+      phaseGateGroupKey: _phaseGateGroupKey,
       dispatchableTargets: _dispatchableTargets,
-      freePathToDispatchable: _freePathToDispatchable
+      freePathToDispatchable: _freePathToDispatchable,
+      buildPhaseGateGroups: _buildPhaseGateGroups,
+      createPhaseGateDispatches: _createPhaseGateDispatches
     }
   };
 }
