@@ -10,7 +10,8 @@ use super::discord_log::RoutineDiscordLogger;
 use super::loader::{
     MAX_AUTOMATION_INVENTORY_ITEMS, MAX_AUTOMATION_INVENTORY_PAYLOAD_BYTES,
     MAX_OBSERVATION_PAYLOAD_BYTES, MAX_OBSERVATIONS_PER_TICK, ObservationLimits,
-    RoutineScriptLoader, RoutineTickAgent, RoutineTickContext, RoutineTickRoutine, RoutineTickRun,
+    ROUTINE_TICK_ERROR_PUBLIC_REASON, RoutineScriptLoader, RoutineTickAgent, RoutineTickContext,
+    RoutineTickRoutine, RoutineTickRun,
 };
 use super::migrated::{is_migrated_launchd_script_ref, validate_migrated_launchd_activation};
 use super::store::{ClaimedRoutineRun, RoutineStore, terminal_failure_should_pause};
@@ -256,18 +257,30 @@ pub async fn execute_claimed_script_run(
     let action = match loader.execute_tick(&claimed.script_ref, context) {
         Ok(action) => action,
         Err(error) => {
-            let message = error.to_string();
+            let diagnostic = error.to_string();
+            tracing::error!(
+                routine_run_id = %claimed.run_id,
+                routine_script = %claimed.script_ref,
+                error = %diagnostic,
+                "routine tick evaluation failed"
+            );
+            let public_reason = ROUTINE_TICK_ERROR_PUBLIC_REASON.to_string();
             let result_json = Some(json!({
-                "error": message,
+                "error": public_reason,
+                "diagnostic_class": ROUTINE_TICK_ERROR_PUBLIC_REASON,
                 "script_ref": claimed.script_ref,
             }));
             let closed = if terminal_failure_should_pause(pause_on_terminal_failure) {
                 store
-                    .fail_run_and_pause_routine(&claimed.run_id, &message, result_json.clone())
+                    .fail_run_and_pause_routine(
+                        &claimed.run_id,
+                        &public_reason,
+                        result_json.clone(),
+                    )
                     .await?
             } else {
                 store
-                    .fail_run(&claimed.run_id, &message, result_json.clone(), None)
+                    .fail_run(&claimed.run_id, &public_reason, result_json.clone(), None)
                     .await?
             };
             if !closed {
@@ -280,7 +293,7 @@ pub async fn execute_claimed_script_run(
                 action: "error".to_string(),
                 status: "failed".to_string(),
                 result_json,
-                error: Some(message),
+                error: Some(public_reason),
                 fresh_context_guaranteed: pre_provider_fresh_context_guaranteed(),
             }));
         }

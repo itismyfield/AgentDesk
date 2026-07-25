@@ -43,7 +43,7 @@ pub(super) async fn migrated_launchd_metadata_for_state(
     let requested_script_ref = script_ref.to_string();
     let script_ref_for_task = requested_script_ref.clone();
     let script = tokio::task::spawn_blocking(move || {
-        let loader = RoutineScriptLoader::new()
+        let loader = RoutineScriptLoader::new_shared(&routine_script_dirs)
             .map_err(|error| format!("routine script loader init failed: {error}"))?;
         loader
             .load_dirs(&routine_script_dirs)
