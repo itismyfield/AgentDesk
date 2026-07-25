@@ -215,6 +215,7 @@ pub(in crate::services::discord) async fn cmd_start(
 pub(in crate::services::discord) async fn cmd_resume(
     ctx: Context<'_>,
     #[description = "Provider session id to resume (empty = auto-select previous)"]
+    #[autocomplete = "super::resume_autocomplete::autocomplete_resume_session"]
     session_id: Option<String>,
     #[description = "Worktree path for the resumed session (defaults to current)"] cwd: Option<
         String,
@@ -279,7 +280,7 @@ pub(in crate::services::discord) async fn cmd_resume(
         &pool,
         registry.as_deref(),
         &forward_context,
-        false,
+        crate::services::session_resume::ResumeForwardingMetadata::default(),
         &session_key,
         &opts,
     )

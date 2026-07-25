@@ -239,6 +239,93 @@ pub(crate) async fn resolve_cancel_forward_target(
     }
 }
 
+fn required_owner_ids<'a>(
+    owner_instance_id: Option<&'a str>,
+    local_instance_id: Option<&'a str>,
+) -> Result<(&'a str, &'a str), ForwardResolution> {
+    let owner = owner_instance_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ForwardResolution::Unavailable {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            body: json!({
+                "error": "session owner is missing",
+                "code": "session_owner_missing",
+            }),
+        })?;
+    let local = local_instance_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ForwardResolution::Unavailable {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            body: json!({
+                "error": "local cluster instance id is missing",
+                "code": "session_local_instance_id_missing",
+                "owner_instance_id": owner,
+            }),
+        })?;
+    if !valid_instance_id(owner) {
+        return Err(ForwardResolution::Unavailable {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            body: json!({
+                "error": "session owner instance id is invalid",
+                "code": "session_owner_instance_id_invalid",
+                "owner_instance_id": owner,
+            }),
+        });
+    }
+    if !valid_instance_id(local) {
+        return Err(ForwardResolution::Unavailable {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            body: json!({
+                "error": "local cluster instance id is invalid",
+                "code": "session_local_instance_id_invalid",
+                "local_instance_id": local,
+            }),
+        });
+    }
+    Ok((owner, local))
+}
+
+/// Resolve a session owner without the legacy ownerless-local fallback.
+/// Filesystem-backed operations use this fence so only the durable owner may
+/// read local state; missing or unroutable ownership fails closed.
+pub(crate) async fn resolve_required_owner_target(
+    state: &ForwardCallerContext,
+    owner_instance_id: Option<&str>,
+    pool: &PgPool,
+) -> ForwardResolution {
+    let (owner, local) =
+        match required_owner_ids(owner_instance_id, state.cluster_instance_id.as_deref()) {
+            Ok(ids) => ids,
+            Err(resolution) => return resolution,
+        };
+    if owner == local {
+        return ForwardResolution::Local;
+    }
+
+    let worker_nodes = match crate::services::cluster::node_registry::list_worker_nodes(
+        pool,
+        state.config.cluster.lease_ttl_secs,
+    )
+    .await
+    {
+        Ok(nodes) => nodes,
+        Err(error) => {
+            return ForwardResolution::Unavailable {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                body: json!({
+                    "error": format!("failed to load worker nodes for session forwarding: {error}"),
+                    "code": "worker_nodes_unavailable",
+                    "owner_instance_id": owner,
+                }),
+            };
+        }
+    };
+
+    resolve_forward_target_from_nodes(Some(owner), Some(local), &worker_nodes)
+}
+
 pub(crate) async fn resolve_forward_target(
     state: &ForwardCallerContext,
     owner_instance_id: Option<&str>,
@@ -338,6 +425,20 @@ pub(crate) async fn forward_kill_tmux(
             .json(&json!({ "reason": reason, "minimum_idle_minutes": minimum_idle_minutes })),
     );
     forward_json_response(request, "kill-tmux", target).await
+}
+
+pub(crate) async fn forward_resume_candidates(
+    state: &ForwardCallerContext,
+    target: &ForwardTarget,
+    session_key: &str,
+) -> (StatusCode, Json<Value>) {
+    let url = format!(
+        "{}/api/sessions/{}/resume-candidates",
+        target.base_url,
+        encode_path_segment(session_key)
+    );
+    let request = apply_node_headers(state, target, client().get(url));
+    forward_json_response(request, "resume-candidates", target).await
 }
 
 pub(crate) async fn forward_resume_previous(
@@ -810,7 +911,7 @@ mod tests {
         CancelRetryDecision, ForwardResolution, ForwardTarget, classify_cancel_forward_response,
         client, encode_path_segment, forward_json_response, is_forwarded_request,
         legacy_session_key_matches_channel, load_cancel_owner, load_cancel_turn_session,
-        resolve_forward_target_from_nodes,
+        required_owner_ids, resolve_forward_target_from_nodes,
     };
     use axum::Json;
     use axum::http::{HeaderMap, HeaderValue};
@@ -830,6 +931,26 @@ mod tests {
         assert_eq!(
             resolve_forward_target_from_nodes(Some("worker"), None, &[]),
             ForwardResolution::Local
+        );
+    }
+
+    #[test]
+    fn required_owner_resolution_fails_closed_on_missing_identity() {
+        for (owner, local, code) in [
+            (None, Some("leader"), "session_owner_missing"),
+            (Some("worker"), None, "session_local_instance_id_missing"),
+        ] {
+            let Err(ForwardResolution::Unavailable { status, body }) =
+                required_owner_ids(owner, local)
+            else {
+                panic!("missing required identity must be unavailable");
+            };
+            assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(body["code"], code);
+        }
+        assert_eq!(
+            required_owner_ids(Some("worker"), Some("leader")),
+            Ok(("worker", "leader"))
         );
     }
 
@@ -1005,6 +1126,59 @@ mod tests {
             encode_path_segment("host:AgentDesk-codex/a b"),
             "host%3AAgentDesk-codex%2Fa%20b"
         );
+    }
+
+    #[tokio::test]
+    async fn forward_resume_candidates_uses_get_auth_and_owner_headers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("test listener addr");
+        let server =
+            tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("accept test request");
+                let mut buffer = [0_u8; 2048];
+                let read = socket.read(&mut buffer).await.expect("read request");
+                let request = String::from_utf8_lossy(&buffer[..read]).to_ascii_lowercase();
+                assert!(request.starts_with(
+                    "get /api/sessions/host%3aagentdesk-claude%2f42/resume-candidates "
+                ));
+                assert!(request.contains("authorization: bearer secret-token"));
+                assert!(request.contains("x-agentdesk-forwarded-by: leader"));
+                assert!(request.contains("x-agentdesk-session-owner: worker-a"));
+                let body = r#"{"ok":true,"candidates":[]}"#;
+                let response = format!(
+                    concat!(
+                        "HTTP/1.1 200 OK\r\n",
+                        "content-type: application/json\r\n",
+                        "content-length: {}\r\n",
+                        "connection: close\r\n\r\n{}"
+                    ),
+                    body.len(),
+                    body
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+            });
+        let mut config = crate::config::Config::default();
+        config.server.auth_token = Some("secret-token".to_string());
+        let state = super::ForwardCallerContext {
+            pg_pool: None,
+            config: std::sync::Arc::new(config),
+            cluster_instance_id: Some("leader".to_string()),
+        };
+        let target = ForwardTarget {
+            owner_instance_id: "worker-a".to_string(),
+            base_url: format!("http://{addr}"),
+        };
+
+        let (status, Json(body)) =
+            super::forward_resume_candidates(&state, &target, "host:AgentDesk-claude/42").await;
+        server.await.expect("test server task");
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body["ok"].as_bool(), Some(true));
     }
 
     #[tokio::test]

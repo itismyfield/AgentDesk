@@ -76,7 +76,8 @@ src/
 │   ├── automation_candidates/
 │   │   └── verdict_tests.rs
 │   ├── dispatched_sessions/
-│   │   └── rebind_override.rs
+│   │   ├── rebind_override.rs
+│   │   └── resume_rebind.rs
 │   ├── dispatches/
 │   │   ├── outbox/
 │   │   │   ├── claim.rs
@@ -489,6 +490,7 @@ src/
 │   │   │   ├── receipt.rs
 │   │   │   ├── recovery_ops.rs
 │   │   │   ├── restart.rs
+│   │   │   ├── resume_autocomplete.rs
 │   │   │   ├── session.rs
 │   │   │   ├── sidecar.rs
 │   │   │   ├── skill.rs
@@ -1250,6 +1252,8 @@ src/
 │   ├── session_backend/
 │   │   ├── stream_line.rs
 │   │   └── terminal_usage.rs
+│   ├── session_resume/
+│   │   └── candidates.rs
 │   ├── settings/
 │   │   └── runtime_config_put.rs
 │   ├── slo/

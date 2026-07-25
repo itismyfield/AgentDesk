@@ -127,10 +127,37 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             json!({"error": "session not found"}),
         ),
         ep(
+            "GET",
+            "/api/sessions/{session_key}/resume-candidates",
+            "sessions",
+            "List owner-local Claude transcript candidates from the current worktree lineage. Excludes the current and live-bound sessions; cross-node requests are forwarded once to the session owner.",
+        )
+        .with_params([(
+            "session_key",
+            path_param(
+                "Session key in legacy host:tmux_name or namespaced provider/token/host:tmux_name form",
+            ),
+        )])
+        .with_example(
+            json!({
+                "path": {"session_key": "claude/hash123/mac-mini:AgentDesk-claude-adk-cc"}
+            }),
+            json!({
+                "ok": true,
+                "session_key": "claude/hash123/mac-mini:AgentDesk-claude-adk-cc",
+                "candidates": [{
+                    "session_id": "acd0ea18-a5a9-4fa6-a29c-f7034cb06273",
+                    "cwd": "/Users/itismyfield/.adk/release/worktrees/claude-adk-cc-20260723-050333",
+                    "modified_at_ms": 1784793600000_u64,
+                    "title": "Implement resume session picker"
+                }]
+            }),
+        ),
+        ep(
             "POST",
             "/api/sessions/{session_key}/resume-previous",
             "sessions",
-            "Rebind a channel to a previous provider session (resume its conversation). With session_id (+optional cwd) forces that session; without either, auto-selects the channel workspace's most recent prior session.",
+            "Rebind a channel to a previous provider session. Raw session_id (+optional cwd) remains supported; pick:<uuid> values are revalidated against a fresh owner-local candidate inventory before rebinding; omitting both auto-selects the newest eligible prior session.",
         )
         .with_params([
             (
@@ -144,7 +171,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 body_param(
                     "string",
                     false,
-                    "Target provider session id to resume. Omit to auto-select the previous session.",
+                    "Raw provider session id or autocomplete marker pick:<uuid>. Markers ignore cwd and are resolved from a fresh owner-side inventory. Omit to auto-select the previous session.",
                 ),
             ),
             (

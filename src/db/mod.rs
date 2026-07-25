@@ -6,6 +6,8 @@ pub mod cancel_tombstones;
 pub mod dispatch_semaphores;
 #[path = "dispatched_sessions/rebind_override.rs"]
 pub(crate) mod dispatched_session_rebind_override;
+#[path = "dispatched_sessions/resume_rebind.rs"]
+pub(crate) mod dispatched_session_resume_rebind;
 pub mod dispatched_sessions;
 pub mod dispatches;
 pub mod idempotency;

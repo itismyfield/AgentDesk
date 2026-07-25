@@ -179,6 +179,16 @@ pub async fn reconcile_stale_turn(
     }
 }
 
+/// GET /api/sessions/{session_key}/resume-candidates
+pub async fn resume_candidates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_key): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    crate::services::session_resume::resume_candidates(State(state), headers, Path(session_key))
+        .await
+}
+
 /// POST /api/sessions/{session_key}/resume-previous
 pub async fn resume_previous_session(
     State(state): State<AppState>,

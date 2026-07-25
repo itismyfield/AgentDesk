@@ -31,6 +31,7 @@ mod node;
 mod receipt;
 mod recovery_ops;
 mod restart;
+mod resume_autocomplete;
 mod session;
 mod sidecar;
 mod skill;
@@ -163,11 +164,17 @@ pub(super) use voice::{cmd_vc_join, cmd_vc_leave, cmd_voice};
 
 #[cfg(test)]
 mod response_wording_tests {
+    use super::super::{DiscordBotSettings, discord_io::user_is_authorized};
     use super::{
         ALREADY_STOPPING_RESPONSE, NO_ACTIVE_TURN_RESPONSE, SESSION_CLEARED_RESPONSE,
-        STOPPING_RESPONSE, owner_error_response, session_restored_response,
-        session_started_response, shell_command_execution_error_response,
-        shell_command_output_response, shell_command_task_error_response,
+        STOPPING_RESPONSE, owner_error_response,
+        resume_autocomplete::{
+            CandidateView, DISCORD_AUTOCOMPLETE_LIMIT, DISCORD_CHOICE_NAME_LIMIT, build_choices,
+            candidate_label, candidate_matches,
+        },
+        session_restored_response, session_started_response,
+        shell_command_execution_error_response, shell_command_output_response,
+        shell_command_task_error_response,
     };
 
     #[test]
@@ -218,6 +225,74 @@ mod response_wording_tests {
         let task_error = shell_command_task_error_response(stderr);
         assert!(task_error.starts_with("⚠️ 셸 명령을 처리하는 중 오류가 발생했어요."));
         assert!(task_error.ends_with("```||"));
+    }
+
+    #[test]
+    fn resume_candidate_label_is_unicode_safe_and_uses_uuid_fallback() {
+        let long_title = CandidateView {
+            session_id: "11111111-1111-1111-1111-111111111111".to_string(),
+            cwd: "/tmp/claude-adk-cc-20260101-000001".to_string(),
+            title: Some("한글제목".repeat(40)),
+            modified_at_ms: 0,
+        };
+        let label = candidate_label(&long_title, 86_400_000);
+        assert!(label.chars().count() <= DISCORD_CHOICE_NAME_LIMIT);
+        assert!(label.is_char_boundary(label.len()));
+        assert!(label.contains(" · 1일 전 · claude-adk-cc-20260101-000001"));
+
+        let untitled = CandidateView {
+            session_id: "22222222-2222-2222-2222-222222222222".to_string(),
+            cwd: "/tmp/work\nname".to_string(),
+            title: None,
+            modified_at_ms: 59_000,
+        };
+        let label = candidate_label(&untitled, 60_000);
+        assert!(label.starts_with(&untitled.session_id));
+        assert!(!label.contains('\n'));
+        assert!(label.contains("방금 전"));
+    }
+
+    #[test]
+    fn resume_choices_filter_candidates_and_use_bounded_marker_values() {
+        let matchable = CandidateView {
+            session_id: "11111111-1111-1111-1111-111111111111".to_string(),
+            cwd: "/tmp/Feature-Tree".to_string(),
+            title: Some("Resume Design".to_string()),
+            modified_at_ms: 0,
+        };
+        assert!(candidate_matches(&matchable, "resume"));
+        assert!(candidate_matches(&matchable, "11111111"));
+        assert!(candidate_matches(&matchable, "feature-tree"));
+        assert!(!candidate_matches(&matchable, "missing"));
+
+        let candidates = (0..30).map(|index| CandidateView {
+            session_id: format!("00000000-0000-0000-0000-{index:012}"),
+            cwd: "/tmp/worktree".to_string(),
+            title: Some(format!("Candidate {index}")),
+            modified_at_ms: 0,
+        });
+        let choices = build_choices(candidates, "", 1_000);
+        assert_eq!(choices.len(), DISCORD_AUTOCOMPLETE_LIMIT);
+        let serialized = serde_json::to_value(&choices[0]).expect("serialize choice");
+        assert!(
+            serialized["value"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("pick:"))
+        );
+    }
+
+    #[test]
+    fn resume_authorization_includes_owner_allowlist_and_allow_all() {
+        let mut settings = DiscordBotSettings {
+            owner_user_id: Some(10),
+            allowed_user_ids: vec![20],
+            ..DiscordBotSettings::default()
+        };
+        assert!(user_is_authorized(&settings, 10));
+        assert!(user_is_authorized(&settings, 20));
+        assert!(!user_is_authorized(&settings, 30));
+        settings.allow_all_users = true;
+        assert!(user_is_authorized(&settings, 30));
     }
 }
 

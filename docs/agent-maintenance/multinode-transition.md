@@ -446,6 +446,13 @@
   before merging.
 
 ### Audited touches
+- 2026-07-25 — #4913 resume candidate inventory: transcript discovery, bounded
+  `ai-title` reads, and worktree-lineage filtering remain worker-local to the
+  session owner. Gateways forward the authenticated read-only candidate request
+  once; a forwarded request that reaches a non-owner fails closed without
+  recursive forwarding. `pick:<uuid>` execution rebuilds the owner-local inventory
+  against fresh PostgreSQL bindings before rebind. This adds no leader election,
+  PG lease, schema, worker placement, or cross-node adoption authority.
 - 2026-07-24 — #4712 lifecycle de-giant rebase: `runtime_bootstrap.rs` changes only
   update the restart-marker characterization fixture to the current nonce/version
   encoding, while watcher lifecycle logic moves verbatim behind the existing facade.

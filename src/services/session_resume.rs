@@ -9,7 +9,7 @@
 //!     `services::discord::commands::session`).
 //!
 //! The rebind is durable-first: it UPDATEs `sessions.cwd` +
-//! `sessions.claude_session_id` (via [`rebind_session_provider_pg`]) so the
+//! `sessions.claude_session_id` (via [`rebind_session_provider_with_guard_pg`]) so the
 //! change survives a restart, then mirrors the same target into the in-memory
 //! `DiscordSession` (via `health::rebind_channel_provider_session`) so it takes
 //! effect on the very next turn without a restart. A DB-only rebind would be
@@ -30,9 +30,10 @@ use serde_json::json;
 use sqlx::PgPool;
 
 use crate::app_state::AppState;
+use crate::db::dispatched_session_resume_rebind::rebind_session_provider_with_guard_pg;
 use crate::db::dispatched_sessions::{
     self as dispatched_sessions_db, SessionRebindContext, load_force_kill_session_pg,
-    load_session_rebind_context_pg, rebind_session_provider_pg,
+    load_session_rebind_context_pg,
 };
 use crate::services::discord::health::{
     HealthRegistry, channel_has_active_turn, rebind_channel_provider_session,
@@ -41,6 +42,9 @@ use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
 use poise::serenity_prelude::ChannelId;
+
+mod candidates;
+use candidates::ResumeCandidate;
 
 /// Request body for `POST /api/sessions/{session_key}/resume-previous`.
 ///
@@ -87,6 +91,8 @@ pub(crate) enum ResumeRebindError {
     /// Explicit `session_id` given but no `cwd` is known (row has no `cwd` and
     /// none was supplied).
     MissingCwd,
+    /// A `pick:<uuid>` value no longer exists in a fresh owner-side inventory.
+    StaleCandidate,
     /// Target `cwd` does not exist on disk.
     TargetCwdMissing(String),
     /// Auto-selection is only wired for Claude transcripts.
@@ -118,6 +124,13 @@ impl ResumeRebindError {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({
                     "error": "target cwd is unknown; supply cwd alongside session_id"
+                })),
+            ),
+            ResumeRebindError::StaleCandidate => (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "selected resume candidate is stale or is now bound to a live session",
+                    "code": "resume_candidate_stale"
                 })),
             ),
             ResumeRebindError::TargetCwdMissing(path) => (
@@ -177,28 +190,196 @@ pub async fn resume_previous_session(
         );
     };
     let forward_context = crate::services::session_forwarding::ForwardCallerContext::from(&state);
-    let is_forwarded = crate::services::session_forwarding::is_forwarded_request(&headers);
+    let forwarding = resume_forwarding_metadata(&headers);
     dispatch_resume_previous(
         pool,
         state.health_registry.as_deref(),
         &forward_context,
-        is_forwarded,
+        forwarding,
         &session_key,
         &opts,
     )
     .await
 }
 
+/// GET /api/sessions/{session_key}/resume-candidates
+pub async fn resume_candidates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_key): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(pool) = state.pg_pool_ref() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "postgres pool unavailable"})),
+        );
+    };
+    let forward_context = crate::services::session_forwarding::ForwardCallerContext::from(&state);
+    dispatch_resume_candidates(
+        pool,
+        &forward_context,
+        resume_forwarding_metadata(&headers),
+        &session_key,
+    )
+    .await
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ResumeForwardingMetadata<'a> {
+    forwarded: bool,
+    expected_owner: Option<&'a str>,
+}
+
+fn resume_forwarding_metadata(headers: &HeaderMap) -> ResumeForwardingMetadata<'_> {
+    ResumeForwardingMetadata {
+        forwarded: crate::services::session_forwarding::is_forwarded_request(headers),
+        expected_owner: crate::services::session_forwarding::forwarded_session_owner(headers),
+    }
+}
+
+pub(crate) async fn dispatch_resume_candidates(
+    pool: &PgPool,
+    forward_context: &crate::services::session_forwarding::ForwardCallerContext,
+    forwarding: ResumeForwardingMetadata<'_>,
+    session_key: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(tmux_name) = tmux_name_from_session_key(session_key) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "invalid session_key format"})),
+        );
+    };
+    let provider_info =
+        crate::services::provider::parse_provider_and_channel_from_tmux_name(&tmux_name);
+    let provider_name = provider_info
+        .as_ref()
+        .map(|(provider, _)| provider.as_str());
+    let (_, _, _, session_provider, owner_instance_id) =
+        match load_force_kill_session_pg(pool, session_key, provider_name).await {
+            Ok(Some(tuple)) => tuple,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "session not found"})),
+                );
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                );
+            }
+        };
+
+    if let Err(response) = validate_forwarded_resume_owner(
+        forwarding,
+        session_key,
+        owner_instance_id.as_deref(),
+        forward_context.cluster_instance_id.as_deref(),
+    ) {
+        return response;
+    }
+    let resolution = crate::services::session_forwarding::resolve_required_owner_target(
+        forward_context,
+        owner_instance_id.as_deref(),
+        pool,
+    )
+    .await;
+    if forwarding.forwarded {
+        if !matches!(
+            resolution,
+            crate::services::session_forwarding::ForwardResolution::Local
+        ) {
+            return forwarded_non_owner_response(session_key, owner_instance_id.as_deref());
+        }
+    } else {
+        match resolution {
+            crate::services::session_forwarding::ForwardResolution::Local => {}
+            crate::services::session_forwarding::ForwardResolution::Forward(target) => {
+                return crate::services::session_forwarding::forward_resume_candidates(
+                    forward_context,
+                    &target,
+                    session_key,
+                )
+                .await;
+            }
+            crate::services::session_forwarding::ForwardResolution::Unavailable {
+                status,
+                body,
+            } => return (status, Json(body)),
+        }
+    }
+
+    let provider = provider_info
+        .map(|(provider, _)| provider)
+        .or_else(|| session_provider.as_deref().and_then(ProviderKind::from_str));
+    if !matches!(provider, Some(ProviderKind::Claude)) {
+        return ResumeRebindError::AutoUnsupportedProvider(
+            provider
+                .map(|provider| provider.as_str().to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+        )
+        .into_response();
+    }
+    match load_fresh_candidate_inventory(pool, session_key, None).await {
+        Ok(candidates) => (
+            StatusCode::OK,
+            Json(json!({"ok": true, "session_key": session_key, "candidates": candidates})),
+        ),
+        Err(error) => error.into_response(),
+    }
+}
+
+fn validate_forwarded_resume_owner(
+    forwarding: ResumeForwardingMetadata<'_>,
+    session_key: &str,
+    owner_instance_id: Option<&str>,
+    local_instance_id: Option<&str>,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if !forwarding.forwarded {
+        return Ok(());
+    }
+    let expected_owner = forwarding
+        .expected_owner
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let owner = owner_instance_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let local = local_instance_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if expected_owner.is_none() || expected_owner != owner || owner != local {
+        return Err(forwarded_non_owner_response(session_key, owner));
+    }
+    Ok(())
+}
+
+fn forwarded_non_owner_response(
+    session_key: &str,
+    owner_instance_id: Option<&str>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "error": "forwarded resume request reached a non-owner instance",
+            "code": "forwarded_resume_non_owner",
+            "session_key": session_key,
+            "owner_instance_id": owner_instance_id,
+        })),
+    )
+}
+
 /// Shared entry point for the HTTP route and the `/resume` slash command: load
 /// the owning node, forward cross-node when this node is not the owner (so a
 /// gateway node never mutates a session it does not run — S1), and otherwise
-/// run the local rebind. `is_forwarded` is `true` only when the request already
-/// arrived from a peer node (breaks forward loops).
+/// run the local rebind. Forwarding metadata is populated only when the request
+/// arrived from a peer node and fences recursive or misdirected forwarding.
 pub(crate) async fn dispatch_resume_previous(
     pool: &PgPool,
     registry: Option<&HealthRegistry>,
     forward_context: &crate::services::session_forwarding::ForwardCallerContext,
-    is_forwarded: bool,
+    forwarding: ResumeForwardingMetadata<'_>,
     session_key: &str,
     opts: &ResumePreviousOptions,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -237,14 +418,29 @@ pub(crate) async fn dispatch_resume_previous(
             }
         };
 
-    if !is_forwarded {
-        match crate::services::session_forwarding::resolve_forward_target(
-            forward_context,
-            owner_instance_id.as_deref(),
-            pool,
-        )
-        .await
-        {
+    if let Err(response) = validate_forwarded_resume_owner(
+        forwarding,
+        session_key,
+        owner_instance_id.as_deref(),
+        forward_context.cluster_instance_id.as_deref(),
+    ) {
+        return response;
+    }
+    let resolution = crate::services::session_forwarding::resolve_required_owner_target(
+        forward_context,
+        owner_instance_id.as_deref(),
+        pool,
+    )
+    .await;
+    if forwarding.forwarded {
+        if !matches!(
+            resolution,
+            crate::services::session_forwarding::ForwardResolution::Local
+        ) {
+            return forwarded_non_owner_response(session_key, owner_instance_id.as_deref());
+        }
+    } else {
+        match resolution {
             crate::services::session_forwarding::ForwardResolution::Local => {}
             crate::services::session_forwarding::ForwardResolution::Forward(target) => {
                 return crate::services::session_forwarding::forward_resume_previous(
@@ -259,9 +455,7 @@ pub(crate) async fn dispatch_resume_previous(
             crate::services::session_forwarding::ForwardResolution::Unavailable {
                 status,
                 body,
-            } => {
-                return (status, Json(body));
-            }
+            } => return (status, Json(body)),
         }
     }
 
@@ -269,6 +463,20 @@ pub(crate) async fn dispatch_resume_previous(
         .as_ref()
         .map(|(provider, _)| provider.clone())
         .or_else(|| session_provider.as_deref().and_then(ProviderKind::from_str));
+    let Some(expected_owner_instance_id) = forward_context
+        .cluster_instance_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "local cluster instance id is missing",
+                "code": "session_local_instance_id_missing",
+            })),
+        );
+    };
     let channel_id = runtime_channel_id
         .as_deref()
         .and_then(|id| id.parse::<u64>().ok())
@@ -281,6 +489,7 @@ pub(crate) async fn dispatch_resume_previous(
         provider,
         channel_id,
         &tmux_name,
+        expected_owner_instance_id,
         opts,
     )
     .await
@@ -302,6 +511,7 @@ pub(crate) async fn perform_resume_rebind(
     provider: Option<ProviderKind>,
     channel_id: Option<ChannelId>,
     tmux_name: &str,
+    expected_owner_instance_id: &str,
     opts: &ResumePreviousOptions,
 ) -> Result<ResumeRebindOutcome, ResumeRebindError> {
     let Some(SessionRebindContext {
@@ -327,47 +537,55 @@ pub(crate) async fn perform_resume_rebind(
         return Err(ResumeRebindError::ActiveTurn);
     }
 
-    // Resolve the rebind target.
-    let (target_session_id, target_cwd, auto_selected) = match opts.session_id.as_deref() {
-        Some(session_id) if !session_id.trim().is_empty() => {
-            let cwd = opts
-                .cwd
-                .as_deref()
-                .map(str::to_string)
-                .or_else(|| current_cwd.clone())
-                .ok_or(ResumeRebindError::MissingCwd)?;
-            (session_id.trim().to_string(), cwd, false)
-        }
-        _ => {
-            let provider = provider
-                .clone()
-                .ok_or_else(|| ResumeRebindError::AutoUnsupportedProvider("unknown".to_string()))?;
-            if !matches!(provider, ProviderKind::Claude) {
-                return Err(ResumeRebindError::AutoUnsupportedProvider(
-                    provider.as_str().to_string(),
-                ));
+    // Resolve the rebind target. Picker values are opaque markers: rebuild the
+    // owner-local inventory now so stale, newly-bound, and moved candidates fail
+    // closed instead of trusting autocomplete-time metadata.
+    let (target_session_id, target_cwd, auto_selected, require_target_unbound) =
+        match opts.session_id.as_deref() {
+            Some(value) if candidates::marker_session_id(value).is_some() => {
+                if !matches!(provider, Some(ProviderKind::Claude)) {
+                    return Err(ResumeRebindError::AutoUnsupportedProvider(
+                        provider
+                            .as_ref()
+                            .map(|provider| provider.as_str().to_string())
+                            .unwrap_or_else(|| "unknown".to_string()),
+                    ));
+                }
+                let fresh = load_fresh_candidate_inventory(pool, session_key, None).await?;
+                let candidate = resolve_marker_candidate(value, &fresh)?;
+                let session_id = candidate.session_id;
+                (session_id.clone(), candidate.cwd, false, Some(session_id))
             }
-            // B1: never adopt a session id that some channel is *currently*
-            // bound to (would repoint two channels at one session and thrash
-            // their bindings — the #2843 live-binding hazard). Candidates are
-            // additionally scoped to this channel's own worktree lineage inside
-            // `discover_previous_claude_session_in`, so a sibling agent's
-            // worktree (e.g. `claude-adk-dash-cc-*` next to `claude-adk-cc-*`)
-            // can never be selected.
-            let live_bound = dispatched_sessions_db::load_live_bound_session_ids_pg(pool)
-                .await
-                .map_err(ResumeRebindError::Database)?;
-            let candidate = discover_previous_claude_session_off_runtime(
-                current_cwd.clone(),
-                current_session_id.clone(),
-                live_bound,
-                None,
-            )
-            .await?
-            .ok_or(ResumeRebindError::NoPreviousSession)?;
-            (candidate.session_id, candidate.cwd, true)
-        }
-    };
+            Some(session_id) if session_id.trim().starts_with("pick:") => {
+                return Err(ResumeRebindError::StaleCandidate);
+            }
+            Some(session_id) if !session_id.trim().is_empty() => {
+                let cwd = opts
+                    .cwd
+                    .as_deref()
+                    .map(str::to_string)
+                    .or_else(|| current_cwd.clone())
+                    .ok_or(ResumeRebindError::MissingCwd)?;
+                (session_id.trim().to_string(), cwd, false, None)
+            }
+            _ => {
+                let provider = provider.clone().ok_or_else(|| {
+                    ResumeRebindError::AutoUnsupportedProvider("unknown".to_string())
+                })?;
+                if !matches!(provider, ProviderKind::Claude) {
+                    return Err(ResumeRebindError::AutoUnsupportedProvider(
+                        provider.as_str().to_string(),
+                    ));
+                }
+                let candidate = load_fresh_candidate_inventory(pool, session_key, None)
+                    .await?
+                    .into_iter()
+                    .next()
+                    .ok_or(ResumeRebindError::NoPreviousSession)?;
+                let session_id = candidate.session_id;
+                (session_id.clone(), candidate.cwd, true, Some(session_id))
+            }
+        };
 
     // Reject a target worktree that no longer exists — resuming into a missing
     // cwd would silently start a fresh session in the wrong place.
@@ -380,12 +598,30 @@ pub(crate) async fn perform_resume_rebind(
     // having destroyed the live session (teardown is skipped), so the channel
     // keeps working on its old binding and the operator can retry. Only once
     // the row is repointed do we kill the old tmux and mirror in memory.
-    let rows = rebind_session_provider_pg(pool, session_key, &target_cwd, &target_session_id)
-        .await
-        .map_err(ResumeRebindError::Database)?;
+    let rows = rebind_session_provider_with_guard_pg(
+        pool,
+        session_key,
+        &target_cwd,
+        &target_session_id,
+        require_target_unbound.as_deref(),
+        expected_owner_instance_id,
+    )
+    .await
+    .map_err(ResumeRebindError::Database)?;
     if rows == 0 {
-        // Row disappeared between the context load and the update.
-        return Err(ResumeRebindError::SessionNotFound);
+        let context = load_session_rebind_context_pg(pool, session_key)
+            .await
+            .map_err(ResumeRebindError::Database)?;
+        return match context {
+            None => Err(ResumeRebindError::SessionNotFound),
+            Some(context) if context.active_dispatch_id.is_some() => {
+                Err(ResumeRebindError::ActiveTurn)
+            }
+            Some(_) if require_target_unbound.is_some() => Err(ResumeRebindError::StaleCandidate),
+            Some(_) => Err(ResumeRebindError::Database(
+                "session rebind was not applied".to_string(),
+            )),
+        };
     }
 
     // Teardown the channel's current tmux/turn via the shared lifecycle path.
@@ -436,66 +672,50 @@ pub(crate) async fn perform_resume_rebind(
     })
 }
 
-/// An auto-selected previous-session candidate: the worktree and provider
-/// session id to resume.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PreviousSessionCandidate {
-    pub(crate) cwd: String,
-    pub(crate) session_id: String,
+fn resolve_marker_candidate(
+    marker: &str,
+    candidates: &[ResumeCandidate],
+) -> Result<ResumeCandidate, ResumeRebindError> {
+    let marker_id =
+        candidates::marker_session_id(marker).ok_or(ResumeRebindError::StaleCandidate)?;
+    candidates
+        .iter()
+        .find(|candidate| candidate.session_id == marker_id)
+        .cloned()
+        .ok_or(ResumeRebindError::StaleCandidate)
 }
 
-/// Derive the *lineage stem* of a managed-worktree directory name: the name
-/// with a trailing `-YYYYMMDD-HHMMSS` timestamp removed (the suffix
-/// `create_git_worktree` appends as `{provider}-{safe_name}-{ts}`). Two
-/// worktrees belong to the same channel lineage iff their stems are equal, so
-/// `claude-adk-cc-20260723-054531` and `claude-adk-cc-20260723-050333` share the
-/// stem `claude-adk-cc`, while the sibling agent `claude-adk-dash-cc` (stem
-/// `claude-adk-dash-cc`) does not. Names without the timestamp suffix are their
-/// own stem (only same-name worktrees match — effectively same-worktree scope).
-fn worktree_lineage_stem(dir_name: &str) -> &str {
-    let bytes = dir_name.as_bytes();
-    // Match a trailing `-\d{8}-\d{6}` (date-time) and, if present, cut it off.
-    // 15 trailing chars: `-DDDDDDDD-DDDDDD` → prefix length = len - 16.
-    if bytes.len() > 16 {
-        let tail = &dir_name[dir_name.len() - 16..];
-        let tb = tail.as_bytes();
-        let shaped = tb[0] == b'-'
-            && tb[9] == b'-'
-            && tb[1..9].iter().all(u8::is_ascii_digit)
-            && tb[10..16].iter().all(u8::is_ascii_digit);
-        if shaped {
-            return &dir_name[..dir_name.len() - 16];
-        }
-    }
-    dir_name
+async fn load_fresh_candidate_inventory(
+    pool: &PgPool,
+    session_key: &str,
+    claude_home: Option<std::path::PathBuf>,
+) -> Result<Vec<ResumeCandidate>, ResumeRebindError> {
+    let Some(context) = load_session_rebind_context_pg(pool, session_key)
+        .await
+        .map_err(ResumeRebindError::Database)?
+    else {
+        return Err(ResumeRebindError::SessionNotFound);
+    };
+    let live_bound = dispatched_sessions_db::load_live_bound_session_ids_pg(pool)
+        .await
+        .map_err(ResumeRebindError::Database)?;
+    discover_candidate_inventory_off_runtime(
+        context.cwd,
+        context.claude_session_id,
+        live_bound,
+        claude_home,
+    )
+    .await
 }
 
-/// Auto-select the most recent prior Claude session for a channel.
-///
-/// Scope (B1 — channel attribution): candidate worktrees are the current cwd
-/// plus only those sibling directories that share the current worktree's
-/// *lineage stem* ([`worktree_lineage_stem`]). This prevents auto-select from
-/// crossing into an unrelated agent's / channel's worktree that merely lives in
-/// the same `worktrees/` parent. Within those worktrees, each Claude transcript
-/// (`~/.claude/projects/<slug>/<uuid>.jsonl`, stem = provider session id) is a
-/// candidate; the newest mtime wins.
-///
-/// Exclusions: the channel's own current binding (`current_session_id`) and any
-/// session id in `live_bound` (currently bound to *some* channel's session row)
-/// are skipped, so auto-select never adopts a session another live channel is
-/// using — restoring the #2843 live-binding protection an empty exclude bypassed.
-///
-/// `claude_home` is injectable for tests; production passes `None`.
-///
-/// Returns `None` when no distinct, unbound prior transcript exists in-lineage.
-async fn discover_previous_claude_session_off_runtime(
+async fn discover_candidate_inventory_off_runtime(
     current_cwd: Option<String>,
     current_session_id: Option<String>,
     live_bound: std::collections::HashSet<String>,
     claude_home: Option<std::path::PathBuf>,
-) -> Result<Option<PreviousSessionCandidate>, ResumeRebindError> {
+) -> Result<Vec<ResumeCandidate>, ResumeRebindError> {
     tokio::task::spawn_blocking(move || {
-        discover_previous_claude_session_scoped(
+        candidates::discover_candidates(
             current_cwd.as_deref(),
             current_session_id.as_deref(),
             &live_bound,
@@ -504,82 +724,20 @@ async fn discover_previous_claude_session_off_runtime(
     })
     .await
     .map_err(|error| {
-        ResumeRebindError::Filesystem(format!("previous-session discovery task failed: {error}"))
+        ResumeRebindError::Filesystem(format!("resume candidate discovery task failed: {error}"))
     })
 }
 
-pub(crate) fn discover_previous_claude_session_scoped(
+#[cfg(test)]
+fn discover_previous_claude_session_scoped(
     current_cwd: Option<&str>,
     current_session_id: Option<&str>,
     live_bound: &std::collections::HashSet<String>,
     claude_home: Option<&std::path::Path>,
-) -> Option<PreviousSessionCandidate> {
-    let current_cwd = current_cwd?;
-    let current_path = std::path::Path::new(current_cwd);
-    let parent = current_path.parent()?;
-    let lineage = current_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(worktree_lineage_stem)?;
-
-    // Candidate worktrees: current cwd + siblings sharing the lineage stem.
-    let mut worktrees: Vec<std::path::PathBuf> = vec![current_path.to_path_buf()];
-    if let Ok(entries) = std::fs::read_dir(parent) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() || path == current_path {
-                continue;
-            }
-            let same_lineage = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(worktree_lineage_stem)
-                == Some(lineage);
-            if same_lineage {
-                worktrees.push(path);
-            }
-        }
-    }
-
-    let empty_exclude = std::collections::HashSet::new();
-    let mut best: Option<(std::time::SystemTime, PreviousSessionCandidate)> = None;
-
-    for worktree in worktrees {
-        let transcripts =
-            crate::services::claude_tui::transcript_tail::claude_transcripts_for_cwd_since(
-                &worktree,
-                std::time::UNIX_EPOCH,
-                claude_home,
-                &empty_exclude,
-            );
-        for transcript in transcripts {
-            let Some(session_id) = transcript
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .map(str::to_string)
-            else {
-                continue;
-            };
-            // Skip the channel's own current binding and any live-bound session.
-            if Some(session_id.as_str()) == current_session_id || live_bound.contains(&session_id) {
-                continue;
-            }
-            let Ok(modified) = std::fs::metadata(&transcript).and_then(|meta| meta.modified())
-            else {
-                continue;
-            };
-            let candidate = PreviousSessionCandidate {
-                cwd: worktree.to_string_lossy().to_string(),
-                session_id,
-            };
-            match &best {
-                Some((best_mtime, _)) if *best_mtime >= modified => {}
-                _ => best = Some((modified, candidate)),
-            }
-        }
-    }
-
-    best.map(|(_, candidate)| candidate)
+) -> Option<ResumeCandidate> {
+    candidates::discover_candidates(current_cwd, current_session_id, live_bound, claude_home)
+        .into_iter()
+        .next()
 }
 
 #[cfg(test)]
@@ -605,7 +763,7 @@ mod tests {
         );
         let selected = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            discover_previous_claude_session_off_runtime(
+            discover_candidate_inventory_off_runtime(
                 Some(cwd.to_string_lossy().to_string()),
                 None,
                 no_live_bound(),
@@ -615,12 +773,144 @@ mod tests {
         .await
         .expect("blocking discovery must complete")
         .expect("blocking task must not fail")
+        .into_iter()
+        .next()
         .expect("prior session must be selected");
 
         assert_eq!(Some(selected.clone()), expected);
         assert_eq!(selected.session_id, prior);
         assert_eq!(selected.cwd, cwd.to_string_lossy());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn bounded_title_reader_uses_only_tail_window() {
+        let tmp = unique_tmp("bounded-title");
+        let claude_home = tmp.join(".claude");
+        let cwd = tmp.join("worktrees").join("claude-adk-cc-20260101-000001");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = "22222222-2222-2222-2222-222222222222";
+        let path = write_transcript_with_contents(
+            &claude_home,
+            &cwd,
+            session_id,
+            1_000,
+            b"{\"type\":\"ai-title\",\"aiTitle\":\"old title\"}\n",
+        );
+        let new_title = "{\"type\":\"ai-title\",\"aiTitle\":\"새 제목\"}\n";
+        let mut contents = std::fs::read(&path).unwrap();
+        contents.extend(std::iter::repeat_n(b'x', 70 * 1024));
+        contents.push(b'\n');
+        contents.extend_from_slice(new_title.as_bytes());
+        std::fs::write(&path, contents).unwrap();
+
+        let inventory = candidates::discover_candidates(
+            cwd.to_str(),
+            None,
+            &no_live_bound(),
+            Some(&claude_home),
+        );
+        assert_eq!(inventory[0].title.as_deref(), Some("새 제목"));
+        assert_ne!(inventory[0].title.as_deref(), Some("old title"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn marker_requires_pick_prefix_and_uuid() {
+        assert_eq!(
+            candidates::marker_session_id("pick:11111111-1111-1111-1111-111111111111"),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+        assert_eq!(
+            candidates::marker_session_id("11111111-1111-1111-1111-111111111111"),
+            None
+        );
+        assert_eq!(candidates::marker_session_id("pick:not-a-uuid"), None);
+    }
+
+    #[test]
+    fn marker_resolution_rejects_stale_and_live_bound_candidates() {
+        let marker = "pick:22222222-2222-2222-2222-222222222222";
+        assert!(matches!(
+            resolve_marker_candidate(marker, &[]),
+            Err(ResumeRebindError::StaleCandidate)
+        ));
+        let visible = ResumeCandidate {
+            session_id: "22222222-2222-2222-2222-222222222222".to_string(),
+            cwd: "/tmp/worktree".to_string(),
+            modified_at_ms: 1,
+            title: None,
+        };
+        assert_eq!(
+            resolve_marker_candidate(marker, std::slice::from_ref(&visible))
+                .expect("visible candidate"),
+            visible
+        );
+
+        let tmp = unique_tmp("marker-live-bound");
+        let claude_home = tmp.join(".claude");
+        let cwd = tmp.join("worktrees").join("claude-adk-cc-20260101-000001");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session_id = "22222222-2222-2222-2222-222222222222";
+        write_transcript(&claude_home, &cwd, session_id, 1_000);
+        let live_bound = std::collections::HashSet::from([session_id.to_string()]);
+        let fresh =
+            candidates::discover_candidates(cwd.to_str(), None, &live_bound, Some(&claude_home));
+        assert!(matches!(
+            resolve_marker_candidate(marker, &fresh),
+            Err(ResumeRebindError::StaleCandidate)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn forwarded_non_owner_response_prevents_recursive_forwarding() {
+        let session_key = "host:AgentDesk-claude-42";
+        let matching = ResumeForwardingMetadata {
+            forwarded: true,
+            expected_owner: Some("worker-b"),
+        };
+        assert!(
+            validate_forwarded_resume_owner(
+                matching,
+                session_key,
+                Some("worker-b"),
+                Some("worker-b")
+            )
+            .is_ok()
+        );
+
+        for metadata in [
+            ResumeForwardingMetadata {
+                forwarded: true,
+                expected_owner: None,
+            },
+            ResumeForwardingMetadata {
+                forwarded: true,
+                expected_owner: Some("worker-a"),
+            },
+        ] {
+            let (status, Json(body)) = validate_forwarded_resume_owner(
+                metadata,
+                session_key,
+                Some("worker-b"),
+                Some("worker-b"),
+            )
+            .expect_err("missing or stale expected owner must fail closed");
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body["code"], "forwarded_resume_non_owner");
+            assert_eq!(body["owner_instance_id"], "worker-b");
+        }
+
+        let (status, Json(body)) = validate_forwarded_resume_owner(
+            matching,
+            session_key,
+            Some("worker-b"),
+            Some("worker-a"),
+        )
+        .expect_err("a forwarded request must not execute on a non-owner");
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "forwarded_resume_non_owner");
     }
 
     #[test]
@@ -650,6 +940,16 @@ mod tests {
         sid: &str,
         mtime_secs: i64,
     ) -> std::path::PathBuf {
+        write_transcript_with_contents(claude_home, cwd, sid, mtime_secs, b"{}\n")
+    }
+
+    fn write_transcript_with_contents(
+        claude_home: &std::path::Path,
+        cwd: &std::path::Path,
+        sid: &str,
+        mtime_secs: i64,
+        contents: &[u8],
+    ) -> std::path::PathBuf {
         let dir = crate::services::claude_tui::transcript_tail::claude_project_dir_for_cwd(
             cwd,
             Some(claude_home),
@@ -657,32 +957,13 @@ mod tests {
         .unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("{sid}.jsonl"));
-        std::fs::write(&path, b"{}\n").unwrap();
+        std::fs::write(&path, contents).unwrap();
         set_file_mtime(&path, FileTime::from_unix_time(mtime_secs, 0)).unwrap();
         path
     }
 
     fn no_live_bound() -> std::collections::HashSet<String> {
         std::collections::HashSet::new()
-    }
-
-    #[test]
-    fn lineage_stem_strips_only_datetime_suffix() {
-        assert_eq!(
-            worktree_lineage_stem("claude-adk-cc-20260723-054531"),
-            "claude-adk-cc"
-        );
-        assert_eq!(
-            worktree_lineage_stem("claude-adk-cc-20260723-050333"),
-            "claude-adk-cc"
-        );
-        // Different agent slug — different lineage.
-        assert_eq!(
-            worktree_lineage_stem("claude-adk-dash-cc"),
-            "claude-adk-dash-cc"
-        );
-        // No datetime suffix — the whole name is the stem.
-        assert_eq!(worktree_lineage_stem("issue-123-fix"), "issue-123-fix");
     }
 
     #[test]
