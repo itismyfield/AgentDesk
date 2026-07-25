@@ -24,6 +24,7 @@
 // masquerade as the direct resume-target-gone envelope.
 const DIRECT_STALE_RESUME_PREFIXES: &[&str] = &[
     "no conversation found",
+    "no conversation matching",
     "conversation not found",
     "could not find session",
     "could not find conversation",
@@ -134,10 +135,14 @@ mod tests {
             "Error: No conversation found for session abc-123"
         ));
         assert!(is_direct_stale_resume_error_envelope(
-            "error: no conversation matching that id"
-        ));
-        assert!(is_direct_stale_resume_error_envelope(
             "Conversation not found."
+        ));
+    }
+
+    #[test]
+    fn matches_claude_no_conversation_matching_envelope() {
+        assert!(is_direct_stale_resume_error_envelope(
+            "error: no conversation matching that id"
         ));
     }
 
