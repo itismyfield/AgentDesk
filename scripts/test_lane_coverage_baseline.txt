@@ -416,7 +416,6 @@ services::discord::tmux::restored_turn_injected_anchor_tests
 services::discord::tmux::streaming_rollover_frozen_prefix_persistence_tests
 services::discord::tmux::terminal_finalize_liveness_tests
 services::discord::tmux::tmux_kill_policy::recent_turn_stop_range_tests
-services::discord::tmux::tmux_output_stream::tests
 services::discord::tmux::tmux_session_files::tests
 services::discord::tmux::tmux_watcher::commit_decisions::runtime_binding_offset_tests
 services::discord::tmux::tmux_watcher::completion_gate::matched_session_jsonl_gate_tests
@@ -450,7 +449,6 @@ services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_
 services::discord::tmux::watcher_lifecycle::tests::tests
 services::discord::tmux::watcher_placeholder_status_tests
 services::discord::tmux::watcher_stream_progress_tests
-services::discord::tmux_error_detect::pure_tests
 services::discord::tmux_overload_retry::completion_release_tests
 services::discord::tmux_reaper::tests
 services::discord::tmux_restart_handoff::notice_target_tests
