@@ -558,6 +558,7 @@ mod tests {
             "mac-mini-release".to_string(),
             crate::config::ClusterNodeConfig {
                 max_concurrent_dispatches: Some(1),
+                ..crate::config::ClusterNodeConfig::default()
             },
         );
 

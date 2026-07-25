@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::http::HeaderMap;
+use axum::{Json, http::HeaderMap};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 
@@ -481,17 +481,19 @@ impl QueueService {
         let session_info =
             crate::services::session_forwarding::load_cancel_turn_session(pool, channel_id).await?;
 
-        if crate::services::session_forwarding::is_forwarded_request(headers) {
-            let owner = session_info
-                .as_ref()
-                .and_then(|session| session.owner_instance_id.as_deref());
-            if owner != forward_context.cluster_instance_id.as_deref() {
-                return Err(ServiceError::conflict(
-                    "forwarded cancel owner changed before local mutation",
-                )
-                .with_context("channel_id", channel_id)
-                .with_context("owner_instance_id", owner));
-            }
+        let owner = session_info
+            .as_ref()
+            .and_then(|session| session.owner_instance_id.as_deref());
+        if let Err((_, Json(body))) = crate::services::session_forwarding::enforce_receiver_fence(
+            headers,
+            owner,
+            forward_context.cluster_instance_id.as_deref(),
+        ) {
+            return Err(ServiceError::conflict(
+                "forwarded cancel owner changed before local mutation",
+            )
+            .with_context("channel_id", channel_id)
+            .with_context("forward_fence", body));
         }
 
         let channel_target = self.resolve_cancel_turn_channel_target(channel_id).await?;

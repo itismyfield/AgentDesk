@@ -126,6 +126,7 @@ jobs:
               - 'src/services/dispatches/**'
               - 'src/services/queue.rs'
               - 'src/services/session_forwarding.rs'
+              - 'src/services/session_forwarding/**'
               - 'src/server/routes/queue_api.rs'
               # #4460: recovery owns production-shaped PostgreSQL/outbox
               # tests; changes to the owner or its sidecars must run them.
@@ -575,6 +576,15 @@ jobs:
           cache-bin: false
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Trusted session forwarding tests
+        timeout-minutes: 10
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: env -u AGENTDESK_ROOT_DIR cargo test --lib services::session_forwarding -- --skip _pg --skip pg_ --skip postgres
 
       - name: just test-postgres
         timeout-minutes: 20
