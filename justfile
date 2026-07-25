@@ -35,6 +35,7 @@ test-non-pg:
     cargo test --lib server::routes::e2e_control::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib formatting -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib delivery_record -- --skip _pg --skip pg_ --skip postgres
+    env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::watcher_lifecycle::tests::tests::turn_starts_reuse_healthy_runtime_path_incumbent_after_handoff -- --exact
     cargo test --lib server::claude_oauth_usage_tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib tui_task_card::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib server::routes::message_outbox::tests -- --skip _pg --skip pg_ --skip postgres
@@ -56,6 +57,13 @@ test-non-pg:
     cargo test --lib services::discord::turn_bridge::followup_requeue::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::turn_bridge::terminal_outcome_delivery::busy_followup_retry::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::gateway::tests -- --skip _pg --skip pg_ --skip postgres
+    env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::gateway::outbound_messages::classified_edit_tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
+    env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_dispatch::queued::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
+    env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::intake_turn::placeholder_handoff::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
+    env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::completion_admission::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
+    # #4892: keep the live panel and spinner-merged latest-tool contracts in the retained lane.
+    env -u AGENTDESK_ROOT_DIR cargo test --lib placeholder_live_events -- --skip _pg --skip pg_ --skip postgres
+    env -u AGENTDESK_ROOT_DIR cargo test --lib single_message_panel::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::outbound::serenity_reference::tests::lifecycle_notice_nonce_is_stable_and_semantic_event_scoped -- --exact
     cargo test --lib services::discord::outbound::delivery::tests::v3_referenced_send_preserves_reference_and_dedupes -- --exact
     cargo test --lib cli::args::tests::legacy_queue_help_directs_users_to_query_without_changing_compatibility_contract

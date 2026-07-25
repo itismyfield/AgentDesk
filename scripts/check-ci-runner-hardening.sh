@@ -60,6 +60,14 @@ unless document["concurrency"] == expected_concurrency
   exit 1
 end
 
+manual_inputs = document.dig(true, "workflow_dispatch", "inputs")
+manual_inputs ||= document.dig("on", "workflow_dispatch", "inputs")
+baseline_input = manual_inputs.is_a?(Hash) ? manual_inputs["test_lane_baseline_ref"] : nil
+unless baseline_input.is_a?(Hash) && baseline_input["required"] == true && baseline_input["type"] == "string"
+  warn "#{path}: workflow_dispatch must require an immutable test-lane baseline ref"
+  exit 1
+end
+
 targets = {
   "check_fast_cross_os" => {
     "label" => "cross-OS job",

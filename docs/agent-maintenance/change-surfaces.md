@@ -256,7 +256,10 @@
     identity-guarded mailbox release + `global_active` decrement + the
     finalizer's D-side channel cleanup ahead of the awaited status-panel edit so
     a same-channel follow-up racing the edit can no longer make the late
-    finalizer identity-miss and permanently skip the decrement; the D-side
+    finalizer identity-miss and permanently skip the decrement; #4888 additionally
+    records the matching mailbox release with the actor-owned completion admission
+    ledger before the projection await, so queue eligibility cannot bypass terminal
+    projection/disposition settlement; the D-side
     role-override drop snapshots the owned value before any await and uses
     `remove_if` so a fresh counter-model follow-up inserting its own override
     during the release is not clobbered. The #4106r2 WARN-fix splits
@@ -1729,7 +1732,11 @@
     reconciliation, production LoC; PG-backed tests for `current_batch_phase_pg`
     + `reconcile_phase_gate_for_terminal_dispatch_on_pg_tx` live in a
     `#[cfg(test)] mod`. Split the test module out into a sibling
-    `phase_gates_tests.rs` before adding new feature logic).
+    `phase_gates_tests.rs` before adding new feature logic). Verdict extraction,
+    checks inference, expected-verdict selection, and diagnostic preservation are
+    owned by the split-friendly sibling `src/db/auto_queue/phase_gate_verdict.rs`;
+    changes to either surface require reducer unit coverage plus PG reconciler
+    coverage for primary and sibling dispatches.
   - `src/db/dispatches/mod.rs` (frozen giant surface; dispatch slot/thread binding and
     outbox-adjacent PG helpers, pushed over the giant-file threshold by
     #2778/#2783 slot-isolation recovery. Split slot allocation helpers before

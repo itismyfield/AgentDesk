@@ -193,12 +193,19 @@ pub(crate) fn claim_watcher(
     if let Some((existing_channel_id, existing_cancelled, existing_paused, existing_output_path)) =
         find_watcher_by_tmux_session(watchers, &requested_tmux)
     {
-        let replace_paused_incumbent =
-            existing_paused && !matches!(source, "turn_start_message" | "turn_start_headless");
+        let turn_start_uses_provisional_output_path =
+            matches!(source, "turn_start_message" | "turn_start_headless");
+        let output_path_changed = existing_output_path != requested_output_path;
+        let replace_paused_incumbent = existing_paused && !turn_start_uses_provisional_output_path;
+        // Turn admission resolves the canonical pre-handoff wrapper path. Once a
+        // healthy watcher has adopted the provider-native runtime transcript,
+        // that provisional path must not downgrade the live registry binding.
+        let replace_for_output_path =
+            output_path_changed && !turn_start_uses_provisional_output_path;
         if force_replace_live_same_tmux
             || existing_cancelled
             || replace_paused_incumbent
-            || existing_output_path != requested_output_path
+            || replace_for_output_path
         {
             if let Some((_, existing_handle)) =
                 watchers.remove_tmux_session_locked(&guard, &requested_tmux)
@@ -216,7 +223,7 @@ pub(crate) fn claim_watcher(
                     existing_cancelled,
                     force_replace_live_same_tmux,
                     replace_paused_incumbent,
-                    output_path_changed = existing_output_path != requested_output_path,
+                    output_path_changed,
                     "watcher claim cancelled same-tmux incumbent before spawning replacement"
                 );
             }

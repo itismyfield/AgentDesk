@@ -4,10 +4,21 @@ use serde::Serialize;
 use serde_json::{Map, Number, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::engine::loader::compute_policy_version;
+
+mod discovery;
+use discovery::{
+    add_cached_candidates_for_root, candidate_failure_key, collect_routine_script_paths,
+    routine_roots_identity, script_ref,
+};
+
+fn full_source_version(source: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(source.as_bytes()))
+}
 
 #[inline]
 fn recover_poisoned_lock<T>(e: PoisonError<T>) -> T {
@@ -52,9 +63,47 @@ pub const MAX_OBSERVATIONS_PER_TICK: usize = 100;
 pub const MAX_OBSERVATION_PAYLOAD_BYTES: usize = 65536;
 pub const MAX_AUTOMATION_INVENTORY_ITEMS: usize = 100;
 pub const MAX_AUTOMATION_INVENTORY_PAYLOAD_BYTES: usize = 32768;
+pub const ROUTINE_TICK_ERROR_PUBLIC_REASON: &str = "routine_tick_exception";
 const LEGACY_AUTOMATION_CANDIDATE_EXECUTOR_REF: &str = "monitoring/automation-executor-v2.js";
 const CANONICAL_AUTOMATION_CANDIDATE_EXECUTOR_REF: &str =
     "monitoring/automation-candidate-executor.js";
+const ROUTINE_LOAD_RETRY_BASE: Duration = Duration::from_secs(30);
+const ROUTINE_LOAD_RETRY_MAX: Duration = Duration::from_secs(60 * 60);
+
+#[derive(Debug, Clone)]
+struct RoutineScriptFailure {
+    source_version: Option<String>,
+    consecutive_failures: u32,
+    retry_at: Instant,
+    warning_emitted: bool,
+}
+
+struct SharedRoutineLoaderState {
+    scripts: RoutineScriptStore,
+    failed_scripts: Mutex<HashMap<PathBuf, RoutineScriptFailure>>,
+    load_gate: Mutex<()>,
+    #[cfg(test)]
+    evaluation_attempts: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    load_error_emissions: std::sync::atomic::AtomicUsize,
+}
+
+impl SharedRoutineLoaderState {
+    fn new() -> Self {
+        Self {
+            scripts: Arc::new(Mutex::new(HashMap::new())),
+            failed_scripts: Mutex::new(HashMap::new()),
+            load_gate: Mutex::new(()),
+            #[cfg(test)]
+            evaluation_attempts: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            load_error_emissions: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+static SHARED_LOADER_STATES: LazyLock<Mutex<HashMap<PathBuf, Arc<SharedRoutineLoaderState>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -122,20 +171,51 @@ pub struct RoutineTickAgent {
 ///
 /// This intentionally does not use the PolicyEngine store or
 /// `agentdesk.registerPolicy()` namespace. Failed loads return an error before
-/// mutating the store, so callers keep the last-known-good registry.
+/// mutating the store, so callers keep the last-known-good registry. Read and
+/// evaluation failures use bounded exponential backoff; unchanged candidates
+/// are always retried within one hour instead of remaining disabled for the
+/// process lifetime.
 pub struct RoutineScriptLoader {
-    scripts: RoutineScriptStore,
+    state: Arc<SharedRoutineLoaderState>,
+    #[cfg(test)]
+    source_read_hook: Mutex<Option<Arc<dyn Fn(&Path) + Send + Sync>>>,
+    #[cfg(test)]
+    source_reader: Mutex<Option<Arc<dyn Fn(&Path) -> std::io::Result<String> + Send + Sync>>>,
 }
 
 impl RoutineScriptLoader {
     pub fn new() -> Result<Self> {
-        Ok(Self {
-            scripts: Arc::new(Mutex::new(HashMap::new())),
-        })
+        Ok(Self::with_state(Arc::new(SharedRoutineLoaderState::new())))
+    }
+
+    pub fn new_shared(roots: &[PathBuf]) -> Result<Self> {
+        let key = routine_roots_identity(roots);
+        let mut states = SHARED_LOADER_STATES
+            .lock()
+            .unwrap_or_else(recover_poisoned_lock);
+        states.retain(|_, state| Arc::strong_count(state) > 1);
+        let state = states
+            .entry(key)
+            .or_insert_with(|| Arc::new(SharedRoutineLoaderState::new()))
+            .clone();
+        Ok(Self::with_state(state))
+    }
+
+    fn with_state(state: Arc<SharedRoutineLoaderState>) -> Self {
+        Self {
+            state,
+            #[cfg(test)]
+            source_read_hook: Mutex::new(None),
+            #[cfg(test)]
+            source_reader: Mutex::new(None),
+        }
     }
 
     #[cfg(test)]
     pub fn load_script(&self, root: &Path, path: &Path) -> Result<String> {
+        self.state
+            .evaluation_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let script = load_single_routine_script(root, path)?;
         tracing::debug!(
             routine_script = %script.script_ref,
@@ -145,7 +225,8 @@ impl RoutineScriptLoader {
             "loaded routine script"
         );
         let script_ref = script.script_ref.clone();
-        self.scripts
+        self.state
+            .scripts
             .lock()
             .unwrap_or_else(recover_poisoned_lock)
             .insert(script_ref.clone(), script);
@@ -160,14 +241,21 @@ impl RoutineScriptLoader {
     }
 
     pub fn load_dirs(&self, roots: &[PathBuf]) -> Result<usize> {
+        let _load_permit = self
+            .state
+            .load_gate
+            .lock()
+            .unwrap_or_else(recover_poisoned_lock);
         let mut seen_refs = HashSet::new();
         let mut candidates_by_ref: BTreeMap<String, Vec<RoutineScriptCandidate>> = BTreeMap::new();
         let existing_scripts: HashMap<String, LoadedRoutineScript> = self
+            .state
             .scripts
             .lock()
             .unwrap_or_else(recover_poisoned_lock)
             .clone();
 
+        let primary_root_identity = roots.first().and_then(|root| root.canonicalize().ok());
         for (root_index, root) in roots.iter().enumerate() {
             if !root.exists() {
                 tracing::warn!("Routines directory does not exist: {}", root.display());
@@ -181,8 +269,14 @@ impl RoutineScriptLoader {
                 continue;
             }
 
+            let exclude_bundled_node_helpers = root
+                .canonicalize()
+                .ok()
+                .is_some_and(|identity| primary_root_identity.as_ref() == Some(&identity));
             let mut entries = Vec::new();
-            if let Err(e) = collect_routine_script_paths(root, &mut entries) {
+            if let Err(e) =
+                collect_routine_script_paths(root, exclude_bundled_node_helpers, &mut entries)
+            {
                 tracing::warn!(
                     routines_dir = %root.display(),
                     error = %e,
@@ -215,6 +309,14 @@ impl RoutineScriptLoader {
         }
 
         let existing_refs: HashSet<String> = existing_scripts.keys().cloned().collect();
+        let candidate_paths: HashSet<PathBuf> = candidates_by_ref
+            .values()
+            .flat_map(|candidates| {
+                candidates
+                    .iter()
+                    .map(|candidate| candidate_failure_key(&candidate.path))
+            })
+            .collect();
 
         let mut loaded = 0;
         let mut loaded_scripts = Vec::new();
@@ -222,6 +324,7 @@ impl RoutineScriptLoader {
             let has_existing = existing_refs.contains(&script_ref);
             let mut selected = None;
             for candidate in candidates.iter().rev() {
+                let candidate_key = candidate_failure_key(&candidate.path);
                 if let Some(script) = &candidate.cached {
                     tracing::warn!(
                         routine_script = %script_ref,
@@ -232,8 +335,81 @@ impl RoutineScriptLoader {
                     selected = Some((script.clone(), false));
                     break;
                 }
-                match load_single_routine_script(&candidate.root, &candidate.path) {
+
+                #[cfg(test)]
+                let source_result = if let Some(reader) = self
+                    .source_reader
+                    .lock()
+                    .unwrap_or_else(recover_poisoned_lock)
+                    .clone()
+                {
+                    reader(&candidate.path)
+                } else {
+                    std::fs::read_to_string(&candidate.path)
+                };
+                #[cfg(not(test))]
+                let source_result = std::fs::read_to_string(&candidate.path);
+                let source = match source_result {
+                    Ok(source) => source,
+                    Err(e) => {
+                        let now = Instant::now();
+                        if self.should_retry_candidate(&candidate_key, None, now, has_existing) {
+                            let retry_delay = self.record_failure(&candidate_key, None, now);
+                            #[cfg(test)]
+                            self.state
+                                .load_error_emissions
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            tracing::error!(
+                                routine_script = %candidate.path.display(),
+                                error = %e,
+                                retry_after_seconds = retry_delay.as_secs(),
+                                "failed to read routine script; keeping last-known-good registry"
+                            );
+                        }
+                        if has_existing {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                let source_version = full_source_version(&source);
+                #[cfg(test)]
+                if let Some(hook) = self
+                    .source_read_hook
+                    .lock()
+                    .unwrap_or_else(recover_poisoned_lock)
+                    .clone()
+                {
+                    hook(&candidate.path);
+                }
+                let now = Instant::now();
+                if !self.should_retry_candidate(
+                    &candidate_key,
+                    Some(&source_version),
+                    now,
+                    has_existing,
+                ) {
+                    if has_existing {
+                        break;
+                    }
+                    continue;
+                }
+
+                #[cfg(test)]
+                self.state
+                    .evaluation_attempts
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                match load_single_routine_script_from_source(
+                    &candidate.root,
+                    &candidate.path,
+                    source,
+                ) {
                     Ok(script) => {
+                        self.state
+                            .failed_scripts
+                            .lock()
+                            .unwrap_or_else(recover_poisoned_lock)
+                            .remove(&candidate_key);
                         if candidates.len() > 1 {
                             tracing::info!(
                                 routine_script = %script_ref,
@@ -246,8 +422,16 @@ impl RoutineScriptLoader {
                         break;
                     }
                     Err(e) => {
+                        let retry_delay =
+                            self.record_failure(&candidate_key, Some(source_version.clone()), now);
+                        #[cfg(test)]
+                        self.state
+                            .load_error_emissions
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         tracing::error!(
                             routine_script = %candidate.path.display(),
+                            script_version = %source_version,
+                            retry_after_seconds = retry_delay.as_secs(),
                             error = %e,
                             "failed to load routine script; keeping last-known-good registry"
                         );
@@ -270,6 +454,11 @@ impl RoutineScriptLoader {
             }
         }
 
+        self.state
+            .failed_scripts
+            .lock()
+            .unwrap_or_else(recover_poisoned_lock)
+            .retain(|path, _| candidate_paths.contains(path));
         let pruned = self.apply_dir_reload(loaded_scripts, &seen_refs)?;
         if pruned > 0 {
             tracing::info!(count = pruned, "pruned missing routine scripts");
@@ -278,8 +467,86 @@ impl RoutineScriptLoader {
         Ok(loaded)
     }
 
+    fn should_retry_candidate(
+        &self,
+        path: &Path,
+        source_version: Option<&String>,
+        now: Instant,
+        has_existing: bool,
+    ) -> bool {
+        let mut failures = self
+            .state
+            .failed_scripts
+            .lock()
+            .unwrap_or_else(recover_poisoned_lock);
+        let Some(failure) = failures.get_mut(path) else {
+            return true;
+        };
+        if failure.source_version.as_ref() != source_version {
+            return true;
+        }
+        if now >= failure.retry_at {
+            return true;
+        }
+
+        let retry_after = failure.retry_at.saturating_duration_since(now);
+        if !has_existing && !failure.warning_emitted {
+            tracing::warn!(
+                routine_script = %path.display(),
+                retry_after_seconds = retry_after.as_secs(),
+                consecutive_failures = failure.consecutive_failures,
+                "routine script is not loaded; retry deferred by failure backoff"
+            );
+            failure.warning_emitted = true;
+        } else {
+            tracing::debug!(
+                routine_script = %path.display(),
+                retry_after_seconds = retry_after.as_secs(),
+                consecutive_failures = failure.consecutive_failures,
+                "skipped routine script until failure backoff expires"
+            );
+        }
+        false
+    }
+
+    fn record_failure(
+        &self,
+        path: &Path,
+        source_version: Option<String>,
+        now: Instant,
+    ) -> Duration {
+        let mut failures = self
+            .state
+            .failed_scripts
+            .lock()
+            .unwrap_or_else(recover_poisoned_lock);
+        let consecutive_failures = failures
+            .get(path)
+            .filter(|failure| failure.source_version == source_version)
+            .map_or(1, |failure| failure.consecutive_failures.saturating_add(1));
+        let exponent = consecutive_failures.saturating_sub(1).min(31);
+        let retry_delay = ROUTINE_LOAD_RETRY_BASE
+            .checked_mul(1_u32 << exponent)
+            .unwrap_or(ROUTINE_LOAD_RETRY_MAX)
+            .min(ROUTINE_LOAD_RETRY_MAX);
+        failures.insert(
+            path.to_path_buf(),
+            RoutineScriptFailure {
+                source_version,
+                consecutive_failures,
+                retry_at: now + retry_delay,
+                warning_emitted: false,
+            },
+        );
+        retry_delay
+    }
+
     pub fn get_script(&self, script_ref: &str) -> Result<Option<LoadedRoutineScript>> {
-        let scripts = self.scripts.lock().unwrap_or_else(recover_poisoned_lock);
+        let scripts = self
+            .state
+            .scripts
+            .lock()
+            .unwrap_or_else(recover_poisoned_lock);
         if let Some(script) = scripts.get(script_ref).cloned() {
             return Ok(Some(script));
         }
@@ -306,6 +573,7 @@ impl RoutineScriptLoader {
     #[cfg(test)]
     pub fn has_script(&self, script_ref: &str) -> Result<bool> {
         Ok(self
+            .state
             .scripts
             .lock()
             .unwrap_or_else(recover_poisoned_lock)
@@ -314,6 +582,7 @@ impl RoutineScriptLoader {
 
     pub fn script_refs(&self) -> Result<Vec<String>> {
         let mut refs: Vec<String> = self
+            .state
             .scripts
             .lock()
             .unwrap_or_else(recover_poisoned_lock)
@@ -329,7 +598,11 @@ impl RoutineScriptLoader {
         loaded_scripts: Vec<LoadedRoutineScript>,
         seen_refs: &HashSet<String>,
     ) -> Result<usize> {
-        let mut scripts = self.scripts.lock().unwrap_or_else(recover_poisoned_lock);
+        let mut scripts = self
+            .state
+            .scripts
+            .lock()
+            .unwrap_or_else(recover_poisoned_lock);
         for script in loaded_scripts {
             scripts.insert(script.script_ref.clone(), script);
         }
@@ -339,16 +612,17 @@ impl RoutineScriptLoader {
     }
 }
 
-impl Drop for RoutineScriptLoader {
-    fn drop(&mut self) {
-        let mut scripts = self.scripts.lock().unwrap_or_else(recover_poisoned_lock);
-        scripts.clear();
-    }
-}
-
 pub fn load_single_routine_script(root: &Path, path: &Path) -> Result<LoadedRoutineScript> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| anyhow!("read routine script {}: {e}", path.display()))?;
+    load_single_routine_script_from_source(root, path, source)
+}
+
+fn load_single_routine_script_from_source(
+    root: &Path,
+    path: &Path,
+    source: String,
+) -> Result<LoadedRoutineScript> {
     let fallback_name = path
         .file_stem()
         .unwrap_or_default()
@@ -420,10 +694,16 @@ fn evaluate_tick_action(
         let js_context: rquickjs::Value = ctx
             .eval(format!("JSON.parse({context_literal})"))
             .map_err(|e| anyhow!("build routine tick context: {e}"))?;
-        let action_value: rquickjs::Value = registration
-            .tick
-            .call((js_context,))
-            .map_err(|e| anyhow!("routine script {} tick(ctx) failed: {e}", script.script_ref))?;
+        let action_value: rquickjs::Value = match registration.tick.call((js_context,)) {
+            Ok(value) => value,
+            Err(e) => {
+                let detail = quickjs_exception_detail(&ctx, &e);
+                return Err(anyhow!(
+                    "routine script {} tick(ctx) failed: {detail}",
+                    script.script_ref
+                ));
+            }
+        };
         ensure_acyclic_js_value(ctx, action_value.clone(), "routine action")?;
         js_value_to_json(action_value)
     })
@@ -432,6 +712,26 @@ fn evaluate_tick_action(
 fn install_interrupt_handler(runtime: &Runtime, timeout: Duration) {
     let started = Instant::now();
     runtime.set_interrupt_handler(Some(Box::new(move || started.elapsed() > timeout)));
+}
+
+fn quickjs_exception_detail(ctx: &rquickjs::Ctx<'_>, error: &rquickjs::Error) -> String {
+    let caught = ctx.catch();
+    if let Some(exception) = caught.clone().into_exception() {
+        let message = exception.message().unwrap_or_default();
+        let stack = exception.stack().unwrap_or_default();
+        return match (message.is_empty(), stack.is_empty()) {
+            (false, false) => format!("{message}\n{stack}"),
+            (false, true) => message,
+            (true, false) => stack.trim_start().to_string(),
+            (true, true) => error.to_string(),
+        };
+    }
+
+    <rquickjs::convert::Coerced<String> as rquickjs::FromJs>::from_js(ctx, caught)
+        .map(|rquickjs::convert::Coerced(detail)| detail)
+        .ok()
+        .filter(|detail| !detail.is_empty())
+        .unwrap_or_else(|| error.to_string())
 }
 
 struct CapturedRoutineRegistration<'js> {
@@ -466,8 +766,9 @@ fn capture_registered_routine<'js>(
     let eval_result: rquickjs::Result<rquickjs::Value> =
         ctx.eval_with_options(source.as_bytes().to_vec(), eval_opts);
     if let Err(e) = eval_result {
+        let exception_detail = quickjs_exception_detail(&ctx, &e);
         return Err(anyhow!(
-            "JS eval error in routine script {}: {e}",
+            "JS eval error in routine script {}: {exception_detail}",
             path.display()
         ));
     }
@@ -618,60 +919,62 @@ fn ensure_acyclic_js_value<'js>(
             "#,
         )
         .map_err(|e| anyhow!("routine action cycle checker init failed: {e}"))?;
-    checker
-        .call::<_, ()>((value,))
-        .map_err(|e| anyhow!("{label} cycle check failed: {e}"))
-}
-
-fn script_ref(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
-fn add_cached_candidates_for_root(
-    existing_scripts: &HashMap<String, LoadedRoutineScript>,
-    candidates_by_ref: &mut BTreeMap<String, Vec<RoutineScriptCandidate>>,
-    seen_refs: &mut HashSet<String>,
-    root_index: usize,
-    root: &Path,
-) {
-    for (script_ref, script) in existing_scripts
-        .iter()
-        .filter(|(_, script)| script.file.starts_with(root))
-    {
-        seen_refs.insert(script_ref.clone());
-        candidates_by_ref
-            .entry(script_ref.clone())
-            .or_default()
-            .push(RoutineScriptCandidate {
-                root_index,
-                root: root.to_path_buf(),
-                path: script.file.clone(),
-                cached: Some(script.clone()),
-            });
-    }
-}
-
-fn collect_routine_script_paths(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in std::fs::read_dir(root)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let path = entry.path();
-        if file_type.is_dir() {
-            collect_routine_script_paths(&path, out)?;
-        } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "js") {
-            out.push(path);
-        }
+    if let Err(e) = checker.call::<_, ()>((value,)) {
+        let detail = quickjs_exception_detail(&ctx, &e);
+        return Err(anyhow!("{label} cycle check failed: {detail}"));
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use super::discovery::stable_absolute_path;
     use super::*;
+    use std::io::{self, Write};
+    use std::sync::Barrier;
     use std::thread;
+    use tracing_subscriber::fmt::writer::MakeWriter;
+
+    #[derive(Clone)]
+    struct CapturingWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_debug_logs<F>(emit: F) -> String
+    where
+        F: FnOnce(),
+    {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(CapturingWriter {
+                buffer: buffer.clone(),
+            })
+            .finish();
+        tracing::subscriber::with_default(subscriber, emit);
+        String::from_utf8(buffer.lock().unwrap().clone()).unwrap()
+    }
 
     fn fixture_routines_root() -> PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -828,6 +1131,414 @@ mod tests {
         assert_eq!(loader.load_dir(dir.path()).unwrap(), 1);
         assert_eq!(loader.script_refs().unwrap(), vec!["ops/daily/summary.js"]);
         assert!(loader.has_script("ops/daily/summary.js").unwrap());
+    }
+
+    #[test]
+    fn load_dir_excludes_node_only_worktree_inventory_helper() {
+        let dir = tempfile::tempdir().unwrap();
+        let monitoring = dir.path().join("monitoring");
+        std::fs::create_dir_all(&monitoring).unwrap();
+        std::fs::write(
+            monitoring.join("local_worktree_inventory.js"),
+            "const fs = require('node:fs'); module.exports = { fs };",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("inventory-routine.js"),
+            "agentdesk.routines.register({ name: 'Inventory', tick() { return { action: 'skip' }; } });",
+        )
+        .unwrap();
+
+        let loader = RoutineScriptLoader::new().unwrap();
+        let logs = capture_debug_logs(|| {
+            assert_eq!(loader.load_dir(dir.path()).unwrap(), 1);
+        });
+        assert_eq!(loader.script_refs().unwrap(), vec!["inventory-routine.js"]);
+        assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
+        assert!(
+            logs.contains("excluded Node-only worktree inventory helper from QuickJS discovery"),
+            "logs={logs}"
+        );
+    }
+
+    #[test]
+    fn load_dir_hashes_and_evaluates_the_same_source_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("atomic-source.js");
+        std::fs::write(&path, "throw new Error('broken snapshot');").unwrap();
+
+        let loader = RoutineScriptLoader::new().unwrap();
+        let replacement_path = path.clone();
+        *loader.source_read_hook.lock().unwrap() = Some(Arc::new(move |candidate| {
+            if candidate == replacement_path {
+                std::fs::write(
+                    candidate,
+                    "agentdesk.routines.register({ name: 'Replacement', tick() { return { action: 'skip' }; } });",
+                )
+                .unwrap();
+            }
+        }));
+
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        assert_eq!(
+            loader
+                .state
+                .failed_scripts
+                .lock()
+                .unwrap()
+                .get(&candidate_failure_key(&path))
+                .unwrap()
+                .source_version,
+            Some(full_source_version("throw new Error('broken snapshot');"))
+        );
+        assert!(!loader.has_script("atomic-source.js").unwrap());
+    }
+
+    #[test]
+    fn operator_root_can_define_the_bundled_helper_relative_path_as_a_routine() {
+        let bundled = tempfile::tempdir().unwrap();
+        let operator = tempfile::tempdir().unwrap();
+        let bundled_monitoring = bundled.path().join("monitoring");
+        let operator_monitoring = operator.path().join("monitoring");
+        std::fs::create_dir_all(&bundled_monitoring).unwrap();
+        std::fs::create_dir_all(&operator_monitoring).unwrap();
+        std::fs::write(
+            bundled_monitoring.join("local_worktree_inventory.js"),
+            "const fs = require('node:fs'); module.exports = { fs };",
+        )
+        .unwrap();
+        std::fs::write(
+            operator_monitoring.join("local_worktree_inventory.js"),
+            "agentdesk.routines.register({ name: 'Operator Inventory', tick() { return { action: 'skip' }; } });",
+        )
+        .unwrap();
+
+        let loader = RoutineScriptLoader::new().unwrap();
+        assert_eq!(
+            loader
+                .load_dirs(&[bundled.path().to_path_buf(), operator.path().to_path_buf()])
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            loader
+                .get_script("monitoring/local_worktree_inventory.js")
+                .unwrap()
+                .unwrap()
+                .name,
+            "Operator Inventory"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn additional_alias_of_primary_root_keeps_bundled_helper_excluded() {
+        use std::os::unix::fs::symlink;
+
+        let bundled = tempfile::tempdir().unwrap();
+        let alias_parent = tempfile::tempdir().unwrap();
+        let monitoring = bundled.path().join("monitoring");
+        std::fs::create_dir_all(&monitoring).unwrap();
+        std::fs::write(
+            monitoring.join("local_worktree_inventory.js"),
+            "const fs = require('node:fs'); module.exports = { fs };",
+        )
+        .unwrap();
+        let alias = alias_parent.path().join("bundled-alias");
+        symlink(bundled.path(), &alias).unwrap();
+
+        let loader = RoutineScriptLoader::new().unwrap();
+        assert_eq!(
+            loader
+                .load_dirs(&[bundled.path().to_path_buf(), alias])
+                .unwrap(),
+            0
+        );
+        assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
+        assert!(loader.script_refs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn source_failure_identity_uses_full_sha256() {
+        let first = full_source_version("routine source one");
+        let second = full_source_version("routine source two");
+
+        assert_eq!(first.len(), 64);
+        assert_eq!(second.len(), 64);
+        assert_ne!(first, second);
+        assert_eq!(first, full_source_version("routine source one"));
+    }
+
+    #[test]
+    fn failure_backoff_doubles_and_caps_at_one_hour() {
+        let loader = RoutineScriptLoader::new().unwrap();
+        let path = Path::new("broken.js");
+        let version = Some("version-1".to_string());
+        let now = Instant::now();
+
+        let mut delays = Vec::new();
+        for _ in 0..10 {
+            delays.push(loader.record_failure(path, version.clone(), now));
+        }
+
+        assert_eq!(delays[0], Duration::from_secs(30));
+        assert_eq!(delays[1], Duration::from_secs(60));
+        assert_eq!(delays[2], Duration::from_secs(120));
+        assert_eq!(delays[7], Duration::from_secs(60 * 60));
+        assert_eq!(delays[9], Duration::from_secs(60 * 60));
+    }
+
+    #[test]
+    fn request_loader_reuses_runtime_lkg_during_backoff_and_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = vec![dir.path().to_path_buf()];
+        let path = dir.path().join("request-routine.js");
+        std::fs::write(
+            &path,
+            "agentdesk.routines.register({ name: 'Last Known Good', tick() { return { action: 'skip', reason: 'lkg' }; } });",
+        )
+        .unwrap();
+
+        let runtime = RoutineScriptLoader::new_shared(&roots).unwrap();
+        assert_eq!(runtime.load_dirs(&roots).unwrap(), 1);
+        std::fs::write(&path, "throw new Error('transient request failure');").unwrap();
+        assert_eq!(runtime.load_dirs(&roots).unwrap(), 0);
+        assert_eq!(
+            runtime
+                .state
+                .evaluation_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+
+        let request = RoutineScriptLoader::new_shared(&roots).unwrap();
+        assert!(Arc::ptr_eq(&runtime.state, &request.state));
+        assert_eq!(request.load_dirs(&roots).unwrap(), 0);
+        assert_eq!(
+            request
+                .state
+                .evaluation_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "a request during backoff must not re-evaluate the transient failure"
+        );
+        assert_eq!(
+            request
+                .get_script("request-routine.js")
+                .unwrap()
+                .unwrap()
+                .name,
+            "Last Known Good"
+        );
+
+        std::fs::write(
+            &path,
+            "agentdesk.routines.register({ name: 'Recovered Request', tick() { return { action: 'skip' }; } });",
+        )
+        .unwrap();
+        let recovered = RoutineScriptLoader::new_shared(&roots).unwrap();
+        assert_eq!(recovered.load_dirs(&roots).unwrap(), 1);
+        assert_eq!(
+            recovered
+                .get_script("request-routine.js")
+                .unwrap()
+                .unwrap()
+                .name,
+            "Recovered Request"
+        );
+    }
+
+    #[test]
+    fn concurrent_shared_loaders_singleflight_one_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = vec![dir.path().to_path_buf()];
+        let path = dir.path().join("concurrent.js");
+        std::fs::write(&path, "throw new Error('singleflight failure');").unwrap();
+
+        let loaders = (0..8)
+            .map(|_| Arc::new(RoutineScriptLoader::new_shared(&roots).unwrap()))
+            .collect::<Vec<_>>();
+        let state = Arc::clone(&loaders[0].state);
+        let barrier = Arc::new(Barrier::new(loaders.len()));
+        let handles = loaders
+            .into_iter()
+            .map(|loader| {
+                let roots = roots.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    loader.load_dirs(&roots).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            assert_eq!(handle.join().unwrap(), 0);
+        }
+        assert_eq!(
+            state
+                .evaluation_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        let failure = state
+            .failed_scripts
+            .lock()
+            .unwrap()
+            .get(&candidate_failure_key(&path))
+            .unwrap()
+            .clone();
+        assert_eq!(failure.consecutive_failures, 1);
+        let retry_delay = failure.retry_at.saturating_duration_since(Instant::now());
+        assert!(retry_delay <= ROUTINE_LOAD_RETRY_BASE);
+        assert!(retry_delay > Duration::ZERO);
+    }
+
+    #[test]
+    fn missing_relative_root_keeps_shared_authority_after_creation() {
+        let relative =
+            PathBuf::from("target").join(format!("routine-root-{}", uuid::Uuid::new_v4()));
+        let absolute = stable_absolute_path(&relative);
+        let configured = vec![relative.clone()];
+        let before = RoutineScriptLoader::new_shared(&configured).unwrap();
+
+        std::fs::create_dir_all(&absolute).unwrap();
+        std::fs::write(
+            absolute.join("created.js"),
+            "agentdesk.routines.register({ name: 'Created Later', tick() { return { action: 'skip' }; } });",
+        )
+        .unwrap();
+        let after = RoutineScriptLoader::new_shared(&[absolute.clone()]).unwrap();
+
+        assert!(Arc::ptr_eq(&before.state, &after.state));
+        assert_eq!(after.load_dirs(&[absolute.clone()]).unwrap(), 1);
+        assert!(before.has_script("created.js").unwrap());
+        std::fs::remove_dir_all(absolute).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_and_symlink_alias_candidate_records_one_failure() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let alias_parent = tempfile::tempdir().unwrap();
+        let path = root.path().join("broken.js");
+        std::fs::write(&path, "throw new Error('alias failure');").unwrap();
+        let alias = alias_parent.path().join("root-alias");
+        symlink(root.path(), &alias).unwrap();
+        let roots = vec![root.path().to_path_buf(), alias];
+
+        let loader = RoutineScriptLoader::new().unwrap();
+        assert_eq!(loader.load_dirs(&roots).unwrap(), 0);
+        assert_eq!(
+            loader
+                .state
+                .evaluation_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(loader.state.failed_scripts.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn failed_script_backoff_skips_eval_until_due_and_content_change_bypasses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recoverable.js");
+        std::fs::write(&path, "throw new Error('broken');").unwrap();
+
+        let loader = RoutineScriptLoader::new().unwrap();
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        assert_eq!(
+            loader
+                .state
+                .evaluation_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        assert_eq!(
+            loader
+                .state
+                .evaluation_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "unchanged script must not be evaluated during backoff"
+        );
+
+        loader
+            .state
+            .failed_scripts
+            .lock()
+            .unwrap()
+            .get_mut(&candidate_failure_key(&path))
+            .unwrap()
+            .retry_at = Instant::now();
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        assert_eq!(
+            loader
+                .state
+                .evaluation_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "script must be retried after backoff expires"
+        );
+
+        std::fs::write(
+            &path,
+            "agentdesk.routines.register({ name: 'Recovered', tick() { return { action: 'skip' }; } });",
+        )
+        .unwrap();
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 1);
+        assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
+        assert_eq!(
+            loader.get_script("recoverable.js").unwrap().unwrap().name,
+            "Recovered"
+        );
+    }
+
+    #[test]
+    fn quickjs_eval_error_includes_exception_message_and_stack() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node-only.js");
+        std::fs::write(&path, "require('node:fs');").unwrap();
+
+        let error = load_single_routine_script(dir.path(), &path).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("require is not defined"), "{message}");
+        assert!(message.contains("at <eval>"), "{message}");
+    }
+
+    #[test]
+    fn quickjs_eval_error_with_empty_message_starts_with_stack() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty-message.js");
+        std::fs::write(&path, "const error = new Error(''); throw error;").unwrap();
+
+        let error = load_single_routine_script(dir.path(), &path).unwrap_err();
+        let message = error.to_string();
+        let detail = message
+            .strip_prefix(&format!(
+                "JS eval error in routine script {}: ",
+                path.display()
+            ))
+            .unwrap();
+        assert!(!detail.trim().is_empty(), "{detail:?}");
+        assert_eq!(detail, detail.trim_start(), "{detail:?}");
+        assert!(
+            detail.lines().any(|line| !line.trim().is_empty()),
+            "{detail:?}"
+        );
+    }
+
+    #[test]
+    fn quickjs_eval_error_includes_primitive_throw_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("primitive-throw.js");
+        std::fs::write(&path, "throw 'bad config';").unwrap();
+
+        let error = load_single_routine_script(dir.path(), &path).unwrap_err();
+        assert!(error.to_string().contains("bad config"));
     }
 
     #[test]
@@ -1015,6 +1726,73 @@ mod tests {
 
         assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
         assert_eq!(loader.script_refs().unwrap(), vec!["retained.js"]);
+        assert_eq!(
+            loader
+                .state
+                .failed_scripts
+                .lock()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![candidate_failure_key(&retained)]
+        );
+
+        std::fs::remove_file(&retained).unwrap();
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn read_failure_emits_one_error_during_backoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unreadable.js");
+        std::fs::write(
+            &path,
+            "agentdesk.routines.register({ name: 'Unreadable', tick() { return { action: 'skip' }; } });",
+        )
+        .unwrap();
+
+        let loader = RoutineScriptLoader::new().unwrap();
+        let read_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_attempts = Arc::clone(&read_attempts);
+        *loader.source_reader.lock().unwrap() = Some(Arc::new(move |_| {
+            observed_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "test read failure",
+            ))
+        }));
+
+        let logs = capture_debug_logs(|| {
+            assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+            assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        });
+        assert_eq!(
+            logs.matches("failed to read routine script; keeping last-known-good registry")
+                .count(),
+            1,
+            "logs={logs}"
+        );
+        assert_eq!(
+            loader
+                .state
+                .load_error_emissions
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "only the first failed read may emit an ERROR during backoff"
+        );
+        assert_eq!(read_attempts.load(std::sync::atomic::Ordering::Relaxed), 2);
+        let failure = loader
+            .state
+            .failed_scripts
+            .lock()
+            .unwrap()
+            .get(&candidate_failure_key(&path))
+            .unwrap()
+            .clone();
+        assert_eq!(failure.source_version, None);
+        assert_eq!(failure.consecutive_failures, 1);
     }
 
     #[test]
@@ -1080,6 +1858,52 @@ mod tests {
             }
             other => panic!("unexpected action: {other:?}"),
         }
+    }
+
+    #[test]
+    fn tick_error_includes_primitive_throw_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("primitive-tick.js");
+        std::fs::write(
+            &path,
+            "agentdesk.routines.register({ name: 'Primitive Tick', tick() { throw 'tick unavailable'; } });",
+        )
+        .unwrap();
+
+        let loader = RoutineScriptLoader::new().unwrap();
+        loader.load_script(dir.path(), &path).unwrap();
+        let error = loader
+            .execute_tick(
+                "primitive-tick.js",
+                RoutineTickContext {
+                    routine: RoutineTickRoutine {
+                        id: "routine-1".to_string(),
+                        agent_id: None,
+                        script_ref: "primitive-tick.js".to_string(),
+                        name: "Primitive Tick".to_string(),
+                        execution_strategy: "fresh".to_string(),
+                        fresh_context_guaranteed: false,
+                    },
+                    run: RoutineTickRun {
+                        id: "run-1".to_string(),
+                        lease_expires_at: chrono::Utc::now(),
+                    },
+                    agent: None,
+                    checkpoint: None,
+                    now: chrono::Utc::now(),
+                    observations: None,
+                    automation_inventory: None,
+                    limits: ObservationLimits::default(),
+                },
+            )
+            .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("tick unavailable"), "{message}");
+        assert!(
+            !message.contains("Exception generated by QuickJS"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -2301,7 +3125,7 @@ mod tests {
 
         let loader_clone = Arc::clone(&loader);
         let result = thread::spawn(move || {
-            let _lock = loader_clone.scripts.lock().unwrap();
+            let _lock = loader_clone.state.scripts.lock().unwrap();
             panic!("intentional panic to poison the lock");
         })
         .join();

@@ -3183,7 +3183,7 @@ async fn routine_runtime_loop(
     let routine_script_dirs = routines_config.script_dirs();
     let initial_script_dirs = routine_script_dirs.clone();
     let script_loader = match tokio::task::spawn_blocking(move || {
-        let loader = Arc::new(RoutineScriptLoader::new()?);
+        let loader = Arc::new(RoutineScriptLoader::new_shared(&initial_script_dirs)?);
         let count = loader.load_dirs(&initial_script_dirs)?;
         Ok::<_, anyhow::Error>((loader, count))
     })

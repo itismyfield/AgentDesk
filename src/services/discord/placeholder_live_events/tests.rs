@@ -5,6 +5,7 @@ use super::super::formatting::{
 };
 use super::common::{
     EVENT_BLOCK_MAX_CHARS, EVENT_LINE_MAX_CHARS, STATUS_PANEL_MAX_CHARS, STATUS_PANEL_TASK_LIMIT,
+    tool_prefix,
 };
 use super::*;
 use serde_json::json;
@@ -30,6 +31,131 @@ fn render_block_compacts_newest_events_under_limit() {
     assert_eq!(live_lines.len(), 1);
     assert!(block.contains("5회"));
     assert!(!block.contains("echo 24"));
+}
+
+#[test]
+fn tool_prefix_is_a_closed_static_label_set() {
+    let cases = [
+        ("Bash", "[Bash]"),
+        ("command_execution", "[Bash]"),
+        ("exec", "[Bash]"),
+        ("exec_command", "[Bash]"),
+        ("run_cmd", "[Bash]"),
+        ("update_plan", "[Tool]"),
+        ("Read", "[Read]"),
+        ("Edit", "[Edit]"),
+        ("mcp__vault-prod", "[MCP]"),
+        ("mcp__a__b__c", "[MCP]"),
+        ("mcp__hr__lookup_employee_alice", "[MCP]"),
+        ("tenant_secret_custom_tool", "[Tool]"),
+    ];
+
+    for (name, expected) in cases {
+        let label: &'static str = tool_prefix(name);
+        assert_eq!(label, expected, "input: {name}");
+    }
+}
+
+#[test]
+fn raw_codex_exec_command_reaches_single_message_footer_as_bash() {
+    use std::sync::mpsc;
+
+    use crate::services::agent_protocol::StreamMessage;
+    use crate::services::codex_tui::rollout_tail::replay_rollout_file;
+
+    let raw_command = "printf parser-bridge-secret";
+    let rollout = tempfile::NamedTempFile::new().expect("raw Codex rollout fixture");
+    std::fs::write(
+        rollout.path(),
+        format!(
+            r#"{{"type":"response_item","payload":{{"type":"function_call","name":"exec_command","arguments":"{{\"cmd\":\"{raw_command}\"}}","call_id":"call-footer"}}}}
+"#,
+        ),
+    )
+    .expect("write raw Codex rollout fixture");
+    let (tx, rx) = mpsc::channel();
+    replay_rollout_file(rollout.path(), 0, &tx).expect("parse raw Codex rollout");
+    drop(tx);
+
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_892_401);
+    let mut bridged_tool_uses = 0;
+    for message in rx {
+        if let StreamMessage::ToolUse {
+            name,
+            input,
+            tool_use_id,
+        } = message
+        {
+            bridged_tool_uses += 1;
+            assert_eq!(
+                name, "exec_command",
+                "parser must preserve the function name"
+            );
+            assert_eq!(
+                tool_use_id.as_deref(),
+                Some("call-footer"),
+                "parser must preserve the function call id"
+            );
+            assert!(
+                input.contains(raw_command) && input.contains("parser-bridge-secret"),
+                "parser must preserve the raw function arguments before display redaction: {input}"
+            );
+            events.push_status_events(
+                channel_id,
+                status_events_from_tool_use_with_id(&name, &input, tool_use_id.as_deref()),
+            );
+        }
+    }
+    assert_eq!(
+        bridged_tool_uses, 1,
+        "raw rollout must produce exactly one bridgeable ToolUse"
+    );
+
+    let panel = events.render_status_panel(channel_id, &ProviderKind::Codex, 1_700_000_000);
+    let footer = super::super::single_message_panel::compose_footer_status_block("⠸", &panel);
+    assert!(
+        footer.contains("마지막 도구 ([Bash])"),
+        "raw Codex exec_command must survive parser and status handoff: {footer}"
+    );
+    assert!(
+        !footer.contains(raw_command) && !footer.contains("parser-bridge-secret"),
+        "single-message footer must not expose raw Codex command input: {footer}"
+    );
+}
+
+#[test]
+fn compact_events_render_only_closed_labels_for_untrusted_tool_names() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_892_400);
+    for name in [
+        "mcp__vault-prod",
+        "mcp__a__b__c",
+        "mcp__hr__lookup_employee_alice",
+        "tenant_secret_custom_tool",
+    ] {
+        events.push_event(
+            channel_id,
+            RecentPlaceholderEvent::tool_use(name, r#"{"value":"safe summary"}"#).unwrap(),
+        );
+    }
+
+    let block = events
+        .render_block(channel_id)
+        .expect("compact event block");
+    assert!(block.contains("[MCP]") && block.contains("[Tool]"));
+    for private_fragment in [
+        "vault-prod",
+        "a__b__c",
+        "hr",
+        "lookup_employee_alice",
+        "tenant_secret_custom_tool",
+    ] {
+        assert!(
+            !block.contains(private_fragment),
+            "untrusted tool names must not reach compact rendering: {block}"
+        );
+    }
 }
 
 #[test]
@@ -258,12 +384,13 @@ fn status_panel_renders_derived_tool_state_under_limit() {
     );
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(rendered.contains("도구 실행 중"));
+    assert!(rendered.contains("마지막 도구"));
     assert!(rendered.contains("[Bash]"));
     assert!(
         !rendered.contains("cargo test"),
         "status header should show the tool class, not raw command text: {rendered}"
     );
+    assert!(!rendered.contains("진행 중"));
     assert!(rendered.chars().count() <= STATUS_PANEL_MAX_CHARS);
 }
 
@@ -280,13 +407,14 @@ fn status_panel_recent_compacts_raw_command_details() {
     );
 
     let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    // #3983 item 5a: the footer no longer echoes the compact 🖥️ Recent block; the
-    // activity label shows the tool class, never the raw command detail.
-    assert!(rendered.contains("🔧 도구 실행 중"));
+    // #3983 item 5a: the footer no longer echoes the compact 🖥️ Recent block;
+    // #4892 shows only the tool class and keeps arguments on explicit debug surfaces.
+    assert!(rendered.contains("🔧 마지막 도구"));
     assert!(!rendered.contains("🖥️ Recent"));
     assert!(!rendered.contains("```text"));
     assert!(
-        !rendered.contains(raw_command),
+        !rendered.contains(raw_command)
+            && !rendered.contains(r"cargo test --lib placeholder\_live\_events -- --nocapture"),
         "normal status panel must not render raw command detail: {rendered}"
     );
 
@@ -309,9 +437,10 @@ fn characterize_rollover_seed_has_no_status_panel_content_s0() {
     );
 
     let panel = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert!(panel.contains("도구 실행 중"));
+    assert!(panel.contains("마지막 도구"));
     assert!(panel.contains("[Bash]"));
     assert!(!panel.contains("cargo test --lib placeholder_live_events"));
+    assert!(!panel.contains(r"cargo test --lib placeholder\_live\_events"));
 
     let status_block = build_processing_status_block("⠸");
     let current_portion = "relay body ".repeat(250);
@@ -325,7 +454,7 @@ fn characterize_rollover_seed_has_no_status_panel_content_s0() {
             .ends_with(&format!("\n\n{status_block}"))
     );
     for status_panel_fragment in [
-        "도구 실행 중",
+        "마지막 도구",
         "[Bash]",
         "cargo test --lib placeholder_live_events",
     ] {
@@ -387,7 +516,7 @@ fn status_panel_absorbs_stale_and_final_into_the_activity_emoji() {
     );
     let live = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
     assert!(
-        live.contains("🔧 도구 실행 중"),
+        live.contains("🔧 마지막 도구"),
         "running activity: {live:?}"
     );
     assert!(
@@ -441,7 +570,7 @@ fn status_panel_codex_active_omits_processing_tail_after_recent_block() {
         1_700_000_005,
     );
 
-    assert!(rendered.contains("🔧 도구 실행 중"));
+    assert!(rendered.contains("🔧 마지막 도구"));
     assert!(rendered.contains("[Bash]"));
     // #3983 item 5a: the 🖥️ Recent echo is retired from the footer.
     assert!(!rendered.contains("🖥️ Recent"));
@@ -3811,6 +3940,10 @@ fn background_bash_command_only_slot_hides_raw_command_3806() {
         "background Bash class should remain visible: {rendered}"
     );
     assert!(
+        rendered.contains("🔧 마지막 도구 ([Bash]"),
+        "background Bash class must remain visible as the latest tool: {rendered}"
+    );
+    assert!(
         !rendered.contains(raw_command),
         "background Bash slot must not leak raw command detail: {rendered}"
     );
@@ -4141,10 +4274,13 @@ fn status_panel_shows_live_subagent_activity_by_parent_id() {
         !rendered.contains("grep ERROR app.log"),
         "subagent activity must not leak raw command args, got: {rendered}"
     );
-    // Nested activity must NOT turn the panel header into a foreground tool run.
     assert!(
-        !rendered.contains("🔧 도구 실행 중"),
-        "nested subagent step must not clobber the panel header, got: {rendered}"
+        rendered.contains("🧵 subagent 실행 중 (Audit logs)"),
+        "subagent wait state must retain its specific header, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("🔧 마지막 도구"),
+        "subagent wait state must not collapse into the latest-tool header: {rendered}"
     );
 }
 
@@ -6306,7 +6442,141 @@ fn status_panel_renders_plan_but_hides_subagents_for_codex() {
     assert!(rendered.contains("Plan"));
     assert!(rendered.contains("Hidden for Codex"));
     assert!(!rendered.contains("Subagents"));
-    assert!(!rendered.contains("Hidden subagent"));
+    assert!(
+        !rendered.contains("Hidden subagent"),
+        "Codex's hidden-subagent projection must suppress header detail too: {rendered}"
+    );
+    assert!(
+        !rendered.contains("[Task]"),
+        "Codex's hidden-subagent projection must not reintroduce the Task class: {rendered}"
+    );
+}
+
+#[test]
+fn codex_task_class_stays_hidden_after_subagent_terminal_result() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_892_301);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Task",
+            &json!({"description": "Private deployment review"}).to_string(),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result(Some("Task"), true),
+    );
+
+    assert_eq!(status_for(&events, channel_id), DerivedStatus::Running);
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Codex, 1_700_000_000);
+    assert!(
+        !rendered.contains("[Task]"),
+        "Codex must not reveal the Task class after subagent termination: {rendered}"
+    );
+    assert!(
+        !rendered.contains("Private deployment review"),
+        "Codex must not reveal terminated subagent input: {rendered}"
+    );
+}
+
+#[test]
+fn codex_task_class_stays_hidden_after_background_launch_ack() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_892_302);
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_use(
+            "Task",
+            &json!({
+                "description": "Private background review",
+                "run_in_background": true
+            })
+            .to_string(),
+        ),
+    );
+    events.push_status_events(
+        channel_id,
+        status_events_from_tool_result(Some("Task"), false),
+    );
+
+    assert_eq!(status_for(&events, channel_id), DerivedStatus::Running);
+    let rendered = events.render_status_panel(channel_id, &ProviderKind::Codex, 1_700_000_000);
+    assert!(
+        !rendered.contains("[Task]"),
+        "Codex must not reveal the Task class while a background subagent remains active: {rendered}"
+    );
+    assert!(
+        !rendered.contains("Private background review"),
+        "Codex must not reveal acknowledged background subagent input: {rendered}"
+    );
+}
+
+#[test]
+fn subagent_tool_inputs_never_become_channel_visible_descriptions() {
+    let secret = "hvs.CAES.private-token";
+    let endpoint = "https://vault-prod.internal.example";
+
+    for (index, name, input) in [
+        (
+            0_u64,
+            "Task",
+            json!({"prompt": format!("inspect {secret} at {endpoint}")}),
+        ),
+        (
+            1,
+            "Agent",
+            json!({"request": format!("inspect {secret} at {endpoint}")}),
+        ),
+        (
+            2,
+            "SpawnAgent",
+            json!({
+                "credentials": {"token": secret},
+                "endpoint": endpoint
+            }),
+        ),
+    ] {
+        let events = PlaceholderLiveEvents::default();
+        let channel_id = ChannelId::new(4_892_310 + index);
+        events.push_status_events(
+            channel_id,
+            status_events_from_tool_use(name, &input.to_string()),
+        );
+
+        let status_entry = events
+            .status_by_channel
+            .get(&channel_id)
+            .expect("status panel state");
+        let guard = status_entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            guard
+                .last_tool
+                .as_ref()
+                .and_then(|tool| tool.summary.as_deref()),
+            None,
+            "subagent tool input must not be retained as args_summary for {name}"
+        );
+        assert_eq!(
+            guard.subagents.first().map(|slot| slot.desc.as_str()),
+            Some("subagent"),
+            "non-allowlisted subagent input must not become a slot description for {name}"
+        );
+        drop(guard);
+        drop(status_entry);
+
+        let rendered = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
+        assert!(
+            !rendered.contains(secret) && !rendered.contains(endpoint),
+            "subagent tool input must not reach status descriptions for {name}: {rendered}"
+        );
+        assert!(
+            !rendered.contains("credentials") && !rendered.contains("private-token"),
+            "subagent input structure must not reach status descriptions for {name}: {rendered}"
+        );
+    }
 }
 
 #[test]
@@ -9305,7 +9575,7 @@ fn status_panel_free_renderer_orders_header_fields_on_separate_lines() {
     assert_eq!(
         out.lines().take(4).collect::<Vec<_>>(),
         vec![
-            "-# 🟢 진행 중",
+            "-# 🔧 마지막 도구 (아직 없음)",
             "-# 턴 트리거: https://discord.com/channels/1/2/3",
             "-# 턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)",
             "-# 마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>)",

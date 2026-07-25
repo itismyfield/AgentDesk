@@ -11,7 +11,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
 NIGHTLY_WORKFLOW = REPO_ROOT / ".github/workflows/ci-nightly.yml"
-TRUSTED_MACOS_WORKFLOW = REPO_ROOT / ".github/workflows/ci-macos-trusted.yml"
+MACOS_TRUSTED_WORKFLOW = REPO_ROOT / ".github/workflows/ci-macos-trusted.yml"
+TEST_LANE_MAIN_WORKFLOW = (
+    REPO_ROOT / ".github/workflows/test-lane-baseline-main.yml"
+)
 BUSY_RETRY_4888_TEST_COMMAND = (
     "env -u AGENTDESK_ROOT_DIR cargo test --lib _4888 -- --test-threads=1"
 )
@@ -27,6 +30,7 @@ EXPECTED_TEST_NON_PG_COMMANDS = (
     "cargo test --lib server::routes::e2e_control::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib formatting -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib delivery_record -- --skip _pg --skip pg_ --skip postgres",
+    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::watcher_lifecycle::tests::tests::turn_starts_reuse_healthy_runtime_path_incumbent_after_handoff -- --exact",
     "cargo test --lib server::claude_oauth_usage_tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib tui_task_card::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib server::routes::message_outbox::tests -- --skip _pg --skip pg_ --skip postgres",
@@ -46,6 +50,12 @@ EXPECTED_TEST_NON_PG_COMMANDS = (
     "cargo test --lib services::discord::turn_bridge::followup_requeue::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::discord::turn_bridge::terminal_outcome_delivery::busy_followup_retry::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::discord::gateway::tests -- --skip _pg --skip pg_ --skip postgres",
+    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::gateway::outbound_messages::classified_edit_tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
+    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_dispatch::queued::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
+    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::intake_turn::placeholder_handoff::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
+    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::completion_admission::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
+    "env -u AGENTDESK_ROOT_DIR cargo test --lib placeholder_live_events -- --skip _pg --skip pg_ --skip postgres",
+    "env -u AGENTDESK_ROOT_DIR cargo test --lib single_message_panel::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::discord::outbound::serenity_reference::tests::lifecycle_notice_nonce_is_stable_and_semantic_event_scoped -- --exact",
     "cargo test --lib services::discord::outbound::delivery::tests::v3_referenced_send_preserves_reference_and_dedupes -- --exact",
     "cargo test --lib cli::args::tests::legacy_queue_help_directs_users_to_query_without_changing_compatibility_contract",
@@ -161,6 +171,22 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertNotIn("- name: cargo test", job)
         self.assertNotIn("Discord thread-create cross-process lock", job)
 
+    def test_macos_pr_lane_runs_single_message_panel_tests(self) -> None:
+        workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
+        command = (
+            "env -u AGENTDESK_ROOT_DIR cargo test --lib "
+            "single_message_panel::tests -- --skip _pg --skip pg_ --skip postgres"
+        )
+        self.assertEqual(workflow.count(command), 2)
+
+    def test_macos_pr_lane_runs_placeholder_live_events_tests(self) -> None:
+        workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
+        command = (
+            "env -u AGENTDESK_ROOT_DIR cargo test --lib "
+            "placeholder_live_events -- --skip _pg --skip pg_ --skip postgres"
+        )
+        self.assertEqual(workflow.count(command), 2)
+
     def test_main_and_nightly_retain_non_pg_test_coverage(self) -> None:
         justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
         self.assertIn("check: fmt-check lint cargo-check test", justfile)
@@ -187,13 +213,51 @@ class FastCheckCiWiringTests(unittest.TestCase):
         )
 
     def test_trusted_macos_runs_busy_retry_regressions_on_both_runner_paths(self) -> None:
-        workflow = TRUSTED_MACOS_WORKFLOW.read_text(encoding="utf-8")
+        workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
         hosted = job_block(workflow, "macos_hosted")
         self_hosted = job_block(workflow, "macos_self_hosted")
 
         self.assertEqual(hosted.count(BUSY_RETRY_4888_TEST_COMMAND), 1)
         self.assertEqual(
             self_hosted.count(f"nice -n 10 {BUSY_RETRY_4888_TEST_COMMAND}"), 1
+        )
+
+    def test_test_lane_baseline_uses_candidate_snapshot_refs(self) -> None:
+        pr_workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        main_workflow = MAIN_WORKFLOW.read_text(encoding="utf-8")
+        pr_job = job_block(pr_workflow, "scripts")
+        main_job = job_block(main_workflow, "scripts")
+
+        for job in (pr_job, main_job):
+            self.assertIn("fetch-depth: 0", job)
+            self.assertNotIn("origin/main", job)
+            self.assertNotIn("github.event.pull_request.base.sha", job)
+        self.assertIn("workflow_dispatch:", pr_workflow)
+        self.assertIn("test_lane_baseline_ref:", pr_workflow)
+        self.assertIn("required: true", pr_workflow)
+        self.assertIn(
+            "TEST_LANE_BASELINE_REF: ${{ github.event_name == 'pull_request' "
+            "&& 'HEAD^1' || inputs.test_lane_baseline_ref }}",
+            pr_job,
+        )
+        self.assertNotIn("|| 'HEAD'", pr_job)
+        self.assertIn(
+            "TEST_LANE_BASELINE_REF: ${{ github.event.before }}", main_job
+        )
+
+    def test_cancelled_adjacent_main_pushes_cannot_skip_baseline_guard(self) -> None:
+        workflow = TEST_LANE_MAIN_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("name: Test-lane baseline main guard", workflow)
+        self.assertIn("group: test-lane-baseline-main-${{ github.ref }}", workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
+        self.assertNotIn("cancel-in-progress: true", workflow)
+        self.assertIn("fetch-depth: 0", workflow)
+        self.assertIn(
+            "TEST_LANE_BASELINE_REF: ${{ github.event.before }}", workflow
+        )
+        self.assertIn(
+            'scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"',
+            workflow,
         )
 
     def test_ci_script_checks_runs_this_contract(self) -> None:
@@ -203,7 +267,11 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertIn(
             '"$PYTHON" -m unittest tests.test_fast_check_ci_wiring', script
         )
-        self.assertIn('"$PYTHON" scripts/check_test_lane_coverage.py', script)
+        self.assertIn(
+            'scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"',
+            script,
+        )
+        self.assertNotIn("TEST_LANE_BASELINE_REF:-HEAD", script)
         self.assertIn(
             '"$PYTHON" -m unittest tests.test_test_lane_coverage', script
         )
