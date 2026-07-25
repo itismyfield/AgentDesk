@@ -54,7 +54,7 @@ pub(in crate::services::discord) use self::completion_admission::CompletionAdmis
 use self::completion_admission::{CompletionAdmission, publish_claimed_queue_eligible};
 use self::completion_admission_actor::{
     apply_pending_completion_admission, handle_completion_admission_message,
-    note_mailbox_release_after_finalize,
+    note_mailbox_release_after_finalize, take_exact_pending_completion_admission,
 };
 pub(in crate::services::discord) use self::completion_signal::{
     CompletionSignal, completion_signal_from_transcript,
@@ -634,19 +634,14 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         // must never push an armed deadline forward (the EPIC's
                         // never-finalizing bug, mirrored from the gate-timeout arm).
                         let arm_watcher_backstop = relay_owner == RelayOwnerKind::Watcher;
-                        // A `Start` always carries the real `user_msg_id`. Resolve
-                        // any pre-ledger/late-generation edge by stable turn identity
-                        // before registering the exact current-generation key.
+                        // A `Start` consumes only pre-ledger edges for its exact
+                        // generation. Older generation authority remains isolated
+                        // until TTL GC instead of pre-settling the current turn.
                         let exact_key = key.exact_key();
-                        let pending_key = pending_admission
-                            .keys()
-                            .filter(|candidate| {
-                                candidate.channel_id == key.channel_id
-                                    && candidate.user_msg_id == key.user_msg_id
-                            })
-                            .max_by_key(|candidate| candidate.generation)
-                            .copied();
-                        let pending = pending_key.and_then(|candidate| pending_admission.remove(&candidate));
+                        let pending = take_exact_pending_completion_admission(
+                            &mut pending_admission,
+                            exact_key,
+                        );
                         let entry = ledger.entry(exact_key).or_insert(LedgerEntry {
                             phase: Phase::Pending,
                             relay_owner,
@@ -936,14 +931,7 @@ async fn handle_terminal(
         }
     }
 
-    let pending_key = pending_admission
-        .keys()
-        .find(|candidate| {
-            candidate.channel_id == ledger_key.channel_id
-                && candidate.user_msg_id == ledger_key.user_msg_id
-        })
-        .copied();
-    let pending = pending_key.and_then(|candidate| pending_admission.remove(&candidate));
+    let pending = take_exact_pending_completion_admission(pending_admission, ledger_key);
     let entry = ledger.entry(ledger_key).or_insert(LedgerEntry {
         phase: Phase::Pending,
         relay_owner: RelayOwnerKind::None,

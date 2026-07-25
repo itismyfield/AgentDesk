@@ -487,6 +487,108 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn non_watcher_strict_plan_waits_for_capped_retry_veto_after_projection_4893() {
+        let _root = scoped_runtime_root();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(100_000_004_893_001);
+        let message_id = MessageId::new(100_000_004_893_002);
+        let key = super::super::super::turn_finalizer::TurnKey::new(
+            channel_id,
+            message_id.get(),
+            shared.restart.current_generation,
+        );
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+        shared
+            .mailbox(channel_id)
+            .restore_active_turn(token, serenity::model::id::UserId::new(7), message_id)
+            .await;
+        shared
+            .restart
+            .global_active
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        shared
+            .turn_finalizer
+            .register_start_with_completion_admission(
+                key,
+                provider.clone(),
+                super::super::super::inflight::RelayOwnerKind::None,
+                super::super::super::turn_finalizer::CompletionAdmissionPlan::AfterTerminalProjectionAndDispositionSettled,
+                &shared,
+            );
+        let mut completion_events =
+            super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+
+        let finalized = shared
+            .turn_finalizer
+            .submit_terminal(
+                key,
+                provider.clone(),
+                super::super::super::turn_finalizer::TerminalEvent::Complete,
+                super::super::super::turn_finalizer::FinalizeContext::bridge(),
+                shared.clone(),
+            )
+            .await;
+        assert!(matches!(
+            finalized,
+            super::super::super::turn_finalizer::FinalizeOutcome::Finalized { .. }
+        ));
+        let mailbox_release = completion_events
+            .try_recv()
+            .expect("mailbox release must remain a non-eligible edge for a strict plan");
+        assert!(!mailbox_release.queue_is_eligible());
+        assert!(completion_events.try_recv().is_err());
+
+        let (projection_tx, projection_rx) = tokio::sync::oneshot::channel::<()>();
+        let boundary = TerminalProjectionSettled::after(async move {
+            projection_rx.await.expect("release projection boundary");
+        });
+        tokio::pin!(boundary);
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(matches!(
+            std::future::Future::poll(boundary.as_mut(), &mut cx),
+            std::task::Poll::Pending
+        ));
+        assert!(completion_events.try_recv().is_err());
+
+        projection_tx.send(()).expect("settle terminal projection");
+        let (boundary, ()) = boundary.await;
+        let completion_guard = super::guards::CompletionGuard::for_completion_test(
+            shared.clone(),
+            channel_id,
+            message_id.get(),
+        );
+        let capped = FollowupRequeueOutcome {
+            requeued: true,
+            retry_capped: true,
+            notice_message_id: message_id,
+        };
+        assert!(
+            !boundary.release_completion_admission(
+                &completion_guard,
+                Some(capped),
+                &shared,
+                &provider,
+                channel_id,
+                "test_non_watcher_strict_plan_capped_retry",
+            ),
+            "the capped disposition must veto retry scheduling"
+        );
+        tokio::task::yield_now().await;
+        assert!(
+            completion_events.try_recv().is_err(),
+            "projection must settle before the capped disposition, and its false verdict must permanently veto QueueEligible"
+        );
+        completion_guard.note_terminal_disposition_settled(true);
+        tokio::task::yield_now().await;
+        assert!(
+            completion_events.try_recv().is_err(),
+            "a duplicate allow verdict must not upgrade the first capped-retry veto"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn retry_cap_preserves_entry_and_stops_auto_kickoff_4888() {
         let _root = scoped_runtime_root();

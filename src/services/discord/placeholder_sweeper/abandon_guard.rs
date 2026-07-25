@@ -379,12 +379,6 @@ pub(super) async fn finalize_abandoned_mailbox(
         shared
             .turn_finalizer
             .note_mailbox_released(key, shared.clone());
-        shared
-            .turn_finalizer
-            .note_terminal_projection_settled(key, true, shared.clone());
-        shared
-            .turn_finalizer
-            .note_terminal_disposition_settled(key, true, shared.clone());
     }
     AbandonedTmuxCleanupOutcome::from_plan(plan)
 }
@@ -862,7 +856,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn destructive_finalize_converges_dual_admission_once_4888() {
+    async fn destructive_finalize_records_only_mailbox_edge_for_strict_plan_4888() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -914,7 +908,23 @@ mod tests {
             .has_live_watcher_pending(channel_id, shared.restart.current_generation)
             .await;
 
-        let eligible = events.try_recv().expect("queue-eligible event");
+        assert!(
+            events.try_recv().is_err(),
+            "the sweeper owns mailbox release, not strict projection or retry disposition"
+        );
+        shared
+            .turn_finalizer
+            .note_terminal_projection_settled(key, true, shared.clone());
+        shared
+            .turn_finalizer
+            .note_terminal_disposition_settled(key, true, shared.clone());
+        let _ = shared
+            .turn_finalizer
+            .has_live_watcher_pending(channel_id, shared.restart.current_generation)
+            .await;
+        let eligible = events
+            .try_recv()
+            .expect("explicit strict producer edges must release admission");
         assert!(eligible.queue_is_eligible());
         assert_eq!(eligible.turn_id, Some(turn_id));
         assert!(events.try_recv().is_err(), "admission must publish once");

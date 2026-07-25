@@ -90,7 +90,7 @@ pub(in crate::services::discord) async fn mailbox_finish_turn(
 /// On mismatch it returns `removed_token = None`, exactly like an idempotent
 /// second `mailbox_finish_turn`, so the finalizer's counter-decrement gate is
 /// a no-op.
-async fn mailbox_finish_turn_if_matches_inner(
+pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -121,16 +121,6 @@ async fn mailbox_finish_turn_if_matches_inner(
         );
     }
     result
-}
-
-pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    expected_user_message_id: serenity::model::id::MessageId,
-) -> FinishTurnResult {
-    mailbox_finish_turn_if_matches_inner(shared, provider, channel_id, expected_user_message_id)
-        .await
 }
 
 async fn mailbox_finish_turn_if_matches_episode_started_before_inner(

@@ -60,12 +60,6 @@ async fn run_backstop_finalize(
         && let Some(entry) = ledger.get_mut(&ledger_key)
     {
         entry.completion_admission.note_mailbox_released();
-        entry
-            .completion_admission
-            .note_terminal_projection_settled(true);
-        entry
-            .completion_admission
-            .note_terminal_disposition_settled(true);
         publish_claimed_queue_eligible(shared, entry);
     }
     if let Err(payload) = finalized {

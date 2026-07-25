@@ -131,20 +131,6 @@ pub(in crate::services::discord) fn publish_mailbox_release_completion_event(
     }
 }
 
-pub(in crate::services::discord) fn publish_deferred_mailbox_release_completion_event(
-    shared: &SharedData,
-    channel_id: ChannelId,
-    turn_id: Option<u64>,
-    finish: &FinishTurnResult,
-) {
-    if finish.removed_token.is_some() {
-        publish_turn_completion_event(
-            shared,
-            TurnCompletionEvent::mailbox_released(channel_id, turn_id),
-        );
-    }
-}
-
 pub(in crate::services::discord) fn warn_unresolvable_hard_stop_pending_backlog(
     channel_id: ChannelId,
     has_pending: bool,
