@@ -2,7 +2,7 @@ use poise::serenity_prelude as serenity;
 
 use crate::services::discord::model_catalog::{
     DEFAULT_PICKER_VALUE, ModelCatalogEntry, SOURCE_PROVIDER_DEFAULT, is_default_picker_value,
-    resolved_default_model, resolved_models,
+    is_valid_discord_select_option_value, resolved_default_model, resolved_models,
 };
 use crate::services::provider::ProviderKind;
 
@@ -150,14 +150,15 @@ fn capped_model_picker_explicit_entries<'a>(
 ) -> Vec<&'a ModelCatalogEntry> {
     let mut entries: Vec<&ModelCatalogEntry> = resolved_models
         .iter()
+        .filter(|entry| is_valid_discord_select_option_value(entry.value.as_ref()))
         .take(EXPLICIT_MODEL_OPTION_LIMIT)
         .collect();
 
     if let Some(selected_value) = selected_explicit_model {
-        if let Some(selected_entry) = resolved_models
-            .iter()
-            .find(|entry| selected_value.eq_ignore_ascii_case(entry.value.as_ref()))
-        {
+        if let Some(selected_entry) = resolved_models.iter().find(|entry| {
+            is_valid_discord_select_option_value(entry.value.as_ref())
+                && selected_value.eq_ignore_ascii_case(entry.value.as_ref())
+        }) {
             if !entries.iter().any(|entry| {
                 entry
                     .value
@@ -178,7 +179,9 @@ fn append_unavailable_selected_option(
     options: &mut Vec<ModelPickerOptionSpec>,
     selected_explicit_model: Option<&str>,
 ) {
-    let Some(selected_value) = selected_explicit_model else {
+    let Some(selected_value) =
+        selected_explicit_model.filter(|value| is_valid_discord_select_option_value(value))
+    else {
         return;
     };
 
@@ -211,8 +214,9 @@ pub(super) fn build_model_picker_option_specs(
 ) -> Vec<ModelPickerOptionSpec> {
     let selected_explicit_model = match pending_model {
         Some(value) if is_default_picker_value(value) => None,
-        Some(value) => Some(value),
-        None => override_model,
+        Some(value) if is_valid_discord_select_option_value(value) => Some(value),
+        Some(_) => override_model.filter(|value| is_valid_discord_select_option_value(value)),
+        None => override_model.filter(|value| is_valid_discord_select_option_value(value)),
     };
     let resolved_models = resolved_models(provider, working_dir);
     let mut options = Vec::with_capacity(resolved_models.len());
@@ -227,6 +231,7 @@ pub(super) fn build_model_picker_option_specs(
                     .is_some_and(|active| active.eq_ignore_ascii_case(entry.value.as_ref())),
             }),
     );
+    append_unavailable_selected_option(&mut options, selected_explicit_model);
     if options.is_empty() {
         options.push(ModelPickerOptionSpec {
             value: DEFAULT_PICKER_VALUE.to_string(),
@@ -240,7 +245,6 @@ pub(super) fn build_model_picker_option_specs(
             selected: false,
         });
     }
-    append_unavailable_selected_option(&mut options, selected_explicit_model);
     options
 }
 
@@ -297,8 +301,8 @@ mod tests {
     }
 
     #[test]
-    fn invariant_model_picker_keeps_unavailable_selection_with_bounded_text() {
-        let selected = "claude-".to_string() + &"x".repeat(120);
+    fn invariant_model_picker_keeps_valid_unavailable_selection_with_bounded_text() {
+        let selected = "가".repeat(DISCORD_SELECT_MENU_TEXT_LIMIT);
         let mut options = (0..DISCORD_SELECT_MENU_OPTION_LIMIT)
             .map(|index| ModelPickerOptionSpec {
                 value: format!("value-{index}"),
@@ -322,6 +326,31 @@ mod tests {
             option.label.chars().count() <= DISCORD_SELECT_MENU_TEXT_LIMIT
                 && option.description.chars().count() <= DISCORD_SELECT_MENU_TEXT_LIMIT
         }));
+    }
+
+    #[test]
+    fn invariant_model_picker_skips_oversize_catalog_and_persisted_values_without_truncating() {
+        let invalid = "x".repeat(DISCORD_SELECT_MENU_TEXT_LIMIT + 1);
+        let entries = vec![ModelCatalogEntry::owned(
+            invalid.clone(),
+            "Invalid catalog value".to_string(),
+            "Test catalog entry".to_string(),
+            "Model picker invariant".to_string(),
+        )];
+        assert!(capped_model_picker_explicit_entries(&entries, Some(&invalid)).is_empty());
+
+        let options = build_model_picker_option_specs(
+            &ProviderKind::OpenCode,
+            None,
+            Some(&invalid),
+            "default",
+            SOURCE_PROVIDER_DEFAULT,
+            None,
+        );
+
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].value, DEFAULT_PICKER_VALUE);
+        assert!(options.iter().all(|option| option.value != invalid));
     }
 
     #[test]

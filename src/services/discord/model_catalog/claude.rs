@@ -67,6 +67,21 @@ const CURATED_ALIASES: &[CuratedAlias] = &[
         label: "Haiku 4.5",
         metadata_fallback_id: "claude-haiku-4-5-20251001",
     },
+    CuratedAlias {
+        selector: "sonnet[1m]",
+        label: "Sonnet 1M",
+        metadata_fallback_id: "claude-sonnet-5",
+    },
+    CuratedAlias {
+        selector: "opus[1m]",
+        label: "Opus 1M",
+        metadata_fallback_id: "claude-opus-5",
+    },
+    CuratedAlias {
+        selector: "opusplan",
+        label: "Opus Plan",
+        metadata_fallback_id: "claude-sonnet-5",
+    },
 ];
 
 const STATIC_FALLBACK_IDS: &[&str] = &[
@@ -451,7 +466,7 @@ where
         after_id = Some(next);
     }
 
-    Err(FetchFailure::PaginationLimit)
+    unreachable!("bounded page loop returns from every terminal page state")
 }
 
 async fn fetch_network_page(
@@ -503,12 +518,18 @@ async fn fetch_network_page(
     Ok(body)
 }
 
-async fn fetch_api_models(api_key: &str) -> Result<Vec<ApiModel>, FetchFailure> {
-    let client = reqwest::Client::builder()
+fn build_anthropic_client() -> Result<reqwest::Client, FetchFailure> {
+    reqwest::Client::builder()
         .connect_timeout(HTTP_CONNECT_TIMEOUT)
         .timeout(HTTP_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .build()
-        .map_err(|_| FetchFailure::Transport)?;
+        .map_err(|_| FetchFailure::Transport)
+}
+
+async fn fetch_api_models(api_key: &str) -> Result<Vec<ApiModel>, FetchFailure> {
+    let client = build_anthropic_client()?;
     let api_key = api_key.to_string();
     fetch_api_models_with(move |after_id| {
         let client = client.clone();
@@ -539,7 +560,11 @@ where
     F: FnOnce(String) -> Fut,
     Fut: Future<Output = Result<Vec<ApiModel>, FetchFailure>>,
 {
-    if cache_is_fresh(path, current_ms) {
+    let freshness_path = path.to_path_buf();
+    if tokio::task::spawn_blocking(move || cache_is_fresh(&freshness_path, current_ms))
+        .await
+        .unwrap_or(false)
+    {
         return RefreshOutcome::Fresh;
     }
     let Some(api_key) = api_key.map(str::trim).filter(|key| !key.is_empty()) else {
@@ -561,9 +586,12 @@ where
     let Ok(serialized) = serde_json::to_string(&cache) else {
         return RefreshOutcome::CacheWriteFailed;
     };
-    match runtime_store::atomic_write(path, &serialized) {
-        Ok(()) => RefreshOutcome::Updated,
-        Err(_) => RefreshOutcome::CacheWriteFailed,
+    let write_path = path.to_path_buf();
+    match tokio::task::spawn_blocking(move || runtime_store::atomic_write(&write_path, &serialized))
+        .await
+    {
+        Ok(Ok(())) => RefreshOutcome::Updated,
+        Ok(Err(_)) | Err(_) => RefreshOutcome::CacheWriteFailed,
     }
 }
 
@@ -652,6 +680,12 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(&values[..4], ["fable", "opus", "sonnet", "haiku"]);
+        for selector in ["sonnet[1m]", "opus[1m]", "opusplan"] {
+            assert!(
+                values.contains(&selector),
+                "runtime-only selector {selector} must survive without caches"
+            );
+        }
         for alias in CURATED_ALIASES {
             let entry = entries
                 .iter()
@@ -765,6 +799,101 @@ mod tests {
         assert!(rendered.contains("claude-safe"));
         assert!(!rendered.contains(secret));
         assert!(!rendered.contains("credential-secret"));
+    }
+
+    #[tokio::test]
+    async fn invariant_claude_model_catalog_http_client_does_not_follow_redirects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 1_024];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:9/credential-leak\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = build_anthropic_client().unwrap();
+        let response = client
+            .get(format!("http://{address}/models"))
+            .header("x-api-key", "test-only-secret")
+            .send()
+            .await
+            .unwrap();
+
+        server.await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+    }
+
+    #[tokio::test]
+    async fn invariant_claude_model_catalog_http_client_ignores_environment_proxy() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        struct EnvRestore {
+            values: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        }
+
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                for (name, value) in self.values.drain(..) {
+                    match value {
+                        Some(value) => unsafe { std::env::set_var(name, value) },
+                        None => unsafe { std::env::remove_var(name) },
+                    }
+                }
+            }
+        }
+
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let variables = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
+        let _restore = EnvRestore {
+            values: variables
+                .iter()
+                .map(|name| (*name, std::env::var_os(name)))
+                .collect(),
+        };
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_address = proxy.local_addr().unwrap();
+        for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+            unsafe { std::env::set_var(name, format!("http://{proxy_address}")) };
+        }
+        unsafe { std::env::remove_var("NO_PROXY") };
+
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_address = origin.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = origin.accept().await.unwrap();
+            let mut request = vec![0_u8; 1_024];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+        });
+
+        let response = build_anthropic_client()
+            .unwrap()
+            .get(format!("http://{origin_address}/models"))
+            .send()
+            .await
+            .unwrap();
+
+        server.await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), proxy.accept())
+                .await
+                .is_err(),
+            "environment proxy must not receive the request"
+        );
     }
 
     #[tokio::test]

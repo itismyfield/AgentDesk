@@ -12,6 +12,8 @@ use crate::services::provider::ProviderKind;
 
 mod claude;
 
+pub(crate) const DISCORD_SELECT_OPTION_VALUE_LIMIT: usize = 100;
+
 /// Sentinel value stored in the picker's pending state when the user selects "Default".
 /// Callers use `is_default_picker_value()` rather than comparing this directly.
 pub(in crate::services::discord) const DEFAULT_PICKER_VALUE: &str = "__agentdesk_default__";
@@ -575,13 +577,6 @@ fn build_gemini_model_catalog_from_models_js(raw: &str) -> Option<Vec<ModelCatal
     (!entries.is_empty()).then_some(entries)
 }
 
-const CLAUDE_MODEL_ALIASES: &[(&str, &str)] = &[
-    ("fable", "fable"),
-    ("opus", "opus"),
-    ("sonnet", "sonnet"),
-    ("haiku", "haiku"),
-];
-
 const CODEX_MODEL_ALIASES: &[(&str, &str)] = &[
     ("gpt-5-codex", "gpt-5-codex"),
     ("o3", "o3"),
@@ -859,10 +854,9 @@ pub(in crate::services::discord) fn spawn_claude_model_catalog_refresh(
 
 fn model_aliases(provider: &ProviderKind) -> &'static [(&'static str, &'static str)] {
     match provider {
-        ProviderKind::Claude => CLAUDE_MODEL_ALIASES,
         ProviderKind::Codex => CODEX_MODEL_ALIASES,
         ProviderKind::Gemini => GEMINI_MODEL_ALIASES,
-        ProviderKind::OpenCode | ProviderKind::Qwen => &[],
+        ProviderKind::Claude | ProviderKind::OpenCode | ProviderKind::Qwen => &[],
         ProviderKind::Unsupported(_) => &[],
     }
 }
@@ -891,8 +885,8 @@ fn is_safe_model_selector(raw: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']'))
 }
 
-fn looks_like_model_identifier(raw: &str) -> bool {
-    is_safe_model_selector(raw)
+pub(crate) fn is_valid_discord_select_option_value(raw: &str) -> bool {
+    !raw.is_empty() && raw.chars().count() <= DISCORD_SELECT_OPTION_VALUE_LIMIT
 }
 
 pub(in crate::services::discord) fn validate_model_input(
@@ -903,6 +897,11 @@ pub(in crate::services::discord) fn validate_model_input(
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("Model name cannot be empty.".to_string());
+    }
+    if !is_valid_discord_select_option_value(trimmed) {
+        return Err(format!(
+            "Model name cannot exceed {DISCORD_SELECT_OPTION_VALUE_LIMIT} characters."
+        ));
     }
 
     if matches!(provider, ProviderKind::Qwen) {
@@ -937,7 +936,7 @@ pub(in crate::services::discord) fn validate_model_input(
         return Ok(canonical);
     }
 
-    if looks_like_model_identifier(trimmed) {
+    if is_safe_model_selector(trimmed) {
         return Ok(trimmed.to_string());
     }
 
@@ -955,7 +954,7 @@ fn is_valid_opencode_model_override(raw: &str) -> bool {
     };
     !provider_id.trim().is_empty()
         && !model_id.trim().is_empty()
-        && raw.len() <= 128
+        && is_valid_discord_select_option_value(raw)
         && raw.chars().all(|c| {
             c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '/' | '[' | ']')
         })
@@ -981,5 +980,18 @@ mod tests {
         assert!(validate_model_input(&ProviderKind::Claude, &"a".repeat(65), None).is_err());
         assert!(validate_model_input(&ProviderKind::Claude, "claude/unsafe", None).is_err());
         assert!(validate_model_input(&ProviderKind::Claude, "클로드", None).is_err());
+    }
+
+    #[test]
+    fn invariant_model_input_rejects_values_over_discord_option_limit_without_truncating() {
+        let valid = format!("provider/{}", "x".repeat(91));
+        let invalid = format!("provider/{}", "x".repeat(92));
+
+        assert_eq!(valid.chars().count(), DISCORD_SELECT_OPTION_VALUE_LIMIT);
+        assert_eq!(
+            validate_model_input(&ProviderKind::OpenCode, &valid, None).unwrap(),
+            valid
+        );
+        assert!(validate_model_input(&ProviderKind::OpenCode, &invalid, None).is_err());
     }
 }
