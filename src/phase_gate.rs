@@ -242,14 +242,14 @@ pub fn dispatch_result_checks(phase_gate: &Value) -> Option<Vec<&str>> {
 }
 
 #[cfg(test)]
-mod tests {
+mod auto_queue_phase_gate_tests {
     use super::*;
 
     #[test]
     fn phase_gate_registry_catalog_and_dispatch_mapping_share_declarations() {
         let catalog = catalog_value();
         for declaration in PHASE_GATE_DECLARATIONS {
-            let resolved = resolve_declaration_value(declaration.kind.id()).expect("declaration");
+            let resolved = resolve_declaration_value(declaration.kind.id()).expect("declaration"); // agentdesk-audit: allow-unwrap — immutable built-in declaration fixture
             let catalog_entry = catalog["kinds"]
                 .as_array()
                 .and_then(|kinds| {
@@ -257,7 +257,7 @@ mod tests {
                         .iter()
                         .find(|kind| kind["id"] == declaration.kind.id())
                 })
-                .expect("catalog entry");
+                .expect("catalog entry"); // agentdesk-audit: allow-unwrap — catalog is generated from the same immutable registry
             assert_eq!(
                 catalog_entry["required_checks"],
                 resolved["required_checks"]
@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn phase_gate_registry_deploy_check_requires_authoritative_evidence() {
-        let declaration = declaration_for_id("deploy-gate").expect("deploy declaration");
+        let declaration = declaration_for_id("deploy-gate").expect("deploy declaration"); // agentdesk-audit: allow-unwrap — immutable built-in declaration fixture
         assert_eq!(
             declaration.unavailable_reason,
             Some(DEPLOY_GATE_UNAVAILABLE_REASON)
@@ -286,7 +286,7 @@ mod tests {
     #[test]
     fn phase_gate_registry_snapshot_validation_fails_closed() {
         let valid =
-            resolve_declaration_value(DEFAULT_PHASE_GATE_KIND).expect("default declaration");
+            resolve_declaration_value(DEFAULT_PHASE_GATE_KIND).expect("default declaration"); // agentdesk-audit: allow-unwrap — immutable built-in declaration fixture
         assert!(snapshot_matches_current(&valid));
 
         for field in [
@@ -296,11 +296,11 @@ mod tests {
             "pass_verdict",
         ] {
             let mut malformed = valid.clone();
-            malformed.as_object_mut().expect("object").remove(field);
+            malformed.as_object_mut().expect("object").remove(field); // agentdesk-audit: allow-unwrap — registry declarations serialize as JSON objects
             assert!(!snapshot_matches_current(&malformed), "missing {field}");
         }
 
-        let deploy = resolve_declaration_value("deploy-gate").expect("deploy declaration");
+        let deploy = resolve_declaration_value("deploy-gate").expect("deploy declaration"); // agentdesk-audit: allow-unwrap — immutable built-in declaration fixture
         assert!(!snapshot_matches_current(&deploy));
         assert!(!snapshot_matches_current(&json!({"kind": "ship-it"})));
     }
