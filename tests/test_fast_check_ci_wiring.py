@@ -214,10 +214,13 @@ class FastCheckCiWiringTests(unittest.TestCase):
         for job in (pr_job, main_job):
             self.assertIn("fetch-depth: 0", job)
             self.assertNotIn("origin/main", job)
-            self.assertNotIn("github.event.pull_request.base.sha", job)
         self.assertNotIn("workflow_dispatch:", pr_workflow)
         self.assertRegex(
             pr_job, r"(?m)^          TEST_LANE_BASELINE_REF: HEAD\^1$"
+        )
+        self.assertRegex(
+            pr_job,
+            r"(?m)^          PR_BASE_SHA: \$\{\{ github\.event\.pull_request\.base\.sha \}\}$",
         )
         self.assertNotIn("github.event_name", pr_job)
         self.assertNotIn("inputs.", pr_job)
@@ -475,6 +478,33 @@ jobs:
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("linked.yaml must not be a symlink", result.stderr)
 
+    def test_pr_script_checks_pass_immutable_base_sha_to_lane_guard(self) -> None:
+        job = job_block(PR_WORKFLOW.read_text(encoding="utf-8"), "scripts")
+        self.assertIn("fetch-depth: 0", job)
+        self.assertIn(
+            "PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}", job
+        )
+        self.assertIn("run: ./scripts/ci-script-checks.sh", job)
+
+        script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('if [ -n "${PR_BASE_SHA:-}" ]; then', script)
+        self.assertIn('TEST_LANE_ARGS+=(--base-sha "$PR_BASE_SHA")', script)
+        self.assertIn(
+            'scripts/check_test_lane_coverage.py "${TEST_LANE_ARGS[@]}"',
+            script,
+        )
+
+    def test_pr_lane_manifest_excludes_post_merge_only_recipe(self) -> None:
+        manifest = (REPO_ROOT / "scripts/pr_test_lane_manifest.txt").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("just test-non-pg", manifest)
+        self.assertIn("witness .github/workflows/ci-macos-trusted.yml", manifest)
+        self.assertIn("witness .github/workflows/ci-pr.yml", manifest)
+        self.assertIn("lane postgres ::", manifest)
+
     def test_ci_script_checks_runs_this_contract(self) -> None:
         script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(
             encoding="utf-8"
@@ -483,12 +513,17 @@ jobs:
             '"$PYTHON" -m unittest tests.test_fast_check_ci_wiring', script
         )
         self.assertIn(
-            'scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"',
-            script,
+            'TEST_LANE_ARGS=(--baseline-ref "$TEST_LANE_BASELINE_REF")', script
+        )
+        self.assertIn(
+            'scripts/check_test_lane_coverage.py "${TEST_LANE_ARGS[@]}"', script
         )
         self.assertNotIn("TEST_LANE_BASELINE_REF:-HEAD", script)
         self.assertIn(
             '"$PYTHON" -m unittest tests.test_test_lane_coverage', script
+        )
+        self.assertTrue(
+            (REPO_ROOT / "scripts/test_lane_candidate_provenance.py").is_file()
         )
 
 

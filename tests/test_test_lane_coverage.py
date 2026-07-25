@@ -9,8 +9,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest import mock
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -213,6 +213,273 @@ class LaneFilterTests(unittest.TestCase):
             )
         )
 
+    def test_libtest_multiple_positive_filters_use_union_semantics(self) -> None:
+        lane = coverage.LaneFilter(("alpha", "beta"), ("postgres",))
+        self.assertTrue(lane.selects("tests::alpha_case"))
+        self.assertTrue(lane.selects("tests::beta_case"))
+        self.assertFalse(lane.selects("tests::gamma_case"))
+        self.assertFalse(lane.selects("tests::alpha_postgres_case"))
+
+    def test_exact_applies_to_positive_filter_but_skip_is_substring(self) -> None:
+        lane = coverage.LaneFilter(("tests::alpha",), ("alpha",), True)
+        self.assertFalse(lane.selects("tests::alpha"))
+        self.assertFalse(lane.selects("other::tests::alpha"))
+
+    def test_positive_and_exact_zero_match_are_rejected(self) -> None:
+        inventory = {"tests": {"tests::real_case"}}
+        failures = coverage.ensure_non_vacuous_filters(
+            (
+                coverage.LaneFilter(
+                    ("missing",), (), provenance="positive-lane"
+                ),
+                coverage.LaneFilter(
+                    ("tests::renamed",), (), True, provenance="exact-lane"
+                ),
+            ),
+            inventory,
+        )
+        self.assertEqual(len(failures), 2)
+        self.assertIn("positive filter 'missing' selects zero tests", failures[0])
+        self.assertIn("exact filter 'tests::renamed' selects zero tests", failures[1])
+
+
+class CandidateProvenanceTests(unittest.TestCase):
+    def git(self, root: Path, *args: str) -> str:
+        result = subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.email=fixture@example.com",
+                "-c",
+                "user.name=Fixture",
+                *args,
+            ],
+            cwd=root,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        return result.stdout.strip()
+
+    def make_repo(self, root: Path, lane_filter: str = "covered") -> str:
+        (root / "src").mkdir()
+        (root / ".github/workflows").mkdir(parents=True)
+        (root / "scripts").mkdir()
+        (root / "src/lib.rs").write_text(
+            "#[cfg(test)] mod legacy_tests {\n"
+            "    #[test] fn existing_case() { assert_eq!(1, 1); }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        command = (
+            f"cargo test --lib {lane_filter} -- --skip _pg "
+            "--skip pg_ --skip postgres"
+        )
+        (root / ".github/workflows/ci-pr.yml").write_text(
+            f"run: {command}\n", encoding="utf-8"
+        )
+        (root / "justfile").write_text(
+            "test-non-pg:\n    cargo test --lib legacy_tests\n",
+            encoding="utf-8",
+        )
+        (root / "scripts/pr_test_lane_manifest.txt").write_text(
+            f"lane fixture :: src/** :: {command}\n"
+            f"witness .github/workflows/ci-pr.yml :: 1 :: {command}\n",
+            encoding="utf-8",
+        )
+        self.git(root, "init", "-q")
+        self.git(root, "add", "src/lib.rs", "justfile", ".github", "scripts")
+        self.git(root, "commit", "-qm", "base")
+        return self.git(root, "rev-parse", "HEAD")
+
+    def commit_candidate(self, root: Path, source: str) -> None:
+        (root / "src/lib.rs").write_text(source, encoding="utf-8")
+        self.git(root, "add", "src/lib.rs")
+        self.git(root, "commit", "-qm", "candidate")
+
+    def check(self, root: Path, base: str) -> coverage.CheckResult:
+        return coverage.check_pr_candidate(
+            root,
+            base,
+            manifest_path=root / "scripts/pr_test_lane_manifest.txt",
+        )
+
+    def test_added_test_in_baselined_module_requires_pr_lane_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self.make_repo(root, lane_filter="never_matches")
+            self.commit_candidate(
+                root,
+                "#[cfg(test)] mod legacy_tests {\n"
+                "    #[test] fn existing_case() { assert_eq!(1, 1); }\n"
+                "    #[test] fn added_case() { assert_eq!(2, 2); }\n"
+                "}\n",
+            )
+            result = self.check(root, base)
+            self.assertEqual(
+                [item.name for item in result.changed_tests],
+                ["legacy_tests::added_case"],
+            )
+            self.assertTrue(
+                any("added test legacy_tests::added_case" in item for item in result.failures)
+            )
+
+    def test_materially_modified_test_requires_pr_lane_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self.make_repo(root, lane_filter="never_matches")
+            self.commit_candidate(
+                root,
+                "#[cfg(test)] mod legacy_tests {\n"
+                "    #[test] fn existing_case() { assert_eq!(\"new\", \"new\"); }\n"
+                "}\n",
+            )
+            result = self.check(root, base)
+            self.assertEqual(result.changed_tests[0].change, "modified")
+            self.assertIn("legacy_tests::existing_case", result.failures[-1])
+
+    def test_comment_and_format_only_test_change_is_not_material(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self.make_repo(root, lane_filter="legacy_tests")
+            self.commit_candidate(
+                root,
+                "#[cfg(test)] mod legacy_tests {\n"
+                "    // Explanation changed.\n"
+                "    #[test]\n"
+                "    fn existing_case( ) { assert_eq!( 1, 1 ); }\n"
+                "}\n",
+            )
+            result = self.check(root, base)
+            self.assertEqual(result.changed_tests, ())
+            self.assertEqual(result.failures, ())
+
+    def test_full_name_pr_filter_covers_changed_test(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self.make_repo(root, lane_filter="added_case")
+            self.commit_candidate(
+                root,
+                "#[cfg(test)] mod legacy_tests {\n"
+                "    #[test] fn existing_case() { assert_eq!(1, 1); }\n"
+                "    #[test] fn added_case() { assert_eq!(2, 2); }\n"
+                "}\n",
+            )
+            result = self.check(root, base)
+            self.assertEqual(result.failures, ())
+            self.assertEqual(result.coverage["legacy_tests::added_case"], ("pr-ci:fixture",))
+
+    def test_post_merge_just_recipe_does_not_count_as_pr_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self.make_repo(root, lane_filter="existing_case")
+            self.commit_candidate(
+                root,
+                "#[cfg(test)] mod legacy_tests {\n"
+                "    #[test] fn existing_case() { assert_eq!(1, 1); }\n"
+                "    #[test] fn post_merge_only() { assert!(true); }\n"
+                "}\n",
+            )
+            result = self.check(root, base)
+            self.assertEqual(result.coverage["legacy_tests::post_merge_only"], ())
+            self.assertTrue(result.failures)
+
+    def test_skip_veto_and_path_condition_are_enforced(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self.make_repo(root, lane_filter="legacy_tests")
+            manifest = root / "scripts/pr_test_lane_manifest.txt"
+            command = "cargo test --lib legacy_tests -- --skip added"
+            (root / ".github/workflows/ci-pr.yml").write_text(
+                f"run: {command}\n", encoding="utf-8"
+            )
+            manifest.write_text(
+                f"lane fixture :: docs/** :: {command}\n"
+                f"witness .github/workflows/ci-pr.yml :: 1 :: {command}\n",
+                encoding="utf-8",
+            )
+            self.git(root, "add", ".github", "scripts")
+            self.git(root, "commit", "-qm", "change lane")
+            base = self.git(root, "rev-parse", "HEAD")
+            self.commit_candidate(
+                root,
+                "#[cfg(test)] mod legacy_tests {\n"
+                "    #[test] fn existing_case() { assert_eq!(1, 1); }\n"
+                "    #[test] fn added_case() { assert!(true); }\n"
+                "}\n",
+            )
+            result = self.check(root, base)
+            self.assertEqual(result.coverage["legacy_tests::added_case"], ())
+            self.assertTrue(result.failures)
+
+    def test_explicit_base_sha_ignores_moving_origin_main(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self.make_repo(root, lane_filter="added_case")
+            self.commit_candidate(
+                root,
+                "#[cfg(test)] mod legacy_tests {\n"
+                "    #[test] fn existing_case() { assert_eq!(1, 1); }\n"
+                "    #[test] fn added_case() { assert!(true); }\n"
+                "}\n",
+            )
+            self.git(root, "branch", "origin/main", "HEAD")
+            result = self.check(root, base)
+            self.assertEqual(result.changed_tests[0].name, "legacy_tests::added_case")
+
+    def test_inaccessible_base_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.make_repo(root, lane_filter="legacy_tests")
+            with self.assertRaisesRegex(ValueError, "base commit is inaccessible"):
+                self.check(root, "0" * 40)
+
+    def test_changed_unmounted_generated_test_file_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self.make_repo(root, lane_filter="generated_case")
+            (root / "src/generated_tests.rs").write_text(
+                "#[test] fn generated_case() {}\n", encoding="utf-8"
+            )
+            self.git(root, "add", "src/generated_tests.rs")
+            self.git(root, "commit", "-qm", "generated test")
+            result = self.check(root, base)
+            self.assertTrue(
+                any("unsupported" in item for item in result.failures), result.failures
+            )
+
+    def test_changed_include_generated_test_uses_logical_mount(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self.make_repo(root, lane_filter="included_case")
+            source = (
+                "#[cfg(test)] mod legacy_tests {\n"
+                "    include!(\"included.rs\");\n"
+                "}\n"
+            )
+            (root / "src/lib.rs").write_text(source, encoding="utf-8")
+            (root / "src/included.rs").write_text(
+                "#[test] fn existing_included_case() { assert!(true); }\n",
+                encoding="utf-8",
+            )
+            self.git(root, "add", "src")
+            self.git(root, "commit", "-qm", "mount included tests")
+            base = self.git(root, "rev-parse", "HEAD")
+            (root / "src/included.rs").write_text(
+                "#[test] fn existing_included_case() { assert!(true); }\n"
+                "#[test] fn included_case() { assert_eq!(2, 2); }\n",
+                encoding="utf-8",
+            )
+            self.git(root, "add", "src/included.rs")
+            self.git(root, "commit", "-qm", "add included test")
+            result = self.check(root, base)
+            self.assertEqual(result.failures, ())
+            self.assertEqual(
+                result.changed_tests[0].name,
+                "legacy_tests::included_case",
+            )
+
 
 class RatchetTests(unittest.TestCase):
     def make_repo(self, root: Path, module_name: str) -> None:
@@ -220,7 +487,14 @@ class RatchetTests(unittest.TestCase):
         (root / ".github/workflows").mkdir(parents=True)
         (root / "scripts").mkdir()
         (root / "src/lib.rs").write_text(
-            f"#[cfg(test)] mod {module_name} {{}}\n", encoding="utf-8"
+            f"#[cfg(test)] mod {module_name} {{}}\n"
+            "#[cfg(test)] mod covered_tests {\n"
+            "    #[test] fn covered_tests_case() {}\n"
+            "}\n"
+            "#[cfg(test)] mod targeted_tests {\n"
+            "    #[test] fn targeted_tests_case() {}\n"
+            "}\n",
+            encoding="utf-8",
         )
         (root / "justfile").write_text(
             "test-non-pg:\n    cargo test --lib covered_tests\n", encoding="utf-8"
@@ -653,8 +927,10 @@ class RatchetTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(
-            'scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"',
-            script,
+            'TEST_LANE_ARGS=(--baseline-ref "$TEST_LANE_BASELINE_REF")', script
+        )
+        self.assertIn(
+            'scripts/check_test_lane_coverage.py "${TEST_LANE_ARGS[@]}"', script
         )
         self.assertNotIn("TEST_LANE_BASELINE_REF:-HEAD", script)
         self.assertIn(

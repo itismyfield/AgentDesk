@@ -1,0 +1,32 @@
+# Reviewed PR-time Rust test invocations and their path conditions.
+# Format: lane <label> :: <comma-separated changed-path globs> :: <cargo command>
+# Workflow witnesses pin where each command actually runs; post-merge-only
+# justfile test-non-pg commands are deliberately absent.
+# Format: witness <repo-relative workflow> :: <exact count> :: <exact text>
+
+lane transition :: src/**,tests/**,migrations/**,Cargo.toml,Cargo.lock,sqlx-data.json,.cargo/**,rust-toolchain*,build.rs,defaults.json,routines/** :: cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1
+lane auto_queue :: src/**,tests/**,migrations/**,Cargo.toml,Cargo.lock,sqlx-data.json,.cargo/**,rust-toolchain*,build.rs,defaults.json,routines/** :: cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres
+lane cancel :: src/**,tests/**,migrations/**,Cargo.toml,Cargo.lock,sqlx-data.json,.cargo/**,rust-toolchain*,build.rs,defaults.json,routines/** :: cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
+lane review_decision :: src/**,tests/**,migrations/**,Cargo.toml,Cargo.lock,sqlx-data.json,.cargo/**,rust-toolchain*,build.rs,defaults.json,routines/** :: cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
+lane stall_recovery :: src/**,tests/**,migrations/**,Cargo.toml,Cargo.lock,sqlx-data.json,.cargo/**,rust-toolchain*,build.rs,defaults.json,routines/** :: cargo test --all-targets stall_recovery -- --skip _pg --skip pg_ --skip postgres
+lane placeholder_live_events :: src/**,tests/**,migrations/**,Cargo.toml,Cargo.lock,sqlx-data.json,.cargo/**,rust-toolchain*,build.rs,defaults.json,routines/** :: cargo test --lib placeholder_live_events -- --skip _pg --skip pg_ --skip postgres
+lane single_message_panel :: src/**,tests/**,migrations/**,Cargo.toml,Cargo.lock,sqlx-data.json,.cargo/**,rust-toolchain*,build.rs,defaults.json,routines/** :: cargo test --lib single_message_panel::tests -- --skip _pg --skip pg_ --skip postgres
+lane health :: src/**,tests/**,migrations/**,Cargo.toml,Cargo.lock,sqlx-data.json,.cargo/**,rust-toolchain*,build.rs,defaults.json,routines/** :: cargo test --lib health -- --skip _pg --skip pg_ --skip postgres
+lane relay_recovery :: src/**,tests/**,migrations/**,Cargo.toml,Cargo.lock,sqlx-data.json,.cargo/**,rust-toolchain*,build.rs,defaults.json,routines/** :: cargo test --lib relay_recovery -- --skip _pg --skip pg_ --skip postgres
+lane routines :: src/**,tests/**,migrations/**,Cargo.toml,Cargo.lock,sqlx-data.json,.cargo/**,rust-toolchain*,build.rs,defaults.json,routines/** :: cargo test --all-targets routines -- --skip _pg --skip pg_ --skip postgres
+lane invariant :: src/**,tests/**,migrations/**,Cargo.toml,Cargo.lock,sqlx-data.json,.cargo/**,rust-toolchain*,build.rs,defaults.json,routines/** :: cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
+lane postgres :: .github/workflows/**,justfile,migrations/**,scripts/ci/postgres-service.sh,src/db/**,src/dispatch/**,src/engine/**,src/high_risk_recovery.rs,src/kanban/**,src/reconcile.rs,src/server/routes/auto_queue.rs,src/server/routes/dispatched_sessions.rs,src/server/routes/dispatches/**,src/server/routes/message_outbox.rs,src/server/routes/scheduled_messages.rs,src/server/worker_registry.rs,src/services/auto_queue.rs,src/services/auto_queue/**,src/services/dispatches/**,src/services/queue.rs,src/services/session_forwarding.rs,src/server/routes/queue_api.rs,src/services/discord/health/recovery.rs,src/services/discord/health/recovery/**,src/services/scheduled_messages.rs,src/services/scheduled_messages/**,src/services/discord/outbound/source_registry.rs,src/services/message_outbox.rs,src/services/message_outbox_recovery.rs,src/services/message_outbox_recovery_support.rs,src/services/message_outbox_recovery_tests.rs,src/services/api_friction/**,src/services/retrospectives.rs,src/services/discord_dm_reply_store.rs,src/server/cluster.rs,src/server/task_dispatch_claims.rs,src/services/dispatch_watchdog.rs,src/services/cluster/intake_router_hook.rs,src/services/cluster/intake_router_hook/**,src/services/discord/router/intake_dispatch.rs,src/services/discord/router/intake_dispatch/**,src/services/observability/**,src/config.rs,Cargo.toml,Cargo.lock,sqlx-data.json :: cargo test -- _pg pg_ postgres --nocapture --test-threads=1
+
+witness .github/workflows/ci-macos-trusted.yml :: 2 :: cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1
+witness .github/workflows/ci-macos-trusted.yml :: 2 :: cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres
+witness .github/workflows/ci-macos-trusted.yml :: 2 :: cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
+witness .github/workflows/ci-macos-trusted.yml :: 2 :: cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
+witness .github/workflows/ci-macos-trusted.yml :: 2 :: cargo test --all-targets stall_recovery -- --skip _pg --skip pg_ --skip postgres
+witness .github/workflows/ci-macos-trusted.yml :: 2 :: cargo test --lib placeholder_live_events -- --skip _pg --skip pg_ --skip postgres
+witness .github/workflows/ci-macos-trusted.yml :: 2 :: cargo test --lib single_message_panel::tests -- --skip _pg --skip pg_ --skip postgres
+witness .github/workflows/ci-macos-trusted.yml :: 2 :: cargo test --lib health -- --skip _pg --skip pg_ --skip postgres
+witness .github/workflows/ci-macos-trusted.yml :: 2 :: cargo test --lib relay_recovery -- --skip _pg --skip pg_ --skip postgres
+witness .github/workflows/ci-macos-trusted.yml :: 2 :: cargo test --all-targets routines -- --skip _pg --skip pg_ --skip postgres
+witness .github/workflows/ci-macos-trusted.yml :: 2 :: cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
+witness .github/workflows/ci-pr.yml :: 1 :: run: just test-postgres
+witness justfile :: 1 :: cargo test -- _pg pg_ postgres --nocapture --test-threads=1

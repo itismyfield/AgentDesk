@@ -781,11 +781,13 @@ jobs:
         run: sudo apt-get install -y shellcheck
 
       - name: Run script checks
-        run: ./scripts/ci-script-checks.sh
         env:
-          # Required Script checks only run on protected PR candidates. Their
-          # synthetic merge first parent is the exact immutable base snapshot.
+          # Required Script checks run only on protected PR candidates. The
+          # synthetic merge first parent and payload base SHA are immutable
+          # inputs for baseline authority and changed-test provenance.
           TEST_LANE_BASELINE_REF: HEAD^1
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: ./scripts/ci-script-checks.sh
 
       # Keep high-value relay ratchets as explicit named steps as well as in the
       # aggregate script suite so their failure surface is immediately visible.

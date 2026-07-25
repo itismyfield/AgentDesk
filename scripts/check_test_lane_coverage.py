@@ -16,16 +16,30 @@ debt can therefore only shrink without a redundant scalar lock.
 from __future__ import annotations
 
 import argparse
+import fnmatch
+import hashlib
+import importlib.util
 import re
 import shlex
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+_PROVENANCE_SPEC = importlib.util.spec_from_file_location(
+    "test_lane_candidate_provenance",
+    Path(__file__).with_name("test_lane_candidate_provenance.py"),
+)
+assert _PROVENANCE_SPEC and _PROVENANCE_SPEC.loader
+provenance = importlib.util.module_from_spec(_PROVENANCE_SPEC)
+sys.modules[_PROVENANCE_SPEC.name] = provenance
+_PROVENANCE_SPEC.loader.exec_module(provenance)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE_REL = Path("scripts/test_lane_coverage_baseline.txt")
+PR_LANE_MANIFEST_REL = provenance.PR_LANE_MANIFEST_REL
+DEFAULT_PR_TEST_PATHS = ("src/**",)
 
 # Attributes do not contain a closing square bracket in the forms used by this
 # repository. Strings and comments are blanked without changing offsets, so the
@@ -89,28 +103,66 @@ class LaneFilter:
     positives: tuple[str, ...]
     skips: tuple[str, ...]
     exact: bool = False
+    command: str = field(default="", compare=False)
+    provenance: str = field(default="", compare=False)
+    changed_paths: tuple[str, ...] = field(
+        default=DEFAULT_PR_TEST_PATHS, compare=False
+    )
+
+    def selects(self, test_name: str) -> bool:
+        """Model libtest's union of positives, exactness, and skip vetoes."""
+        positive_match = not self.positives or any(
+            test_name == positive if self.exact else positive in test_name
+            for positive in self.positives
+        )
+        return positive_match and not any(skip in test_name for skip in self.skips)
 
     def fully_selects(self, module: str, test_names: Iterable[str]) -> bool:
         """Whether this command selects every discovered test in the module.
 
-        This is deliberately conservative: if any ``--skip`` pattern matches a
-        discovered test's full path, the invocation provides only partial module
-        coverage and cannot satisfy the module-level gate.
+        Module debt retains its historical conservative contract: exact pins do
+        not exempt a whole module, positive filters must match the module path,
+        and any matching skip makes the module only partially covered.
+        Changed-test provenance uses ``selects`` directly at full-name level.
         """
         if self.exact:
             return False
         positive_match = not self.positives or any(
             positive in module for positive in self.positives
         )
-        if not positive_match:
-            return False
-        if any(skip in module for skip in self.skips):
+        if not positive_match or any(skip in module for skip in self.skips):
             return False
         return not any(
             skip in test_name
             for test_name in test_names
             for skip in self.skips
         )
+
+    def is_applicable_to(self, changed_paths: Iterable[str]) -> bool:
+        return any(
+            fnmatch.fnmatch(path, pattern)
+            for path in changed_paths
+            for pattern in self.changed_paths
+        )
+
+
+@dataclass(frozen=True)
+class SourceInventory:
+    tests_by_module: dict[str, set[str]]
+    test_fingerprints: dict[str, str]
+    unsupported_tests: tuple[str, ...] = ()
+    test_modules: dict[str, str] = field(default_factory=dict)
+
+
+ChangedTest = provenance.ChangedTest
+PrLaneManifest = provenance.PrLaneManifest
+CheckResult = provenance.CheckResult
+
+
+@dataclass(frozen=True)
+class SourceMount:
+    logical_prefix: tuple[str, ...]
+    physical_file: str
 
 
 class StripState:
@@ -337,29 +389,240 @@ def _normalize_alias_path(
     return current
 
 
-def discover_test_inventory(repo_root: Path) -> dict[str, set[str]]:
-    """Inventory logical test modules and test paths without building."""
+def _test_item_end(clean: str, fn_start: int) -> int:
+    """Return one test function item's end, including a braced body."""
+    opening = clean.find("{", fn_start)
+    semicolon = clean.find(";", fn_start)
+    if opening < 0 or (semicolon >= 0 and semicolon < opening):
+        return semicolon + 1 if semicolon >= 0 else len(clean)
+    depth = 0
+    for index in range(opening, len(clean)):
+        if clean[index] == "{":
+            depth += 1
+        elif clean[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    raise ValueError("unterminated test function body")
+
+
+def _without_rust_comments(source: str) -> str:
+    """Remove Rust comments while preserving literals and token spelling."""
+    out: list[str] = []
+    index = 0
+    block_depth = 0
+    while index < len(source):
+        if block_depth:
+            if source.startswith("/*", index):
+                block_depth += 1
+                index += 2
+            elif source.startswith("*/", index):
+                block_depth -= 1
+                index += 2
+            else:
+                index += 1
+            continue
+        if source.startswith("//", index):
+            newline = source.find("\n", index)
+            if newline < 0:
+                break
+            out.append("\n")
+            index = newline + 1
+            continue
+        if source.startswith("/*", index):
+            block_depth = 1
+            index += 2
+            continue
+        raw = _RAW_STRING_OPEN.match(source, index)
+        if raw:
+            closer = '"' + "#" * len(raw.group(1))
+            end = source.find(closer, raw.end())
+            end = len(source) if end < 0 else end + len(closer)
+            out.append(source[index:end])
+            index = end
+            continue
+        string_width = 2 if source.startswith('b"', index) else 1
+        if source[index] == '"' or string_width == 2:
+            end = index + string_width
+            while end < len(source):
+                if source[end] == "\\" and end + 1 < len(source):
+                    end += 2
+                elif source[end] == '"':
+                    end += 1
+                    break
+                else:
+                    end += 1
+            out.append(source[index:end])
+            index = end
+            continue
+        if source[index] == "'":
+            char = _CHAR_LITERAL.match(source, index)
+            if char:
+                out.append(char.group())
+                index = char.end()
+                continue
+        out.append(source[index])
+        index += 1
+    return "".join(out)
+
+
+def _material_test_item(source: str, start: int, end: int) -> str:
+    """Drop comments and insignificant whitespace while retaining literals."""
+    without_comments = _without_rust_comments(source[start:end])
+    return re.sub(r"\s+", "", without_comments)
+
+
+def _source_test_fingerprints(source: str, base: tuple[str, ...]) -> dict[str, str]:
+    clean = strip_rust(source)
+    attributed_tests = [
+        match
+        for match in ATTRIBUTED_FN_RE.finditer(clean)
+        if TEST_ATTR_RE.search(source[match.start("attrs") : match.end("attrs")])
+    ]
+    if not attributed_tests:
+        return {}
+
+    declarations: list[tuple[int, int, str, str]] = []
+    for match in MOD_RE.finditer(clean):
+        declarations.append(
+            (match.start(), match.end(), match.group("name"), match.group("term"))
+        )
+    events = sorted(
+        [(start, "mod", (end, name, term)) for start, end, name, term in declarations]
+        + [(match.start("name"), "test_fn", match) for match in attributed_tests],
+        key=lambda event: event[0],
+    )
+    inline_stack: list[tuple[int, str]] = []
+    depth = 0
+    cursor = 0
+    fingerprints: dict[str, str] = {}
+    for offset, kind, payload in events:
+        for brace in re.finditer(r"[{}]", clean[cursor:offset]):
+            if brace.group() == "{":
+                depth += 1
+            else:
+                depth -= 1
+                while inline_stack and inline_stack[-1][0] > depth:
+                    inline_stack.pop()
+        if kind == "test_fn":
+            match = payload
+            name = "::".join((*base, *(item[1] for item in inline_stack), match.group("name")))
+            item_start = match.start("attrs")
+            item_end = _test_item_end(clean, match.end())
+            item = _material_test_item(source, item_start, item_end)
+            fingerprints[name] = hashlib.sha256(item.encode("utf-8")).hexdigest()
+            cursor = offset
+            continue
+        end, name, term = payload
+        if term == "{":
+            depth += 1
+            inline_stack.append((depth, name))
+        cursor = end
+    return fingerprints
+
+
+def _include_mounts(
+    repo_root: Path, src_root: Path
+) -> tuple[dict[Path, SourceMount], tuple[str, ...]]:
+    mounts: dict[Path, SourceMount] = {}
+    unsupported: list[str] = []
+    include_re = re.compile(r'\binclude!\s*\(\s*"(?P<path>[^"]+)"\s*\)')
+    for parent in sorted(src_root.rglob("*.rs")):
+        rel = parent.relative_to(src_root)
+        if rel.name == "main.rs" or (rel.parts and rel.parts[0] == "bin"):
+            continue
+        source = parent.read_text(encoding="utf-8")
+        clean = strip_rust(source)
+        base = file_module_path(src_root, parent)
+        declarations = [
+            (match.start(), match.end(), match.group("name"), match.group("term"))
+            for match in MOD_RE.finditer(clean)
+        ]
+        include_matches = list(include_re.finditer(source))
+        events = sorted(
+            [(start, "mod", (end, name, term)) for start, end, name, term in declarations]
+            + [(match.start(), "include", match) for match in include_matches],
+            key=lambda event: event[0],
+        )
+        stack: list[tuple[int, str]] = []
+        depth = 0
+        cursor = 0
+        for offset, kind, payload in events:
+            for brace in re.finditer(r"[{}]", clean[cursor:offset]):
+                if brace.group() == "{":
+                    depth += 1
+                else:
+                    depth -= 1
+                    while stack and stack[-1][0] > depth:
+                        stack.pop()
+            if kind == "mod":
+                end, name, term = payload
+                if term == "{":
+                    depth += 1
+                    stack.append((depth, name))
+                cursor = end
+                continue
+            match = payload
+            target = (parent.parent / match.group("path")).resolve()
+            try:
+                target.relative_to(src_root)
+            except ValueError:
+                unsupported.append(
+                    f"{parent.relative_to(repo_root)}: include! target escapes src/"
+                )
+            else:
+                mount = SourceMount(
+                    (*base, *(item[1] for item in stack)),
+                    str(parent.relative_to(repo_root)),
+                )
+                previous = mounts.get(target)
+                if previous is not None and previous != mount:
+                    unsupported.append(
+                        f"{target.relative_to(repo_root)}: include! has multiple logical mounts"
+                    )
+                mounts[target] = mount
+            cursor = match.end()
+    return mounts, tuple(unsupported)
+
+
+def discover_source_inventory(repo_root: Path) -> SourceInventory:
+    """Inventory logical tests and material-body fingerprints without building."""
+    repo_root = repo_root.resolve()
     src_root = (repo_root / "src").resolve()
+    include_mounts, include_failures = _include_mounts(repo_root, src_root)
     physical_inventory: dict[tuple[str, ...], set[tuple[str, ...]]] = {}
+    physical_fingerprints: dict[tuple[str, ...], str] = {}
     raw_aliases: dict[tuple[str, ...], tuple[str, ...]] = {}
+    unsupported: list[str] = list(include_failures)
 
     for path in sorted(src_root.rglob("*.rs")):
         rel = path.relative_to(src_root)
         if rel.name == "main.rs" or (rel.parts and rel.parts[0] == "bin"):
             continue
-        base = file_module_path(src_root, path)
+        mount = include_mounts.get(path.resolve())
+        base = mount.logical_prefix if mount else file_module_path(src_root, path)
         source = path.read_text(encoding="utf-8")
         modules, tests_by_module, aliases = _module_records(source, base)
+        fingerprints = _source_test_fingerprints(source, base)
         for module in modules:
             physical = tuple(module.split("::"))
             physical_inventory.setdefault(physical, set()).update(
                 tuple(test.split("::"))
                 for test in tests_by_module.get(module, set())
             )
+        if mount and fingerprints:
+            owner_module = (
+                "::".join(base)
+                if base and base[-1] == "tests"
+                else "::".join(base[:-1] or base)
+            )
+            owner_path = tuple(owner_module.split("::"))
+            physical_inventory.setdefault(owner_path, set()).update(
+                tuple(test.split("::")) for test in fingerprints
+            )
+        for test_name, fingerprint in fingerprints.items():
+            physical_fingerprints[tuple(test_name.split("::"))] = fingerprint
         for logical, relative_target, inline_parents in aliases:
-            # Rust resolves #[path] inside inline modules from a matching
-            # physical subdirectory (e.g. mod outer { #[path="leaf.rs"] ... }
-            # resolves as outer/leaf.rs), not solely from the declaring file.
             target = (path.parent.joinpath(*inline_parents) / relative_target).resolve()
             try:
                 physical_target = file_module_path(src_root, target)
@@ -387,13 +650,38 @@ def discover_test_inventory(repo_root: Path) -> dict[str, set[str]]:
         aliases = updated
 
     inventory: dict[str, set[str]] = {}
+    fingerprints: dict[str, str] = {}
     for physical_module, physical_tests in physical_inventory.items():
         module = "::".join(_normalize_alias_path(physical_module, aliases))
         inventory.setdefault(module, set()).update(
             "::".join(_normalize_alias_path(test, aliases))
             for test in physical_tests
         )
-    return inventory
+    for physical_test, fingerprint in physical_fingerprints.items():
+        fingerprints["::".join(_normalize_alias_path(physical_test, aliases))] = fingerprint
+    test_modules = {
+        test_name: module
+        for module, test_names in inventory.items()
+        for test_name in test_names
+    }
+    for test_name in fingerprints:
+        if test_name in test_modules:
+            continue
+        candidates = [
+            module
+            for module in inventory
+            if test_name.startswith(f"{module}::")
+        ]
+        if candidates:
+            test_modules[test_name] = max(candidates, key=len)
+    return SourceInventory(
+        inventory, fingerprints, tuple(unsupported), test_modules
+    )
+
+
+def discover_test_inventory(repo_root: Path) -> dict[str, set[str]]:
+    """Inventory logical test modules and test paths without building."""
+    return discover_source_inventory(repo_root).tests_by_module
 
 
 def discover_test_modules(repo_root: Path) -> set[str]:
@@ -417,7 +705,12 @@ def just_recipe_commands(justfile: str, recipe_name: str) -> tuple[str, ...]:
     return tuple(commands)
 
 
-def cargo_test_filter(command: str) -> LaneFilter | None:
+def cargo_test_filter(
+    command: str,
+    *,
+    provenance: str = "",
+    changed_paths: tuple[str, ...] = DEFAULT_PR_TEST_PATHS,
+) -> LaneFilter | None:
     """Parse one library cargo-test command's positive and skip filters."""
     cargo = command.find("cargo test")
     if cargo < 0:
@@ -472,7 +765,18 @@ def cargo_test_filter(command: str) -> LaneFilter | None:
             positives.append(token)
         index += 1
 
-    return LaneFilter(tuple(positives), tuple(skips), exact)
+    return LaneFilter(
+        tuple(positives),
+        tuple(skips),
+        exact,
+        command,
+        provenance,
+        changed_paths,
+    )
+
+
+def load_pr_lane_manifest(path: Path) -> PrLaneManifest:
+    return provenance.load_pr_lane_manifest(path, cargo_test_filter)
 
 
 def discover_lane_filters(repo_root: Path) -> tuple[LaneFilter, ...]:
@@ -526,6 +830,37 @@ def uncovered_modules(
         for module, test_names in inventory.items()
         if not any(lane.fully_selects(module, test_names) for lane in active)
     }
+
+
+resolve_candidate_commit = provenance.resolve_commit
+changed_paths = provenance.changed_paths
+source_tree_at_commit = provenance.source_tree_at_commit
+changed_tests_between = provenance.changed_tests_between
+ensure_non_vacuous_filters = provenance.ensure_non_vacuous_filters
+
+
+def verify_pr_lane_manifest(
+    repo_root: Path, manifest_path: Path
+) -> PrLaneManifest:
+    return provenance.verify_pr_lane_manifest(
+        repo_root, manifest_path, cargo_test_filter, just_recipe_commands
+    )
+
+
+def check_pr_candidate(
+    repo_root: Path,
+    base_sha: str,
+    *,
+    manifest_path: Path | None = None,
+) -> CheckResult:
+    return provenance.check_pr_candidate(
+        repo_root,
+        base_sha,
+        discover_source_inventory=discover_source_inventory,
+        cargo_test_filter=cargo_test_filter,
+        just_recipe_commands=just_recipe_commands,
+        manifest_path=manifest_path,
+    )
 
 
 def parse_baseline(text: str, source: str) -> set[str]:
@@ -604,11 +939,23 @@ def check(
     *,
     reference_label: str = "reference snapshot",
     emit_success: bool = True,
+    base_sha: str | None = None,
 ) -> int:
-    inventory = discover_test_inventory(repo_root)
+    source_inventory = discover_source_inventory(repo_root)
+    inventory = source_inventory.tests_by_module
     lanes = discover_lane_filters(repo_root)
     current = uncovered_modules(inventory, lanes)
     baseline = load_baseline(baseline_path)
+
+    vacuous = ensure_non_vacuous_filters(lanes, source_inventory)
+    if vacuous:
+        print(
+            f"FAIL: {len(vacuous)} curated cargo-test filter(s) select zero tests.",
+            file=sys.stderr,
+        )
+        for failure in vacuous:
+            print(f"  - {failure}", file=sys.stderr)
+        return 1
 
     growth = baseline_growth(baseline, reference_baseline)
     if growth:
@@ -646,15 +993,36 @@ def check(
         )
         return 1
 
+    pr_result = None
+    if base_sha is not None:
+        pr_result = check_pr_candidate(repo_root, base_sha)
+        if pr_result.failures:
+            print(
+                f"FAIL: PR test-lane provenance: {len(pr_result.failures)} violation(s).",
+                file=sys.stderr,
+            )
+            for failure in pr_result.failures:
+                print(f"  - {failure}", file=sys.stderr)
+            return 1
+        if emit_success:
+            for changed in pr_result.changed_tests:
+                owners = ", ".join(pr_result.coverage[changed.name])
+                print(f"PR-COVERED: {changed.change} {changed.name} -> {owners}")
+
     if emit_success:
         removed = len(reference_baseline - baseline)
+        pr_suffix = (
+            f"; {len(pr_result.changed_tests)} changed test(s) have PR provenance"
+            if pr_result is not None
+            else ""
+        )
         print(
             f"OK: {len(inventory)} logical Rust cfg(test) modules and "
             f"{sum(map(len, inventory.values()))} test function(s) inventoried; "
             f"{len(current)} uncovered module(s) exactly match the candidate "
             f"baseline, which removed {removed} debt entr"
             f"{'y' if removed == 1 else 'ies'} from {reference_label}; "
-            f"{len(lanes)} curated cargo-test invocation(s)."
+            f"{len(lanes)} curated cargo-test invocation(s){pr_suffix}."
         )
     return 0
 
@@ -664,6 +1032,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--baseline", type=Path, default=None)
     parser.add_argument("--baseline-ref", required=True)
+    parser.add_argument(
+        "--base-sha",
+        help="explicit immutable PR base commit for changed-test provenance",
+    )
     args = parser.parse_args(argv)
     repo_root = args.repo_root.resolve()
     baseline = args.baseline.resolve() if args.baseline else repo_root / BASELINE_REL
@@ -676,6 +1048,7 @@ def main(argv: list[str] | None = None) -> int:
             baseline,
             reference_baseline,
             reference_label=f"commit {reference_sha}",
+            base_sha=args.base_sha,
         )
     except (OSError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
