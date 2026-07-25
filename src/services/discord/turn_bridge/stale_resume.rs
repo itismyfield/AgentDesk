@@ -107,11 +107,12 @@ pub(super) fn output_file_has_stale_resume_error_after_offset(
         })
 }
 
-pub(super) fn stream_error_has_stale_resume_error(message: &str, stderr: &str) -> bool {
-    message
-        .lines()
-        .chain(stderr.lines())
-        .any(is_direct_stale_resume_error_envelope)
+pub(super) fn stream_error_has_stale_resume_error(message: &str, _stderr: &str) -> bool {
+    // StreamMessage::Error.message is either the parsed provider result payload
+    // or a local closed-form transport error. stderr is raw child-process output
+    // and has no stable structured envelope; admitting timestamp/level prefixes
+    // here would recreate substring false positives from quoted child failures.
+    message.lines().any(is_direct_stale_resume_error_envelope)
 }
 
 pub(super) fn stream_error_requires_terminal_session_reset(message: &str, stderr: &str) -> bool {
@@ -232,11 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_error_helpers_compose_message_and_stderr() {
-        assert!(stream_error_has_stale_resume_error(
-            "",
-            "could not find session matching the resume target"
-        ));
+    fn stream_error_uses_structured_message_and_ignores_raw_stderr() {
         assert!(stream_error_has_stale_resume_error(
             "Error: No conversation found",
             ""
@@ -244,6 +241,10 @@ mod tests {
         assert!(!stream_error_has_stale_resume_error(
             "transport error",
             "tls handshake aborted"
+        ));
+        assert!(!stream_error_has_stale_resume_error(
+            "Process exited with code Some(1)",
+            "2026-07-25T12:34:56Z ERROR Error: No conversation found"
         ));
         assert!(!stream_error_has_stale_resume_error(
             "Error: child failed: No conversation found with session ID abc",

@@ -417,6 +417,25 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     let result_str = extract_result_error_text(&val);
+                    if is_error {
+                        let overload = detect_structured_provider_overload(&val)
+                            .map(TerminalAbortDiagnosis::ProviderOverload);
+                        let auth = is_auth_error_message(&result_str)
+                            .then_some(TerminalAbortDiagnosis::ProviderAuthenticationFailed);
+                        let prompt_too_long = is_prompt_too_long_message(&result_str)
+                            .then_some(TerminalAbortDiagnosis::PromptTooLong);
+                        outcome.terminal_diagnosis = prefer_watcher_terminal_diagnosis(
+                            prefer_watcher_terminal_diagnosis(prompt_too_long, auth),
+                            overload,
+                        );
+                        if let Some(diagnosis) = outcome.terminal_diagnosis {
+                            outcome.terminal_kind = Some(diagnosis.terminal_kind());
+                        }
+                    }
+                    let transcript_result = outcome
+                        .terminal_diagnosis
+                        .map(|diagnosis| diagnosis.public_reason().to_string())
+                        .unwrap_or_else(|| result_str.clone());
                     push_transcript_event(
                         &mut tool_state.transcript_events,
                         SessionTranscriptEvent {
@@ -426,48 +445,26 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
                                 SessionTranscriptEventKind::Result
                             },
                             tool_name: None,
-                            summary: Some(if result_str.trim().is_empty() {
+                            summary: Some(if transcript_result.trim().is_empty() {
                                 if is_error {
                                     "error".to_string()
                                 } else {
                                     "completed".to_string()
                                 }
                             } else {
-                                truncate_str(&result_str, 120).to_string()
+                                truncate_str(&transcript_result, 120).to_string()
                             }),
-                            content: result_str.clone(),
+                            content: transcript_result,
                             status: Some(if is_error { "error" } else { "success" }.to_string()),
                             is_error,
                         },
                     );
 
-                    if is_error {
-                        if is_prompt_too_long_message(&result_str) {
-                            outcome.is_prompt_too_long = true;
-                        }
-                        if is_auth_error_message(&result_str) {
-                            outcome.is_auth_error = true;
-                            outcome.terminal_kind = Some(WatcherTerminalKind::AuthError);
-                            outcome.auth_error_message.get_or_insert(result_str.clone());
-                        }
-                        if let Some(overload) = detect_structured_provider_overload(&val) {
-                            outcome.is_provider_overloaded = true;
-                            outcome.terminal_kind = Some(WatcherTerminalKind::ProviderOverload);
-                            outcome
-                                .provider_overload_message
-                                .get_or_insert(overload.display_reason);
-                        }
-                    }
-
                     // Use result text when streaming didn't capture the final response:
                     // 1. full_response is empty — no text was streamed at all
                     // 2. tools were used but no text was streamed after the last tool
                     //    — append result_str so earlier narration is preserved (#2749)
-                    if !outcome.is_prompt_too_long
-                        && !outcome.is_auth_error
-                        && !outcome.is_provider_overloaded
-                        && !result_str.is_empty()
-                    {
+                    if outcome.terminal_diagnosis.is_none() && !result_str.is_empty() {
                         if full_response.trim().is_empty() {
                             full_response.clear();
                             full_response.push_str(&result_str);
@@ -689,6 +686,7 @@ fn strip_leading_tui_response_chrome_in_place(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::discord::tmux_error_detect::ProviderOverloadReason;
     use crate::services::session_backend::StreamLineState;
 
     mod provider_output_guard_tests {
@@ -871,8 +869,10 @@ mod tests {
             process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
 
         assert!(outcome.found_result);
-        assert!(!outcome.is_provider_overloaded);
-        assert_eq!(outcome.provider_overload_message, None);
+        assert!(!matches!(
+            outcome.terminal_diagnosis,
+            Some(TerminalAbortDiagnosis::ProviderOverload(_))
+        ));
         assert_eq!(outcome.terminal_kind, Some(WatcherTerminalKind::HardResult));
     }
 
@@ -889,15 +889,21 @@ mod tests {
             process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
 
         assert!(!outcome.found_result);
-        assert!(!outcome.is_auth_error);
-        assert!(!outcome.is_provider_overloaded);
+        assert!(!matches!(
+            outcome.terminal_diagnosis,
+            Some(TerminalAbortDiagnosis::ProviderAuthenticationFailed)
+        ));
+        assert!(!matches!(
+            outcome.terminal_diagnosis,
+            Some(TerminalAbortDiagnosis::ProviderOverload(_))
+        ));
         assert_eq!(outcome.terminal_kind, None);
     }
 
     #[test]
-    fn auth_error_result_uses_typed_terminal_kind() {
+    fn auth_error_result_uses_closed_terminal_reason_in_persisted_transcript() {
         let mut buffer = concat!(
-            "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"result\":\"Please run /login\",\"session_id\":\"sess-auth\"}\n",
+            "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"result\":\"invalid api key sk-secret-material\",\"session_id\":\"sess-auth\"}\n",
         )
         .to_string();
         let mut state = StreamLineState::new();
@@ -908,8 +914,21 @@ mod tests {
             process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
 
         assert!(outcome.found_result);
-        assert!(outcome.is_auth_error);
+        assert!(matches!(
+            outcome.terminal_diagnosis,
+            Some(TerminalAbortDiagnosis::ProviderAuthenticationFailed)
+        ));
         assert_eq!(outcome.terminal_kind, Some(WatcherTerminalKind::AuthError));
+        let terminal = tool_state
+            .transcript_events
+            .last()
+            .expect("terminal transcript event");
+        assert_eq!(
+            terminal.summary.as_deref(),
+            Some("provider_authentication_failed")
+        );
+        assert_eq!(terminal.content, "provider_authentication_failed");
+        assert!(!format!("{terminal:?}").contains("sk-secret-material"));
     }
 
     #[test]
@@ -926,15 +945,71 @@ mod tests {
             process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
 
         assert!(outcome.found_result);
-        assert!(outcome.is_provider_overloaded);
         assert_eq!(
-            outcome.provider_overload_message.as_deref(),
-            Some("Provider HTTP 429 capacity response")
+            outcome.terminal_diagnosis,
+            Some(TerminalAbortDiagnosis::ProviderOverload(
+                ProviderOverloadReason::HttpStatus(429)
+            ))
         );
         assert_eq!(
             outcome.terminal_kind,
             Some(WatcherTerminalKind::ProviderOverload)
         );
+    }
+
+    #[test]
+    fn structured_overload_wins_over_joined_auth_text_in_any_error_order() {
+        for errors in [
+            vec![
+                "invalid api key sk-secret-material",
+                "[API Error: 529 overloaded_error]",
+            ],
+            vec![
+                "[API Error: 529 overloaded_error]",
+                "invalid api key sk-secret-material",
+            ],
+        ] {
+            let mut buffer = format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "result",
+                    "subtype": "error_during_execution",
+                    "is_error": true,
+                    "errors": errors,
+                    "session_id": "sess-mixed"
+                })
+            );
+            let mut state = StreamLineState::new();
+            let mut full_response = String::new();
+            let mut tool_state = WatcherToolState::new();
+
+            let outcome =
+                process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+            assert_eq!(
+                outcome.terminal_diagnosis,
+                Some(TerminalAbortDiagnosis::ProviderOverload(
+                    ProviderOverloadReason::HttpStatus(529)
+                ))
+            );
+            assert_eq!(
+                outcome.terminal_kind,
+                Some(WatcherTerminalKind::ProviderOverload)
+            );
+            assert!(
+                !outcome
+                    .terminal_diagnosis
+                    .expect("typed terminal diagnosis")
+                    .public_reason()
+                    .contains("sk-secret-material")
+            );
+            let terminal = tool_state
+                .transcript_events
+                .last()
+                .expect("terminal transcript event");
+            assert_eq!(terminal.content, "provider_http_529_capacity_response");
+            assert!(!format!("{terminal:?}").contains("sk-secret-material"));
+        }
     }
 
     #[test]

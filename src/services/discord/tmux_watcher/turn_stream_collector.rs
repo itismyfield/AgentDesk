@@ -128,11 +128,7 @@ pub(super) struct CollectedTurnStream {
     pub(super) found_result: bool,
     pub(super) terminal_kind: Option<WatcherTerminalKind>,
     pub(super) terminal_evidence_offset: Option<u64>,
-    pub(super) is_prompt_too_long: bool,
-    pub(super) is_auth_error: bool,
-    pub(super) auth_error_message: Option<String>,
-    pub(super) is_provider_overloaded: bool,
-    pub(super) provider_overload_message: Option<String>,
+    pub(super) terminal_diagnosis: Option<TerminalAbortDiagnosis>,
     pub(super) stale_resume_detected: bool,
     pub(super) task_notification_kind: Option<TaskNotificationKind>,
     pub(super) task_notification_context:
@@ -502,11 +498,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
     } else {
         None
     };
-    let mut is_prompt_too_long = initial_outcome.is_prompt_too_long;
-    let mut is_auth_error = initial_outcome.is_auth_error;
-    let mut auth_error_message = initial_outcome.auth_error_message;
-    let mut is_provider_overloaded = initial_outcome.is_provider_overloaded;
-    let mut provider_overload_message = initial_outcome.provider_overload_message;
+    let mut terminal_diagnosis = initial_outcome.terminal_diagnosis;
     let mut stale_resume_detected = initial_outcome.stale_resume_detected;
     let mut auto_compaction_lifecycle_attempted = false;
     let mut task_notification_kind = stream_seed.task_notification_kind;
@@ -793,13 +785,13 @@ pub(super) async fn collect_turn_stream_until_terminal(
                             .terminal_evidence_offset
                             .or(terminal_evidence_offset);
                     }
-                    is_prompt_too_long = is_prompt_too_long || outcome.is_prompt_too_long;
-                    is_auth_error = is_auth_error || outcome.is_auth_error;
-                    if auth_error_message.is_none() {
-                        auth_error_message = outcome.auth_error_message;
+                    terminal_diagnosis = prefer_watcher_terminal_diagnosis(
+                        terminal_diagnosis,
+                        outcome.terminal_diagnosis,
+                    );
+                    if let Some(diagnosis) = terminal_diagnosis {
+                        terminal_kind = Some(diagnosis.terminal_kind());
                     }
-                    is_provider_overloaded =
-                        is_provider_overloaded || outcome.is_provider_overloaded;
                     stale_resume_detected = stale_resume_detected || outcome.stale_resume_detected;
                     if let Some(kind) = outcome.task_notification_kind {
                         task_notification_kind =
@@ -847,9 +839,6 @@ pub(super) async fn collect_turn_stream_until_terminal(
                                 hint
                             );
                         }
-                    }
-                    if provider_overload_message.is_none() {
-                        provider_overload_message = outcome.provider_overload_message;
                     }
                     if outcome.auto_compacted && !auto_compaction_lifecycle_attempted {
                         auto_compaction_lifecycle_attempted =
@@ -1144,11 +1133,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
         found_result,
         terminal_kind,
         terminal_evidence_offset,
-        is_prompt_too_long,
-        is_auth_error,
-        auth_error_message,
-        is_provider_overloaded,
-        provider_overload_message,
+        terminal_diagnosis,
         stale_resume_detected,
         task_notification_kind,
         task_notification_context,

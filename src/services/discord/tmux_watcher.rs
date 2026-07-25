@@ -574,11 +574,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             found_result,
             terminal_kind,
             terminal_evidence_offset,
-            is_prompt_too_long,
-            is_auth_error,
-            auth_error_message,
-            is_provider_overloaded,
-            provider_overload_message,
+            terminal_diagnosis,
             stale_resume_detected,
             task_notification_kind,
             task_notification_context,
@@ -610,9 +606,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 turn_is_external_input_for_session,
                 finish_mailbox_on_completion,
                 startup_inflight_snapshot,
-                is_prompt_too_long,
-                is_auth_error,
-                is_provider_overloaded,
+                terminal_diagnosis,
                 prompt_too_long_killed,
                 terminal_delivery_observed,
                 active_read_state,
@@ -663,11 +657,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 turn_data_start_offset,
                 current_offset,
                 response_sent_offset,
-                is_prompt_too_long,
-                is_auth_error,
-                auth_error_message: &auth_error_message,
-                is_provider_overloaded,
-                provider_overload_message: &provider_overload_message,
+                terminal_diagnosis,
             };
             let mut abort_exit_state = TerminalAbortExitState {
                 placeholder_from_restored_inflight: &mut placeholder_from_restored_inflight,
@@ -3394,7 +3384,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         now - ts > 300 // 5 min cooldown
                     });
             // DISABLED — token counting still unreliable
-            if false && pct >= ctx_cfg.compact_pct && !is_prompt_too_long && compact_cooldown_ok {
+            if false && pct >= ctx_cfg.compact_pct && compact_cooldown_ok {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
                     "  [{ts}] ⚡ [watcher] Auto-compact: {} at {pct}% ({tokens} tokens)",

@@ -46,34 +46,80 @@ pub(super) enum ProviderOverloadReason {
     ErrorCode(&'static str),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct DetectedProviderOverload {
-    pub(super) reason: ProviderOverloadReason,
-    pub(super) display_reason: String,
+impl ProviderOverloadReason {
+    pub(super) fn public_reason(self) -> &'static str {
+        match self {
+            Self::HttpStatus(429) => "provider_http_429_capacity_response",
+            Self::HttpStatus(529) => "provider_http_529_capacity_response",
+            Self::ErrorCode("overloaded_error") => "provider_capacity_error_overloaded_error",
+            _ => "provider_capacity_response",
+        }
+    }
 }
 
-fn detected_status(status: u64) -> Option<DetectedProviderOverload> {
-    let status = u16::try_from(status).ok()?;
-    Some(DetectedProviderOverload {
-        reason: ProviderOverloadReason::HttpStatus(status),
-        display_reason: format!("Provider HTTP {status} capacity response"),
-    })
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TerminalAbortDiagnosis {
+    PromptTooLong,
+    ProviderAuthenticationFailed,
+    ProviderOverload(ProviderOverloadReason),
 }
 
-fn detected_code(code: &str) -> Option<DetectedProviderOverload> {
-    let code = OVERLOAD_ERROR_CODES
+impl TerminalAbortDiagnosis {
+    pub(super) fn terminal_kind(self) -> super::WatcherTerminalKind {
+        match self {
+            Self::PromptTooLong => super::WatcherTerminalKind::PromptTooLong,
+            Self::ProviderAuthenticationFailed => super::WatcherTerminalKind::AuthError,
+            Self::ProviderOverload(_) => super::WatcherTerminalKind::ProviderOverload,
+        }
+    }
+
+    pub(super) fn public_reason(self) -> &'static str {
+        match self {
+            Self::PromptTooLong => "prompt_too_long",
+            Self::ProviderAuthenticationFailed => "provider_authentication_failed",
+            Self::ProviderOverload(reason) => reason.public_reason(),
+        }
+    }
+
+    fn precedence(self) -> u8 {
+        match self {
+            Self::PromptTooLong => 1,
+            Self::ProviderAuthenticationFailed => 2,
+            Self::ProviderOverload(_) => 3,
+        }
+    }
+}
+
+pub(super) fn prefer_watcher_terminal_diagnosis(
+    current: Option<TerminalAbortDiagnosis>,
+    candidate: Option<TerminalAbortDiagnosis>,
+) -> Option<TerminalAbortDiagnosis> {
+    match (current, candidate) {
+        (Some(current), Some(candidate)) if candidate.precedence() > current.precedence() => {
+            Some(candidate)
+        }
+        (Some(current), _) => Some(current),
+        (None, candidate) => candidate,
+    }
+}
+
+fn detected_status(status: u64) -> Option<ProviderOverloadReason> {
+    u16::try_from(status)
+        .ok()
+        .map(ProviderOverloadReason::HttpStatus)
+}
+
+fn detected_code(code: &str) -> Option<ProviderOverloadReason> {
+    OVERLOAD_ERROR_CODES
         .iter()
         .copied()
-        .find(|candidate| *candidate == code)?;
-    Some(DetectedProviderOverload {
-        reason: ProviderOverloadReason::ErrorCode(code),
-        display_reason: format!("Provider capacity error ({code})"),
-    })
+        .find(|candidate| *candidate == code)
+        .map(ProviderOverloadReason::ErrorCode)
 }
 
 pub(super) fn detect_structured_provider_overload(
     value: &serde_json::Value,
-) -> Option<DetectedProviderOverload> {
+) -> Option<ProviderOverloadReason> {
     if value.get("type").and_then(serde_json::Value::as_str) != Some("result") {
         return None;
     }
@@ -117,7 +163,7 @@ fn result_error_texts(value: &serde_json::Value) -> impl Iterator<Item = &str> {
         .chain(value.get("result").and_then(serde_json::Value::as_str))
 }
 
-fn detect_api_error_overload_envelope(text: &str) -> Option<DetectedProviderOverload> {
+fn detect_api_error_overload_envelope(text: &str) -> Option<ProviderOverloadReason> {
     let detail =
         crate::services::provider_error_transcript::single_api_error_envelope_detail(text)?;
     let lower = detail.to_ascii_lowercase();
@@ -156,8 +202,7 @@ fn structured_error_objects(
 #[cfg(test)]
 mod pure_tests {
     use super::{
-        DetectedProviderOverload, ProviderOverloadReason, detect_structured_provider_overload,
-        is_auth_error_message,
+        ProviderOverloadReason, detect_structured_provider_overload, is_auth_error_message,
     };
 
     #[test]
@@ -199,17 +244,11 @@ mod pure_tests {
         });
         assert_eq!(
             detect_structured_provider_overload(&claude),
-            Some(DetectedProviderOverload {
-                reason: ProviderOverloadReason::HttpStatus(529),
-                display_reason: "Provider HTTP 529 capacity response".to_string(),
-            })
+            Some(ProviderOverloadReason::HttpStatus(529))
         );
         assert_eq!(
             detect_structured_provider_overload(&wrapper),
-            Some(DetectedProviderOverload {
-                reason: ProviderOverloadReason::HttpStatus(429),
-                display_reason: "Provider HTTP 429 capacity response".to_string(),
-            })
+            Some(ProviderOverloadReason::HttpStatus(429))
         );
     }
 
@@ -244,9 +283,7 @@ mod pure_tests {
             "errors": ["[api error: 529 overloaded_error]"]
         });
         assert_eq!(
-            detect_structured_provider_overload(&value)
-                .as_ref()
-                .map(|detected| detected.reason),
+            detect_structured_provider_overload(&value),
             Some(ProviderOverloadReason::HttpStatus(529))
         );
     }

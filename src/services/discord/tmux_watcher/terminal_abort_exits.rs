@@ -12,89 +12,148 @@ pub(super) enum AbortExitOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TerminalAbortKind {
-    PromptTooLong,
-    AuthError,
-    ProviderOverload,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TerminalAbortDispatchAction {
     FailWithRetry,
     FailAuthExpired,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderOverloadPlanDecision {
+    MainOrchestration,
+    RetryScheduled,
+    RetryExhausted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalAbortDisposition {
+    PreserveMainWatcher,
+    ResetDisposableSession,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TerminalAbortPlan {
-    kill_session: bool,
-    preserve_watcher: bool,
+    diagnosis: TerminalAbortDiagnosis,
+    disposition: TerminalAbortDisposition,
     dispatch_action: Option<TerminalAbortDispatchAction>,
+}
+
+impl TerminalAbortPlan {
+    fn kills_session(self) -> bool {
+        matches!(
+            self.disposition,
+            TerminalAbortDisposition::ResetDisposableSession
+        )
+    }
+
+    fn exit_outcome(self) -> AbortExitOutcome {
+        match self.disposition {
+            TerminalAbortDisposition::PreserveMainWatcher => AbortExitOutcome::PreserveWatcher,
+            TerminalAbortDisposition::ResetDisposableSession => {
+                AbortExitOutcome::ContinueWatcherLoop
+            }
+        }
+    }
 }
 
 fn terminal_abort_plan(
     tmux_session_name: &str,
     channel_id: serenity::ChannelId,
-    kind: TerminalAbortKind,
+    diagnosis: TerminalAbortDiagnosis,
 ) -> TerminalAbortPlan {
     let main_orchestration_session =
         watcher_session_is_main_orchestration(tmux_session_name, channel_id);
-    let dispatch_action = match kind {
-        TerminalAbortKind::PromptTooLong => Some(TerminalAbortDispatchAction::FailWithRetry),
-        TerminalAbortKind::AuthError => Some(TerminalAbortDispatchAction::FailAuthExpired),
-        TerminalAbortKind::ProviderOverload if main_orchestration_session => {
+    let dispatch_action = match diagnosis {
+        TerminalAbortDiagnosis::PromptTooLong => Some(TerminalAbortDispatchAction::FailWithRetry),
+        TerminalAbortDiagnosis::ProviderAuthenticationFailed => {
+            Some(TerminalAbortDispatchAction::FailAuthExpired)
+        }
+        TerminalAbortDiagnosis::ProviderOverload(_) if main_orchestration_session => {
             Some(TerminalAbortDispatchAction::FailWithRetry)
         }
-        TerminalAbortKind::ProviderOverload => None,
+        TerminalAbortDiagnosis::ProviderOverload(_) => None,
     };
     TerminalAbortPlan {
-        kill_session: !main_orchestration_session,
-        preserve_watcher: main_orchestration_session,
+        diagnosis,
+        disposition: if main_orchestration_session {
+            TerminalAbortDisposition::PreserveMainWatcher
+        } else {
+            TerminalAbortDisposition::ResetDisposableSession
+        },
         dispatch_action,
     }
 }
 
-async fn execute_terminal_abort_plan_with<F, Fut, G, GFut>(
+fn terminal_overload_abort_plan(
+    tmux_session_name: &str,
+    channel_id: serenity::ChannelId,
+    diagnosis: TerminalAbortDiagnosis,
+    decision: ProviderOverloadPlanDecision,
+) -> TerminalAbortPlan {
+    let mut plan = terminal_abort_plan(tmux_session_name, channel_id, diagnosis);
+    plan.dispatch_action = match decision {
+        ProviderOverloadPlanDecision::MainOrchestration
+        | ProviderOverloadPlanDecision::RetryExhausted => {
+            Some(TerminalAbortDispatchAction::FailWithRetry)
+        }
+        ProviderOverloadPlanDecision::RetryScheduled => None,
+    };
+    plan
+}
+
+async fn execute_terminal_abort_plan_with<F, Fut, G, GFut, N, NFut, E>(
     plan: TerminalAbortPlan,
     execute_dispatch: F,
     finalize_turn: G,
+    project_notification: N,
 ) -> AbortExitOutcome
 where
-    F: FnOnce(TerminalAbortDispatchAction) -> Fut,
+    F: FnOnce(TerminalAbortDispatchAction, &'static str) -> Fut,
     Fut: std::future::Future<Output = ()>,
     G: FnOnce() -> GFut,
     GFut: std::future::Future<Output = ()>,
+    N: FnOnce() -> NFut,
+    NFut: std::future::Future<Output = Result<(), E>>,
+    E: std::fmt::Display,
 {
     if let Some(action) = plan.dispatch_action {
-        execute_dispatch(action).await;
+        execute_dispatch(action, plan.diagnosis.public_reason()).await;
     }
     finalize_turn().await;
-    if plan.preserve_watcher {
-        AbortExitOutcome::PreserveWatcher
-    } else {
-        AbortExitOutcome::ContinueWatcherLoop
+    if let Err(error) = project_notification().await {
+        let error = crate::utils::redact::redact_known_secrets(&error.to_string());
+        let error = crate::services::discord::formatting::redact_sensitive_for_placeholder(&error);
+        tracing::warn!(
+            diagnosis = %plan.diagnosis.public_reason(),
+            error,
+            "watcher terminal notification failed after lifecycle closure"
+        );
     }
+    plan.exit_outcome()
 }
 
-async fn execute_terminal_abort_plan<F, Fut>(
+async fn execute_terminal_abort_plan<F, Fut, N, NFut, E>(
     plan: TerminalAbortPlan,
     api_port: u16,
     dispatch_id: Option<&str>,
-    failure_text: &str,
     finalize_turn: F,
+    project_notification: N,
 ) -> AbortExitOutcome
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = ()>,
+    N: FnOnce() -> NFut,
+    NFut: std::future::Future<Output = Result<(), E>>,
+    E: std::fmt::Display,
 {
     execute_terminal_abort_plan_with(
         plan,
-        |action| async move {
+        |action, reason| async move {
             match action {
                 TerminalAbortDispatchAction::FailWithRetry => {
                     crate::services::discord::turn_bridge::fail_dispatch_with_retry(
                         api_port,
                         dispatch_id,
-                        failure_text,
+                        &reason,
                     )
                     .await;
                 }
@@ -102,15 +161,36 @@ where
                     crate::services::discord::turn_bridge::fail_dispatch_auth_expired(
                         api_port,
                         dispatch_id,
-                        failure_text,
+                        &reason,
                     )
                     .await;
                 }
             }
         },
         finalize_turn,
+        project_notification,
     )
     .await
+}
+
+async fn project_terminal_abort_notice(
+    http: &serenity::Http,
+    shared: &Arc<SharedData>,
+    channel_id: serenity::ChannelId,
+    placeholder_msg_id: Option<serenity::MessageId>,
+    notice: &str,
+) -> serenity::Result<()> {
+    match placeholder_msg_id {
+        Some(msg_id) => {
+            rate_limit_wait(shared, channel_id).await;
+            crate::services::discord::http::edit_channel_message(http, channel_id, msg_id, notice)
+                .await
+                .map(|_| ())
+        }
+        None => crate::services::discord::http::send_channel_message(http, channel_id, notice)
+            .await
+            .map(|_| ()),
+    }
 }
 
 fn should_run_post_stream_exit(outcome: AbortExitOutcome) -> bool {
@@ -135,11 +215,7 @@ pub(super) struct TerminalAbortExitLocals<'a> {
     pub(super) turn_data_start_offset: u64,
     pub(super) current_offset: u64,
     pub(super) response_sent_offset: usize,
-    pub(super) is_prompt_too_long: bool,
-    pub(super) is_auth_error: bool,
-    pub(super) auth_error_message: &'a Option<String>,
-    pub(super) is_provider_overloaded: bool,
-    pub(super) provider_overload_message: &'a Option<String>,
+    pub(super) terminal_diagnosis: Option<TerminalAbortDiagnosis>,
 }
 
 pub(super) struct TerminalAbortExitState<'a> {
@@ -228,17 +304,17 @@ pub(super) async fn handle_terminal_abort_exits(
         return AbortExitOutcome::ContinueWatcherLoop;
     }
 
+    let Some(terminal_diagnosis) = locals.terminal_diagnosis else {
+        return AbortExitOutcome::Fallthrough;
+    };
+
     // Handle prompt-too-long: kill disposable thread sessions so the next message
     // creates a fresh one; preserve the main orchestration session and watcher.
-    if locals.is_prompt_too_long {
+    if matches!(terminal_diagnosis, TerminalAbortDiagnosis::PromptTooLong) {
         clear_provider_overload_retry_state(channel_id);
         let ts = chrono::Local::now().format("%H:%M:%S");
-        let plan = terminal_abort_plan(
-            tmux_session_name,
-            channel_id,
-            TerminalAbortKind::PromptTooLong,
-        );
-        *state.prompt_too_long_killed = plan.kill_session;
+        let plan = terminal_abort_plan(tmux_session_name, channel_id, terminal_diagnosis);
+        *state.prompt_too_long_killed = plan.kills_session();
         let inflight_state = crate::services::discord::inflight::load_inflight_state(
             watcher_provider,
             channel_id.get(),
@@ -266,7 +342,7 @@ pub(super) async fn handle_terminal_abort_exits(
                 "watcher blocked automatic kill of main orchestration session; cleared provider session and continued watcher"
             );
         }
-        if plan.kill_session {
+        if plan.kills_session() {
             tracing::info!(
                 "  [{ts}] 👁 Prompt too long detected in watcher for {tmux_session_name}, killing session"
             );
@@ -304,25 +380,10 @@ pub(super) async fn handle_terminal_abort_exits(
         } else {
             "⚠️ 컨텍스트 한도 초과로 세션을 초기화했습니다. 다음 메시지부터 새 세션으로 처리됩니다."
         };
-        match locals.placeholder_msg_id {
-            Some(msg_id) => {
-                rate_limit_wait(shared, channel_id).await;
-                let _ = crate::services::discord::http::edit_channel_message(
-                    http, channel_id, msg_id, notice,
-                )
-                .await;
-            }
-            None => {
-                let _ =
-                    crate::services::discord::http::send_channel_message(http, channel_id, notice)
-                        .await;
-            }
-        }
         let outcome = execute_terminal_abort_plan(
             plan,
             shared.api_port,
             dispatch_id.as_deref(),
-            "prompt too long; provider session cleared for a fresh retry",
             || async {
                 finalize_pinned_watcher_exit(
                     shared,
@@ -332,6 +393,16 @@ pub(super) async fn handle_terminal_abort_exits(
                     "watcher_prompt_too_long_exit",
                 )
                 .await;
+            },
+            || async {
+                project_terminal_abort_notice(
+                    http,
+                    shared,
+                    channel_id,
+                    locals.placeholder_msg_id,
+                    notice,
+                )
+                .await
             },
         )
         .await;
@@ -350,9 +421,12 @@ pub(super) async fn handle_terminal_abort_exits(
 
     // Handle auth error: kill disposable sessions and notify the user; preserve
     // main orchestration sessions and their watcher.
-    if locals.is_auth_error {
+    if matches!(
+        terminal_diagnosis,
+        TerminalAbortDiagnosis::ProviderAuthenticationFailed
+    ) {
         clear_provider_overload_retry_state(channel_id);
-        let plan = terminal_abort_plan(tmux_session_name, channel_id, TerminalAbortKind::AuthError);
+        let plan = terminal_abort_plan(tmux_session_name, channel_id, terminal_diagnosis);
         let inflight_state = crate::services::discord::inflight::load_inflight_state(
             watcher_provider,
             channel_id.get(),
@@ -362,20 +436,15 @@ pub(super) async fn handle_terminal_abort_exits(
             .and_then(|state| state.session_id.as_deref());
         let dispatch_id =
             resolve_watcher_dispatch_id(shared, channel_id, inflight_state.as_ref()).await;
-        let auth_detail = locals
-            .auth_error_message
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("authentication expired");
-        let ts = chrono::Local::now().format("%H:%M:%S");
+        let public_reason = plan.diagnosis.public_reason();
         tracing::info!(
-            "  [{ts}] 👁 Auth error detected in watcher for {tmux_session_name}: {}",
-            truncate_str(auth_detail, 300)
+            tmux_session = %tmux_session_name,
+            diagnosis = %public_reason,
+            "watcher detected provider authentication failure"
         );
         // This legacy flag suppresses the later pane-death handoff only when
         // this branch actually killed a disposable session.
-        *state.prompt_too_long_killed = plan.kill_session;
+        *state.prompt_too_long_killed = plan.kills_session();
 
         clear_provider_session_for_retry(
             shared,
@@ -393,7 +462,7 @@ pub(super) async fn handle_terminal_abort_exits(
                 "watcher blocked automatic kill of main orchestration session; continuing watcher"
             );
         }
-        if plan.kill_session {
+        if plan.kills_session() {
             write_watcher_forced_kill_log(
                 shared,
                 channel_id,
@@ -424,46 +493,10 @@ pub(super) async fn handle_terminal_abort_exits(
         }
 
         let notice = if main_orchestration_session {
-            format!(
-                "⚠️ 인증이 만료되어 현재 dispatch를 실패 처리했습니다. 메인 오케스트레이션 세션은 보존하고 watcher 감시를 계속합니다.\n관리자가 CLI에서 재인증(`/login`)을 완료한 후 다시 디스패치해주세요.\n\n사유: {}",
-                truncate_str(auth_detail, 300)
-            )
+            "⚠️ 인증이 만료되어 현재 dispatch를 실패 처리했습니다. 메인 오케스트레이션 세션은 보존하고 watcher 감시를 계속합니다.\n관리자가 CLI에서 재인증(`/login`)을 완료한 후 다시 디스패치해주세요.\n\n사유: provider_authentication_failed"
         } else {
-            format!(
-                "⚠️ 인증이 만료되어 현재 dispatch를 실패 처리했습니다. 세션을 종료합니다.\n관리자가 CLI에서 재인증(`/login`)을 완료한 후 다시 디스패치해주세요.\n\n사유: {}",
-                truncate_str(auth_detail, 300)
-            )
+            "⚠️ 인증이 만료되어 현재 dispatch를 실패 처리했습니다. 세션을 종료합니다.\n관리자가 CLI에서 재인증(`/login`)을 완료한 후 다시 디스패치해주세요.\n\n사유: provider_authentication_failed"
         };
-        let notice_ok = match locals.placeholder_msg_id {
-            Some(msg_id) => {
-                rate_limit_wait(shared, channel_id).await;
-                crate::services::discord::http::edit_channel_message(
-                    http, channel_id, msg_id, &notice,
-                )
-                .await
-                .is_ok()
-            }
-            None => crate::services::discord::http::send_channel_message(http, channel_id, &notice)
-                .await
-                .is_ok(),
-        };
-        if !notice_ok {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                "  [{ts}] ⚠ watcher: auth error notice failed before dispatch failure — preserving inflight for retry"
-            );
-            finish_monitor_auto_turn_if_claimed(
-                shared,
-                watcher_provider,
-                channel_id,
-                &mut *state.monitor_auto_turn_claimed,
-                &mut *state.monitor_auto_turn_finished,
-                &mut *state.monitor_auto_turn_synthetic_msg_id,
-                &mut *state.monitor_auto_turn_ledger_generation,
-            )
-            .await;
-            return AbortExitOutcome::ContinueWatcherLoop;
-        }
         // #897 round-3 Medium: skip reaction work for `rebind_origin`
         // inflights — their `user_msg_id=0` identifies no real Discord
         // message so issuing reactions against it just produces API
@@ -484,15 +517,10 @@ pub(super) async fn handle_terminal_abort_exits(
             )
             .await;
         }
-        let failure_text = format!(
-            "authentication expired; re-authentication required: {}",
-            truncate_str(auth_detail, 300)
-        );
         let outcome = execute_terminal_abort_plan(
             plan,
             shared.api_port,
             dispatch_id.as_deref(),
-            &failure_text,
             || async {
                 finalize_pinned_watcher_exit(
                     shared,
@@ -502,6 +530,16 @@ pub(super) async fn handle_terminal_abort_exits(
                     "watcher_auth_error_exit",
                 )
                 .await;
+            },
+            || async {
+                project_terminal_abort_notice(
+                    http,
+                    shared,
+                    channel_id,
+                    locals.placeholder_msg_id,
+                    notice,
+                )
+                .await
             },
         )
         .await;
@@ -518,18 +556,8 @@ pub(super) async fn handle_terminal_abort_exits(
         return outcome;
     }
 
-    if locals.is_provider_overloaded {
-        let plan = terminal_abort_plan(
-            tmux_session_name,
-            channel_id,
-            TerminalAbortKind::ProviderOverload,
-        );
-        let overload_message = locals
-            .provider_overload_message
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("provider overload detected");
+    if let TerminalAbortDiagnosis::ProviderOverload(reason) = terminal_diagnosis {
+        let overload_message = reason.public_reason();
         let inflight_state = crate::services::discord::inflight::load_inflight_state(
             watcher_provider,
             channel_id.get(),
@@ -548,10 +576,23 @@ pub(super) async fn handle_terminal_abort_exits(
             .as_deref()
             .map(|text| record_provider_overload_retry(channel_id, text))
             .unwrap_or(ProviderOverloadDecision::Exhausted);
+        let plan_decision = if main_orchestration_session {
+            ProviderOverloadPlanDecision::MainOrchestration
+        } else if matches!(decision, ProviderOverloadDecision::Exhausted) {
+            ProviderOverloadPlanDecision::RetryExhausted
+        } else {
+            ProviderOverloadPlanDecision::RetryScheduled
+        };
+        let plan = terminal_overload_abort_plan(
+            tmux_session_name,
+            channel_id,
+            terminal_diagnosis,
+            plan_decision,
+        );
         let retry_notice = if main_orchestration_session {
             format!(
                 "⚠️ 모델 capacity 상태를 감지했지만 메인 오케스트레이션 세션은 보존했습니다. 현재 turn을 실패 처리하고 watcher 감시를 계속합니다.\n\n사유: {}",
-                truncate_str(overload_message, 300)
+                truncate_str(&overload_message, 300)
             )
         } else {
             match &decision {
@@ -563,7 +604,7 @@ pub(super) async fn handle_terminal_abort_exits(
                 ),
                 ProviderOverloadDecision::Exhausted => format!(
                     "⚠️ 모델 capacity 상태가 계속되어 자동 재시도를 중단했습니다. 잠시 후 다시 시도해 주세요.\n\n사유: {}",
-                    truncate_str(overload_message, 300)
+                    truncate_str(&overload_message, 300)
                 ),
             }
         };
@@ -574,7 +615,7 @@ pub(super) async fn handle_terminal_abort_exits(
             tmux_session_name,
             overload_message
         );
-        *state.prompt_too_long_killed = plan.kill_session;
+        *state.prompt_too_long_killed = plan.kills_session();
 
         clear_provider_session_for_retry(
             shared,
@@ -593,13 +634,13 @@ pub(super) async fn handle_terminal_abort_exits(
                 "watcher blocked automatic kill of main orchestration session; continuing watcher"
             );
         }
-        if plan.kill_session {
+        if plan.kills_session() {
             write_watcher_forced_kill_log(
                 shared,
                 channel_id,
                 tmux_session_name,
                 locals.current_offset,
-                overload_message,
+                &overload_message,
             );
             let sess = (*tmux_session_name).clone();
             let termination_reason = match &decision {
@@ -623,50 +664,6 @@ pub(super) async fn handle_terminal_abort_exits(
                 }),
             )
             .await;
-        }
-
-        let notice_ok = match locals.placeholder_msg_id {
-            Some(msg_id) => {
-                rate_limit_wait(shared, channel_id).await;
-                crate::services::discord::http::edit_channel_message(
-                    http,
-                    channel_id,
-                    msg_id,
-                    &retry_notice,
-                )
-                .await
-                .is_ok()
-            }
-            None => crate::services::discord::http::send_channel_message(
-                http,
-                channel_id,
-                &retry_notice,
-            )
-            .await
-            .is_ok(),
-        };
-        if !notice_ok {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            if main_orchestration_session {
-                tracing::warn!(
-                    "  [{ts}] ⚠ watcher: provider overload notice failed; still failing the active dispatch before releasing the protected turn"
-                );
-            } else {
-                tracing::warn!(
-                    "  [{ts}] ⚠ watcher: provider overload notice failed before retry/failure handling — preserving inflight for retry"
-                );
-                finish_monitor_auto_turn_if_claimed(
-                    shared,
-                    watcher_provider,
-                    channel_id,
-                    &mut *state.monitor_auto_turn_claimed,
-                    &mut *state.monitor_auto_turn_finished,
-                    &mut *state.monitor_auto_turn_synthetic_msg_id,
-                    &mut *state.monitor_auto_turn_ledger_generation,
-                )
-                .await;
-                return AbortExitOutcome::ContinueWatcherLoop;
-            }
         }
 
         // #897 round-3 Medium: skip reaction + retry scheduling for
@@ -699,39 +696,35 @@ pub(super) async fn handle_terminal_abort_exits(
                 .await;
             }
         }
-        let failure_text = format!(
-            "provider overloaded; main orchestration session preserved: {}",
-            truncate_str(overload_message, 300)
-        );
-        let outcome = if plan.dispatch_action.is_some() {
-            let outcome = execute_terminal_abort_plan(
-                plan,
-                shared.api_port,
-                dispatch_id.as_deref(),
-                &failure_text,
-                || async {
-                    finalize_pinned_watcher_exit(
-                        shared,
-                        watcher_provider,
-                        channel_id,
-                        inflight_state.as_ref(),
-                        "watcher_provider_overload_exit",
-                    )
-                    .await;
-                },
-            )
-            .await;
+        let outcome = execute_terminal_abort_plan(
+            plan,
+            shared.api_port,
+            dispatch_id.as_deref(),
+            || async {
+                finalize_pinned_watcher_exit(
+                    shared,
+                    watcher_provider,
+                    channel_id,
+                    inflight_state.as_ref(),
+                    "watcher_provider_overload_exit",
+                )
+                .await;
+            },
+            || async {
+                project_terminal_abort_notice(
+                    http,
+                    shared,
+                    channel_id,
+                    locals.placeholder_msg_id,
+                    &retry_notice,
+                )
+                .await
+            },
+        )
+        .await;
+        if plan.dispatch_action.is_some() {
             clear_provider_overload_retry_state(channel_id);
-            outcome
         } else {
-            finalize_pinned_watcher_exit(
-                shared,
-                watcher_provider,
-                channel_id,
-                inflight_state.as_ref(),
-                "watcher_provider_overload_exit",
-            )
-            .await;
             match decision {
                 ProviderOverloadDecision::Retry {
                     attempt,
@@ -765,21 +758,10 @@ pub(super) async fn handle_terminal_abort_exits(
                     }
                 }
                 ProviderOverloadDecision::Exhausted => {
-                    let failure_text = format!(
-                        "provider overloaded after {} auto-retries: {}",
-                        PROVIDER_OVERLOAD_MAX_RETRIES,
-                        truncate_str(overload_message, 300)
-                    );
-                    crate::services::discord::turn_bridge::fail_dispatch_with_retry(
-                        shared.api_port,
-                        dispatch_id.as_deref(),
-                        &failure_text,
-                    )
-                    .await;
+                    clear_provider_overload_retry_state(channel_id);
                 }
             }
-            AbortExitOutcome::ContinueWatcherLoop
-        };
+        }
         finish_monitor_auto_turn_if_claimed(
             shared,
             watcher_provider,
@@ -799,38 +781,127 @@ pub(super) async fn handle_terminal_abort_exits(
 #[cfg(test)]
 mod tests {
     use super::{
-        AbortExitOutcome, TerminalAbortDispatchAction, TerminalAbortKind,
-        execute_terminal_abort_plan_with, should_run_post_stream_exit, terminal_abort_plan,
+        AbortExitOutcome, ProviderOverloadPlanDecision, TerminalAbortDispatchAction,
+        execute_terminal_abort_plan_with, project_terminal_abort_notice,
+        should_run_post_stream_exit, terminal_abort_plan, terminal_overload_abort_plan,
+    };
+    use crate::services::discord::tmux_error_detect::{
+        ProviderOverloadReason, TerminalAbortDiagnosis,
     };
     use poise::serenity_prelude as serenity;
+    use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
+    use tracing::Instrument;
+    use tracing_subscriber::fmt::MakeWriter;
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     enum TestExecutionStep {
-        Dispatch(TerminalAbortDispatchAction),
+        Dispatch(TerminalAbortDispatchAction, &'static str),
         Finalize,
+        Notify(&'static str),
+    }
+
+    #[derive(Clone)]
+    struct CapturingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("tracing buffer")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[derive(Clone)]
+    struct DiscordFailureSink {
+        bodies: Arc<Mutex<Vec<String>>>,
+        failure: String,
+    }
+
+    async fn failing_discord_http(
+        failure: &str,
+    ) -> (
+        serenity::Http,
+        Arc<Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+
+        async fn fail(
+            State(sink): State<DiscordFailureSink>,
+            Json(body): Json<serde_json::Value>,
+        ) -> (StatusCode, Json<serde_json::Value>) {
+            sink.bodies
+                .lock()
+                .expect("discord request bodies")
+                .push(body.to_string());
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"message": sink.failure, "code": 0})),
+            )
+        }
+
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let sink = DiscordFailureSink {
+            bodies: Arc::clone(&bodies),
+            failure: failure.to_string(),
+        };
+        let app = Router::new()
+            .route("/api/v10/channels/{id}/messages", post(fail))
+            .with_state(sink);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock Discord listener");
+        let proxy = format!(
+            "http://{}",
+            listener.local_addr().expect("mock Discord address")
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("mock Discord server");
+        });
+        let http = serenity::HttpBuilder::new("test-token")
+            .proxy(proxy)
+            .ratelimiter_disabled(true)
+            .build();
+        (http, bodies, server)
     }
 
     #[tokio::test]
     async fn main_terminal_aborts_execute_one_authority_and_preserve_watcher() {
         let channel_id = serenity::ChannelId::new(42);
-        for (kind, expected_action) in [
+        for (diagnosis, expected_action) in [
             (
-                TerminalAbortKind::PromptTooLong,
+                TerminalAbortDiagnosis::PromptTooLong,
                 TerminalAbortDispatchAction::FailWithRetry,
             ),
             (
-                TerminalAbortKind::AuthError,
+                TerminalAbortDiagnosis::ProviderAuthenticationFailed,
                 TerminalAbortDispatchAction::FailAuthExpired,
             ),
             (
-                TerminalAbortKind::ProviderOverload,
+                TerminalAbortDiagnosis::ProviderOverload(ProviderOverloadReason::HttpStatus(529)),
                 TerminalAbortDispatchAction::FailWithRetry,
             ),
         ] {
-            let plan = terminal_abort_plan("AgentDesk-claude-adk-cc", channel_id, kind);
+            let plan = terminal_abort_plan("AgentDesk-claude-adk-cc", channel_id, diagnosis);
             assert!(
-                !plan.kill_session,
+                !plan.kills_session(),
                 "main tmux must never be an abort kill target"
             );
             let calls = Arc::new(Mutex::new(Vec::new()));
@@ -838,13 +909,13 @@ mod tests {
             let finalize_recorded = Arc::clone(&calls);
             let outcome = execute_terminal_abort_plan_with(
                 plan,
-                move |action| {
+                move |action, reason| {
                     let recorded = Arc::clone(&dispatch_recorded);
                     async move {
                         recorded
                             .lock()
                             .expect("terminal execution log")
-                            .push(TestExecutionStep::Dispatch(action));
+                            .push(TestExecutionStep::Dispatch(action, reason));
                     }
                 },
                 move || {
@@ -856,13 +927,14 @@ mod tests {
                             .push(TestExecutionStep::Finalize);
                     }
                 },
+                || async { Ok::<(), &str>(()) },
             )
             .await;
 
             assert_eq!(
                 calls.lock().expect("terminal execution log").as_slice(),
                 &[
-                    TestExecutionStep::Dispatch(expected_action),
+                    TestExecutionStep::Dispatch(expected_action, diagnosis.public_reason(),),
                     TestExecutionStep::Finalize,
                 ],
                 "dispatch failure must execute exactly once before finalization can publish completion"
@@ -880,17 +952,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auth_notification_transport_failure_closes_lifecycle_without_secret_leak() {
+        let secret = "sk-secret-material";
+        let public_reason = "provider_authentication_failed";
+        for (session, expected_outcome) in [
+            ("AgentDesk-claude-adk-cc", AbortExitOutcome::PreserveWatcher),
+            (
+                "AgentDesk-claude-adk-cc-t42",
+                AbortExitOutcome::ContinueWatcherLoop,
+            ),
+        ] {
+            let plan = terminal_abort_plan(
+                session,
+                serenity::ChannelId::new(42),
+                TerminalAbortDiagnosis::ProviderAuthenticationFailed,
+            );
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let dispatch_recorded = Arc::clone(&calls);
+            let finalize_recorded = Arc::clone(&calls);
+            let notification_recorded = Arc::clone(&calls);
+            let logs = Arc::new(Mutex::new(Vec::new()));
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(CapturingWriter(Arc::clone(&logs)))
+                .finish();
+
+            let (http, bodies, server) =
+                failing_discord_http(&format!("discord transport rejected {secret}")).await;
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let outcome = execute_terminal_abort_plan_with(
+                plan,
+                move |action, reason| {
+                    let recorded = Arc::clone(&dispatch_recorded);
+                    async move {
+                        recorded
+                            .lock()
+                            .expect("terminal execution log")
+                            .push(TestExecutionStep::Dispatch(action, reason));
+                    }
+                },
+                move || {
+                    let recorded = Arc::clone(&finalize_recorded);
+                    async move {
+                        recorded
+                            .lock()
+                            .expect("terminal execution log")
+                            .push(TestExecutionStep::Finalize);
+                    }
+                },
+                move || {
+                    let recorded = Arc::clone(&notification_recorded);
+                    async move {
+                        recorded
+                            .lock()
+                            .expect("terminal execution log")
+                            .push(TestExecutionStep::Notify(public_reason));
+                        project_terminal_abort_notice(
+                            &http,
+                            &shared,
+                            serenity::ChannelId::new(42),
+                            None,
+                            public_reason,
+                        )
+                        .await
+                    }
+                },
+            )
+            .with_subscriber(subscriber)
+            .await;
+            server.abort();
+
+            let calls = calls.lock().expect("terminal execution log");
+            assert_eq!(
+                calls.as_slice(),
+                &[
+                    TestExecutionStep::Dispatch(
+                        TerminalAbortDispatchAction::FailAuthExpired,
+                        public_reason,
+                    ),
+                    TestExecutionStep::Finalize,
+                    TestExecutionStep::Notify(public_reason),
+                ]
+            );
+            let sinks = format!("{calls:?}");
+            assert!(sinks.contains(public_reason));
+            assert!(!sinks.contains(secret));
+            drop(calls);
+            let bodies = bodies.lock().expect("discord request bodies");
+            assert_eq!(bodies.len(), 1);
+            assert!(bodies[0].contains(public_reason));
+            assert!(!bodies[0].contains(secret));
+            drop(bodies);
+
+            let logs =
+                String::from_utf8(logs.lock().expect("tracing buffer").clone()).expect("utf8 logs");
+            assert!(logs.contains(public_reason));
+            assert!(!logs.contains(secret));
+            assert!(logs.contains("discord transport rejected ***"));
+            assert_eq!(outcome, expected_outcome);
+            assert_eq!(
+                should_run_post_stream_exit(outcome),
+                false,
+                "terminal lifecycle closure must bypass post-stream cleanup"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn disposable_terminal_aborts_keep_existing_kill_and_retry_policy() {
         let channel_id = serenity::ChannelId::new(42);
         let thread_session = "AgentDesk-claude-adk-cc-t42";
-        let prompt =
-            terminal_abort_plan(thread_session, channel_id, TerminalAbortKind::PromptTooLong);
-        assert!(prompt.kill_session);
+        let prompt = terminal_abort_plan(
+            thread_session,
+            channel_id,
+            TerminalAbortDiagnosis::PromptTooLong,
+        );
+        assert!(prompt.kills_session());
         let prompt_calls = Arc::new(Mutex::new(Vec::new()));
         let prompt_recorded = Arc::clone(&prompt_calls);
         let prompt_outcome = execute_terminal_abort_plan_with(
             prompt,
-            move |action| {
+            move |action, _reason| {
                 let prompt_recorded = Arc::clone(&prompt_recorded);
                 async move {
                     prompt_recorded
@@ -900,6 +1084,7 @@ mod tests {
                 }
             },
             || async {},
+            || async { Ok::<(), &str>(()) },
         )
         .await;
         assert_eq!(
@@ -908,13 +1093,17 @@ mod tests {
         );
         assert_eq!(prompt_outcome, AbortExitOutcome::ContinueWatcherLoop);
 
-        let auth = terminal_abort_plan(thread_session, channel_id, TerminalAbortKind::AuthError);
-        assert!(auth.kill_session);
+        let auth = terminal_abort_plan(
+            thread_session,
+            channel_id,
+            TerminalAbortDiagnosis::ProviderAuthenticationFailed,
+        );
+        assert!(auth.kills_session());
         let auth_calls = Arc::new(Mutex::new(Vec::new()));
         let auth_recorded = Arc::clone(&auth_calls);
         let auth_outcome = execute_terminal_abort_plan_with(
             auth,
-            move |action| {
+            move |action, _reason| {
                 let auth_recorded = Arc::clone(&auth_recorded);
                 async move {
                     auth_recorded
@@ -924,6 +1113,7 @@ mod tests {
                 }
             },
             || async {},
+            || async { Ok::<(), &str>(()) },
         )
         .await;
         assert_eq!(
@@ -932,17 +1122,20 @@ mod tests {
         );
         assert_eq!(auth_outcome, AbortExitOutcome::ContinueWatcherLoop);
 
-        let overload = terminal_abort_plan(
+        let overload_diagnosis =
+            TerminalAbortDiagnosis::ProviderOverload(ProviderOverloadReason::HttpStatus(529));
+        let overload_retry = terminal_overload_abort_plan(
             thread_session,
             channel_id,
-            TerminalAbortKind::ProviderOverload,
+            overload_diagnosis,
+            ProviderOverloadPlanDecision::RetryScheduled,
         );
-        assert!(overload.kill_session);
+        assert!(overload_retry.kills_session());
         let overload_calls = Arc::new(Mutex::new(Vec::new()));
         let overload_recorded = Arc::clone(&overload_calls);
         let overload_outcome = execute_terminal_abort_plan_with(
-            overload,
-            move |action| {
+            overload_retry,
+            move |action, _reason| {
                 let overload_recorded = Arc::clone(&overload_recorded);
                 async move {
                     overload_recorded
@@ -952,6 +1145,7 @@ mod tests {
                 }
             },
             || async {},
+            || async { Ok::<(), &str>(()) },
         )
         .await;
         assert!(
@@ -961,5 +1155,17 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(overload_outcome, AbortExitOutcome::ContinueWatcherLoop);
+
+        let overload_exhausted = terminal_overload_abort_plan(
+            thread_session,
+            channel_id,
+            overload_diagnosis,
+            ProviderOverloadPlanDecision::RetryExhausted,
+        );
+        assert_eq!(
+            overload_exhausted.dispatch_action,
+            Some(TerminalAbortDispatchAction::FailWithRetry),
+            "an exhausted disposable overload must fail its dispatch"
+        );
     }
 }

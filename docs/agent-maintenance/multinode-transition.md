@@ -446,6 +446,7 @@
   before merging.
 
 ### Audited touches
+- 2026-07-25 — #4895 watcher terminal-abort hardening keeps overload/auth/prompt diagnosis, dispatch failure, provider-session reset, tmux disposal, and watcher retention in the existing worker-local watcher owner. Typed precedence and best-effort Discord notification projection add no PostgreSQL schema, lease, leader election, cross-node adoption, routing, or worker-placement authority.
 - 2026-07-24 — #4712 lifecycle de-giant rebase: `runtime_bootstrap.rs` changes only
   update the restart-marker characterization fixture to the current nonce/version
   encoding, while watcher lifecycle logic moves verbatim behind the existing facade.

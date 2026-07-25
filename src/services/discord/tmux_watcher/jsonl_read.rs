@@ -81,6 +81,7 @@ mod tests {
     };
     use crate::services::session_backend::StreamLineState;
     use poise::serenity_prelude::ChannelId;
+    use std::io::Write;
 
     #[test]
     fn attach_offset_discards_only_the_persisted_partial_record() {
@@ -109,6 +110,59 @@ mod tests {
             format!("{complete}\n")
         );
         assert_eq!(chunk.start_offset, partial.len() as u64 + 1);
+    }
+
+    #[test]
+    fn unterminated_partial_record_is_discarded_at_attach_boundary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("unterminated-partial.jsonl");
+        let partial = serde_json::json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "discarded partial"}]}
+        })
+        .to_string();
+        std::fs::write(&path, &partial).expect("partial fixture");
+        let resume_offset = (partial.find("discarded").expect("payload") + 2) as u64;
+
+        let aligned =
+            read_jsonl_chunk_at_attach(path.to_str().expect("path"), resume_offset).expect("align");
+        assert!(aligned.skipped_partial_record);
+        assert!(aligned.data.is_empty());
+        assert_eq!(aligned.start_offset, partial.len() as u64);
+        assert_eq!(aligned.end_offset, partial.len() as u64);
+
+        let terminal = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "completed"
+        })
+        .to_string();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append file")
+            .write_all(format!("\n{terminal}\n").as_bytes())
+            .expect("append terminal");
+
+        let next = read_jsonl_chunk_contiguous(path.to_str().expect("path"), aligned.end_offset)
+            .expect("contiguous read");
+        assert_eq!(next.start_offset, partial.len() as u64);
+        let next_data = String::from_utf8(next.data).expect("utf8");
+        assert_eq!(next_data, format!("\n{terminal}\n"));
+
+        // Reattach semantics intentionally discard the record that contained
+        // the persisted mid-record offset, even if it is completed later. The
+        // leading newline is empty and only the following terminal is parsed.
+        let mut buffer = next_data;
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+        assert!(outcome.found_result);
+        assert_eq!(full_response, "completed");
+        assert!(buffer.is_empty());
     }
 
     #[test]
@@ -279,13 +333,9 @@ mod tests {
             outcome.found_result,
             "terminal result must survive chunking"
         );
-        assert!(
-            !outcome.is_auth_error,
-            "review prose must not trigger auth abort"
-        );
-        assert!(
-            !outcome.is_provider_overloaded,
-            "review prose must not trigger overload abort"
+        assert_eq!(
+            outcome.terminal_diagnosis, None,
+            "review prose must not trigger a terminal abort diagnosis"
         );
         assert!(
             watcher_session_is_main_orchestration("AgentDesk-claude-adk-cc", ChannelId::new(42)),

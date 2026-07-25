@@ -37,7 +37,8 @@ use super::settings::{
 };
 use super::task_notification_delivery::footer_background_marker_session_key;
 use super::tmux_error_detect::{
-    detect_structured_provider_overload, is_auth_error_message, is_prompt_too_long_message,
+    TerminalAbortDiagnosis, detect_structured_provider_overload, is_auth_error_message,
+    is_prompt_too_long_message, prefer_watcher_terminal_diagnosis,
 };
 use super::tmux_overload_retry::{
     PROVIDER_OVERLOAD_MAX_RETRIES, ProviderOverloadDecision, clear_provider_overload_retry_state,
@@ -123,11 +124,7 @@ pub(super) struct WatcherLineOutcome {
     pub terminal_evidence_offset: Option<u64>,
     pub pre_turn_bytes_skipped: usize,
     pub soft_terminal_candidate: bool,
-    pub is_prompt_too_long: bool,
-    pub is_auth_error: bool,
-    pub auth_error_message: Option<String>,
-    pub is_provider_overloaded: bool,
-    pub provider_overload_message: Option<String>,
+    pub terminal_diagnosis: Option<tmux_error_detect::TerminalAbortDiagnosis>,
     pub stale_resume_detected: bool,
     pub auto_compacted: bool,
     pub task_notification_kind: Option<TaskNotificationKind>,
@@ -141,6 +138,7 @@ pub(super) enum WatcherTerminalKind {
     HardResult,
     SoftStopHookSummary,
     SoftUserBoundary,
+    PromptTooLong,
     AuthError,
     ProviderOverload,
 }
@@ -151,6 +149,7 @@ impl WatcherTerminalKind {
             Self::HardResult => "hard_result",
             Self::SoftStopHookSummary => "soft_stop_hook_summary",
             Self::SoftUserBoundary => "soft_user_boundary",
+            Self::PromptTooLong => "prompt_too_long",
             Self::AuthError => "auth_error",
             Self::ProviderOverload => "provider_overload",
         }

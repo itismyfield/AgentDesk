@@ -68,6 +68,10 @@ fn consume_resume_offset(
     true
 }
 
+fn commit_jsonl_read_boundary(current_offset: &mut u64, read_chunk: &JsonlReadChunk) {
+    *current_offset = read_chunk.end_offset;
+}
+
 pub(super) struct PostTerminalState<'a> {
     pub(super) turn_result_relayed: bool,
     pub(super) post_terminal_continuation_logged: &'a mut bool,
@@ -351,12 +355,16 @@ pub(super) async fn poll_watcher_output_or_continue(
             tmux_session = %tmux_session_name,
             requested_offset = current_offset,
             aligned_offset = read_chunk.start_offset,
-            "tmux watcher aligned a non-boundary JSONL offset without classifying the partial record"
+            "tmux watcher discarded the partial record at a persisted non-boundary offset"
         );
     }
+    // Alignment may consume an unterminated partial record all the way to the
+    // current EOF and return no data. Commit that authoritative boundary before
+    // any empty-data early return; otherwise the next contiguous poll restarts
+    // from the stale mid-record offset and can reinterpret the discarded tail.
+    commit_jsonl_read_boundary(&mut current_offset, &read_chunk);
     let data = read_chunk.data;
     let data_start_offset = read_chunk.start_offset;
-    let new_offset = read_chunk.end_offset;
 
     let bytes_available = data.len().saturating_add(all_data.len());
     let poll_decision = if bytes_available == 0 {
@@ -422,7 +430,6 @@ pub(super) async fn poll_watcher_output_or_continue(
     }
 
     // We got new data while not paused — this means terminal input triggered a response
-    current_offset = new_offset;
     // #3956: re-stamp the submit prompt anchor on this observed streaming output
     // so a turn streaming continuously past PROMPT_ANCHOR_SUBMIT_TTL (4h) keeps a
     // live anchor for the #3885 same-input follow-up-requeue peek (no duplicate
@@ -442,7 +449,7 @@ pub(super) async fn poll_watcher_output_or_continue(
         post_terminal_continuation_logged = true;
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
-            "  [{ts}] 👁 post-terminal-success continuation: new output arrived for {tmux_session_name} after terminal success (offset {data_start_offset} -> {new_offset}); watcher staying alive"
+            "  [{ts}] 👁 post-terminal-success continuation: new output arrived for {tmux_session_name} after terminal success (offset {data_start_offset} -> {current_offset}); watcher staying alive"
         );
     }
     // Compute the SSH-direct bypass signal lazily — the dedupe state
@@ -641,8 +648,24 @@ pub(super) async fn poll_watcher_output_or_continue(
 
 #[cfg(test)]
 mod tests {
-    use super::consume_resume_offset;
+    use super::{commit_jsonl_read_boundary, consume_resume_offset};
+    use crate::services::discord::tmux_watcher::jsonl_read::JsonlReadChunk;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn empty_aligned_read_commits_authoritative_eof_boundary() {
+        let mut current_offset = 11;
+        let chunk = JsonlReadChunk {
+            data: Vec::new(),
+            start_offset: 97,
+            end_offset: 97,
+            skipped_partial_record: true,
+        };
+
+        commit_jsonl_read_boundary(&mut current_offset, &chunk);
+
+        assert_eq!(current_offset, 97);
+    }
 
     #[test]
     fn consuming_resume_offset_rearms_record_boundary_alignment() {
