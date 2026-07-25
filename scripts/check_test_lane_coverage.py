@@ -7,10 +7,10 @@ filters instead of running every library test. This source-only guard finds
 (including ``#[path = "..."]`` aliases), and compares them with each curated
 ``cargo test`` command's positive and ``--skip`` filters.
 
-The existing uncovered set is locked twice: its sorted names live in the
-baseline file and its entry count lives in this script. Any new module, stale
-entry, or baseline growth fails. Reducing debt therefore requires an explicit,
-reviewable edit to both locks.
+The existing uncovered set is recorded as sorted names in the baseline file.
+The checked-out candidate baseline must be a subset of an immutable reference
+snapshot, and any newly uncovered module or stale entry also fails. Baseline
+debt can therefore only shrink without a redundant scalar lock.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import re
 import shlex
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,7 +26,6 @@ from typing import Iterable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE_REL = Path("scripts/test_lane_coverage_baseline.txt")
-BASELINE_ENTRY_COUNT = 686
 
 # Attributes do not contain a closing square bracket in the forms used by this
 # repository. Strings and comments are blanked without changing offsets, so the
@@ -528,25 +528,81 @@ def uncovered_modules(
     }
 
 
-def load_baseline(path: Path) -> set[str]:
-    """Read the sorted one-module-per-line debt baseline."""
+def parse_baseline(text: str, source: str) -> set[str]:
+    """Parse a sorted one-module-per-line debt baseline."""
     entries = [
         line.strip()
-        for line in path.read_text(encoding="utf-8").splitlines()
+        for line in text.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
     if entries != sorted(entries):
-        raise ValueError(f"baseline entries must be sorted: {path}")
+        raise ValueError(f"baseline entries must be sorted: {source}")
     if len(entries) != len(set(entries)):
-        raise ValueError(f"baseline contains duplicate entries: {path}")
+        raise ValueError(f"baseline contains duplicate entries: {source}")
     return set(entries)
+
+
+def load_baseline(path: Path) -> set[str]:
+    """Read the working-tree debt baseline."""
+    return parse_baseline(path.read_text(encoding="utf-8"), str(path))
+
+
+def resolve_commit(repo_root: Path, ref: str) -> str:
+    """Resolve a baseline reference once to an immutable commit object."""
+    if not ref or set(ref) == {"0"}:
+        raise ValueError(f"invalid baseline reference: {ref or '<empty>'}")
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        detail = getattr(exc, "stderr", "") or str(exc)
+        raise ValueError(
+            f"cannot resolve baseline reference {ref!r}: {detail.strip()}"
+        ) from exc
+    sha = result.stdout.strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{40,64}", sha):
+        raise ValueError(f"git returned an invalid commit id for {ref!r}: {sha!r}")
+    return sha
+
+
+def load_baseline_from_git(repo_root: Path, ref: str) -> tuple[str, set[str]]:
+    """Read the baseline blob from one immutable commit snapshot."""
+    sha = resolve_commit(repo_root, ref)
+    source = f"{sha}:{BASELINE_REL.as_posix()}"
+    try:
+        result = subprocess.run(
+            ["git", "show", source],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        detail = getattr(exc, "stderr", "") or str(exc)
+        raise ValueError(
+            f"cannot read reference baseline {source}: {detail.strip()}"
+        ) from exc
+    return sha, parse_baseline(result.stdout, source)
+
+
+def baseline_growth(
+    baseline: set[str], reference_baseline: set[str]
+) -> list[str]:
+    """Return candidate entries absent from the immutable reference."""
+    return sorted(baseline - reference_baseline)
 
 
 def check(
     repo_root: Path,
     baseline_path: Path,
-    expected_baseline_count: int = BASELINE_ENTRY_COUNT,
+    reference_baseline: set[str],
     *,
+    reference_label: str = "reference snapshot",
     emit_success: bool = True,
 ) -> int:
     inventory = discover_test_inventory(repo_root)
@@ -554,16 +610,18 @@ def check(
     current = uncovered_modules(inventory, lanes)
     baseline = load_baseline(baseline_path)
 
-    if len(baseline) != expected_baseline_count:
-        direction = "growth" if len(baseline) > expected_baseline_count else "shrinkage"
+    growth = baseline_growth(baseline, reference_baseline)
+    if growth:
         print(
-            f"FAIL: baseline {direction}: {len(baseline)} entries, but the locked "
-            f"count is {expected_baseline_count}.",
+            f"FAIL: baseline growth forbidden: {len(growth)} entr"
+            f"{'y' if len(growth) == 1 else 'ies'} absent from {reference_label}.",
             file=sys.stderr,
         )
+        for module in growth:
+            print(f"  + {module}", file=sys.stderr)
         print(
-            "Update BASELINE_ENTRY_COUNT only when review intentionally accepts a "
-            "smaller corrected debt set; baseline growth is forbidden.",
+            "Remove '+' entries; the candidate baseline may only preserve or "
+            "remove debt from its immutable reference snapshot.",
             file=sys.stderr,
         )
         return 1
@@ -574,7 +632,7 @@ def check(
         print(
             f"FAIL: coverage baseline drift: {len(new)} newly uncovered, "
             f"{len(stale)} stale/covered, {len(current)} currently uncovered "
-            f"(locked baseline {len(baseline)}).",
+            f"(candidate baseline {len(baseline)}).",
             file=sys.stderr,
         )
         for module in new:
@@ -582,17 +640,20 @@ def check(
         for module in stale:
             print(f"  - {module}", file=sys.stderr)
         print(
-            "Add broad module coverage for '+' entries. Remove '-' entries and "
-            "lower BASELINE_ENTRY_COUNT to lock in debt reduction.",
+            "Add broad module coverage for '+' entries. Remove '-' entries to "
+            "lock in debt reduction.",
             file=sys.stderr,
         )
         return 1
 
     if emit_success:
+        removed = len(reference_baseline - baseline)
         print(
             f"OK: {len(inventory)} logical Rust cfg(test) modules and "
             f"{sum(map(len, inventory.values()))} test function(s) inventoried; "
-            f"{len(current)} uncovered module(s) exactly match the locked baseline; "
+            f"{len(current)} uncovered module(s) exactly match the candidate "
+            f"baseline, which removed {removed} debt entr"
+            f"{'y' if removed == 1 else 'ies'} from {reference_label}; "
             f"{len(lanes)} curated cargo-test invocation(s)."
         )
     return 0
@@ -602,11 +663,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--baseline", type=Path, default=None)
+    parser.add_argument("--baseline-ref", required=True)
     args = parser.parse_args(argv)
     repo_root = args.repo_root.resolve()
     baseline = args.baseline.resolve() if args.baseline else repo_root / BASELINE_REL
     try:
-        return check(repo_root, baseline)
+        reference_sha, reference_baseline = load_baseline_from_git(
+            repo_root, args.baseline_ref
+        )
+        return check(
+            repo_root,
+            baseline,
+            reference_baseline,
+            reference_label=f"commit {reference_sha}",
+        )
     except (OSError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2

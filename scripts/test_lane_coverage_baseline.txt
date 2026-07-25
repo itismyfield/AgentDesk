@@ -1,6 +1,6 @@
 # Existing logical Rust cfg(test) modules not fully selected by test-non-pg or
-# PR-targeted cargo-test invocations. Keep sorted and exactly synchronized with
-# BASELINE_ENTRY_COUNT in check_test_lane_coverage.py. Entries may only shrink.
+# PR-targeted cargo-test invocations. Keep sorted. A candidate baseline must be
+# a subset of its immutable comparison snapshot, so entries may only shrink.
 api_caller_observability::tests
 cli::args::tests
 cli::client::activity_tests

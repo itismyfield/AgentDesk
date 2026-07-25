@@ -251,6 +251,10 @@ jobs:
 
       - name: Run script checks
         run: ./scripts/ci-script-checks.sh
+        env:
+          # The non-cancelling test-lane-baseline-main workflow is authoritative
+          # across adjacent pushes; this aggregate lane keeps equivalent coverage.
+          TEST_LANE_BASELINE_REF: ${{ github.event.before }}
 
       - name: Upload maintainability audit artifact
         if: always()
