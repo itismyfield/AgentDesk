@@ -831,7 +831,7 @@ mod tests {
             state.resume_transition.begin(Uuid::new_v4(), started_at),
             BeginResumeTransitionResult::Begun(_)
         ));
-        let (reply, receive) = oneshot::channel();
+        let (reply, mut receive) = oneshot::channel();
         let clear = gate_reserved_arm(
             &mut state,
             ChannelMailboxMsg::Clear {
