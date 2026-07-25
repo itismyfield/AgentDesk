@@ -783,6 +783,10 @@ jobs:
 
       - name: Run script checks
         run: ./scripts/ci-script-checks.sh
+        env:
+          # pull_request checkouts are candidate merge commits. Their first
+          # parent is the exact base snapshot used to build this candidate.
+          TEST_LANE_BASELINE_REF: ${{ github.event_name == 'pull_request' && 'HEAD^1' || 'HEAD' }}
 
       # Keep high-value relay ratchets as explicit named steps as well as in the
       # aggregate script suite so their failure surface is immediately visible.

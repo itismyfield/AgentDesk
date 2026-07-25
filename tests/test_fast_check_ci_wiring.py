@@ -196,6 +196,23 @@ class FastCheckCiWiringTests(unittest.TestCase):
             job_block(nightly, "full_windows"),
         )
 
+    def test_test_lane_baseline_uses_candidate_snapshot_refs(self) -> None:
+        pr_job = job_block(PR_WORKFLOW.read_text(encoding="utf-8"), "scripts")
+        main_job = job_block(MAIN_WORKFLOW.read_text(encoding="utf-8"), "scripts")
+
+        for job in (pr_job, main_job):
+            self.assertIn("fetch-depth: 0", job)
+            self.assertNotIn("origin/main", job)
+            self.assertNotIn("github.event.pull_request.base.sha", job)
+        self.assertIn(
+            "TEST_LANE_BASELINE_REF: ${{ github.event_name == 'pull_request' "
+            "&& 'HEAD^1' || 'HEAD' }}",
+            pr_job,
+        )
+        self.assertIn(
+            "TEST_LANE_BASELINE_REF: ${{ github.event.before }}", main_job
+        )
+
     def test_ci_script_checks_runs_this_contract(self) -> None:
         script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(
             encoding="utf-8"
@@ -203,7 +220,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertIn(
             '"$PYTHON" -m unittest tests.test_fast_check_ci_wiring', script
         )
-        self.assertIn('"$PYTHON" scripts/check_test_lane_coverage.py', script)
+        self.assertIn(
+            'scripts/check_test_lane_coverage.py --baseline-ref "${TEST_LANE_BASELINE_REF:-HEAD}"',
+            script,
+        )
         self.assertIn(
             '"$PYTHON" -m unittest tests.test_test_lane_coverage', script
         )

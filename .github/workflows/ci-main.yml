@@ -251,6 +251,10 @@ jobs:
 
       - name: Run script checks
         run: ./scripts/ci-script-checks.sh
+        env:
+          # Compare the checked-out main snapshot with the immutable state
+          # before this push, including every commit in a multi-commit push.
+          TEST_LANE_BASELINE_REF: ${{ github.event.before }}
 
       - name: Upload maintainability audit artifact
         if: always()

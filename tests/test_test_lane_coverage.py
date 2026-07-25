@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -231,14 +232,21 @@ class RatchetTests(unittest.TestCase):
         )
 
     def run_check(
-        self, root: Path, baseline_entries: str, expected_count: int
+        self,
+        root: Path,
+        baseline_entries: str,
+        reference_entries: set[str],
     ) -> tuple[int, str]:
         baseline = root / "scripts/test_lane_coverage_baseline.txt"
         baseline.write_text(baseline_entries, encoding="utf-8")
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             result = coverage.check(
-                root, baseline, expected_count, emit_success=False
+                root,
+                baseline,
+                reference_entries,
+                reference_label="fixture base",
+                emit_success=False,
             )
         return result, stderr.getvalue()
 
@@ -246,7 +254,7 @@ class RatchetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             self.make_repo(root, "new_tests")
-            result, stderr = self.run_check(root, "", 0)
+            result, stderr = self.run_check(root, "", set())
             self.assertEqual(result, 1)
             self.assertIn("+ new_tests", stderr)
 
@@ -254,15 +262,30 @@ class RatchetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             self.make_repo(root, "new_tests")
-            result, stderr = self.run_check(root, "new_tests\n", 0)
+            result, stderr = self.run_check(root, "new_tests\n", set())
             self.assertEqual(result, 1)
-            self.assertIn("baseline growth", stderr)
+            self.assertIn("baseline growth forbidden", stderr)
+            self.assertIn("+ new_tests", stderr)
+
+    def test_parallel_disjoint_removals_compose_without_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.make_repo(root, "legacy_c")
+            result, stderr = self.run_check(
+                root,
+                "legacy_c\n",
+                {"legacy_a", "legacy_c"},
+            )
+            self.assertEqual(result, 0)
+            self.assertEqual(stderr, "")
 
     def test_stale_baseline_entry_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             self.make_repo(root, "covered_tests")
-            result, stderr = self.run_check(root, "covered_tests\n", 1)
+            result, stderr = self.run_check(
+                root, "covered_tests\n", {"covered_tests"}
+            )
             self.assertEqual(result, 1)
             self.assertIn("1 stale/covered", stderr)
             self.assertIn("- covered_tests", stderr)
@@ -271,7 +294,9 @@ class RatchetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             self.make_repo(root, "legacy_tests")
-            result, stderr = self.run_check(root, "legacy_tests\n", 1)
+            result, stderr = self.run_check(
+                root, "legacy_tests\n", {"legacy_tests"}
+            )
             self.assertEqual(result, 0)
             self.assertEqual(stderr, "")
 
@@ -286,15 +311,235 @@ class RatchetTests(unittest.TestCase):
             baseline,
         )
 
-    def test_repository_baseline_count_matches_locked_constant(self) -> None:
-        baseline = coverage.load_baseline(REPO_ROOT / coverage.BASELINE_REL)
-        self.assertEqual(len(baseline), coverage.BASELINE_ENTRY_COUNT)
+    def test_candidate_merge_first_parent_composes_parallel_removals(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.make_repo(root, "legacy_01")
+            baseline = root / coverage.BASELINE_REL
+            (root / "src/lib.rs").write_text(
+                "#[cfg(test)] mod legacy_09 {}\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "init", "-q", "-b", "main", root], check=True
+            )
+            subprocess.run(
+                ["git", "-C", root, "config", "user.email", "tests@example.com"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", root, "config", "user.name", "Tests"], check=True
+            )
+
+            baseline.write_text(
+                "".join(f"legacy_{index:02d}\n" for index in range(1, 10)),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "-C", root, "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", root, "commit", "-q", "-m", "common base"],
+                check=True,
+            )
+            common_sha = subprocess.check_output(
+                ["git", "-C", root, "rev-parse", "HEAD"], text=True
+            ).strip()
+
+            subprocess.run(["git", "-C", root, "switch", "-q", "-c", "pr"], check=True)
+            baseline.write_text(
+                "".join(
+                    f"legacy_{index:02d}\n"
+                    for index in range(1, 10)
+                    if index != 8
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "-C", root, "commit", "-qam", "remove b"], check=True)
+            pr_sha = subprocess.check_output(
+                ["git", "-C", root, "rev-parse", "HEAD"], text=True
+            ).strip()
+
+            subprocess.run(
+                ["git", "-C", root, "switch", "-q", "--detach", common_sha], check=True
+            )
+            baseline.write_text(
+                "".join(
+                    f"legacy_{index:02d}\n"
+                    for index in range(1, 10)
+                    if index != 2
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "-C", root, "commit", "-qam", "remove a"], check=True)
+            main_sha = subprocess.check_output(
+                ["git", "-C", root, "rev-parse", "HEAD"], text=True
+            ).strip()
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    root,
+                    "merge",
+                    "-q",
+                    "--no-ff",
+                    pr_sha,
+                    "-m",
+                    "candidate",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            candidate_sha = subprocess.check_output(
+                ["git", "-C", root, "rev-parse", "HEAD"], text=True
+            ).strip()
+
+            resolved, reference = coverage.load_baseline_from_git(root, "HEAD^1")
+            self.assertEqual(resolved, main_sha)
+            self.assertEqual(
+                reference,
+                {f"legacy_{index:02d}" for index in range(1, 10) if index != 2},
+            )
+            self.assertEqual(
+                coverage.load_baseline(baseline),
+                {
+                    f"legacy_{index:02d}"
+                    for index in range(1, 10)
+                    if index not in {2, 8}
+                },
+            )
+            candidate = coverage.load_baseline(baseline)
+            self.assertEqual(coverage.baseline_growth(candidate, reference), [])
+            self.assertEqual(reference - candidate, {"legacy_08"})
+
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    root,
+                    "update-ref",
+                    "refs/remotes/origin/main",
+                    pr_sha,
+                ],
+                check=True,
+            )
+            self.assertEqual(
+                coverage.load_baseline_from_git(root, "HEAD^1"),
+                (
+                    main_sha,
+                    {
+                        f"legacy_{index:02d}"
+                        for index in range(1, 10)
+                        if index != 2
+                    },
+                ),
+            )
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "-C", root, "rev-parse", "HEAD"], text=True
+                ).strip(),
+                candidate_sha,
+            )
+
+    def test_main_push_before_sha_reads_pre_push_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            baseline = root / coverage.BASELINE_REL
+            baseline.parent.mkdir(parents=True)
+            subprocess.run(
+                ["git", "init", "-q", "-b", "main", root], check=True
+            )
+            subprocess.run(
+                ["git", "-C", root, "config", "user.email", "tests@example.com"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", root, "config", "user.name", "Tests"], check=True
+            )
+            baseline.write_text("legacy_a\n", encoding="utf-8")
+            subprocess.run(["git", "-C", root, "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", root, "commit", "-q", "-m", "before"], check=True
+            )
+            before = subprocess.check_output(
+                ["git", "-C", root, "rev-parse", "HEAD"], text=True
+            ).strip()
+
+            baseline.write_text("legacy_a\nlegacy_b\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", root, "commit", "-qam", "intermediate growth"],
+                check=True,
+            )
+            baseline.write_text("legacy_b\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", root, "commit", "-qam", "tip changes growth"],
+                check=True,
+            )
+
+            _, reference = coverage.load_baseline_from_git(root, before)
+            _, previous_commit = coverage.load_baseline_from_git(root, "HEAD^1")
+            self.assertEqual(reference, {"legacy_a"})
+            self.assertEqual(previous_commit, {"legacy_a", "legacy_b"})
+            self.assertEqual(
+                coverage.baseline_growth(coverage.load_baseline(baseline), reference),
+                ["legacy_b"],
+            )
+            self.assertEqual(
+                coverage.baseline_growth(
+                    coverage.load_baseline(baseline), previous_commit
+                ),
+                [],
+            )
+
+    def test_missing_zero_or_shallow_reference_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            subprocess.run(
+                ["git", "init", "-q", "-b", "main", root], check=True
+            )
+            for ref in ("0" * 40, "missing-parent"):
+                with self.subTest(ref=ref), self.assertRaises(ValueError):
+                    coverage.load_baseline_from_git(root, ref)
+
+    def test_reference_without_baseline_blob_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            subprocess.run(
+                ["git", "init", "-q", "-b", "main", root], check=True
+            )
+            subprocess.run(
+                ["git", "-C", root, "config", "user.email", "tests@example.com"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", root, "config", "user.name", "Tests"], check=True
+            )
+            (root / "placeholder").write_text("x", encoding="utf-8")
+            subprocess.run(["git", "-C", root, "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", root, "commit", "-q", "-m", "no baseline"],
+                check=True,
+            )
+            with self.assertRaises(ValueError):
+                coverage.load_baseline_from_git(root, "HEAD")
+
+    def test_repository_uses_semantic_baseline_without_scalar(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        baseline_text = (REPO_ROOT / coverage.BASELINE_REL).read_text(encoding="utf-8")
+        self.assertNotIn("BASELINE_ENTRY_COUNT", source)
+        self.assertNotIn("BASELINE_ENTRY_COUNT", baseline_text)
+        self.assertEqual(
+            coverage.load_baseline(REPO_ROOT / coverage.BASELINE_REL),
+            coverage.parse_baseline(baseline_text, "repository baseline"),
+        )
 
     def test_ci_script_checks_wires_guard_and_tests(self) -> None:
         script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(
             encoding="utf-8"
         )
-        self.assertIn('"$PYTHON" scripts/check_test_lane_coverage.py', script)
+        self.assertIn(
+            'scripts/check_test_lane_coverage.py --baseline-ref "${TEST_LANE_BASELINE_REF:-HEAD}"',
+            script,
+        )
         self.assertIn(
             '"$PYTHON" -m unittest tests.test_test_lane_coverage', script
         )
