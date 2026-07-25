@@ -1605,10 +1605,10 @@ mod auto_queue_phase_gate_finalize_wrapper_tests {
 
     impl Write for CapturingWriter {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.buffer
-                .lock()
-                .expect("capture phase-gate log bytes")
-                .extend_from_slice(bytes);
+            match self.buffer.lock() {
+                Ok(mut buffer) => buffer.extend_from_slice(bytes),
+                Err(poisoned) => poisoned.into_inner().extend_from_slice(bytes),
+            }
             Ok(bytes.len())
         }
 
@@ -1637,13 +1637,14 @@ mod auto_queue_phase_gate_finalize_wrapper_tests {
             })
             .finish();
         tracing::subscriber::with_default(subscriber, emit);
-        String::from_utf8(
-            buffer
-                .lock()
-                .expect("read captured phase-gate log bytes")
-                .clone(),
-        )
-        .expect("phase-gate logs must be UTF-8")
+        let bytes = match buffer.lock() {
+            Ok(buffer) => buffer.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        match String::from_utf8(bytes) {
+            Ok(logs) => logs,
+            Err(error) => panic!("phase-gate logs must be UTF-8: {error}"),
+        }
     }
 
     fn gate() -> serde_json::Value {
