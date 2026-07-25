@@ -10,7 +10,8 @@ use super::discord_log::RoutineDiscordLogger;
 use super::loader::{
     MAX_AUTOMATION_INVENTORY_ITEMS, MAX_AUTOMATION_INVENTORY_PAYLOAD_BYTES,
     MAX_OBSERVATION_PAYLOAD_BYTES, MAX_OBSERVATIONS_PER_TICK, ObservationLimits,
-    RoutineScriptLoader, RoutineTickAgent, RoutineTickContext, RoutineTickRoutine, RoutineTickRun,
+    ROUTINE_TICK_ERROR_PUBLIC_REASON, RoutineScriptLoader, RoutineTickAgent, RoutineTickContext,
+    RoutineTickRoutine, RoutineTickRun,
 };
 use super::migrated::{is_migrated_launchd_script_ref, validate_migrated_launchd_activation};
 use super::store::{ClaimedRoutineRun, RoutineStore, terminal_failure_should_pause};
@@ -256,18 +257,26 @@ pub async fn execute_claimed_script_run(
     let action = match loader.execute_tick(&claimed.script_ref, context) {
         Ok(action) => action,
         Err(error) => {
-            let message = error.to_string();
-            let result_json = Some(json!({
-                "error": message,
-                "script_ref": claimed.script_ref,
-            }));
+            let diagnostic = error.to_string();
+            let (public_reason, result_json) =
+                public_tick_failure(&diagnostic, &claimed.script_ref);
+            tracing::error!(
+                routine_run_id = %claimed.run_id,
+                routine_script = %claimed.script_ref,
+                error = %diagnostic,
+                "routine tick evaluation failed"
+            );
             let closed = if terminal_failure_should_pause(pause_on_terminal_failure) {
                 store
-                    .fail_run_and_pause_routine(&claimed.run_id, &message, result_json.clone())
+                    .fail_run_and_pause_routine(
+                        &claimed.run_id,
+                        &public_reason,
+                        result_json.clone(),
+                    )
                     .await?
             } else {
                 store
-                    .fail_run(&claimed.run_id, &message, result_json.clone(), None)
+                    .fail_run(&claimed.run_id, &public_reason, result_json.clone(), None)
                     .await?
             };
             if !closed {
@@ -280,7 +289,7 @@ pub async fn execute_claimed_script_run(
                 action: "error".to_string(),
                 status: "failed".to_string(),
                 result_json,
-                error: Some(message),
+                error: Some(public_reason),
                 fresh_context_guaranteed: pre_provider_fresh_context_guaranteed(),
             }));
         }
@@ -626,6 +635,16 @@ fn pre_provider_fresh_context_guaranteed() -> bool {
     false
 }
 
+fn public_tick_failure(_diagnostic: &str, script_ref: &str) -> (String, Option<Value>) {
+    let public_reason = ROUTINE_TICK_ERROR_PUBLIC_REASON.to_string();
+    let result_json = Some(json!({
+        "error": public_reason,
+        "diagnostic_class": ROUTINE_TICK_ERROR_PUBLIC_REASON,
+        "script_ref": script_ref,
+    }));
+    (public_reason, result_json)
+}
+
 async fn close_action(
     store: &RoutineStore,
     agent_executor: Option<&RoutineAgentExecutor>,
@@ -876,10 +895,32 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        action_detail, merge_loaded_script_automation_inventory,
-        pre_provider_fresh_context_guaranteed, validate_claimed_migrated_launchd_run,
+        RoutineRunOutcome, action_detail, merge_loaded_script_automation_inventory,
+        pre_provider_fresh_context_guaranteed, public_tick_failure,
+        validate_claimed_migrated_launchd_run,
     };
     use crate::services::routines::{RoutineAction, RoutineScriptLoader, store::ClaimedRoutineRun};
+
+    #[test]
+    fn tick_failure_public_projection_never_contains_diagnostic() {
+        let diagnostic = "routine tick failed: api_key=sk-live-secret";
+        let (reason, result_json) = public_tick_failure(diagnostic, "secret.js");
+        let outcome = RoutineRunOutcome {
+            run_id: "run-1".to_string(),
+            routine_id: "routine-1".to_string(),
+            script_ref: "secret.js".to_string(),
+            action: "error".to_string(),
+            status: "failed".to_string(),
+            result_json,
+            error: Some(reason),
+            fresh_context_guaranteed: false,
+        };
+        let api_json = serde_json::to_string(&outcome).unwrap();
+
+        assert!(api_json.contains("routine_tick_exception"), "{api_json}");
+        assert!(!api_json.contains("sk-live-secret"), "{api_json}");
+        assert!(!api_json.contains(diagnostic), "{api_json}");
+    }
 
     #[test]
     fn pre_provider_paths_cannot_claim_fresh_context() {
