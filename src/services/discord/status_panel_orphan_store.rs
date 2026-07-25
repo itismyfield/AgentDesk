@@ -268,11 +268,12 @@ fn remove_pending_bind_in_root(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) enum PendingBindOwnedRemovalOutcome {
-    OwnershipMismatch,
-    OwnedRecordRemoved,
-    OwnedRecordMissing,
+    Removed,
+    NotOwned,
+    Deferred,
+    DurabilityFailure(String),
 }
 
 fn ensure_pending_bind_protection_in_root(
@@ -309,32 +310,32 @@ fn remove_pending_bind_if_owned_in_root(
         provider,
         channel_id,
     );
-    let Ok(_inflight_guard) =
-        crate::services::discord::inflight::lock_inflight_state_path(&inflight_path)
-    else {
-        ensure_pending_bind_protection_in_root(
-            root,
-            provider,
-            token_hash,
-            channel_id,
-            panel_msg_id,
-            identity,
-        );
-        return PendingBindOwnedRemovalOutcome::OwnershipMismatch;
-    };
-    let Some(inflight) = fs::read_to_string(&inflight_path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<InflightTurnState>(&raw).ok())
-    else {
-        ensure_pending_bind_protection_in_root(
-            root,
-            provider,
-            token_hash,
-            channel_id,
-            panel_msg_id,
-            identity,
-        );
-        return PendingBindOwnedRemovalOutcome::OwnershipMismatch;
+    let _inflight_guard =
+        match crate::services::discord::inflight::lock_inflight_state_path(&inflight_path) {
+            Ok(guard) => guard,
+            Err(error) => return PendingBindOwnedRemovalOutcome::DurabilityFailure(error),
+        };
+    let inflight = match fs::read_to_string(&inflight_path) {
+        Ok(raw) => match serde_json::from_str::<InflightTurnState>(&raw) {
+            Ok(state) => state,
+            Err(error) => {
+                return PendingBindOwnedRemovalOutcome::DurabilityFailure(error.to_string());
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            ensure_pending_bind_protection_in_root(
+                root,
+                provider,
+                token_hash,
+                channel_id,
+                panel_msg_id,
+                identity,
+            );
+            return PendingBindOwnedRemovalOutcome::NotOwned;
+        }
+        Err(error) => {
+            return PendingBindOwnedRemovalOutcome::DurabilityFailure(error.to_string());
+        }
     };
     if !identity.matches_state(&inflight) || inflight.status_message_id != Some(panel_msg_id) {
         ensure_pending_bind_protection_in_root(
@@ -345,7 +346,7 @@ fn remove_pending_bind_if_owned_in_root(
             panel_msg_id,
             identity,
         );
-        return PendingBindOwnedRemovalOutcome::OwnershipMismatch;
+        return PendingBindOwnedRemovalOutcome::NotOwned;
     }
 
     let _store_guard = STORE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -353,12 +354,12 @@ fn remove_pending_bind_if_owned_in_root(
     let before = entries.len();
     entries.retain(|entry| !(entry.id == panel_msg_id && entry.is_pending_bind()));
     if entries.len() == before {
-        return PendingBindOwnedRemovalOutcome::OwnedRecordMissing;
+        return PendingBindOwnedRemovalOutcome::Deferred;
     }
-    if save_channel_in_root(root, provider, token_hash, channel_id, &entries).is_err() {
-        return PendingBindOwnedRemovalOutcome::OwnershipMismatch;
+    match save_channel_in_root(root, provider, token_hash, channel_id, &entries) {
+        Ok(()) => PendingBindOwnedRemovalOutcome::Removed,
+        Err(error) => PendingBindOwnedRemovalOutcome::DurabilityFailure(error),
     }
-    PendingBindOwnedRemovalOutcome::OwnedRecordRemoved
 }
 
 fn is_queued_in_root(
@@ -552,7 +553,9 @@ pub(in crate::services::discord) fn remove_pending_bind_if_owned(
         runtime_store::discord_status_panel_orphans_root(),
         runtime_store::discord_inflight_root(),
     ) else {
-        return PendingBindOwnedRemovalOutcome::OwnershipMismatch;
+        return PendingBindOwnedRemovalOutcome::DurabilityFailure(
+            "status panel transition roots unavailable".to_string(),
+        );
     };
     remove_pending_bind_if_owned_in_root(
         &root,

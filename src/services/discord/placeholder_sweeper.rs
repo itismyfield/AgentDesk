@@ -934,6 +934,21 @@ pub(super) fn spawn_placeholder_sweeper(
                 &shared.token_hash,
             )
             .await;
+            let recovered_panel_transitions =
+                super::status_panel_transition::recover_unreconciled_with_delete(
+                    &provider,
+                    &shared.token_hash,
+                    |channel_id, message_id| {
+                        let http = http.clone();
+                        async move {
+                            serenity::ChannelId::new(channel_id)
+                                .delete_message(&http, serenity::MessageId::new(message_id))
+                                .await
+                                .is_ok()
+                        }
+                    },
+                )
+                .await;
             // #3296: reconcile durable aborted-anchor markers — retry the ✅ for
             // markers a terminal commit already covered, and apply the TTL'd
             // `⏳ → ⚠` fallback for anchors nothing ever covered (held while a
@@ -956,19 +971,21 @@ pub(super) fn spawn_placeholder_sweeper(
             sweeps_since_heartbeat = sweeps_since_heartbeat.saturating_add(1);
             if should_log_sweep_report(report, sweeps_since_heartbeat)
                 || drained > 0
+                || recovered_panel_transitions > 0
                 || drained_abort_markers > 0
                 || drained_abandon_requests > 0
                 || swept_orphan_anchors > 0
             {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
-                    "  [{ts}] 🧹 placeholder sweeper ({}): scanned={} stalled={} abandoned={} reclaimed_panels={} drained_orphans={} drained_abort_markers={} drained_abandon_requests={} swept_orphan_anchors={}",
+                    "  [{ts}] 🧹 placeholder sweeper ({}): scanned={} stalled={} abandoned={} reclaimed_panels={} drained_orphans={} recovered_panel_transitions={} drained_abort_markers={} drained_abandon_requests={} swept_orphan_anchors={}",
                     provider.as_str(),
                     report.scanned,
                     report.stalled,
                     report.abandoned,
                     report.reclaimed_panels,
                     drained,
+                    recovered_panel_transitions,
                     drained_abort_markers,
                     drained_abandon_requests,
                     swept_orphan_anchors

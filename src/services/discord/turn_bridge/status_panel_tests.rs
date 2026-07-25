@@ -1376,20 +1376,15 @@ async fn pending_bind_write_and_delete_dual_failure_is_typed_unreconciled_4891()
         &[fallback_panel],
         "the write failure must attempt immediate rollback"
     );
-    let probe_request = super::fallback::CompletionFallbackRequest {
-        shared: shared.as_ref(),
-        channel_id,
-        provider: &provider,
-        expected_user_msg_id: Some(4_891_352),
-        confirmed_missing_prior_panel: None,
-        last_status_panel_text: &mut last_status_panel_text,
-        panel_text: String::new(),
-        wip_warning: None,
-        source: "test_dual_failure_probe",
-    };
     assert!(
-        super::fallback::unreconciled_fallback_is_retained(&probe_request, fallback_panel),
-        "dual failure must retain process-local recovery authority instead of reporting success"
+        crate::services::discord::status_panel_transition::load_unreconciled(
+            &provider,
+            &shared.token_hash,
+        )
+        .expect("load transition journal")
+        .iter()
+        .any(|intent| intent.candidate_panel_id == fallback_panel.get()),
+        "dual failure must retain durable transition authority instead of reporting success"
     );
 }
 

@@ -2,11 +2,6 @@
 //! from `turn_bridge/status_panel.rs`.
 
 use super::super::*;
-use std::collections::HashSet;
-use std::sync::{LazyLock, Mutex};
-
-static UNRECONCILED_FALLBACK_PANELS: LazyLock<Mutex<HashSet<(String, String, u64, u64)>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ConfirmedMissingPriorPanel {
@@ -25,26 +20,6 @@ pub(super) struct CompletionFallbackRequest<'a> {
     pub wip_warning:
         Option<crate::services::discord::turn_end_wip_warning::TurnEndWipWarningReservation>,
     pub source: &'static str,
-}
-
-fn preregister_status_panel_completion_fallback_message_id(
-    request: &CompletionFallbackRequest<'_>,
-    message_id: MessageId,
-) -> Result<(), String> {
-    let turn_identity = request
-        .expected_user_msg_id
-        .and_then(|expected_user_msg_id| {
-            super::inflight::load_inflight_state(request.provider, request.channel_id.get())
-                .filter(|state| state.user_msg_id == expected_user_msg_id)
-                .map(|state| super::inflight::InflightTurnIdentity::from_state(&state))
-        });
-    crate::services::discord::status_panel_orphan_store::enqueue_pending_bind(
-        request.provider,
-        &request.shared.token_hash,
-        request.channel_id.get(),
-        message_id.get(),
-        turn_identity,
-    )
 }
 
 fn persist_status_panel_completion_fallback_message_id(
@@ -190,52 +165,6 @@ fn fallback_pending_bind_write_failed(
     );
 }
 
-fn retain_unreconciled_fallback_in_memory(
-    request: &CompletionFallbackRequest<'_>,
-    message_id: MessageId,
-) {
-    UNRECONCILED_FALLBACK_PANELS
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .insert((
-            request.provider.as_str().to_string(),
-            request.shared.token_hash.clone(),
-            request.channel_id.get(),
-            message_id.get(),
-        ));
-}
-
-fn clear_unreconciled_fallback_in_memory(
-    request: &CompletionFallbackRequest<'_>,
-    message_id: MessageId,
-) {
-    UNRECONCILED_FALLBACK_PANELS
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .remove(&(
-            request.provider.as_str().to_string(),
-            request.shared.token_hash.clone(),
-            request.channel_id.get(),
-            message_id.get(),
-        ));
-}
-
-#[cfg(test)]
-pub(super) fn unreconciled_fallback_is_retained(
-    request: &CompletionFallbackRequest<'_>,
-    message_id: MessageId,
-) -> bool {
-    UNRECONCILED_FALLBACK_PANELS
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .contains(&(
-            request.provider.as_str().to_string(),
-            request.shared.token_hash.clone(),
-            request.channel_id.get(),
-            message_id.get(),
-        ))
-}
-
 pub(super) async fn complete_status_panel_v2_fallback_with_http(
     http: &serenity::Http,
     mut request: CompletionFallbackRequest<'_>,
@@ -244,19 +173,35 @@ pub(super) async fn complete_status_panel_v2_fallback_with_http(
         .await
     {
         Ok(message) => {
-            if let Err(error) =
-                preregister_status_panel_completion_fallback_message_id(&request, message.id)
-            {
-                fallback_pending_bind_write_failed(&request, message.id, &error);
-                if super::http::delete_channel_message(http, request.channel_id, message.id)
-                    .await
-                    .is_err()
-                {
-                    retain_unreconciled_fallback_in_memory(&request, message.id);
-                }
+            let identity = request
+                .expected_user_msg_id
+                .and_then(|expected_user_msg_id| {
+                    super::inflight::load_inflight_state(request.provider, request.channel_id.get())
+                        .filter(|state| state.user_msg_id == expected_user_msg_id)
+                        .map(|state| super::inflight::InflightTurnIdentity::from_state(&state))
+                });
+            let transition = crate::services::discord::status_panel_transition::begin_candidate(
+                request.provider,
+                &request.shared.token_hash,
+                request.channel_id.get(),
+                message.id.get(),
+                request
+                    .confirmed_missing_prior_panel
+                    .map(|prior| prior.message_id.get()),
+                request
+                    .confirmed_missing_prior_panel
+                    .map(|prior| prior.generation)
+                    .unwrap_or_default(),
+                identity,
+            );
+            if !matches!(
+                transition,
+                crate::services::discord::status_panel_transition::StatusPanelTransitionAction::KeepCurrent { .. }
+            ) {
+                fallback_pending_bind_write_failed(&request, message.id, "transition intent pending recovery");
+                let _ = super::http::delete_channel_message(http, request.channel_id, message.id).await;
                 return super::StatusPanelCompletionResult::unreconciled(message.id);
             }
-            clear_unreconciled_fallback_in_memory(&request, message.id);
             finalize_fallback_binding(&mut request, message.id)
         }
         Err(error) => {
@@ -290,20 +235,35 @@ pub(super) async fn complete_status_panel_v2_fallback_with_gateway<G: TurnGatewa
 
     match send_result {
         Ok(message_id) => {
-            if let Err(error) =
-                preregister_status_panel_completion_fallback_message_id(&request, message_id)
-            {
-                fallback_pending_bind_write_failed(&request, message_id, &error);
-                if gateway
-                    .delete_message(request.channel_id, message_id)
-                    .await
-                    .is_err()
-                {
-                    retain_unreconciled_fallback_in_memory(&request, message_id);
-                }
+            let identity = request
+                .expected_user_msg_id
+                .and_then(|expected_user_msg_id| {
+                    super::inflight::load_inflight_state(request.provider, request.channel_id.get())
+                        .filter(|state| state.user_msg_id == expected_user_msg_id)
+                        .map(|state| super::inflight::InflightTurnIdentity::from_state(&state))
+                });
+            let transition = crate::services::discord::status_panel_transition::begin_candidate(
+                request.provider,
+                &request.shared.token_hash,
+                request.channel_id.get(),
+                message_id.get(),
+                request
+                    .confirmed_missing_prior_panel
+                    .map(|prior| prior.message_id.get()),
+                request
+                    .confirmed_missing_prior_panel
+                    .map(|prior| prior.generation)
+                    .unwrap_or_default(),
+                identity,
+            );
+            if !matches!(
+                transition,
+                crate::services::discord::status_panel_transition::StatusPanelTransitionAction::KeepCurrent { .. }
+            ) {
+                fallback_pending_bind_write_failed(&request, message_id, "transition intent pending recovery");
+                let _ = gateway.delete_message(request.channel_id, message_id).await;
                 return super::StatusPanelCompletionResult::unreconciled(message_id);
             }
-            clear_unreconciled_fallback_in_memory(&request, message_id);
             finalize_fallback_binding(&mut request, message_id)
         }
         Err(error) => {

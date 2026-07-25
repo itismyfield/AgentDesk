@@ -137,6 +137,13 @@ pub(super) fn discord_status_panel_singletons_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_status_panel_singletons"))
 }
 
+/// #4891: intent-first journal for multi-file status-panel ownership changes.
+/// The journal is replayable because inflight, singleton, and orphan files do not
+/// share a filesystem transaction.
+pub(super) fn discord_status_panel_transitions_root() -> Option<PathBuf> {
+    runtime_root().map(|root| root.join("discord_status_panel_transitions"))
+}
+
 /// #3859: durable abandon-request store. A SYNC failure-path site (turn-task
 /// `InflightCleanupGuard` Drop, heartbeat-gap sweeper) that evicts an inflight
 /// row with a live "🔄 처리 중" placeholder cannot drive the async Discord edit

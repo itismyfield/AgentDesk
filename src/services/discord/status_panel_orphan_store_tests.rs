@@ -244,7 +244,7 @@ fn pending_bind_exact_owner_remove_keeps_record_after_reownership() {
             panel_id,
             &InflightTurnIdentity::from_state(&original),
         ),
-        PendingBindOwnedRemovalOutcome::OwnershipMismatch
+        PendingBindOwnedRemovalOutcome::NotOwned
     );
     assert_eq!(
         load_pending_in_root(&orphan_root, &provider, token),
@@ -293,7 +293,7 @@ fn pending_bind_exact_owner_remove_clears_matching_record() {
             panel_id,
             &InflightTurnIdentity::from_state(&live),
         ),
-        PendingBindOwnedRemovalOutcome::OwnedRecordRemoved
+        PendingBindOwnedRemovalOutcome::Removed
     );
     assert!(load_pending_in_root(&orphan_root, &provider, token).is_empty());
 }
@@ -331,7 +331,7 @@ fn pending_bind_exact_owner_remove_restores_missing_protection_after_reownership
             panel_id,
             &InflightTurnIdentity::from_state(&original),
         ),
-        PendingBindOwnedRemovalOutcome::OwnershipMismatch
+        PendingBindOwnedRemovalOutcome::NotOwned
     );
     assert_eq!(
         load_pending_in_root(&orphan_root, &provider, token),
