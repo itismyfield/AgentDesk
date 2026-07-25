@@ -218,6 +218,54 @@ RUBY
 trusted_workflow=".github/workflows/ci-macos-trusted.yml"
 pr_workflow=".github/workflows/ci-pr.yml"
 
+workflow_files() {
+  find .github/workflows -maxdepth 1 -type f \
+    \( -name '*.yml' -o -name '*.yaml' \) -print0
+}
+
+validate_required_context_uniqueness() {
+  if ! command -v ruby >/dev/null 2>&1; then
+    error "ruby is required to validate required workflow contexts structurally"
+    return
+  fi
+
+  while IFS= read -r -d '' workflow; do
+    if ! ruby - "$workflow" "$pr_workflow" <<'RUBY'
+require "yaml"
+
+path, pr_path = ARGV
+begin
+  document = YAML.load_file(path)
+rescue StandardError => error
+  warn "#{path}: cannot parse YAML: #{error.message}"
+  exit 1
+end
+jobs = document.is_a?(Hash) ? document["jobs"] : nil
+unless jobs.is_a?(Hash)
+  warn "#{path}: jobs must be a YAML mapping"
+  exit 1
+end
+script_check_jobs = jobs.each_with_object([]) do |(job_id, job), matches|
+  if job.is_a?(Hash) && job["name"].to_s.strip == "Script checks"
+    matches << job_id.to_s
+  end
+end
+if path == pr_path
+  unless script_check_jobs == ["scripts"]
+    warn "#{path}: required Script checks context must belong only to jobs.scripts"
+    exit 1
+  end
+elsif script_check_jobs.any?
+  warn "#{path}: must not publish required Script checks context (jobs: #{script_check_jobs.join(', ')})"
+  exit 1
+end
+RUBY
+    then
+      error "$workflow violates required Script checks context uniqueness"
+    fi
+  done < <(workflow_files)
+}
+
 if [ ! -f "$trusted_workflow" ]; then
   error "missing $trusted_workflow"
 fi
@@ -225,9 +273,7 @@ if [ ! -f "$pr_workflow" ]; then
   error "missing $pr_workflow"
 fi
 
-for workflow in .github/workflows/*.yml; do
-  [ -f "$workflow" ] || continue
-
+while IFS= read -r -d '' workflow; do
   if grep -Eq '^[[:space:]]+pull_request(_target)?:' "$workflow"; then
     if grep -Eq 'MACOS_RUNNER|self-hosted' "$workflow"; then
       error "$workflow is pull_request-triggered and must not reference self-hosted macOS routing"
@@ -241,7 +287,9 @@ for workflow in .github/workflows/*.yml; do
   if grep -q 'RUSTC_WRAPPER=' "$workflow" && ! grep -q 'SCCACHE_GHA_ENABLED=' "$workflow"; then
     error "$workflow clears RUSTC_WRAPPER but not SCCACHE_GHA_ENABLED"
   fi
-done
+done < <(workflow_files)
+
+validate_required_context_uniqueness
 
 if [ -f "$trusted_workflow" ]; then
   if grep -Eq '^[[:space:]]+pull_request(_target)?:' "$trusted_workflow"; then

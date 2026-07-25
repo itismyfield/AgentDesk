@@ -69,6 +69,13 @@ def job_block(workflow: str, job_name: str) -> str:
     return workflow[match.start() : next_job.start() if next_job else len(workflow)]
 
 
+def workflow_paths(root: Path = REPO_ROOT) -> tuple[Path, ...]:
+    workflows = root / ".github/workflows"
+    return tuple(
+        sorted((*workflows.glob("*.yml"), *workflows.glob("*.yaml")))
+    )
+
+
 def just_recipe_commands(justfile: str, recipe_name: str) -> tuple[str, ...]:
     marker = re.compile(rf"^{re.escape(recipe_name)}:[ \t]*.*$", re.MULTILINE)
     match = marker.search(justfile)
@@ -231,7 +238,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             job_block(pr_workflow, "scripts"),
             r"(?m)^          TEST_LANE_BASELINE_REF: HEAD\^1$",
         )
-        for workflow_path in (REPO_ROOT / ".github/workflows").glob("*.yml"):
+        for workflow_path in workflow_paths():
             workflow = workflow_path.read_text(encoding="utf-8")
             with self.subTest(workflow=workflow_path.name):
                 if workflow_path != PR_WORKFLOW:
@@ -245,6 +252,40 @@ class FastCheckCiWiringTests(unittest.TestCase):
             (REPO_ROOT / ".github/workflows/test-lane-baseline-main.yml").exists()
         )
 
+    def run_hardening_fixture(
+        self, pr_workflow: str, extra_workflows: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".github/workflows").mkdir(parents=True)
+            (root / "scripts").mkdir()
+            (root / ".github/workflows/ci-pr.yml").write_text(
+                pr_workflow, encoding="utf-8"
+            )
+            trusted = (REPO_ROOT / ".github/workflows/ci-macos-trusted.yml").read_text(
+                encoding="utf-8"
+            )
+            (root / ".github/workflows/ci-macos-trusted.yml").write_text(
+                trusted, encoding="utf-8"
+            )
+            for name, content in (extra_workflows or {}).items():
+                (root / ".github/workflows" / name).write_text(
+                    content, encoding="utf-8"
+                )
+            script = (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_text(
+                encoding="utf-8"
+            )
+            (root / "scripts/check-ci-runner-hardening.sh").write_text(
+                script, encoding="utf-8"
+            )
+            return subprocess.run(
+                ["bash", "scripts/check-ci-runner-hardening.sh"],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
     def test_hardening_rejects_flow_sequence_manual_trigger(self) -> None:
         source = PR_WORKFLOW.read_text(encoding="utf-8")
         mutated = re.sub(
@@ -254,34 +295,28 @@ class FastCheckCiWiringTests(unittest.TestCase):
             count=1,
         )
         self.assertNotEqual(mutated, source)
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            (root / ".github/workflows").mkdir(parents=True)
-            (root / "scripts").mkdir()
-            (root / ".github/workflows/ci-pr.yml").write_text(
-                mutated, encoding="utf-8"
-            )
-            trusted = (REPO_ROOT / ".github/workflows/ci-macos-trusted.yml").read_text(
-                encoding="utf-8"
-            )
-            (root / ".github/workflows/ci-macos-trusted.yml").write_text(
-                trusted, encoding="utf-8"
-            )
-            script = (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_text(
-                encoding="utf-8"
-            )
-            (root / "scripts/check-ci-runner-hardening.sh").write_text(
-                script, encoding="utf-8"
-            )
-            result = subprocess.run(
-                ["bash", "scripts/check-ci-runner-hardening.sh"],
-                cwd=root,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
+        result = self.run_hardening_fixture(mutated)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("triggered only by pull_request", result.stderr)
+
+    def test_hardening_rejects_yaml_manual_duplicate_script_context(self) -> None:
+        duplicate = """\
+name: Duplicate required context
+on: [push, workflow_dispatch]
+jobs:
+  bypass:
+    name: "Script checks "
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+"""
+        result = self.run_hardening_fixture(
+            PR_WORKFLOW.read_text(encoding="utf-8"),
+            {"manual-bypass.yaml": duplicate},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must not publish required Script checks context", result.stderr)
+        self.assertIn("manual-bypass.yaml", result.stderr)
 
     def test_ci_script_checks_runs_this_contract(self) -> None:
         script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(
