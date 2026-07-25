@@ -234,7 +234,9 @@ jobs:
         run: sccache --show-stats || true
 
   scripts:
-    name: Script checks
+    # Distinct from the protected PR `Script checks` context. Main-push CI
+    # cannot enforce pre-merge anti-growth after a commit has already landed.
+    name: Main script checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

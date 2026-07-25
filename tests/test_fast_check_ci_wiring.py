@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -207,10 +209,17 @@ class FastCheckCiWiringTests(unittest.TestCase):
             self.assertNotIn("origin/main", job)
             self.assertNotIn("github.event.pull_request.base.sha", job)
         self.assertNotIn("workflow_dispatch:", pr_workflow)
-        self.assertIn("TEST_LANE_BASELINE_REF: HEAD^1", pr_job)
+        self.assertRegex(
+            pr_job, r"(?m)^          TEST_LANE_BASELINE_REF: HEAD\^1$"
+        )
         self.assertNotIn("github.event_name", pr_job)
         self.assertNotIn("inputs.", pr_job)
-        self.assertIn("TEST_LANE_BASELINE_REF: HEAD", main_job)
+        self.assertRegex(
+            main_job, r"(?m)^          TEST_LANE_BASELINE_REF: HEAD$"
+        )
+        self.assertNotRegex(
+            main_job, r"(?m)^          TEST_LANE_BASELINE_REF: HEAD\^1$"
+        )
 
     def test_required_script_context_is_pr_only(self) -> None:
         pr_workflow = PR_WORKFLOW.read_text(encoding="utf-8")
@@ -218,18 +227,61 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertNotIn("workflow_dispatch:", pr_workflow)
         self.assertNotRegex(pr_workflow, r"(?m)^  push:")
         self.assertEqual(pr_workflow.count("name: Script checks"), 1)
-        self.assertIn(
-            "TEST_LANE_BASELINE_REF: HEAD^1",
+        self.assertRegex(
             job_block(pr_workflow, "scripts"),
+            r"(?m)^          TEST_LANE_BASELINE_REF: HEAD\^1$",
         )
         for workflow_path in (REPO_ROOT / ".github/workflows").glob("*.yml"):
             workflow = workflow_path.read_text(encoding="utf-8")
             with self.subTest(workflow=workflow_path.name):
-                if "workflow_dispatch:" in workflow:
-                    self.assertNotRegex(workflow, r"(?m)^\s+name: Script checks$")
+                if workflow_path != PR_WORKFLOW:
+                    self.assertNotRegex(workflow, r"(?m)^    name: Script checks$")
+        main_job = job_block(
+            MAIN_WORKFLOW.read_text(encoding="utf-8"), "scripts"
+        )
+        self.assertIn("name: Main script checks", main_job)
+        self.assertNotRegex(main_job, r"(?m)^    name: Script checks$")
         self.assertFalse(
             (REPO_ROOT / ".github/workflows/test-lane-baseline-main.yml").exists()
         )
+
+    def test_hardening_rejects_flow_sequence_manual_trigger(self) -> None:
+        source = PR_WORKFLOW.read_text(encoding="utf-8")
+        mutated = re.sub(
+            r"(?ms)^on:\n.*?^concurrency:\n",
+            "on: [pull_request, workflow_dispatch]\n\nconcurrency:\n",
+            source,
+            count=1,
+        )
+        self.assertNotEqual(mutated, source)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".github/workflows").mkdir(parents=True)
+            (root / "scripts").mkdir()
+            (root / ".github/workflows/ci-pr.yml").write_text(
+                mutated, encoding="utf-8"
+            )
+            trusted = (REPO_ROOT / ".github/workflows/ci-macos-trusted.yml").read_text(
+                encoding="utf-8"
+            )
+            (root / ".github/workflows/ci-macos-trusted.yml").write_text(
+                trusted, encoding="utf-8"
+            )
+            script = (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_text(
+                encoding="utf-8"
+            )
+            (root / "scripts/check-ci-runner-hardening.sh").write_text(
+                script, encoding="utf-8"
+            )
+            result = subprocess.run(
+                ["bash", "scripts/check-ci-runner-hardening.sh"],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("triggered only by pull_request", result.stderr)
 
     def test_ci_script_checks_runs_this_contract(self) -> None:
         script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(

@@ -61,8 +61,18 @@ unless document["concurrency"] == expected_concurrency
 end
 
 trigger = document[true] || document["on"]
-if trigger.is_a?(Hash) && trigger.key?("workflow_dispatch")
-  warn "#{path}: required PR contexts must not be publishable by workflow_dispatch"
+trigger_events = case trigger
+when Hash
+  trigger.keys.map(&:to_s)
+when Array
+  trigger.map(&:to_s)
+when String
+  [trigger]
+else
+  []
+end
+unless trigger_events == ["pull_request"]
+  warn "#{path}: required PR contexts must be triggered only by pull_request"
   exit 1
 end
 
