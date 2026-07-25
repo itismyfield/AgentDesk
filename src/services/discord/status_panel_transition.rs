@@ -207,11 +207,13 @@ pub(in crate::services::discord) fn commit_bound_candidate(
     identity: &InflightTurnIdentity,
     generation: Option<u64>,
 ) -> StatusPanelTransitionAction {
-    let binding = match status_panel_singleton_store::bind_if_owned(
+    let binding = match status_panel_singleton_store::bind_if_owned_guarded(
         provider,
         token_hash,
         channel_id,
         candidate_panel_id,
+        generation,
+        Some(identity),
         generation,
     ) {
         Ok(binding) => binding,

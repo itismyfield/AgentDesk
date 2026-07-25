@@ -101,6 +101,26 @@ pub(in crate::services::discord) fn bind_if_owned(
     panel_message_id: u64,
     generation: Option<u64>,
 ) -> Result<StatusPanelSingletonBinding, String> {
+    bind_if_owned_guarded(
+        provider,
+        token_hash,
+        channel_id,
+        panel_message_id,
+        generation,
+        None,
+        None,
+    )
+}
+
+pub(in crate::services::discord) fn bind_if_owned_guarded(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    panel_message_id: u64,
+    generation: Option<u64>,
+    identity: Option<&inflight::InflightTurnIdentity>,
+    expected_generation: Option<u64>,
+) -> Result<StatusPanelSingletonBinding, String> {
     let inflight_root = runtime_store::discord_inflight_root()
         .ok_or_else(|| "AgentDesk inflight runtime root unavailable".to_string())?;
     let path = inflight::inflight_state_path(&inflight_root, provider, channel_id);
@@ -108,7 +128,10 @@ pub(in crate::services::discord) fn bind_if_owned(
     let raw = fs::read_to_string(&path).map_err(|error| error.to_string())?;
     let mut state = serde_json::from_str::<inflight::InflightTurnState>(&raw)
         .map_err(|error| error.to_string())?;
-    if state.status_message_id != Some(panel_message_id) {
+    if state.status_message_id != Some(panel_message_id)
+        || identity.is_some_and(|identity| !identity.matches_state(&state))
+        || expected_generation.is_some_and(|generation| generation != state.status_panel_generation)
+    {
         return Err("status panel singleton ownership changed".to_string());
     }
     if let Some(generation) = generation
