@@ -80,15 +80,17 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
         }
         StatusPanelCompletionAction::SendFallback => {
             complete_status_panel_v2_fallback_with_gateway(
-                shared,
                 gateway,
-                channel_id,
-                provider,
-                expected_user_msg_id,
-                last_status_panel_text,
-                panel_text,
-                wip_warning,
-                source,
+                CompletionFallbackRequest {
+                    shared,
+                    channel_id,
+                    provider,
+                    expected_user_msg_id: Some(expected_user_msg_id),
+                    last_status_panel_text,
+                    panel_text,
+                    wip_warning,
+                    source,
+                },
             )
             .await
         }
@@ -140,15 +142,17 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
                 Err(error) => {
                     if status_panel_message_missing_error(&error) {
                         return complete_status_panel_v2_fallback_with_gateway(
-                            shared,
                             gateway,
-                            channel_id,
-                            provider,
-                            expected_user_msg_id,
-                            last_status_panel_text,
-                            panel_text,
-                            wip_warning,
-                            source,
+                            CompletionFallbackRequest {
+                                shared,
+                                channel_id,
+                                provider,
+                                expected_user_msg_id: Some(expected_user_msg_id),
+                                last_status_panel_text,
+                                panel_text,
+                                wip_warning,
+                                source,
+                            },
                         )
                         .await;
                     }
@@ -368,15 +372,17 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http_and
         StatusPanelCompletionAction::SendFallback => {
             rate_limit_wait(shared, channel_id).await;
             complete_status_panel_v2_fallback_with_http(
-                shared.as_ref(),
                 http,
-                channel_id,
-                provider,
-                expected_user_msg_id,
-                last_status_panel_text,
-                panel_text,
-                wip_warning,
-                source,
+                CompletionFallbackRequest {
+                    shared: shared.as_ref(),
+                    channel_id,
+                    provider,
+                    expected_user_msg_id,
+                    last_status_panel_text,
+                    panel_text,
+                    wip_warning,
+                    source,
+                },
             )
             .await
         }
@@ -422,15 +428,17 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http_and
                     let error = error.to_string();
                     if status_panel_message_missing_error(&error) {
                         return complete_status_panel_v2_fallback_with_http(
-                            shared.as_ref(),
                             http,
-                            channel_id,
-                            provider,
-                            expected_user_msg_id,
-                            last_status_panel_text,
-                            panel_text,
-                            wip_warning,
-                            source,
+                            CompletionFallbackRequest {
+                                shared: shared.as_ref(),
+                                channel_id,
+                                provider,
+                                expected_user_msg_id,
+                                last_status_panel_text,
+                                panel_text,
+                                wip_warning,
+                                source,
+                            },
                         )
                         .await;
                     }
@@ -448,69 +456,12 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http_and
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn complete_status_panel_v2_fallback_with_http(
-    shared: &SharedData,
-    http: &serenity::Http,
-    channel_id: ChannelId,
-    provider: &ProviderKind,
-    expected_user_msg_id: Option<u64>,
-    last_status_panel_text: &mut String,
-    panel_text: String,
-    wip_warning: Option<
-        crate::services::discord::turn_end_wip_warning::TurnEndWipWarningReservation,
-    >,
-    source: &'static str,
-) -> StatusPanelCompletionResult {
-    match send_status_panel_v2_completion_fallback_http(http, channel_id, &panel_text).await {
-        Ok(message_id) => {
-            if let Some(warning) = wip_warning {
-                warning.commit();
-            }
-            preregister_status_panel_completion_fallback_message_id(
-                shared,
-                provider,
-                channel_id,
-                expected_user_msg_id,
-                message_id,
-            );
-            persist_status_panel_completion_fallback_message_id(
-                shared,
-                provider,
-                channel_id,
-                expected_user_msg_id,
-                message_id,
-                source,
-            );
-            let binding_disposition =
-                singleton::commit_completed_binding(shared, provider, channel_id, Some(message_id));
-            *last_status_panel_text = panel_text;
-            StatusPanelCompletionResult {
-                committed: true,
-                binding_disposition,
-                completed_panel_message_id: Some(message_id),
-            }
-        }
-        Err(error) => {
-            tracing::warn!(
-                "[turn_bridge] failed to send fallback status-panel-v2 completion in channel {} from {}: {}",
-                channel_id,
-                source,
-                error
-            );
-            StatusPanelCompletionResult::not_applicable(false)
-        }
-    }
-}
-
 mod fallback;
 mod purge;
 pub(in crate::services::discord) mod singleton;
 use fallback::{
-    complete_status_panel_v2_fallback_with_gateway,
-    persist_status_panel_completion_fallback_message_id,
-    preregister_status_panel_completion_fallback_message_id,
-    send_status_panel_v2_completion_fallback_http,
+    CompletionFallbackRequest, complete_status_panel_v2_fallback_with_gateway,
+    complete_status_panel_v2_fallback_with_http,
 };
 use purge::{
     purge_pending_bind_for_completed_status_panel,

@@ -149,6 +149,7 @@ pub(in crate::services::discord) fn commit_if_owned_or_current(
                     token_hash,
                     channel_id,
                     panel_message_id,
+                    false,
                 );
             }
             let binding = StatusPanelSingletonBinding {
@@ -167,6 +168,7 @@ pub(in crate::services::discord) fn commit_if_owned_or_current(
                 token_hash,
                 channel_id,
                 panel_message_id,
+                true,
             )
         }
         Err(error) => CompletedBindingCommitOutcome::DurabilityFailure(error.to_string()),
@@ -182,12 +184,14 @@ fn current_singleton_outcome_in_root(
     token_hash: &str,
     channel_id: u64,
     panel_message_id: u64,
+    missing_inflight: bool,
 ) -> CompletedBindingCommitOutcome {
     match load_in_root(root, provider, token_hash, channel_id) {
         Some(binding) if binding.panel_message_id == panel_message_id => {
             CompletedBindingCommitOutcome::CommittedCurrent(binding)
         }
         Some(_) => CompletedBindingCommitOutcome::Superseded,
+        None if missing_inflight => CompletedBindingCommitOutcome::Superseded,
         None => CompletedBindingCommitOutcome::DurabilityFailure(
             "completed status panel singleton binding unavailable".to_string(),
         ),
@@ -430,6 +434,24 @@ mod tests {
             commit_if_owned_or_current(&provider, token_hash, channel_id, 802),
             CompletedBindingCommitOutcome::Superseded,
             "an absent inflight row must not authorize replacing the current singleton"
+        );
+    }
+
+    #[test]
+    fn completion_without_inflight_or_singleton_is_reclaimable_superseded_4891() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
+
+        assert_eq!(
+            commit_if_owned_or_current(&ProviderKind::Claude, "test-token", 48_913, 803),
+            CompletedBindingCommitOutcome::Superseded,
+            "a completed fallback with no owner must retain orphan retirement authority"
         );
     }
 

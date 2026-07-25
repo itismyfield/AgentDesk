@@ -60,9 +60,7 @@ pub(in crate::services::discord) fn completion_commit_allows_pending_bind_purge(
 ) -> bool {
     matches!(
         disposition,
-        CompletedBindingDisposition::NotApplicable
-            | CompletedBindingDisposition::CommittedCurrent
-            | CompletedBindingDisposition::Superseded
+        CompletedBindingDisposition::NotApplicable | CompletedBindingDisposition::CommittedCurrent
     )
 }
 
@@ -90,7 +88,7 @@ mod tests {
         assert!(!completion_commit_allows_orphan_removal(
             CompletedBindingDisposition::DurabilityFailure
         ));
-        assert!(completion_commit_allows_pending_bind_purge(
+        assert!(!completion_commit_allows_pending_bind_purge(
             CompletedBindingDisposition::Superseded
         ));
         assert!(!completion_commit_allows_pending_bind_purge(

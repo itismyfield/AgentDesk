@@ -36,6 +36,19 @@ fn test_inflight(
 }
 
 #[test]
+fn pending_bind_write_failure_is_reported() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let blocked_root = root.path().join("blocked");
+    fs::write(&blocked_root, "not a directory").expect("blocking file");
+
+    let error =
+        enqueue_pending_bind_in_root(&blocked_root, &ProviderKind::Claude, "tok", 100, 5001, None)
+            .expect_err("pending-bind durability failure must reach the caller");
+
+    assert!(!error.is_empty());
+}
+
+#[test]
 fn enqueue_is_idempotent_and_removable() {
     let root = tempfile::tempdir().expect("tempdir");
     let root = root.path();
@@ -106,7 +119,8 @@ fn pending_bind_drain_removes_record_when_bind_landed_without_delete() {
         channel_id,
         panel_id,
         Some(InflightTurnIdentity::from_state(&live)),
-    );
+    )
+    .expect("seed pending bind");
 
     let outcome = prepare_pending_bind_for_drain_in_root(
         root,
@@ -142,7 +156,8 @@ fn pending_bind_exact_owner_remove_keeps_record_after_reownership() {
         channel_id,
         panel_id,
         Some(InflightTurnIdentity::from_state(&original)),
-    );
+    )
+    .expect("seed pending bind");
     let inflight_path = crate::services::discord::inflight::inflight_state_path(
         &inflight_root,
         &provider,
@@ -190,7 +205,8 @@ fn pending_bind_exact_owner_remove_clears_matching_record() {
         channel_id,
         panel_id,
         Some(InflightTurnIdentity::from_state(&live)),
-    );
+    )
+    .expect("seed pending bind");
     let inflight_path = crate::services::discord::inflight::inflight_state_path(
         &inflight_root,
         &provider,
@@ -312,7 +328,8 @@ fn pending_bind_unclaimed_after_grace_reclassifies_to_stranded_delete_path() {
         channel_id,
         panel_id,
         Some(InflightTurnIdentity::from_state(&original)),
-    );
+    )
+    .expect("seed pending bind");
 
     assert_eq!(
         prepare_pending_bind_for_drain_in_root(root, &provider, token, channel_id, panel_id, None),

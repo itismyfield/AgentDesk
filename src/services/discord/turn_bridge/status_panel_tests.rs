@@ -1054,7 +1054,7 @@ async fn status_panel_completion_fallback_posts_after_unknown_message_edit() {
 }
 
 #[tokio::test]
-async fn status_panel_direct_fallback_binds_real_message_id_for_retirement_4891() {
+async fn status_panel_direct_fallback_without_inflight_retains_retirement_intent_4891() {
     let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
     let shared = make_two_message_status_panel_shared_for_tests();
     let gateway = StatusPanelFallbackGateway::default();
@@ -1062,23 +1062,23 @@ async fn status_panel_direct_fallback_binds_real_message_id_for_retirement_4891(
     let channel_id = ChannelId::new(4_891_301);
     let prior_panel = MessageId::new(1_500_000_000_489_302);
     let fallback_panel = gateway.send_id;
-    let mut current_owner = InflightTurnState::new(
+    let mut prior_owner = InflightTurnState::new(
         provider.clone(),
         channel_id.get(),
-        Some("direct-fallback-bind-test".to_string()),
+        Some("direct-fallback-prior-owner".to_string()),
         42,
         4_891_303,
         4_891_304,
-        "newer turn".to_string(),
+        "prior turn".to_string(),
         None,
         None,
         None,
         None,
         0,
     );
-    current_owner.status_message_id = Some(prior_panel.get());
-    current_owner.status_panel_generation = 2;
-    save_inflight_state(&current_owner).expect("persist newer panel owner");
+    prior_owner.status_message_id = Some(prior_panel.get());
+    prior_owner.status_panel_generation = 2;
+    save_inflight_state(&prior_owner).expect("persist prior panel owner");
     crate::services::discord::status_panel_singleton_store::bind_if_owned(
         &provider,
         &shared.token_hash,
@@ -1087,6 +1087,7 @@ async fn status_panel_direct_fallback_binds_real_message_id_for_retirement_4891(
         None,
     )
     .expect("bind prior current singleton");
+    assert!(clear_inflight_state(&provider, channel_id.get()));
     let mut last_status_panel_text = String::new();
 
     let completion = complete_status_panel_v2(
@@ -1099,7 +1100,7 @@ async fn status_panel_direct_fallback_binds_real_message_id_for_retirement_4891(
         &mut last_status_panel_text,
         false,
         false,
-        "test_direct_fallback_bind",
+        "test_direct_fallback_without_inflight",
         4_891_303,
     )
     .await;
@@ -1107,22 +1108,18 @@ async fn status_panel_direct_fallback_binds_real_message_id_for_retirement_4891(
     assert!(completion.committed);
     assert_eq!(
         completion.binding_disposition,
-        super::singleton::CompletedBindingDisposition::CommittedCurrent
+        super::singleton::CompletedBindingDisposition::Superseded
     );
     assert_eq!(completion.completed_panel_message_id, Some(fallback_panel));
-    assert_eq!(
-        load_inflight_state(&provider, channel_id.get()).and_then(|state| state.status_message_id),
-        Some(fallback_panel.get()),
-        "direct fallback send must atomically publish its real message id to inflight"
-    );
+    assert!(load_inflight_state(&provider, channel_id.get()).is_none());
     assert!(
-        !crate::services::discord::status_panel_orphan_store::is_queued(
+        crate::services::discord::status_panel_orphan_store::is_queued(
             &provider,
             &shared.token_hash,
             channel_id.get(),
             fallback_panel.get(),
         ),
-        "a durably bound fallback panel must leave no stranded retirement record"
+        "inflight-less fallback must retain a durable orphan retirement intent"
     );
     assert_eq!(
         crate::services::discord::status_panel_singleton_store::load(
@@ -1131,56 +1128,71 @@ async fn status_panel_direct_fallback_binds_real_message_id_for_retirement_4891(
             channel_id.get(),
         )
         .map(|binding| binding.panel_message_id),
-        Some(fallback_panel.get()),
-        "singleton authority must move from the stale panel to the fallback message id"
+        Some(prior_panel.get()),
+        "an ownerless fallback must not replace the current singleton"
     );
+}
 
-    let next_panel = MessageId::new(1_500_000_000_489_305);
-    let next_gateway = StatusPanelFallbackGateway {
-        send_id: next_panel,
-        ..StatusPanelFallbackGateway::default()
-    };
-    let mut next_turn = InflightTurnState::new(
+#[tokio::test]
+async fn status_panel_direct_fallback_preserves_existing_same_turn_panel_4891() {
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+    let shared = make_two_message_status_panel_shared_for_tests();
+    let gateway = StatusPanelFallbackGateway::default();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_891_311);
+    let prior_panel = MessageId::new(1_500_000_000_489_312);
+    let fallback_panel = gateway.send_id;
+    let mut owner = InflightTurnState::new(
         provider.clone(),
         channel_id.get(),
-        Some("next-turn-retirement-test".to_string()),
+        Some("direct-fallback-existing-panel".to_string()),
         42,
-        4_891_305,
-        4_891_306,
-        "next turn".to_string(),
+        4_891_313,
+        4_891_314,
+        "same turn".to_string(),
         None,
         None,
         None,
         None,
         0,
     );
-    save_inflight_state(&next_turn).expect("persist next turn owner");
-    let mut next_status_panel_msg_id = None;
-    let mut next_generation = next_turn.status_panel_generation;
-    let mut next_dirty = true;
-    super::super::two_message_panel::create_bridge_two_message_status_panel_below_answer(
-        &next_gateway,
-        shared.as_ref(),
+    owner.status_message_id = Some(prior_panel.get());
+    owner.status_panel_generation = 2;
+    save_inflight_state(&owner).expect("persist existing panel owner");
+    crate::services::discord::status_panel_singleton_store::bind_if_owned(
         &provider,
+        &shared.token_hash,
+        channel_id.get(),
+        prior_panel.get(),
+        None,
+    )
+    .expect("bind existing current singleton");
+    let mut last_status_panel_text = String::new();
+
+    let completion = complete_status_panel_v2(
+        shared.as_ref(),
+        &gateway,
         channel_id,
-        "⠸",
-        MessageId::new(next_turn.current_msg_id),
-        &mut next_status_panel_msg_id,
-        &mut next_turn,
-        &mut next_generation,
-        &mut next_dirty,
+        None,
+        &provider,
+        1_700_000_000,
+        &mut last_status_panel_text,
+        false,
+        false,
+        "test_direct_fallback_existing_panel",
+        4_891_313,
     )
     .await;
 
-    assert_eq!(next_status_panel_msg_id, Some(next_panel));
+    assert!(completion.committed);
     assert_eq!(
-        next_gateway
-            .deleted_message_ids
-            .lock()
-            .expect("deleted message ids lock")
-            .as_slice(),
-        &[fallback_panel],
-        "the next turn must retire the direct-fallback panel through singleton authority"
+        completion.binding_disposition,
+        super::singleton::CompletedBindingDisposition::Superseded
+    );
+    assert_eq!(
+        load_inflight_state(&provider, channel_id.get()).and_then(|state| state.status_message_id),
+        Some(prior_panel.get()),
+        "fallback must not overwrite a same-turn panel that already owns inflight"
     );
     assert_eq!(
         crate::services::discord::status_panel_singleton_store::load(
@@ -1189,7 +1201,83 @@ async fn status_panel_direct_fallback_binds_real_message_id_for_retirement_4891(
             channel_id.get(),
         )
         .map(|binding| binding.panel_message_id),
-        Some(next_panel.get())
+        Some(prior_panel.get())
+    );
+    assert!(
+        crate::services::discord::status_panel_orphan_store::is_queued(
+            &provider,
+            &shared.token_hash,
+            channel_id.get(),
+            fallback_panel.get(),
+        ),
+        "the redundant fallback must remain reclaimable instead of displacing the valid panel"
+    );
+}
+
+#[tokio::test]
+async fn fallback_singleton_failure_keeps_pending_bind_recovery_record_4891() {
+    let (_env_lock, runtime_root) = isolate_agentdesk_runtime_root();
+    let shared = make_two_message_status_panel_shared_for_tests();
+    let gateway = StatusPanelFallbackGateway::default();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_891_321);
+    let fallback_panel = gateway.send_id;
+    let mut owner = InflightTurnState::new(
+        provider.clone(),
+        channel_id.get(),
+        Some("fallback-singleton-failure".to_string()),
+        42,
+        4_891_322,
+        4_891_323,
+        "same turn".to_string(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    save_inflight_state(&owner).expect("persist fallback owner");
+    let singleton_root = runtime_root
+        ._root
+        .path()
+        .join("runtime")
+        .join("discord_status_panel_singletons");
+    fs::write(&singleton_root, "block singleton directory").expect("block singleton writes");
+    let mut last_status_panel_text = String::new();
+
+    let completion = complete_status_panel_v2(
+        shared.as_ref(),
+        &gateway,
+        channel_id,
+        None,
+        &provider,
+        1_700_000_000,
+        &mut last_status_panel_text,
+        false,
+        false,
+        "test_fallback_singleton_failure",
+        4_891_322,
+    )
+    .await;
+
+    assert!(completion.committed);
+    assert_eq!(
+        completion.binding_disposition,
+        super::singleton::CompletedBindingDisposition::DurabilityFailure
+    );
+    assert_eq!(
+        load_inflight_state(&provider, channel_id.get()).and_then(|state| state.status_message_id),
+        Some(fallback_panel.get()),
+        "the inflight bind should succeed before the injected singleton write failure"
+    );
+    assert!(
+        crate::services::discord::status_panel_orphan_store::is_queued(
+            &provider,
+            &shared.token_hash,
+            channel_id.get(),
+            fallback_panel.get(),
+        ),
+        "singleton durability failure must not purge the fallback PendingBind"
     );
 }
 
@@ -1216,7 +1304,8 @@ async fn status_panel_completion_purges_pending_bind_for_final_panel() {
         channel_id.get(),
         panel.get(),
         Some(InflightTurnIdentity::from_state(&state)),
-    );
+    )
+    .expect("seed pending bind");
     assert_eq!(
         crate::services::discord::status_panel_orphan_store::load_pending(
             &provider,

@@ -100,13 +100,24 @@ pub(super) async fn create_bridge_two_message_status_panel_below_answer<G: TurnG
             let identity = crate::services::discord::inflight::InflightTurnIdentity::from_state(
                 inflight_state,
             );
-            crate::services::discord::status_panel_orphan_store::enqueue_pending_bind(
-                provider,
-                &shared.token_hash,
-                channel_id.get(),
-                panel_msg_id.get(),
-                Some(identity.clone()),
-            );
+            if let Err(error) =
+                crate::services::discord::status_panel_orphan_store::enqueue_pending_bind(
+                    provider,
+                    &shared.token_hash,
+                    channel_id.get(),
+                    panel_msg_id.get(),
+                    Some(identity.clone()),
+                )
+            {
+                tracing::warn!(
+                    channel_id = channel_id.get(),
+                    panel_message_id = panel_msg_id.get(),
+                    error = %error,
+                    "failed to persist bridge status-panel pending-bind protection"
+                );
+                let _ = gateway.delete_message(channel_id, panel_msg_id).await;
+                return;
+            }
             let bind_outcome = crate::services::discord::inflight::bind_status_panel(
                 provider,
                 channel_id.get(),
@@ -321,17 +332,28 @@ pub(super) async fn reanchor_bridge_two_message_status_panel_below_answer<
     };
     match gateway.send_message(channel_id, panel_text).await {
         Ok(new_panel_id) => {
-            crate::services::discord::status_panel_orphan_store::enqueue_pending_bind(
-                provider,
-                &shared.token_hash,
-                channel_id.get(),
-                new_panel_id.get(),
-                Some(
-                    crate::services::discord::inflight::InflightTurnIdentity::from_state(
-                        inflight_state,
+            if let Err(error) =
+                crate::services::discord::status_panel_orphan_store::enqueue_pending_bind(
+                    provider,
+                    &shared.token_hash,
+                    channel_id.get(),
+                    new_panel_id.get(),
+                    Some(
+                        crate::services::discord::inflight::InflightTurnIdentity::from_state(
+                            inflight_state,
+                        ),
                     ),
-                ),
-            );
+                )
+            {
+                tracing::warn!(
+                    channel_id = channel_id.get(),
+                    panel_message_id = new_panel_id.get(),
+                    error = %error,
+                    "failed to persist bridge re-anchor pending-bind protection"
+                );
+                let _ = gateway.delete_message(channel_id, new_panel_id).await;
+                return false;
+            }
             let mut updated = inflight_state.clone();
             updated.status_message_id = Some(new_panel_id.get());
             // The answer chunk stays the tail; keep the persisted anchor coherent

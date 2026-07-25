@@ -184,13 +184,23 @@ async fn recover_two_message_panel_with_gateway<G: RecoveryPanelGateway + ?Sized
         }
     };
 
-    status_panel_orphan_store::enqueue_pending_bind(
+    if let Err(error) = status_panel_orphan_store::enqueue_pending_bind(
         provider,
         &shared.token_hash,
         channel_id.get(),
         new_panel_id.get(),
         Some(identity.clone()),
-    );
+    ) {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            panel_message_id = new_panel_id.get(),
+            error = %error,
+            "two-message restart recovery could not persist pending-bind protection"
+        );
+        let _ = gateway.delete_panel(channel_id, new_panel_id).await;
+        return false;
+    }
     let bind_outcome = inflight::bind_status_panel(
         provider,
         channel_id.get(),

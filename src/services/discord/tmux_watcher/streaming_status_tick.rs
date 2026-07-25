@@ -493,13 +493,11 @@ pub(super) async fn update_streaming_status_tick(
                 .await
                 {
                     Ok(panel_msg) => {
-                        preregister_watcher_two_message_panel_orphan(
-                            shared.ui.two_message_panel_enabled,
-                            shared.as_ref(),
-                            &watcher_provider,
-                            channel_id,
-                            panel_msg.id,
-                        );
+                        protect_or_discard_watcher_two_message_panel((
+                            (&http, &shared, &watcher_provider),
+                            (channel_id, &tmux_session_name, panel_msg.id),
+                        ))
+                        .await;
                         let fresh_inflight =
                             crate::services::discord::inflight::load_inflight_state(
                                 &watcher_provider,

@@ -214,37 +214,51 @@ fn reanchor_bind_bumps_epoch_atomically_and_guard_stale_skips_old_epoch() {
     ));
 }
 
-#[test]
-fn status_panel_watcher_reconcile_retains_superseded_orphan_4891() {
+#[tokio::test]
+async fn status_panel_watcher_wrapper_reclassifies_superseded_pending_bind_4891() {
     let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root_for_two_message_tests();
     let mut shared = crate::services::discord::make_shared_data_for_tests();
-    Arc::get_mut(&mut shared)
+    let ui = &mut Arc::get_mut(&mut shared)
         .expect("fresh shared data should be uniquely owned")
-        .ui
-        .two_message_panel_enabled = true;
+        .ui;
+    ui.two_message_panel_enabled = true;
+    ui.status_panel_v2_enabled = true;
     let provider = ProviderKind::Claude;
     let channel_id = ChannelId::new(4_891_201);
     let completed_panel = serenity::MessageId::new(1_500_000_000_489_201);
-    crate::services::discord::status_panel_orphan_store::enqueue(
+    crate::services::discord::status_panel_orphan_store::enqueue_pending_bind(
+        &provider,
+        &shared.token_hash,
+        channel_id.get(),
+        completed_panel.get(),
+        None,
+    )
+    .expect("seed actual fallback pending bind");
+    let http = serenity::Http::new("test-token");
+    let mut last_status_panel_text = String::new();
+
+    complete_watcher_status_panel_v2_with_generation_guard(
+        &http,
+        &shared,
+        channel_id,
+        &provider,
+        1_700_000_000,
+        Some(completed_panel),
+        &mut last_status_panel_text,
+        false,
+        false,
+        None,
+        true,
+        true,
+    )
+    .await;
+
+    crate::services::discord::status_panel_orphan_store::remove_pending_bind(
         &provider,
         &shared.token_hash,
         channel_id.get(),
         completed_panel.get(),
     );
-
-    reconcile_watcher_status_panel_completion(
-        &shared,
-        &provider,
-        channel_id,
-        Some(completed_panel),
-        true,
-        crate::services::discord::turn_bridge::status_panel::StatusPanelCompletionResult {
-            committed: true,
-            binding_disposition: crate::services::discord::turn_bridge::status_panel::singleton::CompletedBindingDisposition::Superseded,
-            completed_panel_message_id: Some(completed_panel),
-        },
-    );
-
     assert!(
         crate::services::discord::status_panel_orphan_store::is_queued(
             &provider,
@@ -252,7 +266,7 @@ fn status_panel_watcher_reconcile_retains_superseded_orphan_4891() {
             channel_id.get(),
             completed_panel.get(),
         ),
-        "watcher completion reconcile must retain a superseded panel's orphan retirement intent"
+        "the wrapper must turn Superseded PendingBind into durable stranded delete intent"
     );
 }
 
@@ -274,7 +288,8 @@ fn watcher_orphan_preregistration_is_flag_gated_and_removed_after_persist() {
         &provider,
         channel_id,
         panel,
-    );
+    )
+    .expect("flag-off preregistration");
     assert!(
         crate::services::discord::status_panel_orphan_store::load_pending(
             &provider,
@@ -290,7 +305,8 @@ fn watcher_orphan_preregistration_is_flag_gated_and_removed_after_persist() {
         &provider,
         channel_id,
         panel,
-    );
+    )
+    .expect("persist pending bind");
     assert!(
         crate::services::discord::status_panel_orphan_store::load_pending(
             &provider,

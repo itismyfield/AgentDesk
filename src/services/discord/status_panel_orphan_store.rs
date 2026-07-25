@@ -155,15 +155,17 @@ fn save_channel_in_root(
     token_hash: &str,
     channel_id: u64,
     entries: &[StatusPanelOrphanEntry],
-) {
+) -> Result<(), String> {
     let path = channel_file_path_in_root(root, provider, token_hash, channel_id);
     if entries.is_empty() {
-        let _ = fs::remove_file(&path);
-        return;
+        return match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.to_string()),
+        };
     }
-    if let Ok(json) = serde_json::to_string_pretty(entries) {
-        let _ = runtime_store::atomic_write(&path, &json);
-    }
+    let json = serde_json::to_string_pretty(entries).map_err(|error| error.to_string())?;
+    runtime_store::atomic_write(&path, &json)
 }
 
 fn upsert_entry_in_root(
@@ -172,9 +174,9 @@ fn upsert_entry_in_root(
     token_hash: &str,
     channel_id: u64,
     entry: StatusPanelOrphanEntry,
-) {
+) -> Result<(), String> {
     if channel_id == 0 || entry.id == 0 {
-        return;
+        return Err("status panel orphan ids must be non-zero".to_string());
     }
     let _guard = STORE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut entries = load_channel_in_root(root, provider, token_hash, channel_id);
@@ -195,11 +197,10 @@ fn upsert_entry_in_root(
                 }
             }
         }
-        save_channel_in_root(root, provider, token_hash, channel_id, &entries);
-        return;
+        return save_channel_in_root(root, provider, token_hash, channel_id, &entries);
     }
     entries.push(entry);
-    save_channel_in_root(root, provider, token_hash, channel_id, &entries);
+    save_channel_in_root(root, provider, token_hash, channel_id, &entries)
 }
 
 fn enqueue_in_root(
@@ -208,14 +209,14 @@ fn enqueue_in_root(
     token_hash: &str,
     channel_id: u64,
     panel_msg_id: u64,
-) {
+) -> Result<(), String> {
     upsert_entry_in_root(
         root,
         provider,
         token_hash,
         channel_id,
         StatusPanelOrphanEntry::stranded(panel_msg_id),
-    );
+    )
 }
 
 fn enqueue_pending_bind_in_root(
@@ -225,14 +226,14 @@ fn enqueue_pending_bind_in_root(
     channel_id: u64,
     panel_msg_id: u64,
     turn_identity: Option<InflightTurnIdentity>,
-) {
+) -> Result<(), String> {
     upsert_entry_in_root(
         root,
         provider,
         token_hash,
         channel_id,
         StatusPanelOrphanEntry::pending_bind(panel_msg_id, turn_identity),
-    );
+    )
 }
 
 fn remove_in_root(
@@ -247,7 +248,7 @@ fn remove_in_root(
     let before = entries.len();
     entries.retain(|entry| entry.id != panel_msg_id);
     if entries.len() != before {
-        save_channel_in_root(root, provider, token_hash, channel_id, &entries);
+        let _ = save_channel_in_root(root, provider, token_hash, channel_id, &entries);
     }
 }
 
@@ -263,7 +264,7 @@ fn remove_pending_bind_in_root(
     let before = entries.len();
     entries.retain(|entry| !(entry.id == panel_msg_id && entry.is_pending_bind()));
     if entries.len() != before {
-        save_channel_in_root(root, provider, token_hash, channel_id, &entries);
+        let _ = save_channel_in_root(root, provider, token_hash, channel_id, &entries);
     }
 }
 
@@ -291,7 +292,7 @@ fn ensure_pending_bind_protection_in_root(
         panel_msg_id,
         Some(identity.clone()),
     ));
-    save_channel_in_root(root, provider, token_hash, channel_id, &entries);
+    let _ = save_channel_in_root(root, provider, token_hash, channel_id, &entries);
 }
 
 fn remove_pending_bind_if_owned_in_root(
@@ -354,7 +355,9 @@ fn remove_pending_bind_if_owned_in_root(
     if entries.len() == before {
         return PendingBindOwnedRemovalOutcome::OwnedRecordMissing;
     }
-    save_channel_in_root(root, provider, token_hash, channel_id, &entries);
+    if save_channel_in_root(root, provider, token_hash, channel_id, &entries).is_err() {
+        return PendingBindOwnedRemovalOutcome::OwnershipMismatch;
+    }
     PendingBindOwnedRemovalOutcome::OwnedRecordRemoved
 }
 
@@ -417,7 +420,7 @@ pub(in crate::services::discord) fn enqueue(
     let Some(root) = runtime_store::discord_status_panel_orphans_root() else {
         return;
     };
-    enqueue_in_root(&root, provider, token_hash, channel_id, panel_msg_id);
+    let _ = enqueue_in_root(&root, provider, token_hash, channel_id, panel_msg_id);
 }
 
 /// Record a just-sent panel id as a pending bind: it is live-protected until the
@@ -429,10 +432,9 @@ pub(in crate::services::discord) fn enqueue_pending_bind(
     channel_id: u64,
     panel_msg_id: u64,
     turn_identity: Option<InflightTurnIdentity>,
-) {
-    let Some(root) = runtime_store::discord_status_panel_orphans_root() else {
-        return;
-    };
+) -> Result<(), String> {
+    let root = runtime_store::discord_status_panel_orphans_root()
+        .ok_or_else(|| "AgentDesk runtime root unavailable".to_string())?;
     enqueue_pending_bind_in_root(
         &root,
         provider,
@@ -440,7 +442,7 @@ pub(in crate::services::discord) fn enqueue_pending_bind(
         channel_id,
         panel_msg_id,
         turn_identity,
-    );
+    )
 }
 
 fn should_record_separate_status_panel_orphan_for_flags(
@@ -468,7 +470,7 @@ fn enqueue_separate_status_panel_orphan_in_root_for_flags(
     ) {
         return;
     }
-    enqueue_in_root(root, provider, token_hash, channel_id, panel_msg_id);
+    let _ = enqueue_in_root(root, provider, token_hash, channel_id, panel_msg_id);
 }
 
 /// Record a same-run separate status-panel orphan. Footer-mode turns never own a
@@ -673,7 +675,9 @@ fn prepare_pending_bind_for_drain_in_root(
 
     if inflight.and_then(|state| state.status_message_id) == Some(panel_msg_id) {
         entries.remove(index);
-        save_channel_in_root(root, provider, token_hash, channel_id, &entries);
+        if save_channel_in_root(root, provider, token_hash, channel_id, &entries).is_err() {
+            return PendingBindDrainOutcome::Deferred;
+        }
         return PendingBindDrainOutcome::RemovedBoundPanel;
     }
 
@@ -683,13 +687,15 @@ fn prepare_pending_bind_for_drain_in_root(
 
     if entries[index].pending_bind_drain_cycles >= PENDING_BIND_GRACE_DRAIN_CYCLES {
         entries[index].reclassify_to_stranded();
-        save_channel_in_root(root, provider, token_hash, channel_id, &entries);
+        if save_channel_in_root(root, provider, token_hash, channel_id, &entries).is_err() {
+            return PendingBindDrainOutcome::Deferred;
+        }
         return PendingBindDrainOutcome::ReclassifiedToStranded;
     }
 
     entries[index].pending_bind_drain_cycles =
         entries[index].pending_bind_drain_cycles.saturating_add(1);
-    save_channel_in_root(root, provider, token_hash, channel_id, &entries);
+    let _ = save_channel_in_root(root, provider, token_hash, channel_id, &entries);
     PendingBindDrainOutcome::Deferred
 }
 
