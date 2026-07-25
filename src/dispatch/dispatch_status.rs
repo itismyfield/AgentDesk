@@ -1377,10 +1377,20 @@ fn infer_phase_gate_verdict(
         );
     }
 
+    let declared_check_count = phase_gate_ctx
+        .get("checks")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let reported_check_count = result
+        .get("checks")
+        .and_then(serde_json::Value::as_object)
+        .map_or(0, serde_json::Map::len);
     tracing::info!(
-        "[dispatch] #699 inferring phase-gate verdict '{}' for dispatch {} (all declared checks passed)",
-        pass_verdict,
         dispatch_id,
+        pass_verdict = %pass_verdict,
+        declared_check_count,
+        reported_check_count,
+        "[dispatch] #699 inferred phase-gate verdict because all declared checks passed",
     );
 
     Some(enriched)
@@ -1584,6 +1594,57 @@ mod auto_queue_terminal_sync_policy_tests {
 mod auto_queue_phase_gate_finalize_wrapper_tests {
     use super::{infer_effective_completion_result, infer_phase_gate_verdict};
     use serde_json::json;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::writer::MakeWriter;
+
+    #[derive(Clone)]
+    struct CapturingWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for CapturingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.buffer
+                .lock()
+                .expect("capture phase-gate log bytes")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_info_logs(emit: impl FnOnce()) -> String {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .with_writer(CapturingWriter {
+                buffer: buffer.clone(),
+            })
+            .finish();
+        tracing::subscriber::with_default(subscriber, emit);
+        String::from_utf8(
+            buffer
+                .lock()
+                .expect("read captured phase-gate log bytes")
+                .clone(),
+        )
+        .expect("phase-gate logs must be UTF-8")
+    }
 
     fn gate() -> serde_json::Value {
         json!({
@@ -1637,6 +1698,20 @@ mod auto_queue_phase_gate_finalize_wrapper_tests {
             injected.get("verdict").and_then(|value| value.as_str()),
             Some("phase_gate_passed")
         );
+    }
+
+    #[test]
+    fn inferred_verdict_log_preserves_check_cardinality_fields() {
+        let result = json!({ "checks": passing_checks() });
+        let logs = capture_info_logs(|| {
+            let injected = infer_phase_gate_verdict("dsp-log-fields", &gate(), &result);
+            assert!(injected.is_some());
+        });
+
+        assert!(logs.contains("dispatch_id=\"dsp-log-fields\""), "{logs}");
+        assert!(logs.contains("pass_verdict=phase_gate_passed"), "{logs}");
+        assert!(logs.contains("declared_check_count=3"), "{logs}");
+        assert!(logs.contains("reported_check_count=3"), "{logs}");
     }
 
     #[test]
