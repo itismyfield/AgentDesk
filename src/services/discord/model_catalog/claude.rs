@@ -864,9 +864,7 @@ mod tests {
             }
         }
 
-        let _env_lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let variables = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
         let _restore = EnvRestore {
             values: variables
