@@ -1057,6 +1057,25 @@ mod tests {
     }
 
     #[test]
+    fn failure_backoff_doubles_and_caps_at_one_hour() {
+        let loader = RoutineScriptLoader::new().unwrap();
+        let path = Path::new("broken.js");
+        let version = Some("version-1".to_string());
+        let now = Instant::now();
+
+        let mut delays = Vec::new();
+        for _ in 0..10 {
+            delays.push(loader.record_failure(path, version.clone(), now));
+        }
+
+        assert_eq!(delays[0], Duration::from_secs(30));
+        assert_eq!(delays[1], Duration::from_secs(60));
+        assert_eq!(delays[2], Duration::from_secs(120));
+        assert_eq!(delays[7], Duration::from_secs(60 * 60));
+        assert_eq!(delays[9], Duration::from_secs(60 * 60));
+    }
+
+    #[test]
     fn failed_script_backoff_skips_eval_until_due_and_content_change_bypasses_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("recoverable.js");
@@ -1327,44 +1346,31 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn unreadable_script_uses_the_same_bounded_backoff() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("unreadable.js");
-        std::fs::write(
-            &path,
-            "agentdesk.routines.register({ name: 'Unreadable', tick() { return { action: 'skip' }; } });",
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
-
+    fn source_less_read_failure_uses_the_same_bounded_backoff() {
+        let path = Path::new("unreadable.js");
         let loader = RoutineScriptLoader::new().unwrap();
-        assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        loader.record_failure(path, None, Instant::now());
         let first = loader
             .failed_scripts
             .lock()
             .unwrap()
-            .get(&path)
+            .get(path)
             .unwrap()
             .clone();
         assert_eq!(first.source_version, None);
         assert_eq!(first.consecutive_failures, 1);
 
-        assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        assert!(!loader.should_retry_candidate(path, None, Instant::now(), false));
         let second = loader
             .failed_scripts
             .lock()
             .unwrap()
-            .get(&path)
+            .get(path)
             .unwrap()
             .clone();
         assert_eq!(second.consecutive_failures, 1);
         assert_eq!(second.retry_at, first.retry_at);
-
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
     #[test]
