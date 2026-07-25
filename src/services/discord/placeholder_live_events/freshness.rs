@@ -140,7 +140,8 @@ mod tests {
             name: "Read".to_string(),
             summary: Some("src/services/discord/status_panel.rs".to_string()),
         };
-        let rendered = render_activity_line_with_last_tool(&DerivedStatus::Running, Some(&last_tool));
+        let rendered =
+            render_activity_line_with_last_tool(&DerivedStatus::Running, Some(&last_tool));
 
         assert_eq!(
             rendered,
@@ -181,10 +182,7 @@ mod tests {
             },
         ] {
             let rendered = render_activity_line_with_last_tool(&status, Some(&last_tool));
-            assert_eq!(
-                rendered,
-                "🔧 마지막 도구 ([Monitor] · wait for build)"
-            );
+            assert_eq!(rendered, "🔧 마지막 도구 ([Monitor] · wait for build)");
             assert!(!rendered.contains("진행 중"));
         }
     }
@@ -221,7 +219,7 @@ mod tests {
             summary: None,
         };
         for (status, last_tool, expected_prefix) in [
-            (DerivedStatus::Running, None, "🛠️"),
+            (DerivedStatus::Running, None, "🔧"),
             (DerivedStatus::MonitorWait, Some(&last_tool), "🔧"),
             (
                 DerivedStatus::ScheduleWakeup(Some(30)),

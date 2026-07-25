@@ -287,8 +287,8 @@ fn status_panel_recent_compacts_raw_command_details() {
     assert!(!rendered.contains("🖥️ Recent"));
     assert!(!rendered.contains("```text"));
     assert!(
-        rendered.contains(raw_command),
-        "normal status panel must render the latest tool's short target: {rendered}"
+        rendered.contains(r"cargo test --lib placeholder\_live\_events -- --nocapture"),
+        "normal status panel must render the escaped latest-tool target: {rendered}"
     );
 
     let raw_debug_block = events.render_raw_block_for_tests(channel_id).unwrap();
@@ -3812,8 +3812,12 @@ fn background_bash_command_only_slot_hides_raw_command_3806() {
         "background Bash class should remain visible: {rendered}"
     );
     assert!(
-        !rendered.contains(raw_command),
-        "background Bash slot must not leak raw command detail: {rendered}"
+        rendered.contains("🔧 마지막 도구 ([Bash]"),
+        "background Bash launch must remain visible as the latest tool: {rendered}"
+    );
+    assert!(
+        rendered.contains("codex exec --skip-git-repo-check -m gpt-5.5"),
+        "the latest-tool header must reuse the bounded formatter summary: {rendered}"
     );
 }
 
@@ -4142,11 +4146,11 @@ fn status_panel_shows_live_subagent_activity_by_parent_id() {
         !rendered.contains("grep ERROR app.log"),
         "subagent activity must not leak raw command args, got: {rendered}"
     );
-    // Nested activity must not replace the top-level Agent launch remembered by
+    // Nested activity must not replace the top-level Task launch remembered by
     // the panel header; the nested Bash step belongs only to the subagent slot.
     assert!(
-        rendered.contains("🔧 마지막 도구 ([Agent]"),
-        "top-level Agent launch must remain the panel's latest tool, got: {rendered}"
+        rendered.contains("🔧 마지막 도구 ([Task] · [general-purpose] Audit logs)"),
+        "top-level Task launch must remain the panel's latest tool, got: {rendered}"
     );
 }
 
@@ -6308,7 +6312,10 @@ fn status_panel_renders_plan_but_hides_subagents_for_codex() {
     assert!(rendered.contains("Plan"));
     assert!(rendered.contains("Hidden for Codex"));
     assert!(!rendered.contains("Subagents"));
-    assert!(!rendered.contains("Hidden subagent"));
+    assert!(
+        rendered.contains("🔧 마지막 도구 ([Task] · Hidden subagent)"),
+        "Codex must omit the subagent section while retaining the latest tool header: {rendered}"
+    );
 }
 
 #[test]
