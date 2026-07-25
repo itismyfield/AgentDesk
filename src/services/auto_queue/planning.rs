@@ -323,12 +323,12 @@ mod phase_gate_generate_validation_tests {
     #[test]
     fn pr_confirm_and_legacy_default_remain_generation_compatible() {
         let explicit = normalize_generate_entries(&body(Some("pr-confirm")))
-            .expect("valid")
-            .expect("entries");
+            .expect("valid") // agentdesk-audit: allow-unwrap — test assertion for available built-in kind
+            .expect("entries"); // agentdesk-audit: allow-unwrap — fixture always supplies entries
         assert_eq!(explicit[0].phase_gate_kind.as_deref(), Some("pr-confirm"));
         let legacy = normalize_generate_entries(&body(None))
-            .expect("valid")
-            .expect("entries");
+            .expect("valid") // agentdesk-audit: allow-unwrap — test assertion for legacy omitted kind
+            .expect("entries"); // agentdesk-audit: allow-unwrap — fixture always supplies entries
         assert!(legacy[0].phase_gate_kind.is_none());
     }
 }

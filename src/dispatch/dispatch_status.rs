@@ -1647,7 +1647,7 @@ mod auto_queue_phase_gate_finalize_wrapper_tests {
     }
 
     fn gate() -> serde_json::Value {
-        crate::phase_gate::resolve_declaration_value("pr-confirm").expect("pr-confirm declaration")
+        crate::phase_gate::resolve_declaration_value("pr-confirm").expect("pr-confirm declaration") // agentdesk-audit: allow-unwrap — immutable built-in fixture in #[cfg(test)] module
     }
 
     fn passing_checks() -> serde_json::Value {

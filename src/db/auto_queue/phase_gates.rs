@@ -1940,8 +1940,9 @@ mod reconcile_phase_gate_pg_tests {
 
     fn gate_context() -> serde_json::Value {
         let mut declaration = crate::phase_gate::resolve_declaration_value("pr-confirm")
-            .expect("pr-confirm declaration");
-        let gate = declaration.as_object_mut().expect("declaration object");
+            .expect("pr-confirm declaration"); // agentdesk-audit: allow-unwrap — immutable built-in fixture in #[cfg(test)] module
+        let gate = declaration.as_object_mut().expect("declaration object"); // agentdesk-audit: allow-unwrap — registry declaration is always a JSON object
+
         gate.insert("run_id".to_string(), json!("run-pg-test"));
         gate.insert("batch_phase".to_string(), json!(0));
         gate.insert("next_phase".to_string(), json!(1));
@@ -2459,7 +2460,7 @@ mod reconcile_phase_gate_pg_tests {
             },
         )
         .await
-        .expect("seed sibling privacy gate");
+        .expect("seed sibling privacy gate"); // agentdesk-audit: allow-unwrap — test-only PG fixture in #[cfg(test)] module
 
         let outcome = run_reconcile(
             &pool,
@@ -2470,7 +2471,7 @@ mod reconcile_phase_gate_pg_tests {
         )
         .await;
         let PhaseGateReconciliation::MarkedFailed { failed_reason, .. } = outcome else {
-            panic!("expected sibling failure");
+            panic!("expected sibling failure"); // agentdesk-audit: allow-unwrap — test assertion for the required fail-closed outcome
         };
         assert!(!failed_reason.contains("authorization"));
         assert!(!failed_reason.contains("Bearer secret"));
