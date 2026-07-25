@@ -508,6 +508,7 @@ src/
 │   │   │   ├── streaming_status.rs
 │   │   │   └── tool_markdown.rs
 │   │   ├── gateway/
+│   │   │   ├── helpers.rs
 │   │   │   └── outbound_messages.rs
 │   │   ├── health/
 │   │   │   ├── recovery/
@@ -624,7 +625,8 @@ src/
 │   │   │   └── workflow_panel.rs
 │   │   ├── placeholder_sweeper/
 │   │   │   ├── abandon_guard.rs
-│   │   │   └── panel_shape.rs
+│   │   │   ├── panel_shape.rs
+│   │   │   └── transition_recovery.rs
 │   │   ├── prompt_builder/
 │   │   │   ├── channel_recent_context.rs
 │   │   │   ├── dispatch_contract.rs
@@ -768,6 +770,8 @@ src/
 │   │   │   ├── read.rs
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
+│   │   ├── status_panel_orphan_store/
+│   │   │   └── persistence.rs
 │   │   ├── task_notification_delivery/
 │   │   │   ├── store/
 │   │   │   │   ├── card_claim.rs
@@ -795,6 +799,7 @@ src/
 │   │   │   └── ops.rs
 │   │   ├── tmux_watcher/
 │   │   │   ├── streaming_status_tick/
+│   │   │   │   ├── panel_refresh.rs
 │   │   │   │   └── types.rs
 │   │   │   ├── commit_decisions.rs
 │   │   │   ├── committed_placeholder_cleanup.rs
@@ -1095,6 +1100,7 @@ src/
 │   │   ├── status_panel_orphan_store.rs
 │   │   ├── status_panel_orphan_store_tests.rs
 │   │   ├── status_panel_singleton_store.rs
+│   │   ├── status_panel_transition.rs
 │   │   ├── streaming_finalizer.rs
 │   │   ├── subagent_notification_card.rs
 │   │   ├── task_supervisor.rs

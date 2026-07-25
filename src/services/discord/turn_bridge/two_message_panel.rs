@@ -87,32 +87,57 @@ pub(super) async fn create_bridge_two_message_status_panel_below_answer<G: TurnG
         channel_id.get(),
     );
     let panel_block = super::formatting::build_processing_status_block(initial_indicator);
-    match gateway.send_message(channel_id, &panel_block).await {
-        Ok(panel_msg_id) => {
-            let next_generation = inflight_state
-                .status_panel_generation
-                .max(
-                    prior_binding
-                        .map(|binding| binding.generation)
-                        .unwrap_or_default(),
-                )
-                .saturating_add(1);
-            let identity = crate::services::discord::inflight::InflightTurnIdentity::from_state(
-                inflight_state,
+    if let Some(prior) = prior_binding
+        && inflight_state.status_panel_generation < prior.generation
+    {
+        inflight_state.status_panel_generation = prior.generation;
+        if crate::services::discord::inflight::save_inflight_state_if_matches_identity(
+            inflight_state,
+            &crate::services::discord::inflight::InflightTurnIdentity::from_state(inflight_state),
+            inflight_state.turn_start_offset,
+        ) != crate::services::discord::inflight::GuardedSaveOutcome::Saved
+        {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                "failed to seed bridge panel generation from durable singleton"
             );
+            *status_panel_dirty = false;
+            return;
+        }
+    }
+    let identity =
+        crate::services::discord::inflight::InflightTurnIdentity::from_state(inflight_state);
+    let prepared = match crate::services::discord::status_panel_transition::prepare_candidate(
+        provider,
+        &shared.token_hash,
+        channel_id.get(),
+        prior_binding,
+        Some(identity.clone()),
+        crate::services::discord::status_panel_transition::StatusPanelTransitionOperation::LiveBind,
+        &panel_block,
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            tracing::warn!(channel_id = channel_id.get(), error = %error, "failed to persist bridge panel intent before send");
+            *status_panel_dirty = false;
+            return;
+        }
+    };
+    match gateway
+        .send_message_with_nonce(channel_id, &panel_block, &prepared.nonce)
+        .await
+    {
+        Ok(panel_msg_id) => {
             if !matches!(
-                crate::services::discord::status_panel_transition::begin_candidate(
+                crate::services::discord::status_panel_transition::acknowledge_candidate(
                     provider,
                     &shared.token_hash,
                     channel_id.get(),
+                    &prepared,
                     panel_msg_id.get(),
-                    prior_binding.map(|binding| binding.panel_message_id),
-                    next_generation,
-                    Some(identity.clone()),
                 ),
                 crate::services::discord::status_panel_transition::StatusPanelTransitionAction::KeepCurrent { .. }
             ) {
-                let _ = gateway.delete_message(channel_id, panel_msg_id).await;
                 return;
             }
             let bind_outcome = crate::services::discord::inflight::bind_status_panel(
@@ -145,11 +170,12 @@ pub(super) async fn create_bridge_two_message_status_panel_below_answer<G: TurnG
                         .await
                         .is_ok()
                     {
-                        crate::services::discord::status_panel_orphan_store::remove(
+                        let _ = crate::services::discord::status_panel_transition::finalize_retirement(
                             provider,
                             &shared.token_hash,
                             channel_id.get(),
                             panel_msg_id.get(),
+                            crate::services::discord::status_panel_transition::StatusPanelRetirementOutcome::Removed,
                         );
                     } else {
                         crate::services::discord::status_panel_orphan_store::enqueue(
@@ -169,7 +195,6 @@ pub(super) async fn create_bridge_two_message_status_panel_below_answer<G: TurnG
                     return;
                 }
             };
-            let next_generation = next_generation.max(bound_generation);
             let next_generation = match crate::services::discord::status_panel_transition::commit_bound_candidate(
                 provider,
                 &shared.token_hash,
@@ -177,13 +202,20 @@ pub(super) async fn create_bridge_two_message_status_panel_below_answer<G: TurnG
                 panel_msg_id.get(),
                 &identity,
                 bound_generation,
-                Some(next_generation),
             ) {
                 crate::services::discord::status_panel_transition::StatusPanelTransitionAction::KeepCurrent {
                     generation: Some(generation),
                 } => generation,
                 crate::services::discord::status_panel_transition::StatusPanelTransitionAction::RetireCandidate => {
-                    if gateway.delete_message(channel_id, panel_msg_id).await.is_err() {
+                    if gateway.delete_message(channel_id, panel_msg_id).await.is_ok() {
+                        let _ = crate::services::discord::status_panel_transition::finalize_retirement(
+                            provider,
+                            &shared.token_hash,
+                            channel_id.get(),
+                            panel_msg_id.get(),
+                            crate::services::discord::status_panel_transition::StatusPanelRetirementOutcome::Removed,
+                        );
+                    } else {
                         crate::services::discord::status_panel_orphan_store::enqueue(
                             provider,
                             &shared.token_hash,
@@ -196,8 +228,7 @@ pub(super) async fn create_bridge_two_message_status_panel_below_answer<G: TurnG
                 }
                 crate::services::discord::status_panel_transition::StatusPanelTransitionAction::DeferDurability { .. }
                 | crate::services::discord::status_panel_transition::StatusPanelTransitionAction::RecoverUnreconciled
-                | crate::services::discord::status_panel_transition::StatusPanelTransitionAction::KeepCurrent { generation: None }
-                | crate::services::discord::status_panel_transition::StatusPanelTransitionAction::AdoptFallback { .. } => {
+                | crate::services::discord::status_panel_transition::StatusPanelTransitionAction::KeepCurrent { generation: None } => {
                     *status_panel_dirty = false;
                     return;
                 }
@@ -315,24 +346,43 @@ pub(super) async fn reanchor_bridge_two_message_status_panel_below_answer<
     let Some(old_panel_id) = *status_panel_msg_id else {
         return false;
     };
-    match gateway.send_message(channel_id, panel_text).await {
+    let identity =
+        crate::services::discord::inflight::InflightTurnIdentity::from_state(inflight_state);
+    let prior =
+        crate::services::discord::status_panel_singleton_store::StatusPanelSingletonBinding {
+            panel_message_id: old_panel_id.get(),
+            generation: inflight_state.status_panel_generation,
+        };
+    let prepared = match crate::services::discord::status_panel_transition::prepare_candidate(
+        provider,
+        &shared.token_hash,
+        channel_id.get(),
+        Some(prior),
+        Some(identity.clone()),
+        crate::services::discord::status_panel_transition::StatusPanelTransitionOperation::LiveBind,
+        panel_text,
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            tracing::warn!(channel_id = channel_id.get(), error = %error, "failed to persist bridge re-anchor intent before send");
+            return false;
+        }
+    };
+    match gateway
+        .send_message_with_nonce(channel_id, panel_text, &prepared.nonce)
+        .await
+    {
         Ok(new_panel_id) => {
-            let identity = crate::services::discord::inflight::InflightTurnIdentity::from_state(
-                inflight_state,
-            );
             if !matches!(
-                crate::services::discord::status_panel_transition::begin_candidate(
+                crate::services::discord::status_panel_transition::acknowledge_candidate(
                     provider,
                     &shared.token_hash,
                     channel_id.get(),
+                    &prepared,
                     new_panel_id.get(),
-                    Some(old_panel_id.get()),
-                    inflight_state.status_panel_generation.saturating_add(1),
-                    Some(identity.clone()),
                 ),
                 crate::services::discord::status_panel_transition::StatusPanelTransitionAction::KeepCurrent { .. }
             ) {
-                let _ = gateway.delete_message(channel_id, new_panel_id).await;
                 return false;
             }
             let mut updated = inflight_state.clone();
@@ -359,7 +409,15 @@ pub(super) async fn reanchor_bridge_two_message_status_panel_below_answer<
                     .await
                     .is_ok()
                 {
-                    crate::services::discord::status_panel_orphan_store::remove(
+                    let _ = crate::services::discord::status_panel_transition::finalize_retirement(
+                        provider,
+                        &shared.token_hash,
+                        channel_id.get(),
+                        new_panel_id.get(),
+                        crate::services::discord::status_panel_transition::StatusPanelRetirementOutcome::Removed,
+                    );
+                } else {
+                    crate::services::discord::status_panel_orphan_store::enqueue(
                         provider,
                         &shared.token_hash,
                         channel_id.get(),
@@ -375,7 +433,6 @@ pub(super) async fn reanchor_bridge_two_message_status_panel_below_answer<
                 new_panel_id.get(),
                 &identity,
                 next_generation,
-                Some(next_generation),
             ) {
                 crate::services::discord::status_panel_transition::StatusPanelTransitionAction::KeepCurrent {
                     generation: Some(generation),
@@ -532,6 +589,15 @@ mod tests {
                     Ok(MessageId::new(send_id))
                 }
             })
+        }
+
+        fn send_message_with_nonce<'a>(
+            &'a self,
+            channel_id: ChannelId,
+            content: &'a str,
+            _nonce: &'a str,
+        ) -> GatewayFuture<'a, Result<MessageId, String>> {
+            self.send_message(channel_id, content)
         }
 
         fn edit_message<'a>(
@@ -870,6 +936,14 @@ mod tests {
         // the durable row must exist or the guarded save skips as Missing.
         crate::services::discord::inflight::save_inflight_state(&inflight)
             .expect("persist inflight row for guarded reanchor save");
+        crate::services::discord::status_panel_singleton_store::bind_if_owned(
+            &ProviderKind::Claude,
+            &shared.token_hash,
+            777,
+            old_panel,
+            Some(1),
+        )
+        .expect("persist prior singleton binding");
 
         let reanchored = reanchor_bridge_two_message_status_panel_below_answer(
             &gateway,

@@ -1,20 +1,9 @@
-//! Explicit status-panel ownership transition authority (#4891).
+//! Durable status-panel create and ownership transition authority (#4891).
 //!
-//! `discord_inflight`, singleton, and orphan files cannot be committed as one
-//! filesystem transaction. Every multi-file ownership change therefore writes an
-//! intent first. The intent is the recovery authority until the reducer reaches a
-//! terminal state and removes it. Replay is idempotent.
-//!
-//! Lock order for synchronous transitions is journal → inflight → singleton →
-//! orphan. Transport code never holds these locks across Discord HTTP awaits.
-//!
-//! Crash boundaries:
-//! - before intent write: no transition exists;
-//! - after intent, before inflight/singleton/orphan write: replay resumes the same
-//!   exact turn-identity/generation guarded transition;
-//! - after ownership write, before intent removal: replay observes the committed
-//!   state and removes only the stale intent;
-//! - any read/write ambiguity: `DeferDurability`; never destructive ownership.
+//! Every Discord create is preceded by a durable nonce-keyed intent. Discord's
+//! enforced nonce makes an ACK-unknown retry idempotent: replay receives the same
+//! message id, records it, and resumes ownership reconciliation. The journal is
+//! authoritative until ownership or retirement reaches a terminal state.
 
 use std::collections::HashMap;
 use std::fs;
@@ -23,36 +12,79 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use super::inflight::InflightTurnIdentity;
+use super::inflight::{self, InflightTurnIdentity};
 use super::runtime_store;
-use super::status_panel_orphan_store::{self, PendingBindOwnedRemovalOutcome};
-use super::status_panel_singleton_store;
+use super::status_panel_orphan_store;
+use super::status_panel_singleton_store::{self, StatusPanelSingletonBinding};
 use crate::services::provider::ProviderKind;
 
 static TRANSITION_LOCK: Mutex<()> = Mutex::new(());
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(in crate::services::discord) enum StatusPanelTransitionState {
-    CandidateSent,
-    PendingBindDurable,
-    OwnershipCommitted,
-    Unreconciled,
+struct TransitionFileLock {
+    _file: fs::File,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+impl Drop for TransitionFileLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let _ = unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
+
+fn lock_intent_path(path: &Path) -> Result<TransitionFileLock, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "status panel transition path has no channel directory".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    // One stable lock per channel bounds lock artifacts and serializes scans with
+    // nonce-specific updates across rolling processes.
+    let lock_path = parent.join(".transitions.lock");
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(lock_path)
+        .map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+    }
+    Ok(TransitionFileLock { _file: file })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub(in crate::services::discord) enum StatusPanelTransitionEvent {
-    CandidateObserved,
-    PendingBindCleanup,
-    CandidateNotOwned,
-    Retry,
+pub(in crate::services::discord) enum StatusPanelTransitionState {
+    #[default]
+    Prepared,
+    CandidateAcknowledged,
+    PendingBindDurable,
+    // Legacy states. Replay reconciles them from current durable owner evidence.
+    OwnershipCommitted,
+    Retiring,
+    CandidateSent,
+    Unreconciled,
+    // A committed owner has been durably recorded; replay only removes residue.
+    Settled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::services::discord) enum StatusPanelTransitionOperation {
+    #[default]
+    LiveBind,
+    CompletionFallback,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) enum StatusPanelTransitionAction {
     KeepCurrent { generation: Option<u64> },
-    AdoptFallback { generation: u64 },
     RetireCandidate,
     DeferDurability { error: String },
     RecoverUnreconciled,
@@ -67,14 +99,30 @@ pub(in crate::services::discord) enum StatusPanelRetirementOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::services::discord) struct StatusPanelTransitionIntent {
+    #[serde(default)]
+    pub nonce: String,
     pub provider: String,
     pub token_hash: String,
     pub channel_id: u64,
-    pub candidate_panel_id: u64,
+    #[serde(default)]
+    pub candidate_panel_id: Option<u64>,
     pub prior_panel_id: Option<u64>,
-    pub generation: u64,
+    #[serde(default)]
+    pub prior_generation: Option<u64>,
+    #[serde(default)]
+    pub generation: Option<u64>,
     pub identity: Option<InflightTurnIdentity>,
+    #[serde(default)]
+    pub operation: StatusPanelTransitionOperation,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
     pub state: StatusPanelTransitionState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::services::discord) struct PreparedStatusPanelTransition {
+    pub nonce: String,
 }
 
 fn root() -> Result<PathBuf, String> {
@@ -82,27 +130,92 @@ fn root() -> Result<PathBuf, String> {
         .ok_or_else(|| "status panel transition root unavailable".to_string())
 }
 
+fn channel_dir_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+) -> PathBuf {
+    root.join(provider.as_str())
+        .join(token_hash)
+        .join(channel_id.to_string())
+}
+
 fn path_in_root(
     root: &Path,
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: u64,
-    candidate_panel_id: u64,
+    nonce: &str,
 ) -> PathBuf {
-    root.join(provider.as_str())
-        .join(token_hash)
-        .join(channel_id.to_string())
-        .join(format!("{candidate_panel_id}.json"))
+    channel_dir_in_root(root, provider, token_hash, channel_id).join(format!("{nonce}.json"))
+}
+
+fn canonical_nonce(path: &Path) -> Option<&str> {
+    path.file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|stem| {
+            stem.parse::<u64>().is_ok()
+                || (stem.starts_with("adksp")
+                    && stem.len() <= 40
+                    && stem.chars().all(|ch| ch.is_ascii_alphanumeric()))
+        })
+}
+
+fn valid_canonical_name(path: &Path) -> bool {
+    path.extension().and_then(|value| value.to_str()) == Some("json")
+        && canonical_nonce(path).is_some()
 }
 
 fn load_in_root(path: &Path) -> Result<Option<StatusPanelTransitionIntent>, String> {
     match fs::read_to_string(path) {
-        Ok(raw) => serde_json::from_str(&raw)
-            .map(Some)
-            .map_err(|error| error.to_string()),
+        Ok(raw) => {
+            let mut intent: StatusPanelTransitionIntent =
+                serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+            let path_nonce = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            if intent.nonce.is_empty() && path_nonce.parse::<u64>().is_ok() {
+                intent.nonce = path_nonce.to_string();
+            }
+            Ok(Some(intent))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.to_string()),
     }
+}
+
+fn validate_intent_scope(
+    path: &Path,
+    intent: &StatusPanelTransitionIntent,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+) -> Result<(), String> {
+    let nonce = canonical_nonce(path)
+        .ok_or_else(|| "status panel transition path has no canonical nonce".to_string())?;
+    if intent.provider != provider.as_str()
+        || intent.token_hash != token_hash
+        || intent.channel_id != channel_id
+        || intent.nonce != nonce
+    {
+        return Err("status panel transition payload/path scope mismatch".to_string());
+    }
+    Ok(())
+}
+
+fn load_scoped_in_root(
+    path: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+) -> Result<Option<StatusPanelTransitionIntent>, String> {
+    let Some(intent) = load_in_root(path)? else {
+        return Ok(None);
+    };
+    validate_intent_scope(path, &intent, provider, token_hash, channel_id)?;
+    Ok(Some(intent))
 }
 
 fn save_in_root(path: &Path, intent: &StatusPanelTransitionIntent) -> Result<(), String> {
@@ -118,96 +231,301 @@ fn remove_in_root(path: &Path) -> Result<(), String> {
     }
 }
 
-pub(in crate::services::discord) fn record_candidate_intent(
+fn new_nonce() -> String {
+    let raw = uuid::Uuid::new_v4().simple().to_string();
+    format!("adksp{}", &raw[..20])
+}
+
+pub(in crate::services::discord) fn prepare_candidate(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    prior_binding: Option<StatusPanelSingletonBinding>,
+    identity: Option<InflightTurnIdentity>,
+    operation: StatusPanelTransitionOperation,
+    content: &str,
+) -> Result<PreparedStatusPanelTransition, String> {
+    if channel_id == 0 || content.is_empty() {
+        return Err("status panel transition requires channel and content".to_string());
+    }
+    let _guard = TRANSITION_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = root()?;
+    let nonce = new_nonce();
+    let path = path_in_root(&root, provider, token_hash, channel_id, &nonce);
+    let _file_guard = lock_intent_path(&path)?;
+    let intent = StatusPanelTransitionIntent {
+        nonce: nonce.clone(),
+        provider: provider.as_str().to_string(),
+        token_hash: token_hash.to_string(),
+        channel_id,
+        candidate_panel_id: None,
+        prior_panel_id: prior_binding.map(|binding| binding.panel_message_id),
+        prior_generation: prior_binding.map(|binding| binding.generation),
+        generation: None,
+        identity,
+        operation,
+        content: content.to_string(),
+        state: StatusPanelTransitionState::Prepared,
+    };
+    save_in_root(&path, &intent)?;
+    Ok(PreparedStatusPanelTransition { nonce })
+}
+
+fn find_by_candidate_in_root(
+    root: &Path,
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: u64,
     candidate_panel_id: u64,
-    prior_panel_id: Option<u64>,
+) -> Result<Option<(PathBuf, StatusPanelTransitionIntent)>, String> {
+    find_by_candidate_locked_in_root(root, provider, token_hash, channel_id, candidate_panel_id)
+}
+
+fn find_by_candidate_locked_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    candidate_panel_id: u64,
+) -> Result<Option<(PathBuf, StatusPanelTransitionIntent)>, String> {
+    let dir = channel_dir_in_root(root, provider, token_hash, channel_id);
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        if !valid_canonical_name(&path) {
+            continue;
+        }
+        match load_scoped_in_root(&path, provider, token_hash, channel_id) {
+            Ok(Some(intent)) if intent.candidate_panel_id == Some(candidate_panel_id) => {
+                return Ok(Some((path, intent)));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "isolating malformed status-panel transition intent"
+                );
+                quarantine_malformed_strict(&path)?;
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn update_intent_by_nonce<F>(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    nonce: &str,
+    update: F,
+) -> Result<StatusPanelTransitionIntent, String>
+where
+    F: FnOnce(&mut StatusPanelTransitionIntent) -> Result<(), String>,
+{
+    let _guard = TRANSITION_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = root()?;
+    let path = path_in_root(&root, provider, token_hash, channel_id, nonce);
+    let _file_guard = lock_intent_path(&path)?;
+    let mut intent = load_scoped_in_root(&path, provider, token_hash, channel_id)?
+        .ok_or_else(|| "status panel transition intent missing".to_string())?;
+    update(&mut intent)?;
+    save_in_root(&path, &intent)?;
+    Ok(intent)
+}
+
+pub(in crate::services::discord) fn cancel_prepared_candidate(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    prepared: &PreparedStatusPanelTransition,
+) -> Result<bool, String> {
+    let _guard = TRANSITION_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = root()?;
+    let path = path_in_root(&root, provider, token_hash, channel_id, &prepared.nonce);
+    let _file_guard = lock_intent_path(&path)?;
+    let Some(intent) = load_scoped_in_root(&path, provider, token_hash, channel_id)? else {
+        return Ok(false);
+    };
+    if intent.state != StatusPanelTransitionState::Prepared || intent.candidate_panel_id.is_some() {
+        return Ok(false);
+    }
+    remove_in_root(&path)?;
+    Ok(true)
+}
+
+fn protect_acknowledged_candidate(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    nonce: &str,
+    candidate_panel_id: u64,
+) -> Result<StatusPanelTransitionIntent, String> {
+    let _guard = TRANSITION_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = root()?;
+    let path = path_in_root(&root, provider, token_hash, channel_id, nonce);
+    let _file_guard = lock_intent_path(&path)?;
+    let mut intent = match load_scoped_in_root(&path, provider, token_hash, channel_id) {
+        Ok(Some(intent)) => intent,
+        Ok(None) => return Err("status panel transition intent missing".to_string()),
+        Err(error) => {
+            quarantine_malformed_strict(&path)?;
+            return Err(error);
+        }
+    };
+    if intent
+        .candidate_panel_id
+        .is_some_and(|id| id != candidate_panel_id)
+    {
+        return Err("status panel nonce resolved to a different message".to_string());
+    }
+    intent.candidate_panel_id = Some(candidate_panel_id);
+    intent.state = StatusPanelTransitionState::CandidateAcknowledged;
+    save_in_root(&path, &intent)?;
+    status_panel_orphan_store::enqueue_pending_bind(
+        provider,
+        token_hash,
+        channel_id,
+        candidate_panel_id,
+        intent.identity.clone(),
+    )?;
+    intent.state = StatusPanelTransitionState::PendingBindDurable;
+    save_in_root(&path, &intent)?;
+    Ok(intent)
+}
+
+pub(in crate::services::discord) fn acknowledge_candidate(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    prepared: &PreparedStatusPanelTransition,
+    candidate_panel_id: u64,
+) -> StatusPanelTransitionAction {
+    if candidate_panel_id == 0 {
+        return StatusPanelTransitionAction::DeferDurability {
+            error: "status panel candidate id must be non-zero".to_string(),
+        };
+    }
+    match protect_acknowledged_candidate(
+        provider,
+        token_hash,
+        channel_id,
+        &prepared.nonce,
+        candidate_panel_id,
+    ) {
+        Ok(_) => StatusPanelTransitionAction::KeepCurrent { generation: None },
+        Err(error) => StatusPanelTransitionAction::DeferDurability { error },
+    }
+}
+
+fn mark_intent_terminal_for_candidate(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    candidate_panel_id: u64,
     generation: u64,
-    identity: Option<InflightTurnIdentity>,
 ) -> Result<(), String> {
     let _guard = TRANSITION_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let root = root()?;
-    let path = path_in_root(&root, provider, token_hash, channel_id, candidate_panel_id);
-    let intent = StatusPanelTransitionIntent {
-        provider: provider.as_str().to_string(),
-        token_hash: token_hash.to_string(),
+    let probe = path_in_root(
+        &root,
+        provider,
+        token_hash,
         channel_id,
-        candidate_panel_id,
-        prior_panel_id,
-        generation,
-        identity,
-        state: StatusPanelTransitionState::CandidateSent,
-    };
-    match load_in_root(&path)? {
-        Some(existing) if existing == intent => Ok(()),
-        Some(_) => Err("status panel transition candidate intent conflicts".to_string()),
-        None => save_in_root(&path, &intent),
-    }
-}
-
-pub(in crate::services::discord) fn begin_candidate(
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: u64,
-    candidate_panel_id: u64,
-    prior_panel_id: Option<u64>,
-    generation: u64,
-    identity: Option<InflightTurnIdentity>,
-) -> StatusPanelTransitionAction {
-    if let Err(error) = record_candidate_intent(
+        &format!("lookup-{candidate_panel_id}"),
+    );
+    let _file_guard = lock_intent_path(&probe)?;
+    if let Some((path, mut intent)) = find_by_candidate_locked_in_root(
+        &root,
         provider,
         token_hash,
         channel_id,
         candidate_panel_id,
-        prior_panel_id,
-        generation,
-        identity.clone(),
-    ) {
-        return StatusPanelTransitionAction::DeferDurability { error };
+    )? {
+        intent.state = StatusPanelTransitionState::Settled;
+        intent.generation = Some(generation);
+        save_in_root(&path, &intent)?;
     }
-    match status_panel_orphan_store::enqueue_pending_bind(
-        provider,
-        token_hash,
-        channel_id,
-        candidate_panel_id,
-        identity,
-    ) {
-        Ok(()) => {
-            match mark_pending_bind_durable(provider, token_hash, channel_id, candidate_panel_id) {
-                Ok(()) => StatusPanelTransitionAction::KeepCurrent { generation: None },
-                Err(error) => StatusPanelTransitionAction::DeferDurability { error },
-            }
-        }
-        Err(_) => {
-            let _ = update_state(
-                provider,
-                token_hash,
-                channel_id,
-                candidate_panel_id,
-                StatusPanelTransitionState::Unreconciled,
-            );
-            StatusPanelTransitionAction::RecoverUnreconciled
-        }
-    }
+    Ok(())
 }
 
-pub(in crate::services::discord) fn mark_pending_bind_durable(
+fn remove_intent_for_candidate(
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: u64,
     candidate_panel_id: u64,
 ) -> Result<(), String> {
-    update_state(
+    let _guard = TRANSITION_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let root = root()?;
+    let probe = path_in_root(
+        &root,
+        provider,
+        token_hash,
+        channel_id,
+        &format!("lookup-{candidate_panel_id}"),
+    );
+    let _file_guard = lock_intent_path(&probe)?;
+    if let Some((path, _)) = find_by_candidate_locked_in_root(
+        &root,
         provider,
         token_hash,
         channel_id,
         candidate_panel_id,
-        StatusPanelTransitionState::PendingBindDurable,
-    )
+    )? {
+        remove_in_root(&path)?;
+    }
+    Ok(())
+}
+
+fn settle_committed_candidate(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    candidate_panel_id: u64,
+    binding: StatusPanelSingletonBinding,
+) -> StatusPanelTransitionAction {
+    if let Err(error) = mark_intent_terminal_for_candidate(
+        provider,
+        token_hash,
+        channel_id,
+        candidate_panel_id,
+        binding.generation,
+    ) {
+        return StatusPanelTransitionAction::DeferDurability { error };
+    }
+    if let Err(error) = status_panel_orphan_store::remove_pending_bind_checked(
+        provider,
+        token_hash,
+        channel_id,
+        candidate_panel_id,
+    ) {
+        return StatusPanelTransitionAction::DeferDurability { error };
+    }
+    if let Err(error) =
+        remove_intent_for_candidate(provider, token_hash, channel_id, candidate_panel_id)
+    {
+        return StatusPanelTransitionAction::DeferDurability { error };
+    }
+    StatusPanelTransitionAction::KeepCurrent {
+        generation: Some(binding.generation),
+    }
 }
 
 pub(in crate::services::discord) fn commit_bound_candidate(
@@ -217,88 +535,94 @@ pub(in crate::services::discord) fn commit_bound_candidate(
     candidate_panel_id: u64,
     identity: &InflightTurnIdentity,
     expected_generation: u64,
-    desired_generation: Option<u64>,
 ) -> StatusPanelTransitionAction {
-    let binding = match status_panel_singleton_store::bind_if_owned_guarded(
+    let expected_prior = match root().and_then(|root| {
+        find_by_candidate_in_root(&root, provider, token_hash, channel_id, candidate_panel_id)
+    }) {
+        Ok(Some((_, intent))) => expected_prior(&intent),
+        Ok(None) => None,
+        Err(error) => return StatusPanelTransitionAction::DeferDurability { error },
+    };
+    let binding = match status_panel_singleton_store::bind_if_owned_guarded_with_prior(
         provider,
         token_hash,
         channel_id,
         candidate_panel_id,
-        desired_generation,
+        Some(expected_generation),
         Some(identity),
         Some(expected_generation),
+        expected_prior,
+        true,
     ) {
         status_panel_singleton_store::GuardedSingletonBindOutcome::Committed(binding) => binding,
         status_panel_singleton_store::GuardedSingletonBindOutcome::NotOwned => {
-            return StatusPanelTransitionAction::RetireCandidate;
+            match status_panel_singleton_store::load_typed(provider, token_hash, channel_id) {
+                status_panel_singleton_store::StatusPanelSingletonLoadOutcome::Present(binding)
+                    if binding.panel_message_id == candidate_panel_id =>
+                {
+                    return settle_committed_candidate(
+                        provider,
+                        token_hash,
+                        channel_id,
+                        candidate_panel_id,
+                        binding,
+                    );
+                }
+                status_panel_singleton_store::StatusPanelSingletonLoadOutcome::DurabilityFailure(
+                    error,
+                ) => return StatusPanelTransitionAction::DeferDurability { error },
+                _ => return StatusPanelTransitionAction::RetireCandidate,
+            }
         }
         status_panel_singleton_store::GuardedSingletonBindOutcome::DurabilityFailure(error) => {
             return StatusPanelTransitionAction::DeferDurability { error };
         }
     };
-    resolve_after_singleton_commit(
+    settle_committed_candidate(
         provider,
         token_hash,
         channel_id,
         candidate_panel_id,
-        identity,
-        binding.generation,
+        binding,
     )
 }
 
-pub(in crate::services::discord) fn resolve_after_singleton_commit(
+pub(in crate::services::discord) fn settle_completed_candidate(
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: u64,
     candidate_panel_id: u64,
-    identity: &InflightTurnIdentity,
-    generation: u64,
 ) -> StatusPanelTransitionAction {
-    let _guard = TRANSITION_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let root = match root() {
-        Ok(root) => root,
-        Err(error) => return StatusPanelTransitionAction::DeferDurability { error },
-    };
-    let path = path_in_root(&root, provider, token_hash, channel_id, candidate_panel_id);
-    let mut intent = match load_in_root(&path) {
-        Ok(Some(intent)) if intent.candidate_panel_id == candidate_panel_id => intent,
-        Ok(_) => {
-            return StatusPanelTransitionAction::DeferDurability {
-                error: "status panel transition intent missing".to_string(),
+    let intent = match root().and_then(|root| {
+        find_by_candidate_in_root(&root, provider, token_hash, channel_id, candidate_panel_id)
+    }) {
+        Ok(Some((_, intent))) => intent,
+        Ok(None) => {
+            return match status_panel_singleton_store::load_typed(
+                provider,
+                token_hash,
+                channel_id,
+            ) {
+                status_panel_singleton_store::StatusPanelSingletonLoadOutcome::Present(binding)
+                    if binding.panel_message_id == candidate_panel_id =>
+                {
+                    settle_committed_candidate(
+                        provider,
+                        token_hash,
+                        channel_id,
+                        candidate_panel_id,
+                        binding,
+                    )
+                }
+                status_panel_singleton_store::StatusPanelSingletonLoadOutcome::DurabilityFailure(
+                    error,
+                ) => StatusPanelTransitionAction::DeferDurability { error },
+                _ => StatusPanelTransitionAction::RecoverUnreconciled,
             };
         }
         Err(error) => return StatusPanelTransitionAction::DeferDurability { error },
     };
-    intent.state = StatusPanelTransitionState::OwnershipCommitted;
-    if let Err(error) = save_in_root(&path, &intent) {
-        return StatusPanelTransitionAction::DeferDurability { error };
-    }
-
-    match status_panel_orphan_store::remove_pending_bind_if_owned(
-        provider,
-        token_hash,
-        channel_id,
-        candidate_panel_id,
-        identity,
-    ) {
-        PendingBindOwnedRemovalOutcome::Removed => {
-            if let Err(error) = remove_in_root(&path) {
-                return StatusPanelTransitionAction::DeferDurability { error };
-            }
-            StatusPanelTransitionAction::KeepCurrent {
-                generation: Some(generation),
-            }
-        }
-        PendingBindOwnedRemovalOutcome::NotOwned => StatusPanelTransitionAction::RetireCandidate,
-        PendingBindOwnedRemovalOutcome::Deferred => {
-            StatusPanelTransitionAction::RecoverUnreconciled
-        }
-        PendingBindOwnedRemovalOutcome::DurabilityFailure(error) => {
-            StatusPanelTransitionAction::DeferDurability { error }
-        }
-    }
+    reconcile_acknowledged(&intent)
 }
 
 pub(in crate::services::discord) fn finalize_retirement(
@@ -311,108 +635,142 @@ pub(in crate::services::discord) fn finalize_retirement(
     if outcome == StatusPanelRetirementOutcome::Deferred {
         return Ok(false);
     }
-    let _guard = TRANSITION_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let root = root()?;
-    remove_in_root(&path_in_root(
-        &root,
+    status_panel_orphan_store::remove_checked(
         provider,
         token_hash,
         channel_id,
         candidate_panel_id,
-    ))?;
+    )?;
+    remove_intent_for_candidate(provider, token_hash, channel_id, candidate_panel_id)?;
     Ok(true)
 }
 
-fn update_state(
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: u64,
-    candidate_panel_id: u64,
-    state: StatusPanelTransitionState,
-) -> Result<(), String> {
-    let _guard = TRANSITION_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let root = root()?;
-    let path = path_in_root(&root, provider, token_hash, channel_id, candidate_panel_id);
-    let mut intent =
-        load_in_root(&path)?.ok_or_else(|| "status panel transition intent missing".to_string())?;
-    if intent.candidate_panel_id != candidate_panel_id {
-        return Err("status panel transition candidate changed".to_string());
-    }
-    intent.state = state;
-    save_in_root(&path, &intent)
+fn expected_prior(intent: &StatusPanelTransitionIntent) -> Option<StatusPanelSingletonBinding> {
+    intent
+        .prior_panel_id
+        .zip(intent.prior_generation)
+        .map(
+            |(panel_message_id, generation)| StatusPanelSingletonBinding {
+                panel_message_id,
+                generation,
+            },
+        )
 }
 
-pub(in crate::services::discord) async fn recover_unreconciled_with_delete<D, DeleteFuture>(
-    provider: &ProviderKind,
-    token_hash: &str,
-    mut delete_candidate: D,
-) -> usize
-where
-    D: FnMut(u64, u64) -> DeleteFuture,
-    DeleteFuture: std::future::Future<Output = StatusPanelRetirementOutcome>,
-{
-    let intents = match load_unreconciled(provider, token_hash) {
-        Ok(intents) => intents,
-        Err(_) => return 0,
-    };
-    let mut resolved = 0;
-    for intent in intents {
-        let action = match (intent.state, intent.identity.as_ref()) {
-            (StatusPanelTransitionState::OwnershipCommitted, Some(identity)) => {
-                resolve_after_singleton_commit(
-                    provider,
-                    token_hash,
-                    intent.channel_id,
-                    intent.candidate_panel_id,
-                    identity,
-                    intent.generation,
-                )
-            }
-            (StatusPanelTransitionState::PendingBindDurable, Some(identity)) => {
-                commit_bound_candidate(
-                    provider,
-                    token_hash,
-                    intent.channel_id,
-                    intent.candidate_panel_id,
-                    identity,
-                    intent.generation,
-                    None,
-                )
-            }
-            (StatusPanelTransitionState::CandidateSent, _)
-            | (StatusPanelTransitionState::Unreconciled, _)
-            | (StatusPanelTransitionState::PendingBindDurable, None)
-            | (StatusPanelTransitionState::OwnershipCommitted, None) => {
-                StatusPanelTransitionAction::RecoverUnreconciled
-            }
+fn reconcile_acknowledged(intent: &StatusPanelTransitionIntent) -> StatusPanelTransitionAction {
+    let Some(provider) = ProviderKind::from_str(&intent.provider) else {
+        return StatusPanelTransitionAction::DeferDurability {
+            error: format!(
+                "unknown status panel transition provider: {}",
+                intent.provider
+            ),
         };
-        match action {
-            StatusPanelTransitionAction::KeepCurrent { .. } => resolved += 1,
-            StatusPanelTransitionAction::RetireCandidate => {
-                let retirement =
-                    delete_candidate(intent.channel_id, intent.candidate_panel_id).await;
-                if finalize_retirement(
-                    provider,
-                    token_hash,
-                    intent.channel_id,
-                    intent.candidate_panel_id,
-                    retirement,
-                )
-                .unwrap_or(false)
-                {
-                    resolved += 1;
-                }
-            }
-            StatusPanelTransitionAction::AdoptFallback { .. }
-            | StatusPanelTransitionAction::DeferDurability { .. }
-            | StatusPanelTransitionAction::RecoverUnreconciled => {}
+    };
+    let Some(candidate) = intent.candidate_panel_id else {
+        return StatusPanelTransitionAction::RecoverUnreconciled;
+    };
+    match status_panel_singleton_store::load_typed(&provider, &intent.token_hash, intent.channel_id)
+    {
+        status_panel_singleton_store::StatusPanelSingletonLoadOutcome::Present(binding)
+            if binding.panel_message_id == candidate =>
+        {
+            return settle_committed_candidate(
+                &provider,
+                &intent.token_hash,
+                intent.channel_id,
+                candidate,
+                binding,
+            );
+        }
+        status_panel_singleton_store::StatusPanelSingletonLoadOutcome::DurabilityFailure(error) => {
+            return StatusPanelTransitionAction::DeferDurability { error };
+        }
+        _ => {}
+    }
+
+    if let Some(identity) = intent.identity.as_ref()
+        && let Some(state) = inflight::load_inflight_state(&provider, intent.channel_id)
+        && identity.matches_state(&state)
+    {
+        let bound = if state.status_message_id == Some(candidate) {
+            true
+        } else {
+            let guard = inflight::StatusPanelBindGuard {
+                require_identity: Some(identity.clone()),
+                skip_if_panel_already_set: intent.prior_panel_id.is_none(),
+                require_current_status_message_id: intent.prior_panel_id,
+                bump_status_panel_generation: true,
+                ..Default::default()
+            };
+            inflight::bind_status_panel(&provider, intent.channel_id, candidate, &guard).is_bound()
+        };
+        if bound
+            && let Some(state) = inflight::load_inflight_state(&provider, intent.channel_id)
+            && state.status_message_id == Some(candidate)
+        {
+            return commit_bound_candidate(
+                &provider,
+                &intent.token_hash,
+                intent.channel_id,
+                candidate,
+                identity,
+                state.status_panel_generation,
+            );
         }
     }
-    resolved
+
+    if intent.operation == StatusPanelTransitionOperation::CompletionFallback {
+        return match status_panel_singleton_store::commit_replacement_if_current(
+            &provider,
+            &intent.token_hash,
+            intent.channel_id,
+            candidate,
+            expected_prior(intent),
+        ) {
+            status_panel_singleton_store::CompletedBindingCommitOutcome::CommittedCurrent(
+                binding,
+            ) => settle_committed_candidate(
+                &provider,
+                &intent.token_hash,
+                intent.channel_id,
+                candidate,
+                binding,
+            ),
+            status_panel_singleton_store::CompletedBindingCommitOutcome::Superseded => {
+                StatusPanelTransitionAction::RetireCandidate
+            }
+            status_panel_singleton_store::CompletedBindingCommitOutcome::DurabilityFailure(
+                error,
+            ) => StatusPanelTransitionAction::DeferDurability { error },
+        };
+    }
+    StatusPanelTransitionAction::RetireCandidate
+}
+
+fn quarantine_malformed_strict(path: &Path) -> Result<(), String> {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("unknown.json");
+    let quarantine = path.with_file_name(format!(
+        "{file_name}.corrupt-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    match fs::rename(path, quarantine) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn quarantine_malformed_for_discovery(path: &Path) {
+    if let Err(error) = quarantine_malformed_strict(path) {
+        tracing::warn!(
+            path = %path.display(),
+            error = %error,
+            "failed to quarantine malformed status-panel transition intent"
+        );
+    }
 }
 
 pub(in crate::services::discord) fn load_unreconciled(
@@ -426,386 +784,669 @@ pub(in crate::services::discord) fn load_unreconciled(
         Err(error) => return Err(error.to_string()),
     };
     let mut intents = HashMap::new();
-    for channel in channels.flatten() {
-        let candidates = match fs::read_dir(channel.path()) {
+    for channel in channels {
+        let channel = channel.map_err(|error| error.to_string())?;
+        let channel_path = channel.path();
+        if !channel_path.is_dir() {
+            continue;
+        }
+        let Some(channel_id) = channel_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .and_then(|value| value.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        let candidates = match fs::read_dir(&channel_path) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error.to_string()),
         };
-        for candidate in candidates.flatten() {
-            if let Some(intent) = load_in_root(&candidate.path())? {
-                intents.insert((intent.channel_id, intent.candidate_panel_id), intent);
+        for candidate in candidates {
+            let candidate = candidate.map_err(|error| error.to_string())?;
+            let path = candidate.path();
+            if !valid_canonical_name(&path) {
+                continue;
+            }
+            match load_scoped_in_root(&path, provider, token_hash, channel_id) {
+                Ok(Some(intent)) => {
+                    intents.insert((intent.channel_id, intent.nonce.clone()), intent);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %error,
+                        "isolating malformed status-panel transition intent"
+                    );
+                    quarantine_malformed_for_discovery(&path);
+                }
             }
         }
     }
     Ok(intents.into_values().collect())
 }
 
-pub(in crate::services::discord) fn reducer(
-    state: StatusPanelTransitionState,
-    event: StatusPanelTransitionEvent,
-    exact_owner: bool,
-    durability_ok: bool,
-    generation: u64,
-) -> StatusPanelTransitionAction {
-    if !durability_ok {
-        return StatusPanelTransitionAction::DeferDurability {
-            error: "status panel transition durability unavailable".to_string(),
+pub(in crate::services::discord) async fn recover_with_transport<S, SendFuture, D, DeleteFuture>(
+    provider: &ProviderKind,
+    token_hash: &str,
+    mut send_candidate: S,
+    mut delete_candidate: D,
+) -> usize
+where
+    S: FnMut(u64, String, String) -> SendFuture,
+    SendFuture: std::future::Future<Output = Result<u64, String>>,
+    D: FnMut(u64, u64) -> DeleteFuture,
+    DeleteFuture: std::future::Future<Output = StatusPanelRetirementOutcome>,
+{
+    let intents = match load_unreconciled(provider, token_hash) {
+        Ok(intents) => intents,
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to load status-panel transition intents");
+            return 0;
+        }
+    };
+    let mut resolved = 0;
+    for mut intent in intents {
+        if intent.state == StatusPanelTransitionState::Settled {
+            let Some(candidate) = intent.candidate_panel_id else {
+                continue;
+            };
+            // Settled is written only after singleton ownership commits. It no
+            // longer participates in owner selection, so a newer generation may
+            // safely replace the candidate while this bounded residue is removed.
+            if status_panel_orphan_store::remove_pending_bind_checked(
+                provider,
+                token_hash,
+                intent.channel_id,
+                candidate,
+            )
+            .is_ok()
+                && remove_intent_for_candidate(provider, token_hash, intent.channel_id, candidate)
+                    .is_ok()
+            {
+                resolved += 1;
+            }
+            continue;
+        }
+        if intent.state == StatusPanelTransitionState::Prepared {
+            let sent = send_candidate(
+                intent.channel_id,
+                intent.content.clone(),
+                intent.nonce.clone(),
+            )
+            .await;
+            let candidate = match sent {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    tracing::debug!(
+                        channel_id = intent.channel_id,
+                        nonce = %intent.nonce,
+                        error = %error,
+                        "status-panel intent send remains pending"
+                    );
+                    continue;
+                }
+            };
+            let action = acknowledge_candidate(
+                provider,
+                token_hash,
+                intent.channel_id,
+                &PreparedStatusPanelTransition {
+                    nonce: intent.nonce.clone(),
+                },
+                candidate,
+            );
+            if matches!(action, StatusPanelTransitionAction::DeferDurability { .. }) {
+                continue;
+            }
+            intent.candidate_panel_id = Some(candidate);
+            intent.state = StatusPanelTransitionState::PendingBindDurable;
+        }
+        let Some(candidate) = intent.candidate_panel_id else {
+            continue;
         };
-    }
-    match (state, event, exact_owner) {
-        (
-            StatusPanelTransitionState::CandidateSent,
-            StatusPanelTransitionEvent::CandidateObserved,
-            true,
-        ) => StatusPanelTransitionAction::AdoptFallback { generation },
-        (
-            StatusPanelTransitionState::OwnershipCommitted,
-            StatusPanelTransitionEvent::PendingBindCleanup,
-            true,
-        ) => StatusPanelTransitionAction::KeepCurrent {
-            generation: Some(generation),
-        },
-        (_, StatusPanelTransitionEvent::CandidateNotOwned, false) => {
-            StatusPanelTransitionAction::RetireCandidate
+        let action = reconcile_acknowledged(&intent);
+        match action {
+            StatusPanelTransitionAction::KeepCurrent { .. } => resolved += 1,
+            StatusPanelTransitionAction::RetireCandidate => {
+                let retirement = delete_candidate(intent.channel_id, candidate).await;
+                if finalize_retirement(
+                    provider,
+                    token_hash,
+                    intent.channel_id,
+                    candidate,
+                    retirement,
+                )
+                .unwrap_or(false)
+                {
+                    resolved += 1;
+                }
+            }
+            StatusPanelTransitionAction::DeferDurability { .. }
+            | StatusPanelTransitionAction::RecoverUnreconciled => {}
         }
-        (StatusPanelTransitionState::Unreconciled, StatusPanelTransitionEvent::Retry, _) => {
-            StatusPanelTransitionAction::RecoverUnreconciled
-        }
-        _ => StatusPanelTransitionAction::RecoverUnreconciled,
     }
+    resolved
+}
+
+pub(in crate::services::discord) async fn recover_unreconciled_with_delete<D, DeleteFuture>(
+    provider: &ProviderKind,
+    token_hash: &str,
+    delete_candidate: D,
+) -> usize
+where
+    D: FnMut(u64, u64) -> DeleteFuture,
+    DeleteFuture: std::future::Future<Output = StatusPanelRetirementOutcome>,
+{
+    recover_with_transport(
+        provider,
+        token_hash,
+        |_, _, _| async { Err("no create transport available".to_string()) },
+        delete_candidate,
+    )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::discord::inflight;
 
-    fn test_root() -> tempfile::TempDir {
-        match tempfile::tempdir() {
-            Ok(root) => root,
-            Err(error) => {
-                assert!(false, "create isolated runtime root: {error}");
-                std::process::abort()
-            }
-        }
-    }
-
-    fn persist_owner(state: &inflight::InflightTurnState) {
-        assert!(
-            inflight::save_inflight_state(state).is_ok(),
-            "persist transition replay owner"
+    #[test]
+    fn prepared_intent_exists_before_message_id_is_known_4891() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
         );
+        let prepared = prepare_candidate(
+            &ProviderKind::Claude,
+            "tok",
+            42,
+            None,
+            None,
+            StatusPanelTransitionOperation::CompletionFallback,
+            "complete",
+        )
+        .expect("prepare intent");
+        let intents = load_unreconciled(&ProviderKind::Claude, "tok").expect("load intents");
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].nonce, prepared.nonce);
+        assert_eq!(intents[0].candidate_panel_id, None);
+        assert_eq!(intents[0].state, StatusPanelTransitionState::Prepared);
     }
 
-    fn replay_intents(
-        provider: &ProviderKind,
-        token_hash: &str,
-    ) -> Vec<StatusPanelTransitionIntent> {
-        match load_unreconciled(provider, token_hash) {
-            Ok(intents) => intents,
-            Err(error) => {
-                assert!(false, "load transition replay intents: {error}");
-                Vec::new()
-            }
-        }
-    }
-
-    fn test_owner(
-        channel_id: u64,
-        user_msg_id: u64,
-        panel_message_id: u64,
-        generation: u64,
-    ) -> inflight::InflightTurnState {
-        let mut state = inflight::InflightTurnState::new(
-            ProviderKind::Claude,
+    #[test]
+    fn cancel_prepared_candidate_only_removes_unsent_intent_4891() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let token = "tok";
+        let channel_id = 42;
+        let unsent = prepare_candidate(
+            &provider,
+            token,
             channel_id,
             None,
-            1,
-            user_msg_id,
-            user_msg_id + 1,
-            "transition replay test".to_string(),
             None,
-            None,
-            None,
-            None,
-            0,
-        );
-        state.status_message_id = Some(panel_message_id);
-        state.status_panel_generation = generation;
-        state
-    }
-
-    #[test]
-    fn reducer_never_turns_durability_uncertainty_into_retirement_4891() {
-        assert!(matches!(
-            reducer(
-                StatusPanelTransitionState::OwnershipCommitted,
-                StatusPanelTransitionEvent::PendingBindCleanup,
-                true,
-                false,
-                7,
-            ),
-            StatusPanelTransitionAction::DeferDurability { .. }
-        ));
-    }
-
-    #[test]
-    fn intent_replay_survives_every_write_boundary_4891() {
-        let root = tempfile::tempdir().expect("transition root");
-        let provider = ProviderKind::Claude;
-        let path = path_in_root(root.path(), &provider, "tok", 42, 99);
-        let intent = StatusPanelTransitionIntent {
-            provider: provider.as_str().to_string(),
-            token_hash: "tok".to_string(),
-            channel_id: 42,
-            candidate_panel_id: 99,
-            prior_panel_id: Some(98),
-            generation: 7,
-            identity: None,
-            state: StatusPanelTransitionState::CandidateSent,
-        };
-        save_in_root(&path, &intent).expect("intent first");
-        assert_eq!(load_in_root(&path).expect("replay"), Some(intent));
-        remove_in_root(&path).expect("terminal remove");
-        assert_eq!(load_in_root(&path).expect("removed"), None);
-    }
-
-    #[test]
-    fn per_candidate_intents_are_idempotent_and_never_overwrite_4891() -> Result<(), String> {
-        let _env_lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let runtime_root = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-            "AGENTDESK_ROOT_DIR",
-            runtime_root.path(),
-        );
-        let provider = ProviderKind::Claude;
-
-        record_candidate_intent(&provider, "tok", 42, 99, Some(98), 7, None)?;
-        record_candidate_intent(&provider, "tok", 42, 99, Some(98), 7, None)?;
-        record_candidate_intent(&provider, "tok", 42, 100, Some(99), 8, None)?;
+            StatusPanelTransitionOperation::CompletionFallback,
+            "unsent",
+        )
+        .expect("prepare unsent intent");
         assert!(
-            record_candidate_intent(&provider, "tok", 42, 99, Some(97), 9, None).is_err(),
-            "the same candidate key must reject a conflicting intent"
+            cancel_prepared_candidate(&provider, token, channel_id, &unsent)
+                .expect("cancel unsent intent")
+        );
+        assert!(
+            load_unreconciled(&provider, token)
+                .expect("load intents")
+                .is_empty()
         );
 
-        let mut candidates: Vec<_> = load_unreconciled(&provider, "tok")?
-            .into_iter()
-            .map(|intent| intent.candidate_panel_id)
-            .collect();
-        candidates.sort_unstable();
-        assert_eq!(candidates, vec![99, 100]);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn pending_bind_restart_replay_commits_exact_owner_without_retirement_4891() {
-        let _env_lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let runtime_root = test_root();
-        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-            "AGENTDESK_ROOT_DIR",
-            runtime_root.path(),
-        );
-        let provider = ProviderKind::Claude;
-        let token_hash = "tok";
-        let channel_id = 42;
-        let panel_id = 99;
-        let generation = 7;
-        let owner = test_owner(channel_id, 70, panel_id, generation);
-        let identity = InflightTurnIdentity::from_state(&owner);
-        persist_owner(&owner);
+        let acknowledged = prepare_candidate(
+            &provider,
+            token,
+            channel_id,
+            None,
+            None,
+            StatusPanelTransitionOperation::CompletionFallback,
+            "acknowledged",
+        )
+        .expect("prepare acknowledged intent");
         assert!(matches!(
-            begin_candidate(
-                &provider,
-                token_hash,
-                channel_id,
-                panel_id,
-                Some(98),
-                generation,
-                Some(identity),
-            ),
-            StatusPanelTransitionAction::KeepCurrent { .. }
+            acknowledge_candidate(&provider, token, channel_id, &acknowledged, 5000),
+            StatusPanelTransitionAction::KeepCurrent { generation: None }
         ));
-        let delete_count = std::sync::atomic::AtomicUsize::new(0);
-
+        assert!(
+            !cancel_prepared_candidate(&provider, token, channel_id, &acknowledged)
+                .expect("acknowledged intent is not cancellable")
+        );
         assert_eq!(
-            recover_unreconciled_with_delete(&provider, token_hash, |_, _| {
-                delete_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                async { StatusPanelRetirementOutcome::Removed }
-            })
-            .await,
+            load_unreconciled(&provider, token)
+                .expect("load acknowledged intent")
+                .len(),
             1
         );
-        assert_eq!(
-            delete_count.load(std::sync::atomic::Ordering::Relaxed),
-            0,
-            "exact-owner replay must commit rather than retire the live candidate"
-        );
-        assert_eq!(
-            status_panel_singleton_store::load(&provider, token_hash, channel_id),
-            Some(status_panel_singleton_store::StatusPanelSingletonBinding {
-                panel_message_id: panel_id,
-                generation,
-            })
-        );
-        assert!(replay_intents(&provider, token_hash).is_empty());
     }
 
-    #[tokio::test]
-    async fn pending_bind_restart_replay_retires_only_not_owned_candidate_4891() {
+    #[test]
+    fn completed_current_singleton_without_inflight_settles_intent_4891() {
         let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let runtime_root = test_root();
+        let runtime_root = tempfile::tempdir().expect("runtime root");
         let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
             "AGENTDESK_ROOT_DIR",
             runtime_root.path(),
         );
         let provider = ProviderKind::Claude;
-        let token_hash = "tok";
-        let channel_id = 42;
-        let panel_id = 99;
-        let stale_owner = test_owner(channel_id, 70, panel_id, 7);
+        let token = "tok";
+        let channel_id = 43;
+        let candidate = 5001;
+        let prepared = prepare_candidate(
+            &provider,
+            token,
+            channel_id,
+            None,
+            None,
+            StatusPanelTransitionOperation::CompletionFallback,
+            "complete",
+        )
+        .expect("prepare intent");
         assert!(matches!(
-            begin_candidate(
-                &provider,
-                token_hash,
-                channel_id,
-                panel_id,
-                Some(98),
-                7,
-                Some(InflightTurnIdentity::from_state(&stale_owner)),
-            ),
-            StatusPanelTransitionAction::KeepCurrent { .. }
+            acknowledge_candidate(&provider, token, channel_id, &prepared, candidate),
+            StatusPanelTransitionAction::KeepCurrent { generation: None }
         ));
-        let replacement = test_owner(channel_id, 71, 100, 8);
-        persist_owner(&replacement);
-        let delete_count = std::sync::atomic::AtomicUsize::new(0);
-
-        assert_eq!(
-            recover_unreconciled_with_delete(&provider, token_hash, |channel, candidate| {
-                assert_eq!((channel, candidate), (channel_id, panel_id));
-                delete_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                async { StatusPanelRetirementOutcome::PermanentAbsent }
-            })
-            .await,
-            1
-        );
-        assert_eq!(delete_count.load(std::sync::atomic::Ordering::Relaxed), 1);
-        assert!(replay_intents(&provider, token_hash).is_empty());
-    }
-
-    #[tokio::test]
-    async fn pending_bind_restart_replay_defers_singleton_io_failure_without_delete_4891() {
-        let _env_lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let runtime_root = test_root();
-        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-            "AGENTDESK_ROOT_DIR",
-            runtime_root.path(),
-        );
-        let provider = ProviderKind::Claude;
-        let token_hash = "tok";
-        let channel_id = 42;
-        let panel_id = 99;
-        let generation = 7;
-        let owner = test_owner(channel_id, 70, panel_id, generation);
         assert!(matches!(
-            begin_candidate(
-                &provider,
-                token_hash,
-                channel_id,
-                panel_id,
-                Some(98),
-                generation,
-                Some(InflightTurnIdentity::from_state(&owner)),
+            status_panel_singleton_store::commit_replacement_if_current(
+                &provider, token, channel_id, candidate, None,
             ),
-            StatusPanelTransitionAction::KeepCurrent { .. }
+            status_panel_singleton_store::CompletedBindingCommitOutcome::CommittedCurrent(_)
         ));
-        persist_owner(&owner);
-        let singleton_path = match runtime_store::discord_status_panel_singletons_root() {
-            Some(path) => path,
-            None => {
-                assert!(false, "singleton root must be available");
-                return;
+
+        assert!(matches!(
+            settle_completed_candidate(&provider, token, channel_id, candidate),
+            StatusPanelTransitionAction::KeepCurrent {
+                generation: Some(1)
             }
-        };
+        ));
         assert!(
-            fs::write(&singleton_path, "block singleton writes").is_ok(),
-            "block singleton writes for fault injection"
+            load_unreconciled(&provider, token)
+                .expect("load intents")
+                .is_empty(),
+            "already-current completion must settle rather than retire on restart"
         );
-        let delete_count = std::sync::atomic::AtomicUsize::new(0);
-
-        assert_eq!(
-            recover_unreconciled_with_delete(&provider, token_hash, |_, _| {
-                delete_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                async { StatusPanelRetirementOutcome::Removed }
-            })
-            .await,
-            0
+        assert!(
+            find_by_candidate_in_root(
+                &root().expect("transition root"),
+                &provider,
+                token,
+                channel_id,
+                candidate,
+            )
+            .expect("terminal lookup")
+            .is_none(),
+            "terminal intent must be removed after pending-bind cleanup"
         );
-        assert_eq!(
-            delete_count.load(std::sync::atomic::Ordering::Relaxed),
-            0,
-            "singleton durability ambiguity must keep the candidate"
-        );
-        assert_eq!(replay_intents(&provider, token_hash).len(), 1);
+        assert!(!status_panel_orphan_store::is_queued(
+            &provider, token, channel_id, candidate
+        ));
     }
 
     #[tokio::test]
-    async fn retirement_transport_deferral_survives_restart_replay_4891() {
+    async fn identityless_prepared_intent_replays_same_nonce_and_terminates_4891() {
         let _env_lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let runtime_root = test_root();
+        let runtime_root = tempfile::tempdir().expect("runtime root");
         let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
             "AGENTDESK_ROOT_DIR",
             runtime_root.path(),
         );
         let provider = ProviderKind::Claude;
-        let token_hash = "tok";
-        let channel_id = 42;
-        let panel_id = 99;
-        let stale_owner = test_owner(channel_id, 70, panel_id, 7);
-        assert!(matches!(
-            begin_candidate(
-                &provider,
-                token_hash,
-                channel_id,
-                panel_id,
-                Some(98),
-                7,
-                Some(InflightTurnIdentity::from_state(&stale_owner)),
-            ),
-            StatusPanelTransitionAction::KeepCurrent { .. }
-        ));
-        let replacement = test_owner(channel_id, 71, 100, 8);
-        persist_owner(&replacement);
+        let token = "tok";
+        let channel_id = 44;
+        let candidate = 5002;
+        let prepared = prepare_candidate(
+            &provider,
+            token,
+            channel_id,
+            None,
+            None,
+            StatusPanelTransitionOperation::CompletionFallback,
+            "complete",
+        )
+        .expect("prepare intent");
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sent = observed.clone();
 
         assert_eq!(
-            recover_unreconciled_with_delete(&provider, token_hash, |_, _| async {
-                StatusPanelRetirementOutcome::Deferred
-            })
+            recover_with_transport(
+                &provider,
+                token,
+                move |observed_channel, content, nonce| {
+                    let sent = sent.clone();
+                    async move {
+                        sent.lock().expect("send observations").push((
+                            observed_channel,
+                            content,
+                            nonce,
+                        ));
+                        Ok(candidate)
+                    }
+                },
+                |_, _| async { StatusPanelRetirementOutcome::Deferred },
+            )
             .await,
-            0
+            1
         );
         assert_eq!(
-            replay_intents(&provider, token_hash).len(),
-            1,
-            "transient delete ambiguity must survive process restart replay"
+            observed.lock().expect("send observations").as_slice(),
+            &[(channel_id, "complete".to_string(), prepared.nonce)]
+        );
+        assert!(
+            load_unreconciled(&provider, token)
+                .expect("load intents")
+                .is_empty()
         );
         assert_eq!(
-            recover_unreconciled_with_delete(&provider, token_hash, |_, _| async {
-                StatusPanelRetirementOutcome::PermanentAbsent
+            status_panel_singleton_store::load(&provider, token, channel_id),
+            Some(StatusPanelSingletonBinding {
+                panel_message_id: candidate,
+                generation: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn live_candidate_lookup_isolates_poison_and_finds_valid_intent_4891() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let prepared = prepare_candidate(
+            &provider,
+            "tok",
+            45,
+            None,
+            None,
+            StatusPanelTransitionOperation::CompletionFallback,
+            "complete",
+        )
+        .expect("prepare intent");
+        assert!(matches!(
+            acknowledge_candidate(&provider, "tok", 45, &prepared, 5003),
+            StatusPanelTransitionAction::KeepCurrent { generation: None }
+        ));
+        let dir = root().expect("root").join("claude").join("tok").join("45");
+        fs::write(dir.join("00000000000000000000.json"), "{").expect("poison");
+
+        let found = find_by_candidate_in_root(&root().expect("root"), &provider, "tok", 45, 9999)
+            .expect("lookup continues");
+        assert!(found.is_none());
+        assert!(
+            find_by_candidate_in_root(&root().expect("root"), &provider, "tok", 45, 5003)
+                .expect("valid lookup")
+                .is_some()
+        );
+        assert!(
+            fs::read_dir(dir)
+                .expect("dir")
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+        );
+    }
+
+    #[test]
+    fn replay_skips_non_channel_entries_and_quarantines_scope_mismatch_4891() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let token = "tok";
+        let valid = prepare_candidate(
+            &provider,
+            token,
+            42,
+            None,
+            None,
+            StatusPanelTransitionOperation::LiveBind,
+            "live",
+        )
+        .expect("valid intent");
+        let token_root = root().expect("root").join("claude").join(token);
+        fs::write(token_root.join("notes"), "not a channel").expect("provider-root file");
+        fs::create_dir_all(token_root.join("not-a-channel")).expect("nonnumeric directory");
+
+        let poison_nonce = "adkspbbbbbbbbbbbbbbbbbbbb";
+        let poison_path = token_root.join("43").join(format!("{poison_nonce}.json"));
+        fs::create_dir_all(poison_path.parent().expect("poison parent")).expect("poison dir");
+        let poison = StatusPanelTransitionIntent {
+            nonce: poison_nonce.to_string(),
+            provider: provider.as_str().to_string(),
+            token_hash: "other-token".to_string(),
+            channel_id: 43,
+            candidate_panel_id: None,
+            prior_panel_id: None,
+            prior_generation: None,
+            generation: None,
+            identity: None,
+            operation: StatusPanelTransitionOperation::LiveBind,
+            content: "poison".to_string(),
+            state: StatusPanelTransitionState::Prepared,
+        };
+        save_in_root(&poison_path, &poison).expect("scope poison");
+
+        let intents = load_unreconciled(&provider, token).expect("valid replay continues");
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].nonce, valid.nonce);
+        assert!(
+            fs::read_dir(poison_path.parent().expect("poison parent"))
+                .expect("poison dir")
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_states_converge_from_current_owner_evidence_4891() {
+        for (index, state) in [
+            StatusPanelTransitionState::CandidateSent,
+            StatusPanelTransitionState::Unreconciled,
+            StatusPanelTransitionState::OwnershipCommitted,
+            StatusPanelTransitionState::Retiring,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let _env_lock = crate::config::shared_test_env_lock()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let runtime_root = tempfile::tempdir().expect("runtime root");
+            let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+                "AGENTDESK_ROOT_DIR",
+                runtime_root.path(),
+            );
+            let provider = ProviderKind::Claude;
+            let token = "tok";
+            let channel_id = 50 + index as u64;
+            let candidate = 5_100 + index as u64;
+            let prepared = prepare_candidate(
+                &provider,
+                token,
+                channel_id,
+                None,
+                None,
+                StatusPanelTransitionOperation::CompletionFallback,
+                "complete",
+            )
+            .expect("prepare intent");
+            assert!(matches!(
+                acknowledge_candidate(&provider, token, channel_id, &prepared, candidate),
+                StatusPanelTransitionAction::KeepCurrent { generation: None }
+            ));
+            update_intent_by_nonce(&provider, token, channel_id, &prepared.nonce, |intent| {
+                intent.state = state;
+                Ok(())
+            })
+            .expect("set legacy state");
+            status_panel_singleton_store::commit_replacement_if_current(
+                &provider, token, channel_id, candidate, None,
+            );
+
+            assert_eq!(
+                recover_unreconciled_with_delete(&provider, token, |_, _| async {
+                    panic!("current singleton must not be retired")
+                })
+                .await,
+                1,
+                "legacy state {state:?} must settle"
+            );
+            assert!(
+                load_unreconciled(&provider, token)
+                    .expect("load intents")
+                    .is_empty()
+            );
+            assert!(
+                find_by_candidate_in_root(
+                    &root().expect("transition root"),
+                    &provider,
+                    token,
+                    channel_id,
+                    candidate,
+                )
+                .expect("terminal lookup")
+                .is_none(),
+                "legacy state {state:?} must reach bounded terminal cleanup"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn settled_residue_is_removed_after_newer_singleton_wins_4891() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let token = "tok";
+        let channel_id = 60;
+        let candidate = 5_200;
+        let newer = 5_201;
+        let prepared = prepare_candidate(
+            &provider,
+            token,
+            channel_id,
+            None,
+            None,
+            StatusPanelTransitionOperation::CompletionFallback,
+            "complete",
+        )
+        .expect("prepare intent");
+        assert!(matches!(
+            acknowledge_candidate(&provider, token, channel_id, &prepared, candidate),
+            StatusPanelTransitionAction::KeepCurrent { generation: None }
+        ));
+        status_panel_singleton_store::commit_replacement_if_current(
+            &provider, token, channel_id, candidate, None,
+        );
+        update_intent_by_nonce(&provider, token, channel_id, &prepared.nonce, |intent| {
+            intent.state = StatusPanelTransitionState::Settled;
+            intent.generation = Some(1);
+            Ok(())
+        })
+        .expect("mark settled residue");
+        status_panel_singleton_store::commit_replacement_if_current(
+            &provider,
+            token,
+            channel_id,
+            newer,
+            Some(StatusPanelSingletonBinding {
+                panel_message_id: candidate,
+                generation: 1,
+            }),
+        );
+
+        assert_eq!(
+            recover_unreconciled_with_delete(&provider, token, |_, _| async {
+                panic!("settled residue must never delete a panel")
             })
             .await,
             1
         );
-        assert!(replay_intents(&provider, token_hash).is_empty());
+        assert!(
+            load_unreconciled(&provider, token)
+                .expect("load intents")
+                .is_empty()
+        );
+        assert_eq!(
+            status_panel_singleton_store::load(&provider, token, channel_id),
+            Some(StatusPanelSingletonBinding {
+                panel_message_id: newer,
+                generation: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn replay_ignores_temp_and_nonnumeric_and_isolates_poison_4891() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
+        prepare_candidate(
+            &ProviderKind::Claude,
+            "tok",
+            42,
+            None,
+            None,
+            StatusPanelTransitionOperation::LiveBind,
+            "live",
+        )
+        .expect("valid intent");
+        let dir = root().expect("root").join("claude").join("tok").join("42");
+        fs::write(dir.join("adkspaaaaaaaaaaaaaaaaaaaa.json"), "{").expect("poison");
+        fs::write(dir.join("write.tmp"), "{").expect("tmp");
+        fs::write(dir.join("notes.json"), "{").expect("nonnumeric");
+
+        assert_eq!(
+            load_unreconciled(&ProviderKind::Claude, "tok")
+                .expect("valid replay continues")
+                .len(),
+            1
+        );
+        assert!(
+            fs::read_dir(dir)
+                .expect("dir")
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+        );
     }
 }

@@ -282,14 +282,25 @@ fn watcher_orphan_preregistration_is_flag_gated_and_removed_after_persist() {
     let channel_id = ChannelId::new(777);
     let panel = serenity::MessageId::new(44);
 
-    preregister_watcher_two_message_panel_orphan(
+    let prepared = prepare_watcher_two_message_panel(
         false,
         shared.as_ref(),
         &provider,
         channel_id,
+        None,
+        None,
+        "panel",
+    )
+    .expect("flag-off preparation");
+    acknowledge_watcher_two_message_panel(
+        false,
+        shared.as_ref(),
+        &provider,
+        channel_id,
+        prepared.as_ref(),
         panel,
     )
-    .expect("flag-off preregistration");
+    .expect("flag-off acknowledgement");
     assert!(
         crate::services::discord::status_panel_orphan_store::load_pending(
             &provider,
@@ -299,11 +310,22 @@ fn watcher_orphan_preregistration_is_flag_gated_and_removed_after_persist() {
         "flag OFF must not introduce orphan-store side effects"
     );
 
-    preregister_watcher_two_message_panel_orphan(
+    let prepared = prepare_watcher_two_message_panel(
         true,
         shared.as_ref(),
         &provider,
         channel_id,
+        None,
+        None,
+        "panel",
+    )
+    .expect("prepare pending bind");
+    acknowledge_watcher_two_message_panel(
+        true,
+        shared.as_ref(),
+        &provider,
+        channel_id,
+        prepared.as_ref(),
         panel,
     )
     .expect("persist pending bind");

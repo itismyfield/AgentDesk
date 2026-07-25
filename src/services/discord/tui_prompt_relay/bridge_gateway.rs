@@ -28,6 +28,28 @@ impl TurnGateway for TuiDirectBridgeGateway {
         })
     }
 
+    fn send_message_with_nonce<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        content: &'a str,
+        nonce: &'a str,
+    ) -> GatewayFuture<'a, Result<MessageId, String>> {
+        Box::pin(async move {
+            super::super::gateway::send_outbound_message_with_nonce_classified(
+                self.http.clone(),
+                self.shared.clone(),
+                channel_id,
+                content,
+                nonce,
+            )
+            .await
+            .map_err(|error| match error {
+                super::super::gateway::ClassifiedOutboundPostError::Transient(error)
+                | super::super::gateway::ClassifiedOutboundPostError::Permanent(error) => error,
+            })
+        })
+    }
+
     fn edit_message<'a>(
         &'a self,
         channel_id: ChannelId,

@@ -1,7 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
@@ -25,7 +24,11 @@ use super::{
 use crate::services::provider::ProviderKind;
 use formatting::ReplaceLongMessageOutcome;
 
+mod helpers;
 mod outbound_messages;
+use self::helpers::{
+    next_headless_message_id, watcher_classified_error_string, watcher_classified_failure_message,
+};
 #[cfg(test)]
 use self::outbound_messages::await_answer_flush_if_queued_notice;
 pub(super) use self::outbound_messages::{
@@ -36,20 +39,6 @@ pub(super) use self::outbound_messages::{
 
 pub(super) type GatewayFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-fn watcher_classified_failure_message(
-    class: super::replace_outcome_policy::WatcherSendFailureClass,
-    message: impl std::fmt::Display,
-) -> String {
-    super::replace_outcome_policy::watcher_send_failure_classified_message(class, message)
-}
-
-fn watcher_classified_error_string(error: &(dyn std::error::Error + 'static)) -> String {
-    watcher_classified_failure_message(
-        super::replace_outcome_policy::classify_watcher_send_failure(error),
-        error,
-    )
-}
-
 #[allow(dead_code)]
 pub(super) trait TurnGateway: Send + Sync {
     fn send_message<'a>(
@@ -57,6 +46,15 @@ pub(super) trait TurnGateway: Send + Sync {
         channel_id: ChannelId,
         content: &'a str,
     ) -> GatewayFuture<'a, Result<MessageId, String>>;
+
+    fn send_message_with_nonce<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _content: &'a str,
+        _nonce: &'a str,
+    ) -> GatewayFuture<'a, Result<MessageId, String>> {
+        Box::pin(async { Err("gateway does not support enforced Discord nonce sends".to_string()) })
+    }
 
     fn send_long_message_with_rollback<'a>(
         &'a self,
@@ -571,11 +569,6 @@ fn live_bot_owner_provider(live_turn: Option<&LiveDiscordTurnContext>) -> Option
     Some(resolve_discord_bot_provider(&live_turn.token))
 }
 
-fn next_headless_message_id() -> MessageId {
-    static HEADLESS_MESSAGE_ID_SEQ: AtomicU64 = AtomicU64::new(9_000_000_000_000_000_000);
-    MessageId::new(HEADLESS_MESSAGE_ID_SEQ.fetch_add(1, Ordering::Relaxed))
-}
-
 impl TurnGateway for DiscordGateway {
     fn send_message<'a>(
         &'a self,
@@ -584,6 +577,25 @@ impl TurnGateway for DiscordGateway {
     ) -> GatewayFuture<'a, Result<MessageId, String>> {
         Box::pin(async move {
             send_outbound_message(self.http.clone(), self.shared.clone(), channel_id, content).await
+        })
+    }
+
+    fn send_message_with_nonce<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        content: &'a str,
+        nonce: &'a str,
+    ) -> GatewayFuture<'a, Result<MessageId, String>> {
+        Box::pin(async move {
+            send_outbound_message_with_nonce_classified(
+                self.http.clone(),
+                self.shared.clone(),
+                channel_id,
+                content,
+                nonce,
+            )
+            .await
+            .map_err(ClassifiedOutboundPostError::into_reason)
         })
     }
 

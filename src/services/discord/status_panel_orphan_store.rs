@@ -1,32 +1,15 @@
-//! #3003: durable retry store for orphaned status-panel-v2 message deletes.
+//! Durable per-panel retry store for status-panel deletes and pending binds.
 //!
-//! The watcher reclaims a TUI-direct status panel inline when its turn ends, and
-//! the placeholder sweeper reclaims panels left on lingering inflight rows. Both
-//! fast paths can fail transiently (Discord 5xx / rate-limit / transport), and
-//! when the owning inflight row has *already been cleared* — e.g. a
-//! stopped/cancelled turn — there is no per-turn handle left to retry from, so
-//! the panel would stay stuck at "계속 처리 중".
-//!
-//! This store records `(channel_id, panel_msg_id)` durably, independent of the
-//! inflight lifecycle, so [`drain`] can retry the delete across sweeps and
-//! restarts until it commits or the message is permanently gone (404/403/410).
-//!
-//! Layout (atomic temp+rename writes, mirroring `queued_placeholders_store`):
-//!
-//! ```text
-//! runtime/discord_status_panel_orphans/<provider>/<token_hash>/<channel_id>.json
-//! ```
-//!
-//! Each file holds panel entries scoped to that channel; legacy raw id arrays
-//! still load as stranded entries. `token_hash` scoping keeps one bot's sweeper
-//! from trying to delete another bot's messages.
-//!
-//! Path resolution is split into `*_in_root` helpers so tests inject an explicit
-//! temp root instead of mutating the global `AGENTDESK_ROOT_DIR` env var.
+//! New writers never read-modify-write the legacy per-channel aggregate file.
+//! Every `(channel, panel)` has its own atomic file, so concurrent processes and
+//! rolling old/new dcserver writers cannot overwrite another new-writer entry.
+//! A tombstone suppresses a removed legacy aggregate entry without rewriting the
+//! legacy file. Malformed canonical files fail closed and are never overwritten.
 
+use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::path::Path;
+use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
 use serde::{Deserialize, Serialize};
@@ -34,15 +17,6 @@ use serde::{Deserialize, Serialize};
 use crate::services::discord::inflight::{InflightTurnIdentity, InflightTurnState};
 use crate::services::discord::runtime_store;
 use crate::services::provider::ProviderKind;
-
-/// Serializes the read-modify-write of `enqueue`/`remove` across the watcher
-/// tasks and the sweeper task that all touch this store concurrently (codex P2
-/// r14). The critical section is purely synchronous file IO (no await), and
-/// these operations only run on the rare delete-failure / drain paths, so a
-/// single process-wide lock has negligible contention. Per-file `atomic_write`
-/// keeps individual writes crash-safe; this lock keeps two concurrent
-/// read-modify-write cycles from clobbering each other.
-static STORE_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 const PENDING_BIND_GRACE_DRAIN_CYCLES: u8 = 2;
 
@@ -121,153 +95,6 @@ fn identity_matches_state(identity: &InflightTurnIdentity, state: &InflightTurnS
         && identity.turn_start_offset == state.turn_start_offset
 }
 
-fn provider_dir_in_root(root: &Path, provider: &ProviderKind, token_hash: &str) -> PathBuf {
-    root.join(provider.as_str()).join(token_hash)
-}
-
-fn channel_file_path_in_root(
-    root: &Path,
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: u64,
-) -> PathBuf {
-    provider_dir_in_root(root, provider, token_hash).join(format!("{channel_id}.json"))
-}
-
-fn load_channel_in_root(
-    root: &Path,
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: u64,
-) -> Vec<StatusPanelOrphanEntry> {
-    let path = channel_file_path_in_root(root, provider, token_hash, channel_id);
-    let Ok(raw) = fs::read_to_string(&path) else {
-        return Vec::new();
-    };
-    serde_json::from_str::<StatusPanelOrphanChannelFile>(&raw)
-        .map(StatusPanelOrphanChannelFile::into_entries)
-        .unwrap_or_default()
-}
-
-fn save_channel_in_root(
-    root: &Path,
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: u64,
-    entries: &[StatusPanelOrphanEntry],
-) -> Result<(), String> {
-    let path = channel_file_path_in_root(root, provider, token_hash, channel_id);
-    if entries.is_empty() {
-        return match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.to_string()),
-        };
-    }
-    let json = serde_json::to_string_pretty(entries).map_err(|error| error.to_string())?;
-    runtime_store::atomic_write(&path, &json)
-}
-
-fn upsert_entry_in_root(
-    root: &Path,
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: u64,
-    entry: StatusPanelOrphanEntry,
-) -> Result<(), String> {
-    if channel_id == 0 || entry.id == 0 {
-        return Err("status panel orphan ids must be non-zero".to_string());
-    }
-    let _guard = STORE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut entries = load_channel_in_root(root, provider, token_hash, channel_id);
-    if let Some(existing) = entries.iter_mut().find(|existing| existing.id == entry.id) {
-        match (existing.kind, entry.kind) {
-            // A duplicate panel that failed to bind/delete must become an ordinary
-            // stranded orphan immediately; otherwise the pending-bind live-panel
-            // protection would delay self-heal for a panel no inflight row owns.
-            (_, StatusPanelOrphanKind::Stranded) => {
-                *existing = StatusPanelOrphanEntry::stranded(entry.id);
-            }
-            // Never downgrade an already-stranded delete retry back into a
-            // pending bind. A stranded entry is an explicit delete intent.
-            (StatusPanelOrphanKind::Stranded, StatusPanelOrphanKind::PendingBind) => {}
-            (StatusPanelOrphanKind::PendingBind, StatusPanelOrphanKind::PendingBind) => {
-                if existing.turn_identity.is_none() {
-                    existing.turn_identity = entry.turn_identity;
-                }
-            }
-        }
-        return save_channel_in_root(root, provider, token_hash, channel_id, &entries);
-    }
-    entries.push(entry);
-    save_channel_in_root(root, provider, token_hash, channel_id, &entries)
-}
-
-fn enqueue_in_root(
-    root: &Path,
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: u64,
-    panel_msg_id: u64,
-) -> Result<(), String> {
-    upsert_entry_in_root(
-        root,
-        provider,
-        token_hash,
-        channel_id,
-        StatusPanelOrphanEntry::stranded(panel_msg_id),
-    )
-}
-
-fn enqueue_pending_bind_in_root(
-    root: &Path,
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: u64,
-    panel_msg_id: u64,
-    turn_identity: Option<InflightTurnIdentity>,
-) -> Result<(), String> {
-    upsert_entry_in_root(
-        root,
-        provider,
-        token_hash,
-        channel_id,
-        StatusPanelOrphanEntry::pending_bind(panel_msg_id, turn_identity),
-    )
-}
-
-fn remove_in_root(
-    root: &Path,
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: u64,
-    panel_msg_id: u64,
-) {
-    let _guard = STORE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut entries = load_channel_in_root(root, provider, token_hash, channel_id);
-    let before = entries.len();
-    entries.retain(|entry| entry.id != panel_msg_id);
-    if entries.len() != before {
-        let _ = save_channel_in_root(root, provider, token_hash, channel_id, &entries);
-    }
-}
-
-fn remove_pending_bind_in_root(
-    root: &Path,
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: u64,
-    panel_msg_id: u64,
-) {
-    let _guard = STORE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut entries = load_channel_in_root(root, provider, token_hash, channel_id);
-    let before = entries.len();
-    entries.retain(|entry| !(entry.id == panel_msg_id && entry.is_pending_bind()));
-    if entries.len() != before {
-        let _ = save_channel_in_root(root, provider, token_hash, channel_id, &entries);
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) enum PendingBindOwnedRemovalOutcome {
     Removed,
@@ -283,17 +110,15 @@ fn ensure_pending_bind_protection_in_root(
     channel_id: u64,
     panel_msg_id: u64,
     identity: &InflightTurnIdentity,
-) {
-    let _store_guard = STORE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut entries = load_channel_in_root(root, provider, token_hash, channel_id);
-    if entries.iter().any(|entry| entry.id == panel_msg_id) {
-        return;
-    }
-    entries.push(StatusPanelOrphanEntry::pending_bind(
+) -> Result<(), String> {
+    enqueue_pending_bind_in_root(
+        root,
+        provider,
+        token_hash,
+        channel_id,
         panel_msg_id,
         Some(identity.clone()),
-    ));
-    let _ = save_channel_in_root(root, provider, token_hash, channel_id, &entries);
+    )
 }
 
 fn remove_pending_bind_if_owned_in_root(
@@ -323,40 +148,35 @@ fn remove_pending_bind_if_owned_in_root(
             }
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            ensure_pending_bind_protection_in_root(
+            return match ensure_pending_bind_protection_in_root(
                 root,
                 provider,
                 token_hash,
                 channel_id,
                 panel_msg_id,
                 identity,
-            );
-            return PendingBindOwnedRemovalOutcome::NotOwned;
+            ) {
+                Ok(()) => PendingBindOwnedRemovalOutcome::NotOwned,
+                Err(error) => PendingBindOwnedRemovalOutcome::DurabilityFailure(error),
+            };
         }
-        Err(error) => {
-            return PendingBindOwnedRemovalOutcome::DurabilityFailure(error.to_string());
-        }
+        Err(error) => return PendingBindOwnedRemovalOutcome::DurabilityFailure(error.to_string()),
     };
     if !identity.matches_state(&inflight) || inflight.status_message_id != Some(panel_msg_id) {
-        ensure_pending_bind_protection_in_root(
+        return match ensure_pending_bind_protection_in_root(
             root,
             provider,
             token_hash,
             channel_id,
             panel_msg_id,
             identity,
-        );
-        return PendingBindOwnedRemovalOutcome::NotOwned;
+        ) {
+            Ok(()) => PendingBindOwnedRemovalOutcome::NotOwned,
+            Err(error) => PendingBindOwnedRemovalOutcome::DurabilityFailure(error),
+        };
     }
-
-    let _store_guard = STORE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut entries = load_channel_in_root(root, provider, token_hash, channel_id);
-    let before = entries.len();
-    entries.retain(|entry| !(entry.id == panel_msg_id && entry.is_pending_bind()));
-    if entries.len() == before {
-        return PendingBindOwnedRemovalOutcome::Deferred;
-    }
-    match save_channel_in_root(root, provider, token_hash, channel_id, &entries) {
+    match remove_pending_bind_in_root_checked(root, provider, token_hash, channel_id, panel_msg_id)
+    {
         Ok(()) => PendingBindOwnedRemovalOutcome::Removed,
         Err(error) => PendingBindOwnedRemovalOutcome::DurabilityFailure(error),
     }
@@ -369,9 +189,60 @@ fn is_queued_in_root(
     channel_id: u64,
     panel_msg_id: u64,
 ) -> bool {
-    load_channel_in_root(root, provider, token_hash, channel_id)
-        .iter()
-        .any(|entry| entry.id == panel_msg_id)
+    load_channel_result_in_root(root, provider, token_hash, channel_id)
+        .map(|entries| entries.iter().any(|entry| entry.id == panel_msg_id))
+        .unwrap_or(true)
+}
+
+fn discover_channels_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+) -> Result<HashSet<u64>, String> {
+    let dir = provider_dir_in_root(root, provider, token_hash);
+    let files = match fs::read_dir(dir) {
+        Ok(files) => files,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut channels = HashSet::new();
+    for file in files {
+        let file = file.map_err(|error| error.to_string())?;
+        let path = file.path();
+        let raw = if path.is_dir() {
+            path.file_name().and_then(|value| value.to_str())
+        } else if path.extension().and_then(|value| value.to_str()) == Some("json") {
+            path.file_stem().and_then(|value| value.to_str())
+        } else {
+            None
+        };
+        if let Some(channel) = raw.and_then(|value| value.parse::<u64>().ok()) {
+            channels.insert(channel);
+        }
+    }
+    Ok(channels)
+}
+
+fn load_pending_entries_result_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+) -> Result<Vec<(u64, StatusPanelOrphanEntry)>, String> {
+    let mut out = Vec::new();
+    for channel_id in discover_channels_in_root(root, provider, token_hash)? {
+        for entry in load_channel_result_in_root(root, provider, token_hash, channel_id)? {
+            out.push((channel_id, entry));
+        }
+    }
+    Ok(out)
+}
+
+fn load_pending_entries_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+) -> Vec<(u64, StatusPanelOrphanEntry)> {
+    load_pending_entries_result_in_root(root, provider, token_hash).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -382,36 +253,6 @@ fn load_pending_in_root(root: &Path, provider: &ProviderKind, token_hash: &str) 
         .collect()
 }
 
-fn load_pending_entries_in_root(
-    root: &Path,
-    provider: &ProviderKind,
-    token_hash: &str,
-) -> Vec<(u64, StatusPanelOrphanEntry)> {
-    let dir = provider_dir_in_root(root, provider, token_hash);
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(channel_id) = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .and_then(|stem| stem.parse::<u64>().ok())
-        else {
-            continue;
-        };
-        for entry in load_channel_in_root(root, provider, token_hash, channel_id) {
-            out.push((channel_id, entry));
-        }
-    }
-    out
-}
-
-/// Record a panel id for durable delete-retry. Idempotent (set semantics) so a
-/// sweeper that re-observes the same orphan every pass does not grow the file.
-/// #3351: also accepts watcher relay-placeholder ids (not only v2 panel ids) —
-/// the drain semantics (delete or forget) are identical for both.
 pub(in crate::services::discord) fn enqueue(
     provider: &ProviderKind,
     token_hash: &str,
@@ -421,12 +262,11 @@ pub(in crate::services::discord) fn enqueue(
     let Some(root) = runtime_store::discord_status_panel_orphans_root() else {
         return;
     };
-    let _ = enqueue_in_root(&root, provider, token_hash, channel_id, panel_msg_id);
+    if let Err(error) = enqueue_in_root(&root, provider, token_hash, channel_id, panel_msg_id) {
+        tracing::warn!(channel_id, panel_msg_id, error = %error, "failed to persist status-panel orphan");
+    }
 }
 
-/// Record a just-sent panel id as a pending bind: it is live-protected until the
-/// inflight bind either lands, the same turn is still in the bind window, or the
-/// record ages past the unclaimed grace and becomes an ordinary stranded delete.
 pub(in crate::services::discord) fn enqueue_pending_bind(
     provider: &ProviderKind,
     token_hash: &str,
@@ -465,19 +305,14 @@ fn enqueue_separate_status_panel_orphan_in_root_for_flags(
     channel_id: u64,
     panel_msg_id: u64,
 ) {
-    if !should_record_separate_status_panel_orphan_for_flags(
+    if should_record_separate_status_panel_orphan_for_flags(
         single_message_panel_enabled,
         status_panel_v2_enabled,
     ) {
-        return;
+        let _ = enqueue_in_root(root, provider, token_hash, channel_id, panel_msg_id);
     }
-    let _ = enqueue_in_root(root, provider, token_hash, channel_id, panel_msg_id);
 }
 
-/// Record a same-run separate status-panel orphan. Footer-mode turns never own a
-/// separate status panel, so they must not grow this store. Transition cleanup
-/// for stale flag-off panels uses the raw [`enqueue`] after an attempted sweeper
-/// delete, because those are real legacy panel messages that still need retry.
 pub(in crate::services::discord) fn enqueue_separate_status_panel_orphan(
     status_panel_v2_enabled: bool,
     provider: &ProviderKind,
@@ -499,7 +334,6 @@ pub(in crate::services::discord) fn enqueue_separate_status_panel_orphan(
     );
 }
 
-/// All pending `(channel_id, panel_msg_id)` records for this bot.
 #[cfg(test)]
 pub(in crate::services::discord) fn load_pending(
     provider: &ProviderKind,
@@ -511,37 +345,46 @@ pub(in crate::services::discord) fn load_pending(
     load_pending_in_root(&root, provider, token_hash)
 }
 
-/// Drop a record once its delete has committed (or the message is permanently
-/// gone). No-op when the id is not present.
+pub(in crate::services::discord) fn remove_checked(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    panel_msg_id: u64,
+) -> Result<(), String> {
+    let root = runtime_store::discord_status_panel_orphans_root()
+        .ok_or_else(|| "AgentDesk runtime root unavailable".to_string())?;
+    remove_in_root_checked(&root, provider, token_hash, channel_id, panel_msg_id)
+}
+
 pub(in crate::services::discord) fn remove(
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: u64,
     panel_msg_id: u64,
 ) {
-    let Some(root) = runtime_store::discord_status_panel_orphans_root() else {
-        return;
-    };
-    remove_in_root(&root, provider, token_hash, channel_id, panel_msg_id);
+    let _ = remove_checked(provider, token_hash, channel_id, panel_msg_id);
 }
 
-/// Drop only pending-bind records for a completed live panel. Stranded delete
-/// retries keep their original semantics.
+pub(in crate::services::discord) fn remove_pending_bind_checked(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    panel_msg_id: u64,
+) -> Result<(), String> {
+    let root = runtime_store::discord_status_panel_orphans_root()
+        .ok_or_else(|| "AgentDesk runtime root unavailable".to_string())?;
+    remove_pending_bind_in_root_checked(&root, provider, token_hash, channel_id, panel_msg_id)
+}
+
 pub(in crate::services::discord) fn remove_pending_bind(
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: u64,
     panel_msg_id: u64,
 ) {
-    let Some(root) = runtime_store::discord_status_panel_orphans_root() else {
-        return;
-    };
-    remove_pending_bind_in_root(&root, provider, token_hash, channel_id, panel_msg_id);
+    let _ = remove_pending_bind_checked(provider, token_hash, channel_id, panel_msg_id);
 }
 
-/// Drop a pending-bind record only while the same durable turn still owns the
-/// exact panel. The inflight flock stays held through the orphan-store removal,
-/// so a replacement owner cannot land between the ownership check and removal.
 pub(in crate::services::discord) fn remove_pending_bind_if_owned(
     provider: &ProviderKind,
     token_hash: &str,
@@ -568,9 +411,6 @@ pub(in crate::services::discord) fn remove_pending_bind_if_owned(
     )
 }
 
-/// Is this panel still queued for deletion? Used by [`drain`] to re-validate a
-/// record immediately before deleting it, so a record the completion path
-/// removed (the panel became valid) after the drain's snapshot is not deleted.
 pub(in crate::services::discord) fn is_queued(
     provider: &ProviderKind,
     token_hash: &str,
@@ -578,7 +418,7 @@ pub(in crate::services::discord) fn is_queued(
     panel_msg_id: u64,
 ) -> bool {
     let Some(root) = runtime_store::discord_status_panel_orphans_root() else {
-        return false;
+        return true;
     };
     is_queued_in_root(&root, provider, token_hash, channel_id, panel_msg_id)
 }
@@ -590,11 +430,6 @@ pub(in crate::services::discord) fn delete_error_is_permanent(err: &serenity::Er
             .is_some_and(|status| matches!(status.as_u16(), 404 | 403 | 410)))
 }
 
-/// #3607: emit the durable `relay_delete` observation for the orphan-store drain
-/// delete (sweeper-class). Outcome mirrors the convergence branches:
-/// `Ok` → committed, permanent `Err` (404/403/410) → already_gone, other
-/// `Err` → failed. Panel deletes are non-terminal cleanups. Observation only —
-/// the caller's removal / retry logic is unchanged.
 fn emit_orphan_drain_delete(
     provider: &ProviderKind,
     channel_id: u64,
@@ -603,7 +438,7 @@ fn emit_orphan_drain_delete(
 ) {
     let permanent = result.as_ref().err().is_some_and(delete_error_is_permanent);
     let outcome = super::placeholder_cleanup::panel_sweep_delete_outcome(result.is_ok(), permanent);
-    let detail = result.as_ref().err().map(|err| err.to_string());
+    let detail = result.as_ref().err().map(|error| error.to_string());
     crate::services::observability::emit_relay_delete(
         provider.as_str(),
         channel_id,
@@ -617,8 +452,6 @@ fn emit_orphan_drain_delete(
     );
 }
 
-/// #3351: pure drain-defer decision for relay-placeholder records — `true` when
-/// the live inflight row still anchors `candidate` as its `current_msg_id`.
 fn orphan_drain_placeholder_is_live(current_msg_id: Option<u64>, candidate: u64) -> bool {
     candidate != 0 && current_msg_id == Some(candidate)
 }
@@ -629,7 +462,6 @@ fn stranded_orphan_drain_should_delete(
     candidate: u64,
 ) -> bool {
     use crate::services::discord::status_panel_singleton_store::StatusPanelSingletonLoadOutcome;
-
     if candidate == 0
         || matches!(
             singleton,
@@ -644,11 +476,11 @@ fn stranded_orphan_drain_should_delete(
             if binding.panel_message_id == candidate
     );
     let legacy_owns = inflight_state.and_then(|state| state.status_message_id) == Some(candidate);
-    let live_placeholder_owns = orphan_drain_placeholder_is_live(
+    let placeholder_owns = orphan_drain_placeholder_is_live(
         inflight_state.map(|state| state.current_msg_id),
         candidate,
     );
-    !singleton_owns && !legacy_owns && !live_placeholder_owns
+    !singleton_owns && !legacy_owns && !placeholder_owns
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -658,6 +490,9 @@ enum PendingBindDrainOutcome {
     ReclassifiedToStranded,
     AlreadyStranded,
 }
+
+mod persistence;
+use persistence::*;
 
 fn pending_bind_same_turn_window(
     entry: &StatusPanelOrphanEntry,
@@ -677,35 +512,34 @@ fn prepare_pending_bind_for_drain_in_root(
     panel_msg_id: u64,
     inflight: Option<&InflightTurnState>,
 ) -> PendingBindDrainOutcome {
-    let _guard = STORE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut entries = load_channel_in_root(root, provider, token_hash, channel_id);
-    let Some(index) = entries.iter().position(|entry| entry.id == panel_msg_id) else {
-        return PendingBindDrainOutcome::Missing;
-    };
-    if !entries[index].is_pending_bind() {
-        return PendingBindDrainOutcome::AlreadyStranded;
-    }
-
-    if inflight.and_then(|state| state.status_message_id) == Some(panel_msg_id) {
-        return PendingBindDrainOutcome::Deferred;
-    }
-
-    if pending_bind_same_turn_window(&entries[index], inflight) {
-        return PendingBindDrainOutcome::Deferred;
-    }
-
-    if entries[index].pending_bind_drain_cycles >= PENDING_BIND_GRACE_DRAIN_CYCLES {
-        entries[index].reclassify_to_stranded();
-        if save_channel_in_root(root, provider, token_hash, channel_id, &entries).is_err() {
+    persistence::with_channel_lock(root, provider, token_hash, channel_id, || {
+        let entries = match load_channel_result_in_root(root, provider, token_hash, channel_id) {
+            Ok(entries) => entries,
+            Err(_) => return PendingBindDrainOutcome::Deferred,
+        };
+        let Some(mut entry) = entries.into_iter().find(|entry| entry.id == panel_msg_id) else {
+            return PendingBindDrainOutcome::Missing;
+        };
+        if !entry.is_pending_bind() {
+            return PendingBindDrainOutcome::AlreadyStranded;
+        }
+        if inflight.and_then(|state| state.status_message_id) == Some(panel_msg_id)
+            || pending_bind_same_turn_window(&entry, inflight)
+        {
             return PendingBindDrainOutcome::Deferred;
         }
-        return PendingBindDrainOutcome::ReclassifiedToStranded;
-    }
-
-    entries[index].pending_bind_drain_cycles =
-        entries[index].pending_bind_drain_cycles.saturating_add(1);
-    let _ = save_channel_in_root(root, provider, token_hash, channel_id, &entries);
-    PendingBindDrainOutcome::Deferred
+        if entry.pending_bind_drain_cycles >= PENDING_BIND_GRACE_DRAIN_CYCLES {
+            entry.reclassify_to_stranded();
+            return match save_entry_in_root(root, provider, token_hash, channel_id, &entry) {
+                Ok(()) => PendingBindDrainOutcome::ReclassifiedToStranded,
+                Err(_) => PendingBindDrainOutcome::Deferred,
+            };
+        }
+        entry.pending_bind_drain_cycles = entry.pending_bind_drain_cycles.saturating_add(1);
+        let _ = save_entry_in_root(root, provider, token_hash, channel_id, &entry);
+        PendingBindDrainOutcome::Deferred
+    })
+    .unwrap_or(PendingBindDrainOutcome::Deferred)
 }
 
 fn prepare_pending_bind_for_drain(
@@ -728,9 +562,6 @@ fn prepare_pending_bind_for_drain(
     )
 }
 
-/// Retry every pending panel delete once. A committed delete, or a permanent
-/// "message gone" (404/403/410), drops the record; a transient failure keeps it
-/// for the next pass. Returns the number of records cleared this pass.
 pub(in crate::services::discord) async fn drain(
     http: &Arc<serenity::Http>,
     shared: &Arc<crate::services::discord::SharedData>,
@@ -760,24 +591,20 @@ where
         let Some(root) = runtime_store::discord_status_panel_orphans_root() else {
             return 0;
         };
-        load_pending_entries_in_root(&root, provider, token_hash)
+        match load_pending_entries_result_in_root(&root, provider, token_hash) {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::warn!(error = %error, "status-panel orphan store failed closed");
+                return 0;
+            }
+        }
     };
-    let mut cleared = 0usize;
+    let mut cleared = 0;
     for (channel_id, entry) in pending {
         let panel_msg_id = entry.id;
-        // #3003 (codex P2 r26): re-validate against the live store immediately
-        // before deleting. Between `load_pending` and here, the completion path may
-        // have removed this record (the panel was completed and is now valid);
-        // deleting from a stale snapshot would skip a record already cleaned up.
-        // NOTE: this narrows but does not by itself close the check→delete gap — the
-        // inflight gate below is what closes the TOCTOU against an in-flight
-        // completion (see #3003 workflow r27).
         if !is_queued(provider, token_hash, channel_id, panel_msg_id) {
             continue;
         }
-        // Pending-bind entries are crash-window protection for a just-sent live
-        // panel. They are not delete intents until the bind window is conclusively
-        // gone for at least two drain passes.
         let mut inflight_state =
             crate::services::discord::inflight::load_inflight_state(provider, channel_id);
         if entry.is_pending_bind() {
@@ -788,8 +615,7 @@ where
                 panel_msg_id,
                 inflight_state.as_ref(),
             ) {
-                PendingBindDrainOutcome::Missing => continue,
-                PendingBindDrainOutcome::Deferred => continue,
+                PendingBindDrainOutcome::Missing | PendingBindDrainOutcome::Deferred => continue,
                 PendingBindDrainOutcome::ReclassifiedToStranded
                 | PendingBindDrainOutcome::AlreadyStranded => {
                     inflight_state = crate::services::discord::inflight::load_inflight_state(
@@ -798,51 +624,46 @@ where
                 }
             }
         }
-        if !is_queued(provider, token_hash, channel_id, panel_msg_id) {
-            continue;
-        }
-        // #3003 (workflow r28): defer the delete only while the live inflight row
-        // still owns THIS EXACT panel (`status_message_id == panel_msg_id`). In that
-        // window the turn's completion/reclaim path may be editing the panel into its
-        // final state, and the unlocked `delete_message` round-trip below would race
-        // that completion and erase a freshly-finalized valid panel — the residual
-        // TOCTOU the r26 `is_queued` recheck only narrows.
-        //
-        // Keying on turn identity (not bare channel presence, as r27 did) is required:
-        // a channel-coarse gate deferred whenever ANY inflight existed, so a newer
-        // turn re-occupying the channel — or a stale row pinned alive by a long-lived
-        // tmux pane — would defer an OLD turn's orphan forever (the store is its only
-        // reclaim path). A different/absent `status_message_id` means the live turn
-        // does not own this orphan, so it is safe to delete now.
         let singleton = crate::services::discord::status_panel_singleton_store::load_typed(
             provider, token_hash, channel_id,
         );
         if !stranded_orphan_drain_should_delete(inflight_state.as_ref(), &singleton, panel_msg_id) {
             continue;
         }
-        let channel = serenity::ChannelId::new(channel_id);
-        let message = serenity::MessageId::new(panel_msg_id);
-        let delete_result = delete_message(channel, message).await;
-        // #3607: durable observability for the sweeper-class retry delete — classify
-        // committed / already_gone (permanent 404/403/410) / failed using the SAME
-        // `delete_error_is_permanent` match the convergence below uses (emit-only; no
-        // behaviour change).
-        emit_orphan_drain_delete(provider, channel_id, panel_msg_id, &delete_result);
-        match delete_result {
-            Ok(_) => {
-                remove(provider, token_hash, channel_id, panel_msg_id);
-                cleared += 1;
-            }
-            Err(err) if delete_error_is_permanent(&err) => {
-                remove(provider, token_hash, channel_id, panel_msg_id);
-                cleared += 1;
-            }
-            Err(err) => {
+        let result = delete_message(
+            serenity::ChannelId::new(channel_id),
+            serenity::MessageId::new(panel_msg_id),
+        )
+        .await;
+        emit_orphan_drain_delete(provider, channel_id, panel_msg_id, &result);
+        let retirement = match &result {
+            Ok(()) => Some(
+                crate::services::discord::status_panel_transition::StatusPanelRetirementOutcome::Removed,
+            ),
+            Err(error) if delete_error_is_permanent(error) => Some(
+                crate::services::discord::status_panel_transition::StatusPanelRetirementOutcome::PermanentAbsent,
+            ),
+            Err(error) => {
                 tracing::debug!(
-                    "[status_panel_orphan_store] retry delete for {channel_id}/{panel_msg_id} \
-                     failed transiently — keeping for next drain: {err}"
+                    channel_id,
+                    panel_msg_id,
+                    error = %error,
+                    "status-panel orphan delete remains pending"
                 );
+                None
             }
+        };
+        if let Some(retirement) = retirement
+            && crate::services::discord::status_panel_transition::finalize_retirement(
+                provider,
+                token_hash,
+                channel_id,
+                panel_msg_id,
+                retirement,
+            )
+            .unwrap_or(false)
+        {
+            cleared += 1;
         }
     }
     cleared

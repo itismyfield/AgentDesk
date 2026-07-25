@@ -9,12 +9,26 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+static STORE_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+struct SingletonFileLock {
+    _file: fs::File,
+}
+
+impl Drop for SingletonFileLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let _ = unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
+
 use serde::{Deserialize, Serialize};
 
 use crate::services::discord::{inflight, runtime_store};
 use crate::services::provider::ProviderKind;
-
-static STORE_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::services::discord) struct StatusPanelSingletonBinding {
@@ -47,6 +61,45 @@ fn channel_file_path_in_root(
     channel_id: u64,
 ) -> PathBuf {
     provider_dir_in_root(root, provider, token_hash).join(format!("{channel_id}.json"))
+}
+
+fn lock_channel_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+) -> Result<SingletonFileLock, String> {
+    let lock_path = channel_file_path_in_root(root, provider, token_hash, channel_id)
+        .with_extension("json.lock");
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(lock_path)
+        .map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+    }
+    Ok(SingletonFileLock { _file: file })
+}
+
+fn write_binding_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    binding: StatusPanelSingletonBinding,
+) -> Result<(), String> {
+    let path = channel_file_path_in_root(root, provider, token_hash, channel_id);
+    let json = serde_json::to_string_pretty(&binding).map_err(|error| error.to_string())?;
+    runtime_store::atomic_write(&path, &json)
 }
 
 fn load_in_root(
@@ -86,12 +139,11 @@ fn bind_in_root(
     if channel_id == 0 || binding.panel_message_id == 0 {
         return Err("status panel singleton ids must be non-zero".to_string());
     }
-    let _guard = STORE_WRITE_LOCK
+    let _process_guard = STORE_WRITE_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let path = channel_file_path_in_root(root, provider, token_hash, channel_id);
-    let json = serde_json::to_string_pretty(&binding).map_err(|error| error.to_string())?;
-    runtime_store::atomic_write(&path, &json)
+    let _channel_guard = lock_channel_in_root(root, provider, token_hash, channel_id)?;
+    write_binding_in_root(root, provider, token_hash, channel_id, binding)
 }
 
 pub(in crate::services::discord) fn bind_if_owned(
@@ -133,6 +185,30 @@ pub(in crate::services::discord) fn bind_if_owned_guarded(
     generation: Option<u64>,
     identity: Option<&inflight::InflightTurnIdentity>,
     expected_generation: Option<u64>,
+) -> GuardedSingletonBindOutcome {
+    bind_if_owned_guarded_with_prior(
+        provider,
+        token_hash,
+        channel_id,
+        panel_message_id,
+        generation,
+        identity,
+        expected_generation,
+        None,
+        false,
+    )
+}
+
+pub(in crate::services::discord) fn bind_if_owned_guarded_with_prior(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    panel_message_id: u64,
+    generation: Option<u64>,
+    identity: Option<&inflight::InflightTurnIdentity>,
+    expected_generation: Option<u64>,
+    expected_prior: Option<StatusPanelSingletonBinding>,
+    enforce_prior: bool,
 ) -> GuardedSingletonBindOutcome {
     let Some(inflight_root) = runtime_store::discord_inflight_root() else {
         return GuardedSingletonBindOutcome::DurabilityFailure(
@@ -188,9 +264,90 @@ pub(in crate::services::discord) fn bind_if_owned_guarded(
             "AgentDesk runtime root unavailable".to_string(),
         );
     };
-    match bind_in_root(&root, provider, token_hash, channel_id, binding) {
+    let _process_guard = STORE_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _channel_guard = match lock_channel_in_root(&root, provider, token_hash, channel_id) {
+        Ok(guard) => guard,
+        Err(error) => return GuardedSingletonBindOutcome::DurabilityFailure(error),
+    };
+    if enforce_prior {
+        match (
+            load_in_root(&root, provider, token_hash, channel_id),
+            expected_prior,
+        ) {
+            (StatusPanelSingletonLoadOutcome::Present(current), Some(expected))
+                if current == expected => {}
+            (StatusPanelSingletonLoadOutcome::Missing, None) => {}
+            (StatusPanelSingletonLoadOutcome::DurabilityFailure(error), _) => {
+                return GuardedSingletonBindOutcome::DurabilityFailure(error);
+            }
+            _ => return GuardedSingletonBindOutcome::NotOwned,
+        }
+    }
+    match write_binding_in_root(&root, provider, token_hash, channel_id, binding) {
         Ok(()) => GuardedSingletonBindOutcome::Committed(binding),
         Err(error) => GuardedSingletonBindOutcome::DurabilityFailure(error),
+    }
+}
+
+pub(in crate::services::discord) fn commit_replacement_if_current(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    replacement_panel_message_id: u64,
+    expected_prior: Option<StatusPanelSingletonBinding>,
+) -> CompletedBindingCommitOutcome {
+    let Some(inflight_root) = runtime_store::discord_inflight_root() else {
+        return CompletedBindingCommitOutcome::DurabilityFailure(
+            "AgentDesk inflight runtime root unavailable".to_string(),
+        );
+    };
+    let inflight_path = inflight::inflight_state_path(&inflight_root, provider, channel_id);
+    let _inflight_guard = match inflight::lock_inflight_state_path(&inflight_path) {
+        Ok(guard) => guard,
+        Err(error) => return CompletedBindingCommitOutcome::DurabilityFailure(error),
+    };
+    let Some(root) = runtime_store::discord_status_panel_singletons_root() else {
+        return CompletedBindingCommitOutcome::DurabilityFailure(
+            "AgentDesk runtime root unavailable".to_string(),
+        );
+    };
+    let _process_guard = STORE_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _channel_guard = match lock_channel_in_root(&root, provider, token_hash, channel_id) {
+        Ok(guard) => guard,
+        Err(error) => return CompletedBindingCommitOutcome::DurabilityFailure(error),
+    };
+    let current = load_in_root(&root, provider, token_hash, channel_id);
+    let generation = match (current, expected_prior) {
+        (StatusPanelSingletonLoadOutcome::Present(current), Some(expected))
+            if current == expected =>
+        {
+            current.generation.saturating_add(1)
+        }
+        (StatusPanelSingletonLoadOutcome::Present(current), _)
+            if current.panel_message_id == replacement_panel_message_id =>
+        {
+            return CompletedBindingCommitOutcome::CommittedCurrent(current);
+        }
+        (StatusPanelSingletonLoadOutcome::Missing, None) => 1,
+        (StatusPanelSingletonLoadOutcome::Present(_), _)
+        | (StatusPanelSingletonLoadOutcome::Missing, Some(_)) => {
+            return CompletedBindingCommitOutcome::Superseded;
+        }
+        (StatusPanelSingletonLoadOutcome::DurabilityFailure(error), _) => {
+            return CompletedBindingCommitOutcome::DurabilityFailure(error);
+        }
+    };
+    let binding = StatusPanelSingletonBinding {
+        panel_message_id: replacement_panel_message_id,
+        generation,
+    };
+    match write_binding_in_root(&root, provider, token_hash, channel_id, binding) {
+        Ok(()) => CompletedBindingCommitOutcome::CommittedCurrent(binding),
+        Err(error) => CompletedBindingCommitOutcome::DurabilityFailure(error),
     }
 }
 
@@ -300,9 +457,12 @@ fn clear_if_current_in_root(
     channel_id: u64,
     panel_message_id: u64,
 ) -> bool {
-    let _guard = STORE_WRITE_LOCK
+    let _process_guard = STORE_WRITE_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
+    let Ok(_channel_guard) = lock_channel_in_root(root, provider, token_hash, channel_id) else {
+        return false;
+    };
     let StatusPanelSingletonLoadOutcome::Present(binding) =
         load_in_root(root, provider, token_hash, channel_id)
     else {

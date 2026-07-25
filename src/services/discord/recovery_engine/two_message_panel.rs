@@ -43,6 +43,7 @@ trait RecoveryPanelGateway {
         &'a self,
         channel_id: ChannelId,
         content: &'a str,
+        nonce: &'a str,
     ) -> RecoveryPanelFuture<'a, Result<MessageId, String>>;
 
     fn delete_panel<'a>(
@@ -89,6 +90,7 @@ impl RecoveryPanelGateway for SerenityRecoveryPanelGateway<'_> {
         &'a self,
         channel_id: ChannelId,
         content: &'a str,
+        nonce: &'a str,
     ) -> RecoveryPanelFuture<'a, Result<MessageId, String>> {
         Box::pin(async move {
             if crate::services::discord::e2e_control::consume_send_failure(
@@ -97,10 +99,12 @@ impl RecoveryPanelGateway for SerenityRecoveryPanelGateway<'_> {
             ) {
                 return Err("injected E2E Discord send failure".to_string());
             }
-            crate::services::discord::http::send_channel_message(self.http, channel_id, content)
-                .await
-                .map(|message| message.id)
-                .map_err(|error| error.to_string())
+            crate::services::discord::http::send_channel_message_with_nonce(
+                self.http, channel_id, content, nonce,
+            )
+            .await
+            .map(|message| message.id)
+            .map_err(|error| error.to_string())
         })
     }
 
@@ -171,32 +175,54 @@ async fn recover_two_message_panel_with_gateway<G: RecoveryPanelGateway + ?Sized
         provider,
         started_at_unix,
     );
-    let new_panel_id = match gateway.send_panel(channel_id, &panel_text).await {
+    let prior_binding = panel_message_id.map(|panel_message_id| {
+        crate::services::discord::status_panel_singleton_store::StatusPanelSingletonBinding {
+            panel_message_id: panel_message_id.get(),
+            generation: state.status_panel_generation,
+        }
+    });
+    let prepared = match crate::services::discord::status_panel_transition::prepare_candidate(
+        provider,
+        &shared.token_hash,
+        channel_id.get(),
+        prior_binding,
+        Some(identity.clone()),
+        crate::services::discord::status_panel_transition::StatusPanelTransitionOperation::LiveBind,
+        &panel_text,
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            tracing::warn!(provider = %provider.as_str(), channel_id = channel_id.get(), error = %error, "two-message recovery could not persist intent before send");
+            return false;
+        }
+    };
+    let new_panel_id = match gateway
+        .send_panel(channel_id, &panel_text, &prepared.nonce)
+        .await
+    {
         Ok(message_id) => message_id,
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
                 channel_id = channel_id.get(),
+                nonce = %prepared.nonce,
                 error = %error,
-                "two-message restart recovery failed to publish a replacement panel"
+                "two-message restart recovery send is ambiguous; nonce intent remains durable"
             );
             return false;
         }
     };
 
     if !matches!(
-        crate::services::discord::status_panel_transition::begin_candidate(
+        crate::services::discord::status_panel_transition::acknowledge_candidate(
             provider,
             &shared.token_hash,
             channel_id.get(),
+            &prepared,
             new_panel_id.get(),
-            panel_message_id.map(MessageId::get),
-            state.status_panel_generation.saturating_add(1),
-            Some(identity.clone()),
         ),
         crate::services::discord::status_panel_transition::StatusPanelTransitionAction::KeepCurrent { .. }
     ) {
-        let _ = gateway.delete_panel(channel_id, new_panel_id).await;
         return false;
     }
     let bind_outcome = inflight::bind_status_panel(
@@ -224,11 +250,12 @@ async fn recover_two_message_panel_with_gateway<G: RecoveryPanelGateway + ?Sized
                 new_panel_id.get(),
             );
         } else {
-            status_panel_orphan_store::remove(
+            let _ = crate::services::discord::status_panel_transition::finalize_retirement(
                 provider,
                 &shared.token_hash,
                 channel_id.get(),
                 new_panel_id.get(),
+                crate::services::discord::status_panel_transition::StatusPanelRetirementOutcome::Removed,
             );
         }
         tracing::warn!(
@@ -260,11 +287,12 @@ async fn recover_two_message_panel_with_gateway<G: RecoveryPanelGateway + ?Sized
                 new_panel_id.get(),
             );
         } else {
-            status_panel_orphan_store::remove(
+            let _ = crate::services::discord::status_panel_transition::finalize_retirement(
                 provider,
                 &shared.token_hash,
                 channel_id.get(),
                 new_panel_id.get(),
+                crate::services::discord::status_panel_transition::StatusPanelRetirementOutcome::Removed,
             );
         }
         return false;
@@ -279,13 +307,20 @@ async fn recover_two_message_panel_with_gateway<G: RecoveryPanelGateway + ?Sized
         new_panel_id.get(),
         &identity,
         reloaded.status_panel_generation,
-        None,
     ) {
         crate::services::discord::status_panel_transition::StatusPanelTransitionAction::KeepCurrent {
             generation: Some(generation),
         } => generation,
         crate::services::discord::status_panel_transition::StatusPanelTransitionAction::RetireCandidate => {
-            if gateway.delete_panel(channel_id, new_panel_id).await.is_err() {
+            if gateway.delete_panel(channel_id, new_panel_id).await.is_ok() {
+                let _ = crate::services::discord::status_panel_transition::finalize_retirement(
+                    provider,
+                    &shared.token_hash,
+                    channel_id.get(),
+                    new_panel_id.get(),
+                    crate::services::discord::status_panel_transition::StatusPanelRetirementOutcome::Removed,
+                );
+            } else {
                 status_panel_orphan_store::enqueue(
                     provider,
                     &shared.token_hash,
@@ -297,8 +332,7 @@ async fn recover_two_message_panel_with_gateway<G: RecoveryPanelGateway + ?Sized
         }
         crate::services::discord::status_panel_transition::StatusPanelTransitionAction::DeferDurability { .. }
         | crate::services::discord::status_panel_transition::StatusPanelTransitionAction::RecoverUnreconciled
-        | crate::services::discord::status_panel_transition::StatusPanelTransitionAction::KeepCurrent { generation: None }
-        | crate::services::discord::status_panel_transition::StatusPanelTransitionAction::AdoptFallback { .. } => {
+        | crate::services::discord::status_panel_transition::StatusPanelTransitionAction::KeepCurrent { generation: None } => {
             return false;
         }
     };
@@ -382,6 +416,7 @@ mod tests {
             &'a self,
             _channel_id: ChannelId,
             _content: &'a str,
+            _nonce: &'a str,
         ) -> RecoveryPanelFuture<'a, Result<MessageId, String>> {
             Box::pin(async move {
                 self.sent.lock().unwrap().push(self.next_id);
@@ -451,6 +486,14 @@ mod tests {
         let provider = ProviderKind::Claude;
         let mut state = live_state(44_880, 7_001);
         inflight::save_inflight_state(&state).expect("seed inflight");
+        crate::services::discord::status_panel_singleton_store::bind_if_owned(
+            &provider,
+            &shared.token_hash,
+            state.channel_id,
+            200,
+            Some(3),
+        )
+        .expect("seed prior singleton");
         let gateway = MockGateway {
             probe: PersistedPanelState::Live,
             next_id: MessageId::new(400),
@@ -502,6 +545,14 @@ mod tests {
         state.status_message_id = Some(500);
         state.current_msg_id = 300;
         inflight::save_inflight_state(&state).expect("seed inflight");
+        crate::services::discord::status_panel_singleton_store::bind_if_owned(
+            &provider,
+            &shared.token_hash,
+            state.channel_id,
+            500,
+            Some(3),
+        )
+        .expect("seed prior singleton");
         let gateway = MockGateway {
             probe: PersistedPanelState::Missing,
             next_id: MessageId::new(600),
@@ -636,10 +687,9 @@ mod tests {
         // the OLD panel (200) is preserved (same crash-window invariant as the
         // post-bind loss above).
         assert_eq!(*gateway.deleted.lock().unwrap(), vec![MessageId::new(400)]);
-        assert_eq!(
-            status_panel_orphan_store::load_pending(&provider, &shared.token_hash),
-            vec![(replacement.channel_id, 400)],
-            "the failed exact-owner removal must leave its pending record for the sweeper (404-drop)"
+        assert!(
+            status_panel_orphan_store::load_pending(&provider, &shared.token_hash).is_empty(),
+            "successful rollback must terminally settle the replacement transition"
         );
     }
 

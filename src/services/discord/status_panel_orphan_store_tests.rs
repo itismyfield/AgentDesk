@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 use super::*;
 
 fn test_inflight(
@@ -69,6 +71,187 @@ fn enqueue_is_idempotent_and_removable() {
 
     remove_in_root(root, &provider, token, 100, 5002);
     assert!(load_pending_in_root(root, &provider, token).is_empty());
+}
+
+#[test]
+fn corrupt_legacy_store_fails_closed_without_overwrite_4891() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let root = root.path();
+    let provider = ProviderKind::Claude;
+    let token = "tok";
+    let channel_id = 100;
+    let legacy = channel_file_path_in_root(root, &provider, token, channel_id);
+    fs::create_dir_all(legacy.parent().expect("parent")).expect("mkdir");
+    fs::write(&legacy, "{").expect("corrupt legacy");
+
+    assert!(enqueue_in_root(root, &provider, token, channel_id, 5001).is_err());
+    assert!(remove_in_root_checked(root, &provider, token, channel_id, 5001).is_err());
+    assert_eq!(fs::read_to_string(&legacy).expect("legacy unchanged"), "{");
+    assert!(!entry_path_in_root(root, &provider, token, channel_id, 5001).exists());
+    assert!(!tombstone_path_in_root(root, &provider, token, channel_id, 5001).exists());
+}
+
+#[test]
+fn per_panel_writer_survives_legacy_aggregate_rewrite_4891() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let root = root.path();
+    let provider = ProviderKind::Claude;
+    let token = "tok";
+    let channel_id = 100;
+    let legacy = channel_file_path_in_root(root, &provider, token, channel_id);
+    fs::create_dir_all(legacy.parent().expect("parent")).expect("mkdir");
+    fs::write(&legacy, "[5001]").expect("legacy seed");
+
+    enqueue_in_root(root, &provider, token, channel_id, 5002).expect("new writer entry");
+    fs::write(&legacy, "[5001,5003]").expect("rolling legacy rewrite");
+
+    let mut pending = load_pending_in_root(root, &provider, token);
+    pending.sort();
+    assert_eq!(
+        pending,
+        vec![(channel_id, 5001), (channel_id, 5002), (channel_id, 5003)]
+    );
+}
+
+#[test]
+fn removal_without_legacy_entry_leaves_no_tombstone_4891() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let root = root.path();
+    let provider = ProviderKind::Claude;
+    let token = "tok";
+    let channel_id = 100;
+    let panel_id = 5001;
+
+    enqueue_in_root(root, &provider, token, channel_id, panel_id).expect("enqueue");
+    remove_in_root_checked(root, &provider, token, channel_id, panel_id).expect("remove");
+
+    assert!(load_pending_in_root(root, &provider, token).is_empty());
+    assert!(
+        !tombstone_path_in_root(root, &provider, token, channel_id, panel_id).exists(),
+        "new-only entries do not need a permanent legacy-suppression tombstone"
+    );
+}
+
+#[test]
+fn legacy_removal_keeps_suppression_tombstone_4891() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let root = root.path();
+    let provider = ProviderKind::Claude;
+    let token = "tok";
+    let channel_id = 100;
+    let panel_id = 5001;
+    let legacy = channel_file_path_in_root(root, &provider, token, channel_id);
+    fs::create_dir_all(legacy.parent().expect("parent")).expect("mkdir");
+    fs::write(&legacy, "[5001]").expect("legacy seed");
+
+    remove_in_root_checked(root, &provider, token, channel_id, panel_id).expect("remove legacy");
+
+    assert!(load_pending_in_root(root, &provider, token).is_empty());
+    assert!(tombstone_path_in_root(root, &provider, token, channel_id, panel_id).exists());
+}
+
+#[test]
+fn reenqueue_removes_tombstone_and_restores_same_panel_4891() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let root = root.path();
+    let provider = ProviderKind::Claude;
+    let token = "tok";
+    let channel_id = 100;
+    let panel_id = 5001;
+    let legacy = channel_file_path_in_root(root, &provider, token, channel_id);
+    fs::create_dir_all(legacy.parent().expect("parent")).expect("mkdir");
+    fs::write(&legacy, "[5001]").expect("legacy seed");
+
+    remove_in_root_checked(root, &provider, token, channel_id, panel_id).expect("remove");
+    assert!(load_pending_in_root(root, &provider, token).is_empty());
+    assert!(tombstone_path_in_root(root, &provider, token, channel_id, panel_id).exists());
+
+    enqueue_in_root(root, &provider, token, channel_id, panel_id).expect("reenqueue");
+    assert_eq!(
+        load_pending_in_root(root, &provider, token),
+        vec![(channel_id, panel_id)]
+    );
+    assert!(!tombstone_path_in_root(root, &provider, token, channel_id, panel_id).exists());
+}
+
+const CROSS_PROCESS_WRITER_ROOT_4891: &str = "AGENTDESK_ORPHAN_WRITER_ROOT_4891";
+const CROSS_PROCESS_WRITER_PANEL_4891: &str = "AGENTDESK_ORPHAN_WRITER_PANEL_4891";
+
+#[test]
+fn cross_process_writer_helper_4891() {
+    let Ok(root) = std::env::var(CROSS_PROCESS_WRITER_ROOT_4891) else {
+        return;
+    };
+    let panel_id = std::env::var(CROSS_PROCESS_WRITER_PANEL_4891)
+        .expect("writer panel id")
+        .parse::<u64>()
+        .expect("numeric writer panel id");
+    enqueue_in_root(
+        Path::new(&root),
+        &ProviderKind::Claude,
+        "tok",
+        100,
+        panel_id,
+    )
+    .expect("cross-process enqueue");
+}
+
+#[test]
+fn actual_cross_process_writers_keep_distinct_panel_entries_4891() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let executable = std::env::current_exe().expect("test executable");
+    let helper = concat!(
+        "services::discord::status_panel_orphan_store::tests::",
+        "cross_process_writer_helper_4891"
+    );
+    let mut writers = Vec::new();
+    for panel_id in 5001..5009 {
+        writers.push(
+            std::process::Command::new(&executable)
+                .args(["--exact", helper])
+                .env(CROSS_PROCESS_WRITER_ROOT_4891, root.path())
+                .env(CROSS_PROCESS_WRITER_PANEL_4891, panel_id.to_string())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn orphan writer"),
+        );
+    }
+    for mut writer in writers {
+        let status = writer.wait().expect("wait for orphan writer");
+        assert!(
+            status.success(),
+            "cross-process orphan writer failed: {status}"
+        );
+    }
+
+    let pending = load_pending_in_root(root.path(), &ProviderKind::Claude, "tok");
+    assert_eq!(pending.len(), 8);
+    assert_eq!(pending.first(), Some(&(100, 5001)));
+    assert_eq!(pending.last(), Some(&(100, 5008)));
+}
+
+#[test]
+fn concurrent_new_writers_keep_distinct_panel_entries_4891() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let root_path = root.path().to_path_buf();
+    let mut writers = Vec::new();
+    for panel_id in 5001..5017 {
+        let root_path = root_path.clone();
+        writers.push(std::thread::spawn(move || {
+            enqueue_in_root(&root_path, &ProviderKind::Claude, "tok", 100, panel_id)
+                .expect("concurrent enqueue");
+        }));
+    }
+    for writer in writers {
+        writer.join().expect("writer join");
+    }
+
+    let mut pending = load_pending_in_root(&root_path, &ProviderKind::Claude, "tok");
+    pending.sort();
+    assert_eq!(pending.len(), 16);
+    assert_eq!(pending.first(), Some(&(100, 5001)));
+    assert_eq!(pending.last(), Some(&(100, 5016)));
 }
 
 #[test]

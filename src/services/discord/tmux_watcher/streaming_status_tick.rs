@@ -3,7 +3,10 @@ use crate::services::discord::http::{edit_channel_message, send_channel_message}
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[path = "streaming_status_tick/panel_refresh.rs"]
+mod panel_refresh;
 mod provider_output_guard;
+use panel_refresh::refresh_existing_status_panel;
 use provider_output_guard::{guard_rollover, guard_streaming_frame};
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -166,69 +169,21 @@ pub(super) async fn update_streaming_status_tick(
             return StreamingStatusTickOutcome::ContinueStreamingLoop;
         }
 
-        if shared.ui.status_panel_v2_enabled
-            && (single_message_panel_footer_mode || status_panel_msg_id.is_some())
-        {
-            // #3055: re-derive this turn's session lifecycle panel
-            // line on the throttled status tick, matching bridge
-            // behavior and avoiding stale per-channel snapshots.
-            refresh_watcher_session_panel_from_lifecycle(
+        if single_message_panel_footer_mode || status_panel_msg_id.is_some() {
+            // #3055: re-derive this turn's session lifecycle panel line on the
+            // throttled status tick, matching bridge behavior.
+            refresh_existing_status_panel(
+                &http,
                 &shared,
                 channel_id,
-                turn_identity_for_panel
-                    .as_ref()
-                    .map(|identity| identity.user_msg_id)
-                    .unwrap_or(0),
+                &watcher_provider,
                 &tmux_session_name,
+                turn_identity_for_panel.as_ref(),
+                status_panel_started_at,
+                status_panel_msg_id,
+                &mut last_status_panel_text,
             )
             .await;
-        }
-        if watcher_separate_status_panel_enabled(shared.ui.status_panel_v2_enabled)
-            && let Some(status_msg_id) = status_panel_msg_id
-        {
-            let panel_text = shared.ui.placeholder_live_events.render_status_panel(
-                channel_id,
-                &watcher_provider,
-                status_panel_started_at,
-            );
-            let panel_cache_invalidation_epoch = shared
-                .ui
-                .placeholder_live_events
-                .panel_cache_invalidation_epoch(channel_id, status_msg_id.get());
-            if panel_cache_invalidation_epoch.is_some() || panel_text != last_status_panel_text {
-                rate_limit_wait(&shared, channel_id).await;
-                match crate::services::discord::http::edit_channel_message(
-                    &http,
-                    channel_id,
-                    status_msg_id,
-                    &panel_text,
-                )
-                .await
-                {
-                    Ok(_) => {
-                        last_status_panel_text = panel_text;
-                        if let Some(epoch) = panel_cache_invalidation_epoch {
-                            shared
-                                .ui
-                                .placeholder_live_events
-                                .clear_panel_cache_invalidation_if_epoch(
-                                    channel_id,
-                                    status_msg_id.get(),
-                                    epoch,
-                                );
-                        }
-                    }
-                    Err(error) => {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::warn!(
-                            "  [{ts}] ⚠ tmux status-panel-v2 edit failed for msg {} in channel {}: {}",
-                            status_msg_id.get(),
-                            channel_id.get(),
-                            error
-                        );
-                    }
-                }
-            }
         }
 
         let has_assistant_response_for_streaming = !full_response.trim().is_empty();
@@ -484,18 +439,61 @@ pub(super) async fn update_streaming_status_tick(
                     .map(crate::services::discord::inflight::InflightTurnIdentity::from_state);
                 let panel_seed =
                     crate::services::discord::formatting::build_processing_status_block(indicator);
-                rate_limit_wait(&shared, channel_id).await;
-                match crate::services::discord::http::send_channel_message(
-                    &http,
+                let prior_binding = crate::services::discord::status_panel_singleton_store::load(
+                    &watcher_provider,
+                    &shared.token_hash,
+                    channel_id.get(),
+                );
+                let prepared = match prepare_watcher_two_message_panel(
+                    shared.ui.two_message_panel_enabled,
+                    shared.as_ref(),
+                    &watcher_provider,
                     channel_id,
+                    prior_binding,
+                    pre_send_identity.clone(),
                     &panel_seed,
-                )
-                .await
-                {
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        tracing::warn!(
+                            channel_id = channel_id.get(),
+                            error = %error,
+                            "watcher could not persist status-panel intent before send"
+                        );
+                        commit_streaming_status_tick_state!();
+                        return StreamingStatusTickOutcome::ContinueStreamingLoop;
+                    }
+                };
+                rate_limit_wait(&shared, channel_id).await;
+                let send_result = match prepared.as_ref() {
+                    Some(prepared) => {
+                        crate::services::discord::http::send_channel_message_with_nonce(
+                            &http,
+                            channel_id,
+                            &panel_seed,
+                            &prepared.nonce,
+                        )
+                        .await
+                    }
+                    None => {
+                        crate::services::discord::http::send_channel_message(
+                            &http,
+                            channel_id,
+                            &panel_seed,
+                        )
+                        .await
+                    }
+                };
+                match send_result {
                     Ok(panel_msg) => {
                         protect_or_discard_watcher_two_message_panel((
                             (&http, &shared, &watcher_provider),
-                            (channel_id, &tmux_session_name, panel_msg.id),
+                            (
+                                channel_id,
+                                &tmux_session_name,
+                                panel_msg.id,
+                                prepared.as_ref(),
+                            ),
                         ))
                         .await;
                         let fresh_inflight =

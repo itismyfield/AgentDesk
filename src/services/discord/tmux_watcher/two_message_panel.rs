@@ -107,36 +107,62 @@ pub(in crate::services::discord) fn watcher_should_load_inflight_for_reanchor(
     watcher_did_rollover_this_interval && two_message_panel_enabled
 }
 
-pub(in crate::services::discord) fn preregister_watcher_two_message_panel_orphan(
+pub(in crate::services::discord) fn prepare_watcher_two_message_panel(
     two_message_panel_enabled: bool,
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
+    prior_binding: Option<
+        crate::services::discord::status_panel_singleton_store::StatusPanelSingletonBinding,
+    >,
+    turn_identity: Option<crate::services::discord::inflight::InflightTurnIdentity>,
+    panel_text: &str,
+) -> Result<
+    Option<crate::services::discord::status_panel_transition::PreparedStatusPanelTransition>,
+    String,
+> {
+    if !two_message_panel_enabled {
+        return Ok(None);
+    }
+    crate::services::discord::status_panel_transition::prepare_candidate(
+        provider,
+        &shared.token_hash,
+        channel_id.get(),
+        prior_binding,
+        turn_identity,
+        crate::services::discord::status_panel_transition::StatusPanelTransitionOperation::LiveBind,
+        panel_text,
+    )
+    .map(Some)
+}
+
+pub(in crate::services::discord) fn acknowledge_watcher_two_message_panel(
+    two_message_panel_enabled: bool,
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    prepared: Option<
+        &crate::services::discord::status_panel_transition::PreparedStatusPanelTransition,
+    >,
     panel_msg_id: serenity::MessageId,
 ) -> Result<(), String> {
     if !two_message_panel_enabled {
         return Ok(());
     }
-    let turn_identity =
-        crate::services::discord::inflight::load_inflight_state(provider, channel_id.get()).map(
-            |state| crate::services::discord::inflight::InflightTurnIdentity::from_state(&state),
-        );
-    match crate::services::discord::status_panel_transition::begin_candidate(
+    let prepared = prepared.ok_or_else(|| "watcher status panel intent missing".to_string())?;
+    match crate::services::discord::status_panel_transition::acknowledge_candidate(
         provider,
         &shared.token_hash,
         channel_id.get(),
+        prepared,
         panel_msg_id.get(),
-        None,
-        0,
-        turn_identity,
     ) {
         crate::services::discord::status_panel_transition::StatusPanelTransitionAction::KeepCurrent { .. } => Ok(()),
         crate::services::discord::status_panel_transition::StatusPanelTransitionAction::DeferDurability { error } => Err(error),
         crate::services::discord::status_panel_transition::StatusPanelTransitionAction::RecoverUnreconciled => {
             Err("status panel transition pending recovery".to_string())
         }
-        crate::services::discord::status_panel_transition::StatusPanelTransitionAction::AdoptFallback { .. }
-        | crate::services::discord::status_panel_transition::StatusPanelTransitionAction::RetireCandidate => {
+        crate::services::discord::status_panel_transition::StatusPanelTransitionAction::RetireCandidate => {
             Err("status panel transition rejected candidate".to_string())
         }
     }
@@ -162,15 +188,24 @@ pub(in crate::services::discord) fn remove_watcher_two_message_panel_orphan_regi
 pub(in crate::services::discord) async fn protect_or_discard_watcher_two_message_panel(
     request: (
         (&Arc<serenity::Http>, &Arc<SharedData>, &ProviderKind),
-        (ChannelId, &str, serenity::MessageId),
+        (
+            ChannelId,
+            &str,
+            serenity::MessageId,
+            Option<
+                &crate::services::discord::status_panel_transition::PreparedStatusPanelTransition,
+            >,
+        ),
     ),
 ) {
-    let ((http, shared, provider), (channel_id, tmux_session_name, panel_msg_id)) = request;
-    let Err(error) = preregister_watcher_two_message_panel_orphan(
+    let ((http, shared, provider), (channel_id, tmux_session_name, panel_msg_id, prepared)) =
+        request;
+    let Err(error) = acknowledge_watcher_two_message_panel(
         shared.ui.two_message_panel_enabled,
         shared.as_ref(),
         provider,
         channel_id,
+        prepared,
         panel_msg_id,
     ) else {
         return;
@@ -364,7 +399,6 @@ pub(in crate::services::discord) async fn adopt_watcher_singleton_panel_after_fr
         panel_msg_id.get(),
         &identity,
         expected_generation,
-        None,
     ) {
         crate::services::discord::status_panel_transition::StatusPanelTransitionAction::KeepCurrent {
             generation: Some(generation),
@@ -434,27 +468,53 @@ pub(in crate::services::discord) async fn reanchor_watcher_two_message_status_pa
         return false;
     };
 
-    rate_limit_wait(shared, channel_id).await;
-    let new_panel =
-        match crate::services::discord::http::send_channel_message(http, channel_id, panel_text)
-            .await
-        {
-            Ok(message) => message,
-            Err(error) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚠ watcher: #3805 P2 re-anchor panel send failed in channel {}: {}",
-                    channel_id.get(),
-                    error
-                );
-                return false;
-            }
+    let prior =
+        crate::services::discord::status_panel_singleton_store::StatusPanelSingletonBinding {
+            panel_message_id: old_panel_id.get(),
+            generation: *this_turn_status_panel_generation,
         };
-    if let Err(error) = preregister_watcher_two_message_panel_orphan(
+    let prepared = match prepare_watcher_two_message_panel(
         true,
         shared.as_ref(),
         provider,
         channel_id,
+        Some(prior),
+        require_identity.clone(),
+        panel_text,
+    ) {
+        Ok(Some(prepared)) => prepared,
+        Ok(None) => return false,
+        Err(error) => {
+            tracing::warn!(channel_id = channel_id.get(), error = %error, "watcher could not persist re-anchor intent before send");
+            return false;
+        }
+    };
+    rate_limit_wait(shared, channel_id).await;
+    let new_panel = match crate::services::discord::http::send_channel_message_with_nonce(
+        http,
+        channel_id,
+        panel_text,
+        &prepared.nonce,
+    )
+    .await
+    {
+        Ok(message) => message,
+        Err(error) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::warn!(
+                "  [{ts}] ⚠ watcher: #3805 P2 re-anchor panel send failed in channel {}: {}",
+                channel_id.get(),
+                error
+            );
+            return false;
+        }
+    };
+    if let Err(error) = acknowledge_watcher_two_message_panel(
+        true,
+        shared.as_ref(),
+        provider,
+        channel_id,
+        Some(&prepared),
         new_panel.id,
     ) {
         tracing::warn!(
@@ -508,12 +568,17 @@ pub(in crate::services::discord) async fn reanchor_watcher_two_message_status_pa
                 new_panel.id,
             );
         } else {
-            remove_watcher_two_message_panel_orphan_registration(
-                true,
-                shared.as_ref(),
+            let retirement = if discard.is_committed() {
+                crate::services::discord::status_panel_transition::StatusPanelRetirementOutcome::Removed
+            } else {
+                crate::services::discord::status_panel_transition::StatusPanelRetirementOutcome::PermanentAbsent
+            };
+            let _ = crate::services::discord::status_panel_transition::finalize_retirement(
                 provider,
-                channel_id,
-                new_panel.id,
+                &shared.token_hash,
+                channel_id.get(),
+                new_panel.id.get(),
+                retirement,
             );
         }
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -541,7 +606,6 @@ pub(in crate::services::discord) async fn reanchor_watcher_two_message_status_pa
         new_panel.id.get(),
         &identity,
         expected_generation,
-        None,
     ) {
         crate::services::discord::status_panel_transition::StatusPanelTransitionAction::KeepCurrent {
             generation: Some(generation),

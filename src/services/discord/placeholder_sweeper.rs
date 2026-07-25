@@ -39,6 +39,7 @@ use crate::services::provider::ProviderKind;
 
 mod abandon_guard;
 mod panel_shape;
+mod transition_recovery;
 use abandon_guard::{
     AbandonedTmuxCleanupDecision, abandoned_tmux_cleanup_decision_for,
     finalize_owner_dead_cleanup_if_same_turn,
@@ -902,32 +903,6 @@ fn should_log_sweep_report(report: SweepPassReport, sweeps_since_heartbeat: u64)
         || sweeps_since_heartbeat >= SWEEP_HEARTBEAT_INTERVAL_SWEEPS
 }
 
-async fn recover_status_panel_transition_intents(
-    http: &serenity::Http,
-    shared: &SharedData,
-    provider: &ProviderKind,
-) -> usize {
-    super::status_panel_transition::recover_unreconciled_with_delete(
-        provider,
-        &shared.token_hash,
-        |channel_id, message_id| async move {
-            match serenity::ChannelId::new(channel_id)
-                .delete_message(http, serenity::MessageId::new(message_id))
-                .await
-            {
-                Ok(()) => super::status_panel_transition::StatusPanelRetirementOutcome::Removed,
-                Err(error)
-                    if super::status_panel_orphan_store::delete_error_is_permanent(&error) =>
-                {
-                    super::status_panel_transition::StatusPanelRetirementOutcome::PermanentAbsent
-                }
-                Err(_) => super::status_panel_transition::StatusPanelRetirementOutcome::Deferred,
-            }
-        },
-    )
-    .await
-}
-
 /// Spawn the long-lived background task that replays status-panel transition
 /// intents immediately, then runs the stall sweeper at the configured interval.
 /// Should be called once per provider during dcserver bootstrap.
@@ -938,7 +913,8 @@ pub(super) fn spawn_placeholder_sweeper(
 ) {
     tokio::spawn(async move {
         let recovered_panel_transitions =
-            recover_status_panel_transition_intents(&http, &shared, &provider).await;
+            transition_recovery::recover_status_panel_transition_intents(&http, &shared, &provider)
+                .await;
         tokio::time::sleep(tokio::time::Duration::from_secs(INITIAL_DELAY_SECS)).await;
         let mut stalled_tracker = StalledEditTracker::default();
         let mut sweeps_since_heartbeat = 0u64;
@@ -957,7 +933,10 @@ pub(super) fn spawn_placeholder_sweeper(
             )
             .await;
             let recovered_panel_transitions = startup_recovered_panel_transitions.saturating_add(
-                recover_status_panel_transition_intents(&http, &shared, &provider).await,
+                transition_recovery::recover_status_panel_transition_intents(
+                    &http, &shared, &provider,
+                )
+                .await,
             );
             startup_recovered_panel_transitions = 0;
             // #3296: reconcile durable aborted-anchor markers — retry the ✅ for

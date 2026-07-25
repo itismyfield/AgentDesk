@@ -46,6 +46,13 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
     );
     let (panel_text, wip_warning) =
         completion_panel_with_wip_warning(panel_text, last_status_panel_text, inflight.as_ref());
+    let missing_panel_recovery_fence = MissingPanelRecoveryFence::capture(
+        shared,
+        provider,
+        channel_id,
+        status_panel_msg_id,
+        inflight.as_ref(),
+    );
 
     match status_panel_completion_action(status_panel_msg_id, last_status_panel_text, &panel_text) {
         StatusPanelCompletionAction::AlreadyCommitted => {
@@ -87,6 +94,11 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
                     channel_id,
                     provider,
                     expected_user_msg_id: Some(expected_user_msg_id),
+                    expected_prior: crate::services::discord::status_panel_singleton_store::load(
+                        provider,
+                        &shared.token_hash,
+                        channel_id.get(),
+                    ),
                     last_status_panel_text,
                     panel_text,
                     wip_warning,
@@ -143,21 +155,32 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
                 }
                 Err(error) => {
                     if status_panel_message_missing_error(&error) {
-                        tracing::warn!(
-                            "[turn_bridge] deferred status-panel-v2 fallback for message {} in channel {} from {}: a stale 10008 response cannot prove the panel is still absent",
-                            status_msg_id,
-                            channel_id,
-                            source
-                        );
-                    } else {
-                        tracing::warn!(
-                            "[turn_bridge] failed to finalize status-panel-v2 message {} in channel {} from {}: {}",
-                            status_msg_id,
-                            channel_id,
-                            source,
-                            error
-                        );
+                        return recover_missing_status_panel_with_gateway(
+                            gateway,
+                            CompletionFallbackRequest {
+                                shared,
+                                channel_id,
+                                provider,
+                                expected_user_msg_id: Some(expected_user_msg_id),
+                                expected_prior: missing_panel_recovery_fence
+                                    .as_ref()
+                                    .and_then(MissingPanelRecoveryFence::prior_binding),
+                                last_status_panel_text,
+                                panel_text,
+                                wip_warning,
+                                source,
+                            },
+                            missing_panel_recovery_fence,
+                        )
+                        .await;
                     }
+                    tracing::warn!(
+                        "[turn_bridge] failed to finalize status-panel-v2 message {} in channel {} from {}: {}",
+                        status_msg_id,
+                        channel_id,
+                        source,
+                        error
+                    );
                     StatusPanelCompletionResult::not_applicable(false)
                 }
             }
@@ -292,6 +315,15 @@ impl StatusPanelCompletionResult {
         }
     }
 
+    fn durable_recovery() -> Self {
+        Self {
+            committed: false,
+            binding_disposition: singleton::CompletedBindingDisposition::DurabilityFailure,
+            completed_panel_message_id: None,
+            unreconciled_panel_message_id: None,
+        }
+    }
+
     fn unreconciled(message_id: MessageId) -> Self {
         Self {
             committed: false,
@@ -338,10 +370,15 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http_and
         channel_id,
         expected_user_msg_id,
     );
-    let (panel_text, wip_warning) = completion_panel_with_wip_warning(
-        panel_text,
-        last_status_panel_text,
-        inflight.as_ref().map(StatusPanelWipInflight::as_inflight),
+    let inflight_for_fence = inflight.as_ref().map(StatusPanelWipInflight::as_inflight);
+    let (panel_text, wip_warning) =
+        completion_panel_with_wip_warning(panel_text, last_status_panel_text, inflight_for_fence);
+    let missing_panel_recovery_fence = MissingPanelRecoveryFence::capture(
+        shared.as_ref(),
+        provider,
+        channel_id,
+        status_panel_msg_id,
+        inflight_for_fence,
     );
 
     match status_panel_completion_action(status_panel_msg_id, last_status_panel_text, &panel_text) {
@@ -385,6 +422,11 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http_and
                     channel_id,
                     provider,
                     expected_user_msg_id,
+                    expected_prior: crate::services::discord::status_panel_singleton_store::load(
+                        provider,
+                        &shared.token_hash,
+                        channel_id.get(),
+                    ),
                     last_status_panel_text,
                     panel_text,
                     wip_warning,
@@ -435,21 +477,32 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http_and
                 Err(error) => {
                     let error = error.to_string();
                     if status_panel_message_missing_error(&error) {
-                        tracing::warn!(
-                            "[turn_bridge] deferred status-panel-v2 fallback for message {} in channel {} from {}: a stale 10008 response cannot prove the panel is still absent",
-                            status_msg_id,
-                            channel_id,
-                            source
-                        );
-                    } else {
-                        tracing::warn!(
-                            "[turn_bridge] failed to finalize status-panel-v2 message {} in channel {} from {}: {}",
-                            status_msg_id,
-                            channel_id,
-                            source,
-                            error
-                        );
+                        return recover_missing_status_panel_with_http(
+                            http,
+                            CompletionFallbackRequest {
+                                shared: shared.as_ref(),
+                                channel_id,
+                                provider,
+                                expected_user_msg_id,
+                                expected_prior: missing_panel_recovery_fence
+                                    .as_ref()
+                                    .and_then(MissingPanelRecoveryFence::prior_binding),
+                                last_status_panel_text,
+                                panel_text,
+                                wip_warning,
+                                source,
+                            },
+                            missing_panel_recovery_fence,
+                        )
+                        .await;
                     }
+                    tracing::warn!(
+                        "[turn_bridge] failed to finalize status-panel-v2 message {} in channel {} from {}: {}",
+                        status_msg_id,
+                        channel_id,
+                        source,
+                        error
+                    );
                     StatusPanelCompletionResult::not_applicable(false)
                 }
             }
@@ -461,8 +514,9 @@ mod fallback;
 mod purge;
 pub(in crate::services::discord) mod singleton;
 use fallback::{
-    CompletionFallbackRequest, complete_status_panel_v2_fallback_with_gateway,
-    complete_status_panel_v2_fallback_with_http,
+    CompletionFallbackRequest, MissingPanelRecoveryFence,
+    complete_status_panel_v2_fallback_with_gateway, complete_status_panel_v2_fallback_with_http,
+    recover_missing_status_panel_with_gateway, recover_missing_status_panel_with_http,
 };
 use purge::{
     purge_pending_bind_for_completed_status_panel,

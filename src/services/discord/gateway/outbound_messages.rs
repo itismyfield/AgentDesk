@@ -69,6 +69,14 @@ pub(in crate::services::discord) enum ClassifiedOutboundPostError {
     Permanent(String),
 }
 
+impl ClassifiedOutboundPostError {
+    pub(in crate::services::discord) fn into_reason(self) -> String {
+        match self {
+            Self::Transient(reason) | Self::Permanent(reason) => reason,
+        }
+    }
+}
+
 fn classify_terminal_post_result(result: &DeliveryResult) -> Option<ClassifiedOutboundPostError> {
     match result {
         DeliveryResult::TransientFailure { reason } => {

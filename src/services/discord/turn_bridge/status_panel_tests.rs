@@ -33,6 +33,7 @@ struct StatusPanelFallbackGateway {
     delete_error: Option<String>,
     send_id: MessageId,
     can_chain_locally: bool,
+    on_edit: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl StatusPanelFallbackGateway {
@@ -55,6 +56,7 @@ impl Default for StatusPanelFallbackGateway {
             delete_error: None,
             send_id: MessageId::new(1_500_000_000_000_999),
             can_chain_locally: true,
+            on_edit: None,
         }
     }
 }
@@ -81,6 +83,15 @@ impl TurnGateway for StatusPanelFallbackGateway {
         })
     }
 
+    fn send_message_with_nonce<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        content: &'a str,
+        _nonce: &'a str,
+    ) -> TestGatewayFuture<'a, Result<MessageId, String>> {
+        self.send_message(channel_id, content)
+    }
+
     fn edit_message<'a>(
         &'a self,
         _channel_id: ChannelId,
@@ -90,11 +101,15 @@ impl TurnGateway for StatusPanelFallbackGateway {
         let edited_message_ids = self.edited_message_ids.clone();
         let live_messages = self.live_messages.clone();
         let edit_error = self.edit_error.clone();
+        let on_edit = self.on_edit.clone();
         Box::pin(async move {
             edited_message_ids
                 .lock()
                 .expect("edited ids lock")
                 .push(message_id);
+            if let Some(on_edit) = on_edit {
+                on_edit();
+            }
             match edit_error {
                 Some(error) => Err(error),
                 None => {
@@ -1016,10 +1031,9 @@ fn status_panel_wip_completion_uses_preloaded_recovery_snapshot_after_cleanup() 
 }
 
 #[tokio::test]
-async fn unknown_message_response_never_replaces_without_fresh_absence_proof_4891() {
+async fn stale_unknown_message_response_never_replaces_newer_authority_4891() {
     let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
     let shared = make_two_message_status_panel_shared_for_tests();
-    let gateway = StatusPanelFallbackGateway::with_edit_error("Unknown Message 10008");
     let provider = ProviderKind::Claude;
     let channel_id = ChannelId::new(1_509_350_490_461_180_105);
     let user_msg_id = 1_510_319_194_921_504_929;
@@ -1049,6 +1063,28 @@ async fn unknown_message_response_never_replaces_without_fresh_absence_proof_489
         None,
     )
     .expect("bind missing prior singleton");
+    let newer_panel = MessageId::new(stale_status_msg_id.get() + 1);
+    let token_hash = shared.token_hash.clone();
+    let hook_provider = provider.clone();
+    let mut newer_owner = owner.clone();
+    newer_owner.status_message_id = Some(newer_panel.get());
+    newer_owner.status_panel_generation = 8;
+    let on_edit = Arc::new(move || {
+        save_inflight_state(&newer_owner).expect("persist newer panel owner during edit");
+        crate::services::discord::status_panel_singleton_store::bind_if_owned(
+            &hook_provider,
+            &token_hash,
+            channel_id.get(),
+            newer_panel.get(),
+            None,
+        )
+        .expect("bind newer singleton during edit");
+    });
+    let gateway = StatusPanelFallbackGateway {
+        edit_error: Some("Unknown Message 10008".to_string()),
+        on_edit: Some(on_edit),
+        ..StatusPanelFallbackGateway::default()
+    };
     let mut last_status_panel_text = String::new();
 
     let completion = complete_status_panel_v2(
@@ -1074,12 +1110,12 @@ async fn unknown_message_response_never_replaces_without_fresh_absence_proof_489
             .unwrap_or_else(|poison| poison.into_inner())
             .len(),
         0,
-        "a 10008 response has no operation epoch and therefore cannot authorize a fallback send"
+        "a stale 10008 response must fail its exact singleton epoch fence before fallback send"
     );
     assert_eq!(
         load_inflight_state(&provider, channel_id.get()).and_then(|state| state.status_message_id),
-        Some(stale_status_msg_id.get()),
-        "a stale 10008 response must preserve the exact panel authority"
+        Some(newer_panel.get()),
+        "a stale 10008 response must preserve the newer inflight panel authority"
     );
     assert_eq!(
         crate::services::discord::status_panel_singleton_store::load(
@@ -1088,8 +1124,8 @@ async fn unknown_message_response_never_replaces_without_fresh_absence_proof_489
             channel_id.get(),
         )
         .map(|binding| binding.panel_message_id),
-        Some(stale_status_msg_id.get()),
-        "a stale 10008 response must not CAS the singleton to a fallback"
+        Some(newer_panel.get()),
+        "a stale 10008 response must not CAS the newer singleton to a fallback"
     );
     assert!(
         !gateway
@@ -1098,6 +1134,99 @@ async fn unknown_message_response_never_replaces_without_fresh_absence_proof_489
             .unwrap_or_else(|poison| poison.into_inner())
             .contains(&stale_status_msg_id),
         "a stale 10008 response must never delete the panel that may have been edited concurrently"
+    );
+}
+
+#[tokio::test]
+async fn current_epoch_unknown_message_persists_and_commits_replacement_4891() {
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+    let shared = make_two_message_status_panel_shared_for_tests();
+    let gateway = StatusPanelFallbackGateway::with_edit_error("Unknown Message 10008");
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(1_509_350_490_461_180_106);
+    let user_msg_id = 1_510_319_194_921_504_930;
+    let missing_panel = MessageId::new(1_500_000_000_000_112);
+    let mut owner = InflightTurnState::new(
+        provider.clone(),
+        channel_id.get(),
+        None,
+        42,
+        user_msg_id,
+        user_msg_id + 1,
+        "current missing panel".to_string(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    owner.status_message_id = Some(missing_panel.get());
+    owner.status_panel_generation = 7;
+    save_inflight_state(&owner).expect("persist current missing panel owner");
+    crate::services::discord::status_panel_singleton_store::bind_if_owned(
+        &provider,
+        &shared.token_hash,
+        channel_id.get(),
+        missing_panel.get(),
+        None,
+    )
+    .expect("bind current missing singleton");
+    let mut last_status_panel_text = String::new();
+
+    let completion = complete_status_panel_v2(
+        shared.as_ref(),
+        &gateway,
+        channel_id,
+        Some(missing_panel),
+        &provider,
+        1_700_000_000,
+        &mut last_status_panel_text,
+        false,
+        false,
+        "test_current_unknown_status_panel_id",
+        user_msg_id,
+    )
+    .await;
+
+    assert!(completion.committed);
+    let replacement = gateway.send_id;
+    assert_eq!(completion.completed_panel_message_id, Some(replacement));
+    assert_eq!(
+        gateway
+            .sent_messages
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .len(),
+        1,
+        "a current-epoch 10008 must create exactly one fenced replacement"
+    );
+    assert_eq!(
+        load_inflight_state(&provider, channel_id.get())
+            .map(|state| { (state.status_message_id, state.status_panel_generation) }),
+        Some((Some(replacement.get()), 8)),
+        "the replacement must atomically advance the live owner epoch"
+    );
+    assert_eq!(
+        crate::services::discord::status_panel_singleton_store::load(
+            &provider,
+            &shared.token_hash,
+            channel_id.get(),
+        ),
+        Some(
+            crate::services::discord::status_panel_singleton_store::StatusPanelSingletonBinding {
+                panel_message_id: replacement.get(),
+                generation: 8,
+            }
+        )
+    );
+    assert!(
+        crate::services::discord::status_panel_transition::load_unreconciled(
+            &provider,
+            &shared.token_hash,
+        )
+        .expect("load transition journal")
+        .is_empty(),
+        "successful current-epoch recovery must terminally settle its intent"
     );
 }
 
@@ -1222,18 +1351,18 @@ async fn status_panel_direct_fallback_without_inflight_retains_retirement_intent
     assert!(completion.committed);
     assert_eq!(
         completion.binding_disposition,
-        super::singleton::CompletedBindingDisposition::Superseded
+        super::singleton::CompletedBindingDisposition::CommittedCurrent
     );
     assert_eq!(completion.completed_panel_message_id, Some(fallback_panel));
     assert!(load_inflight_state(&provider, channel_id.get()).is_none());
     assert!(
-        crate::services::discord::status_panel_orphan_store::is_queued(
+        !crate::services::discord::status_panel_orphan_store::is_queued(
             &provider,
             &shared.token_hash,
             channel_id.get(),
             fallback_panel.get(),
         ),
-        "inflight-less fallback must retain a durable orphan retirement intent"
+        "successful ownerless fallback must settle its pending-bind intent"
     );
     assert_eq!(
         crate::services::discord::status_panel_singleton_store::load(
@@ -1242,8 +1371,8 @@ async fn status_panel_direct_fallback_without_inflight_retains_retirement_intent
             channel_id.get(),
         )
         .map(|binding| binding.panel_message_id),
-        Some(prior_panel.get()),
-        "an ownerless fallback must not replace the current singleton"
+        Some(fallback_panel.get()),
+        "the fenced ownerless fallback replaces the exact prior singleton"
     );
 }
 
@@ -1301,12 +1430,12 @@ async fn status_panel_direct_fallback_preserves_existing_same_turn_panel_4891() 
     assert!(completion.committed);
     assert_eq!(
         completion.binding_disposition,
-        super::singleton::CompletedBindingDisposition::Superseded
+        super::singleton::CompletedBindingDisposition::CommittedCurrent
     );
     assert_eq!(
         load_inflight_state(&provider, channel_id.get()).and_then(|state| state.status_message_id),
-        Some(prior_panel.get()),
-        "fallback must not overwrite a same-turn panel that already owns inflight"
+        Some(fallback_panel.get()),
+        "the fenced fallback may atomically bind the same turn before committing the singleton"
     );
     assert_eq!(
         crate::services::discord::status_panel_singleton_store::load(
@@ -1315,16 +1444,16 @@ async fn status_panel_direct_fallback_preserves_existing_same_turn_panel_4891() 
             channel_id.get(),
         )
         .map(|binding| binding.panel_message_id),
-        Some(prior_panel.get())
+        Some(fallback_panel.get())
     );
     assert!(
-        crate::services::discord::status_panel_orphan_store::is_queued(
+        !crate::services::discord::status_panel_orphan_store::is_queued(
             &provider,
             &shared.token_hash,
             channel_id.get(),
             fallback_panel.get(),
         ),
-        "the redundant fallback must remain reclaimable instead of displacing the valid panel"
+        "the fenced completion fallback must settle after replacing its exact prior singleton"
     );
 }
 
@@ -1370,14 +1499,13 @@ async fn pending_bind_write_and_delete_dual_failure_is_typed_unreconciled_4891()
         completion.binding_disposition,
         super::singleton::CompletedBindingDisposition::DurabilityFailure
     );
-    assert_eq!(
+    assert!(
         gateway
             .deleted_message_ids
             .lock()
             .expect("deleted message ids lock")
-            .as_slice(),
-        &[fallback_panel],
-        "the write failure must attempt immediate rollback"
+            .is_empty(),
+        "ACKed candidate stays protected when pending-bind durability is ambiguous"
     );
     assert!(
         crate::services::discord::status_panel_transition::load_unreconciled(
@@ -1386,7 +1514,7 @@ async fn pending_bind_write_and_delete_dual_failure_is_typed_unreconciled_4891()
         )
         .expect("load transition journal")
         .iter()
-        .any(|intent| intent.candidate_panel_id == fallback_panel.get()),
+        .any(|intent| intent.candidate_panel_id == Some(fallback_panel.get())),
         "dual failure must retain durable transition authority instead of reporting success"
     );
 }
@@ -1437,7 +1565,7 @@ async fn fallback_singleton_failure_keeps_pending_bind_recovery_record_4891() {
     )
     .await;
 
-    assert!(completion.committed);
+    assert!(!completion.committed);
     assert_eq!(
         completion.binding_disposition,
         super::singleton::CompletedBindingDisposition::DurabilityFailure
