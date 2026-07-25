@@ -895,7 +895,7 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        action_detail, merge_loaded_script_automation_inventory,
+        RoutineRunOutcome, action_detail, merge_loaded_script_automation_inventory,
         pre_provider_fresh_context_guaranteed, public_tick_failure,
         validate_claimed_migrated_launchd_run,
     };
