@@ -143,6 +143,8 @@ pub struct RoutineScriptLoader {
     evaluation_attempts: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     source_read_hook: Mutex<Option<Arc<dyn Fn(&Path) + Send + Sync>>>,
+    #[cfg(test)]
+    source_reader: Mutex<Option<Arc<dyn Fn(&Path) -> std::io::Result<String> + Send + Sync>>>,
 }
 
 impl RoutineScriptLoader {
@@ -154,6 +156,8 @@ impl RoutineScriptLoader {
             evaluation_attempts: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             source_read_hook: Mutex::new(None),
+            #[cfg(test)]
+            source_reader: Mutex::new(None),
         })
     }
 
@@ -262,7 +266,20 @@ impl RoutineScriptLoader {
                     break;
                 }
 
-                let source = match std::fs::read_to_string(&candidate.path) {
+                #[cfg(test)]
+                let source_result = if let Some(reader) = self
+                    .source_reader
+                    .lock()
+                    .unwrap_or_else(recover_poisoned_lock)
+                    .clone()
+                {
+                    reader(&candidate.path)
+                } else {
+                    std::fs::read_to_string(&candidate.path)
+                };
+                #[cfg(not(test))]
+                let source_result = std::fs::read_to_string(&candidate.path);
+                let source = match source_result {
                     Ok(source) => source,
                     Err(e) => {
                         let now = Instant::now();
@@ -1512,25 +1529,48 @@ mod tests {
 
     #[test]
     fn source_less_read_failure_uses_the_same_bounded_backoff() {
-        let path = Path::new("unreadable.js");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unreadable.js");
+        std::fs::write(
+            &path,
+            "agentdesk.routines.register({ name: 'Unreadable', tick() { return { action: 'skip' }; } });",
+        )
+        .unwrap();
+
         let loader = RoutineScriptLoader::new().unwrap();
-        loader.record_failure(path, None, Instant::now());
+        let read_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_attempts = Arc::clone(&read_attempts);
+        *loader.source_reader.lock().unwrap() = Some(Arc::new(move |_| {
+            observed_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "test read failure",
+            ))
+        }));
+
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        assert_eq!(read_attempts.load(std::sync::atomic::Ordering::Relaxed), 1);
         let first = loader
             .failed_scripts
             .lock()
             .unwrap()
-            .get(path)
+            .get(&path)
             .unwrap()
             .clone();
         assert_eq!(first.source_version, None);
         assert_eq!(first.consecutive_failures, 1);
 
-        assert!(!loader.should_retry_candidate(path, None, Instant::now(), false));
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        assert_eq!(
+            read_attempts.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "read must be retried to determine whether the source became available"
+        );
         let second = loader
             .failed_scripts
             .lock()
             .unwrap()
-            .get(path)
+            .get(&path)
             .unwrap()
             .clone();
         assert_eq!(second.consecutive_failures, 1);
