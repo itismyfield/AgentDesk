@@ -278,7 +278,6 @@ services::discord::placeholder_cleanup::permanent_failure_tests
 services::discord::placeholder_cleanup::terminal_anchor_guard_tests
 services::discord::placeholder_controller::edit_retry_tests
 services::discord::placeholder_controller::live_events_tests
-services::discord::placeholder_sweeper::abandon_guard::tests
 services::discord::placeholder_sweeper::is_message_still_placeholder_tests
 services::discord::placeholder_sweeper::panel_shape::tests
 services::discord::placeholder_sweeper::probe_classification_tests
@@ -317,7 +316,6 @@ services::discord::recovery_engine::restore_inflight::tests
 services::discord::recovery_engine::routing_orphan::tests
 services::discord::recovery_engine::runtime::delivered_inflight_reregister_tests
 services::discord::recovery_engine::runtime::readopted_ledger_record_gate_tests
-services::discord::recovery_engine::runtime::reregister_ledger_reseed_tests
 services::discord::recovery_engine::terminal_text_idempotency::tests
 services::discord::recovery_engine::terminal_watcher::restart_report_tests
 services::discord::recovery_engine::terminal_watcher::tests

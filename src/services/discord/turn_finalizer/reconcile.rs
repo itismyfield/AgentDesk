@@ -97,6 +97,7 @@ async fn run_backstop_finalize(
 /// bounded.
 pub(super) async fn reconcile(
     ledger: &mut HashMap<LedgerKey, LedgerEntry>,
+    pending_admission: &mut HashMap<LedgerKey, PendingCompletionAdmission>,
     shared: &Arc<SharedData>,
 ) {
     let now = Instant::now();
@@ -227,11 +228,13 @@ pub(super) async fn reconcile(
         }
     }
 
-    // GC finalized entries past their TTL.
+    // GC admission authority only after the longest bounded late-edge window.
     ledger.retain(|_, entry| {
         !(entry.phase == Phase::Finalized
             && entry
                 .finalized_at
-                .is_some_and(|t| now.duration_since(t) >= FINALIZED_TTL))
+                .is_some_and(|t| now.duration_since(t) >= COMPLETION_ADMISSION_TTL))
     });
+    pending_admission
+        .retain(|_, pending| now.duration_since(pending.updated_at) < COMPLETION_ADMISSION_TTL);
 }

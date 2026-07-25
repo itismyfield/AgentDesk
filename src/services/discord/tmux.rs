@@ -2300,6 +2300,14 @@ async fn release_restored_watcher_active_turn_before_panel_edit(
         shared, provider, channel_id,
     )
     .await;
+    super::turn_finalizer::cleanup::rearm_queue_backstop_after_mailbox_release(
+        shared,
+        provider,
+        channel_id,
+        finish.has_pending,
+        "watcher_pre_panel_mailbox_release",
+    )
+    .await;
     if !finish.has_pending {
         super::turn_finalizer::cleanup::remove_owned_role_override(
             shared,

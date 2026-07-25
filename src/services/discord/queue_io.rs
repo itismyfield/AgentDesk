@@ -703,12 +703,12 @@ pub(in crate::services::discord) fn spawn_turn_completion_idle_queue_listener(
 }
 
 #[cfg(test)]
-fn idle_queue_backstop_fires_for_tests() -> usize {
+pub(in crate::services::discord) fn idle_queue_backstop_fires_for_tests() -> usize {
     IDLE_QUEUE_BACKSTOP_FIRES_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(test)]
-fn idle_queue_backstop_delay_for_tests() -> std::time::Duration {
+pub(in crate::services::discord) fn idle_queue_backstop_delay_for_tests() -> std::time::Duration {
     DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY
 }
 

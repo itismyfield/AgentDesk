@@ -22,6 +22,12 @@ pub(super) struct LedgerEntry {
     pub(super) finalized_at: Option<Instant>,
 }
 
+pub(super) struct PendingCompletionAdmission {
+    pub(super) turn_key: TurnKey,
+    pub(super) completion_admission: CompletionAdmission,
+    pub(super) updated_at: Instant,
+}
+
 pub(super) enum FinalizeMsg {
     Start {
         key: TurnKey,

@@ -3,11 +3,12 @@ use super::*;
 
 pub(super) fn handle_completion_admission_message(
     ledger: &mut HashMap<LedgerKey, LedgerEntry>,
+    pending_admission: &mut HashMap<LedgerKey, PendingCompletionAdmission>,
     msg: FinalizeMsg,
 ) {
     match msg {
         FinalizeMsg::MailboxReleased { key, shared } => {
-            update_completion_admission(ledger, key, &shared, |admission| {
+            update_completion_admission(ledger, pending_admission, key, &shared, |admission| {
                 admission.note_mailbox_released();
             });
         }
@@ -16,7 +17,7 @@ pub(super) fn handle_completion_admission_message(
             allow_queue,
             shared,
         } => {
-            update_completion_admission(ledger, key, &shared, |admission| {
+            update_completion_admission(ledger, pending_admission, key, &shared, |admission| {
                 admission.note_terminal_projection_settled(allow_queue);
             });
         }
@@ -25,7 +26,7 @@ pub(super) fn handle_completion_admission_message(
             allow_queue,
             shared,
         } => {
-            update_completion_admission(ledger, key, &shared, |admission| {
+            update_completion_admission(ledger, pending_admission, key, &shared, |admission| {
                 admission.note_terminal_disposition_settled(allow_queue);
             });
         }
@@ -33,16 +34,98 @@ pub(super) fn handle_completion_admission_message(
     }
 }
 
+fn canonical_admission_ledger_key(
+    ledger: &HashMap<LedgerKey, LedgerEntry>,
+    pending_admission: &HashMap<LedgerKey, PendingCompletionAdmission>,
+    key: TurnKey,
+) -> LedgerKey {
+    if key.user_msg_id != 0 {
+        let exact_key = key.exact_key();
+        if ledger.contains_key(&exact_key) || pending_admission.contains_key(&exact_key) {
+            return exact_key;
+        }
+        if let Some((ledger_key, _)) = ledger
+            .iter()
+            .filter(|(ledger_key, entry)| {
+                ledger_key.channel_id == key.channel_id
+                    && ledger_key.user_msg_id == key.user_msg_id
+                    && entry.turn_key.user_msg_id == key.user_msg_id
+            })
+            .max_by_key(|(ledger_key, entry)| {
+                (entry.phase != Phase::Finalized, ledger_key.generation)
+            })
+        {
+            return *ledger_key;
+        }
+        if let Some((ledger_key, _)) = pending_admission
+            .iter()
+            .filter(|(ledger_key, pending)| {
+                ledger_key.channel_id == key.channel_id
+                    && ledger_key.user_msg_id == key.user_msg_id
+                    && pending.turn_key.user_msg_id == key.user_msg_id
+            })
+            .max_by_key(|(ledger_key, _)| ledger_key.generation)
+        {
+            return *ledger_key;
+        }
+    }
+    resolve_ledger_key(ledger, key)
+}
+
 fn update_completion_admission(
     ledger: &mut HashMap<LedgerKey, LedgerEntry>,
+    pending_admission: &mut HashMap<LedgerKey, PendingCompletionAdmission>,
     key: TurnKey,
     shared: &SharedData,
     update: impl FnOnce(&mut CompletionAdmission),
 ) {
-    let ledger_key = resolve_ledger_key(ledger, key);
+    let ledger_key = canonical_admission_ledger_key(ledger, pending_admission, key);
     if let Some(entry) = ledger.get_mut(&ledger_key) {
         update(&mut entry.completion_admission);
         publish_claimed_queue_eligible(shared, entry);
+        return;
+    }
+
+    let pending =
+        pending_admission
+            .entry(ledger_key)
+            .or_insert_with(|| PendingCompletionAdmission {
+                turn_key: TurnKey::new(key.channel_id, key.user_msg_id, ledger_key.generation),
+                completion_admission: CompletionAdmission::new(CompletionAdmissionPlan::Immediate),
+                updated_at: Instant::now(),
+            });
+    update(&mut pending.completion_admission);
+    pending.updated_at = Instant::now();
+}
+
+pub(super) fn apply_pending_completion_admission(
+    entry: &mut LedgerEntry,
+    pending: Option<PendingCompletionAdmission>,
+) {
+    let Some(pending) = pending else {
+        return;
+    };
+    entry
+        .completion_admission
+        .update_plan(pending.completion_admission.plan);
+    if pending.completion_admission.mailbox_released {
+        entry.completion_admission.note_mailbox_released();
+    }
+    if pending.completion_admission.terminal_projection_settled {
+        entry.completion_admission.note_terminal_projection_settled(
+            pending
+                .completion_admission
+                .terminal_projection_allows_queue,
+        );
+    }
+    if pending.completion_admission.terminal_disposition_settled {
+        entry
+            .completion_admission
+            .note_terminal_disposition_settled(
+                pending
+                    .completion_admission
+                    .terminal_disposition_allows_queue,
+            );
     }
 }
 
@@ -204,6 +287,130 @@ mod tests {
                 completion_events.try_recv().is_err(),
                 "a capped or failed retry decision must remain a permanent queue-admission veto"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn missing_ledger_edges_survive_generation_change_and_keep_first_settle_4906() {
+        with_isolated_runtime_root(|| async move {
+            let shared = make_shared_data_for_tests_with_storage(None);
+            let mut completion_events =
+                turn_completion_events::subscribe_turn_completion_events(&shared);
+            let channel_id = ChannelId::new(4_906_101);
+            let turn_id = 4_906_102;
+            let late_key = TurnKey::new(channel_id, turn_id, 41);
+            let recovered_key = TurnKey::new(channel_id, turn_id, 42);
+            let finalizer = TurnFinalizer::spawn();
+
+            finalizer.note_mailbox_released(late_key, shared.clone());
+            finalizer.note_terminal_projection_settled(late_key, false, shared.clone());
+            finalizer.note_terminal_projection_settled(recovered_key, true, shared.clone());
+            assert!(completion_events.try_recv().is_err());
+
+            finalizer.register_start_with_completion_admission(
+                recovered_key,
+                ProviderKind::Claude,
+                RelayOwnerKind::Watcher,
+                CompletionAdmissionPlan::AfterTerminalProjectionSettled,
+                &shared,
+            );
+            assert!(
+                finalizer
+                    .has_live_watcher_pending(channel_id, recovered_key.generation)
+                    .await
+            );
+            assert!(
+                completion_events.try_recv().is_err(),
+                "the first denied projection edge must survive pre-ledger storage and generation remap"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn finalized_authority_accepts_edge_after_legacy_sixty_second_window_4906() {
+        with_isolated_runtime_root(|| async move {
+            let shared = make_shared_data_for_tests_with_storage(None);
+            let mut completion_events =
+                turn_completion_events::subscribe_turn_completion_events(&shared);
+            let channel_id = ChannelId::new(4_906_111);
+            let turn_id = 4_906_112;
+            shared.restart.global_active.store(1, Ordering::Relaxed);
+            let _token = seed_active_turn(&shared, channel_id, turn_id).await;
+            let finalizer = TurnFinalizer::spawn();
+            let key = TurnKey::new(channel_id, turn_id, 7);
+            finalizer.register_start_with_completion_admission(
+                key,
+                ProviderKind::Claude,
+                RelayOwnerKind::Watcher,
+                CompletionAdmissionPlan::AfterTerminalProjectionSettled,
+                &shared,
+            );
+
+            let outcome = finalizer
+                .submit_terminal(
+                    key,
+                    ProviderKind::Claude,
+                    TerminalEvent::Complete,
+                    FinalizeContext::watcher(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(matches!(outcome, FinalizeOutcome::Finalized { .. }));
+            let released = completion_events.try_recv().expect("mailbox release edge");
+            assert!(!released.queue_is_eligible());
+
+            tokio::time::advance(Duration::from_secs(61)).await;
+            tokio::task::yield_now().await;
+            finalizer.note_terminal_projection_settled(key, true, shared.clone());
+            assert!(!finalizer.has_live_watcher_pending(channel_id, 7).await);
+
+            let eligible = completion_events
+                .try_recv()
+                .expect("late projection edge must retain admission authority beyond 60 seconds");
+            assert!(eligible.queue_is_eligible());
+            assert_eq!(eligible.turn_id, Some(turn_id));
+            finalizer.note_terminal_projection_settled(key, true, shared.clone());
+            assert!(completion_events.try_recv().is_err());
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn missing_ledger_mailbox_edge_replays_once_after_late_registration_4906() {
+        with_isolated_runtime_root(|| async move {
+            let shared = make_shared_data_for_tests_with_storage(None);
+            let mut completion_events =
+                turn_completion_events::subscribe_turn_completion_events(&shared);
+            let channel_id = ChannelId::new(4_906_121);
+            let turn_id = 4_906_122;
+            let old_key = TurnKey::new(channel_id, turn_id, 13);
+            let current_key = TurnKey::new(channel_id, turn_id, 14);
+            let finalizer = TurnFinalizer::spawn();
+
+            finalizer.note_mailbox_released(old_key, shared.clone());
+            assert!(completion_events.try_recv().is_err());
+            finalizer.register_start_with_completion_admission(
+                current_key,
+                ProviderKind::Claude,
+                RelayOwnerKind::None,
+                CompletionAdmissionPlan::Immediate,
+                &shared,
+            );
+            assert!(
+                !finalizer
+                    .has_live_watcher_pending(channel_id, current_key.generation)
+                    .await
+            );
+
+            let eligible = completion_events
+                .try_recv()
+                .expect("stored missing-ledger mailbox edge must replay on registration");
+            assert!(eligible.queue_is_eligible());
+            assert_eq!(eligible.turn_id, Some(turn_id));
+            finalizer.note_mailbox_released(current_key, shared.clone());
+            assert!(completion_events.try_recv().is_err());
         })
         .await;
     }

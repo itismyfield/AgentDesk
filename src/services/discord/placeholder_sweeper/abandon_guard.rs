@@ -205,8 +205,8 @@ struct AbandonedCleanupPlan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AbandonedMailboxFinishActions {
     cancel_removed_token: bool,
-    schedule_queue_kickoff: bool,
-    settle_terminal_projection: bool,
+    rearm_queue_backstop: bool,
+    settle_completion_admission: bool,
 }
 
 fn abandoned_mailbox_finish_actions(
@@ -215,8 +215,8 @@ fn abandoned_mailbox_finish_actions(
 ) -> AbandonedMailboxFinishActions {
     AbandonedMailboxFinishActions {
         cancel_removed_token: removed_token_present,
-        schedule_queue_kickoff: has_pending && !removed_token_present,
-        settle_terminal_projection: removed_token_present,
+        rearm_queue_backstop: has_pending,
+        settle_completion_admission: removed_token_present,
     }
 }
 
@@ -359,18 +359,18 @@ pub(super) async fn finalize_abandoned_mailbox(
         );
         super::super::saturating_decrement_global_active(shared);
     }
-    // A restarted/tokenless mailbox can still own durable soft-queued work.
-    // Schedule from the actor's authoritative backlog flag independently of
-    // token removal so deleting the orphan inflight cannot strand that queue.
-    if actions.schedule_queue_kickoff {
-        super::super::schedule_deferred_idle_queue_kickoff(
-            shared.clone(),
-            provider.clone(),
-            channel,
-            "placeholder_sweeper_abandon",
-        );
-    }
-    if actions.settle_terminal_projection {
+    // Mailbox release always re-arms the coalesced queue backstop when durable
+    // backlog remains. This is independent of ledger presence and token removal;
+    // the backstop rechecks the mailbox and cannot directly double-dequeue.
+    super::super::turn_finalizer::cleanup::rearm_queue_backstop_after_mailbox_release(
+        shared,
+        provider,
+        channel,
+        actions.rearm_queue_backstop,
+        "placeholder_sweeper_abandon",
+    )
+    .await;
+    if actions.settle_completion_admission {
         let key = super::super::turn_finalizer::TurnKey::new(
             channel,
             state.effective_finalizer_turn_id(),
@@ -847,9 +847,9 @@ mod tests {
         let tokenless_idle = abandoned_mailbox_finish_actions(false, false);
 
         assert!(!tokenless_pending.cancel_removed_token);
-        assert!(tokenless_pending.schedule_queue_kickoff);
-        assert!(!tokenless_pending.settle_terminal_projection);
-        assert!(!tokenless_idle.schedule_queue_kickoff);
+        assert!(tokenless_pending.rearm_queue_backstop);
+        assert!(!tokenless_pending.settle_completion_admission);
+        assert!(!tokenless_idle.rearm_queue_backstop);
     }
 
     #[test]
@@ -857,8 +857,8 @@ mod tests {
         let actions = abandoned_mailbox_finish_actions(true, true);
 
         assert!(actions.cancel_removed_token);
-        assert!(!actions.schedule_queue_kickoff);
-        assert!(actions.settle_terminal_projection);
+        assert!(actions.rearm_queue_backstop);
+        assert!(actions.settle_completion_admission);
     }
 
     #[tokio::test(flavor = "current_thread")]

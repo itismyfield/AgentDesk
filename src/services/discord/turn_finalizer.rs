@@ -49,11 +49,12 @@ pub(in crate::services::discord) use cleanup::SyntheticClaimSnapshot;
 // #3479 r9: completion-signal enum + pure derivation extracted; re-exported so
 // the `completion_signal_state` method and the watcher-backstop re-check below
 // reference them unqualified, byte-identical.
-use self::actor_state::{FinalizeMsg, LedgerEntry, Phase};
-use self::completion_admission::CompletionAdmission;
+use self::actor_state::{FinalizeMsg, LedgerEntry, PendingCompletionAdmission, Phase};
 pub(in crate::services::discord) use self::completion_admission::CompletionAdmissionPlan;
+use self::completion_admission::{CompletionAdmission, publish_claimed_queue_eligible};
 use self::completion_admission_actor::{
-    handle_completion_admission_message, note_mailbox_release_after_finalize,
+    apply_pending_completion_admission, handle_completion_admission_message,
+    note_mailbox_release_after_finalize,
 };
 pub(in crate::services::discord) use self::completion_signal::{
     CompletionSignal, completion_signal_from_transcript,
@@ -101,9 +102,11 @@ const GATE_BACKSTOP: Duration = Duration::from_secs(8);
 const WATCHER_REGISTER_BACKSTOP: Duration =
     Duration::from_secs(super::placeholder_sweeper::ABANDON_THRESHOLD_SECS);
 
-/// TTL after which a `Finalized` ledger entry is garbage-collected so the
-/// ledger stays bounded while still suppressing a late double-submit.
-const FINALIZED_TTL: Duration = Duration::from_secs(60);
+/// Keep finalized admission authority beyond the longest bounded retry lineage.
+/// Busy follow-up admission may settle up to five minutes after mailbox release;
+/// retaining ten minutes also covers delayed Discord 429 handling without making
+/// stale entries permanent. Pending pre-ledger edges use the same lifetime.
+const COMPLETION_ADMISSION_TTL: Duration = Duration::from_secs(10 * 60);
 
 /// Identity carried by a submission. The ledger key is the FULL identity
 /// (`channel_id`, `generation`, `user_msg_id`) so two SEQUENTIAL turns in the
@@ -593,6 +596,7 @@ fn panic_payload_summary(payload: &(dyn std::any::Any + Send)) -> String {
 /// cross-task nudge ordering to reason about).
 async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
     let mut ledger: HashMap<LedgerKey, LedgerEntry> = HashMap::new();
+    let mut pending_admission: HashMap<LedgerKey, PendingCompletionAdmission> = HashMap::new();
     // A `Weak` (NOT `Arc`) so the actor never keeps `SharedData` alive: the
     // cycle would otherwise be SharedData → Arc<TurnFinalizer> → sender →
     // actor → cached Arc<SharedData>, leaking the whole runtime across a
@@ -622,7 +626,7 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         // a dead `Weak` here just skips reconcile harmlessly until a
                         // live submission re-primes it.
                         if cached_shared.is_none() {
-                            cached_shared = Some(shared);
+                            cached_shared = Some(shared.clone());
                         }
                         // #3016 phase-5a: a watcher-owned handoff arms the FAR
                         // backstop so a never-terminated turn is visible to the
@@ -630,47 +634,66 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         // must never push an armed deadline forward (the EPIC's
                         // never-finalizing bug, mirrored from the gate-timeout arm).
                         let arm_watcher_backstop = relay_owner == RelayOwnerKind::Watcher;
-                        // A `Start` always carries the real `user_msg_id`, so it
-                        // registers under the exact full-identity key.
-                        ledger
-                            .entry(key.exact_key())
-                            .and_modify(|e| {
-                                // Only refresh the owner while still live; never
-                                // resurrect a finalized turn.
-                                if e.phase != Phase::Finalized {
-                                    e.relay_owner = relay_owner;
-                                    e.provider = provider.clone();
-                                    e.turn_key = key;
-                                    e.completion_admission
-                                        .update_plan(completion_admission_plan);
-                                    if arm_watcher_backstop {
-                                        e.watcher_backstop_deadline.get_or_insert_with(|| {
-                                            Instant::now() + WATCHER_REGISTER_BACKSTOP
-                                        });
-                                    }
-                                }
+                        // A `Start` always carries the real `user_msg_id`. Resolve
+                        // any pre-ledger/late-generation edge by stable turn identity
+                        // before registering the exact current-generation key.
+                        let exact_key = key.exact_key();
+                        let pending_key = pending_admission
+                            .keys()
+                            .filter(|candidate| {
+                                candidate.channel_id == key.channel_id
+                                    && candidate.user_msg_id == key.user_msg_id
                             })
-                            .or_insert(LedgerEntry {
-                                phase: Phase::Pending,
-                                relay_owner,
-                                provider,
-                                turn_key: key,
-                                terminal_deadline: None,
-                                watcher_backstop_deadline: arm_watcher_backstop
-                                    .then(|| Instant::now() + WATCHER_REGISTER_BACKSTOP),
-                                watcher_backstop_probe_at: None,
-                                watcher_backstop_terminal_streak: 0,
-                                watcher_backstop_deadline_pulled: false,
-                                completion_admission: CompletionAdmission::new(
-                                    completion_admission_plan,
-                                ),
-                                finalized_at: None,
-                            });
+                            .max_by_key(|candidate| candidate.generation)
+                            .copied();
+                        let pending = pending_key.and_then(|candidate| pending_admission.remove(&candidate));
+                        let entry = ledger.entry(exact_key).or_insert(LedgerEntry {
+                            phase: Phase::Pending,
+                            relay_owner,
+                            provider: provider.clone(),
+                            turn_key: key,
+                            terminal_deadline: None,
+                            watcher_backstop_deadline: arm_watcher_backstop
+                                .then(|| Instant::now() + WATCHER_REGISTER_BACKSTOP),
+                            watcher_backstop_probe_at: None,
+                            watcher_backstop_terminal_streak: 0,
+                            watcher_backstop_deadline_pulled: false,
+                            completion_admission: CompletionAdmission::new(
+                                completion_admission_plan,
+                            ),
+                            finalized_at: None,
+                        });
+                        if entry.phase != Phase::Finalized {
+                            entry.relay_owner = relay_owner;
+                            entry.provider = provider;
+                            entry.turn_key = key;
+                            entry
+                                .completion_admission
+                                .update_plan(completion_admission_plan);
+                            apply_pending_completion_admission(entry, pending);
+                            if arm_watcher_backstop {
+                                entry.watcher_backstop_deadline.get_or_insert_with(|| {
+                                    Instant::now() + WATCHER_REGISTER_BACKSTOP
+                                });
+                            }
+                            if let Some(shared) = shared.upgrade() {
+                                publish_claimed_queue_eligible(&shared, entry);
+                            }
+                        } else if let Some(pending) = pending {
+                            apply_pending_completion_admission(entry, Some(pending));
+                            if let Some(shared) = shared.upgrade() {
+                                publish_claimed_queue_eligible(&shared, entry);
+                            }
+                        }
                     }
                     msg @ (FinalizeMsg::MailboxReleased { .. }
                     | FinalizeMsg::TerminalProjectionSettled { .. }
                     | FinalizeMsg::TerminalDispositionSettled { .. }) => {
-                        handle_completion_admission_message(&mut ledger, msg);
+                        handle_completion_admission_message(
+                            &mut ledger,
+                            &mut pending_admission,
+                            msg,
+                        );
                     }
                     FinalizeMsg::Terminal {
                         key,
@@ -695,6 +718,7 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         // turn.
                         let outcome = match AssertUnwindSafe(handle_terminal(
                             &mut ledger,
+                            &mut pending_admission,
                             key,
                             provider,
                             event,
@@ -803,7 +827,11 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                     // Finalizing->Finalized and is never left stuck); this outer
                     // guard additionally contains the non-finalize reconcile
                     // surface and keeps the loop alive.
-                    if let Err(payload) = AssertUnwindSafe(reconcile(&mut ledger, &shared))
+                    if let Err(payload) = AssertUnwindSafe(reconcile(
+                        &mut ledger,
+                        &mut pending_admission,
+                        &shared,
+                    ))
                         .catch_unwind()
                         .await
                     {
@@ -871,6 +899,7 @@ mod test_panic_hook {
 
 async fn handle_terminal(
     ledger: &mut HashMap<LedgerKey, LedgerEntry>,
+    pending_admission: &mut HashMap<LedgerKey, PendingCompletionAdmission>,
     key: TurnKey,
     provider: ProviderKind,
     event: TerminalEvent,
@@ -907,6 +936,14 @@ async fn handle_terminal(
         }
     }
 
+    let pending_key = pending_admission
+        .keys()
+        .find(|candidate| {
+            candidate.channel_id == ledger_key.channel_id
+                && candidate.user_msg_id == ledger_key.user_msg_id
+        })
+        .copied();
+    let pending = pending_key.and_then(|candidate| pending_admission.remove(&candidate));
     let entry = ledger.entry(ledger_key).or_insert(LedgerEntry {
         phase: Phase::Pending,
         relay_owner: RelayOwnerKind::None,
@@ -922,6 +959,7 @@ async fn handle_terminal(
         completion_admission: CompletionAdmission::new(CompletionAdmissionPlan::Immediate),
         finalized_at: None,
     });
+    apply_pending_completion_admission(entry, pending);
 
     match entry.phase {
         Phase::Finalizing | Phase::Finalized => {
