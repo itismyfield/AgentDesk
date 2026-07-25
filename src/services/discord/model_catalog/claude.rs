@@ -235,7 +235,7 @@ fn truncate_catalog_text(raw: &str, fallback: &str) -> String {
 
 fn file_cache_key(path: &Path) -> Option<FileCacheKey> {
     let metadata = std::fs::metadata(path).ok()?;
-    if metadata.len() > MAX_CACHE_BODY_BYTES as u64 {
+    if !metadata.file_type().is_file() || metadata.len() > MAX_CACHE_BODY_BYTES as u64 {
         return None;
     }
     let modified_ms = metadata
@@ -694,6 +694,20 @@ mod tests {
             assert_eq!(entry.secondary_summary, alias.metadata_fallback_id);
             assert_ne!(entry.value, alias.metadata_fallback_id);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invariant_claude_model_catalog_rejects_fifo_before_bounded_read() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("cache.fifo");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("spawn mkfifo");
+        assert!(status.success(), "mkfifo should succeed");
+
+        assert!(file_cache_key(&path).is_none());
     }
 
     #[test]

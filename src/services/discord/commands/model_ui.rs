@@ -231,7 +231,6 @@ pub(super) fn build_model_picker_option_specs(
                     .is_some_and(|active| active.eq_ignore_ascii_case(entry.value.as_ref())),
             }),
     );
-    append_unavailable_selected_option(&mut options, selected_explicit_model);
     if options.is_empty() {
         options.push(ModelPickerOptionSpec {
             value: DEFAULT_PICKER_VALUE.to_string(),
@@ -245,6 +244,7 @@ pub(super) fn build_model_picker_option_specs(
             selected: false,
         });
     }
+    append_unavailable_selected_option(&mut options, selected_explicit_model);
     options
 }
 
@@ -326,6 +326,25 @@ mod tests {
             option.label.chars().count() <= DISCORD_SELECT_MENU_TEXT_LIMIT
                 && option.description.chars().count() <= DISCORD_SELECT_MENU_TEXT_LIMIT
         }));
+    }
+
+    #[test]
+    fn invariant_model_picker_empty_catalog_keeps_default_before_valid_unavailable_override() {
+        let selected = "custom-provider/custom-model";
+        let options = build_model_picker_option_specs(
+            &ProviderKind::OpenCode,
+            None,
+            Some(selected),
+            "default",
+            SOURCE_PROVIDER_DEFAULT,
+            None,
+        );
+
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].value, DEFAULT_PICKER_VALUE);
+        assert!(!options[0].selected);
+        assert_eq!(options[1].value, selected);
+        assert!(options[1].selected);
     }
 
     #[test]
