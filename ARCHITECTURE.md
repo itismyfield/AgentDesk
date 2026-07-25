@@ -1229,6 +1229,8 @@ src/
 │   │   ├── tuning_aggregate.rs
 │   │   └── worktree_stale.rs
 │   ├── routines/
+│   │   ├── loader/
+│   │   │   └── discovery.rs
 │   │   ├── action.rs
 │   │   ├── agent_executor.rs
 │   │   ├── discord_log.rs
