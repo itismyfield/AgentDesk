@@ -12,7 +12,7 @@ use crate::engine::loader::compute_policy_version;
 mod discovery;
 use discovery::{
     add_cached_candidates_for_root, candidate_failure_key, collect_routine_script_paths,
-    routine_roots_identity, script_ref, stable_absolute_path,
+    routine_roots_identity, script_ref,
 };
 
 fn full_source_version(source: &str) -> String {
@@ -928,6 +928,7 @@ fn ensure_acyclic_js_value<'js>(
 
 #[cfg(test)]
 mod tests {
+    use super::discovery::stable_absolute_path;
     use super::*;
     use std::io::{self, Write};
     use std::sync::Barrier;
