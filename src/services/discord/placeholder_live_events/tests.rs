@@ -88,6 +88,19 @@ fn raw_codex_exec_command_reaches_single_message_footer_as_bash() {
         } = message
         {
             bridged_tool_uses += 1;
+            assert_eq!(
+                name, "exec_command",
+                "parser must preserve the function name"
+            );
+            assert_eq!(
+                tool_use_id.as_deref(),
+                Some("call-footer"),
+                "parser must preserve the function call id"
+            );
+            assert!(
+                input.contains(raw_command) && input.contains("parser-bridge-secret"),
+                "parser must preserve the raw function arguments before display redaction: {input}"
+            );
             events.push_status_events(
                 channel_id,
                 status_events_from_tool_use_with_id(&name, &input, tool_use_id.as_deref()),
