@@ -868,10 +868,10 @@ fn encode_path_segment(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CancelRetryDecision, TrustedForwardTarget, classify_cancel_forward_response,
-        encode_path_segment, enforce_receiver_fence, forward_json_response, is_forwarded_request,
-        legacy_session_key_matches_channel, load_cancel_owner, load_cancel_turn_session,
-        resolve_forward_target_from_nodes,
+        CancelRetryDecision, ForwardResolution, TrustedForwardTarget,
+        classify_cancel_forward_response, encode_path_segment, enforce_receiver_fence,
+        forward_json_response, is_forwarded_request, legacy_session_key_matches_channel,
+        load_cancel_owner, load_cancel_turn_session, resolve_forward_target_from_nodes,
     };
     use axum::Json;
     use axum::http::{HeaderMap, HeaderValue};
@@ -880,6 +880,117 @@ mod tests {
 
     fn test_target(owner: &str, origin: &str) -> TrustedForwardTarget {
         TrustedForwardTarget::for_test(owner, origin).expect("test target")
+    }
+
+    fn resolution_state(origin: Option<&str>) -> super::ForwardCallerContext {
+        let mut config = crate::config::Config::default();
+        if let Some(origin) = origin {
+            config.cluster.nodes.insert(
+                "worker-a".to_string(),
+                crate::config::ClusterNodeConfig {
+                    trusted_forward_origin: Some(origin.to_string()),
+                    ..crate::config::ClusterNodeConfig::default()
+                },
+            );
+        }
+        super::ForwardCallerContext {
+            pg_pool: None,
+            config: std::sync::Arc::new(config),
+            cluster_instance_id: Some("leader".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_forward_target_keeps_missing_and_local_sessions_local() {
+        let state = resolution_state(None);
+        assert_eq!(
+            resolve_forward_target_from_nodes(
+                &state,
+                None,
+                Some("leader"),
+                &[],
+                "session_forwarding",
+            )
+            .await,
+            ForwardResolution::Local
+        );
+        assert_eq!(
+            resolve_forward_target_from_nodes(
+                &state,
+                Some("worker-a"),
+                None,
+                &[],
+                "session_forwarding",
+            )
+            .await,
+            ForwardResolution::Local
+        );
+        assert_eq!(
+            resolve_forward_target_from_nodes(
+                &state,
+                Some("leader"),
+                Some("leader"),
+                &[],
+                "session_forwarding",
+            )
+            .await,
+            ForwardResolution::Local
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_forward_target_rejects_invalid_owner_and_local_instance_ids() {
+        let state = resolution_state(None);
+        let resolution = resolve_forward_target_from_nodes(
+            &state,
+            Some("worker-a\r\nx-injected"),
+            Some("leader"),
+            &[],
+            "session_forwarding",
+        )
+        .await;
+        assert!(matches!(
+            resolution,
+            ForwardResolution::Unavailable { ref body, .. }
+                if body["code"] == "session_owner_instance_id_invalid"
+        ));
+
+        let resolution = resolve_forward_target_from_nodes(
+            &state,
+            Some("worker-a"),
+            Some("leader\r\nx-injected"),
+            &[],
+            "session_forwarding",
+        )
+        .await;
+        assert!(matches!(
+            resolution,
+            ForwardResolution::Unavailable { ref body, .. }
+                if body["code"] == "session_local_instance_id_invalid"
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolve_forward_target_returns_trusted_foreign_owner() {
+        let state = resolution_state(Some("https://203.0.113.10:8791"));
+        let nodes = vec![json!({
+            "instance_id": "worker-a",
+            "status": "online",
+            "api_base_url": "https://203.0.113.10:8791",
+            "capabilities": {"agentdesk_api": {"session_forwarding": true}}
+        })];
+        let resolution = resolve_forward_target_from_nodes(
+            &state,
+            Some("worker-a"),
+            Some("leader"),
+            &nodes,
+            "session_forwarding",
+        )
+        .await;
+        let ForwardResolution::Forward(target) = resolution else {
+            panic!("expected trusted foreign target");
+        };
+        assert_eq!(target.owner_instance_id(), "worker-a");
     }
 
     #[test]
@@ -1040,6 +1151,46 @@ mod tests {
             resolution,
             super::ForwardResolution::Unavailable { ref body, .. }
                 if body["code"] == "trusted_forward_origin_missing"
+        ));
+    }
+
+    #[tokio::test]
+    async fn cleartext_rejection_never_yields_an_authenticated_request_target() {
+        let mut config = crate::config::Config::default();
+        config.server.auth_token = Some("must-not-be-sent".to_string());
+        config.cluster.nodes.insert(
+            "worker-a".to_string(),
+            crate::config::ClusterNodeConfig {
+                trusted_forward_origin: Some("http://203.0.113.10:8791".to_string()),
+                allow_private_forwarding: true,
+                allow_insecure_http_forwarding: true,
+                ..crate::config::ClusterNodeConfig::default()
+            },
+        );
+        let state = super::ForwardCallerContext {
+            pg_pool: None,
+            config: std::sync::Arc::new(config),
+            cluster_instance_id: Some("leader".to_string()),
+        };
+        let nodes = vec![json!({
+            "instance_id": "worker-a",
+            "status": "online",
+            "api_base_url": "http://203.0.113.10:8791",
+            "capabilities": {"agentdesk_api": {"session_forwarding": true}}
+        })];
+
+        let resolution = resolve_forward_target_from_nodes(
+            &state,
+            Some("worker-a"),
+            Some("leader"),
+            &nodes,
+            "session_forwarding",
+        )
+        .await;
+        assert!(matches!(
+            resolution,
+            ForwardResolution::Unavailable { ref body, .. }
+                if body["code"] == "trusted_forward_insecure_transport"
         ));
     }
 

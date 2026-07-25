@@ -21,6 +21,7 @@ pub(crate) enum TrustedTargetError {
     DnsResolutionFailed,
     UnsafeAddress,
     EmptyDnsAnswer,
+    InsecureTransport,
     ClientBuildFailed,
     InvalidEndpoint,
 }
@@ -36,6 +37,7 @@ impl TrustedTargetError {
             Self::DnsResolutionFailed => "trusted_forward_dns_failed",
             Self::UnsafeAddress => "trusted_forward_address_unsafe",
             Self::EmptyDnsAnswer => "trusted_forward_dns_empty",
+            Self::InsecureTransport => "trusted_forward_insecure_transport",
             Self::ClientBuildFailed => "trusted_forward_client_failed",
             Self::InvalidEndpoint => "trusted_forward_endpoint_invalid",
         }
@@ -54,6 +56,9 @@ impl TrustedTargetError {
             Self::UnsafeAddress => "trusted forwarding origin resolved to a prohibited address",
             Self::EmptyDnsAnswer => {
                 "trusted forwarding origin DNS resolution returned no addresses"
+            }
+            Self::InsecureTransport => {
+                "cleartext forwarding requires explicit private-address transport consent"
             }
             Self::ClientBuildFailed => "trusted forwarding HTTP client construction failed",
             Self::InvalidEndpoint => "trusted forwarding endpoint is invalid",
@@ -227,6 +232,7 @@ async fn build_trusted_target_with_resolver(
         None => return Err(TrustedTargetError::InvalidConfiguredOrigin),
     };
     let pinned = validate_addresses(resolved, node_config.allow_private_forwarding)?;
+    validate_transport(&configured, node_config, &pinned)?;
     let client = build_pinned_client(host, &pinned)?;
 
     Ok(TrustedForwardTarget {
@@ -234,6 +240,25 @@ async fn build_trusted_target_with_resolver(
         origin: configured,
         client,
     })
+}
+
+fn validate_transport(
+    origin: &Url,
+    node_config: &ClusterNodeConfig,
+    pinned: &[SocketAddr],
+) -> Result<(), TrustedTargetError> {
+    if origin.scheme() == "https" {
+        return Ok(());
+    }
+    if !node_config.allow_private_forwarding
+        || !node_config.allow_insecure_http_forwarding
+        || !pinned
+            .iter()
+            .all(|address| address_is_configured_private(address.ip()))
+    {
+        return Err(TrustedTargetError::InsecureTransport);
+    }
+    Ok(())
 }
 
 fn build_pinned_client(
@@ -309,6 +334,22 @@ fn address_is_allowed(address: IpAddr, allow_private: bool) -> bool {
     }
 }
 
+fn address_is_configured_private(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            let octets = address.octets();
+            address.is_private() || octets[0] == 100 && (64..=127).contains(&octets[1])
+        }
+        IpAddr::V6(address) => address.to_ipv4_mapped().map_or_else(
+            || (address.segments()[0] & 0xfe00) == 0xfc00,
+            |address| {
+                let octets = address.octets();
+                address.is_private() || octets[0] == 100 && (64..=127).contains(&octets[1])
+            },
+        ),
+    }
+}
+
 fn ipv4_is_allowed(address: Ipv4Addr, allow_private: bool) -> bool {
     let octets = address.octets();
     if address.is_unspecified()
@@ -371,6 +412,14 @@ mod tests {
     }
 
     fn cluster(origin: Option<&str>, allow_private: bool) -> ClusterConfig {
+        cluster_with_transport(origin, allow_private, false)
+    }
+
+    fn cluster_with_transport(
+        origin: Option<&str>,
+        allow_private: bool,
+        allow_insecure_http: bool,
+    ) -> ClusterConfig {
         let mut nodes = BTreeMap::new();
         nodes.insert(
             "worker-a".to_string(),
@@ -378,6 +427,7 @@ mod tests {
                 max_concurrent_dispatches: None,
                 trusted_forward_origin: origin.map(str::to_string),
                 allow_private_forwarding: allow_private,
+                allow_insecure_http_forwarding: allow_insecure_http,
             },
         );
         ClusterConfig {
@@ -508,6 +558,70 @@ mod tests {
         }
         assert!(validate_addresses(vec!["127.0.0.1:8791".parse().unwrap()], true).is_err());
         assert!(validate_addresses(vec!["169.254.169.254:80".parse().unwrap()], true).is_err());
+    }
+
+    #[tokio::test]
+    async fn cleartext_transport_requires_private_addresses_and_both_consents() {
+        let public = vec!["203.0.113.10:8791".parse().unwrap()];
+        assert_eq!(
+            resolve(
+                &cluster_with_transport(Some("http://worker.example:8791"), true, true),
+                "http://worker.example:8791",
+                public,
+            )
+            .await
+            .unwrap_err(),
+            TrustedTargetError::InsecureTransport
+        );
+
+        let private = vec!["10.0.0.2:8791".parse().unwrap()];
+        for config in [
+            cluster_with_transport(Some("http://worker.example:8791"), false, false),
+            cluster_with_transport(Some("http://worker.example:8791"), true, false),
+            cluster_with_transport(Some("http://worker.example:8791"), false, true),
+        ] {
+            assert_eq!(
+                resolve(&config, "http://worker.example:8791", private.clone())
+                    .await
+                    .unwrap_err(),
+                if config.nodes["worker-a"].allow_private_forwarding {
+                    TrustedTargetError::InsecureTransport
+                } else {
+                    TrustedTargetError::UnsafeAddress
+                }
+            );
+        }
+        assert!(
+            resolve(
+                &cluster_with_transport(Some("http://worker.example:8791"), true, true),
+                "http://worker.example:8791",
+                private,
+            )
+            .await
+            .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn https_transport_keeps_public_and_private_address_semantics() {
+        assert!(
+            resolve(
+                &cluster(Some("https://worker.example:8791"), false),
+                "https://worker.example:8791",
+                vec!["203.0.113.10:8791".parse().unwrap()],
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            resolve(
+                &cluster(Some("https://worker.example:8791"), true),
+                "https://worker.example:8791",
+                vec!["10.0.0.2:8791".parse().unwrap()],
+            )
+            .await
+            .is_ok()
+        );
     }
 
     #[tokio::test]

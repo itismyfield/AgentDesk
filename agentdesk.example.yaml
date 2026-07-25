@@ -8,8 +8,8 @@ cluster:
   # first, then hostname for dispatch caps. Authenticated session forwarding is
   # fail-closed: `trusted_forward_origin` must exactly match the worker's
   # advertised `cluster.api_base_url`; advertisements never become a trust root.
-  # Configure every node before enabling forwarding capabilities. Origins must
-  # be http(s), have path `/`, and contain no userinfo, query, or fragment.
+  # Configure every node before enabling forwarding capabilities. Origins use
+  # HTTPS by default, have path `/`, and contain no userinfo, query, or fragment.
   nodes:
     example-main-node:
       max_concurrent_dispatches: 4
@@ -21,6 +21,11 @@ cluster:
       # multicast targets remain blocked even when the opt-in is true.
       trusted_forward_origin: "https://worker.tailnet.example:8791"
       allow_private_forwarding: true
+      # Cleartext HTTP exposes the shared bearer to the private network. Use only
+      # for an operator-controlled private/Tailscale development origin, and only
+      # together with allow_private_forwarding. HTTP to public or mixed DNS is
+      # always rejected. HTTPS private forwarding does not need this flag.
+      # allow_insecure_http_forwarding: true
   blackout_windows:
     example-main-node:
       - start: "23:00"

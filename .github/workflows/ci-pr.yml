@@ -126,6 +126,7 @@ jobs:
               - 'src/services/dispatches/**'
               - 'src/services/queue.rs'
               - 'src/services/session_forwarding.rs'
+              - 'src/services/session_forwarding/**'
               - 'src/server/routes/queue_api.rs'
               # #4460: recovery owns production-shaped PostgreSQL/outbox
               # tests; changes to the owner or its sidecars must run them.
@@ -786,6 +787,12 @@ jobs:
           # Required Script checks only run on protected PR candidates. Their
           # synthetic merge first parent is the exact immutable base snapshot.
           TEST_LANE_BASELINE_REF: HEAD^1
+
+      # #4913: run the trusted-target behavior module in the PR lane selected by
+      # its source directory; main still retains the exact test-non-pg manifest.
+      - name: Trusted session forwarding tests
+        if: needs.changes.outputs.pg_db == 'true'
+        run: env -u AGENTDESK_ROOT_DIR cargo test --lib services::session_forwarding -- --skip _pg --skip pg_ --skip postgres
 
       # Keep high-value relay ratchets as explicit named steps as well as in the
       # aggregate script suite so their failure surface is immediately visible.

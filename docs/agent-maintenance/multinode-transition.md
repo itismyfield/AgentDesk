@@ -449,9 +449,12 @@
 - 2026-07-25 — #4913 GO-C1 trusted session-forwarding prerequisite:
   `session_forwarding` treats per-node `cluster.nodes.<instance>.trusted_forward_origin`
   as operator-owned authority, requires exact agreement with fresh worker capability
-  advertisements, validates and pins every DNS answer, disables proxies/redirects,
-  and attaches forwarding credentials only after validation. Receivers for tmux
-  output, force-kill, kill-tmux, cancel-turn, and resume-previous fence the expected
+  advertisements, validates and pins every DNS answer, requires HTTPS by default,
+  disables proxies/redirects, and attaches forwarding credentials only after
+  validation. Cleartext HTTP requires separate private-address and insecure-
+  transport opt-ins and only private/Tailscale answers; public or mixed DNS stays
+  blocked. Receivers for tmux output, force-kill, kill-tmux, cancel-turn, and
+  resume-previous fence the expected
   owner header against the current PostgreSQL `sessions.instance_id` and local
   instance before any node-local read/mutation; draft #4916 must apply the same
   shared path to resume-candidates. Classification: leader/gateway-originated HTTP

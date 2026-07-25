@@ -1041,6 +1041,11 @@ pub struct ClusterNodeConfig {
     /// and metadata addresses remain prohibited.
     #[serde(default)]
     pub allow_private_forwarding: bool,
+    /// Permit cleartext HTTP only when every validated target address belongs to
+    /// an explicitly allowed private forwarding range. This is independent from
+    /// private-address consent and therefore requires both flags.
+    #[serde(default)]
+    pub allow_insecure_http_forwarding: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -1277,8 +1282,9 @@ enabled: true
 nodes:
   mac-mini-release:
     max_concurrent_dispatches: 4
-    trusted_forward_origin: "https://mac-mini.example:8791"
+    trusted_forward_origin: "http://mac-mini.tailnet.example:8791"
     allow_private_forwarding: true
+    allow_insecure_http_forwarding: true
 blackout_windows:
   mac-mini-release:
     - start: "23:00"
@@ -1298,9 +1304,16 @@ dispatch_routing:
             config.nodes["mac-mini-release"]
                 .trusted_forward_origin
                 .as_deref(),
-            Some("https://mac-mini.example:8791")
+            Some("http://mac-mini.tailnet.example:8791")
         );
         assert!(config.nodes["mac-mini-release"].allow_private_forwarding);
+        assert!(config.nodes["mac-mini-release"].allow_insecure_http_forwarding);
+        let defaults: ClusterConfig = serde_yaml::from_str(
+            "nodes:\n  worker-default:\n    trusted_forward_origin: https://worker.example:8791\n",
+        )
+        .expect("new forwarding flags preserve config compatibility");
+        assert!(!defaults.nodes["worker-default"].allow_private_forwarding);
+        assert!(!defaults.nodes["worker-default"].allow_insecure_http_forwarding);
         assert_eq!(
             config.blackout_windows["mac-mini-release"][0]
                 .reason
