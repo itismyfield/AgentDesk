@@ -7,16 +7,10 @@ on:
   # compute. Deduping via the concurrency group instead would cancel the older
   # run, but the `*_required_context` mirrors run `if: always()` and FAIL CLOSED
   # on a `cancelled` upstream — so cancellation surfaces spurious required-check
-  # failures. Dropping the redundant push trigger removes the duplicate at the
-  # source with no cancellation. Branch CI is obtained by opening a PR; main is
-  # covered by ci-main.yml.
+  # failures. Dropping both the redundant push trigger and manual dispatch
+  # prevents any non-candidate run from publishing the required `Script checks`
+  # context. Branch CI is obtained by opening a PR; main is covered by ci-main.yml.
   pull_request:
-  workflow_dispatch:
-    inputs:
-      test_lane_baseline_ref:
-        description: Immutable commit SHA used by the test-lane baseline ratchet
-        required: true
-        type: string
 
 concurrency:
   # A PR number is unique inside the base repository, unlike `head_ref`: two
@@ -789,9 +783,9 @@ jobs:
       - name: Run script checks
         run: ./scripts/ci-script-checks.sh
         env:
-          # PR checkouts use the candidate merge's exact first parent. Manual
-          # runs must supply an immutable comparison SHA; omission fails closed.
-          TEST_LANE_BASELINE_REF: ${{ github.event_name == 'pull_request' && 'HEAD^1' || inputs.test_lane_baseline_ref }}
+          # Required Script checks only run on protected PR candidates. Their
+          # synthetic merge first parent is the exact immutable base snapshot.
+          TEST_LANE_BASELINE_REF: HEAD^1
 
       # Keep high-value relay ratchets as explicit named steps as well as in the
       # aggregate script suite so their failure surface is immediately visible.
