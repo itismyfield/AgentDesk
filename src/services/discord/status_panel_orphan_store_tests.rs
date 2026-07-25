@@ -104,7 +104,7 @@ fn orphan_drain_placeholder_is_live_defers_only_exact_live_anchor() {
 }
 
 #[test]
-fn pending_bind_drain_removes_record_when_bind_landed_without_delete() {
+fn pending_bind_drain_defers_bound_panel_until_singleton_commit_4891() {
     let root = tempfile::tempdir().expect("tempdir");
     let root = root.path();
     let provider = ProviderKind::Claude;
@@ -131,10 +131,74 @@ fn pending_bind_drain_removes_record_when_bind_landed_without_delete() {
         Some(&live),
     );
 
-    assert_eq!(outcome, PendingBindDrainOutcome::RemovedBoundPanel);
+    assert_eq!(outcome, PendingBindDrainOutcome::Deferred);
+    assert_eq!(
+        load_pending_in_root(root, &provider, token),
+        vec![(channel_id, panel_id)],
+        "inflight ownership alone must not purge recovery before singleton commit"
+    );
+}
+
+#[tokio::test]
+async fn bound_pending_bind_survives_drain_until_commit_then_purges_4891() {
+    let _env_lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let runtime_root = tempfile::tempdir().expect("runtime root");
+    let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        runtime_root.path(),
+    );
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let token = "tok";
+    let channel_id = 48_930;
+    let panel_id = 5_001;
+    let live = test_inflight(
+        &provider,
+        channel_id,
+        7_001,
+        Some(panel_id),
+        6_001,
+        Some(10),
+    );
+    crate::services::discord::inflight::save_inflight_state(&live).expect("persist bound inflight");
+    enqueue_pending_bind(
+        &provider,
+        token,
+        channel_id,
+        panel_id,
+        Some(InflightTurnIdentity::from_state(&live)),
+    )
+    .expect("persist pending bind");
+
+    let deletes = Arc::new(Mutex::new(Vec::new()));
+    let observed = deletes.clone();
+    assert_eq!(
+        drain_with_delete(&shared, &provider, token, move |channel, message| {
+            let observed = observed.clone();
+            async move {
+                observed
+                    .lock()
+                    .expect("delete observations lock")
+                    .push((channel, message));
+                Ok(())
+            }
+        })
+        .await,
+        0
+    );
+    assert!(is_queued(&provider, token, channel_id, panel_id));
+    assert!(deletes.lock().expect("delete observations lock").is_empty());
+
+    crate::services::discord::status_panel_singleton_store::bind_if_owned(
+        &provider, token, channel_id, panel_id, None,
+    )
+    .expect("commit singleton");
+    remove_pending_bind(&provider, token, channel_id, panel_id);
     assert!(
-        load_pending_in_root(root, &provider, token).is_empty(),
-        "case (a): once inflight owns the pending id, drain removes the record and never deletes the live panel"
+        !is_queued(&provider, token, channel_id, panel_id),
+        "only successful singleton commit may purge the bound PendingBind"
     );
 }
 
@@ -291,7 +355,8 @@ fn pending_bind_drain_defers_same_turn_unbound_window() {
         channel_id,
         panel_id,
         Some(InflightTurnIdentity::from_state(&live)),
-    );
+    )
+    .expect("seed pending bind");
 
     let outcome = prepare_pending_bind_for_drain_in_root(
         root,
@@ -347,7 +412,11 @@ fn pending_bind_unclaimed_after_grace_reclassifies_to_stranded_delete_path() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].kind, StatusPanelOrphanKind::Stranded);
     assert!(
-        stranded_orphan_drain_should_delete(None, None, panel_id),
+        stranded_orphan_drain_should_delete(
+            None,
+            &crate::services::discord::status_panel_singleton_store::StatusPanelSingletonLoadOutcome::Missing,
+            panel_id,
+        ),
         "case (c): after two grace cycles an unclaimed pending bind follows the normal stranded delete path"
     );
 }
@@ -362,14 +431,38 @@ fn stranded_orphan_drain_preserves_current_completed_singleton_4891() {
     assert!(
         !stranded_orphan_drain_should_delete(
             Some(&next_turn),
-            Some(completed_panel),
+            &crate::services::discord::status_panel_singleton_store::StatusPanelSingletonLoadOutcome::Present(
+                crate::services::discord::status_panel_singleton_store::StatusPanelSingletonBinding {
+                    panel_message_id: completed_panel,
+                    generation: 1,
+                },
+            ),
             completed_panel,
         ),
         "the 3-to-4 orphan drain link must not delete the current completed singleton after inflight moved"
     );
     assert!(
-        stranded_orphan_drain_should_delete(Some(&next_turn), Some(5002), completed_panel),
+        stranded_orphan_drain_should_delete(
+            Some(&next_turn),
+            &crate::services::discord::status_panel_singleton_store::StatusPanelSingletonLoadOutcome::Present(
+                crate::services::discord::status_panel_singleton_store::StatusPanelSingletonBinding {
+                    panel_message_id: 5002,
+                    generation: 2,
+                },
+            ),
+            completed_panel,
+        ),
         "once a newer durable singleton supersedes it, the stranded old panel remains reclaimable"
+    );
+    assert!(
+        !stranded_orphan_drain_should_delete(
+            Some(&next_turn),
+            &crate::services::discord::status_panel_singleton_store::StatusPanelSingletonLoadOutcome::DurabilityFailure(
+                "malformed singleton".to_string(),
+            ),
+            completed_panel,
+        ),
+        "singleton read failure must fail closed and defer orphan deletion"
     );
 }
 

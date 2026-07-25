@@ -145,6 +145,7 @@ pub(super) async fn complete_watcher_status_panel_v2(
             committed: true,
             binding_disposition: crate::services::discord::turn_bridge::status_panel::singleton::CompletedBindingDisposition::NotApplicable,
             completed_panel_message_id: None,
+            unreconciled_panel_message_id: None,
         };
     }
     crate::services::discord::turn_bridge::status_panel::complete_status_panel_v2_with_http_and_disposition(

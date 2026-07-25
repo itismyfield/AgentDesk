@@ -622,13 +622,24 @@ fn orphan_drain_placeholder_is_live(current_msg_id: Option<u64>, candidate: u64)
 
 fn stranded_orphan_drain_should_delete(
     inflight_state: Option<&InflightTurnState>,
-    current_singleton_panel_id: Option<u64>,
+    singleton: &crate::services::discord::status_panel_singleton_store::StatusPanelSingletonLoadOutcome,
     candidate: u64,
 ) -> bool {
-    if candidate == 0 {
+    use crate::services::discord::status_panel_singleton_store::StatusPanelSingletonLoadOutcome;
+
+    if candidate == 0
+        || matches!(
+            singleton,
+            StatusPanelSingletonLoadOutcome::DurabilityFailure(_)
+        )
+    {
         return false;
     }
-    let singleton_owns = current_singleton_panel_id == Some(candidate);
+    let singleton_owns = matches!(
+        singleton,
+        StatusPanelSingletonLoadOutcome::Present(binding)
+            if binding.panel_message_id == candidate
+    );
     let legacy_owns = inflight_state.and_then(|state| state.status_message_id) == Some(candidate);
     let live_placeholder_owns = orphan_drain_placeholder_is_live(
         inflight_state.map(|state| state.current_msg_id),
@@ -640,7 +651,6 @@ fn stranded_orphan_drain_should_delete(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingBindDrainOutcome {
     Missing,
-    RemovedBoundPanel,
     Deferred,
     ReclassifiedToStranded,
     AlreadyStranded,
@@ -674,11 +684,7 @@ fn prepare_pending_bind_for_drain_in_root(
     }
 
     if inflight.and_then(|state| state.status_message_id) == Some(panel_msg_id) {
-        entries.remove(index);
-        if save_channel_in_root(root, provider, token_hash, channel_id, &entries).is_err() {
-            return PendingBindDrainOutcome::Deferred;
-        }
-        return PendingBindDrainOutcome::RemovedBoundPanel;
+        return PendingBindDrainOutcome::Deferred;
     }
 
     if pending_bind_same_turn_window(&entries[index], inflight) {
@@ -780,10 +786,6 @@ where
                 inflight_state.as_ref(),
             ) {
                 PendingBindDrainOutcome::Missing => continue,
-                PendingBindDrainOutcome::RemovedBoundPanel => {
-                    cleared += 1;
-                    continue;
-                }
                 PendingBindDrainOutcome::Deferred => continue,
                 PendingBindDrainOutcome::ReclassifiedToStranded
                 | PendingBindDrainOutcome::AlreadyStranded => {
@@ -809,16 +811,10 @@ where
         // tmux pane — would defer an OLD turn's orphan forever (the store is its only
         // reclaim path). A different/absent `status_message_id` means the live turn
         // does not own this orphan, so it is safe to delete now.
-        let current_singleton_panel_id =
-            crate::services::discord::status_panel_singleton_store::load(
-                provider, token_hash, channel_id,
-            )
-            .map(|binding| binding.panel_message_id);
-        if !stranded_orphan_drain_should_delete(
-            inflight_state.as_ref(),
-            current_singleton_panel_id,
-            panel_msg_id,
-        ) {
+        let singleton = crate::services::discord::status_panel_singleton_store::load_typed(
+            provider, token_hash, channel_id,
+        );
+        if !stranded_orphan_drain_should_delete(inflight_state.as_ref(), &singleton, panel_msg_id) {
             continue;
         }
         let channel = serenity::ChannelId::new(channel_id);

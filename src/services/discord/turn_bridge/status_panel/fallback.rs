@@ -2,12 +2,24 @@
 //! from `turn_bridge/status_panel.rs`.
 
 use super::super::*;
+use std::collections::HashSet;
+use std::sync::{LazyLock, Mutex};
+
+static UNRECONCILED_FALLBACK_PANELS: LazyLock<Mutex<HashSet<(String, String, u64, u64)>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ConfirmedMissingPriorPanel {
+    pub message_id: MessageId,
+    pub generation: u64,
+}
 
 pub(super) struct CompletionFallbackRequest<'a> {
     pub shared: &'a SharedData,
     pub channel_id: ChannelId,
     pub provider: &'a ProviderKind,
     pub expected_user_msg_id: Option<u64>,
+    pub confirmed_missing_prior_panel: Option<ConfirmedMissingPriorPanel>,
     pub last_status_panel_text: &'a mut String,
     pub panel_text: String,
     pub wip_warning:
@@ -45,6 +57,9 @@ fn persist_status_panel_completion_fallback_message_id(
     let Some(expected_user_msg_id) = request.expected_user_msg_id else {
         return super::inflight::StatusPanelBindOutcome::Missing;
     };
+    if request.confirmed_missing_prior_panel.is_some() {
+        return super::inflight::StatusPanelBindOutcome::Missing;
+    }
     let guard = super::inflight::StatusPanelBindGuard {
         require_user_msg_id: Some(expected_user_msg_id),
         skip_if_panel_already_set: true,
@@ -95,12 +110,33 @@ fn finalize_fallback_binding(
     message_id: MessageId,
 ) -> super::StatusPanelCompletionResult {
     let bind_outcome = persist_status_panel_completion_fallback_message_id(request, message_id);
-    let binding_disposition = super::singleton::commit_completed_binding(
-        request.shared,
-        request.provider,
-        request.channel_id,
-        Some(message_id),
-    );
+    let binding_disposition = match (
+        request.confirmed_missing_prior_panel,
+        request.expected_user_msg_id,
+    ) {
+        (Some(missing), Some(expected_user_msg_id)) => {
+            super::singleton::classify_completed_binding_commit(
+                request.provider,
+                request.channel_id,
+                message_id,
+                crate::services::discord::status_panel_singleton_store::commit_confirmed_missing_replacement(
+                    request.provider,
+                    &request.shared.token_hash,
+                    request.channel_id.get(),
+                    expected_user_msg_id,
+                    missing.message_id.get(),
+                    missing.generation,
+                    message_id.get(),
+                ),
+            )
+        }
+        _ => super::singleton::commit_completed_binding(
+            request.shared,
+            request.provider,
+            request.channel_id,
+            Some(message_id),
+        ),
+    };
     match binding_disposition {
         super::singleton::CompletedBindingDisposition::NotApplicable
         | super::singleton::CompletedBindingDisposition::CommittedCurrent => {
@@ -136,6 +172,7 @@ fn finalize_fallback_binding(
         committed: true,
         binding_disposition,
         completed_panel_message_id: Some(message_id),
+        unreconciled_panel_message_id: None,
     }
 }
 
@@ -153,6 +190,52 @@ fn fallback_pending_bind_write_failed(
     );
 }
 
+fn retain_unreconciled_fallback_in_memory(
+    request: &CompletionFallbackRequest<'_>,
+    message_id: MessageId,
+) {
+    UNRECONCILED_FALLBACK_PANELS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert((
+            request.provider.as_str().to_string(),
+            request.shared.token_hash.clone(),
+            request.channel_id.get(),
+            message_id.get(),
+        ));
+}
+
+fn clear_unreconciled_fallback_in_memory(
+    request: &CompletionFallbackRequest<'_>,
+    message_id: MessageId,
+) {
+    UNRECONCILED_FALLBACK_PANELS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(&(
+            request.provider.as_str().to_string(),
+            request.shared.token_hash.clone(),
+            request.channel_id.get(),
+            message_id.get(),
+        ));
+}
+
+#[cfg(test)]
+pub(super) fn unreconciled_fallback_is_retained(
+    request: &CompletionFallbackRequest<'_>,
+    message_id: MessageId,
+) -> bool {
+    UNRECONCILED_FALLBACK_PANELS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains(&(
+            request.provider.as_str().to_string(),
+            request.shared.token_hash.clone(),
+            request.channel_id.get(),
+            message_id.get(),
+        ))
+}
+
 pub(super) async fn complete_status_panel_v2_fallback_with_http(
     http: &serenity::Http,
     mut request: CompletionFallbackRequest<'_>,
@@ -165,10 +248,15 @@ pub(super) async fn complete_status_panel_v2_fallback_with_http(
                 preregister_status_panel_completion_fallback_message_id(&request, message.id)
             {
                 fallback_pending_bind_write_failed(&request, message.id, &error);
-                let _ =
-                    super::http::delete_channel_message(http, request.channel_id, message.id).await;
-                return super::StatusPanelCompletionResult::not_applicable(false);
+                if super::http::delete_channel_message(http, request.channel_id, message.id)
+                    .await
+                    .is_err()
+                {
+                    retain_unreconciled_fallback_in_memory(&request, message.id);
+                }
+                return super::StatusPanelCompletionResult::unreconciled(message.id);
             }
+            clear_unreconciled_fallback_in_memory(&request, message.id);
             finalize_fallback_binding(&mut request, message.id)
         }
         Err(error) => {
@@ -206,9 +294,16 @@ pub(super) async fn complete_status_panel_v2_fallback_with_gateway<G: TurnGatewa
                 preregister_status_panel_completion_fallback_message_id(&request, message_id)
             {
                 fallback_pending_bind_write_failed(&request, message_id, &error);
-                let _ = gateway.delete_message(request.channel_id, message_id).await;
-                return super::StatusPanelCompletionResult::not_applicable(false);
+                if gateway
+                    .delete_message(request.channel_id, message_id)
+                    .await
+                    .is_err()
+                {
+                    retain_unreconciled_fallback_in_memory(&request, message_id);
+                }
+                return super::StatusPanelCompletionResult::unreconciled(message_id);
             }
+            clear_unreconciled_fallback_in_memory(&request, message_id);
             finalize_fallback_binding(&mut request, message_id)
         }
         Err(error) => {

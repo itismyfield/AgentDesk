@@ -51,6 +51,11 @@ pub(in crate::services::discord) struct StatusPanelBindGuard {
     /// so overlapping frames cannot silently overwrite each other's newly-bound
     /// panels.
     pub require_current_status_message_id: Option<u64>,
+    /// Bind only while the row remains at this panel-generation epoch. Combined
+    /// with `require_current_status_message_id`, this authorizes replacement of a
+    /// Discord-confirmed-missing panel without letting a stale completion replace
+    /// a live re-anchored panel at a newer epoch.
+    pub require_status_panel_generation: Option<u64>,
     /// #3805 P2: bump `status_panel_generation` from the on-disk row inside the
     /// bind flock. Callers must use this instead of precomputing
     /// `local_generation + 1` outside the lock.
@@ -142,6 +147,11 @@ pub(super) fn bind_status_panel_in_root(
     }
     if let Some(expected) = guard.require_current_status_message_id
         && state.status_message_id != Some(expected)
+    {
+        return StatusPanelBindOutcome::GuardMismatch;
+    }
+    if let Some(expected) = guard.require_status_panel_generation
+        && state.status_panel_generation != expected
     {
         return StatusPanelBindOutcome::GuardMismatch;
     }

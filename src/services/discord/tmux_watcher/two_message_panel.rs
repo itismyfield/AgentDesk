@@ -234,6 +234,7 @@ pub(in crate::services::discord) async fn complete_watcher_status_panel_v2_with_
             binding_disposition:
                 crate::services::discord::turn_bridge::status_panel::singleton::CompletedBindingDisposition::Superseded,
             completed_panel_message_id: status_panel_msg_id,
+            unreconciled_panel_message_id: None,
         }
     } else {
         complete_watcher_status_panel_v2(

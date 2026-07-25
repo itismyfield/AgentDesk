@@ -23,12 +23,26 @@ pub(super) fn commit_completed_binding(
     let Some(panel_message_id) = normalize_status_panel_message_id(panel_message_id) else {
         return CompletedBindingDisposition::NotApplicable;
     };
-    match crate::services::discord::status_panel_singleton_store::commit_if_owned_or_current(
+    classify_completed_binding_commit(
         provider,
-        &shared.token_hash,
-        channel_id.get(),
-        panel_message_id.get(),
-    ) {
+        channel_id,
+        panel_message_id,
+        crate::services::discord::status_panel_singleton_store::commit_if_owned_or_current(
+            provider,
+            &shared.token_hash,
+            channel_id.get(),
+            panel_message_id.get(),
+        ),
+    )
+}
+
+pub(super) fn classify_completed_binding_commit(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    panel_message_id: MessageId,
+    outcome: crate::services::discord::status_panel_singleton_store::CompletedBindingCommitOutcome,
+) -> CompletedBindingDisposition {
+    match outcome {
         crate::services::discord::status_panel_singleton_store::CompletedBindingCommitOutcome::CommittedCurrent(_) => {
             CompletedBindingDisposition::CommittedCurrent
         }

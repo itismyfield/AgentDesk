@@ -23,6 +23,13 @@ pub(in crate::services::discord) struct StatusPanelSingletonBinding {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::services::discord) enum StatusPanelSingletonLoadOutcome {
+    Present(StatusPanelSingletonBinding),
+    Missing,
+    DurabilityFailure(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) enum CompletedBindingCommitOutcome {
     CommittedCurrent(StatusPanelSingletonBinding),
     Superseded,
@@ -47,13 +54,26 @@ fn load_in_root(
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: u64,
-) -> Option<StatusPanelSingletonBinding> {
-    let raw = fs::read_to_string(channel_file_path_in_root(
-        root, provider, token_hash, channel_id,
-    ))
-    .ok()?;
-    let binding = serde_json::from_str::<StatusPanelSingletonBinding>(&raw).ok()?;
-    (binding.panel_message_id != 0).then_some(binding)
+) -> StatusPanelSingletonLoadOutcome {
+    let path = channel_file_path_in_root(root, provider, token_hash, channel_id);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return StatusPanelSingletonLoadOutcome::Missing;
+        }
+        Err(error) => {
+            return StatusPanelSingletonLoadOutcome::DurabilityFailure(error.to_string());
+        }
+    };
+    match serde_json::from_str::<StatusPanelSingletonBinding>(&raw) {
+        Ok(binding) if binding.panel_message_id != 0 => {
+            StatusPanelSingletonLoadOutcome::Present(binding)
+        }
+        Ok(_) => StatusPanelSingletonLoadOutcome::DurabilityFailure(
+            "status panel singleton contains a zero message id".to_string(),
+        ),
+        Err(error) => StatusPanelSingletonLoadOutcome::DurabilityFailure(error.to_string()),
+    }
 }
 
 fn bind_in_root(
@@ -106,6 +126,99 @@ pub(in crate::services::discord) fn bind_if_owned(
         .ok_or_else(|| "AgentDesk runtime root unavailable".to_string())?;
     bind_in_root(&root, provider, token_hash, channel_id, binding)?;
     Ok(binding)
+}
+
+pub(in crate::services::discord) fn commit_confirmed_missing_replacement(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    expected_user_msg_id: u64,
+    missing_panel_message_id: u64,
+    expected_generation: u64,
+    replacement_panel_message_id: u64,
+) -> CompletedBindingCommitOutcome {
+    let Some(inflight_root) = runtime_store::discord_inflight_root() else {
+        return CompletedBindingCommitOutcome::DurabilityFailure(
+            "AgentDesk inflight runtime root unavailable".to_string(),
+        );
+    };
+    let Some(singleton_root) = runtime_store::discord_status_panel_singletons_root() else {
+        return CompletedBindingCommitOutcome::DurabilityFailure(
+            "AgentDesk runtime root unavailable".to_string(),
+        );
+    };
+    let path = inflight::inflight_state_path(&inflight_root, provider, channel_id);
+    let _inflight_guard = match inflight::lock_inflight_state_path(&path) {
+        Ok(guard) => guard,
+        Err(error) => return CompletedBindingCommitOutcome::DurabilityFailure(error),
+    };
+    let _singleton_guard = STORE_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let mut inflight_state = match fs::read_to_string(&path) {
+        Ok(raw) => match serde_json::from_str::<inflight::InflightTurnState>(&raw) {
+            Ok(state) => Some(state),
+            Err(error) => {
+                return CompletedBindingCommitOutcome::DurabilityFailure(error.to_string());
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return CompletedBindingCommitOutcome::DurabilityFailure(error.to_string()),
+    };
+    let inflight_owns_missing = inflight_state.as_ref().is_some_and(|state| {
+        state.user_msg_id == expected_user_msg_id
+            && state.status_message_id == Some(missing_panel_message_id)
+            && state.status_panel_generation == expected_generation
+    });
+    if inflight_state.is_some() && !inflight_owns_missing {
+        return CompletedBindingCommitOutcome::Superseded;
+    }
+
+    match load_in_root(&singleton_root, provider, token_hash, channel_id) {
+        StatusPanelSingletonLoadOutcome::Present(binding)
+            if binding.panel_message_id == replacement_panel_message_id =>
+        {
+            return CompletedBindingCommitOutcome::CommittedCurrent(binding);
+        }
+        StatusPanelSingletonLoadOutcome::Present(binding)
+            if binding.panel_message_id == missing_panel_message_id
+                && binding.generation == expected_generation => {}
+        StatusPanelSingletonLoadOutcome::Missing if inflight_owns_missing => {}
+        StatusPanelSingletonLoadOutcome::Present(_) | StatusPanelSingletonLoadOutcome::Missing => {
+            return CompletedBindingCommitOutcome::Superseded;
+        }
+        StatusPanelSingletonLoadOutcome::DurabilityFailure(error) => {
+            return CompletedBindingCommitOutcome::DurabilityFailure(error);
+        }
+    }
+
+    if let Some(state) = inflight_state.as_mut() {
+        state.status_message_id = Some(replacement_panel_message_id);
+        let json = match serde_json::to_string_pretty(state) {
+            Ok(json) => json,
+            Err(error) => {
+                return CompletedBindingCommitOutcome::DurabilityFailure(error.to_string());
+            }
+        };
+        if let Err(error) = runtime_store::atomic_write(&path, &json) {
+            return CompletedBindingCommitOutcome::DurabilityFailure(error);
+        }
+    }
+    let binding = StatusPanelSingletonBinding {
+        panel_message_id: replacement_panel_message_id,
+        generation: expected_generation,
+    };
+    let singleton_path =
+        channel_file_path_in_root(&singleton_root, provider, token_hash, channel_id);
+    let json = match serde_json::to_string_pretty(&binding) {
+        Ok(json) => json,
+        Err(error) => return CompletedBindingCommitOutcome::DurabilityFailure(error.to_string()),
+    };
+    match runtime_store::atomic_write(&singleton_path, &json) {
+        Ok(()) => CompletedBindingCommitOutcome::CommittedCurrent(binding),
+        Err(error) => CompletedBindingCommitOutcome::DurabilityFailure(error),
+    }
 }
 
 pub(in crate::services::discord) fn commit_if_owned_or_current(
@@ -187,14 +300,23 @@ fn current_singleton_outcome_in_root(
     missing_inflight: bool,
 ) -> CompletedBindingCommitOutcome {
     match load_in_root(root, provider, token_hash, channel_id) {
-        Some(binding) if binding.panel_message_id == panel_message_id => {
+        StatusPanelSingletonLoadOutcome::Present(binding)
+            if binding.panel_message_id == panel_message_id =>
+        {
             CompletedBindingCommitOutcome::CommittedCurrent(binding)
         }
-        Some(_) => CompletedBindingCommitOutcome::Superseded,
-        None if missing_inflight => CompletedBindingCommitOutcome::Superseded,
-        None => CompletedBindingCommitOutcome::DurabilityFailure(
-            "completed status panel singleton binding unavailable".to_string(),
-        ),
+        StatusPanelSingletonLoadOutcome::Present(_) => CompletedBindingCommitOutcome::Superseded,
+        StatusPanelSingletonLoadOutcome::Missing if missing_inflight => {
+            CompletedBindingCommitOutcome::Superseded
+        }
+        StatusPanelSingletonLoadOutcome::Missing => {
+            CompletedBindingCommitOutcome::DurabilityFailure(
+                "completed status panel singleton binding unavailable".to_string(),
+            )
+        }
+        StatusPanelSingletonLoadOutcome::DurabilityFailure(error) => {
+            CompletedBindingCommitOutcome::DurabilityFailure(error)
+        }
     }
 }
 
@@ -208,7 +330,9 @@ fn clear_if_current_in_root(
     let _guard = STORE_WRITE_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let Some(binding) = load_in_root(root, provider, token_hash, channel_id) else {
+    let StatusPanelSingletonLoadOutcome::Present(binding) =
+        load_in_root(root, provider, token_hash, channel_id)
+    else {
         return false;
     };
     if binding.panel_message_id != panel_message_id {
@@ -225,7 +349,23 @@ pub(in crate::services::discord) fn load(
     token_hash: &str,
     channel_id: u64,
 ) -> Option<StatusPanelSingletonBinding> {
-    let root = runtime_store::discord_status_panel_singletons_root()?;
+    match load_typed(provider, token_hash, channel_id) {
+        StatusPanelSingletonLoadOutcome::Present(binding) => Some(binding),
+        StatusPanelSingletonLoadOutcome::Missing
+        | StatusPanelSingletonLoadOutcome::DurabilityFailure(_) => None,
+    }
+}
+
+pub(in crate::services::discord) fn load_typed(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+) -> StatusPanelSingletonLoadOutcome {
+    let Some(root) = runtime_store::discord_status_panel_singletons_root() else {
+        return StatusPanelSingletonLoadOutcome::DurabilityFailure(
+            "AgentDesk runtime root unavailable".to_string(),
+        );
+    };
     load_in_root(&root, provider, token_hash, channel_id)
 }
 
@@ -476,7 +616,7 @@ mod tests {
 
         assert_eq!(
             load_in_root(root.path(), &provider, token_hash, channel_id),
-            Some(StatusPanelSingletonBinding {
+            StatusPanelSingletonLoadOutcome::Present(StatusPanelSingletonBinding {
                 panel_message_id: 700,
                 generation: 4,
             }),
@@ -495,7 +635,41 @@ mod tests {
         ));
         assert_eq!(
             load_in_root(root.path(), &provider, token_hash, channel_id),
-            None
+            StatusPanelSingletonLoadOutcome::Missing
         );
+    }
+
+    #[test]
+    fn typed_load_distinguishes_missing_malformed_zero_and_read_failure_4891() {
+        let root = tempfile::tempdir().expect("singleton root");
+        let provider = ProviderKind::Claude;
+        let token_hash = "test-token";
+
+        assert_eq!(
+            load_in_root(root.path(), &provider, token_hash, 48_620),
+            StatusPanelSingletonLoadOutcome::Missing
+        );
+
+        let malformed = channel_file_path_in_root(root.path(), &provider, token_hash, 48_621);
+        fs::create_dir_all(malformed.parent().expect("singleton parent")).expect("create parent");
+        fs::write(&malformed, "{malformed").expect("write malformed singleton");
+        assert!(matches!(
+            load_in_root(root.path(), &provider, token_hash, 48_621),
+            StatusPanelSingletonLoadOutcome::DurabilityFailure(_)
+        ));
+
+        let zero = channel_file_path_in_root(root.path(), &provider, token_hash, 48_622);
+        fs::write(&zero, r#"{"panel_message_id":0,"generation":1}"#).expect("write zero singleton");
+        assert!(matches!(
+            load_in_root(root.path(), &provider, token_hash, 48_622),
+            StatusPanelSingletonLoadOutcome::DurabilityFailure(_)
+        ));
+
+        let unreadable = channel_file_path_in_root(root.path(), &provider, token_hash, 48_623);
+        fs::create_dir_all(&unreadable).expect("create directory at singleton file path");
+        assert!(matches!(
+            load_in_root(root.path(), &provider, token_hash, 48_623),
+            StatusPanelSingletonLoadOutcome::DurabilityFailure(_)
+        ));
     }
 }

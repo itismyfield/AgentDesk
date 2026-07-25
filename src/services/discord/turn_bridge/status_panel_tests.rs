@@ -30,6 +30,7 @@ struct StatusPanelFallbackGateway {
     live_messages: Arc<Mutex<HashMap<MessageId, String>>>,
     deleted_message_ids: Arc<Mutex<Vec<MessageId>>>,
     edit_error: Option<String>,
+    delete_error: Option<String>,
     send_id: MessageId,
     can_chain_locally: bool,
 }
@@ -51,6 +52,7 @@ impl Default for StatusPanelFallbackGateway {
             live_messages: Arc::new(Mutex::new(HashMap::new())),
             deleted_message_ids: Arc::new(Mutex::new(Vec::new())),
             edit_error: None,
+            delete_error: None,
             send_id: MessageId::new(1_500_000_000_000_999),
             can_chain_locally: true,
         }
@@ -113,11 +115,15 @@ impl TurnGateway for StatusPanelFallbackGateway {
     ) -> TestGatewayFuture<'a, Result<(), String>> {
         let deleted_message_ids = self.deleted_message_ids.clone();
         let live_messages = self.live_messages.clone();
+        let delete_error = self.delete_error.clone();
         Box::pin(async move {
             deleted_message_ids
                 .lock()
                 .expect("deleted message ids lock")
                 .push(message_id);
+            if let Some(error) = delete_error {
+                return Err(error);
+            }
             live_messages
                 .lock()
                 .expect("live messages lock")
@@ -1010,16 +1016,43 @@ fn status_panel_wip_completion_uses_preloaded_recovery_snapshot_after_cleanup() 
 }
 
 #[tokio::test]
-async fn status_panel_completion_fallback_posts_after_unknown_message_edit() {
+async fn unknown_message_fallback_atomically_replaces_exact_missing_authority_4891() {
     let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
-    let shared = make_status_panel_v2_shared_for_tests();
-    let gateway = StatusPanelFallbackGateway::with_edit_error("Unknown Message");
+    let shared = make_two_message_status_panel_shared_for_tests();
+    let gateway = StatusPanelFallbackGateway::with_edit_error("Unknown Message 10008");
     let provider = ProviderKind::Claude;
-    let channel_id = ChannelId::new(1509350490461180105);
+    let channel_id = ChannelId::new(1_509_350_490_461_180_105);
+    let user_msg_id = 1_510_319_194_921_504_929;
     let stale_status_msg_id = MessageId::new(1_500_000_000_000_111);
+    let fallback_panel = gateway.send_id;
+    let mut owner = InflightTurnState::new(
+        provider.clone(),
+        channel_id.get(),
+        None,
+        42,
+        user_msg_id,
+        user_msg_id + 1,
+        "unknown-message fallback".to_string(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    owner.status_message_id = Some(stale_status_msg_id.get());
+    owner.status_panel_generation = 7;
+    save_inflight_state(&owner).expect("persist missing-panel owner");
+    crate::services::discord::status_panel_singleton_store::bind_if_owned(
+        &provider,
+        &shared.token_hash,
+        channel_id.get(),
+        stale_status_msg_id.get(),
+        None,
+    )
+    .expect("bind missing prior singleton");
     let mut last_status_panel_text = String::new();
 
-    let committed = complete_status_panel_v2(
+    let completion = complete_status_panel_v2(
         shared.as_ref(),
         &gateway,
         channel_id,
@@ -1030,27 +1063,105 @@ async fn status_panel_completion_fallback_posts_after_unknown_message_edit() {
         false,
         false,
         "test_unknown_status_panel_id",
-        1510319194921504929,
+        user_msg_id,
     )
     .await;
 
-    assert!(committed.committed);
+    assert!(completion.committed);
     assert_eq!(
-        gateway
-            .edited_message_ids
-            .lock()
-            .expect("edited ids lock")
-            .as_slice(),
-        &[stale_status_msg_id]
+        completion.binding_disposition,
+        super::singleton::CompletedBindingDisposition::CommittedCurrent
     );
-    let sent_messages = gateway
-        .sent_messages
-        .lock()
-        .expect("sent messages lock")
-        .clone();
-    assert_eq!(sent_messages.len(), 1);
-    assert!(sent_messages[0].contains("완료"));
-    assert_eq!(last_status_panel_text, sent_messages[0]);
+    assert_eq!(
+        load_inflight_state(&provider, channel_id.get()).and_then(|state| state.status_message_id),
+        Some(fallback_panel.get()),
+        "confirmed 10008 must replace only the exact missing inflight panel"
+    );
+    assert_eq!(
+        crate::services::discord::status_panel_singleton_store::load(
+            &provider,
+            &shared.token_hash,
+            channel_id.get(),
+        )
+        .map(|binding| binding.panel_message_id),
+        Some(fallback_panel.get()),
+        "confirmed 10008 must move singleton authority to the fallback"
+    );
+    assert!(
+        !crate::services::discord::status_panel_orphan_store::is_queued(
+            &provider,
+            &shared.token_hash,
+            channel_id.get(),
+            fallback_panel.get(),
+        ),
+        "adopted Unknown Message fallback must not be retired"
+    );
+}
+
+#[tokio::test]
+async fn transient_edit_error_does_not_replace_live_same_turn_panel_4891() {
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+    let shared = make_two_message_status_panel_shared_for_tests();
+    let gateway = StatusPanelFallbackGateway::with_edit_error("Discord 503 transient");
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_891_341);
+    let user_msg_id = 4_891_342;
+    let live_panel = MessageId::new(1_500_000_000_489_341);
+    let mut owner = InflightTurnState::new(
+        provider.clone(),
+        channel_id.get(),
+        None,
+        42,
+        user_msg_id,
+        user_msg_id + 1,
+        "transient edit".to_string(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    owner.status_message_id = Some(live_panel.get());
+    owner.status_panel_generation = 8;
+    save_inflight_state(&owner).expect("persist live panel owner");
+    crate::services::discord::status_panel_singleton_store::bind_if_owned(
+        &provider,
+        &shared.token_hash,
+        channel_id.get(),
+        live_panel.get(),
+        None,
+    )
+    .expect("bind live singleton");
+    let mut last_status_panel_text = String::new();
+
+    let completion = complete_status_panel_v2(
+        shared.as_ref(),
+        &gateway,
+        channel_id,
+        Some(live_panel),
+        &provider,
+        1_700_000_000,
+        &mut last_status_panel_text,
+        false,
+        false,
+        "test_transient_status_panel_edit",
+        user_msg_id,
+    )
+    .await;
+
+    assert!(!completion.committed);
+    assert!(
+        gateway
+            .sent_messages
+            .lock()
+            .expect("sent messages lock")
+            .is_empty()
+    );
+    assert_eq!(
+        load_inflight_state(&provider, channel_id.get()).and_then(|state| state.status_message_id),
+        Some(live_panel.get()),
+        "transient edit errors must not authorize fallback replacement"
+    );
 }
 
 #[tokio::test]
@@ -1211,6 +1322,74 @@ async fn status_panel_direct_fallback_preserves_existing_same_turn_panel_4891() 
             fallback_panel.get(),
         ),
         "the redundant fallback must remain reclaimable instead of displacing the valid panel"
+    );
+}
+
+#[tokio::test]
+async fn pending_bind_write_and_delete_dual_failure_is_typed_unreconciled_4891() {
+    let (_env_lock, runtime_root) = isolate_agentdesk_runtime_root();
+    let shared = make_two_message_status_panel_shared_for_tests();
+    let gateway = StatusPanelFallbackGateway {
+        delete_error: Some("delete failed".to_string()),
+        ..StatusPanelFallbackGateway::default()
+    };
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_891_351);
+    let fallback_panel = gateway.send_id;
+    let runtime_dir = runtime_root._root.path().join("runtime");
+    fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+    let orphan_root = runtime_dir.join("discord_status_panel_orphans");
+    fs::write(&orphan_root, "block orphan directory").expect("block orphan writes");
+    let mut last_status_panel_text = String::new();
+
+    let completion = complete_status_panel_v2(
+        shared.as_ref(),
+        &gateway,
+        channel_id,
+        None,
+        &provider,
+        1_700_000_000,
+        &mut last_status_panel_text,
+        false,
+        false,
+        "test_dual_failure",
+        4_891_352,
+    )
+    .await;
+
+    assert!(!completion.committed);
+    assert_eq!(completion.completed_panel_message_id, None);
+    assert_eq!(
+        completion.unreconciled_panel_message_id,
+        Some(fallback_panel)
+    );
+    assert_eq!(
+        completion.binding_disposition,
+        super::singleton::CompletedBindingDisposition::DurabilityFailure
+    );
+    assert_eq!(
+        gateway
+            .deleted_message_ids
+            .lock()
+            .expect("deleted message ids lock")
+            .as_slice(),
+        &[fallback_panel],
+        "the write failure must attempt immediate rollback"
+    );
+    let probe_request = super::fallback::CompletionFallbackRequest {
+        shared: shared.as_ref(),
+        channel_id,
+        provider: &provider,
+        expected_user_msg_id: Some(4_891_352),
+        confirmed_missing_prior_panel: None,
+        last_status_panel_text: &mut last_status_panel_text,
+        panel_text: String::new(),
+        wip_warning: None,
+        source: "test_dual_failure_probe",
+    };
+    assert!(
+        super::fallback::unreconciled_fallback_is_retained(&probe_request, fallback_panel),
+        "dual failure must retain process-local recovery authority instead of reporting success"
     );
 }
 

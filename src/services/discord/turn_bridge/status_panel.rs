@@ -76,6 +76,7 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
                 committed: true,
                 binding_disposition,
                 completed_panel_message_id: normalize_status_panel_message_id(status_panel_msg_id),
+                unreconciled_panel_message_id: None,
             }
         }
         StatusPanelCompletionAction::SendFallback => {
@@ -86,6 +87,7 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
                     channel_id,
                     provider,
                     expected_user_msg_id: Some(expected_user_msg_id),
+                    confirmed_missing_prior_panel: None,
                     last_status_panel_text,
                     panel_text,
                     wip_warning,
@@ -137,10 +139,24 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
                         completed_panel_message_id: normalize_status_panel_message_id(
                             status_panel_msg_id,
                         ),
+                        unreconciled_panel_message_id: None,
                     }
                 }
                 Err(error) => {
                     if status_panel_message_missing_error(&error) {
+                        let confirmed_missing_prior_panel =
+                            crate::services::discord::inflight::load_inflight_state(
+                                provider,
+                                channel_id.get(),
+                            )
+                            .filter(|state| {
+                                state.user_msg_id == expected_user_msg_id
+                                    && state.status_message_id == Some(status_msg_id.get())
+                            })
+                            .map(|state| ConfirmedMissingPriorPanel {
+                                message_id: status_msg_id,
+                                generation: state.status_panel_generation,
+                            });
                         return complete_status_panel_v2_fallback_with_gateway(
                             gateway,
                             CompletionFallbackRequest {
@@ -148,6 +164,7 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
                                 channel_id,
                                 provider,
                                 expected_user_msg_id: Some(expected_user_msg_id),
+                                confirmed_missing_prior_panel,
                                 last_status_panel_text,
                                 panel_text,
                                 wip_warning,
@@ -284,6 +301,7 @@ pub(in crate::services::discord) struct StatusPanelCompletionResult {
     pub committed: bool,
     pub binding_disposition: singleton::CompletedBindingDisposition,
     pub completed_panel_message_id: Option<MessageId>,
+    pub unreconciled_panel_message_id: Option<MessageId>,
 }
 
 impl StatusPanelCompletionResult {
@@ -292,6 +310,16 @@ impl StatusPanelCompletionResult {
             committed,
             binding_disposition: singleton::CompletedBindingDisposition::NotApplicable,
             completed_panel_message_id: None,
+            unreconciled_panel_message_id: None,
+        }
+    }
+
+    fn unreconciled(message_id: MessageId) -> Self {
+        Self {
+            committed: false,
+            binding_disposition: singleton::CompletedBindingDisposition::DurabilityFailure,
+            completed_panel_message_id: None,
+            unreconciled_panel_message_id: Some(message_id),
         }
     }
 }
@@ -367,6 +395,7 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http_and
                 committed: true,
                 binding_disposition,
                 completed_panel_message_id: normalize_status_panel_message_id(status_panel_msg_id),
+                unreconciled_panel_message_id: None,
             }
         }
         StatusPanelCompletionAction::SendFallback => {
@@ -378,6 +407,7 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http_and
                     channel_id,
                     provider,
                     expected_user_msg_id,
+                    confirmed_missing_prior_panel: None,
                     last_status_panel_text,
                     panel_text,
                     wip_warning,
@@ -422,11 +452,21 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http_and
                         completed_panel_message_id: normalize_status_panel_message_id(
                             status_panel_msg_id,
                         ),
+                        unreconciled_panel_message_id: None,
                     }
                 }
                 Err(error) => {
                     let error = error.to_string();
                     if status_panel_message_missing_error(&error) {
+                        let confirmed_missing_prior_panel = inflight_snapshot
+                            .filter(|state| {
+                                expected_user_msg_id == Some(state.user_msg_id)
+                                    && state.status_message_id == Some(status_msg_id.get())
+                            })
+                            .map(|state| ConfirmedMissingPriorPanel {
+                                message_id: status_msg_id,
+                                generation: state.status_panel_generation,
+                            });
                         return complete_status_panel_v2_fallback_with_http(
                             http,
                             CompletionFallbackRequest {
@@ -434,6 +474,7 @@ pub(in crate::services::discord) async fn complete_status_panel_v2_with_http_and
                                 channel_id,
                                 provider,
                                 expected_user_msg_id,
+                                confirmed_missing_prior_panel,
                                 last_status_panel_text,
                                 panel_text,
                                 wip_warning,
@@ -460,8 +501,8 @@ mod fallback;
 mod purge;
 pub(in crate::services::discord) mod singleton;
 use fallback::{
-    CompletionFallbackRequest, complete_status_panel_v2_fallback_with_gateway,
-    complete_status_panel_v2_fallback_with_http,
+    CompletionFallbackRequest, ConfirmedMissingPriorPanel,
+    complete_status_panel_v2_fallback_with_gateway, complete_status_panel_v2_fallback_with_http,
 };
 use purge::{
     purge_pending_bind_for_completed_status_panel,
