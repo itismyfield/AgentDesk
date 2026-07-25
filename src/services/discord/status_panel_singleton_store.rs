@@ -101,7 +101,7 @@ pub(in crate::services::discord) fn bind_if_owned(
     panel_message_id: u64,
     generation: Option<u64>,
 ) -> Result<StatusPanelSingletonBinding, String> {
-    bind_if_owned_guarded(
+    match bind_if_owned_guarded(
         provider,
         token_hash,
         channel_id,
@@ -109,7 +109,20 @@ pub(in crate::services::discord) fn bind_if_owned(
         generation,
         None,
         None,
-    )
+    ) {
+        GuardedSingletonBindOutcome::Committed(binding) => Ok(binding),
+        GuardedSingletonBindOutcome::NotOwned => {
+            Err("status panel singleton ownership changed".to_string())
+        }
+        GuardedSingletonBindOutcome::DurabilityFailure(error) => Err(error),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::services::discord) enum GuardedSingletonBindOutcome {
+    Committed(StatusPanelSingletonBinding),
+    NotOwned,
+    DurabilityFailure(String),
 }
 
 pub(in crate::services::discord) fn bind_if_owned_guarded(
@@ -120,35 +133,65 @@ pub(in crate::services::discord) fn bind_if_owned_guarded(
     generation: Option<u64>,
     identity: Option<&inflight::InflightTurnIdentity>,
     expected_generation: Option<u64>,
-) -> Result<StatusPanelSingletonBinding, String> {
-    let inflight_root = runtime_store::discord_inflight_root()
-        .ok_or_else(|| "AgentDesk inflight runtime root unavailable".to_string())?;
+) -> GuardedSingletonBindOutcome {
+    let Some(inflight_root) = runtime_store::discord_inflight_root() else {
+        return GuardedSingletonBindOutcome::DurabilityFailure(
+            "AgentDesk inflight runtime root unavailable".to_string(),
+        );
+    };
     let path = inflight::inflight_state_path(&inflight_root, provider, channel_id);
-    let _guard = inflight::lock_inflight_state_path(&path)?;
-    let raw = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-    let mut state = serde_json::from_str::<inflight::InflightTurnState>(&raw)
-        .map_err(|error| error.to_string())?;
+    let _guard = match inflight::lock_inflight_state_path(&path) {
+        Ok(guard) => guard,
+        Err(error) => return GuardedSingletonBindOutcome::DurabilityFailure(error),
+    };
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return GuardedSingletonBindOutcome::NotOwned;
+        }
+        Err(error) => {
+            return GuardedSingletonBindOutcome::DurabilityFailure(error.to_string());
+        }
+    };
+    let mut state = match serde_json::from_str::<inflight::InflightTurnState>(&raw) {
+        Ok(state) => state,
+        Err(error) => {
+            return GuardedSingletonBindOutcome::DurabilityFailure(error.to_string());
+        }
+    };
     if state.status_message_id != Some(panel_message_id)
         || identity.is_some_and(|identity| !identity.matches_state(&state))
         || expected_generation.is_some_and(|generation| generation != state.status_panel_generation)
     {
-        return Err("status panel singleton ownership changed".to_string());
+        return GuardedSingletonBindOutcome::NotOwned;
     }
     if let Some(generation) = generation
         && generation > state.status_panel_generation
     {
         state.status_panel_generation = generation;
-        let json = serde_json::to_string_pretty(&state).map_err(|error| error.to_string())?;
-        runtime_store::atomic_write(&path, &json)?;
+        let json = match serde_json::to_string_pretty(&state) {
+            Ok(json) => json,
+            Err(error) => {
+                return GuardedSingletonBindOutcome::DurabilityFailure(error.to_string());
+            }
+        };
+        if let Err(error) = runtime_store::atomic_write(&path, &json) {
+            return GuardedSingletonBindOutcome::DurabilityFailure(error);
+        }
     }
     let binding = StatusPanelSingletonBinding {
         panel_message_id,
         generation: state.status_panel_generation,
     };
-    let root = runtime_store::discord_status_panel_singletons_root()
-        .ok_or_else(|| "AgentDesk runtime root unavailable".to_string())?;
-    bind_in_root(&root, provider, token_hash, channel_id, binding)?;
-    Ok(binding)
+    let Some(root) = runtime_store::discord_status_panel_singletons_root() else {
+        return GuardedSingletonBindOutcome::DurabilityFailure(
+            "AgentDesk runtime root unavailable".to_string(),
+        );
+    };
+    match bind_in_root(&root, provider, token_hash, channel_id, binding) {
+        Ok(()) => GuardedSingletonBindOutcome::Committed(binding),
+        Err(error) => GuardedSingletonBindOutcome::DurabilityFailure(error),
+    }
 }
 
 pub(in crate::services::discord) fn commit_confirmed_missing_replacement(

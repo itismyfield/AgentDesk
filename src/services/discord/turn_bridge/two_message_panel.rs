@@ -176,6 +176,7 @@ pub(super) async fn create_bridge_two_message_status_panel_below_answer<G: TurnG
                 channel_id.get(),
                 panel_msg_id.get(),
                 &identity,
+                bound_generation,
                 Some(next_generation),
             ) {
                 crate::services::discord::status_panel_transition::StatusPanelTransitionAction::KeepCurrent {
@@ -373,6 +374,7 @@ pub(super) async fn reanchor_bridge_two_message_status_panel_below_answer<
                 channel_id.get(),
                 new_panel_id.get(),
                 &identity,
+                next_generation,
                 Some(next_generation),
             ) {
                 crate::services::discord::status_panel_transition::StatusPanelTransitionAction::KeepCurrent {

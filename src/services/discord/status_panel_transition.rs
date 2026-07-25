@@ -82,10 +82,12 @@ fn path_in_root(
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: u64,
+    candidate_panel_id: u64,
 ) -> PathBuf {
     root.join(provider.as_str())
         .join(token_hash)
-        .join(format!("{channel_id}.json"))
+        .join(channel_id.to_string())
+        .join(format!("{candidate_panel_id}.json"))
 }
 
 fn load_in_root(path: &Path) -> Result<Option<StatusPanelTransitionIntent>, String> {
@@ -124,7 +126,7 @@ pub(in crate::services::discord) fn record_candidate_intent(
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let root = root()?;
-    let path = path_in_root(&root, provider, token_hash, channel_id);
+    let path = path_in_root(&root, provider, token_hash, channel_id, candidate_panel_id);
     let intent = StatusPanelTransitionIntent {
         provider: provider.as_str().to_string(),
         token_hash: token_hash.to_string(),
@@ -205,19 +207,25 @@ pub(in crate::services::discord) fn commit_bound_candidate(
     channel_id: u64,
     candidate_panel_id: u64,
     identity: &InflightTurnIdentity,
-    generation: Option<u64>,
+    expected_generation: u64,
+    desired_generation: Option<u64>,
 ) -> StatusPanelTransitionAction {
     let binding = match status_panel_singleton_store::bind_if_owned_guarded(
         provider,
         token_hash,
         channel_id,
         candidate_panel_id,
-        generation,
+        desired_generation,
         Some(identity),
-        generation,
+        Some(expected_generation),
     ) {
-        Ok(binding) => binding,
-        Err(error) => return StatusPanelTransitionAction::DeferDurability { error },
+        status_panel_singleton_store::GuardedSingletonBindOutcome::Committed(binding) => binding,
+        status_panel_singleton_store::GuardedSingletonBindOutcome::NotOwned => {
+            return StatusPanelTransitionAction::RetireCandidate;
+        }
+        status_panel_singleton_store::GuardedSingletonBindOutcome::DurabilityFailure(error) => {
+            return StatusPanelTransitionAction::DeferDurability { error };
+        }
     };
     resolve_after_singleton_commit(
         provider,
@@ -244,7 +252,7 @@ pub(in crate::services::discord) fn resolve_after_singleton_commit(
         Ok(root) => root,
         Err(error) => return StatusPanelTransitionAction::DeferDurability { error },
     };
-    let path = path_in_root(&root, provider, token_hash, channel_id);
+    let path = path_in_root(&root, provider, token_hash, channel_id, candidate_panel_id);
     let mut intent = match load_in_root(&path) {
         Ok(Some(intent)) if intent.candidate_panel_id == candidate_panel_id => intent,
         Ok(_) => {
@@ -310,7 +318,7 @@ fn update_state(
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let root = root()?;
-    let path = path_in_root(&root, provider, token_hash, channel_id);
+    let path = path_in_root(&root, provider, token_hash, channel_id, candidate_panel_id);
     let mut intent =
         load_in_root(&path)?.ok_or_else(|| "status panel transition intent missing".to_string())?;
     if intent.candidate_panel_id != candidate_panel_id {
@@ -365,7 +373,13 @@ where
             | StatusPanelTransitionAction::RecoverUnreconciled => {
                 if delete_candidate(intent.channel_id, intent.candidate_panel_id).await {
                     if let Ok(root) = root() {
-                        let path = path_in_root(&root, provider, token_hash, intent.channel_id);
+                        let path = path_in_root(
+                            &root,
+                            provider,
+                            token_hash,
+                            intent.channel_id,
+                            intent.candidate_panel_id,
+                        );
                         if remove_in_root(&path).is_ok() {
                             resolved += 1;
                         }
@@ -384,15 +398,22 @@ pub(in crate::services::discord) fn load_unreconciled(
     token_hash: &str,
 ) -> Result<Vec<StatusPanelTransitionIntent>, String> {
     let root = root()?.join(provider.as_str()).join(token_hash);
-    let entries = match fs::read_dir(root) {
+    let channels = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error.to_string()),
     };
     let mut intents = HashMap::new();
-    for entry in entries.flatten() {
-        if let Some(intent) = load_in_root(&entry.path())? {
-            intents.insert(intent.channel_id, intent);
+    for channel in channels.flatten() {
+        let candidates = match fs::read_dir(channel.path()) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        for candidate in candidates.flatten() {
+            if let Some(intent) = load_in_root(&candidate.path())? {
+                intents.insert((intent.channel_id, intent.candidate_panel_id), intent);
+            }
         }
     }
     Ok(intents.into_values().collect())
@@ -455,7 +476,7 @@ mod tests {
     fn intent_replay_survives_every_write_boundary_4891() {
         let root = tempfile::tempdir().expect("transition root");
         let provider = ProviderKind::Claude;
-        let path = path_in_root(root.path(), &provider, "tok", 42);
+        let path = path_in_root(root.path(), &provider, "tok", 42, 99);
         let intent = StatusPanelTransitionIntent {
             provider: provider.as_str().to_string(),
             token_hash: "tok".to_string(),

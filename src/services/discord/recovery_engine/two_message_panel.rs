@@ -278,6 +278,7 @@ async fn recover_two_message_panel_with_gateway<G: RecoveryPanelGateway + ?Sized
         channel_id.get(),
         new_panel_id.get(),
         &identity,
+        reloaded.status_panel_generation,
         None,
     ) {
         crate::services::discord::status_panel_transition::StatusPanelTransitionAction::KeepCurrent {

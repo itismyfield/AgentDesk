@@ -353,18 +353,17 @@ pub(in crate::services::discord) async fn adopt_watcher_singleton_panel_after_fr
         &shared.token_hash,
         channel_id.get(),
     );
-    let identity =
-        crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
-            .filter(|state| state.status_message_id == Some(panel_msg_id.get()))
-            .map(|state| {
-                crate::services::discord::inflight::InflightTurnIdentity::from_state(&state)
-            })?;
+    let owned = crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
+        .filter(|state| state.status_message_id == Some(panel_msg_id.get()))?;
+    let expected_generation = owned.status_panel_generation;
+    let identity = crate::services::discord::inflight::InflightTurnIdentity::from_state(&owned);
     let generation = match crate::services::discord::status_panel_transition::commit_bound_candidate(
         provider,
         &shared.token_hash,
         channel_id.get(),
         panel_msg_id.get(),
         &identity,
+        expected_generation,
         None,
     ) {
         crate::services::discord::status_panel_transition::StatusPanelTransitionAction::KeepCurrent {
@@ -526,21 +525,22 @@ pub(in crate::services::discord) async fn reanchor_watcher_two_message_status_pa
         return false;
     }
 
-    let identity =
+    let owned =
         match crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
             .filter(|state| state.status_message_id == Some(new_panel.id.get()))
-            .map(|state| {
-                crate::services::discord::inflight::InflightTurnIdentity::from_state(&state)
-            }) {
-            Some(identity) => identity,
+        {
+            Some(state) => state,
             None => return false,
         };
+    let expected_generation = owned.status_panel_generation;
+    let identity = crate::services::discord::inflight::InflightTurnIdentity::from_state(&owned);
     let generation = match crate::services::discord::status_panel_transition::commit_bound_candidate(
         provider,
         &shared.token_hash,
         channel_id.get(),
         new_panel.id.get(),
         &identity,
+        expected_generation,
         None,
     ) {
         crate::services::discord::status_panel_transition::StatusPanelTransitionAction::KeepCurrent {
