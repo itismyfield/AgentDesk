@@ -66,6 +66,9 @@ test-non-pg:
     # Run health first so a fail-fast relay_recovery failure cannot hide it.
     python3 scripts/ci-timeout.py 900 env -u AGENTDESK_ROOT_DIR cargo test --lib health -- --skip _pg --skip pg_ --skip postgres
     env -u AGENTDESK_ROOT_DIR cargo test --lib relay_recovery -- --skip _pg --skip pg_ --skip postgres
+    # #4875: keep the Claude catalog and picker test modules fully selected.
+    cargo test --lib services::discord::model_catalog -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib services::discord::commands::model_ui::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
     # `ClaudeBinary` capability invariants are compile-fail doctests in src/lib.rs.
     # Filter the real rustdoc harness to this public capability contract.
