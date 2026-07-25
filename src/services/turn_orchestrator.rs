@@ -16,6 +16,7 @@ mod dispatch_cleanup;
 mod dispatch_reservation;
 mod episode_identity;
 mod front_requeue;
+mod intervention_merge;
 mod overflow;
 mod pending_queue_persistence;
 mod queue_cancellation;
@@ -40,6 +41,10 @@ use dispatch_reservation::{
 };
 use episode_identity::{TurnNonceGuard, turn_nonce_guard_matches};
 use front_requeue::requeue_intervention_front;
+use intervention_merge::{
+    push_unique_message_ids, push_unique_source_message_queued_generations,
+    push_unique_source_text_segments,
+};
 pub(crate) use overflow::SoftInterventionProbe;
 use overflow::drain_head_overflow;
 #[cfg(test)]
@@ -74,6 +79,8 @@ pub(crate) const INTERVENTION_DEDUP_WINDOW: Duration = Duration::from_secs(10);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InterventionMode {
     Soft,
+    #[cfg(test)]
+    TestNonSoft,
 }
 
 #[derive(Clone, Debug)]
@@ -306,45 +313,6 @@ fn ensure_source_message_ids(intervention: &mut Intervention) {
         }
     }
     ensure_source_text_segments(intervention);
-}
-
-fn push_unique_message_ids(
-    existing: &mut Vec<MessageId>,
-    incoming: impl IntoIterator<Item = MessageId>,
-) {
-    for message_id in incoming {
-        if !existing.contains(&message_id) {
-            existing.push(message_id);
-        }
-    }
-}
-
-fn push_unique_source_message_queued_generations(
-    existing: &mut Vec<SourceMessageQueuedGeneration>,
-    incoming: impl IntoIterator<Item = SourceMessageQueuedGeneration>,
-) {
-    for incoming in incoming {
-        if !existing
-            .iter()
-            .any(|owner| owner.message_id == incoming.message_id)
-        {
-            existing.push(incoming);
-        }
-    }
-}
-
-fn push_unique_source_text_segments(
-    existing: &mut Vec<SourceMessageTextSegment>,
-    incoming: impl IntoIterator<Item = SourceMessageTextSegment>,
-) {
-    for incoming in incoming {
-        if !existing
-            .iter()
-            .any(|segment| segment.message_id == incoming.message_id)
-        {
-            existing.push(incoming);
-        }
-    }
 }
 
 fn should_merge_intervention(last: &Intervention, incoming: &Intervention) -> bool {
@@ -1734,6 +1702,10 @@ enum ChannelMailboxMsg {
         key: ResumeTransitionKey,
         reply: oneshot::Sender<AdvanceResumeTransitionResult>,
     },
+    RenewResumeTransition {
+        key: ResumeTransitionKey,
+        reply: oneshot::Sender<ResumeTransitionLeaseResult>,
+    },
     CompleteResumeTransition {
         key: ResumeTransitionKey,
         reply: oneshot::Sender<EndResumeTransitionResult>,
@@ -2227,7 +2199,8 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
             let Some(msg) = registry_purge::gate_closed_arm(&state, msg) else {
                 continue;
             };
-            let Some(msg) = resume_transition::gate_reserved_arm(&state, msg) else {
+            let Some(msg) = resume_transition::gate_reserved_arm(&mut state, msg, Instant::now())
+            else {
                 continue;
             };
             match msg {
@@ -2563,20 +2536,20 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     transition_id,
                     reply,
                 } => {
-                    let result = state.resume_transition.begin(transition_id);
-                    let _ = reply.send(result);
+                    let _ =
+                        reply.send(state.resume_transition.begin(transition_id, Instant::now()));
                 }
                 ChannelMailboxMsg::AdvanceResumeTransition { key, reply } => {
-                    let result = state.resume_transition.advance(key);
-                    let _ = reply.send(result);
+                    let _ = reply.send(state.resume_transition.advance(key, Instant::now()));
+                }
+                ChannelMailboxMsg::RenewResumeTransition { key, reply } => {
+                    let _ = reply.send(state.resume_transition.renew(key, Instant::now()));
                 }
                 ChannelMailboxMsg::CompleteResumeTransition { key, reply } => {
-                    let result = state.resume_transition.complete(key);
-                    let _ = reply.send(result);
+                    let _ = reply.send(state.resume_transition.complete(key, Instant::now()));
                 }
                 ChannelMailboxMsg::AbortResumeTransition { key, reply } => {
-                    let result = state.resume_transition.abort(key);
-                    let _ = reply.send(result);
+                    let _ = reply.send(state.resume_transition.abort(key, Instant::now()));
                 }
                 ChannelMailboxMsg::Enqueue {
                     mut intervention,

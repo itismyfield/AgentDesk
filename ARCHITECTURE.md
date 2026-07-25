@@ -1269,10 +1269,12 @@ src/
 │   │   ├── dispatch_reservation.rs
 │   │   ├── episode_identity.rs
 │   │   ├── front_requeue.rs
+│   │   ├── intervention_merge.rs
 │   │   ├── overflow.rs
 │   │   ├── pending_queue_persistence.rs
 │   │   ├── queue_cancellation.rs
 │   │   ├── registry_purge.rs
+│   │   ├── resume_transition.rs
 │   │   ├── source_generation.rs
 │   │   └── turn_finished_signal.rs
 │   ├── agent_protocol.rs

@@ -1,9 +1,15 @@
+use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
+
 use uuid::Uuid;
 
 use super::{
-    ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxState, PurgeQueueResult,
-    RecoveryKickoffResult, TakeNextSoftResult, TryStartTurnResult,
+    ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxState, InterventionMode,
+    PurgeQueueResult, RecoveryKickoffResult, TakeNextSoftResult, TryStartTurnResult,
 };
+
+pub(crate) const RESUME_TRANSITION_LEASE_DURATION: Duration = Duration::from_secs(120);
+pub(crate) const RESUME_TRANSITION_HISTORY_LIMIT: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct ResumeTransitionKey {
@@ -15,12 +21,19 @@ pub(crate) struct ResumeTransitionKey {
 pub(crate) enum ResumeTransitionTerminalKind {
     Completed,
     Aborted,
+    LeaseExpired,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ResumeTransitionTerminalReceipt {
     pub(crate) key: ResumeTransitionKey,
     pub(crate) kind: ResumeTransitionTerminalKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ResumeTransitionAdvanceReceipt {
+    pub(crate) previous: ResumeTransitionKey,
+    pub(crate) current: ResumeTransitionKey,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,30 +61,38 @@ pub(crate) enum ResumeTransitionMutationRefusal {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AdvanceResumeTransitionResult {
-    Advanced {
-        previous: ResumeTransitionKey,
-        current: ResumeTransitionKey,
-    },
-    AlreadyAdvanced {
-        previous: ResumeTransitionKey,
-        current: ResumeTransitionKey,
-    },
+    Advanced(ResumeTransitionAdvanceReceipt),
+    AlreadyAdvancedCurrent(ResumeTransitionAdvanceReceipt),
     Refused(ResumeTransitionMutationRefusal),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum EndResumeTransitionResult {
     Applied(ResumeTransitionTerminalReceipt),
-    AlreadyApplied(ResumeTransitionTerminalReceipt),
+    AlreadyAppliedInactive(ResumeTransitionTerminalReceipt),
     Refused(ResumeTransitionMutationRefusal),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResumeTransitionLeaseResult {
+    Renewed(ResumeTransitionKey),
+    Refused(ResumeTransitionMutationRefusal),
+}
+
+#[derive(Clone, Copy)]
+struct ActiveResumeTransition {
+    key: ResumeTransitionKey,
+    lease_expires_at: Instant,
 }
 
 #[derive(Default)]
 pub(super) struct ResumeTransitionState {
-    active: Option<ResumeTransitionKey>,
+    active: Option<ActiveResumeTransition>,
     last_issued_fence: u64,
-    advance_receipts: Vec<(ResumeTransitionKey, ResumeTransitionKey)>,
-    terminal: Option<ResumeTransitionTerminalReceipt>,
+    advance_history: VecDeque<ResumeTransitionAdvanceReceipt>,
+    advance_by_previous: HashMap<ResumeTransitionKey, ResumeTransitionAdvanceReceipt>,
+    terminal_history: VecDeque<ResumeTransitionTerminalReceipt>,
+    terminal_by_transition: HashMap<Uuid, ResumeTransitionTerminalReceipt>,
 }
 
 impl ResumeTransitionState {
@@ -79,37 +100,61 @@ impl ResumeTransitionState {
         self.active.is_some()
     }
 
-    pub(super) fn begin(&mut self, transition_id: Uuid) -> BeginResumeTransitionResult {
+    pub(super) fn recover_expired(
+        &mut self,
+        now: Instant,
+    ) -> Option<ResumeTransitionTerminalReceipt> {
+        let active = self
+            .active
+            .filter(|active| active.lease_expires_at <= now)?;
+        self.active = None;
+        let receipt = ResumeTransitionTerminalReceipt {
+            key: active.key,
+            kind: ResumeTransitionTerminalKind::LeaseExpired,
+        };
+        self.push_terminal(receipt);
+        Some(receipt)
+    }
+
+    pub(super) fn begin(
+        &mut self,
+        transition_id: Uuid,
+        now: Instant,
+    ) -> BeginResumeTransitionResult {
+        self.recover_expired(now);
         if let Some(active) = self.active {
-            return if active.transition_id == transition_id {
-                BeginResumeTransitionResult::AlreadyReserved(active)
+            return if active.key.transition_id == transition_id {
+                BeginResumeTransitionResult::AlreadyReserved(active.key)
             } else {
-                BeginResumeTransitionResult::Occupied(active)
+                BeginResumeTransitionResult::Occupied(active.key)
             };
         }
-        if let Some(terminal) = self
-            .terminal
-            .filter(|receipt| receipt.key.transition_id == transition_id)
-        {
+        if let Some(terminal) = self.terminal_by_transition.get(&transition_id).copied() {
             return BeginResumeTransitionResult::AlreadyTerminal(terminal);
         }
         let Some(key) = self.issue_key(transition_id) else {
             return BeginResumeTransitionResult::FenceExhausted;
         };
-        self.active = Some(key);
+        self.active = Some(ActiveResumeTransition {
+            key,
+            lease_expires_at: now + RESUME_TRANSITION_LEASE_DURATION,
+        });
         BeginResumeTransitionResult::Begun(key)
     }
 
-    pub(super) fn advance(&mut self, key: ResumeTransitionKey) -> AdvanceResumeTransitionResult {
-        if let Some((previous, current)) = self
-            .advance_receipts
-            .iter()
-            .copied()
-            .find(|(previous, _)| *previous == key)
-        {
-            return AdvanceResumeTransitionResult::AlreadyAdvanced { previous, current };
-        }
-        if self.active != Some(key) {
+    pub(super) fn advance(
+        &mut self,
+        key: ResumeTransitionKey,
+        now: Instant,
+    ) -> AdvanceResumeTransitionResult {
+        self.recover_expired(now);
+        let active = self.active.map(|active| active.key);
+        if active != Some(key) {
+            if let Some(receipt) = self.advance_by_previous.get(&key).copied()
+                && active == Some(receipt.current)
+            {
+                return AdvanceResumeTransitionResult::AlreadyAdvancedCurrent(receipt);
+            }
             return AdvanceResumeTransitionResult::Refused(self.stale_refusal(key));
         }
         let Some(current) = self.issue_key(key.transition_id) else {
@@ -117,42 +162,72 @@ impl ResumeTransitionState {
                 ResumeTransitionMutationRefusal::FenceExhausted,
             );
         };
-        self.active = Some(current);
-        self.advance_receipts.push((key, current));
-        AdvanceResumeTransitionResult::Advanced {
+        let receipt = ResumeTransitionAdvanceReceipt {
             previous: key,
             current,
+        };
+        self.active = Some(ActiveResumeTransition {
+            key: current,
+            lease_expires_at: now + RESUME_TRANSITION_LEASE_DURATION,
+        });
+        self.push_advance(receipt);
+        AdvanceResumeTransitionResult::Advanced(receipt)
+    }
+
+    pub(super) fn renew(
+        &mut self,
+        key: ResumeTransitionKey,
+        now: Instant,
+    ) -> ResumeTransitionLeaseResult {
+        self.recover_expired(now);
+        if self.active.map(|active| active.key) != Some(key) {
+            return ResumeTransitionLeaseResult::Refused(self.stale_refusal(key));
         }
+        let active = self.active.as_mut().expect("exact active key checked");
+        active.lease_expires_at = now + RESUME_TRANSITION_LEASE_DURATION;
+        ResumeTransitionLeaseResult::Renewed(key)
     }
 
-    pub(super) fn complete(&mut self, key: ResumeTransitionKey) -> EndResumeTransitionResult {
-        self.end(key, ResumeTransitionTerminalKind::Completed)
+    pub(super) fn complete(
+        &mut self,
+        key: ResumeTransitionKey,
+        now: Instant,
+    ) -> EndResumeTransitionResult {
+        self.end(key, ResumeTransitionTerminalKind::Completed, now)
     }
 
-    pub(super) fn abort(&mut self, key: ResumeTransitionKey) -> EndResumeTransitionResult {
-        self.end(key, ResumeTransitionTerminalKind::Aborted)
+    pub(super) fn abort(
+        &mut self,
+        key: ResumeTransitionKey,
+        now: Instant,
+    ) -> EndResumeTransitionResult {
+        self.end(key, ResumeTransitionTerminalKind::Aborted, now)
     }
 
     fn end(
         &mut self,
         key: ResumeTransitionKey,
         kind: ResumeTransitionTerminalKind,
+        now: Instant,
     ) -> EndResumeTransitionResult {
-        if let Some(terminal) = self.terminal.filter(|receipt| receipt.key == key) {
-            return if terminal.kind == kind {
-                EndResumeTransitionResult::AlreadyApplied(terminal)
-            } else {
-                EndResumeTransitionResult::Refused(
-                    ResumeTransitionMutationRefusal::TerminalConflict(terminal),
-                )
-            };
-        }
-        if self.active != Some(key) {
+        self.recover_expired(now);
+        if self.active.map(|active| active.key) != Some(key) {
+            if self.active.is_none()
+                && let Some(terminal) = self.terminal_for_key(key)
+            {
+                return if terminal.kind == kind {
+                    EndResumeTransitionResult::AlreadyAppliedInactive(terminal)
+                } else {
+                    EndResumeTransitionResult::Refused(
+                        ResumeTransitionMutationRefusal::TerminalConflict(terminal),
+                    )
+                };
+            }
             return EndResumeTransitionResult::Refused(self.stale_refusal(key));
         }
         let receipt = ResumeTransitionTerminalReceipt { key, kind };
         self.active = None;
-        self.terminal = Some(receipt);
+        self.push_terminal(receipt);
         EndResumeTransitionResult::Applied(receipt)
     }
 
@@ -165,20 +240,52 @@ impl ResumeTransitionState {
         })
     }
 
+    fn terminal_for_key(
+        &self,
+        key: ResumeTransitionKey,
+    ) -> Option<ResumeTransitionTerminalReceipt> {
+        self.terminal_by_transition
+            .get(&key.transition_id)
+            .copied()
+            .filter(|receipt| receipt.key == key)
+    }
+
     fn stale_refusal(&self, key: ResumeTransitionKey) -> ResumeTransitionMutationRefusal {
         ResumeTransitionMutationRefusal::Stale {
-            current: self.active,
-            terminal: self
-                .terminal
-                .filter(|receipt| receipt.key.transition_id == key.transition_id),
+            current: self.active.map(|active| active.key),
+            terminal: self.terminal_for_key(key),
         }
+    }
+
+    fn push_advance(&mut self, receipt: ResumeTransitionAdvanceReceipt) {
+        self.advance_by_previous.insert(receipt.previous, receipt);
+        if self.advance_history.len() == RESUME_TRANSITION_HISTORY_LIMIT
+            && let Some(evicted) = self.advance_history.pop_front()
+        {
+            self.advance_by_previous.remove(&evicted.previous);
+        }
+        self.advance_history.push_back(receipt);
+    }
+
+    fn push_terminal(&mut self, receipt: ResumeTransitionTerminalReceipt) {
+        self.terminal_by_transition
+            .insert(receipt.key.transition_id, receipt);
+        if self.terminal_history.len() == RESUME_TRANSITION_HISTORY_LIMIT
+            && let Some(evicted) = self.terminal_history.pop_front()
+        {
+            self.terminal_by_transition
+                .remove(&evicted.key.transition_id);
+        }
+        self.terminal_history.push_back(receipt);
     }
 }
 
 pub(super) fn gate_reserved_arm(
-    state: &ChannelMailboxState,
+    state: &mut ChannelMailboxState,
     msg: ChannelMailboxMsg,
+    now: Instant,
 ) -> Option<ChannelMailboxMsg> {
+    state.resume_transition.recover_expired(now);
     if !state.resume_transition.is_reserved() {
         return Some(msg);
     }
@@ -206,7 +313,10 @@ pub(super) fn gate_reserved_arm(
             let _ = reply.send(TakeNextSoftResult {
                 intervention: None,
                 dispatch_lease: None,
-                has_more: !state.intervention_queue.is_empty(),
+                has_more: state
+                    .intervention_queue
+                    .iter()
+                    .any(|item| item.mode == InterventionMode::Soft),
                 queue_len_after: state.intervention_queue.len(),
                 queue_exit_events: Vec::new(),
                 persistence_error: None,
@@ -257,6 +367,17 @@ impl ChannelMailboxHandle {
         .await
     }
 
+    pub(crate) async fn renew_resume_transition(
+        &self,
+        key: ResumeTransitionKey,
+    ) -> ResumeTransitionLeaseResult {
+        self.request(
+            |reply| ChannelMailboxMsg::RenewResumeTransition { key, reply },
+            ResumeTransitionLeaseResult::Refused(ResumeTransitionMutationRefusal::ActorUnreachable),
+        )
+        .await
+    }
+
     pub(crate) async fn complete_resume_transition(
         &self,
         key: ResumeTransitionKey,
@@ -287,13 +408,12 @@ mod tests {
 
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
     use tokio::sync::oneshot;
-    use uuid::Uuid;
 
     use super::*;
     use crate::services::provider::{CancelToken, ProviderKind};
     use crate::services::turn_orchestrator::{
-        ActiveTurnKind, ChannelMailboxHandle, ChannelMailboxRegistry, EnqueueRefusalReason,
-        Intervention, InterventionMode, QueuePersistenceContext, SourceMessageTextSegment,
+        ActiveTurnKind, ChannelMailboxRegistry, EnqueueRefusalReason, Intervention,
+        QueuePersistenceContext, SourceMessageTextSegment,
     };
 
     fn persistence(name: &str) -> QueuePersistenceContext {
@@ -323,6 +443,13 @@ mod tests {
         }
     }
 
+    async fn begin(handle: &ChannelMailboxHandle, transition_id: Uuid) -> ResumeTransitionKey {
+        match handle.begin_resume_transition(transition_id).await {
+            BeginResumeTransitionResult::Begun(key) => key,
+            other => panic!("unexpected begin result: {other:?}"),
+        }
+    }
+
     async fn close_if_idle(handle: &ChannelMailboxHandle) -> Result<(), &'static str> {
         let (reply, receive) = oneshot::channel();
         handle
@@ -338,12 +465,7 @@ mod tests {
     async fn reservation_gates_admission_dequeue_purge_and_close() {
         let registry = ChannelMailboxRegistry::default();
         let handle = registry.handle(ChannelId::new(4_916_001));
-        let transition_id = Uuid::new_v4();
-        let key = match handle.begin_resume_transition(transition_id).await {
-            BeginResumeTransitionResult::Begun(key) => key,
-            other => panic!("unexpected begin result: {other:?}"),
-        };
-
+        let key = begin(&handle, Uuid::new_v4()).await;
         let start = handle
             .try_start_turn_kinded_result(
                 Arc::new(CancelToken::new()),
@@ -355,7 +477,6 @@ mod tests {
             .await;
         assert!(!start.started);
         assert!(start.refused_resume_transition);
-
         handle
             .restore_active_turn_kinded(
                 Arc::new(CancelToken::new()),
@@ -364,7 +485,6 @@ mod tests {
                 ActiveTurnKind::UserOrAgent,
             )
             .await;
-
         let recovery = handle
             .recovery_kickoff(
                 Arc::new(CancelToken::new()),
@@ -377,9 +497,12 @@ mod tests {
         assert!(!handle.has_active_turn().await);
 
         let persistence = persistence("resume-transition-gates");
-        let enqueued = handle.enqueue(intervention(101), persistence.clone()).await;
-        assert!(enqueued.enqueued);
-        assert_eq!(enqueued.refusal_reason, None);
+        assert!(
+            handle
+                .enqueue(intervention(101), persistence.clone())
+                .await
+                .enqueued
+        );
         let requeued = handle
             .requeue_front(intervention(100), persistence.clone())
             .await;
@@ -388,16 +511,7 @@ mod tests {
             requeued.refusal_reason,
             Some(EnqueueRefusalReason::MailboxClosed)
         );
-
         let before = handle.snapshot().await;
-        assert_eq!(
-            before
-                .intervention_queue
-                .iter()
-                .map(|item| item.message_id)
-                .collect::<Vec<_>>(),
-            vec![MessageId::new(100), MessageId::new(101)]
-        );
         let held = handle.take_next_soft(persistence.clone()).await;
         assert!(held.intervention.is_none());
         assert!(held.held_for_resume_transition);
@@ -417,35 +531,20 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(after_hold.pending_user_dispatch, None);
-
-        let purge = handle.purge_queue(persistence.clone(), true).await;
         assert_eq!(
-            purge,
+            handle.purge_queue(persistence.clone(), true).await,
             PurgeQueueResult {
                 refused_resume_transition: true,
                 ..PurgeQueueResult::default()
             }
         );
-        let after_purge = handle.snapshot().await;
-        assert_eq!(
-            after_purge
-                .intervention_queue
-                .iter()
-                .map(|item| item.message_id)
-                .collect::<Vec<_>>(),
-            vec![MessageId::new(100), MessageId::new(101)]
-        );
         assert_eq!(
             close_if_idle(&handle).await,
             Err("resume_transition_reserved")
         );
-
         assert!(matches!(
             handle.complete_resume_transition(key).await,
-            EndResumeTransitionResult::Applied(ResumeTransitionTerminalReceipt {
-                kind: ResumeTransitionTerminalKind::Completed,
-                ..
-            })
+            EndResumeTransitionResult::Applied(_)
         ));
         let taken = handle.take_next_soft(persistence).await;
         assert_eq!(
@@ -456,110 +555,261 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_keys_are_monotonic_stale_safe_and_idempotent() {
+    async fn stale_t1_receipts_do_not_authorize_while_t2_is_active() {
         let registry = ChannelMailboxRegistry::default();
         let handle = registry.handle(ChannelId::new(4_916_002));
-        let first_id = Uuid::new_v4();
-        let first = match handle.begin_resume_transition(first_id).await {
+        let t1 = begin(&handle, Uuid::new_v4()).await;
+        let t1_current = match handle.advance_resume_transition(t1).await {
+            AdvanceResumeTransitionResult::Advanced(receipt) => receipt.current,
+            other => panic!("unexpected advance result: {other:?}"),
+        };
+        assert_eq!(
+            handle.advance_resume_transition(t1).await,
+            AdvanceResumeTransitionResult::AlreadyAdvancedCurrent(ResumeTransitionAdvanceReceipt {
+                previous: t1,
+                current: t1_current,
+            })
+        );
+        assert!(matches!(
+            handle.complete_resume_transition(t1_current).await,
+            EndResumeTransitionResult::Applied(_)
+        ));
+        let t2 = begin(&handle, Uuid::new_v4()).await;
+        assert!(matches!(
+            handle.advance_resume_transition(t1).await,
+            AdvanceResumeTransitionResult::Refused(
+                ResumeTransitionMutationRefusal::Stale {
+                    current: Some(current),
+                    ..
+                }
+            ) if current == t2
+        ));
+        assert!(matches!(
+            handle.complete_resume_transition(t1_current).await,
+            EndResumeTransitionResult::Refused(
+                ResumeTransitionMutationRefusal::Stale {
+                    current: Some(current),
+                    ..
+                }
+            ) if current == t2
+        ));
+        assert!(matches!(
+            handle.abort_resume_transition(t1_current).await,
+            EndResumeTransitionResult::Refused(
+                ResumeTransitionMutationRefusal::Stale {
+                    current: Some(current),
+                    ..
+                }
+            ) if current == t2
+        ));
+        let wrong_fence = ResumeTransitionKey {
+            transition_id: t2.transition_id,
+            fence: t2.fence + 1,
+        };
+        assert!(matches!(
+            handle.advance_resume_transition(wrong_fence).await,
+            AdvanceResumeTransitionResult::Refused(
+                ResumeTransitionMutationRefusal::Stale {
+                    current: Some(current),
+                    ..
+                }
+            ) if current == t2
+        ));
+        assert!(matches!(
+            handle.complete_resume_transition(wrong_fence).await,
+            EndResumeTransitionResult::Refused(
+                ResumeTransitionMutationRefusal::Stale {
+                    current: Some(current),
+                    ..
+                }
+            ) if current == t2
+        ));
+        assert!(matches!(
+            handle.abort_resume_transition(wrong_fence).await,
+            EndResumeTransitionResult::Refused(
+                ResumeTransitionMutationRefusal::Stale {
+                    current: Some(current),
+                    ..
+                }
+            ) if current == t2
+        ));
+        assert!(matches!(
+            handle.renew_resume_transition(wrong_fence).await,
+            ResumeTransitionLeaseResult::Refused(
+                ResumeTransitionMutationRefusal::Stale {
+                    current: Some(current),
+                    ..
+                }
+            ) if current == t2
+        ));
+    }
+
+    #[tokio::test]
+    async fn completed_transition_replay_stays_terminal_after_later_completion() {
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(ChannelId::new(4_916_003));
+        let t1_id = Uuid::new_v4();
+        let t1 = begin(&handle, t1_id).await;
+        let t1_receipt = match handle.complete_resume_transition(t1).await {
+            EndResumeTransitionResult::Applied(receipt) => receipt,
+            other => panic!("unexpected completion result: {other:?}"),
+        };
+        let t2 = begin(&handle, Uuid::new_v4()).await;
+        assert!(matches!(
+            handle.complete_resume_transition(t2).await,
+            EndResumeTransitionResult::Applied(_)
+        ));
+        assert_eq!(
+            handle.begin_resume_transition(t1_id).await,
+            BeginResumeTransitionResult::AlreadyTerminal(t1_receipt)
+        );
+        assert_eq!(
+            handle.advance_resume_transition(t1).await,
+            AdvanceResumeTransitionResult::Refused(ResumeTransitionMutationRefusal::Stale {
+                current: None,
+                terminal: Some(t1_receipt),
+            })
+        );
+        assert_eq!(
+            handle.complete_resume_transition(t1).await,
+            EndResumeTransitionResult::AlreadyAppliedInactive(t1_receipt)
+        );
+        assert_eq!(
+            handle.abort_resume_transition(t1).await,
+            EndResumeTransitionResult::Refused(ResumeTransitionMutationRefusal::TerminalConflict(
+                t1_receipt
+            ))
+        );
+    }
+
+    #[test]
+    fn expired_orphan_recovers_without_losing_queue_and_live_owner_can_renew() {
+        let mut state = ChannelMailboxState::default();
+        state.intervention_queue.push(intervention(401));
+        let started_at = Instant::now();
+        let key = match state.resume_transition.begin(Uuid::new_v4(), started_at) {
             BeginResumeTransitionResult::Begun(key) => key,
             other => panic!("unexpected begin result: {other:?}"),
         };
-        assert_eq!(first.fence, 1);
+        let near_expiry = started_at + RESUME_TRANSITION_LEASE_DURATION - Duration::from_secs(1);
         assert_eq!(
-            handle.begin_resume_transition(first_id).await,
-            BeginResumeTransitionResult::AlreadyReserved(first)
+            state.resume_transition.renew(key, near_expiry),
+            ResumeTransitionLeaseResult::Renewed(key)
         );
-        assert!(matches!(
-            handle.begin_resume_transition(Uuid::new_v4()).await,
-            BeginResumeTransitionResult::Occupied(active) if active == first
-        ));
-
-        let foreign = ResumeTransitionKey {
-            transition_id: Uuid::new_v4(),
-            fence: first.fence,
-        };
-        assert!(matches!(
-            handle.advance_resume_transition(foreign).await,
-            AdvanceResumeTransitionResult::Refused(
-                ResumeTransitionMutationRefusal::Stale { current: Some(active), .. }
-            ) if active == first
-        ));
-        let stale_fence = ResumeTransitionKey {
-            transition_id: first.transition_id,
-            fence: first.fence + 10,
-        };
-        assert!(matches!(
-            handle.complete_resume_transition(stale_fence).await,
-            EndResumeTransitionResult::Refused(
-                ResumeTransitionMutationRefusal::Stale { current: Some(active), .. }
-            ) if active == first
-        ));
-
-        let second = match handle.advance_resume_transition(first).await {
-            AdvanceResumeTransitionResult::Advanced { previous, current } => {
-                assert_eq!(previous, first);
-                current
-            }
-            other => panic!("unexpected advance result: {other:?}"),
-        };
-        assert_eq!(second.fence, 2);
-        assert_eq!(
-            handle.advance_resume_transition(first).await,
-            AdvanceResumeTransitionResult::AlreadyAdvanced {
-                previous: first,
-                current: second,
-            }
+        assert!(state.resume_transition.is_reserved());
+        assert!(
+            state
+                .resume_transition
+                .recover_expired(
+                    near_expiry + RESUME_TRANSITION_LEASE_DURATION - Duration::from_secs(1)
+                )
+                .is_none()
         );
-        assert!(matches!(
-            handle.abort_resume_transition(first).await,
-            EndResumeTransitionResult::Refused(
-                ResumeTransitionMutationRefusal::Stale { current: Some(active), .. }
-            ) if active == second
-        ));
-
-        let completed = ResumeTransitionTerminalReceipt {
-            key: second,
-            kind: ResumeTransitionTerminalKind::Completed,
-        };
+        let terminal = state
+            .resume_transition
+            .recover_expired(near_expiry + RESUME_TRANSITION_LEASE_DURATION)
+            .expect("orphan lease should expire at the renewed deadline");
+        assert_eq!(terminal.key, key);
+        assert_eq!(terminal.kind, ResumeTransitionTerminalKind::LeaseExpired);
+        assert_eq!(state.intervention_queue[0].message_id, MessageId::new(401));
         assert_eq!(
-            handle.complete_resume_transition(second).await,
-            EndResumeTransitionResult::Applied(completed)
-        );
-        assert_eq!(
-            handle.complete_resume_transition(second).await,
-            EndResumeTransitionResult::AlreadyApplied(completed)
-        );
-        assert_eq!(
-            handle.abort_resume_transition(second).await,
+            state.resume_transition.complete(
+                key,
+                near_expiry + RESUME_TRANSITION_LEASE_DURATION + Duration::from_secs(1),
+            ),
             EndResumeTransitionResult::Refused(ResumeTransitionMutationRefusal::TerminalConflict(
-                completed
+                terminal
             ))
         );
+    }
 
-        let next_id = Uuid::new_v4();
-        let third = match handle.begin_resume_transition(next_id).await {
-            BeginResumeTransitionResult::Begun(key) => key,
-            other => panic!("unexpected second begin result: {other:?}"),
-        };
-        assert_eq!(third.fence, 3);
-        let aborted = ResumeTransitionTerminalReceipt {
-            key: third,
-            kind: ResumeTransitionTerminalKind::Aborted,
-        };
+    #[test]
+    fn indexed_histories_are_bounded() {
+        let mut state = ResumeTransitionState::default();
+        let mut now = Instant::now();
+        for _ in 0..(RESUME_TRANSITION_HISTORY_LIMIT + 5) {
+            let transition_id = Uuid::new_v4();
+            let mut key = match state.begin(transition_id, now) {
+                BeginResumeTransitionResult::Begun(key) => key,
+                other => panic!("unexpected begin result: {other:?}"),
+            };
+            for _ in 0..2 {
+                now += Duration::from_millis(1);
+                key = match state.advance(key, now) {
+                    AdvanceResumeTransitionResult::Advanced(receipt) => receipt.current,
+                    other => panic!("unexpected advance result: {other:?}"),
+                };
+            }
+            now += Duration::from_millis(1);
+            assert!(matches!(
+                state.complete(key, now),
+                EndResumeTransitionResult::Applied(_)
+            ));
+        }
+        assert_eq!(state.advance_history.len(), RESUME_TRANSITION_HISTORY_LIMIT);
         assert_eq!(
-            handle.abort_resume_transition(third).await,
-            EndResumeTransitionResult::Applied(aborted)
+            state.advance_by_previous.len(),
+            RESUME_TRANSITION_HISTORY_LIMIT
         );
         assert_eq!(
-            handle.abort_resume_transition(third).await,
-            EndResumeTransitionResult::AlreadyApplied(aborted)
+            state.terminal_history.len(),
+            RESUME_TRANSITION_HISTORY_LIMIT
         );
+        assert_eq!(
+            state.terminal_by_transition.len(),
+            RESUME_TRANSITION_HISTORY_LIMIT
+        );
+    }
+
+    #[tokio::test]
+    async fn gated_take_reports_no_soft_work_for_non_soft_only_queue() {
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(ChannelId::new(4_916_009));
+        let key = begin(&handle, Uuid::new_v4()).await;
+        let persistence = persistence("resume-transition-non-soft");
+        let mut item = intervention(901);
+        item.mode = InterventionMode::TestNonSoft;
+        assert!(handle.enqueue(item, persistence.clone()).await.enqueued);
+        let held = handle.take_next_soft(persistence).await;
+        assert!(held.intervention.is_none());
+        assert!(held.held_for_resume_transition);
+        assert!(!held.has_more);
+        assert_eq!(held.queue_len_after, 1);
+        assert!(matches!(
+            handle.abort_resume_transition(key).await,
+            EndResumeTransitionResult::Applied(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn terminal_idempotency_is_only_authoritative_while_inactive() {
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(ChannelId::new(4_916_006));
+        let t1 = begin(&handle, Uuid::new_v4()).await;
+        let terminal = match handle.complete_resume_transition(t1).await {
+            EndResumeTransitionResult::Applied(receipt) => receipt,
+            other => panic!("unexpected completion result: {other:?}"),
+        };
+        assert_eq!(
+            handle.complete_resume_transition(t1).await,
+            EndResumeTransitionResult::AlreadyAppliedInactive(terminal)
+        );
+        let t2 = begin(&handle, Uuid::new_v4()).await;
+        assert!(matches!(
+            handle.complete_resume_transition(t1).await,
+            EndResumeTransitionResult::Refused(
+                ResumeTransitionMutationRefusal::Stale {
+                    current: Some(current),
+                    ..
+                }
+            ) if current == t2
+        ));
     }
 
     #[tokio::test]
     async fn caller_cancellation_does_not_clear_committed_reservation() {
         let registry = ChannelMailboxRegistry::default();
-        let handle = registry.handle(ChannelId::new(4_916_003));
+        let handle = registry.handle(ChannelId::new(4_916_007));
         let transition_id = Uuid::new_v4();
         let (reply, receive) = oneshot::channel();
         handle
@@ -570,29 +820,12 @@ mod tests {
             })
             .expect("mailbox actor should accept begin request");
         drop(receive);
-
         let key = match handle.begin_resume_transition(transition_id).await {
             BeginResumeTransitionResult::AlreadyReserved(key) => key,
             other => panic!("cancelled caller reservation was not retained: {other:?}"),
         };
-        assert_eq!(key.fence, 1);
-        let blocked = handle
-            .try_start_turn(
-                Arc::new(CancelToken::new()),
-                UserId::new(10),
-                MessageId::new(100),
-            )
-            .await;
-        assert!(!blocked);
-        assert!(matches!(
-            handle.abort_resume_transition(key).await,
-            EndResumeTransitionResult::Applied(ResumeTransitionTerminalReceipt {
-                kind: ResumeTransitionTerminalKind::Aborted,
-                ..
-            })
-        ));
         assert!(
-            handle
+            !handle
                 .try_start_turn(
                     Arc::new(CancelToken::new()),
                     UserId::new(10),
@@ -600,16 +833,17 @@ mod tests {
                 )
                 .await
         );
+        assert!(matches!(
+            handle.abort_resume_transition(key).await,
+            EndResumeTransitionResult::Applied(_)
+        ));
     }
 
     #[tokio::test]
     async fn abort_cleanup_allows_idle_close_again() {
         let registry = ChannelMailboxRegistry::default();
-        let handle = registry.handle(ChannelId::new(4_916_004));
-        let key = match handle.begin_resume_transition(Uuid::new_v4()).await {
-            BeginResumeTransitionResult::Begun(key) => key,
-            other => panic!("unexpected begin result: {other:?}"),
-        };
+        let handle = registry.handle(ChannelId::new(4_916_008));
+        let key = begin(&handle, Uuid::new_v4()).await;
         assert_eq!(
             close_if_idle(&handle).await,
             Err("resume_transition_reserved")

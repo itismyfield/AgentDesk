@@ -128,6 +128,12 @@ pub(super) fn gate_closed_arm(
             ));
             None
         }
+        ChannelMailboxMsg::RenewResumeTransition { reply, .. } => {
+            let _ = reply.send(super::ResumeTransitionLeaseResult::Refused(
+                super::ResumeTransitionMutationRefusal::MailboxClosed,
+            ));
+            None
+        }
         ChannelMailboxMsg::CompleteResumeTransition { reply, .. }
         | ChannelMailboxMsg::AbortResumeTransition { reply, .. } => {
             let _ = reply.send(super::EndResumeTransitionResult::Refused(
