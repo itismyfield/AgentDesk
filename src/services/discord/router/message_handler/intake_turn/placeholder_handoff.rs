@@ -42,6 +42,8 @@ fn apply_bound_notice_edit_result(
     }
 }
 
+/// Reuse the retry input's bound busy notice rather than posting a card per attempt.
+/// A confirmed-missing notice clears its stale binding and falls through to replacement.
 pub(super) async fn reuse_bound_busy_notice(
     http: &Arc<serenity::http::Http>,
     shared: &Arc<SharedData>,

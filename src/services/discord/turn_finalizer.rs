@@ -34,8 +34,10 @@ use super::SharedData;
 // #3041 P1-0: dormant lease types for the *Delivery messages below (mod.rs §2-§3).
 use super::{DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome};
 
+mod actor_state;
 pub(in crate::services::discord) mod cleanup;
 mod completion_admission;
+mod completion_admission_actor;
 pub(in crate::services::discord) mod completion_signal;
 mod delivery_lease;
 mod finalize;
@@ -47,8 +49,12 @@ pub(in crate::services::discord) use cleanup::SyntheticClaimSnapshot;
 // #3479 r9: completion-signal enum + pure derivation extracted; re-exported so
 // the `completion_signal_state` method and the watcher-backstop re-check below
 // reference them unqualified, byte-identical.
+use self::actor_state::{FinalizeMsg, LedgerEntry, Phase};
+use self::completion_admission::CompletionAdmission;
 pub(in crate::services::discord) use self::completion_admission::CompletionAdmissionPlan;
-use self::completion_admission::{CompletionAdmission, publish_claimed_queue_eligible};
+use self::completion_admission_actor::{
+    handle_completion_admission_message, note_mailbox_release_after_finalize,
+};
 pub(in crate::services::discord) use self::completion_signal::{
     CompletionSignal, completion_signal_from_transcript,
 };
@@ -153,7 +159,10 @@ pub(in crate::services::discord) struct LedgerKey {
 /// retained `Finalized` entry → `AlreadyFinalized`); a channel-only id-0
 /// terminal collapses per `resolve_channel_only` (never prematurely finalizing
 /// a queued follow-up).
-fn resolve_ledger_key(ledger: &HashMap<LedgerKey, LedgerEntry>, key: TurnKey) -> LedgerKey {
+pub(super) fn resolve_ledger_key(
+    ledger: &HashMap<LedgerKey, LedgerEntry>,
+    key: TurnKey,
+) -> LedgerKey {
     resolve_channel_only(
         key,
         ledger
@@ -269,144 +278,6 @@ pub(in crate::services::discord) enum FinalizeOutcome {
     /// with a bounded deadline; the reconciler will finalize when the
     /// precondition clears.
     Deferred,
-}
-
-/// Ledger phase for a single turn. Owned solely by the actor task; the
-/// check-and-set on this enum is the one place exactly-once is decided.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Phase {
-    Pending,
-    Finalizing,
-    Finalized,
-}
-
-struct LedgerEntry {
-    phase: Phase,
-    relay_owner: RelayOwnerKind,
-    provider: ProviderKind,
-    /// The originating identity, retained so the deadline-armed reconciler can
-    /// reconstruct a `TurnKey` for `do_finalize` (channel-scoped, so any of the
-    /// colliding ids is equivalent).
-    turn_key: TurnKey,
-    /// Backstop deadline for a deferred gate-timeout. `None` unless a
-    /// `GateTimeout{Some(false)}` armed it.
-    terminal_deadline: Option<Instant>,
-    /// #3016 phase-5a — FAR backstop deadline armed at `register_start` for a
-    /// watcher-owned turn (distinct from the short `terminal_deadline`): the
-    /// generous `WATCHER_REGISTER_BACKSTOP` horizon that makes a
-    /// never-terminated watcher handoff VISIBLE to the reconciler, which
-    /// re-checks liveness before finalizing. `None` for non-watcher owners.
-    watcher_backstop_deadline: Option<Instant>,
-    /// #3277 (Defect C) — when the proven-terminal fast path last probed this
-    /// entry (`None` = never probed; the first reconcile tick probes it).
-    watcher_backstop_probe_at: Option<Instant>,
-    /// #3277 (Defect C) — consecutive terminal probes observed so far. Reset
-    /// to 0 by any non-terminal probe and by an at-deadline deferral.
-    watcher_backstop_terminal_streak: u8,
-    /// #3277 codex r1 — true while `watcher_backstop_deadline` is the fast-path
-    /// PULLED one (its re-check stays STRICT); false on the natural horizon.
-    watcher_backstop_deadline_pulled: bool,
-    /// Turn-level queue-admission barrier shared by every terminal submitter.
-    completion_admission: CompletionAdmission,
-    /// When the entry reached `Finalized`, for TTL-based GC.
-    finalized_at: Option<Instant>,
-}
-
-/// Messages the actor task drains. Each carries `Arc<SharedData>` so the
-/// finalize side-effects can run inside the task without the finalizer holding
-/// a `Weak<SharedData>` back-reference (which would re-introduce an Arc cycle
-/// and ordering ambiguity).
-enum FinalizeMsg {
-    /// #3018 register: submitted synchronously at intake/handoff BEFORE the
-    /// watcher can submit a terminal (arrival order replaces the deleted
-    /// Release/AcqRel `mailbox_finalize_owed.store` ordering). #3016 phase-5a:
-    /// carries a `Weak<SharedData>` (NOT `Arc` — no cycle) so the actor primes
-    /// `cached_shared` from the very FIRST `Start` and the far-backstop tick
-    /// runs even when no terminal ever arrives.
-    Start {
-        key: TurnKey,
-        provider: ProviderKind,
-        relay_owner: RelayOwnerKind,
-        completion_admission_plan: CompletionAdmissionPlan,
-        shared: std::sync::Weak<SharedData>,
-    },
-    MailboxReleased {
-        key: TurnKey,
-        shared: Arc<SharedData>,
-    },
-    TerminalProjectionSettled {
-        key: TurnKey,
-        allow_queue: bool,
-        shared: Arc<SharedData>,
-    },
-    TerminalDispositionSettled {
-        key: TurnKey,
-        allow_queue: bool,
-        shared: Arc<SharedData>,
-    },
-    Terminal {
-        key: TurnKey,
-        provider: ProviderKind,
-        event: TerminalEvent,
-        ctx: FinalizeContext,
-        claim_snapshot: Option<SyntheticClaimSnapshot>,
-        shared: Arc<SharedData>,
-        ack: oneshot::Sender<FinalizeOutcome>,
-    },
-    /// #3041 §2-§3 (DORMANT until P1-2..): CAS-acquire `(key, [start,end))` for
-    /// `holder` via the actor. The watcher acquires the cell directly (B4
-    /// fast-path), so this variant has no sender yet — it is reserved for the
-    /// sink/bridge wiring.
-    #[allow(dead_code)] // #3041: no sender until sink/bridge wiring (P1-2..).
-    AcquireDelivery {
-        key: DeliveryLeaseKey,
-        lease: Arc<DeliveryLeaseCell>,
-        holder: LeaseHolder,
-        start: u64,
-        end: u64,
-        deadline_ms: u64,
-        ack: oneshot::Sender<bool>,
-    },
-    /// #3041 three-way commit; full-identity mismatch = no-op. A `Delivered`
-    /// commit also advances the channel's `confirmed_end_offset` watermark to
-    /// `end` (§5.2) via the SAME monotonic CAS the watcher's inline advance
-    /// uses. DORMANT (reverted in P1-1): the watcher commits + advances INLINE
-    /// (`watcher_lease_commit_advance`) because the actor-commit deferral
-    /// reopened the #3143 duplicate window; kept for the §5.3 phase.
-    #[allow(dead_code)] // #3041: wired in a later phase (ledger-coupled commit, §5.3).
-    CommitDelivery {
-        key: DeliveryLeaseKey,
-        lease: Arc<DeliveryLeaseCell>,
-        holder: LeaseHolder,
-        start: u64,
-        end: u64,
-        outcome: LeaseOutcome,
-        provider: ProviderKind,
-        tmux_session_name: String,
-        shared: Arc<SharedData>,
-        ack: oneshot::Sender<bool>,
-    },
-    /// #3041 compare-and-release; full-identity match only. DORMANT (reverted in
-    /// P1-1): the watcher releases its lease INLINE after the inline commit, NOT
-    /// via this awaited actor round-trip. Kept defined for a later phase.
-    #[allow(dead_code)] // #3041: wired in a later phase (alongside CommitDelivery).
-    ReleaseDelivery {
-        key: DeliveryLeaseKey,
-        lease: Arc<DeliveryLeaseCell>,
-        holder: LeaseHolder,
-        start: u64,
-        end: u64,
-        ack: oneshot::Sender<bool>,
-    },
-    /// #3016 S1 (A2-banked, read-only): ask the ledger whether the channel's
-    /// `generation` has a live (non-`Finalized`) entry that the watcher owns.
-    /// Pure read of the actor-owned ledger; mutates nothing. #3016 phase-5b1:
-    /// wired into production via `has_live_watcher_pending`.
-    QueryWatcherPending {
-        channel_id: ChannelId,
-        generation: u64,
-        ack: oneshot::Sender<bool>,
-    },
 }
 
 /// A per-runtime actor, held as `Arc<TurnFinalizer>` on `SharedData`. One
@@ -796,38 +667,10 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                                 finalized_at: None,
                             });
                     }
-                    FinalizeMsg::MailboxReleased { key, shared } => {
-                        let ledger_key = resolve_ledger_key(&ledger, key);
-                        if let Some(entry) = ledger.get_mut(&ledger_key) {
-                            entry.completion_admission.note_mailbox_released();
-                            publish_claimed_queue_eligible(&shared, entry);
-                        }
-                    }
-                    FinalizeMsg::TerminalProjectionSettled {
-                        key,
-                        allow_queue,
-                        shared,
-                    } => {
-                        let ledger_key = resolve_ledger_key(&ledger, key);
-                        if let Some(entry) = ledger.get_mut(&ledger_key) {
-                            entry
-                                .completion_admission
-                                .note_terminal_projection_settled(allow_queue);
-                            publish_claimed_queue_eligible(&shared, entry);
-                        }
-                    }
-                    FinalizeMsg::TerminalDispositionSettled {
-                        key,
-                        allow_queue,
-                        shared,
-                    } => {
-                        let ledger_key = resolve_ledger_key(&ledger, key);
-                        if let Some(entry) = ledger.get_mut(&ledger_key) {
-                            entry
-                                .completion_admission
-                                .note_terminal_disposition_settled(allow_queue);
-                            publish_claimed_queue_eligible(&shared, entry);
-                        }
+                    msg @ (FinalizeMsg::MailboxReleased { .. }
+                    | FinalizeMsg::TerminalProjectionSettled { .. }
+                    | FinalizeMsg::TerminalDispositionSettled { .. }) => {
+                        handle_completion_admission_message(&mut ledger, msg);
                     }
                     FinalizeMsg::Terminal {
                         key,
@@ -1179,24 +1022,7 @@ async fn handle_terminal(
     .await
     {
         Ok(outcome) => {
-            if matches!(
-                outcome,
-                FinalizeOutcome::Finalized {
-                    removed_token: Some(_),
-                    ..
-                }
-            ) {
-                entry.completion_admission.note_mailbox_released();
-                if entry.relay_owner == RelayOwnerKind::None {
-                    entry
-                        .completion_admission
-                        .note_terminal_projection_settled(true);
-                    entry
-                        .completion_admission
-                        .note_terminal_disposition_settled(true);
-                }
-                publish_claimed_queue_eligible(shared, entry);
-            }
+            note_mailbox_release_after_finalize(&outcome, entry, shared);
             outcome
         }
         Err(payload) => {
@@ -1250,7 +1076,7 @@ mod tests {
     // env-dir Mutex is intentionally held across the test awaits (current-thread
     // runtime, serialization is the whole point). Test-only.
     #[allow(clippy::await_holding_lock)]
-    async fn with_isolated_runtime_root<F, Fut>(f: F)
+    pub(super) async fn with_isolated_runtime_root<F, Fut>(f: F)
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = ()>,
@@ -1298,165 +1124,6 @@ mod tests {
                 )
                 .await;
             assert!(matches!(second, FinalizeOutcome::AlreadyFinalized));
-        })
-        .await;
-    }
-
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn early_deferred_registration_survives_later_immediate_refresh_4888() {
-        with_isolated_runtime_root(|| async move {
-            let shared = super::super::make_shared_data_for_tests_with_storage(None);
-            let mut completion_events =
-                super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
-            let ch = ChannelId::new(4_888_101);
-            let tid = 4_888_102;
-            shared.restart.global_active.store(1, Ordering::Relaxed);
-            let _token = seed_active_turn(&shared, ch, tid).await;
-            let fin = TurnFinalizer::spawn();
-            let k = TurnKey::new(ch, tid, 0);
-            fin.register_start_with_completion_admission(
-                k,
-                ProviderKind::Claude,
-                RelayOwnerKind::Watcher,
-                CompletionAdmissionPlan::AfterTerminalProjectionSettled,
-                &shared,
-            );
-            fin.register_start(k, ProviderKind::Claude, RelayOwnerKind::Watcher, &shared);
-
-            let watcher = fin
-                .submit_terminal(
-                    k,
-                    ProviderKind::Claude,
-                    TerminalEvent::Complete,
-                    FinalizeContext::watcher(),
-                    shared.clone(),
-                )
-                .await;
-            assert!(matches!(watcher, FinalizeOutcome::Finalized { .. }));
-            let released = completion_events
-                .try_recv()
-                .expect("mailbox release must publish its non-eligible edge");
-            assert!(!released.queue_is_eligible());
-            assert!(completion_events.try_recv().is_err());
-
-            let bridge = fin
-                .submit_terminal(
-                    k,
-                    ProviderKind::Claude,
-                    TerminalEvent::Complete,
-                    FinalizeContext::bridge(),
-                    shared.clone(),
-                )
-                .await;
-            assert!(matches!(bridge, FinalizeOutcome::AlreadyFinalized));
-            fin.note_terminal_projection_settled(k, true, shared.clone());
-            fin.note_terminal_projection_settled(k, true, shared.clone());
-            assert!(fin.has_live_watcher_pending(ch, 0).await == false);
-
-            let eligible = completion_events
-                .try_recv()
-                .expect("settled edge must release deferred queue admission");
-            assert_eq!(eligible.channel_id, ch);
-            assert_eq!(eligible.turn_id, Some(tid));
-            assert!(eligible.queue_is_eligible());
-            assert!(
-                completion_events.try_recv().is_err(),
-                "duplicate settled edges must not republish QueueEligible"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn denied_projection_settlement_cannot_be_upgraded_by_duplicate_owner_4888() {
-        with_isolated_runtime_root(|| async move {
-            let shared = super::super::make_shared_data_for_tests_with_storage(None);
-            let mut completion_events =
-                super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
-            let ch = ChannelId::new(4_888_111);
-            let tid = 4_888_112;
-            shared.restart.global_active.store(1, Ordering::Relaxed);
-            let _token = seed_active_turn(&shared, ch, tid).await;
-            let fin = TurnFinalizer::spawn();
-            let k = TurnKey::new(ch, tid, 0);
-            fin.register_start_with_completion_admission(
-                k,
-                ProviderKind::Claude,
-                RelayOwnerKind::Watcher,
-                CompletionAdmissionPlan::AfterTerminalProjectionAndDispositionSettled,
-                &shared,
-            );
-
-            let outcome = fin
-                .submit_terminal(
-                    k,
-                    ProviderKind::Claude,
-                    TerminalEvent::Complete,
-                    FinalizeContext::watcher(),
-                    shared.clone(),
-                )
-                .await;
-            assert!(matches!(outcome, FinalizeOutcome::Finalized { .. }));
-            let released = completion_events
-                .try_recv()
-                .expect("mailbox release must publish its non-eligible edge");
-            assert!(!released.queue_is_eligible());
-
-            fin.note_terminal_projection_settled(k, true, shared.clone());
-            fin.note_terminal_disposition_settled(k, false, shared.clone());
-            fin.note_terminal_disposition_settled(k, true, shared.clone());
-            assert!(!fin.has_live_watcher_pending(ch, 0).await);
-            assert!(
-                completion_events.try_recv().is_err(),
-                "a capped or failed retry decision must remain a permanent queue-admission veto"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn projection_settlement_before_mailbox_release_is_not_lost_4888() {
-        with_isolated_runtime_root(|| async move {
-            let shared = super::super::make_shared_data_for_tests_with_storage(None);
-            let mut completion_events =
-                super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
-            let ch = ChannelId::new(4_888_121);
-            let tid = 4_888_122;
-            shared.restart.global_active.store(1, Ordering::Relaxed);
-            let _token = seed_active_turn(&shared, ch, tid).await;
-            let fin = TurnFinalizer::spawn();
-            let k = TurnKey::new(ch, tid, 0);
-            fin.register_start_with_completion_admission(
-                k,
-                ProviderKind::Claude,
-                RelayOwnerKind::Watcher,
-                CompletionAdmissionPlan::AfterTerminalProjectionSettled,
-                &shared,
-            );
-            fin.note_terminal_projection_settled(k, true, shared.clone());
-            assert!(fin.has_live_watcher_pending(ch, 0).await);
-            assert!(completion_events.try_recv().is_err());
-
-            let outcome = fin
-                .submit_terminal(
-                    k,
-                    ProviderKind::Claude,
-                    TerminalEvent::Complete,
-                    FinalizeContext::watcher(),
-                    shared.clone(),
-                )
-                .await;
-            assert!(matches!(outcome, FinalizeOutcome::Finalized { .. }));
-            let released = completion_events
-                .try_recv()
-                .expect("mailbox release must publish its non-eligible edge");
-            assert!(!released.queue_is_eligible());
-            let eligible = completion_events
-                .try_recv()
-                .expect("mailbox release must consume the previously settled projection edge");
-            assert!(eligible.queue_is_eligible());
-            assert_eq!(eligible.turn_id, Some(tid));
-            assert!(completion_events.try_recv().is_err());
         })
         .await;
     }

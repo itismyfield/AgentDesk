@@ -83,6 +83,35 @@ fn schedule_retry_if_eligible(
     true
 }
 
+pub(super) async fn requeue_if_needed(
+    outcome: &mut Option<FollowupRequeueOutcome>,
+    requeue_candidate: bool,
+    already_pending: bool,
+    shared_owned: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    inflight_state: &InflightTurnState,
+    dispatch_id: Option<&str>,
+    adk_session_key: Option<&str>,
+    turn_id: &str,
+) {
+    if !requeue_candidate || already_pending {
+        return;
+    }
+    *outcome = Some(
+        requeue_claude_tui_followup_pre_submit_timeout(
+            shared_owned,
+            provider,
+            channel_id,
+            inflight_state,
+            dispatch_id,
+            adk_session_key,
+            turn_id,
+        )
+        .await,
+    );
+}
+
 pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
     shared_owned: &Arc<SharedData>,
     provider: &ProviderKind,

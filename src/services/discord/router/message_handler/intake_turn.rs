@@ -1343,9 +1343,6 @@ pub(super) async fn handle_text_message(
         .await;
     }
 
-    // #4888: retry the same input on its bound busy notice instead of posting a
-    // card per attempt. A failed reset drops the stale binding and falls through
-    // to the normal fresh-anchor path.
     let reusable_busy_notice = placeholder_handoff::reuse_bound_busy_notice(
         http,
         shared,

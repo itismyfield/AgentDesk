@@ -325,23 +325,19 @@ pub(super) async fn handle_delivery_epilogue(
                         "TUI transport error was already delivered; skipping quiescence gate so inflight cleanup can complete"
                     );
                 }
-                // Skip only when the busy path already requeued; legacy must still requeue (#4610).
-                if claude_tui_followup_pre_submit_requeue_candidate
-                    && !claude_tui_busy_requeue_pending
-                {
-                    *busy_requeue_outcome = Some(
-                        followup_requeue::requeue_claude_tui_followup_pre_submit_timeout(
-                            &shared_owned,
-                            &provider,
-                            channel_id,
-                            &inflight_state,
-                            dispatch_id.as_deref(),
-                            adk_session_key.as_deref(),
-                            turn_id.as_str(),
-                        )
-                        .await,
-                    );
-                }
+                followup_requeue::requeue_if_needed(
+                    busy_requeue_outcome,
+                    claude_tui_followup_pre_submit_requeue_candidate,
+                    claude_tui_busy_requeue_pending,
+                    &shared_owned,
+                    &provider,
+                    channel_id,
+                    &inflight_state,
+                    dispatch_id.as_deref(),
+                    adk_session_key.as_deref(),
+                    turn_id.as_str(),
+                )
+                .await;
                 super::super::super::tmux::TuiCompletionGateOutcome::NotGated
             };
 

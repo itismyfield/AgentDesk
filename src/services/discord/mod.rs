@@ -3680,64 +3680,7 @@ async fn mailbox_clear_pending_dispatch_reservation(
         .await;
 }
 
-/// Front-restore an inflight Claude TUI follow-up that failed before submission;
-/// it predates queued interventions, and the deferred kickoff prevents hot loops.
-pub(in crate::services::discord) async fn mailbox_requeue_inflight_for_followup_retry(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    inflight_state: &InflightTurnState,
-) -> MailboxEnqueueOutcome {
-    let user_msg_id = inflight_state.user_msg_id;
-    let busy_followup_retry_user_msg_id =
-        inflight_state.effective_busy_followup_retry_user_msg_id();
-    if user_msg_id == 0 || inflight_state.user_text.trim().is_empty() {
-        return MailboxEnqueueOutcome::default();
-    }
-    let message_id = MessageId::new(user_msg_id);
-    let busy_followup_retry_message_id = MessageId::new(busy_followup_retry_user_msg_id);
-    // FIX #6 (Codex P2): rebuild the retry Intervention from the persisted
-    // follow-up requeue context instead of hardcoding empty values, so a
-    // PRE-submit busy-timeout requeue preserves the originating turn's reply
-    // context, attachments, and voice metadata. Legacy rows (pre-v9) default
-    // these to None/empty/false, matching the previous behavior exactly.
-    // #4247 FIX 2: rebuild the mark from the persisted `followup_preserve_on_cancel`
-    // decision; leaving it unmarked would regress a genuine-human-marked instruction
-    // to origin/main's drop-on-cancel behavior at the downstream preservation guards.
-    let queued_generation = shared.restart.current_generation;
-    let source_message_queued_generations = if inflight_state.followup_preserve_on_cancel {
-        vec![
-            crate::services::turn_orchestrator::SourceMessageQueuedGeneration::user_instruction(
-                message_id,
-                queued_generation,
-            ),
-        ]
-    } else {
-        Vec::new()
-    };
-    let intervention = Intervention {
-        author_id: UserId::new(inflight_state.request_owner_user_id),
-        author_is_bot: false,
-        message_id,
-        queued_generation,
-        source_message_ids: if busy_followup_retry_message_id == message_id {
-            vec![message_id]
-        } else {
-            vec![message_id, busy_followup_retry_message_id]
-        },
-        source_message_queued_generations,
-        source_text_segments: Vec::new(),
-        text: inflight_state.user_text.clone(),
-        mode: crate::services::turn_orchestrator::InterventionMode::Soft,
-        created_at: std::time::Instant::now(),
-        reply_context: inflight_state.followup_reply_context.clone(),
-        has_reply_boundary: inflight_state.followup_has_reply_boundary,
-        merge_consecutive: inflight_state.followup_merge_consecutive,
-        pending_uploads: inflight_state.followup_pending_uploads.clone(),
-        voice_announcement: inflight_state.followup_voice_announcement.clone(),
-    };
-    mailbox_requeue_intervention_front(shared, provider, channel_id, intervention).await
-}
+pub(in crate::services::discord) use busy_followup_retry_store::requeue_inflight_for_followup_retry as mailbox_requeue_inflight_for_followup_retry;
 
 #[cfg(test)]
 mod followup_retry_requeue_tests {

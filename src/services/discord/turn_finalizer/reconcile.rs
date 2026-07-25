@@ -9,6 +9,7 @@
 //! (`super::lease_now_ms()`) is rewritten to its absolute path; the bodies are
 //! otherwise identical.
 
+use super::completion_admission::publish_claimed_queue_eligible;
 use super::*;
 
 /// Run the deadline-elapsed backstop finalize for ONE entry: flip
