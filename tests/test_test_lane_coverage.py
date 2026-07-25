@@ -491,25 +491,6 @@ class RatchetTests(unittest.TestCase):
                 [],
             )
 
-    def test_cancelled_adjacent_push_cannot_make_debt_authoritative(self) -> None:
-        trusted = {"legacy_a"}
-        cancelled_push = {"legacy_a", "legacy_b"}
-        adjacent_push = {"legacy_b"}
-
-        self.assertEqual(
-            coverage.baseline_growth(cancelled_push, trusted), ["legacy_b"]
-        )
-        self.assertEqual(
-            coverage.baseline_growth(adjacent_push, cancelled_push), []
-        )
-        self.assertEqual(
-            coverage.baseline_growth(adjacent_push, trusted), ["legacy_b"]
-        )
-        workflow = (
-            REPO_ROOT / ".github/workflows/test-lane-baseline-main.yml"
-        ).read_text(encoding="utf-8")
-        self.assertIn("cancel-in-progress: false", workflow)
-
     def test_main_forwards_explicit_baseline_ref_to_git_loader(self) -> None:
         reference = {"legacy_a"}
         with mock.patch.object(

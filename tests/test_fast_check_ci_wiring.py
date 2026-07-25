@@ -12,9 +12,6 @@ PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
 NIGHTLY_WORKFLOW = REPO_ROOT / ".github/workflows/ci-nightly.yml"
 MACOS_TRUSTED_WORKFLOW = REPO_ROOT / ".github/workflows/ci-macos-trusted.yml"
-TEST_LANE_MAIN_WORKFLOW = (
-    REPO_ROOT / ".github/workflows/test-lane-baseline-main.yml"
-)
 
 # This manifest is intentionally exact: changing the retained test recipe must also
 # update this test deliberately. The duplication is a drift-prevention gate, not an
@@ -209,32 +206,29 @@ class FastCheckCiWiringTests(unittest.TestCase):
             self.assertIn("fetch-depth: 0", job)
             self.assertNotIn("origin/main", job)
             self.assertNotIn("github.event.pull_request.base.sha", job)
-        self.assertIn("workflow_dispatch:", pr_workflow)
-        self.assertIn("test_lane_baseline_ref:", pr_workflow)
-        self.assertIn("required: true", pr_workflow)
-        self.assertIn(
-            "TEST_LANE_BASELINE_REF: ${{ github.event_name == 'pull_request' "
-            "&& 'HEAD^1' || inputs.test_lane_baseline_ref }}",
-            pr_job,
-        )
-        self.assertNotIn("|| 'HEAD'", pr_job)
-        self.assertIn(
-            "TEST_LANE_BASELINE_REF: ${{ github.event.before }}", main_job
-        )
+        self.assertNotIn("workflow_dispatch:", pr_workflow)
+        self.assertIn("TEST_LANE_BASELINE_REF: HEAD^1", pr_job)
+        self.assertNotIn("github.event_name", pr_job)
+        self.assertNotIn("inputs.", pr_job)
+        self.assertIn("TEST_LANE_BASELINE_REF: HEAD", main_job)
 
-    def test_cancelled_adjacent_main_pushes_cannot_skip_baseline_guard(self) -> None:
-        workflow = TEST_LANE_MAIN_WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("name: Test-lane baseline main guard", workflow)
-        self.assertIn("group: test-lane-baseline-main-${{ github.ref }}", workflow)
-        self.assertIn("cancel-in-progress: false", workflow)
-        self.assertNotIn("cancel-in-progress: true", workflow)
-        self.assertIn("fetch-depth: 0", workflow)
+    def test_required_script_context_is_pr_only(self) -> None:
+        pr_workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("pull_request:", pr_workflow)
+        self.assertNotIn("workflow_dispatch:", pr_workflow)
+        self.assertNotRegex(pr_workflow, r"(?m)^  push:")
+        self.assertEqual(pr_workflow.count("name: Script checks"), 1)
         self.assertIn(
-            "TEST_LANE_BASELINE_REF: ${{ github.event.before }}", workflow
+            "TEST_LANE_BASELINE_REF: HEAD^1",
+            job_block(pr_workflow, "scripts"),
         )
-        self.assertIn(
-            'scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"',
-            workflow,
+        for workflow_path in (REPO_ROOT / ".github/workflows").glob("*.yml"):
+            workflow = workflow_path.read_text(encoding="utf-8")
+            with self.subTest(workflow=workflow_path.name):
+                if "workflow_dispatch:" in workflow:
+                    self.assertNotRegex(workflow, r"(?m)^\s+name: Script checks$")
+        self.assertFalse(
+            (REPO_ROOT / ".github/workflows/test-lane-baseline-main.yml").exists()
         )
 
     def test_ci_script_checks_runs_this_contract(self) -> None:
