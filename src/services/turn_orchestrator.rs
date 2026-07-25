@@ -503,6 +503,7 @@ pub(crate) struct ClearChannelResult {
     // clear-channel path, no consumer yet. See `FinishTurnResult`.
     #[allow(dead_code)]
     pub(crate) persistence_error: Option<String>,
+    pub(crate) refused_resume_transition: bool,
 }
 
 pub(crate) struct CancelActiveTurnResult {
@@ -1196,6 +1197,7 @@ impl ChannelMailboxHandle {
                 removed_token: None,
                 queue_exit_events: Vec::new(),
                 persistence_error: None,
+                refused_resume_transition: false,
             },
         )
         .await
@@ -1603,11 +1605,20 @@ impl ChannelMailboxRegistry {
 //      `RecoveryKickoff`, `Enqueue`) — are REFUSED with that arm's existing
 //      "cannot start" reply (`TryStartTurn` ⇒ `false`); callers re-resolve a
 //      fresh actor via the registry `*_with_closed_retry` helpers and replay.
-//  (b) everything else stays ALLOWED — reads, cancels, finishes, drains, and
+//  (b) resume lifecycle arms (`BeginResumeTransition`, `AdvanceResumeTransition`,
+//      `RenewResumeTransition`, `CompleteResumeTransition`,
+//      `AbortResumeTransition`) are START-LIKE while tombstoned and refused by
+//      the same gate; a severed actor cannot own or mutate a transition.
+//  (c) everything else stays ALLOWED — reads, cancels, finishes, drains, and
 //      queue RESTITUTION (`RequeueFront`/`ReplaceQueue`/hydrate, which
 //      re-persist already-accepted work to disk for a successor actor to
 //      hydrate — refusing those would drop user messages).
-// New arms must be classified here and (if start-like) gated there.
+// Resume reservation adds a second classification: `TryStartTurn`,
+// `RestoreActiveTurn`, `RecoveryKickoff`, and `TakeNextSoft` cannot interleave
+// new ownership; `Clear`, `PurgeQueue`, and `CloseIfIdle` cannot destroy the
+// reservation or its protected state; `Enqueue` and `RequeueFront` remain
+// allowed restitution. `resume_transition::gate_reserved_arm` enforces it.
+// New arms must be classified here and in the applicable actor gate.
 enum ChannelMailboxMsg {
     Snapshot {
         reply: oneshot::Sender<ChannelMailboxSnapshot>,
@@ -3041,6 +3052,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             removed_token,
                             queue_exit_events: Vec::new(),
                             persistence_error: Some(error),
+                            refused_resume_transition: false,
                         }
                     } else {
                         clear_pending_user_dispatch(&mut state);
@@ -3054,6 +3066,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             removed_token,
                             queue_exit_events,
                             persistence_error: None,
+                            refused_resume_transition: false,
                         }
                     };
                     let _ = reply.send(result);

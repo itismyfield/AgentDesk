@@ -385,12 +385,6 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     notify_mode: SoftClearNotifyMode,
     explicit_session_key: Option<&str>,
 ) -> anyhow::Result<()> {
-    crate::db::session_transcripts::record_channel_clear_boundary(
-        shared.pg_pool.as_ref(),
-        &channel_id.get().to_string(),
-    )
-    .await?;
-
     let tmux_name = {
         let data = shared.core.lock().await;
         data.sessions
@@ -400,6 +394,16 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     };
 
     let cleared = mailbox_clear_channel(shared, provider, channel_id).await;
+    if cleared.refused_resume_transition {
+        anyhow::bail!("channel clear deferred while resume transition is active");
+    }
+    let clear_boundary_result = crate::db::session_transcripts::record_channel_clear_boundary(
+        shared.pg_pool.as_ref(),
+        &channel_id.get().to_string(),
+    )
+    .await;
+    // The mailbox mutation has already committed. Complete teardown even when
+    // the durable transcript fence fails, then surface that failure below.
     if cleared.removed_token.is_some() {
         saturating_decrement_global_active(shared);
     }
@@ -484,6 +488,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
         );
     }
 
+    clear_boundary_result?;
     Ok(())
 }
 

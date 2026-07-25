@@ -40,6 +40,20 @@ pub(super) async fn apply_relay_recovery_decision(
         RelayRecoveryActionKind::ClearOrphanPendingToken => {
             let channel = ChannelId::new(decision.channel_id);
             let cleared = mailbox_clear_channel(shared, provider, channel).await;
+            if cleared.refused_resume_transition {
+                let after = mailbox_snapshot(shared, channel).await;
+                return RelayRecoveryApplyResult {
+                    status: "deferred_resume_transition",
+                    removed_thread_proofs: 0,
+                    removed_mailbox_token: false,
+                    post_mailbox_has_cancel_token: Some(after.cancel_token.is_some()),
+                    post_mailbox_queue_depth: Some(after.intervention_queue.len()),
+                    reattach_watcher_spawned: None,
+                    reattach_watcher_replaced: None,
+                    reattach_initial_offset: None,
+                    reattach_error: None,
+                };
+            }
             if source.cleanup_session() {
                 super::stall_recovery::finalize_orphaned_clear(
                     shared,

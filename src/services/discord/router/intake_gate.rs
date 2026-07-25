@@ -1114,14 +1114,15 @@ pub(in crate::services::discord) async fn handle_event(
                             chrono::Utc::now().timestamp(),
                         )
                         .await;
-                        if stale_inflight {
-                            thread_guard_force_clean_stale_thread(
+                        let stale_cleanup_applied = stale_inflight
+                            && thread_guard_force_clean_stale_thread(
                                 &data.shared,
                                 &data.provider,
                                 channel_id,
                                 thread_id,
                             )
                             .await;
+                        if stale_cleanup_applied {
                             // Fall through to normal processing below.
                         } else {
                             let ts = chrono::Local::now().format("%H:%M:%S");

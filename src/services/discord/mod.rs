@@ -3980,10 +3980,11 @@ async fn mailbox_clear_channel(
         .clear(queue_persistence_context(shared, provider, channel_id))
         .await;
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
-    // #2443 — `Clear` is the cancel/teardown exit path. Mark recovery_done so
-    // a watcher that subscribed to the recovery latch is freed even when
-    // recovery is aborted rather than completed.
-    shared.mailboxes.recovery_done(channel_id).mark_done();
+    // A refused resume reservation still owns the recovery latch. Successful
+    // cancel/teardown frees watchers subscribed to recovery completion (#2443).
+    if !result.refused_resume_transition {
+        shared.mailboxes.recovery_done(channel_id).mark_done();
+    }
     result
 }
 
@@ -4670,19 +4671,6 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
     if expired.is_empty() {
         return;
     }
-    {
-        let mut data = shared.core.lock().await;
-        for expired_session in &expired {
-            let ch = expired_session.channel_id;
-            // Clean up worktree if session had one
-            if let Some(session) = data.sessions.get(&ch) {
-                if let Some(ref wt) = session.worktree {
-                    cleanup_git_worktree(shared.pg_pool.as_ref(), wt);
-                }
-            }
-            data.sessions.remove(&ch);
-        }
-    }
     // #3588: idle 정리는 in-memory/worktree 메모리 회수만 수행하고 provider
     // session(claude resume id)은 DB에 보존한다. 다음 턴에서
     // `fetch_provider_session_id`로 복원되어 `--resume`으로 transcript가 이어진다.
@@ -4692,15 +4680,32 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
     // 레이블 오표시가 발생한다. (#3591에서 100턴 세션 리셋도 제거되어 reset 기반
     // 저장 경로는 없다; resume 실패 복구만 auto_retry_with_history가 별도로 저장한다.)
     // 명시적 세션 초기화는 idle recap의 `새 세션 시작` 버튼(idle_recap:clear)으로 한다.
+    let mut cleared_expired = Vec::new();
     for expired_session in &expired {
         let cleared = mailbox_clear_channel(shared, &provider, expired_session.channel_id).await;
+        if cleared.refused_resume_transition {
+            tracing::debug!(
+                channel_id = expired_session.channel_id.get(),
+                "idle session cleanup deferred while resume transition is active"
+            );
+            continue;
+        }
         if cleared.removed_token.is_some() {
             saturating_decrement_global_active(shared);
         }
+        {
+            let mut data = shared.core.lock().await;
+            if let Some(session) = data.sessions.remove(&expired_session.channel_id)
+                && let Some(worktree) = session.worktree.as_ref()
+            {
+                cleanup_git_worktree(shared.pg_pool.as_ref(), worktree);
+            }
+        }
         shared.api_timestamps.remove(&expired_session.channel_id);
+        cleared_expired.push(expired_session);
     }
     // Record termination audit for cleaned-up sessions
-    for expired_session in &expired {
+    for expired_session in &cleared_expired {
         if let Some(session_key) = expired_session.session_key.as_deref() {
             let should_record =
                 mark_session_disconnected_for_idle_cleanup(shared.pg_pool.as_ref(), session_key)
@@ -4722,7 +4727,10 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
             );
         }
     }
-    tracing::info!("  [cleanup] Removed {} idle session(s)", expired.len());
+    tracing::info!(
+        "  [cleanup] Removed {} idle session(s)",
+        cleared_expired.len()
+    );
 }
 
 async fn mark_session_disconnected_for_idle_cleanup(

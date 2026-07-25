@@ -127,13 +127,14 @@ pub(super) async fn thread_guard_should_force_clean_stale_thread(
 }
 
 /// #1446 Layer 2 — perform the THREAD-GUARD's stale-thread cleanup:
-///   1. drop the parent → thread mapping so subsequent intakes do not re-
-///      trigger the guard,
-///   2. delete the thread's inflight state file (releases the durable lock
+///   1. **clear** the thread's mailbox (cancel token + active turn anchor +
+///      pending interventions). A resume reservation refuses this mutation,
+///      preserving every related proof and leaving the intake queued.
+///   2. after clear commits, drop the parent → thread mapping so subsequent
+///      intakes do not re-trigger the guard,
+///   3. delete the thread's inflight state file (releases the durable lock
 ///      whose presence convinced `mailbox_has_active_turn` the dispatch is
-///      still live),
-///   3. **clear** the thread's mailbox (cancel token + active turn anchor +
-///      pending interventions). `cancel_active_turn` alone is insufficient
+///      still live). `cancel_active_turn` alone is insufficient
 ///      here — for a dead-dispatch case there is no live turn task to
 ///      observe the cancel signal and call `finish_turn`, so
 ///      `has_active_turn()` would stay `true` forever and the next bot
@@ -156,12 +157,20 @@ pub(super) async fn thread_guard_force_clean_stale_thread(
     provider: &ProviderKind,
     _parent_channel_id: serenity::ChannelId,
     thread_id: serenity::ChannelId,
-) {
+) -> bool {
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
         "  [{ts}] 🔓 THREAD-GUARD: stale inflight detected for thread {}, cleaning up and proceeding",
         thread_id
     );
+    let cleared = mailbox_clear_channel(shared, provider, thread_id).await;
+    if cleared.refused_resume_transition {
+        tracing::warn!(
+            channel_id = thread_id.get(),
+            "THREAD-GUARD stale cleanup deferred while resume transition is active"
+        );
+        return false;
+    }
     let thread_parent_kickoffs =
         crate::services::discord::turn_finalizer::cleanup::collect_and_clear_thread_parents(
             shared, thread_id,
@@ -172,13 +181,13 @@ pub(super) async fn thread_guard_force_clean_stale_thread(
         thread_parent_kickoffs,
     );
     crate::services::discord::inflight::delete_inflight_state_file(provider, thread_id.get());
-    let cleared = mailbox_clear_channel(shared, provider, thread_id).await;
     crate::services::discord::stall_recovery::finalize_orphaned_clear(
         shared,
         thread_id,
         cleared.removed_token,
         "1446_thread_guard_stale_inflight",
     );
+    true
 }
 
 /// #2044 F7 (P3 — documentation): invariant note.

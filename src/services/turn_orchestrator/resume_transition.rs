@@ -132,6 +132,9 @@ impl ResumeTransitionState {
         if let Some(terminal) = self.terminal_by_transition.get(&transition_id).copied() {
             return BeginResumeTransitionResult::AlreadyTerminal(terminal);
         }
+        // B1 is a reservation primitive, not the quiescence protocol itself.
+        // A future B2 caller must establish an idle mailbox before `begin`:
+        // no active turn, recovery marker, or pending dispatch handoff.
         let Some(key) = self.issue_key(transition_id) else {
             return BeginResumeTransitionResult::FenceExhausted;
         };
@@ -321,6 +324,15 @@ pub(super) fn gate_reserved_arm(
                 queue_exit_events: Vec::new(),
                 persistence_error: None,
                 held_for_resume_transition: true,
+            });
+            None
+        }
+        ChannelMailboxMsg::Clear { reply, .. } => {
+            let _ = reply.send(super::ClearChannelResult {
+                removed_token: None,
+                queue_exit_events: Vec::new(),
+                persistence_error: None,
+                refused_resume_transition: true,
             });
             None
         }
@@ -554,6 +566,93 @@ mod tests {
         assert!(!taken.held_for_resume_transition);
     }
 
+    #[derive(Clone, Copy)]
+    enum ClearReservationRelease {
+        Complete,
+        Abort,
+    }
+
+    async fn assert_clear_refused_then_succeeds(channel_id: u64, release: ClearReservationRelease) {
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(ChannelId::new(channel_id));
+        let persistence = persistence("resume-transition-clear");
+        let token = Arc::new(CancelToken::new());
+        assert!(
+            handle
+                .try_start_turn(Arc::clone(&token), UserId::new(11), MessageId::new(110),)
+                .await
+        );
+        assert!(
+            handle
+                .enqueue(intervention(111), persistence.clone())
+                .await
+                .enqueued
+        );
+        let key = begin(&handle, Uuid::new_v4()).await;
+        let before = handle.snapshot().await;
+
+        let refused = handle.clear(persistence.clone()).await;
+        assert!(refused.refused_resume_transition);
+        assert!(refused.removed_token.is_none());
+        assert!(refused.queue_exit_events.is_empty());
+        let after_refusal = handle.snapshot().await;
+        assert!(
+            after_refusal
+                .cancel_token
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(active, &token))
+        );
+        assert_eq!(
+            after_refusal.active_request_owner,
+            before.active_request_owner
+        );
+        assert_eq!(
+            after_refusal.active_user_message_id,
+            before.active_user_message_id
+        );
+        assert_eq!(
+            after_refusal
+                .intervention_queue
+                .iter()
+                .map(|item| item.message_id)
+                .collect::<Vec<_>>(),
+            before
+                .intervention_queue
+                .iter()
+                .map(|item| item.message_id)
+                .collect::<Vec<_>>()
+        );
+
+        match release {
+            ClearReservationRelease::Complete => assert!(matches!(
+                handle.complete_resume_transition(key).await,
+                EndResumeTransitionResult::Applied(_)
+            )),
+            ClearReservationRelease::Abort => assert!(matches!(
+                handle.abort_resume_transition(key).await,
+                EndResumeTransitionResult::Applied(_)
+            )),
+        }
+        let cleared = handle.clear(persistence).await;
+        assert!(!cleared.refused_resume_transition);
+        assert!(
+            cleared
+                .removed_token
+                .as_ref()
+                .is_some_and(|removed| Arc::ptr_eq(removed, &token))
+        );
+        assert_eq!(cleared.queue_exit_events.len(), 1);
+        let after_clear = handle.snapshot().await;
+        assert!(after_clear.cancel_token.is_none());
+        assert!(after_clear.intervention_queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_is_refused_without_state_loss_until_complete_or_abort() {
+        assert_clear_refused_then_succeeds(4_916_010, ClearReservationRelease::Complete).await;
+        assert_clear_refused_then_succeeds(4_916_011, ClearReservationRelease::Abort).await;
+    }
+
     #[tokio::test]
     async fn stale_t1_receipts_do_not_authorize_while_t2_is_active() {
         let registry = ChannelMailboxRegistry::default();
@@ -721,6 +820,30 @@ mod tests {
                 terminal
             ))
         );
+    }
+
+    #[test]
+    fn expired_clear_gate_releases_message_and_preserves_queue() {
+        let mut state = ChannelMailboxState::default();
+        state.intervention_queue.push(intervention(402));
+        let started_at = Instant::now();
+        assert!(matches!(
+            state.resume_transition.begin(Uuid::new_v4(), started_at),
+            BeginResumeTransitionResult::Begun(_)
+        ));
+        let (reply, receive) = oneshot::channel();
+        let clear = gate_reserved_arm(
+            &mut state,
+            ChannelMailboxMsg::Clear {
+                persistence: persistence("resume-transition-expired-clear"),
+                reply,
+            },
+            started_at + RESUME_TRANSITION_LEASE_DURATION,
+        );
+        assert!(matches!(clear, Some(ChannelMailboxMsg::Clear { .. })));
+        assert_eq!(state.intervention_queue[0].message_id, MessageId::new(402));
+        drop(clear);
+        assert!(receive.try_recv().is_err());
     }
 
     #[test]

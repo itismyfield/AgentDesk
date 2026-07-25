@@ -1380,6 +1380,13 @@ pub async fn clear_provider_channel_runtime(
     };
 
     let cleared = discord::mailbox_clear_channel(&shared, &provider, channel_id).await;
+    if cleared.refused_resume_transition {
+        tracing::warn!(
+            channel_id = channel_id.get(),
+            "runtime clear deferred while resume transition is active"
+        );
+        return false;
+    }
     if let Some(token) = cleared.removed_token {
         discord::turn_bridge::stop_active_turn(
             &provider,
