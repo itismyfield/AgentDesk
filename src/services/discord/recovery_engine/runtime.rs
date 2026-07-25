@@ -510,7 +510,8 @@ mod reregister_ledger_reseed_tests {
             );
         let ch = ChannelId::new(52_486);
         let turn_id = 9_301;
-        let state = active_turn_state(ch.get(), turn_id);
+        let mut state = active_turn_state(ch.get(), turn_id);
+        state.set_relay_owner_kind(super::inflight::RelayOwnerKind::StandbyRelay);
         let token = Arc::new(crate::services::provider::CancelToken::new());
         shared
             .mailbox(ch)
