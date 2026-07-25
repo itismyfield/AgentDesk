@@ -5,6 +5,7 @@ use super::super::formatting::{
 };
 use super::common::{
     EVENT_BLOCK_MAX_CHARS, EVENT_LINE_MAX_CHARS, STATUS_PANEL_MAX_CHARS, STATUS_PANEL_TASK_LIMIT,
+    tool_prefix,
 };
 use super::*;
 use serde_json::json;
@@ -30,6 +31,63 @@ fn render_block_compacts_newest_events_under_limit() {
     assert_eq!(live_lines.len(), 1);
     assert!(block.contains("5회"));
     assert!(!block.contains("echo 24"));
+}
+
+#[test]
+fn tool_prefix_is_a_closed_static_label_set() {
+    let cases = [
+        ("Bash", "[Bash]"),
+        ("command_execution", "[Bash]"),
+        ("exec", "[Bash]"),
+        ("exec_command", "[Bash]"),
+        ("run_cmd", "[Bash]"),
+        ("update_plan", "[Tool]"),
+        ("Read", "[Read]"),
+        ("Edit", "[Edit]"),
+        ("mcp__vault-prod", "[MCP]"),
+        ("mcp__a__b__c", "[MCP]"),
+        ("mcp__hr__lookup_employee_alice", "[MCP]"),
+        ("tenant_secret_custom_tool", "[Tool]"),
+    ];
+
+    for (name, expected) in cases {
+        let label: &'static str = tool_prefix(name);
+        assert_eq!(label, expected, "input: {name}");
+    }
+}
+
+#[test]
+fn compact_events_render_only_closed_labels_for_untrusted_tool_names() {
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_892_400);
+    for name in [
+        "mcp__vault-prod",
+        "mcp__a__b__c",
+        "mcp__hr__lookup_employee_alice",
+        "tenant_secret_custom_tool",
+    ] {
+        events.push_event(
+            channel_id,
+            RecentPlaceholderEvent::tool_use(name, r#"{"value":"safe summary"}"#).unwrap(),
+        );
+    }
+
+    let block = events
+        .render_block(channel_id)
+        .expect("compact event block");
+    assert!(block.contains("[MCP]") && block.contains("[Tool]"));
+    for private_fragment in [
+        "vault-prod",
+        "a__b__c",
+        "hr",
+        "lookup_employee_alice",
+        "tenant_secret_custom_tool",
+    ] {
+        assert!(
+            !block.contains(private_fragment),
+            "untrusted tool names must not reach compact rendering: {block}"
+        );
+    }
 }
 
 #[test]

@@ -114,13 +114,12 @@ fn render_last_tool(last_tool: Option<&LastToolCall>) -> String {
     )
 }
 
-/// #4892: tool inputs are untrusted and may contain credentials, signed URLs,
-/// private paths, or arbitrary payloads. This channel-visible surface therefore
-/// renders only the allowlisted tool class produced by `tool_prefix`; new tools
-/// fail closed and never render their arguments.
+/// #4892: tool inputs and names are untrusted and may contain credentials,
+/// tenant identifiers, signed URLs, private paths, or arbitrary payloads. The
+/// classifier returns only static labels, so no caller-controlled bytes reach
+/// this channel-visible surface.
 fn render_tool_activity(name: &str) -> String {
-    let class = escape_status_panel_markdown(&tool_prefix(name));
-    format!("🔧 마지막 도구 ({})", truncate_chars(&class, 140))
+    format!("🔧 마지막 도구 ({})", tool_prefix(name))
 }
 
 #[cfg(test)]
@@ -229,24 +228,32 @@ mod tests {
     }
 
     #[test]
-    fn mcp_tool_hides_server_namespace_and_escapes_operation_markdown() {
-        let rendered = render_activity_line_with_last_tool(
-            &DerivedStatus::ToolRunning {
-                name: "mcp__vault_prod__read_secret".to_string(),
-                summary: None,
-            },
-            None,
-        );
+    fn mcp_tool_names_collapse_to_one_static_label() {
+        for name in [
+            "mcp__vault-prod",
+            "mcp__a__b__c",
+            "mcp__hr__lookup_employee_alice",
+        ] {
+            let rendered = render_activity_line_with_last_tool(
+                &DerivedStatus::ToolRunning {
+                    name: name.to_string(),
+                    summary: None,
+                },
+                None,
+            );
 
-        assert_eq!(rendered, r"🔧 마지막 도구 ([read\_secret])");
-        assert!(
-            !rendered.contains("vault_prod") && !rendered.contains("mcp__"),
-            "MCP server namespace must not reach the status panel: {rendered}"
-        );
+            assert_eq!(rendered, "🔧 마지막 도구 ([MCP])", "input: {name}");
+            for private_fragment in ["vault-prod", "a__b__c", "hr", "lookup_employee_alice"] {
+                assert!(
+                    !rendered.contains(private_fragment),
+                    "MCP names and operations must never reach the status panel: {rendered}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn tool_activity_restores_defensive_class_clamp() {
+    fn tool_activity_output_is_bounded_by_the_static_label_set() {
         let rendered = render_activity_line_with_last_tool(
             &DerivedStatus::ToolRunning {
                 name: format!("mcp__private_server__{}", "a".repeat(300)),
@@ -255,11 +262,23 @@ mod tests {
             None,
         );
 
-        assert!(
-            rendered.chars().count() <= "🔧 마지막 도구 ()".chars().count() + 140,
-            "tool class must remain defensively clamped: {rendered}"
-        );
+        assert_eq!(rendered, "🔧 마지막 도구 ([MCP])");
         assert!(!rendered.contains("private_server"));
+    }
+
+    #[test]
+    fn codex_execution_function_names_map_to_bash() {
+        for name in ["command_execution", "exec", "exec_command", "run_cmd"] {
+            let rendered = render_activity_line_with_last_tool(
+                &DerivedStatus::ToolRunning {
+                    name: name.to_string(),
+                    summary: None,
+                },
+                None,
+            );
+
+            assert_eq!(rendered, "🔧 마지막 도구 ([Bash])", "input: {name}");
+        }
     }
 
     #[test]
