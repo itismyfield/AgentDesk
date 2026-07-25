@@ -90,16 +90,15 @@ high_risk_recovery:
 
 ## 3. High-risk recovery lane test axes
 
-`#1011`/`#974` 감사로그는 release gate 의 high-risk recovery lane 이 아래 **4 축**을 회귀 방지선으로 유지해야 한다고 명시한다. 레거시 SQLite 기반 `src/integration_tests/tests/high_risk_recovery.rs` 시나리오 하네스는 #3035 Phase 1 에서 제거되었으며, PG-only 회귀 보호는 `src/high_risk_recovery.rs` 로 이전된다. 아래 시나리오 매트릭스(`failure_recovery` / `outbox_boundary` / `delayed_worker` / `idle_session_cleanup` 축)는 제거된 레거시 하네스 기준 기록이며 PG 스위트 재매핑은 후속 Phase 에서 진행한다. 축별 대표 시나리오는 [`docs/high-risk-recovery-lane.md`](../high-risk-recovery-lane.md#release-gate-축-매핑) 참고.
+High-risk recovery required job은 `src/high_risk_recovery.rs`의 PostgreSQL 기반 5개 테스트를 `cargo test --lib high_risk_recovery:: -- --test-threads=1`로 실행한다. 제거된 legacy SQLite 하네스와 존재하지 않는 `scenario_*` 이름은 release-gate coverage로 계산하지 않는다. 전체 목록과 개별 재현 명령은 [`docs/high-risk-recovery-lane.md`](../high-risk-recovery-lane.md#current-recovery-tests) 참고.
 
-| Axis | What it guards | Representative scenarios (cargo test filters) |
+| Axis | What it guards | Anchored full test names |
 | --- | --- | --- |
-| **Live turn 보존** | restart 직후 in-flight turn / dispatch 가 손실되거나 broken pointer 로 복원되지 않도록 | `high_risk_recovery::failure_recovery::scenario_3_restart_recovery_reconciles_broken_state`, `failure_recovery::scenario_667_restart_recovery_reconciles_duplicate_review_dispatches` |
-| **Watcher reattach** | tmux 출력 watcher / deadlock watchdog 가 재시작 후 정상 재부착되고 stale 입력에 잘못 알림 보내지 않도록 | `high_risk_recovery::delayed_worker::scenario_421_deadlock_recent_output_extends_watchdog`, `delayed_worker::scenario_421_deadlock_stale_output_only_marks_suspected_deadlock`, `delayed_worker::scenario_421_long_turn_alerts_start_at_30_minutes` |
-| **Dispatch/outbox idempotency** | notify outbox 가 정확히 1회 전달되고 fallback / duplicate / mixed action / completed 상태가 깨지지 않도록 | `high_risk_recovery::outbox_boundary::scenario_160_1_outbox_batch_delivers_exactly_once`, `outbox_boundary::scenario_160_2_recovery_fallback_completes_dispatch`, `outbox_boundary::scenario_160_4_outbox_processes_all_entries_including_duplicates`, `outbox_boundary::scenario_160_6_notify_success_keeps_completed_dispatch_terminal` |
-| **Queue loss 방지** | boot reconcile 이 누락된 review dispatch / notify outbox / 깨진 auto-queue entry 를 backfill 하고, idle 세션 정리가 active dispatch 를 잘라먹지 않도록 | `high_risk_recovery::failure_recovery::scenario_251_boot_reconcile_backfills_missing_notify_outbox`, `failure_recovery::scenario_251_boot_reconcile_refires_missing_review_dispatch`, `failure_recovery::scenario_251_boot_reconcile_resets_broken_auto_queue_entries`, `idle_session_cleanup::scenario_492_idle_session_with_active_dispatch_uses_180_minute_safety_ttl` |
+| **Restart/runtime state repair** | boot/review drift reconcile이 stale runtime 상태만 안전하게 복구하도록 | `high_risk_recovery::boot_reconcile_pg_resets_stale_runtime_rows`, `high_risk_recovery::completed_queue_review_drift_reconcile_promotes_only_stale_done_entries` |
+| **Dispatch delivery idempotency** | restart recovery가 이미 기록된 typed dispatch delivery를 재게시하지 않도록 | `high_risk_recovery::restart_recovery_does_not_repost_prior_typed_dispatch_delivery` |
+| **Dispatch/outbox loss prevention** | runtime/boot reconcile이 pending-delivery orphan과 누락 review dispatch를 복구하도록 | `high_risk_recovery::runtime_reconcile_auto_queue_pending_delivery_orphans_requeues_notify_outbox`, `high_risk_recovery::boot_reconcile_pg_refires_missing_review_dispatch` |
 
-이 4 축 중 하나라도 시나리오가 0 개로 줄어들면 lane 자체가 release gate 자격을 잃는다고 본다. 새 시나리오는 위 표 + `docs/high-risk-recovery-lane.md` 동시 갱신 후 PR 에 동봉.
+각 축은 최소 1개 실제 테스트를 유지해야 한다. 테스트를 추가·삭제·개명하면 위 표와 `docs/high-risk-recovery-lane.md`를 함께 갱신하고 `cargo test --lib high_risk_recovery:: -- --list`로 0-test drift가 없음을 확인한다. watcher reattach 및 delayed-worker 경계는 다른 모듈의 테스트가 소유하며 이 5개 테스트의 보장 범위로 과장하지 않는다.
 
 ## 4. Resource Contention Policy
 
@@ -115,11 +114,7 @@ high_risk_recovery:
 
 - `PgRecoveryTestDatabase::create` 는 test마다 `agentdesk_pg_recovery_<uuid>` 데이터베이스를 신규 생성 → 독립 pool → drop 순으로 정리.
 - `crate::db::postgres::lock_test_lifecycle()` lifecycle guard 로 동시 create/drop 직렬화.
-- `seed_*` 헬퍼는 in-memory SQLite `test_db()` fixture 를 사용 — PG 가 필요 없는 recovery 시나리오는 PG 서비스와 독립.
-
-### Pool sizing
-
-- Recovery test의 `pg_recovery_test_config` 는 `pool_max = 1` 로 설정. 단일 connection 으로 startup reconcile 이 runtime pool 을 점유하지 않고 completion 되는지 검증 (`scenario_969_pg_boot_reconcile_uses_startup_pool_without_pool_timeout_logs`).
+- 각 recovery 테스트는 해당 독립 PostgreSQL pool에 agent, card, dispatch, outbox fixture를 직접 seed한다.
 
 ## 5. Triage 분류 규약
 
@@ -130,7 +125,7 @@ high_risk_recovery:
 | Full tests 개별 케이스 red | `<mod>::<test>` (e.g. `pipeline::tests::…`) | `cargo test -p agentdesk <identifier> -- --exact --nocapture` | `agent:project-agentdesk` |
 | PG tests 개별 케이스 red | `<mod>::…_pg_…` / `postgres_…` | `cargo test -p agentdesk <identifier> -- --exact --nocapture` | `agent:project-agentdesk` |
 | High-risk recovery job 자체 red (로그에서 test id 추출 실패) | `job::High-risk recovery` | `_job-level failure; see failing workflow job_` | `agent:project-agentdesk` |
-| High-risk recovery 개별 시나리오 red | `high_risk_recovery::<submod>::scenario_…` | `cargo test -p agentdesk <identifier> -- --exact --nocapture` | `agent:project-agentdesk` |
+| High-risk recovery 개별 테스트 red | `high_risk_recovery::<test>` | `cargo test --lib <identifier> -- --exact --nocapture` | `agent:project-agentdesk` |
 | 인프라 종료(job-level, test id 추출 실패 + SIGTERM/signal 15/exit 143/cancel, **real-failure 신호 없음**) | **미기록 — flaky skip** | (없음, ci-red 미승격) | (없음) |
 | Job-level red + real-failure 신호(`error[E…]` / `could not compile` / `test result: FAILED` / `panicked at` / failed assertion) — SIGTERM 노이즈 혼재 여부 무관 | `job::<name>` | `_job-level failure; see failing workflow job_` | `agent:project-agentdesk` |
 

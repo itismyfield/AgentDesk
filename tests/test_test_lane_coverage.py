@@ -226,9 +226,14 @@ class LaneFilterTests(unittest.TestCase):
         self.assertFalse(lane.selects("tests::gamma_case"))
         self.assertFalse(lane.selects("tests::alpha_postgres_case"))
 
-    def test_exact_applies_to_positive_filter_but_skip_is_substring(self) -> None:
-        lane = coverage.LaneFilter(("tests::alpha",), ("alpha",), True)
-        self.assertFalse(lane.selects("tests::alpha"))
+    def test_exact_applies_to_positive_and_skip_filters(self) -> None:
+        lane = coverage.LaneFilter(
+            ("tests::alpha", "tests::alpha_postgres"),
+            ("tests::alpha_postgres",),
+            True,
+        )
+        self.assertTrue(lane.selects("tests::alpha"))
+        self.assertFalse(lane.selects("tests::alpha_postgres"))
         self.assertFalse(lane.selects("other::tests::alpha"))
 
     def test_positive_and_exact_zero_match_are_rejected(self) -> None:
@@ -313,6 +318,66 @@ class CandidateProvenanceTests(unittest.TestCase):
         )
         return result.stdout.strip()
 
+    def workflow_source(
+        self,
+        command: str,
+        *,
+        event: str = "pull_request",
+        path_pattern: str = "src/**",
+        runner: str = "ubuntu-latest",
+    ) -> str:
+        return (
+            "name: CI PR\n"
+            "on:\n"
+            f"  {event}:\n"
+            "jobs:\n"
+            "  changes:\n"
+            "    name: Changed paths\n"
+            "    runs-on: ubuntu-latest\n"
+            "    outputs:\n"
+            "      rust_or_policy: ${{ steps.filter.outputs.rust_or_policy }}\n"
+            "    steps:\n"
+            "      - id: filter\n"
+            "        uses: dorny/paths-filter@v3\n"
+            "        with:\n"
+            "          filters: |\n"
+            "            rust_or_policy:\n"
+            f"              - '{path_pattern}'\n"
+            "  check_fast:\n"
+            "    name: Fast compile check (ubuntu-latest)\n"
+            "    needs: changes\n"
+            "    if: needs.changes.outputs.rust_or_policy == 'true'\n"
+            f"    runs-on: {runner}\n"
+            "    steps:\n"
+            f"      - run: {command}\n"
+            "  fast_check_required_context:\n"
+            "    name: Fast check (ubuntu-latest)\n"
+            "    needs:\n"
+            "      - changes\n"
+            "      - check_fast\n"
+            "    if: always()\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - env:\n"
+            "          FILTER_OUTPUT: ${{ needs.changes.outputs.rust_or_policy }}\n"
+            "          UPSTREAM_JOB_NAME: check_fast\n"
+            "          UPSTREAM_RESULT: ${{ needs.check_fast.result }}\n"
+            "        run: ./scripts/required-check-mirror.sh\n"
+        )
+
+    def manifest_source(
+        self, command: str, *, path_pattern: str = "src/**"
+    ) -> str:
+        return (
+            "authority fixture :: .github/workflows/ci-pr.yml :: check_fast :: "
+            "ubuntu-latest :: rust_or_policy :: "
+            "needs.changes.outputs.rust_or_policy == 'true' :: "
+            "fast_check_required_context :: Fast check (ubuntu-latest)\n"
+            f"lane fixture :: fixture :: {path_pattern} :: {command}\n"
+            "witness fixture :: .github/workflows/ci-pr.yml :: 1 :: "
+            f"{command}\n"
+        )
+
     def make_repo(self, root: Path, lane_filter: str = "covered") -> str:
         (root / "src").mkdir()
         (root / ".github/workflows").mkdir(parents=True)
@@ -328,16 +393,14 @@ class CandidateProvenanceTests(unittest.TestCase):
             "--skip pg_ --skip postgres"
         )
         (root / ".github/workflows/ci-pr.yml").write_text(
-            f"run: {command}\n", encoding="utf-8"
+            self.workflow_source(command), encoding="utf-8"
         )
         (root / "justfile").write_text(
             "test-non-pg:\n    cargo test --lib legacy_tests\n",
             encoding="utf-8",
         )
         (root / "scripts/pr_test_lane_manifest.txt").write_text(
-            f"lane fixture :: src/** :: {command}\n"
-            f"witness .github/workflows/ci-pr.yml :: 1 :: {command}\n",
-            encoding="utf-8",
+            self.manifest_source(command), encoding="utf-8"
         )
         self.git(root, "init", "-q")
         self.git(root, "add", "src/lib.rs", "justfile", ".github", "scripts")
@@ -421,6 +484,102 @@ class CandidateProvenanceTests(unittest.TestCase):
             self.assertEqual(result.failures, ())
             self.assertEqual(result.coverage["legacy_tests::added_case"], ("pr-ci:fixture",))
 
+    def test_non_pr_workflow_cannot_witness_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.make_repo(root, lane_filter="legacy_tests")
+            workflow = root / ".github/workflows/ci-pr.yml"
+            source = workflow.read_text(encoding="utf-8").replace(
+                "  pull_request:\n", "  workflow_dispatch:\n"
+            )
+            workflow.write_text(source, encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "pull_request-only"):
+                coverage.verify_pr_lane_manifest(
+                    root, root / "scripts/pr_test_lane_manifest.txt"
+                )
+
+    def test_nightly_workflow_cannot_witness_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.make_repo(root, lane_filter="legacy_tests")
+            workflow = root / ".github/workflows/ci-pr.yml"
+            nightly = root / ".github/workflows/ci-nightly.yml"
+            workflow.rename(nightly)
+            manifest = root / "scripts/pr_test_lane_manifest.txt"
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    ".github/workflows/ci-pr.yml",
+                    ".github/workflows/ci-nightly.yml",
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "protected ci-pr workflow"):
+                coverage.verify_pr_lane_manifest(root, manifest)
+
+    def test_command_in_unrelated_pr_job_cannot_witness_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.make_repo(root, lane_filter="legacy_tests")
+            workflow = root / ".github/workflows/ci-pr.yml"
+            source = workflow.read_text(encoding="utf-8")
+            command = (
+                "cargo test --lib legacy_tests -- --skip _pg "
+                "--skip pg_ --skip postgres"
+            )
+            workflow.write_text(
+                source.replace(f"      - run: {command}\n", "      - run: cargo check\n")
+                + "  advisory:\n"
+                + "    name: Advisory\n"
+                + "    runs-on: ubuntu-latest\n"
+                + "    steps:\n"
+                + f"      - run: {command}\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "outside authority job"):
+                coverage.verify_pr_lane_manifest(
+                    root, root / "scripts/pr_test_lane_manifest.txt"
+                )
+
+    def test_lane_paths_must_be_covered_by_authority_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.make_repo(root, lane_filter="legacy_tests")
+            manifest = root / "scripts/pr_test_lane_manifest.txt"
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    "lane fixture :: fixture :: src/** ::",
+                    "lane fixture :: fixture :: docs/** ::",
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "paths exceed workflow authority"):
+                coverage.verify_pr_lane_manifest(root, manifest)
+
+    def test_self_hosted_pr_job_cannot_authorize_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.make_repo(root, lane_filter="legacy_tests")
+            workflow = root / ".github/workflows/ci-pr.yml"
+            workflow.write_text(
+                workflow.read_text(encoding="utf-8").replace(
+                    "    runs-on: ubuntu-latest\n    steps:\n"
+                    "      - run: cargo test",
+                    "    runs-on: [self-hosted, macOS]\n    steps:\n"
+                    "      - run: cargo test",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "runner drift"):
+                coverage.verify_pr_lane_manifest(
+                    root, root / "scripts/pr_test_lane_manifest.txt"
+                )
+
     def test_post_merge_just_recipe_does_not_count_as_pr_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -443,11 +602,11 @@ class CandidateProvenanceTests(unittest.TestCase):
             manifest = root / "scripts/pr_test_lane_manifest.txt"
             command = "cargo test --lib legacy_tests -- --skip added"
             (root / ".github/workflows/ci-pr.yml").write_text(
-                f"run: {command}\n", encoding="utf-8"
+                self.workflow_source(command, path_pattern="docs/**"),
+                encoding="utf-8",
             )
             manifest.write_text(
-                f"lane fixture :: docs/** :: {command}\n"
-                f"witness .github/workflows/ci-pr.yml :: 1 :: {command}\n",
+                self.manifest_source(command, path_pattern="docs/**"),
                 encoding="utf-8",
             )
             self.git(root, "add", ".github", "scripts")
@@ -496,9 +655,66 @@ class CandidateProvenanceTests(unittest.TestCase):
             self.git(root, "add", "src/generated_tests.rs")
             self.git(root, "commit", "-qm", "generated test")
             result = self.check(root, base)
-            self.assertTrue(
-                any("unsupported" in item for item in result.failures), result.failures
+            self.assertIn(
+                "unsupported changed test source has no logical cfg(test) module mount: "
+                "generated_tests::generated_case",
+                result.failures,
             )
+
+    def test_nested_unmounted_test_source_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self.make_repo(root, lane_filter="nested_case")
+            nested = root / "src/services/observability"
+            nested.mkdir(parents=True)
+            (nested / "metrics.rs").write_text(
+                "#[test] fn nested_case() {}\n", encoding="utf-8"
+            )
+            self.git(root, "add", "src/services/observability/metrics.rs")
+            self.git(root, "commit", "-qm", "nested generated test")
+
+            result = self.check(root, base)
+            self.assertIn(
+                "unsupported changed test source has no logical cfg(test) module mount: "
+                "services::observability::metrics::nested_case",
+                result.failures,
+            )
+
+    def test_nested_unmounted_test_uses_physical_source_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "src/services/observability").mkdir(parents=True)
+            (root / "src/services/observability/metrics.rs").write_text(
+                "#[test] fn nested_case() {}\n", encoding="utf-8"
+            )
+
+            inventory = coverage.discover_source_inventory(root)
+
+            self.assertEqual(
+                inventory.test_sources[
+                    "services::observability::metrics::nested_case"
+                ],
+                "src/services/observability/metrics.rs",
+            )
+            self.assertNotIn(
+                "services::observability::metrics::nested_case",
+                inventory.test_modules,
+            )
+
+    def test_lane_path_matching_normalizes_windows_separators(self) -> None:
+        lane = coverage.LaneFilter(("nested_case",), (), changed_paths=("src/**",))
+        self.assertTrue(lane.is_applicable_to(("src\\services\\metrics.rs",)))
+
+    def test_negative_path_pattern_excludes_matching_change(self) -> None:
+        lane = coverage.LaneFilter(
+            ("nested_case",),
+            (),
+            changed_paths=("src/services/discord/**", "!src/services/discord/live/**"),
+        )
+        self.assertFalse(
+            lane.is_applicable_to(("src/services/discord/live/events.rs",))
+        )
+        self.assertTrue(lane.is_applicable_to(("src/services/discord/mod.rs",)))
 
     def test_changed_include_generated_test_uses_logical_mount(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

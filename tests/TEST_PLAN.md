@@ -11,15 +11,17 @@
 | --- | --- | --- | --- |
 | `unit` | 직렬화, 저장, mailbox state 같은 로컬 불변식 검증 | `src/services/discord/*` 개별 테스트 모듈 | 모듈별 `cargo test --bin agentdesk <filter>` |
 | `state-transition integration` | DB + policy + dispatch 상태 전이 검증 | `src/integration_tests.rs` | 기본 gate는 `cargo test --all-targets` |
-| `failure-recovery` | restart / reconcile / outbox / delayed-worker 복구 경계 검증 | `src/integration_tests/tests/high_risk_recovery.rs` | `cargo test --lib high_risk_recovery::` |
+| `failure-recovery` | PostgreSQL restart / reconcile / outbox 복구 경계 검증 | `src/high_risk_recovery.rs` | `cargo test --lib high_risk_recovery::` |
 
 ### 현재 고정 실행 경로
 
 - broad regression: `cargo test --all-targets`
-- high-risk recovery gate: `cargo test --lib high_risk_recovery::`
-- restart / boot reconcile만 재현: `cargo test --lib high_risk_recovery::failure_recovery::`
-- outbox boundary만 재현: `cargo test --lib high_risk_recovery::outbox_boundary::`
-- delayed worker / watchdog만 재현: `cargo test --lib high_risk_recovery::delayed_worker::`
+- high-risk recovery gate: `cargo test --lib high_risk_recovery:: -- --test-threads=1`
+- stale runtime row reset: `cargo test --lib high_risk_recovery::boot_reconcile_pg_resets_stale_runtime_rows -- --exact`
+- typed dispatch dedupe: `cargo test --lib high_risk_recovery::restart_recovery_does_not_repost_prior_typed_dispatch_delivery -- --exact`
+- pending-delivery outbox repair: `cargo test --lib high_risk_recovery::runtime_reconcile_auto_queue_pending_delivery_orphans_requeues_notify_outbox -- --exact`
+- missing review dispatch repair: `cargo test --lib high_risk_recovery::boot_reconcile_pg_refires_missing_review_dispatch -- --exact`
+- stale completed review promotion: `cargo test --lib high_risk_recovery::completed_queue_review_drift_reconcile_promotes_only_stale_done_entries -- --exact`
 
 고위험 coverage inventory와 `existing vs missing` 매핑은 `docs/high-risk-recovery-lane.md`가 기준 문서다.
 
@@ -301,4 +303,4 @@ tests/
     └── restart_test.rs   ← 기동 → turn → kill → 재기동 → 복구
 ```
 
-현재 운영 중인 recovery lane 모듈 경계는 `src/integration_tests/tests/high_risk_recovery.rs`이며, 위 디렉터리 구조는 장기적인 분리 방향을 설명한다.
+현재 운영 중인 recovery lane 모듈 경계는 `src/high_risk_recovery.rs`이며, 위 디렉터리 구조는 장기적인 분리 방향을 설명한다.

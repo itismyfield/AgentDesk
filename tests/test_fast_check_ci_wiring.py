@@ -93,7 +93,7 @@ def just_recipe_commands(justfile: str, recipe_name: str) -> tuple[str, ...]:
 
 
 class FastCheckCiWiringTests(unittest.TestCase):
-    def test_pr_fast_check_is_compile_and_policy_only(self) -> None:
+    def test_pr_fast_check_runs_reviewed_targeted_tests_on_hosted_ubuntu(self) -> None:
         job = job_block(PR_WORKFLOW.read_text(encoding="utf-8"), "check_fast")
 
         self.assertIn("name: Fast compile check (${{ matrix.os }})", job)
@@ -103,10 +103,23 @@ class FastCheckCiWiringTests(unittest.TestCase):
             job,
         )
         self.assertIn("os: [ubuntu-latest]", job)
+        self.assertNotIn("self-hosted", job)
         self.assertIn("- name: Policy JS unit tests", job)
+        self.assertIn("- name: PR-protected targeted Rust tests", job)
         self.assertIn("- name: cargo check\n        run: just cargo-check", job)
         self.assertNotIn("just test-non-pg", job)
-        self.assertNotRegex(job, r"(?m)^\s*cargo test\b")
+        manifest = (REPO_ROOT / "scripts/pr_test_lane_manifest.txt").read_text(
+            encoding="utf-8"
+        )
+        commands = tuple(
+            line.split(" :: ", 3)[3]
+            for line in manifest.splitlines()
+            if line.startswith("lane ") and " :: fast :: " in line
+        )
+        self.assertEqual(len(commands), 11)
+        for command in commands:
+            self.assertEqual(job.count(command), 1)
+            self.assertEqual(PR_WORKFLOW.read_text(encoding="utf-8").count(command), 1)
 
     def test_required_fast_check_context_mirrors_the_same_upstream_job(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
@@ -501,10 +514,19 @@ jobs:
             encoding="utf-8"
         )
         self.assertNotIn("just test-non-pg", manifest)
-        self.assertIn("witness .github/workflows/ci-macos-trusted.yml", manifest)
-        self.assertIn("witness .github/workflows/ci-pr.yml", manifest)
-        self.assertIn("lane postgres ::", manifest)
-        self.assertIn("lane high-risk-recovery ::", manifest)
+        self.assertNotIn("ci-macos-trusted.yml", manifest)
+        self.assertIn(
+            "authority fast :: .github/workflows/ci-pr.yml :: check_fast :: "
+            "${{ matrix.os }} :: rust_or_policy",
+            manifest,
+        )
+        self.assertIn(
+            "witness fast :: .github/workflows/ci-pr.yml", manifest
+        )
+        self.assertIn("lane postgres :: postgres ::", manifest)
+        self.assertIn(
+            "lane high-risk-recovery :: high-risk-recovery ::", manifest
+        )
         command = "cargo test --lib high_risk_recovery:: -- --test-threads=1"
         pr_workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         self.assertEqual(pr_workflow.count(command), 1)

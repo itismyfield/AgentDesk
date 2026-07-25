@@ -357,6 +357,22 @@ jobs:
       # `lint` owns fmt/clippy in its independent required mirror. Keep this
       # required Ubuntu lane to compilation and policy tests; main and nightly
       # retain the longer non-PG test coverage outside the PR critical path.
+      - name: PR-protected targeted Rust tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1
+          cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres
+          cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
+          cargo test --all-targets review_decision -- --skip _pg --skip pg_ --skip postgres
+          cargo test --all-targets stall_recovery -- --skip _pg --skip pg_ --skip postgres
+          env -u AGENTDESK_ROOT_DIR cargo test --lib placeholder_live_events -- --skip _pg --skip pg_ --skip postgres
+          env -u AGENTDESK_ROOT_DIR cargo test --lib single_message_panel::tests -- --skip _pg --skip pg_ --skip postgres
+          env -u AGENTDESK_ROOT_DIR cargo test --lib health -- --skip _pg --skip pg_ --skip postgres
+          env -u AGENTDESK_ROOT_DIR cargo test --lib relay_recovery -- --skip _pg --skip pg_ --skip postgres
+          cargo test --all-targets routines -- --skip _pg --skip pg_ --skip postgres
+          cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
+
       - name: cargo check
         run: just cargo-check
 

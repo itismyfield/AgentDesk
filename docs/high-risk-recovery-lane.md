@@ -1,55 +1,43 @@
 # High-Risk Recovery Lane
 
-고위험 회귀는 개별 함수 단위보다 상태 전이, 재시작, outbox 전달 경계, 지연된 worker 복구에서 더 자주 발생한다. 이 문서는 해당 영역을 `unit / state-transition integration / failure-recovery` 3계층으로 고정하고, 항상 실행되는 recovery lane과 남은 테스트 공백을 기록한다.
-
-> **#3035 Phase 1 메모:** 레거시 SQLite 기반 `src/integration_tests.rs` 및 `src/integration_tests/tests/high_risk_recovery.rs` 하네스(legacy-sqlite-tests 게이트, 기본 빌드 미컴파일)는 제거되었다. PG-only 회귀 보호는 `src/high_risk_recovery.rs` 로 이전되며, 아래 `scenario_*` 시나리오 표는 제거된 레거시 하네스 기준 기록(historical)이다. PG 스위트로의 시나리오 재매핑은 후속 Phase 에서 진행한다.
+고위험 회귀는 개별 함수 단위보다 상태 전이, 재시작, outbox 전달 경계에서 더 자주 발생한다. 이 문서는 현재 required recovery lane이 실제로 실행하는 PostgreSQL 기반 테스트와 그 책임을 고정한다.
 
 ## Layer Model
 
 | Layer | Responsibility | Primary code path | Stable command |
 | --- | --- | --- | --- |
-| `unit` | 파일 단위 직렬화/저장 규약, mailbox state, handoff roundtrip | `src/services/discord/inflight.rs`, `src/services/discord/handoff.rs`, `src/services/discord/channel_mailbox.rs` | 모듈별 `cargo test --bin agentdesk <filter>` |
-| `state-transition integration` | DB + policy engine + dispatch 상태 전이 | `src/integration_tests.rs` | 기본 gate: `cargo test --all-targets` |
-| `failure-recovery` | restart / reconcile / outbox delivery / delayed-worker recovery 경계 | `src/integration_tests/tests/high_risk_recovery.rs` | `cargo test --lib high_risk_recovery::` |
+| `unit` | 파일 단위 직렬화/저장 규약, mailbox state, handoff roundtrip | `src/services/discord/inflight.rs`, `src/services/discord/handoff.rs`, `src/services/discord/channel_mailbox.rs` | 모듈별 `cargo test --lib <filter>` |
+| `state-transition integration` | DB + policy engine + dispatch 상태 전이 | `src/integration_tests.rs` 및 각 서비스의 `#[cfg(test)]` 모듈 | 기본 gate: `cargo test --all-targets` |
+| `failure-recovery` | PostgreSQL restart / reconcile / outbox delivery 경계 | `src/high_risk_recovery.rs` | `cargo test --lib high_risk_recovery:: -- --test-threads=1` |
 
 ## Recovery Lane Commands
 
-- 전체 recovery gate: `cargo test --lib high_risk_recovery::`
-- restart / boot reconcile: `cargo test --lib high_risk_recovery::failure_recovery::`
-- outbox delivery boundary: `cargo test --lib high_risk_recovery::outbox_boundary::`
-- delayed worker / watchdog: `cargo test --lib high_risk_recovery::delayed_worker::`
+- 전체 recovery gate: `cargo test --lib high_risk_recovery:: -- --test-threads=1`
+- 개별 재현은 아래 full test name에 `--exact`를 붙인다.
 
-## Curated Scenarios
+## Current Recovery Tests
 
-| Module filter | Representative tests | Why always-on |
-| --- | --- | --- |
-| `high_risk_recovery::failure_recovery::` | `scenario_3_restart_recovery_reconciles_broken_state`, `scenario_251_boot_reconcile_backfills_missing_notify_outbox`, `scenario_251_boot_reconcile_refires_missing_review_dispatch` | 부팅 직후 reconcile이 깨진 review pointer, 누락 outbox, 누락 review dispatch를 복구하는지 확인 |
-| `high_risk_recovery::outbox_boundary::` | `scenario_160_1_outbox_batch_delivers_exactly_once`, `scenario_160_2_recovery_fallback_completes_dispatch`, `scenario_160_4_outbox_processes_all_entries_including_duplicates` | notify exactly-once, fallback completion, duplicate delivery 경계를 고정 |
-| `high_risk_recovery::delayed_worker::` | `scenario_421_deadlock_recent_output_extends_watchdog`, `scenario_421_deadlock_stale_output_only_marks_suspected_deadlock`, `scenario_421_long_turn_alerts_start_at_30_minutes` | worker 지연과 최근 출력 유무에 따라 watchdog 연장/의심/알림 단계가 올바르게 분기되는지 확인 |
-
-## P0 Coverage Inventory
-
-| TEST_PLAN bucket | Existing coverage (code-backed) | Missing / not yet explicit |
-| --- | --- | --- |
-| `Restart During Active Turn` | `src/integration_tests/tests/high_risk_recovery.rs`: `scenario_3_restart_recovery_reconciles_broken_state`; `src/integration_tests/tests/high_risk_recovery.rs`: `scenario_421_deadlock_recent_output_extends_watchdog`; `src/services/discord/channel_mailbox.rs`: `recovery_kickoff_marks_recovery_until_finish_turn` | `restart_during_turn_saves_inflight_state`, `restart_recovery_resumes_completed_turn`, `restart_recovery_reattaches_watcher_if_tmux_alive`, `restart_generation_gating_skips_old_state`, `restart_pending_drains_all_turns_first`, `restart_report_saved_on_graceful_shutdown`, `restart_deferred_until_active_turn_completes` |
-| `Inflight State Lifecycle` | `src/services/discord/inflight.rs`: `test_save_and_load_inflight_state`, `latest_request_owner_user_id_prefers_most_recent_state_across_providers`; `src/integration_tests/tests/high_risk_recovery.rs`: `scenario_421_deadlock_recent_output_extends_watchdog` | `inflight_save_atomic_write`, `inflight_stale_cleanup_over_5min`, `inflight_malformed_json_graceful_skip`, `inflight_provider_mismatch_skip` |
-| `Handoff State` | `src/services/discord/handoff.rs`: `test_save_and_load_handoff`; `src/services/discord/recovery.rs`: `missing_session_recovery_saves_handoff_for_followup_turn`; `src/services/discord/mod.rs`: `handoff_routing_guard_rejects_wrong_agent_settings` | `handoff_dedup_prevents_double_execution`, `handoff_ttl_10min_auto_cleanup` |
-| `Turn Lifecycle` | `src/services/discord/channel_mailbox.rs`: `cancel_active_turn_marks_token_without_clearing_turn_state`, `recovery_kickoff_marks_recovery_until_finish_turn`; `src/integration_tests/tests/high_risk_recovery.rs`: `scenario_421_deadlock_recent_output_extends_watchdog`, `scenario_421_long_turn_alerts_start_at_30_minutes`; `src/services/discord/mod.rs`: `recovery_known_message_ids_include_active_turn_message` | `turn_creates_placeholder_in_discord`, `turn_edits_placeholder_with_final_response`, `turn_increments_global_active_counter`, `turn_decrements_counter_on_completion` |
+| Full test name | Guarded recovery boundary |
+| --- | --- |
+| `high_risk_recovery::boot_reconcile_pg_resets_stale_runtime_rows` | 부팅 reconcile이 stale dispatch runtime row를 안전한 상태로 되돌리는지 검증 |
+| `high_risk_recovery::restart_recovery_does_not_repost_prior_typed_dispatch_delivery` | 재시작 후 이미 기록된 typed dispatch delivery를 다시 게시하지 않는지 검증 |
+| `high_risk_recovery::runtime_reconcile_auto_queue_pending_delivery_orphans_requeues_notify_outbox` | runtime reconcile이 pending-delivery orphan을 notify outbox로 재큐잉하는지 검증 |
+| `high_risk_recovery::boot_reconcile_pg_refires_missing_review_dispatch` | 부팅 reconcile이 누락된 review dispatch를 다시 생성하는지 검증 |
+| `high_risk_recovery::completed_queue_review_drift_reconcile_promotes_only_stale_done_entries` | completed queue drift reconcile이 stale done entry만 승격하는지 검증 |
 
 ## Release gate 축 매핑
 
-`#1011` release gate hardening 감사로그에 따라 recovery lane 은 아래 4 축 중 하나라도 0 개 시나리오가 되면 release gate 자격을 잃는다. [`docs/ci/release-gates.md`](./ci/release-gates.md#3-high-risk-recovery-lane-test-axes) 의 요약과 동기화한다.
+[`docs/ci/release-gates.md`](./ci/release-gates.md#3-high-risk-recovery-lane-test-axes)의 요약과 동기화한다. 현재 5개 테스트가 실제 보장하는 축만 열거하며, 제거된 legacy `scenario_*` 이름을 coverage로 계산하지 않는다.
 
-| Axis | Module filter | Anchored scenarios |
-| --- | --- | --- |
-| Live turn 보존 | `high_risk_recovery::failure_recovery::` | `scenario_3_restart_recovery_reconciles_broken_state`, `scenario_667_restart_recovery_reconciles_duplicate_review_dispatches` |
-| Watcher reattach | `high_risk_recovery::delayed_worker::` | `scenario_421_deadlock_recent_output_extends_watchdog`, `scenario_421_deadlock_stale_output_only_marks_suspected_deadlock`, `scenario_421_long_turn_alerts_start_at_30_minutes` |
-| Dispatch/outbox idempotency | `high_risk_recovery::outbox_boundary::` | `scenario_160_1_outbox_batch_delivers_exactly_once`, `scenario_160_2_recovery_fallback_completes_dispatch`, `scenario_160_4_outbox_processes_all_entries_including_duplicates`, `scenario_160_6_notify_success_keeps_completed_dispatch_terminal` |
-| Queue loss 방지 | `high_risk_recovery::failure_recovery::` + `idle_session_cleanup::` | `scenario_251_boot_reconcile_backfills_missing_notify_outbox`, `scenario_251_boot_reconcile_refires_missing_review_dispatch`, `scenario_251_boot_reconcile_resets_broken_auto_queue_entries`, `scenario_492_idle_session_with_active_dispatch_uses_180_minute_safety_ttl` |
+| Axis | Anchored tests |
+| --- | --- |
+| Restart/runtime state repair | `boot_reconcile_pg_resets_stale_runtime_rows`, `completed_queue_review_drift_reconcile_promotes_only_stale_done_entries` |
+| Dispatch delivery idempotency | `restart_recovery_does_not_repost_prior_typed_dispatch_delivery` |
+| Dispatch/outbox loss prevention | `runtime_reconcile_auto_queue_pending_delivery_orphans_requeues_notify_outbox`, `boot_reconcile_pg_refires_missing_review_dispatch` |
 
-새 시나리오는 위 4 축 중 하나에 귀속시키고 표 + release-gates.md 를 동시 갱신.
+새 시나리오는 위 축 중 하나에 귀속시키고 이 표와 `release-gates.md`를 동시에 갱신한다. watcher reattach나 delayed-worker watchdog처럼 현재 이 파일에 없는 경계는 다른 테스트 모듈이 소유하며, 이 lane의 5개 테스트가 대신 보장한다고 문서화하지 않는다.
 
 ## Notes
 
-- `cargo test --all-targets`는 여전히 전체 회귀 gate다. recovery lane은 이를 대체하지 않고, restart/reconcile/outbox 계열을 별도 required job으로 승격한다.
-- inventory는 현재 "existing vs missing"을 분리해 기록한다. missing 항목은 lane 밖으로 숨기지 않고 문서에 남겨 다음 테스트 투자 우선순위를 고정한다.
+- `cargo test --all-targets`는 여전히 전체 회귀 gate다. recovery lane은 이를 대체하지 않고 PostgreSQL restart/reconcile/outbox 경계를 별도 required job으로 승격한다.
+- `src/high_risk_recovery.rs`의 테스트 수와 이름은 `cargo test --lib high_risk_recovery:: -- --list`로 확인한다. 필터가 0개 테스트를 선택하면 lane drift로 취급한다.

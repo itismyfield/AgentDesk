@@ -110,6 +110,7 @@ class LaneFilter:
         default=DEFAULT_PR_TEST_PATHS, compare=False
     )
     target: str = field(default="lib", compare=False)
+    authority: str = field(default="", compare=False)
 
     def selects(self, test_name: str) -> bool:
         """Model libtest's union of positives, exactness, and skip vetoes."""
@@ -119,7 +120,11 @@ class LaneFilter:
             test_name == positive if self.exact else positive in test_name
             for positive in self.positives
         )
-        return positive_match and not any(skip in test_name for skip in self.skips)
+        skip_match = any(
+            test_name == skip if self.exact else skip in test_name
+            for skip in self.skips
+        )
+        return positive_match and not skip_match
 
     def fully_selects(self, module: str, test_names: Iterable[str]) -> bool:
         """Whether this command selects every discovered test in the module.
@@ -143,10 +148,19 @@ class LaneFilter:
         )
 
     def is_applicable_to(self, changed_paths: Iterable[str]) -> bool:
-        return any(
-            fnmatch.fnmatch(path, pattern)
-            for path in changed_paths
+        normalized_paths = tuple(path.replace("\\", "/") for path in changed_paths)
+        positive_patterns = tuple(
+            pattern for pattern in self.changed_paths if not pattern.startswith("!")
+        )
+        excluded_patterns = tuple(
+            pattern.removeprefix("!")
             for pattern in self.changed_paths
+            if pattern.startswith("!")
+        )
+        return any(
+            any(fnmatch.fnmatch(path, pattern) for pattern in positive_patterns)
+            and not any(fnmatch.fnmatch(path, pattern) for pattern in excluded_patterns)
+            for path in normalized_paths
         )
 
 
@@ -156,6 +170,7 @@ class SourceInventory:
     test_fingerprints: dict[str, str]
     unsupported_tests: tuple[str, ...] = ()
     test_modules: dict[str, str] = field(default_factory=dict)
+    test_sources: dict[str, str] = field(default_factory=dict)
 
 
 ChangedTest = provenance.ChangedTest
@@ -596,6 +611,7 @@ def discover_source_inventory(repo_root: Path) -> SourceInventory:
     include_mounts, include_failures = _include_mounts(repo_root, src_root)
     physical_inventory: dict[tuple[str, ...], set[tuple[str, ...]]] = {}
     physical_fingerprints: dict[tuple[str, ...], str] = {}
+    physical_sources: dict[tuple[str, ...], str] = {}
     raw_aliases: dict[tuple[str, ...], tuple[str, ...]] = {}
     unsupported: list[str] = list(include_failures)
 
@@ -625,7 +641,9 @@ def discover_source_inventory(repo_root: Path) -> SourceInventory:
                 tuple(test.split("::")) for test in fingerprints
             )
         for test_name, fingerprint in fingerprints.items():
-            physical_fingerprints[tuple(test_name.split("::"))] = fingerprint
+            physical_name = tuple(test_name.split("::"))
+            physical_fingerprints[physical_name] = fingerprint
+            physical_sources[physical_name] = path.relative_to(repo_root).as_posix()
         for logical, relative_target, inline_parents in aliases:
             target = (path.parent.joinpath(*inline_parents) / relative_target).resolve()
             try:
@@ -655,6 +673,7 @@ def discover_source_inventory(repo_root: Path) -> SourceInventory:
 
     inventory: dict[str, set[str]] = {}
     fingerprints: dict[str, str] = {}
+    test_sources: dict[str, str] = {}
     for physical_module, physical_tests in physical_inventory.items():
         module = "::".join(_normalize_alias_path(physical_module, aliases))
         inventory.setdefault(module, set()).update(
@@ -662,7 +681,9 @@ def discover_source_inventory(repo_root: Path) -> SourceInventory:
             for test in physical_tests
         )
     for physical_test, fingerprint in physical_fingerprints.items():
-        fingerprints["::".join(_normalize_alias_path(physical_test, aliases))] = fingerprint
+        normalized_test = "::".join(_normalize_alias_path(physical_test, aliases))
+        fingerprints[normalized_test] = fingerprint
+        test_sources[normalized_test] = physical_sources[physical_test]
     test_modules = {
         test_name: module
         for module, test_names in inventory.items()
@@ -679,7 +700,11 @@ def discover_source_inventory(repo_root: Path) -> SourceInventory:
         if candidates:
             test_modules[test_name] = max(candidates, key=len)
     return SourceInventory(
-        inventory, fingerprints, tuple(unsupported), test_modules
+        inventory,
+        fingerprints,
+        tuple(unsupported),
+        test_modules,
+        test_sources,
     )
 
 
@@ -714,6 +739,7 @@ def cargo_test_filter(
     *,
     provenance: str = "",
     changed_paths: tuple[str, ...] = DEFAULT_PR_TEST_PATHS,
+    authority: str = "",
 ) -> LaneFilter | None:
     """Parse one library cargo-test command's positive and skip filters."""
     cargo = command.find("cargo test")
@@ -789,6 +815,7 @@ def cargo_test_filter(
         provenance,
         changed_paths,
         target,
+        authority,
     )
 
 
