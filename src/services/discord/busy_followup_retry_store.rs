@@ -345,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_bindings_are_swept_by_retry_timestamp_or_file_age_4888() {
+    fn stale_bindings_are_swept_by_retry_timestamp_4888() {
         with_root(|| {
             let provider = ProviderKind::Claude;
             let root = runtime_store::discord_busy_followup_retries_root().expect("store root");
@@ -381,6 +381,44 @@ mod tests {
             );
             assert!(load_in_root(&root, &provider, 48_884, 48_885).is_none());
             assert!(load_in_root(&root, &provider, 48_884, 48_886).is_some());
+        });
+    }
+
+    #[test]
+    fn crash_before_first_retry_binding_is_swept_by_file_mtime_4888() {
+        with_root(|| {
+            let provider = ProviderKind::Claude;
+            let root = runtime_store::discord_busy_followup_retries_root().expect("store root");
+            let channel_id = 48_887;
+            let user_msg_id = 48_888;
+            save_in_root(
+                &root,
+                &provider,
+                channel_id,
+                user_msg_id,
+                BusyFollowupRetryState {
+                    notice_message_id: 902,
+                    busy_retry_count: 0,
+                    first_busy_retry_at_ms: 0,
+                },
+            )
+            .expect("save crash-before-retry binding");
+            let path = input_file_path_in_root(&root, &provider, channel_id, user_msg_id);
+            let stale_mtime_ms = 2_000;
+            filetime::set_file_mtime(
+                &path,
+                filetime::FileTime::from_unix_time(stale_mtime_ms / 1_000, 0),
+            )
+            .expect("age crash-before-retry binding");
+
+            assert_eq!(
+                sweep_expired_in_root_at(
+                    &root,
+                    stale_mtime_ms + BUSY_RETRY_STORE_TTL.as_millis() as u64,
+                ),
+                1
+            );
+            assert!(load_in_root(&root, &provider, channel_id, user_msg_id).is_none());
         });
     }
 

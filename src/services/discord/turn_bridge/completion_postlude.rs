@@ -56,7 +56,7 @@ pub(super) async fn run_completion_postlude(
     let status_panel_msg_id = state.status_panel_msg_id;
     let mut last_status_panel_text = state.last_status_panel_text;
     let completion_footer_terminal_text = state.completion_footer_terminal_text;
-    let busy_requeue_outcome = state.busy_requeue_outcome;
+    let mut busy_requeue_outcome = state.busy_requeue_outcome;
     let spin_idx = state.spin_idx;
     let status_panel_generation = state.status_panel_generation;
     let preserve_inflight_for_cleanup_retry = state.preserve_inflight_for_cleanup_retry;
@@ -134,37 +134,53 @@ pub(super) async fn run_completion_postlude(
         }
         let indicator =
             super::super::single_message_panel::single_message_panel_spinner_frame(spin_idx);
-        status_panel_completion_committed = complete_bridge_terminal_footer_or_status_panel(
-            shared_owned.as_ref(),
-            gateway.as_ref(),
-            channel_id,
-            current_msg_id,
-            user_msg_id,
-            status_panel_msg_id,
-            &provider,
-            status_panel_started_at,
-            &mut last_status_panel_text,
-            single_message_panel_footer_mode,
-            is_external_input_tui_direct, // #3959: suppress mirror chrome footer
-            completion_footer_terminal_text.as_deref(),
-            indicator,
-            status_panel_generation, // #3805 P2: prove this turn's panel epoch
-            inflight_state.tmux_session_name.as_deref(),
-        )
-        .await;
-    }
-
-    // The busy notice is shared across attempts. Arm N+1 only after N's final
-    // awaited footer/status-panel edit, so a delayed predecessor cannot overwrite
-    // its successor. This function has no early return before this boundary.
-    if let Some(outcome) = busy_requeue_outcome {
-        outcome.schedule_kickoff_after_terminal_card_delivery(
-            &shared_owned,
-            &provider,
-            channel_id,
-            true,
-            "claude_tui_followup_requeue_after_completion_postlude_card_delivery",
-        );
+        let (terminal_card_commit, committed) =
+            followup_requeue::TerminalCardDeliveryCommitted::after(
+                complete_bridge_terminal_footer_or_status_panel(
+                    shared_owned.as_ref(),
+                    gateway.as_ref(),
+                    channel_id,
+                    current_msg_id,
+                    user_msg_id,
+                    status_panel_msg_id,
+                    &provider,
+                    status_panel_started_at,
+                    &mut last_status_panel_text,
+                    single_message_panel_footer_mode,
+                    is_external_input_tui_direct, // #3959: suppress mirror chrome footer
+                    completion_footer_terminal_text.as_deref(),
+                    indicator,
+                    status_panel_generation, // #3805 P2: prove this turn's panel epoch
+                    inflight_state.tmux_session_name.as_deref(),
+                ),
+            )
+            .await;
+        status_panel_completion_committed = committed;
+        if let Some(outcome) = busy_requeue_outcome.take() {
+            terminal_card_commit.publish_and_arm_retry(
+                Some(outcome),
+                &shared_owned,
+                &provider,
+                channel_id,
+                user_msg_id.map(MessageId::get),
+                "claude_tui_followup_requeue_after_completion_postlude_card_delivery",
+            );
+        }
+    } else {
+        // No completion-card write is needed, so entry to this branch is itself
+        // the terminal-card boundary consumed by both queue-admission paths.
+        let (terminal_card_commit, ()) =
+            followup_requeue::TerminalCardDeliveryCommitted::after(async {}).await;
+        if let Some(outcome) = busy_requeue_outcome.take() {
+            terminal_card_commit.publish_and_arm_retry(
+                Some(outcome),
+                &shared_owned,
+                &provider,
+                channel_id,
+                user_msg_id.map(MessageId::get),
+                "claude_tui_followup_requeue_after_completion_postlude_card_delivery",
+            );
+        }
     }
 
     if status_panel_terminal_committed

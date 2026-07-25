@@ -536,7 +536,11 @@ pub(super) async fn run_post_loop_finalize(
                     } else {
                         super::super::turn_finalizer::TerminalEvent::Complete
                     },
-                    super::super::turn_finalizer::FinalizeContext::bridge(),
+                    if claude_tui_followup_pre_submit_requeue_candidate {
+                        super::super::turn_finalizer::FinalizeContext::bridge_before_terminal_card_commit()
+                    } else {
+                        super::super::turn_finalizer::FinalizeContext::bridge()
+                    },
                     shared_owned.clone(),
                 )
                 .await;
@@ -617,7 +621,11 @@ pub(super) async fn run_post_loop_finalize(
                 } else {
                     super::super::turn_finalizer::TerminalEvent::Complete
                 },
-                super::super::turn_finalizer::FinalizeContext::bridge(),
+                if claude_tui_followup_pre_submit_requeue_candidate {
+                    super::super::turn_finalizer::FinalizeContext::bridge_before_terminal_card_commit()
+                } else {
+                    super::super::turn_finalizer::FinalizeContext::bridge()
+                },
                 shared_owned.clone(),
             )
             .await;

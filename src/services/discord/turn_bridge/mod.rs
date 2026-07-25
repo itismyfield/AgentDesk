@@ -879,7 +879,6 @@ pub(super) fn spawn_turn_bridge(
             terminal_outcome_delivery_output.bridge_should_emit_completion;
         let completion_footer_terminal_text =
             terminal_outcome_delivery_output.completion_footer_terminal_text;
-        let busy_requeue_outcome = terminal_outcome_delivery_output.busy_requeue_outcome;
         let preserve_inflight_for_cleanup_retry =
             terminal_outcome_delivery_output.preserve_inflight_for_cleanup_retry;
         let bridge_skip_holder_owns_inflight =
@@ -893,7 +892,6 @@ pub(super) fn spawn_turn_bridge(
             terminal_outcome_delivery_output.terminal_full_replay_cleanup_msg_ids;
         let _response_sent_offset = terminal_outcome_delivery_output.response_sent_offset;
         let turn_start = terminal_outcome_delivery_output.turn_start;
-
         completion_postlude::run_completion_postlude(
             completion_postlude::CompletionPostludeContext {
                 shared_owned,
@@ -933,7 +931,7 @@ pub(super) fn spawn_turn_bridge(
                 status_panel_msg_id,
                 last_status_panel_text,
                 completion_footer_terminal_text,
-                busy_requeue_outcome,
+                busy_requeue_outcome: terminal_outcome_delivery_output.busy_requeue_outcome,
                 spin_idx,
                 status_panel_generation,
                 preserve_inflight_for_cleanup_retry,

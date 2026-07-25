@@ -624,11 +624,20 @@ pub(in crate::services::discord) fn spawn_turn_completion_idle_queue_listener(
         loop {
             match rx.recv().await {
                 Ok(event) => {
+                    if !event.queue_is_eligible() {
+                        tracing::debug!(
+                            target: "agentdesk::discord::turn_completion_events",
+                            provider = provider.as_str(),
+                            channel_id = event.channel_id.get(),
+                            "mailbox release observed before terminal card commit; queue kick withheld"
+                        );
+                        continue;
+                    }
                     tracing::debug!(
                         target: "agentdesk::discord::turn_completion_events",
                         provider = provider.as_str(),
                         channel_id = event.channel_id.get(),
-                        "turn completion event received; kicking idle queue channel"
+                        "queue-eligible completion event received; kicking idle queue channel"
                     );
                     let outcome = kick_idle_queue_channel_if_context_available(
                         &shared,

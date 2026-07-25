@@ -29,19 +29,36 @@ pub(super) struct FollowupRequeueOutcome {
     pub(super) notice_message_id: MessageId,
 }
 
-impl FollowupRequeueOutcome {
-    /// Arm the next retry only after the caller has completed this attempt's
-    /// final completion-postlude card edit. This sequencing prevents the successor
-    /// from finishing on the shared notice before the predecessor's last edit.
-    pub(super) fn schedule_kickoff_after_terminal_card_delivery(
+/// Proof produced only after the completion-postlude card write future returns.
+/// Both the direct retry arm and the completion listener consume this boundary;
+/// callers cannot synthesize a pre-write `true` flag.
+pub(super) struct TerminalCardDeliveryCommitted;
+
+impl TerminalCardDeliveryCommitted {
+    pub(super) async fn after<F, T>(delivery: F) -> (Self, T)
+    where
+        F: std::future::Future<Output = T>,
+    {
+        let output = delivery.await;
+        (Self, output)
+    }
+
+    pub(super) fn publish_and_arm_retry(
         self,
+        outcome: Option<FollowupRequeueOutcome>,
         shared: &Arc<SharedData>,
         provider: &ProviderKind,
         channel_id: ChannelId,
-        completion_card_boundary_crossed: bool,
+        turn_id: Option<u64>,
         reason: &'static str,
     ) -> bool {
-        if !completion_card_boundary_crossed || !self.requeued || self.retry_capped {
+        super::super::turn_completion_events::publish_queue_eligible_completion_event(
+            shared, channel_id, turn_id,
+        );
+        let Some(outcome) = outcome else {
+            return false;
+        };
+        if !outcome.requeued || outcome.retry_capped {
             return false;
         }
         super::super::schedule_deferred_idle_queue_kickoff(
@@ -355,23 +372,61 @@ mod tests {
             0,
             "requeue alone must not expose the successor before terminal card delivery"
         );
-        assert!(
-            !outcome.schedule_kickoff_after_terminal_card_delivery(
-                &shared,
-                &provider,
+        let mut completion_events =
+            super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+        super::super::super::turn_completion_events::publish_turn_completion_event(
+            &shared,
+            super::super::super::turn_completion_events::TurnCompletionEvent::mailbox_released(
                 channel_id,
-                false,
-                "test_busy_retry_before_completion_postlude_card_delivery",
+                Some(message_id.get()),
             ),
-            "the successor must remain hidden before the completion-postlude card boundary"
         );
-        assert!(outcome.schedule_kickoff_after_terminal_card_delivery(
+        assert!(
+            !completion_events
+                .try_recv()
+                .expect("mailbox release event")
+                .queue_is_eligible(),
+            "mailbox release must not make the successor queue-eligible"
+        );
+        let (delivery_tx, delivery_rx) = tokio::sync::oneshot::channel::<()>();
+        let boundary = TerminalCardDeliveryCommitted::after(async move {
+            let _ = delivery_rx.await;
+        });
+        tokio::pin!(boundary);
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(
+            matches!(
+                std::future::Future::poll(boundary.as_mut(), &mut cx),
+                std::task::Poll::Pending
+            ),
+            "the production commit token must remain unavailable while the final edit is pending"
+        );
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "neither direct nor listener kickoff may run before the edit completes"
+        );
+        delivery_tx.send(()).expect("release final edit");
+        let (boundary, ()) = boundary.await;
+        assert!(boundary.publish_and_arm_retry(
+            Some(outcome),
             &shared,
             &provider,
             channel_id,
-            true,
-            "test_busy_retry_after_terminal_card_delivery",
+            Some(message_id.get()),
+            "test_busy_retry_after_completion_postlude_card_delivery",
         ));
+        assert!(
+            completion_events
+                .try_recv()
+                .expect("queue-eligible completion event")
+                .queue_is_eligible(),
+            "the listener receives eligibility only from the post-edit commit token"
+        );
         assert_eq!(
             shared
                 .restart
@@ -427,12 +482,14 @@ mod tests {
         .await;
         assert!(outcome.requeued);
         assert!(outcome.retry_capped);
+        let (boundary, ()) = TerminalCardDeliveryCommitted::after(async {}).await;
         assert!(
-            !outcome.schedule_kickoff_after_terminal_card_delivery(
+            !boundary.publish_and_arm_retry(
+                Some(outcome),
                 &shared,
                 &provider,
                 channel_id,
-                true,
+                Some(message_id.get()),
                 "test_capped_busy_retry_after_terminal_card_delivery",
             ),
             "a capped retry must not arm a successor after terminal delivery"

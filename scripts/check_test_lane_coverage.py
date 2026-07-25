@@ -481,6 +481,7 @@ def discover_lane_filters(repo_root: Path) -> tuple[LaneFilter, ...]:
     workflows = (
         (repo_root / ".github/workflows/ci-main.yml").read_text(encoding="utf-8"),
         (repo_root / ".github/workflows/ci-pr.yml").read_text(encoding="utf-8"),
+        (repo_root / ".github/workflows/ci-macos-trusted.yml").read_text(encoding="utf-8"),
     )
 
     commands = list(just_recipe_commands(just_text, "test-non-pg"))

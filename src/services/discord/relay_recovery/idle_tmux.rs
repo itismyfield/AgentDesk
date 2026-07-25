@@ -114,6 +114,7 @@ fn relay_recovery_cancel_finalize_context() -> super::turn_finalizer::FinalizeCo
         drain_voice: false,
         kickoff_queue: true,
         expected_idempotent_guard_miss: false,
+        defer_queue_completion: false,
     }
 }
 

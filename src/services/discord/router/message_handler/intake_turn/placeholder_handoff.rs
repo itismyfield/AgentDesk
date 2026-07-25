@@ -1,5 +1,47 @@
 use super::*;
 
+fn apply_bound_notice_edit_result(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    user_msg_id: MessageId,
+    existing: MessageId,
+    result: Result<(), super::super::super::super::gateway::ClassifiedOutboundEditError>,
+) -> Result<(), Option<MessageId>> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(
+            super::super::super::super::gateway::ClassifiedOutboundEditError::ConfirmedMissing(
+                error,
+            ),
+        ) => {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                user_msg_id = user_msg_id.get(),
+                notice_message_id = existing.get(),
+                error = %error,
+                "busy follow-up notice is confirmed missing; clearing its binding before replacement"
+            );
+            let _ = super::super::super::super::busy_followup_retry_store::clear_if_current(
+                provider,
+                channel_id.get(),
+                user_msg_id.get(),
+                existing.get(),
+            );
+            Err(None)
+        }
+        Err(super::super::super::super::gateway::ClassifiedOutboundEditError::Other(error)) => {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                user_msg_id = user_msg_id.get(),
+                notice_message_id = existing.get(),
+                error = %error,
+                "busy follow-up notice edit outcome is ambiguous; preserving binding and retry budget"
+            );
+            Err(Some(existing))
+        }
+    }
+}
+
 pub(super) async fn reuse_bound_busy_notice(
     http: &Arc<serenity::http::Http>,
     shared: &Arc<SharedData>,
@@ -14,28 +56,21 @@ pub(super) async fn reuse_bound_busy_notice(
         user_msg_id.get(),
     )?;
     let existing = MessageId::new(binding.notice_message_id);
-    if let Err(error) = super::super::super::super::gateway::edit_intake_placeholder(
-        http.clone(),
-        shared.clone(),
+    match apply_bound_notice_edit_result(
+        provider,
         channel_id,
+        user_msg_id,
         existing,
-    )
-    .await
-    {
-        tracing::warn!(
-            channel_id = channel_id.get(),
-            user_msg_id = user_msg_id.get(),
-            notice_message_id = existing.get(),
-            error = %error,
-            "busy follow-up notice edit failed; dropping the stale binding and posting a fresh anchor"
-        );
-        let _ = super::super::super::super::busy_followup_retry_store::clear_if_current(
-            provider,
-            channel_id.get(),
-            user_msg_id.get(),
-            existing.get(),
-        );
-        return None;
+        super::super::super::super::gateway::edit_intake_placeholder(
+            http.clone(),
+            shared.clone(),
+            channel_id,
+            existing,
+        )
+        .await,
+    ) {
+        Ok(()) => {}
+        Err(existing) => return existing,
     }
 
     // The dispatch hand-off already consumed this message's queued-placeholder
@@ -56,4 +91,88 @@ pub(super) async fn reuse_bound_busy_notice(
         );
     }
     Some(existing)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::super::gateway::ClassifiedOutboundEditError;
+    use super::*;
+
+    #[test]
+    fn only_confirmed_missing_replaces_bound_busy_notice_4888() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::tempdir().expect("runtime root");
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(100_000_004_888_401);
+        let user_msg_id = MessageId::new(100_000_004_888_402);
+        let notice = MessageId::new(100_000_004_888_403);
+        super::super::super::super::busy_followup_retry_store::bind_notice_if_absent(
+            &provider,
+            channel_id.get(),
+            user_msg_id.get(),
+            notice.get(),
+        )
+        .expect("bind notice");
+        super::super::super::super::busy_followup_retry_store::record_busy_retry(
+            &provider,
+            channel_id.get(),
+            user_msg_id.get(),
+            notice.get(),
+        )
+        .expect("seed aggregate retry count");
+
+        for reason in [
+            "429 rate limited",
+            "500 server error",
+            "503 unavailable",
+            "network timeout",
+        ] {
+            assert_eq!(
+                apply_bound_notice_edit_result(
+                    &provider,
+                    channel_id,
+                    user_msg_id,
+                    notice,
+                    Err(ClassifiedOutboundEditError::Other(reason.to_string())),
+                ),
+                Err(Some(notice))
+            );
+            let preserved = super::super::super::super::busy_followup_retry_store::load(
+                &provider,
+                channel_id.get(),
+                user_msg_id.get(),
+            )
+            .expect("ambiguous failure preserves binding");
+            assert_eq!(preserved.notice_message_id, notice.get());
+            assert_eq!(preserved.busy_retry_count, 1);
+        }
+
+        assert_eq!(
+            apply_bound_notice_edit_result(
+                &provider,
+                channel_id,
+                user_msg_id,
+                notice,
+                Err(ClassifiedOutboundEditError::ConfirmedMissing(
+                    "404 Unknown Message (10008)".to_string(),
+                )),
+            ),
+            Err(None)
+        );
+        assert!(
+            super::super::super::super::busy_followup_retry_store::load(
+                &provider,
+                channel_id.get(),
+                user_msg_id.get(),
+            )
+            .is_none(),
+            "only authoritative missing permits the replacement path"
+        );
+    }
 }

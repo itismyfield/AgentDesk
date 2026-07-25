@@ -33,12 +33,8 @@ pub(in crate::services::discord) async fn edit_intake_placeholder(
     shared: Arc<SharedData>,
     channel_id: ChannelId,
     message_id: MessageId,
-) -> Result<(), String> {
-    let client = SerenityTurnOutboundClient { http, shared };
-    let msg = gateway_outbound_message(channel_id, "...")
-        .with_operation(OutboundOperation::Edit { message_id });
-    outbound_delivery_error(deliver_outbound(&client, shared_outbound_deduper(), msg, None).await)
-        .map(|_| ())
+) -> Result<(), ClassifiedOutboundEditError> {
+    edit_outbound_message_classified(http, shared, channel_id, message_id, "...").await
 }
 
 pub(in crate::services::discord) async fn send_intake_placeholder(
@@ -214,6 +210,24 @@ pub(in crate::services::discord) enum ClassifiedOutboundEditError {
     Other(String),
 }
 
+fn classify_outbound_edit_result(
+    result: DeliveryResult,
+) -> Result<(), ClassifiedOutboundEditError> {
+    match result {
+        DeliveryResult::Sent { .. }
+        | DeliveryResult::Fallback { .. }
+        | DeliveryResult::Duplicate { .. } => Ok(()),
+        DeliveryResult::ConfirmedMissing { reason } => {
+            Err(ClassifiedOutboundEditError::ConfirmedMissing(reason))
+        }
+        DeliveryResult::Skip { reason }
+        | DeliveryResult::TransientFailure { reason }
+        | DeliveryResult::PermanentFailure { reason } => {
+            Err(ClassifiedOutboundEditError::Other(reason))
+        }
+    }
+}
+
 impl std::fmt::Display for ClassifiedOutboundEditError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -232,17 +246,44 @@ pub(in crate::services::discord) async fn edit_outbound_message_classified(
     let client = SerenityTurnOutboundClient { http, shared };
     let msg = gateway_outbound_message(channel_id, content)
         .with_operation(OutboundOperation::Edit { message_id });
-    match deliver_outbound(&client, shared_outbound_deduper(), msg, None).await {
-        DeliveryResult::Sent { .. }
-        | DeliveryResult::Fallback { .. }
-        | DeliveryResult::Duplicate { .. } => Ok(()),
-        DeliveryResult::ConfirmedMissing { reason } => {
-            Err(ClassifiedOutboundEditError::ConfirmedMissing(reason))
-        }
-        DeliveryResult::Skip { reason }
-        | DeliveryResult::TransientFailure { reason }
-        | DeliveryResult::PermanentFailure { reason } => {
-            Err(ClassifiedOutboundEditError::Other(reason))
+    classify_outbound_edit_result(
+        deliver_outbound(&client, shared_outbound_deduper(), msg, None).await,
+    )
+}
+
+#[cfg(test)]
+mod classified_edit_tests {
+    use super::*;
+
+    #[test]
+    fn only_authoritative_missing_allows_placeholder_replacement_4888() {
+        assert!(matches!(
+            classify_outbound_edit_result(DeliveryResult::ConfirmedMissing {
+                reason: "404 Unknown Message (10008)".to_string(),
+            }),
+            Err(ClassifiedOutboundEditError::ConfirmedMissing(_))
+        ));
+        for result in [
+            DeliveryResult::TransientFailure {
+                reason: "429 rate limited".to_string(),
+            },
+            DeliveryResult::TransientFailure {
+                reason: "500 server error".to_string(),
+            },
+            DeliveryResult::TransientFailure {
+                reason: "503 unavailable".to_string(),
+            },
+            DeliveryResult::TransientFailure {
+                reason: "network timeout".to_string(),
+            },
+            DeliveryResult::PermanentFailure {
+                reason: "403 forbidden".to_string(),
+            },
+        ] {
+            assert!(matches!(
+                classify_outbound_edit_result(result),
+                Err(ClassifiedOutboundEditError::Other(_))
+            ));
         }
     }
 }

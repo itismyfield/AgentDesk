@@ -416,13 +416,23 @@ pub(super) async fn already_finalized_active_state(
         key.user_msg_id,
     );
 
-    let finish = super::super::mailbox_finish_turn_if_matches(
-        shared,
-        provider,
-        key.channel_id,
-        serenity::model::id::MessageId::new(key.user_msg_id),
-    )
-    .await;
+    let finish = if ctx.defer_queue_completion {
+        super::super::mailbox_finish_turn_if_matches_before_terminal_card_commit(
+            shared,
+            provider,
+            key.channel_id,
+            serenity::model::id::MessageId::new(key.user_msg_id),
+        )
+        .await
+    } else {
+        super::super::mailbox_finish_turn_if_matches(
+            shared,
+            provider,
+            key.channel_id,
+            serenity::model::id::MessageId::new(key.user_msg_id),
+        )
+        .await
+    };
     let Some(token) = finish.removed_token.as_ref() else {
         return;
     };

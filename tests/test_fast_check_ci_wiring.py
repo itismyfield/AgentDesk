@@ -11,6 +11,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
 NIGHTLY_WORKFLOW = REPO_ROOT / ".github/workflows/ci-nightly.yml"
+TRUSTED_MACOS_WORKFLOW = REPO_ROOT / ".github/workflows/ci-macos-trusted.yml"
+BUSY_RETRY_4888_TEST_COMMAND = (
+    "env -u AGENTDESK_ROOT_DIR cargo test --lib _4888 -- --test-threads=1"
+)
 
 # This manifest is intentionally exact: changing the retained test recipe must also
 # update this test deliberately. The duplication is a drift-prevention gate, not an
@@ -180,6 +184,16 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertIn(
             "cargo test --lib discord_thread_create -- --test-threads=1",
             job_block(nightly, "full_windows"),
+        )
+
+    def test_trusted_macos_runs_busy_retry_regressions_on_both_runner_paths(self) -> None:
+        workflow = TRUSTED_MACOS_WORKFLOW.read_text(encoding="utf-8")
+        hosted = job_block(workflow, "macos_hosted")
+        self_hosted = job_block(workflow, "macos_self_hosted")
+
+        self.assertEqual(hosted.count(BUSY_RETRY_4888_TEST_COMMAND), 1)
+        self.assertEqual(
+            self_hosted.count(f"nice -n 10 {BUSY_RETRY_4888_TEST_COMMAND}"), 1
         )
 
     def test_ci_script_checks_runs_this_contract(self) -> None:

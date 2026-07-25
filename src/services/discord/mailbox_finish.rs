@@ -90,11 +90,12 @@ pub(in crate::services::discord) async fn mailbox_finish_turn(
 /// On mismatch it returns `removed_token = None`, exactly like an idempotent
 /// second `mailbox_finish_turn`, so the finalizer's counter-decrement gate is
 /// a no-op.
-pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches(
+async fn mailbox_finish_turn_if_matches_inner(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
     expected_user_message_id: serenity::model::id::MessageId,
+    defer_queue_completion: bool,
 ) -> FinishTurnResult {
     let result = shared
         .mailbox(channel_id)
@@ -111,13 +112,53 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches(
     if result.removed_token.is_some() {
         shared.mailboxes.recovery_done(channel_id).mark_done();
     }
-    turn_completion_events::publish_mailbox_release_completion_event(
-        shared,
-        channel_id,
-        Some(expected_user_message_id.get()),
-        &result,
-    );
+    if defer_queue_completion {
+        turn_completion_events::publish_deferred_mailbox_release_completion_event(
+            shared,
+            channel_id,
+            Some(expected_user_message_id.get()),
+            &result,
+        );
+    } else if result.removed_token.is_some() {
+        turn_completion_events::publish_queue_eligible_completion_event(
+            shared,
+            channel_id,
+            Some(expected_user_message_id.get()),
+        );
+    }
     result
+}
+
+pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    expected_user_message_id: serenity::model::id::MessageId,
+) -> FinishTurnResult {
+    mailbox_finish_turn_if_matches_inner(
+        shared,
+        provider,
+        channel_id,
+        expected_user_message_id,
+        false,
+    )
+    .await
+}
+
+pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches_before_terminal_card_commit(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    expected_user_message_id: serenity::model::id::MessageId,
+) -> FinishTurnResult {
+    mailbox_finish_turn_if_matches_inner(
+        shared,
+        provider,
+        channel_id,
+        expected_user_message_id,
+        true,
+    )
+    .await
 }
 
 async fn mailbox_finish_turn_if_matches_episode_started_before_inner(

@@ -694,6 +694,7 @@ fn stale_foreign_cancel_finalize_context() -> super::turn_finalizer::FinalizeCon
         drain_voice: false,
         kickoff_queue: true,
         expected_idempotent_guard_miss: false,
+        defer_queue_completion: false,
     }
 }
 
@@ -704,6 +705,7 @@ fn committed_foreign_complete_finalize_context() -> super::turn_finalizer::Final
         drain_voice: false,
         kickoff_queue: true,
         expected_idempotent_guard_miss: false,
+        defer_queue_completion: false,
     }
 }
 
