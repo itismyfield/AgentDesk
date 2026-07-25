@@ -8,6 +8,11 @@ use crate::services::provider::ProviderKind;
 
 const DISCORD_SELECT_MENU_OPTION_LIMIT: usize = 25;
 const EXPLICIT_MODEL_OPTION_LIMIT: usize = DISCORD_SELECT_MENU_OPTION_LIMIT - 1;
+const DISCORD_SELECT_MENU_TEXT_LIMIT: usize = 100;
+
+fn truncate_picker_text(raw: &str) -> String {
+    raw.chars().take(DISCORD_SELECT_MENU_TEXT_LIMIT).collect()
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ModelPickerOptionSpec {
@@ -151,12 +156,13 @@ fn capped_model_picker_explicit_entries<'a>(
     if let Some(selected_value) = selected_explicit_model {
         if let Some(selected_entry) = resolved_models
             .iter()
-            .find(|entry| selected_value.eq_ignore_ascii_case(entry.value))
+            .find(|entry| selected_value.eq_ignore_ascii_case(entry.value.as_ref()))
         {
-            if !entries
-                .iter()
-                .any(|entry| entry.value.eq_ignore_ascii_case(selected_entry.value))
-            {
+            if !entries.iter().any(|entry| {
+                entry
+                    .value
+                    .eq_ignore_ascii_case(selected_entry.value.as_ref())
+            }) {
                 if entries.len() == EXPLICIT_MODEL_OPTION_LIMIT {
                     entries.pop();
                 }
@@ -189,8 +195,8 @@ fn append_unavailable_selected_option(
 
     options.push(ModelPickerOptionSpec {
         value: selected_value.to_string(),
-        label: selected_value.to_string(),
-        description: "Current override | Not in current catalog".to_string(),
+        label: truncate_picker_text(selected_value),
+        description: truncate_picker_text("Current override | Not in current catalog"),
         selected: true,
     });
 }
@@ -215,22 +221,22 @@ pub(super) fn build_model_picker_option_specs(
             .iter()
             .map(|entry| ModelPickerOptionSpec {
                 value: entry.value.to_string(),
-                label: entry.label.to_string(),
-                description: entry.picker_description(),
+                label: truncate_picker_text(&entry.label),
+                description: truncate_picker_text(&entry.picker_description()),
                 selected: selected_explicit_model
-                    .is_some_and(|active| active.eq_ignore_ascii_case(entry.value)),
+                    .is_some_and(|active| active.eq_ignore_ascii_case(entry.value.as_ref())),
             }),
     );
     if options.is_empty() {
         options.push(ModelPickerOptionSpec {
             value: DEFAULT_PICKER_VALUE.to_string(),
-            label: default_picker_option_label(),
-            description: default_picker_option_description(
+            label: truncate_picker_text(&default_picker_option_label()),
+            description: truncate_picker_text(&default_picker_option_description(
                 provider,
                 default_model,
                 default_source,
                 working_dir,
-            ),
+            )),
             selected: false,
         });
     }
@@ -261,4 +267,69 @@ pub(super) fn build_model_picker_options(
             .default_selection(entry.selected)
     })
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(index: usize) -> ModelCatalogEntry {
+        ModelCatalogEntry::owned(
+            format!("claude-test-{index}"),
+            format!("Claude test {index}"),
+            "Test catalog entry".to_string(),
+            "Model picker invariant".to_string(),
+        )
+    }
+
+    #[test]
+    fn invariant_model_picker_caps_explicit_entries_and_keeps_selected_catalog_entry() {
+        let entries = (0..40).map(entry).collect::<Vec<_>>();
+        let selected = "claude-test-39";
+        let capped = capped_model_picker_explicit_entries(&entries, Some(selected));
+
+        assert_eq!(capped.len(), EXPLICIT_MODEL_OPTION_LIMIT);
+        assert!(
+            capped
+                .iter()
+                .any(|entry| entry.value.eq_ignore_ascii_case(selected))
+        );
+    }
+
+    #[test]
+    fn invariant_model_picker_keeps_unavailable_selection_with_bounded_text() {
+        let selected = "claude-".to_string() + &"x".repeat(120);
+        let mut options = (0..DISCORD_SELECT_MENU_OPTION_LIMIT)
+            .map(|index| ModelPickerOptionSpec {
+                value: format!("value-{index}"),
+                label: format!("label-{index}"),
+                description: format!("description-{index}"),
+                selected: false,
+            })
+            .collect::<Vec<_>>();
+
+        append_unavailable_selected_option(&mut options, Some(&selected));
+
+        assert_eq!(options.len(), DISCORD_SELECT_MENU_OPTION_LIMIT);
+        let retained = options.last().expect("selected option retained");
+        assert_eq!(retained.value, selected);
+        assert!(retained.selected);
+        assert_eq!(
+            retained.label.chars().count(),
+            DISCORD_SELECT_MENU_TEXT_LIMIT
+        );
+        assert!(options.iter().all(|option| {
+            option.label.chars().count() <= DISCORD_SELECT_MENU_TEXT_LIMIT
+                && option.description.chars().count() <= DISCORD_SELECT_MENU_TEXT_LIMIT
+        }));
+    }
+
+    #[test]
+    fn invariant_model_picker_truncation_is_unicode_character_safe() {
+        let raw = "가".repeat(DISCORD_SELECT_MENU_TEXT_LIMIT + 5);
+        let truncated = truncate_picker_text(&raw);
+
+        assert_eq!(truncated.chars().count(), DISCORD_SELECT_MENU_TEXT_LIMIT);
+        assert!(truncated.is_char_boundary(truncated.len()));
+    }
 }

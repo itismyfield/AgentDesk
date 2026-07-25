@@ -1,0 +1,985 @@
+use std::collections::HashSet;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{OnceLock, RwLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use futures::StreamExt;
+use serde::{Deserialize, Serialize};
+
+use super::{ModelCatalogEntry, is_safe_model_selector};
+use crate::services::discord::runtime_store;
+use crate::services::provider::ProviderKind;
+
+const GATEWAY_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const CLOCK_SKEW_ALLOWANCE: Duration = Duration::from_secs(5 * 60);
+const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_CACHE_BODY_BYTES: usize = 256 * 1024;
+const MAX_API_PAGES: usize = 4;
+const MAX_MODELS_PER_SOURCE: usize = 100;
+const MAX_CATALOG_TEXT_CHARS: usize = 100;
+const ANTHROPIC_MODELS_URL: &str = "https://api.anthropic.com/v1/models";
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+const API_CACHE_VERSION: u8 = 1;
+
+static REFRESH_TASK_RUNNING: AtomicBool = AtomicBool::new(false);
+static CATALOG_CACHE: OnceLock<RwLock<CatalogCache>> = OnceLock::new();
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FileCacheKey {
+    modified_ms: u128,
+    len: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CatalogCache {
+    entries: Vec<ModelCatalogEntry>,
+}
+
+#[derive(Clone, Copy)]
+struct CuratedAlias {
+    selector: &'static str,
+    label: &'static str,
+    metadata_fallback_id: &'static str,
+}
+
+const CURATED_ALIASES: &[CuratedAlias] = &[
+    CuratedAlias {
+        selector: "fable",
+        label: "Fable 5",
+        metadata_fallback_id: "claude-fable-5",
+    },
+    CuratedAlias {
+        selector: "opus",
+        label: "Opus 5",
+        metadata_fallback_id: "claude-opus-5",
+    },
+    CuratedAlias {
+        selector: "sonnet",
+        label: "Sonnet 5",
+        metadata_fallback_id: "claude-sonnet-5",
+    },
+    CuratedAlias {
+        selector: "haiku",
+        label: "Haiku 4.5",
+        metadata_fallback_id: "claude-haiku-4-5-20251001",
+    },
+];
+
+const STATIC_FALLBACK_IDS: &[&str] = &[
+    "claude-fable-5",
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-haiku-4-5-20251001",
+];
+
+#[derive(Debug, Deserialize)]
+struct GatewayCache {
+    #[serde(rename = "fetchedAt")]
+    fetched_at_ms: u64,
+    #[serde(default)]
+    models: Vec<GatewayModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GatewayModel {
+    #[serde(alias = "value")]
+    id: String,
+    #[serde(default, alias = "displayName")]
+    display_name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ApiCache {
+    version: u8,
+    fetched_at_ms: u64,
+    models: Vec<ApiModel>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ApiModel {
+    id: String,
+    display_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiPage {
+    #[serde(default)]
+    data: Vec<ApiModelWire>,
+    #[serde(default)]
+    has_more: bool,
+    #[serde(default)]
+    last_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiModelWire {
+    id: String,
+    #[serde(default)]
+    display_name: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FetchFailure {
+    Timeout,
+    Transport,
+    HttpStatus,
+    BodyLimit,
+    InvalidResponse,
+    PaginationLimit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RefreshOutcome {
+    Fresh,
+    MissingApiKey,
+    Updated,
+    Empty,
+    FetchFailed(FetchFailure),
+    CacheWriteFailed,
+    CachePathUnavailable,
+}
+
+impl RefreshOutcome {
+    fn category(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::MissingApiKey => "missing_api_key",
+            Self::Updated => "updated",
+            Self::Empty => "empty",
+            Self::FetchFailed(FetchFailure::Timeout) => "timeout",
+            Self::FetchFailed(FetchFailure::Transport) => "transport_failure",
+            Self::FetchFailed(FetchFailure::HttpStatus) => "http_status_failure",
+            Self::FetchFailed(FetchFailure::BodyLimit) => "body_limit",
+            Self::FetchFailed(FetchFailure::InvalidResponse) => "invalid_response",
+            Self::FetchFailed(FetchFailure::PaginationLimit) => "pagination_limit",
+            Self::CacheWriteFailed => "cache_write_failure",
+            Self::CachePathUnavailable => "cache_path_unavailable",
+        }
+    }
+}
+
+struct RefreshTaskGuard;
+
+impl RefreshTaskGuard {
+    fn claim(provider: &ProviderKind) -> Option<Self> {
+        if !matches!(provider, ProviderKind::Claude)
+            || REFRESH_TASK_RUNNING
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return None;
+        }
+        Some(Self)
+    }
+}
+
+impl Drop for RefreshTaskGuard {
+    fn drop(&mut self) {
+        REFRESH_TASK_RUNNING.store(false, Ordering::Release);
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn is_fresh(fetched_at_ms: u64, current_ms: u64) -> bool {
+    let ttl_ms: u64 = GATEWAY_CACHE_TTL.as_millis().try_into().unwrap_or(u64::MAX);
+    let skew_ms: u64 = CLOCK_SKEW_ALLOWANCE
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    fetched_at_ms <= current_ms.saturating_add(skew_ms)
+        && current_ms.saturating_sub(fetched_at_ms) <= ttl_ms
+}
+
+fn truncate_catalog_text(raw: &str, fallback: &str) -> String {
+    let mut text = raw
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(MAX_CATALOG_TEXT_CHARS)
+        .collect::<String>();
+    if text.is_empty() {
+        text = fallback
+            .chars()
+            .take(MAX_CATALOG_TEXT_CHARS)
+            .collect::<String>();
+    }
+    text
+}
+
+fn file_cache_key(path: &Path) -> Option<FileCacheKey> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if metadata.len() > MAX_CACHE_BODY_BYTES as u64 {
+        return None;
+    }
+    let modified_ms = metadata
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    Some(FileCacheKey {
+        modified_ms,
+        len: metadata.len(),
+    })
+}
+
+fn bounded_read(path: &Path, expected: &FileCacheKey) -> Option<Vec<u8>> {
+    let body = std::fs::read(path).ok()?;
+    (body.len() <= MAX_CACHE_BODY_BYTES && body.len() as u64 == expected.len).then_some(body)
+}
+
+fn gateway_cache_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| {
+        home.join(".claude")
+            .join("cache")
+            .join("gateway-models.json")
+    })
+}
+
+fn api_cache_path() -> Option<PathBuf> {
+    runtime_store::runtime_root().map(|root| root.join("claude_model_catalog.json"))
+}
+
+fn model_entry(id: String, label: String, source: &'static str) -> ModelCatalogEntry {
+    ModelCatalogEntry::owned(
+        id,
+        truncate_catalog_text(&label, "Claude model"),
+        source.to_string(),
+        "Local bounded cache".to_string(),
+    )
+}
+
+fn curated_entries() -> Vec<ModelCatalogEntry> {
+    CURATED_ALIASES
+        .iter()
+        .map(|alias| {
+            ModelCatalogEntry::borrowed(
+                alias.selector,
+                alias.label,
+                "Evergreen Claude Code selector",
+                alias.metadata_fallback_id,
+            )
+        })
+        .collect()
+}
+
+fn static_fallback_entries() -> Vec<ModelCatalogEntry> {
+    STATIC_FALLBACK_IDS
+        .iter()
+        .map(|id| {
+            ModelCatalogEntry::borrowed(
+                id,
+                id,
+                "Static Claude metadata fallback",
+                "AgentDesk fallback",
+            )
+        })
+        .collect()
+}
+
+fn gateway_entries_from_raw(raw: &[u8], current_ms: u64) -> Vec<ModelCatalogEntry> {
+    if raw.len() > MAX_CACHE_BODY_BYTES {
+        return Vec::new();
+    }
+    let Ok(cache) = serde_json::from_slice::<GatewayCache>(raw) else {
+        return Vec::new();
+    };
+    if !is_fresh(cache.fetched_at_ms, current_ms) {
+        return Vec::new();
+    }
+
+    cache
+        .models
+        .into_iter()
+        .take(MAX_MODELS_PER_SOURCE)
+        .filter_map(|model| {
+            let id = model.id.trim().to_string();
+            is_safe_model_selector(&id).then(|| {
+                let label = truncate_catalog_text(&model.display_name, &id);
+                model_entry(id, label, "Claude gateway selector")
+            })
+        })
+        .collect()
+}
+
+fn api_entries_from_raw(raw: &[u8], current_ms: u64) -> Vec<ModelCatalogEntry> {
+    if raw.len() > MAX_CACHE_BODY_BYTES {
+        return Vec::new();
+    }
+    let Ok(cache) = serde_json::from_slice::<ApiCache>(raw) else {
+        return Vec::new();
+    };
+    if cache.version != API_CACHE_VERSION || !is_fresh(cache.fetched_at_ms, current_ms) {
+        return Vec::new();
+    }
+
+    cache
+        .models
+        .into_iter()
+        .take(MAX_MODELS_PER_SOURCE)
+        .filter_map(|model| {
+            let id = model.id.trim().to_string();
+            is_safe_model_selector(&id).then(|| {
+                let label = truncate_catalog_text(&model.display_name, &id);
+                model_entry(id, label, "Anthropic Models API")
+            })
+        })
+        .collect()
+}
+
+fn merge_entries(
+    gateway_entries: Vec<ModelCatalogEntry>,
+    api_entries: Vec<ModelCatalogEntry>,
+) -> Vec<ModelCatalogEntry> {
+    let mut seen = HashSet::new();
+    curated_entries()
+        .into_iter()
+        .chain(gateway_entries)
+        .chain(api_entries)
+        .chain(static_fallback_entries())
+        .filter(|entry| seen.insert(entry.value.to_ascii_lowercase()))
+        .collect()
+}
+
+fn catalog_from_raw_sources(
+    gateway_raw: Option<&[u8]>,
+    api_raw: Option<&[u8]>,
+    current_ms: u64,
+) -> Vec<ModelCatalogEntry> {
+    merge_entries(
+        gateway_raw
+            .map(|raw| gateway_entries_from_raw(raw, current_ms))
+            .unwrap_or_default(),
+        api_raw
+            .map(|raw| api_entries_from_raw(raw, current_ms))
+            .unwrap_or_default(),
+    )
+}
+
+fn reload_catalog_cache_from_disk() {
+    let gateway_path = gateway_cache_path();
+    let api_path = api_cache_path();
+    let gateway_key = gateway_path.as_deref().and_then(file_cache_key);
+    let api_key = api_path.as_deref().and_then(file_cache_key);
+    let cache = CATALOG_CACHE.get_or_init(|| RwLock::new(CatalogCache::default()));
+    let gateway_raw = gateway_path
+        .as_deref()
+        .zip(gateway_key.as_ref())
+        .and_then(|(path, expected)| bounded_read(path, expected));
+    let api_raw = api_path
+        .as_deref()
+        .zip(api_key.as_ref())
+        .and_then(|(path, expected)| bounded_read(path, expected));
+    let entries = catalog_from_raw_sources(gateway_raw.as_deref(), api_raw.as_deref(), now_ms());
+    if let Ok(mut cached) = cache.write() {
+        cached.entries = entries;
+    }
+}
+
+async fn reload_catalog_cache() {
+    let _ = tokio::task::spawn_blocking(reload_catalog_cache_from_disk).await;
+}
+
+pub(super) fn resolved_models() -> Vec<ModelCatalogEntry> {
+    CATALOG_CACHE
+        .get_or_init(|| RwLock::new(CatalogCache::default()))
+        .read()
+        .ok()
+        .filter(|cached| !cached.entries.is_empty())
+        .map(|cached| cached.entries.clone())
+        .unwrap_or_else(|| merge_entries(Vec::new(), Vec::new()))
+}
+
+fn parse_api_page(raw: &[u8]) -> Result<ApiPage, FetchFailure> {
+    if raw.len() > MAX_CACHE_BODY_BYTES {
+        return Err(FetchFailure::BodyLimit);
+    }
+    serde_json::from_slice(raw).map_err(|_| FetchFailure::InvalidResponse)
+}
+
+async fn fetch_api_models_with<F, Fut>(mut fetch: F) -> Result<Vec<ApiModel>, FetchFailure>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: Future<Output = Result<Vec<u8>, FetchFailure>>,
+{
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+    let mut after_id = None;
+
+    for page_index in 0..MAX_API_PAGES {
+        let page = parse_api_page(&fetch(after_id.clone()).await?)?;
+        for model in page.data {
+            let id = model.id.trim().to_string();
+            if !is_safe_model_selector(&id) || !seen.insert(id.to_ascii_lowercase()) {
+                continue;
+            }
+            models.push(ApiModel {
+                display_name: truncate_catalog_text(&model.display_name, &id),
+                id,
+            });
+            if models.len() == MAX_MODELS_PER_SOURCE {
+                return Ok(models);
+            }
+        }
+
+        if !page.has_more {
+            return Ok(models);
+        }
+        if page_index + 1 == MAX_API_PAGES {
+            return Err(FetchFailure::PaginationLimit);
+        }
+        let next = page
+            .last_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| is_safe_model_selector(value))
+            .ok_or(FetchFailure::InvalidResponse)?;
+        if after_id.as_ref() == Some(&next) {
+            return Err(FetchFailure::InvalidResponse);
+        }
+        after_id = Some(next);
+    }
+
+    Err(FetchFailure::PaginationLimit)
+}
+
+async fn fetch_network_page(
+    client: reqwest::Client,
+    api_key: String,
+    after_id: Option<String>,
+) -> Result<Vec<u8>, FetchFailure> {
+    let mut request = client
+        .get(ANTHROPIC_MODELS_URL)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .query(&[("limit", MAX_MODELS_PER_SOURCE.to_string())]);
+    if let Some(after_id) = after_id {
+        request = request.query(&[("after_id", after_id)]);
+    }
+
+    let response = request.send().await.map_err(|error| {
+        if error.is_timeout() {
+            FetchFailure::Timeout
+        } else {
+            FetchFailure::Transport
+        }
+    })?;
+    if !response.status().is_success() {
+        return Err(FetchFailure::HttpStatus);
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_CACHE_BODY_BYTES as u64)
+    {
+        return Err(FetchFailure::BodyLimit);
+    }
+
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| {
+            if error.is_timeout() {
+                FetchFailure::Timeout
+            } else {
+                FetchFailure::Transport
+            }
+        })?;
+        if body.len().saturating_add(chunk.len()) > MAX_CACHE_BODY_BYTES {
+            return Err(FetchFailure::BodyLimit);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+async fn fetch_api_models(api_key: &str) -> Result<Vec<ApiModel>, FetchFailure> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        .timeout(HTTP_TIMEOUT)
+        .build()
+        .map_err(|_| FetchFailure::Transport)?;
+    let api_key = api_key.to_string();
+    fetch_api_models_with(move |after_id| {
+        let client = client.clone();
+        let api_key = api_key.clone();
+        async move { fetch_network_page(client, api_key, after_id).await }
+    })
+    .await
+}
+
+fn cache_is_fresh(path: &Path, current_ms: u64) -> bool {
+    file_cache_key(path)
+        .and_then(|key| bounded_read(path, &key))
+        .and_then(|raw| serde_json::from_slice::<ApiCache>(&raw).ok())
+        .is_some_and(|cache| {
+            cache.version == API_CACHE_VERSION
+                && !cache.models.is_empty()
+                && is_fresh(cache.fetched_at_ms, current_ms)
+        })
+}
+
+async fn refresh_cache_with<F, Fut>(
+    path: &Path,
+    current_ms: u64,
+    api_key: Option<&str>,
+    fetch: F,
+) -> RefreshOutcome
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = Result<Vec<ApiModel>, FetchFailure>>,
+{
+    if cache_is_fresh(path, current_ms) {
+        return RefreshOutcome::Fresh;
+    }
+    let Some(api_key) = api_key.map(str::trim).filter(|key| !key.is_empty()) else {
+        return RefreshOutcome::MissingApiKey;
+    };
+    let models = match fetch(api_key.to_string()).await {
+        Ok(models) => models,
+        Err(error) => return RefreshOutcome::FetchFailed(error),
+    };
+    if models.is_empty() {
+        return RefreshOutcome::Empty;
+    }
+
+    let cache = ApiCache {
+        version: API_CACHE_VERSION,
+        fetched_at_ms: current_ms,
+        models: models.into_iter().take(MAX_MODELS_PER_SOURCE).collect(),
+    };
+    let Ok(serialized) = serde_json::to_string(&cache) else {
+        return RefreshOutcome::CacheWriteFailed;
+    };
+    match runtime_store::atomic_write(path, &serialized) {
+        Ok(()) => RefreshOutcome::Updated,
+        Err(_) => RefreshOutcome::CacheWriteFailed,
+    }
+}
+
+async fn refresh_once() -> RefreshOutcome {
+    let Some(path) = api_cache_path() else {
+        return RefreshOutcome::CachePathUnavailable;
+    };
+    let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
+    refresh_cache_with(&path, now_ms(), api_key.as_deref(), |api_key| async move {
+        fetch_api_models(&api_key).await
+    })
+    .await
+}
+
+async fn refresh_and_log() {
+    reload_catalog_cache().await;
+    let outcome = refresh_once().await;
+    if matches!(outcome, RefreshOutcome::Updated) {
+        reload_catalog_cache().await;
+    }
+    tracing::info!(
+        target: "agentdesk::claude_model_catalog",
+        status = outcome.category(),
+        "Claude model catalog refresh check"
+    );
+}
+
+pub(super) fn spawn_background_refresh(
+    provider: &ProviderKind,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let guard = RefreshTaskGuard::claim(provider)?;
+
+    Some(tokio::spawn(async move {
+        let _guard = guard;
+        refresh_and_log().await;
+        let start = tokio::time::Instant::now() + REFRESH_CHECK_INTERVAL;
+        let mut interval = tokio::time::interval_at(start, REFRESH_CHECK_INTERVAL);
+        loop {
+            interval.tick().await;
+            refresh_and_log().await;
+        }
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    fn api_cache_json(fetched_at_ms: u64, models: serde_json::Value) -> Vec<u8> {
+        serde_json::json!({
+            "version": API_CACHE_VERSION,
+            "fetched_at_ms": fetched_at_ms,
+            "models": models,
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    #[test]
+    fn invariant_claude_model_catalog_refresh_claim_is_claude_only_singleflight() {
+        REFRESH_TASK_RUNNING.store(false, Ordering::Release);
+        assert!(RefreshTaskGuard::claim(&ProviderKind::Codex).is_none());
+        assert!(!REFRESH_TASK_RUNNING.load(Ordering::Acquire));
+
+        let guard =
+            RefreshTaskGuard::claim(&ProviderKind::Claude).expect("first Claude task claim");
+        assert!(RefreshTaskGuard::claim(&ProviderKind::Claude).is_none());
+        drop(guard);
+        let reclaimed =
+            RefreshTaskGuard::claim(&ProviderKind::Claude).expect("claim reset after drop");
+        drop(reclaimed);
+        assert!(!REFRESH_TASK_RUNNING.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn invariant_claude_model_catalog_curated_aliases_remain_evergreen_runtime_selectors() {
+        let entries = catalog_from_raw_sources(None, None, 1_000_000);
+        let values = entries
+            .iter()
+            .map(|entry| entry.value.as_ref())
+            .collect::<Vec<_>>();
+
+        assert_eq!(&values[..4], ["fable", "opus", "sonnet", "haiku"]);
+        for alias in CURATED_ALIASES {
+            let entry = entries
+                .iter()
+                .find(|entry| entry.value == alias.selector)
+                .expect("curated alias");
+            assert_eq!(entry.secondary_summary, alias.metadata_fallback_id);
+            assert_ne!(entry.value, alias.metadata_fallback_id);
+        }
+    }
+
+    #[test]
+    fn invariant_claude_model_catalog_invalid_and_stale_caches_fall_back_safely() {
+        let stale = serde_json::json!({
+            "fetchedAt": 1,
+            "models": [{"id": "gateway-only", "display_name": "Gateway"}],
+        })
+        .to_string();
+        let invalid_api = br#"{"version":1,"fetched_at_ms":"secret"}"#;
+        let entries = catalog_from_raw_sources(
+            Some(stale.as_bytes()),
+            Some(invalid_api),
+            GATEWAY_CACHE_TTL.as_millis() as u64 + 10_000,
+        );
+
+        assert!(!entries.iter().any(|entry| entry.value == "gateway-only"));
+        assert!(entries.iter().any(|entry| entry.value == "fable"));
+        assert!(entries.iter().any(|entry| entry.value == "claude-fable-5"));
+    }
+
+    #[test]
+    fn invariant_claude_model_catalog_merge_priority_and_dedupe_are_stable() {
+        let current_ms = 9_000_000;
+        let gateway = serde_json::json!({
+            "fetchedAt": current_ms,
+            "models": [
+                {"id": "claude-shared", "display_name": "Gateway winner"},
+                {"id": "CLAUDE-SHARED", "display_name": "Duplicate"}
+            ],
+        })
+        .to_string();
+        let api = api_cache_json(
+            current_ms,
+            serde_json::json!([
+                {"id": "claude-shared", "display_name": "API loser"},
+                {"id": "claude-api-only", "display_name": "API only"},
+                {"id": "claude-fable-5", "display_name": "API fallback winner"}
+            ]),
+        );
+        let entries = catalog_from_raw_sources(Some(gateway.as_bytes()), Some(&api), current_ms);
+
+        assert_eq!(entries[0].value, "fable");
+        let shared = entries
+            .iter()
+            .find(|entry| entry.value.eq_ignore_ascii_case("claude-shared"))
+            .expect("shared model");
+        assert_eq!(shared.label, "Gateway winner");
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.value.eq_ignore_ascii_case("claude-shared"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.value == "claude-fable-5")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn invariant_claude_model_catalog_gateway_value_selector_is_supported() {
+        let raw = serde_json::json!({
+            "fetchedAt": 10_000,
+            "models": [{"value": "fable[1m]", "displayName": "Fable 1M"}],
+        })
+        .to_string();
+        let entries = catalog_from_raw_sources(Some(raw.as_bytes()), None, 10_000);
+
+        let discovered = entries
+            .iter()
+            .find(|entry| entry.value == "fable[1m]")
+            .expect("gateway selector");
+        assert_eq!(discovered.label, "Fable 1M");
+    }
+
+    #[test]
+    fn invariant_claude_model_catalog_gateway_base_url_and_unknown_fields_never_surface() {
+        let secret = "https://user:password@example.invalid/private?token=secret";
+        let raw = serde_json::json!({
+            "baseUrl": secret,
+            "credentials": {"token": "credential-secret"},
+            "fetchedAt": 10_000,
+            "models": [{"id": "claude-safe", "display_name": "Safe label"}],
+        })
+        .to_string();
+        let entries = catalog_from_raw_sources(Some(raw.as_bytes()), None, 10_000);
+        let rendered = entries
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{} {} {} {}",
+                    entry.value, entry.label, entry.primary_summary, entry.secondary_summary
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("claude-safe"));
+        assert!(!rendered.contains(secret));
+        assert!(!rendered.contains("credential-secret"));
+    }
+
+    #[tokio::test]
+    async fn invariant_claude_model_catalog_api_pagination_uses_bounded_cursor_sequence() {
+        let pages = Arc::new(Mutex::new(VecDeque::from([
+            Ok(serde_json::json!({
+                "data": [{"id": "claude-page-1", "display_name": "Page one"}],
+                "has_more": true,
+                "last_id": "claude-page-1"
+            })
+            .to_string()
+            .into_bytes()),
+            Ok(serde_json::json!({
+                "data": [{"id": "claude-page-2", "display_name": "Page two"}],
+                "has_more": false,
+                "last_id": "claude-page-2"
+            })
+            .to_string()
+            .into_bytes()),
+        ])));
+        let cursors = Arc::new(Mutex::new(Vec::new()));
+        let models = fetch_api_models_with({
+            let pages = Arc::clone(&pages);
+            let cursors = Arc::clone(&cursors);
+            move |cursor| {
+                cursors.lock().unwrap().push(cursor);
+                let response = pages.lock().unwrap().pop_front().unwrap();
+                async move { response }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["claude-page-1", "claude-page-2"]
+        );
+        assert_eq!(
+            *cursors.lock().unwrap(),
+            [None, Some("claude-page-1".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn invariant_claude_model_catalog_api_rejects_body_and_pagination_bounds() {
+        let body = vec![b'x'; MAX_CACHE_BODY_BYTES + 1];
+        let error = fetch_api_models_with(move |_| {
+            let body = body.clone();
+            async move { Ok(body) }
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error, FetchFailure::BodyLimit);
+
+        let error = fetch_api_models_with(|_| async {
+            Ok(serde_json::json!({
+                "data": [],
+                "has_more": true,
+                "last_id": "same-cursor"
+            })
+            .to_string()
+            .into_bytes())
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error, FetchFailure::InvalidResponse);
+
+        let cursor_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let error = fetch_api_models_with({
+            let cursor_count = Arc::clone(&cursor_count);
+            move |_| {
+                let page = cursor_count.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    Ok(serde_json::json!({
+                        "data": [],
+                        "has_more": true,
+                        "last_id": format!("cursor-{page}")
+                    })
+                    .to_string()
+                    .into_bytes())
+                }
+            }
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error, FetchFailure::PaginationLimit);
+        assert_eq!(cursor_count.load(Ordering::Relaxed), MAX_API_PAGES);
+    }
+
+    #[tokio::test]
+    async fn invariant_claude_model_catalog_api_caps_count_and_sanitizes_text() {
+        let models = (0..MAX_MODELS_PER_SOURCE + 10)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("claude-{index}"),
+                    "display_name": format!("{}\nsecret", "가".repeat(120)),
+                })
+            })
+            .collect::<Vec<_>>();
+        let fetched = fetch_api_models_with(move |_| {
+            let models = models.clone();
+            async move {
+                Ok(serde_json::json!({
+                    "data": models,
+                    "has_more": false,
+                    "last_id": null
+                })
+                .to_string()
+                .into_bytes())
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(fetched.len(), MAX_MODELS_PER_SOURCE);
+        assert!(fetched.iter().all(|model| {
+            model.display_name.chars().count() <= MAX_CATALOG_TEXT_CHARS
+                && !model.display_name.chars().any(char::is_control)
+        }));
+    }
+
+    #[tokio::test]
+    async fn invariant_claude_model_catalog_fresh_cache_skips_refresh_fetch() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("cache.json");
+        let current_ms = 55_000;
+        std::fs::write(
+            &path,
+            api_cache_json(
+                current_ms,
+                serde_json::json!([{"id": "claude-lkg", "display_name": "LKG"}]),
+            ),
+        )
+        .unwrap();
+        let fetch_called = Arc::new(AtomicBool::new(false));
+
+        let outcome = refresh_cache_with(&path, current_ms, Some("key"), {
+            let fetch_called = Arc::clone(&fetch_called);
+            move |_| {
+                fetch_called.store(true, Ordering::Release);
+                async { Ok(Vec::new()) }
+            }
+        })
+        .await;
+
+        assert_eq!(outcome, RefreshOutcome::Fresh);
+        assert!(!fetch_called.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn invariant_claude_model_catalog_refresh_failure_preserves_last_known_good_cache() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("cache.json");
+        let original = api_cache_json(
+            1,
+            serde_json::json!([{"id": "claude-lkg", "display_name": "LKG"}]),
+        );
+        std::fs::write(&path, &original).unwrap();
+
+        let outcome = refresh_cache_with(
+            &path,
+            GATEWAY_CACHE_TTL.as_millis() as u64 + 2,
+            Some("key"),
+            |_| async { Err(FetchFailure::Transport) },
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            RefreshOutcome::FetchFailed(FetchFailure::Transport)
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn invariant_claude_model_catalog_empty_refresh_does_not_replace_cache() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("cache.json");
+        let original = api_cache_json(
+            1,
+            serde_json::json!([{"id": "claude-lkg", "display_name": "LKG"}]),
+        );
+        std::fs::write(&path, &original).unwrap();
+
+        let outcome = refresh_cache_with(
+            &path,
+            GATEWAY_CACHE_TTL.as_millis() as u64 + 2,
+            Some("key"),
+            |_| async { Ok(Vec::new()) },
+        )
+        .await;
+
+        assert_eq!(outcome, RefreshOutcome::Empty);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn invariant_claude_model_catalog_successful_refresh_atomically_updates_cache() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("nested").join("cache.json");
+        let current_ms = 55_000;
+        let outcome = refresh_cache_with(&path, current_ms, Some("key"), |_| async {
+            Ok(vec![ApiModel {
+                id: "claude-new".to_string(),
+                display_name: "New model".to_string(),
+            }])
+        })
+        .await;
+
+        assert_eq!(outcome, RefreshOutcome::Updated);
+        let cache: ApiCache = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(cache.fetched_at_ms, current_ms);
+        assert_eq!(cache.models[0].id, "claude-new");
+    }
+}

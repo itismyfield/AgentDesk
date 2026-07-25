@@ -149,13 +149,14 @@ pub(super) fn run_bot_spawn_sigterm_handler(
 
 /// Run the Discord gateway backend (`client.start()`) to completion, classify
 /// the exit, run the post-reconcile startup diagnostic on failure, then abort
-/// and join the gateway-lease keepalive task. This is the final event-loop
-/// entry of run_bot. Consumes `client`.
+/// and join gateway-owned background tasks. This is the final event-loop entry
+/// of run_bot. Consumes `client`.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_bot_run_gateway_backend(
     mut client: serenity::Client,
     provider_for_error: &ProviderKind,
     gateway_lease_task: Option<tokio::task::JoinHandle<()>>,
+    model_catalog_refresh_task: Option<tokio::task::JoinHandle<()>>,
     startup_reconcile_remaining_for_client_start: Arc<std::sync::atomic::AtomicUsize>,
     startup_doctor_started_for_client_start: Arc<std::sync::atomic::AtomicBool>,
     health_registry_for_client_start: Arc<health::HealthRegistry>,
@@ -202,7 +203,10 @@ pub(super) async fn run_bot_run_gateway_backend(
         .await;
     }
 
-    if let Some(handle) = gateway_lease_task {
+    for handle in [gateway_lease_task, model_catalog_refresh_task]
+        .into_iter()
+        .flatten()
+    {
         handle.abort();
         let _ = handle.await;
     }
