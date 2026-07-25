@@ -453,7 +453,9 @@
   disables proxies/redirects, and attaches forwarding credentials only after
   validation. Cleartext HTTP requires separate private-address and insecure-
   transport opt-ins and only private/Tailscale answers; public or mixed DNS stays
-  blocked. Receivers for tmux output, force-kill, kill-tmux, cancel-turn, and
+  blocked. Deprecated IPv6 site-local `fec0::/10` is not an allowed private
+  topology and remains blocked with either opt-in. Receivers for tmux output,
+  force-kill, kill-tmux, cancel-turn, and
   resume-previous fence the expected
   owner header against the current PostgreSQL `sessions.instance_id` and local
   instance before any node-local read/mutation; draft #4916 must apply the same

@@ -17,8 +17,9 @@ cluster:
     example-worker-node:
       max_concurrent_dispatches: 4
       # Private RFC1918, IPv6 ULA, and Tailscale CGNAT addresses require this
-      # node-specific opt-in. Loopback, link-local, metadata, unspecified, and
-      # multicast targets remain blocked even when the opt-in is true.
+      # node-specific opt-in. Loopback, link-local, metadata, unspecified,
+      # multicast, and deprecated IPv6 site-local fec0::/10 targets remain
+      # blocked on every transport even when the opt-in is true.
       trusted_forward_origin: "https://worker.tailnet.example:8791"
       allow_private_forwarding: true
       # Cleartext HTTP exposes the shared bearer to the private network. Use only

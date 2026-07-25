@@ -343,7 +343,7 @@ fn address_is_configured_private(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => ipv4_is_configured_private(address),
         IpAddr::V6(address) => {
-            if ipv6_uses_local_nat64_prefix(address) {
+            if ipv6_uses_local_nat64_prefix(address) || ipv6_is_deprecated_site_local(address) {
                 return false;
             }
             ipv4_embedded_ipv6(address).map_or_else(
@@ -356,6 +356,10 @@ fn address_is_configured_private(address: IpAddr) -> bool {
 
 fn ipv6_uses_local_nat64_prefix(address: Ipv6Addr) -> bool {
     address.octets()[..6] == [0x00, 0x64, 0xff, 0x9b, 0, 1]
+}
+
+fn ipv6_is_deprecated_site_local(address: Ipv6Addr) -> bool {
+    (address.segments()[0] & 0xffc0) == 0xfec0
 }
 
 fn ipv4_embedded_ipv6(address: Ipv6Addr) -> Option<Ipv4Addr> {
@@ -403,6 +407,7 @@ fn ipv6_is_allowed(address: Ipv6Addr, allow_private: bool) -> bool {
         || address.is_loopback()
         || address.is_multicast()
         || (segments[0] & 0xffc0) == 0xfe80
+        || ipv6_is_deprecated_site_local(address)
         || address == AWS_IPV6_METADATA
     {
         return false;
@@ -553,6 +558,8 @@ mod tests {
             "[64:ff9b:1::cb00:710a]:8791",
             "[fd00:ec2::254]:80",
             "[fe80::1]:8791",
+            "[fec0::]:8791",
+            "[feff::]:8791",
             "[ff02::1]:8791",
         ] {
             assert_eq!(
@@ -592,6 +599,9 @@ mod tests {
             "169.254.169.254:80",
             "100.100.100.200:80",
             "192.0.0.192:80",
+            "[fd00:ec2::254]:80",
+            "[fec0::]:8791",
+            "[feff::]:8791",
         ] {
             assert_eq!(
                 validate_addresses(vec![address.parse().unwrap()], true).unwrap_err(),
