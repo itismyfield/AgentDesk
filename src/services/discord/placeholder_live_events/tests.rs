@@ -57,6 +57,61 @@ fn tool_prefix_is_a_closed_static_label_set() {
 }
 
 #[test]
+fn raw_codex_exec_command_reaches_single_message_footer_as_bash() {
+    use std::sync::mpsc;
+
+    use crate::services::agent_protocol::StreamMessage;
+    use crate::services::codex_tui::rollout_tail::replay_rollout_file;
+
+    let raw_command = "printf parser-bridge-secret";
+    let rollout = tempfile::NamedTempFile::new().expect("raw Codex rollout fixture");
+    std::fs::write(
+        rollout.path(),
+        format!(
+            r#"{{"type":"response_item","payload":{{"type":"function_call","name":"exec_command","arguments":"{{\"cmd\":\"{raw_command}\"}}","call_id":"call-footer"}}}}
+"#,
+        ),
+    )
+    .expect("write raw Codex rollout fixture");
+    let (tx, rx) = mpsc::channel();
+    replay_rollout_file(rollout.path(), 0, &tx).expect("parse raw Codex rollout");
+    drop(tx);
+
+    let events = PlaceholderLiveEvents::default();
+    let channel_id = ChannelId::new(4_892_401);
+    let mut bridged_tool_uses = 0;
+    for message in rx {
+        if let StreamMessage::ToolUse {
+            name,
+            input,
+            tool_use_id,
+        } = message
+        {
+            bridged_tool_uses += 1;
+            events.push_status_events(
+                channel_id,
+                status_events_from_tool_use_with_id(&name, &input, tool_use_id.as_deref()),
+            );
+        }
+    }
+    assert_eq!(
+        bridged_tool_uses, 1,
+        "raw rollout must produce exactly one bridgeable ToolUse"
+    );
+
+    let panel = events.render_status_panel(channel_id, &ProviderKind::Codex, 1_700_000_000);
+    let footer = super::super::single_message_panel::compose_footer_status_block("⠸", &panel);
+    assert!(
+        footer.contains("마지막 도구 ([Bash])"),
+        "raw Codex exec_command must survive parser and status handoff: {footer}"
+    );
+    assert!(
+        !footer.contains(raw_command) && !footer.contains("parser-bridge-secret"),
+        "single-message footer must not expose raw Codex command input: {footer}"
+    );
+}
+
+#[test]
 fn compact_events_render_only_closed_labels_for_untrusted_tool_names() {
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(4_892_400);
