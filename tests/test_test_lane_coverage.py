@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -490,13 +491,147 @@ class RatchetTests(unittest.TestCase):
                 [],
             )
 
+    def test_cancelled_adjacent_push_cannot_make_debt_authoritative(self) -> None:
+        trusted = {"legacy_a"}
+        cancelled_push = {"legacy_a", "legacy_b"}
+        adjacent_push = {"legacy_b"}
+
+        self.assertEqual(
+            coverage.baseline_growth(cancelled_push, trusted), ["legacy_b"]
+        )
+        self.assertEqual(
+            coverage.baseline_growth(adjacent_push, cancelled_push), []
+        )
+        self.assertEqual(
+            coverage.baseline_growth(adjacent_push, trusted), ["legacy_b"]
+        )
+        workflow = (
+            REPO_ROOT / ".github/workflows/test-lane-baseline-main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("cancel-in-progress: false", workflow)
+
+    def test_main_forwards_explicit_baseline_ref_to_git_loader(self) -> None:
+        reference = {"legacy_a"}
+        with mock.patch.object(
+            coverage,
+            "load_baseline_from_git",
+            return_value=("a" * 40, reference),
+        ) as load_reference, mock.patch.object(
+            coverage, "check", return_value=0
+        ) as check:
+            result = coverage.main(
+                [
+                    "--repo-root",
+                    str(REPO_ROOT),
+                    "--baseline-ref",
+                    "immutable-before",
+                ]
+            )
+
+        self.assertEqual(result, 0)
+        load_reference.assert_called_once_with(REPO_ROOT.resolve(), "immutable-before")
+        check.assert_called_once()
+        self.assertEqual(check.call_args.args[2], reference)
+        self.assertEqual(check.call_args.kwargs["reference_label"], f"commit {'a' * 40}")
+
+    def test_cli_explicit_reference_catches_growth_that_self_compare_misses(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.make_repo(root, "legacy_b")
+            baseline = root / coverage.BASELINE_REL
+            subprocess.run(["git", "init", "-q", "-b", "main", root], check=True)
+            subprocess.run(
+                ["git", "-C", root, "config", "user.email", "tests@example.com"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", root, "config", "user.name", "Tests"], check=True
+            )
+            baseline.write_text("legacy_a\n", encoding="utf-8")
+            subprocess.run(["git", "-C", root, "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", root, "commit", "-q", "-m", "trusted"], check=True
+            )
+            trusted = subprocess.check_output(
+                ["git", "-C", root, "rev-parse", "HEAD"], text=True
+            ).strip()
+            baseline.write_text("legacy_b\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", root, "commit", "-qam", "candidate growth"],
+                check=True,
+            )
+
+            explicit = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--repo-root",
+                    str(root),
+                    "--baseline-ref",
+                    trusted,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self_compare = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--repo-root",
+                    str(root),
+                    "--baseline-ref",
+                    "HEAD",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(explicit.returncode, 1)
+        self.assertIn("baseline growth forbidden", explicit.stderr)
+        self.assertEqual(self_compare.returncode, 0)
+        self.assertNotIn("baseline growth forbidden", self_compare.stderr)
+
+    def test_cli_requires_explicit_baseline_ref(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--repo-root",
+                str(REPO_ROOT),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--baseline-ref", result.stderr)
+
+    def test_cli_missing_reference_exits_two(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--repo-root",
+                str(REPO_ROOT),
+                "--baseline-ref",
+                "0" * 40,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("invalid baseline reference", result.stderr)
+
     def test_missing_zero_or_shallow_reference_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             subprocess.run(
                 ["git", "init", "-q", "-b", "main", root], check=True
             )
-            for ref in ("0" * 40, "missing-parent"):
+            for ref in ("", "0" * 40, "missing-parent"):
                 with self.subTest(ref=ref), self.assertRaises(ValueError):
                     coverage.load_baseline_from_git(root, ref)
 
@@ -537,9 +672,10 @@ class RatchetTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(
-            'scripts/check_test_lane_coverage.py --baseline-ref "${TEST_LANE_BASELINE_REF:-HEAD}"',
+            'scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"',
             script,
         )
+        self.assertNotIn("TEST_LANE_BASELINE_REF:-HEAD", script)
         self.assertIn(
             '"$PYTHON" -m unittest tests.test_test_lane_coverage', script
         )

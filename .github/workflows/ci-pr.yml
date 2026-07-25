@@ -12,6 +12,11 @@ on:
   # covered by ci-main.yml.
   pull_request:
   workflow_dispatch:
+    inputs:
+      test_lane_baseline_ref:
+        description: Immutable commit SHA used by the test-lane baseline ratchet
+        required: true
+        type: string
 
 concurrency:
   # A PR number is unique inside the base repository, unlike `head_ref`: two
@@ -784,9 +789,9 @@ jobs:
       - name: Run script checks
         run: ./scripts/ci-script-checks.sh
         env:
-          # pull_request checkouts are candidate merge commits. Their first
-          # parent is the exact base snapshot used to build this candidate.
-          TEST_LANE_BASELINE_REF: ${{ github.event_name == 'pull_request' && 'HEAD^1' || 'HEAD' }}
+          # PR checkouts use the candidate merge's exact first parent. Manual
+          # runs must supply an immutable comparison SHA; omission fails closed.
+          TEST_LANE_BASELINE_REF: ${{ github.event_name == 'pull_request' && 'HEAD^1' || inputs.test_lane_baseline_ref }}
 
       # Keep high-value relay ratchets as explicit named steps as well as in the
       # aggregate script suite so their failure surface is immediately visible.

@@ -1,0 +1,30 @@
+name: Test-lane baseline main guard
+
+on:
+  push:
+    branches:
+      - main
+
+# This guard must inspect every main push. If P1 introduced debt and its run were
+# cancelled by P2, comparing P2 only with P1 would make that debt authoritative.
+concurrency:
+  group: test-lane-baseline-main-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test-lane-baseline:
+    name: Test-lane baseline monotonicity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compare with the immutable pre-push snapshot
+        env:
+          TEST_LANE_BASELINE_REF: ${{ github.event.before }}
+        run: python3 scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"

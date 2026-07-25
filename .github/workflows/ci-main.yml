@@ -252,8 +252,8 @@ jobs:
       - name: Run script checks
         run: ./scripts/ci-script-checks.sh
         env:
-          # Compare the checked-out main snapshot with the immutable state
-          # before this push, including every commit in a multi-commit push.
+          # The non-cancelling test-lane-baseline-main workflow is authoritative
+          # across adjacent pushes; this aggregate lane keeps equivalent coverage.
           TEST_LANE_BASELINE_REF: ${{ github.event.before }}
 
       - name: Upload maintainability audit artifact

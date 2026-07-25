@@ -12,6 +12,9 @@ PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
 NIGHTLY_WORKFLOW = REPO_ROOT / ".github/workflows/ci-nightly.yml"
 MACOS_TRUSTED_WORKFLOW = REPO_ROOT / ".github/workflows/ci-macos-trusted.yml"
+TEST_LANE_MAIN_WORKFLOW = (
+    REPO_ROOT / ".github/workflows/test-lane-baseline-main.yml"
+)
 
 # This manifest is intentionally exact: changing the retained test recipe must also
 # update this test deliberately. The duplication is a drift-prevention gate, not an
@@ -197,20 +200,41 @@ class FastCheckCiWiringTests(unittest.TestCase):
         )
 
     def test_test_lane_baseline_uses_candidate_snapshot_refs(self) -> None:
-        pr_job = job_block(PR_WORKFLOW.read_text(encoding="utf-8"), "scripts")
-        main_job = job_block(MAIN_WORKFLOW.read_text(encoding="utf-8"), "scripts")
+        pr_workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        main_workflow = MAIN_WORKFLOW.read_text(encoding="utf-8")
+        pr_job = job_block(pr_workflow, "scripts")
+        main_job = job_block(main_workflow, "scripts")
 
         for job in (pr_job, main_job):
             self.assertIn("fetch-depth: 0", job)
             self.assertNotIn("origin/main", job)
             self.assertNotIn("github.event.pull_request.base.sha", job)
+        self.assertIn("workflow_dispatch:", pr_workflow)
+        self.assertIn("test_lane_baseline_ref:", pr_workflow)
+        self.assertIn("required: true", pr_workflow)
         self.assertIn(
             "TEST_LANE_BASELINE_REF: ${{ github.event_name == 'pull_request' "
-            "&& 'HEAD^1' || 'HEAD' }}",
+            "&& 'HEAD^1' || inputs.test_lane_baseline_ref }}",
             pr_job,
         )
+        self.assertNotIn("|| 'HEAD'", pr_job)
         self.assertIn(
             "TEST_LANE_BASELINE_REF: ${{ github.event.before }}", main_job
+        )
+
+    def test_cancelled_adjacent_main_pushes_cannot_skip_baseline_guard(self) -> None:
+        workflow = TEST_LANE_MAIN_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("name: Test-lane baseline main guard", workflow)
+        self.assertIn("group: test-lane-baseline-main-${{ github.ref }}", workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
+        self.assertNotIn("cancel-in-progress: true", workflow)
+        self.assertIn("fetch-depth: 0", workflow)
+        self.assertIn(
+            "TEST_LANE_BASELINE_REF: ${{ github.event.before }}", workflow
+        )
+        self.assertIn(
+            'scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"',
+            workflow,
         )
 
     def test_ci_script_checks_runs_this_contract(self) -> None:
@@ -221,9 +245,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
             '"$PYTHON" -m unittest tests.test_fast_check_ci_wiring', script
         )
         self.assertIn(
-            'scripts/check_test_lane_coverage.py --baseline-ref "${TEST_LANE_BASELINE_REF:-HEAD}"',
+            'scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"',
             script,
         )
+        self.assertNotIn("TEST_LANE_BASELINE_REF:-HEAD", script)
         self.assertIn(
             '"$PYTHON" -m unittest tests.test_test_lane_coverage', script
         )

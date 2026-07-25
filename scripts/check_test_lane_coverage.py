@@ -26,7 +26,6 @@ from typing import Iterable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE_REL = Path("scripts/test_lane_coverage_baseline.txt")
-DEFAULT_BASELINE_REF = "HEAD"
 
 # Attributes do not contain a closing square bracket in the forms used by this
 # repository. Strings and comments are blanked without changing offsets, so the
@@ -664,7 +663,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--baseline", type=Path, default=None)
-    parser.add_argument("--baseline-ref", default=DEFAULT_BASELINE_REF)
+    parser.add_argument("--baseline-ref", required=True)
     args = parser.parse_args(argv)
     repo_root = args.repo_root.resolve()
     baseline = args.baseline.resolve() if args.baseline else repo_root / BASELINE_REL
