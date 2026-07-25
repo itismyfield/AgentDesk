@@ -1625,7 +1625,7 @@ mod auto_queue_phase_gate_finalize_wrapper_tests {
         }
     }
 
-    fn capture_info_logs(emit: impl FnOnce()) -> String {
+    fn capture_info_logs(emit: impl FnOnce()) -> Result<String, std::string::FromUtf8Error> {
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::INFO)
@@ -1641,10 +1641,7 @@ mod auto_queue_phase_gate_finalize_wrapper_tests {
             Ok(buffer) => buffer.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
         };
-        match String::from_utf8(bytes) {
-            Ok(logs) => logs,
-            Err(error) => panic!("phase-gate logs must be UTF-8: {error}"),
-        }
+        String::from_utf8(bytes)
     }
 
     fn gate() -> serde_json::Value {
@@ -1666,15 +1663,18 @@ mod auto_queue_phase_gate_finalize_wrapper_tests {
     fn finalize_wrapper_overwrites_truthy_non_string_verdict_for_compatibility() {
         for explicit in [json!(true), json!({"blocked_by": "operator"})] {
             let result = json!({ "verdict": explicit, "checks": passing_checks() });
-            let injected = infer_phase_gate_verdict("dsp-finalize-non-string", &gate(), &result)
-                .expect("non-string verdict must preserve checks-based injection"); // agentdesk-audit: allow-unwrap — test-only assertion in #[cfg(test)] module
+            let injected = infer_phase_gate_verdict("dsp-finalize-non-string", &gate(), &result);
             assert_eq!(
-                injected.get("verdict").and_then(|value| value.as_str()),
+                injected
+                    .as_ref()
+                    .and_then(|value| value.get("verdict"))
+                    .and_then(|value| value.as_str()),
                 Some("phase_gate_passed")
             );
             assert_eq!(
                 injected
-                    .get("verdict_inferred")
+                    .as_ref()
+                    .and_then(|value| value.get("verdict_inferred"))
                     .and_then(|value| value.as_bool()),
                 Some(true)
             );
@@ -1693,10 +1693,12 @@ mod auto_queue_phase_gate_finalize_wrapper_tests {
             "completed",
             Some(&context),
             Some(&result),
-        )
-        .expect("non-string decision must preserve checks-based injection"); // agentdesk-audit: allow-unwrap — test-only assertion in #[cfg(test)] module
+        );
         assert_eq!(
-            injected.get("verdict").and_then(|value| value.as_str()),
+            injected
+                .as_ref()
+                .and_then(|value| value.get("verdict"))
+                .and_then(|value| value.as_str()),
             Some("phase_gate_passed")
         );
     }
@@ -1709,10 +1711,26 @@ mod auto_queue_phase_gate_finalize_wrapper_tests {
             assert!(injected.is_some());
         });
 
-        assert!(logs.contains("dispatch_id=\"dsp-log-fields\""), "{logs}");
-        assert!(logs.contains("pass_verdict=phase_gate_passed"), "{logs}");
-        assert!(logs.contains("declared_check_count=3"), "{logs}");
-        assert!(logs.contains("reported_check_count=3"), "{logs}");
+        assert!(
+            logs.as_ref()
+                .is_ok_and(|logs| logs.contains("dispatch_id=\"dsp-log-fields\"")),
+            "{logs:?}"
+        );
+        assert!(
+            logs.as_ref()
+                .is_ok_and(|logs| logs.contains("pass_verdict=phase_gate_passed")),
+            "{logs:?}"
+        );
+        assert!(
+            logs.as_ref()
+                .is_ok_and(|logs| logs.contains("declared_check_count=3")),
+            "{logs:?}"
+        );
+        assert!(
+            logs.as_ref()
+                .is_ok_and(|logs| logs.contains("reported_check_count=3")),
+            "{logs:?}"
+        );
     }
 
     #[test]
