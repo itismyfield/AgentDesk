@@ -44,17 +44,33 @@ pub async fn clear_session_for_turn_target_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> anyhow::Result<()> {
-    sqlx::query(
-        "UPDATE sessions
-         SET status = 'disconnected',
-             active_dispatch_id = NULL,
-             claude_session_id = NULL
-         WHERE session_key = $1",
-    )
-    .bind(session_key)
-    .execute(pool)
-    .await
-    .map_err(|error| anyhow::anyhow!("clear session for {session_key}: {error}"))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| anyhow::anyhow!("begin turn-target clear transaction: {error}"))?;
+    let session_id =
+        crate::db::dispatched_session_canonical_identity::resolve_session_id_for_mutation_pg(
+            &mut tx,
+            session_key,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("resolve turn-target session locator: {error:?}"))?;
+    if let Some(session_id) = session_id {
+        sqlx::query(
+            "UPDATE sessions
+             SET status = 'disconnected',
+                 active_dispatch_id = NULL,
+                 claude_session_id = NULL
+             WHERE id = $1",
+        )
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| anyhow::anyhow!("clear turn-target session row: {error}"))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|error| anyhow::anyhow!("commit turn-target clear transaction: {error}"))?;
     Ok(())
 }
 

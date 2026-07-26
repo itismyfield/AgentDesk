@@ -151,6 +151,19 @@ pub(crate) async fn resolve_session_key_pg(
     resolve_session_key_with_identity_pg(pool, session_key, None, None).await
 }
 
+/// Resolve and lock an exact primary-or-alias locator inside the caller's
+/// mutation transaction. Returning the durable row id keeps the subsequent
+/// write pinned even if the primary locator changes after resolution.
+pub(crate) async fn resolve_session_id_for_mutation_pg(
+    tx: &mut Transaction<'_, Postgres>,
+    session_key: &str,
+) -> Result<Option<i64>, HookSessionUpsertError> {
+    acquire_locator_lock(tx, session_key).await?;
+    let exact = load_exact_key_for_update(tx, session_key).await?;
+    let alias = load_alias_for_update(tx, session_key).await?;
+    resolve_evidence(exact, alias, None, None).map(|target| target.map(|evidence| evidence.id))
+}
+
 pub(crate) async fn upsert_legacy_hook_session_pg(
     pool: &PgPool,
     params: HookSessionUpsert<'_>,

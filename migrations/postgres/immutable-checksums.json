@@ -512,9 +512,14 @@
       "version": 99
     },
     {
-      "path": "migrations/postgres/0100_canonical_discord_session_identity.sql",
-      "sha256": "3f61d2c3944a55d7bce62312baed85a1f112d685fc4b733dc78c73066bfc867e",
+      "path": "migrations/postgres/0100_block_untrusted_deploy_gate.sql",
+      "sha256": "54c6336751b794bb2b6c056de665fe0458596ec4a68a71199ee7126b2a046082",
       "version": 100
+    },
+    {
+      "path": "migrations/postgres/0101_canonical_discord_session_identity.sql",
+      "sha256": "3f61d2c3944a55d7bce62312baed85a1f112d685fc4b733dc78c73066bfc867e",
+      "version": 101
     }
   ],
   "version": 1

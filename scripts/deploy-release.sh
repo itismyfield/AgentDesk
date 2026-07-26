@@ -2071,15 +2071,31 @@ _migrate_pg_tunnel_before_release_stop() {
 
 _migrate_pg_tunnel_before_release_stop
 
-# Fence new relay admissions and let dcserver atomically persist each in-flight
-# delivery frontier before launchd is allowed to stop it. The runtime consumes
-# restart_pending only after queue/checkpoint state and DrainRestart markers are
-# durable; the replacement watcher then resumes from those committed offsets.
 LOCK_FILE="$ADK_REL/runtime/dcserver.lock"
 OLD_PID=""
 if [ -f "$LOCK_FILE" ]; then
     OLD_PID=$(cat "$LOCK_FILE" 2>/dev/null || true)
 fi
+
+# Apply the forward-only database boundary before requesting restart_pending.
+# The runtime may consume a persisted restart request and exit on its own, so no
+# drain marker or self-exit trigger may exist when candidate migration runs. The
+# tunnel migration above is a fail-closed, SQL-ready prerequisite; its EXIT trap
+# restores the previous tunnel state if that prerequisite itself fails.
+echo "▸ Applying release PostgreSQL migrations before restart drain..."
+if ! "$STAGED_BINARY" release-migrate-postgres; then
+    echo "✗ Release PostgreSQL migration failed before restart was requested; the existing runtime remains active."
+    exit 1
+fi
+
+# Migration 0100 is now a forward-only binary floor: once it commits, a pre-0100
+# binary cannot restart because SQLx rejects a database migration newer than its
+# embedded manifest. From this point onward failures must fail forward with the
+# staged 0100-aware binary; do not claim that the old runtime can be preserved.
+# Fence new relay admissions and let dcserver atomically persist each in-flight
+# delivery frontier before launchd is allowed to stop it. The runtime consumes
+# restart_pending only after queue/checkpoint state and DrainRestart markers are
+# durable; the replacement watcher then resumes from those committed offsets.
 AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS=1
 export AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS
 if ! request_restart_drain_mode_or_fail \
@@ -2106,7 +2122,7 @@ fi
 rm -f "$ADK_REL/logs/relay-watchdog.deploy-marker" 2>/dev/null || true
 rm -f "$ADK_REL/runtime/restart_persisted" 2>/dev/null || true
 
-# Stop release only after the durable persistence acknowledgement.
+# Stop release only after migration and the durable persistence acknowledgement.
 echo "▸ Stopping release..."
 LAUNCHD_DOMAIN="$(_launchd_domain)"
 launchctl bootout "$LAUNCHD_DOMAIN/$PLIST_REL" 2>/dev/null || true

@@ -446,13 +446,26 @@
   before merging.
 
 ### Audited touches
+- 2026-07-26 — #4898 untrusted deploy-gate containment: PostgreSQL migration
+  0100 adds a validated cluster-wide `CHECK` constraint that rejects normalized
+  `deploy-gate` provenance. The `ALTER TABLE` lock serializes concurrent legacy
+  writers, so preflight row counts are diagnostic only and every old node is
+  fenced after commit. The release candidate applies migration 0100 after
+  staging, signing, and reversible tunnel readiness, but before requesting
+  `restart_pending` or any runtime self-exit trigger. Migration failure therefore
+  leaves the old process running; after commit, drain/persistence and bootout
+  proceed under a forward-only binary floor. Pre-0100 binaries must not restart
+  after commit. Existing
+  deploy-gate rows block rollout; no node converts or passes them. Enabling a
+  future trusted typed evidence capability requires a coordinated constraint
+  migration and capability rollout across the fleet.
 - 2026-07-25 — #4913 GO-A1 canonical Discord session identity: nullable
   `(provider, discord_token_hash, channel_id, identity_kind)` metadata and
   `session_key_aliases` are shared PostgreSQL authority. Canonical writes serialize
   with tuple/locator-scoped PostgreSQL transaction advisory locks and row locks;
   `session_locator_namespace` unique claims prevent concurrent primary/alias
-  ownership across tables even for old direct writers. Migration and runtime share
-  the scheduled-snapshot exclusion classifier; alias-aware provider-selector,
+  ownership across tables even for old direct writers. Migration 0101 and runtime
+  share the scheduled-snapshot exclusion classifier; alias-aware provider-selector,
   `/resume`, force-kill ownership, and idle-heartbeat reads converge on one durable
   row. Ambiguous exact/alias/canonical or legacy evidence fails closed with
   categorical diagnostics. Existing tmux names, processes, panes, FIFOs, gateway

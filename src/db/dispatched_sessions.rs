@@ -2520,18 +2520,29 @@ pub(crate) async fn delete_session_by_key_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> Result<DeleteSessionResult, String> {
-    let session_id = sqlx::query_scalar::<_, i64>("SELECT id FROM sessions WHERE session_key = $1")
-        .bind(session_key)
-        .fetch_optional(pool)
+    let mut tx = pool
+        .begin()
         .await
-        .map_err(|error| format!("{error}"))?;
-
-    let deleted = sqlx::query("DELETE FROM sessions WHERE session_key = $1")
-        .bind(session_key)
-        .execute(pool)
+        .map_err(|error| format!("begin session delete transaction: {error}"))?;
+    let session_id =
+        crate::db::dispatched_session_canonical_identity::resolve_session_id_for_mutation_pg(
+            &mut tx,
+            session_key,
+        )
         .await
-        .map_err(|error| format!("{error}"))?
-        .rows_affected();
+        .map_err(|error| format!("resolve session delete locator: {error:?}"))?;
+    let deleted = match session_id {
+        Some(session_id) => sqlx::query("DELETE FROM sessions WHERE id = $1")
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("delete postgres session: {error}"))?
+            .rows_affected(),
+        None => 0,
+    };
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit session delete transaction: {error}"))?;
 
     Ok(DeleteSessionResult {
         session_id,
@@ -2696,21 +2707,39 @@ pub(crate) async fn clear_session_id_by_key_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> Result<u64, String> {
-    sqlx::query(
-        "UPDATE sessions
-         SET claude_session_id = NULL,
-             raw_provider_session_id = NULL,
-             claude_session_id_recorded_at = NULL,
-             raw_provider_transcript_len_watermark = 0,
-             raw_provider_transcript_watermark_session_id = NULL,
-             raw_provider_transcript_growth_proven = FALSE
-         WHERE session_key = $1",
-    )
-    .bind(session_key)
-    .execute(pool)
-    .await
-    .map(|result| result.rows_affected())
-    .map_err(|error| format!("{error}"))
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin session selector clear transaction: {error}"))?;
+    let session_id =
+        crate::db::dispatched_session_canonical_identity::resolve_session_id_for_mutation_pg(
+            &mut tx,
+            session_key,
+        )
+        .await
+        .map_err(|error| format!("resolve session selector clear locator: {error:?}"))?;
+    let cleared = match session_id {
+        Some(session_id) => sqlx::query(
+            "UPDATE sessions
+             SET claude_session_id = NULL,
+                 raw_provider_session_id = NULL,
+                 claude_session_id_recorded_at = NULL,
+                 raw_provider_transcript_len_watermark = 0,
+                 raw_provider_transcript_watermark_session_id = NULL,
+                 raw_provider_transcript_growth_proven = FALSE
+             WHERE id = $1",
+        )
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("clear postgres session selectors: {error}"))?
+        .rows_affected(),
+        None => 0,
+    };
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit session selector clear transaction: {error}"))?;
+    Ok(cleared)
 }
 
 pub(crate) async fn update_session_pg(

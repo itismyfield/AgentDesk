@@ -255,7 +255,12 @@ pub(super) fn normalize_generate_entries(
                     "unknown phase_gate_kind '{kind}' (see GET /api/queue/phase-gates/catalog)"
                 ));
             }
-            Some(kind) => Some(kind.to_string()),
+            Some(kind) => {
+                if let Some(reason) = crate::phase_gate::kind_unavailable_reason(kind) {
+                    return Err(reason.to_string());
+                }
+                Some(kind.to_string())
+            }
             None => None,
         };
         normalized.push(RequestedGenerateEntry {
@@ -278,6 +283,53 @@ pub(super) fn normalize_auto_queue_review_mode(
         Some(other) => Err(format!(
             "review_mode must be '{AUTO_QUEUE_REVIEW_MODE_ENABLED}' or '{AUTO_QUEUE_REVIEW_MODE_DISABLED}', got '{other}'"
         )),
+    }
+}
+
+#[cfg(test)]
+mod phase_gate_generate_validation_tests {
+    use super::*;
+
+    fn body(kind: Option<&str>) -> GenerateBody {
+        GenerateBody {
+            repo: None,
+            agent_id: None,
+            auto_assign_agent: None,
+            issue_numbers: None,
+            entries: Some(vec![GenerateEntryBody {
+                issue_number: 4898,
+                batch_phase: Some(0),
+                thread_group: Some(1),
+                phase_gate_kind: kind.map(str::to_string),
+            }]),
+            review_mode: None,
+            mode: None,
+            unified_thread: None,
+            parallel: None,
+            max_concurrent_threads: None,
+            force: None,
+            max_concurrent_per_agent: None,
+        }
+    }
+
+    #[test]
+    fn deploy_gate_generation_is_statically_unavailable() {
+        assert_eq!(
+            normalize_generate_entries(&body(Some("deploy-gate"))).unwrap_err(),
+            crate::phase_gate::DEPLOY_GATE_UNAVAILABLE_REASON
+        );
+    }
+
+    #[test]
+    fn pr_confirm_and_legacy_default_remain_generation_compatible() {
+        let explicit = normalize_generate_entries(&body(Some("pr-confirm")))
+            .expect("valid") // agentdesk-audit: allow-unwrap — test assertion for available built-in kind
+            .expect("entries"); // agentdesk-audit: allow-unwrap — fixture always supplies entries
+        assert_eq!(explicit[0].phase_gate_kind.as_deref(), Some("pr-confirm"));
+        let legacy = normalize_generate_entries(&body(None))
+            .expect("valid") // agentdesk-audit: allow-unwrap — test assertion for legacy omitted kind
+            .expect("entries"); // agentdesk-audit: allow-unwrap — fixture always supplies entries
+        assert!(legacy[0].phase_gate_kind.is_none());
     }
 }
 
