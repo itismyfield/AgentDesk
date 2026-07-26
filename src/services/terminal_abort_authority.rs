@@ -5,26 +5,69 @@
 //! turn. Later adapters must preserve every exact-coordinate and typed-outcome
 //! fence before this authority can be activated.
 
+use crate::services::provider::ProviderKind;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct TranscriptIdentity {
+    session_name: String,
+    spawn_identity: String,
+}
+
+impl TranscriptIdentity {
+    pub(crate) fn new(
+        session_name: impl Into<String>,
+        spawn_identity: impl Into<String>,
+    ) -> Option<Self> {
+        let identity = Self {
+            session_name: session_name.into(),
+            spawn_identity: spawn_identity.into(),
+        };
+        (!identity.session_name.is_empty() && !identity.spawn_identity.is_empty())
+            .then_some(identity)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct WatchedByteRange {
+    start: u64,
+    end: u64,
+}
+
+impl WatchedByteRange {
+    pub(crate) fn new(start: u64, end: u64) -> Option<Self> {
+        (start < end).then_some(Self { start, end })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct TerminalCoordinate {
+    provider: ProviderKind,
     channel_id: u64,
     turn_id: String,
     dispatch_id: String,
     generation: u64,
+    transcript: TranscriptIdentity,
+    watched_range: WatchedByteRange,
 }
 
 impl TerminalCoordinate {
     pub(crate) fn new(
+        provider: ProviderKind,
         channel_id: u64,
         turn_id: impl Into<String>,
         dispatch_id: impl Into<String>,
         generation: u64,
+        transcript: TranscriptIdentity,
+        watched_range: WatchedByteRange,
     ) -> Option<Self> {
         let coordinate = Self {
+            provider,
             channel_id,
             turn_id: turn_id.into(),
             dispatch_id: dispatch_id.into(),
             generation,
+            transcript,
+            watched_range,
         };
         coordinate.is_complete().then_some(coordinate)
     }
@@ -239,12 +282,29 @@ impl AuthClearAttempt {
         })
     }
 
-    fn next(&self) -> Self {
-        Self {
-            coordinate: self.coordinate.clone(),
-            attempt: self.attempt.checked_add(1).unwrap_or(self.attempt),
+    fn next(&self) -> AuthClearAdvance {
+        match self.attempt.checked_add(1) {
+            Some(attempt) => AuthClearAdvance::Next(Self {
+                coordinate: self.coordinate.clone(),
+                attempt,
+            }),
+            None => AuthClearAdvance::Exhausted(Self {
+                coordinate: self.coordinate.clone(),
+                attempt: self.attempt,
+            }),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AuthClearAdvance {
+    Next(AuthClearAttempt),
+    Exhausted(AuthClearAttempt),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AuthClearExhausted {
+    last_failed: AuthClearAttempt,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -272,6 +332,7 @@ impl AuthClearOutcome {
 pub(crate) enum AuthClearObligation {
     NotRequired,
     Pending(AuthClearAttempt),
+    Exhausted(AuthClearExhausted),
     Satisfied(AuthClearAttempt),
 }
 
@@ -288,6 +349,7 @@ impl AuthClearObligation {
 pub(crate) enum AuthRetryObligation {
     None,
     Pending(AuthClearAttempt),
+    ManualRecovery(AuthClearExhausted),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -319,6 +381,12 @@ pub(crate) fn reduce_auth_clear_obligation(
                 settlement: SettlementPermission::Allowed,
                 closed_notice: None,
             },
+            AuthClearObligation::Exhausted(exhausted) => AuthClearReduction {
+                obligation: AuthClearObligation::Exhausted(exhausted.clone()),
+                retry: AuthRetryObligation::ManualRecovery(exhausted.clone()),
+                settlement: SettlementPermission::Blocked,
+                closed_notice: Some(ClosedNotice::AuthClearPending),
+            },
             AuthClearObligation::Satisfied(cleared) => AuthClearReduction {
                 obligation: AuthClearObligation::Satisfied(cleared.clone()),
                 retry: AuthRetryObligation::None,
@@ -345,15 +413,23 @@ pub(crate) fn reduce_auth_clear_obligation(
             settlement: SettlementPermission::Allowed,
             closed_notice: None,
         },
-        AuthClearOutcome::PersistFailed(_) | AuthClearOutcome::Stale(_) => {
-            let retry = attempted.next();
-            AuthClearReduction {
+        AuthClearOutcome::PersistFailed(_) | AuthClearOutcome::Stale(_) => match attempted.next() {
+            AuthClearAdvance::Next(retry) => AuthClearReduction {
                 obligation: AuthClearObligation::Pending(retry.clone()),
                 retry: AuthRetryObligation::Pending(retry),
                 settlement: SettlementPermission::Blocked,
                 closed_notice: Some(ClosedNotice::AuthClearPending),
+            },
+            AuthClearAdvance::Exhausted(last_failed) => {
+                let exhausted = AuthClearExhausted { last_failed };
+                AuthClearReduction {
+                    obligation: AuthClearObligation::Exhausted(exhausted.clone()),
+                    retry: AuthRetryObligation::ManualRecovery(exhausted),
+                    settlement: SettlementPermission::Blocked,
+                    closed_notice: Some(ClosedNotice::AuthClearPending),
+                }
             }
-        }
+        },
     }
 }
 
@@ -399,8 +475,65 @@ pub(crate) fn parse_closed_provider_status(input: &str) -> Option<ProviderErrorS
 mod tests {
     use super::*;
 
+    fn transcript(session_name: &str, spawn_identity: &str) -> TranscriptIdentity {
+        TranscriptIdentity::new(session_name, spawn_identity).unwrap()
+    }
+
+    fn watched_range(start: u64, end: u64) -> WatchedByteRange {
+        WatchedByteRange::new(start, end).unwrap()
+    }
+
+    struct CoordinateFields<'a> {
+        provider: ProviderKind,
+        channel_id: u64,
+        turn_id: &'a str,
+        dispatch_id: &'a str,
+        generation: u64,
+        session_name: &'a str,
+        spawn_identity: &'a str,
+        range: WatchedByteRange,
+    }
+
+    fn coordinate_from_fields(fields: CoordinateFields<'_>) -> TerminalCoordinate {
+        TerminalCoordinate::new(
+            fields.provider,
+            fields.channel_id,
+            fields.turn_id,
+            fields.dispatch_id,
+            fields.generation,
+            transcript(fields.session_name, fields.spawn_identity),
+            fields.range,
+        )
+        .unwrap()
+    }
+
+    fn exact_coordinate(
+        provider: ProviderKind,
+        generation: u64,
+        session_name: &str,
+        spawn_identity: &str,
+        range: WatchedByteRange,
+    ) -> TerminalCoordinate {
+        coordinate_from_fields(CoordinateFields {
+            provider,
+            channel_id: 42,
+            turn_id: "turn-7",
+            dispatch_id: "dispatch-9",
+            generation,
+            session_name,
+            spawn_identity,
+            range,
+        })
+    }
+
     fn coordinate(generation: u64) -> TerminalCoordinate {
-        TerminalCoordinate::new(42, "turn-7", "dispatch-9", generation).unwrap()
+        exact_coordinate(
+            ProviderKind::Claude,
+            generation,
+            "AgentDesk-claude-42",
+            "spawn-7",
+            watched_range(100, 200),
+        )
     }
 
     fn authority(generation: u64) -> TerminalAuthority {
@@ -418,14 +551,52 @@ mod tests {
 
     #[test]
     fn authority_constructor_requires_the_full_exact_tuple_and_kill_id() {
+        let identity = transcript("AgentDesk-claude-42", "spawn-7");
+        let range = watched_range(100, 200);
         for incomplete in [
-            TerminalCoordinate::new(0, "turn-7", "dispatch-9", 1),
-            TerminalCoordinate::new(42, "", "dispatch-9", 1),
-            TerminalCoordinate::new(42, "turn-7", "", 1),
-            TerminalCoordinate::new(42, "turn-7", "dispatch-9", 0),
+            TerminalCoordinate::new(
+                ProviderKind::Claude,
+                0,
+                "turn-7",
+                "dispatch-9",
+                1,
+                identity.clone(),
+                range,
+            ),
+            TerminalCoordinate::new(
+                ProviderKind::Claude,
+                42,
+                "",
+                "dispatch-9",
+                1,
+                identity.clone(),
+                range,
+            ),
+            TerminalCoordinate::new(
+                ProviderKind::Claude,
+                42,
+                "turn-7",
+                "",
+                1,
+                identity.clone(),
+                range,
+            ),
+            TerminalCoordinate::new(
+                ProviderKind::Claude,
+                42,
+                "turn-7",
+                "dispatch-9",
+                0,
+                identity,
+                range,
+            ),
         ] {
             assert!(incomplete.is_none());
         }
+        assert!(TranscriptIdentity::new("", "spawn-7").is_none());
+        assert!(TranscriptIdentity::new("AgentDesk-claude-42", "").is_none());
+        assert!(WatchedByteRange::new(100, 100).is_none());
+        assert!(WatchedByteRange::new(101, 100).is_none());
         assert!(
             TerminalAuthority::new(
                 coordinate(1),
@@ -473,6 +644,172 @@ mod tests {
             classify_no_row_action(NoRowEvidence::Exact(current.clone()), Some(&coordinate(11)),),
             NoRowAction::Authorize(current)
         );
+    }
+
+    #[test]
+    fn no_row_authority_compares_provider_transcript_and_full_range() {
+        let current = authority(11);
+        let mismatches = [
+            exact_coordinate(
+                ProviderKind::Codex,
+                11,
+                "AgentDesk-claude-42",
+                "spawn-7",
+                watched_range(100, 200),
+            ),
+            exact_coordinate(
+                ProviderKind::Claude,
+                11,
+                "AgentDesk-claude-other",
+                "spawn-7",
+                watched_range(100, 200),
+            ),
+            exact_coordinate(
+                ProviderKind::Claude,
+                11,
+                "AgentDesk-claude-42",
+                "spawn-other",
+                watched_range(100, 200),
+            ),
+            exact_coordinate(
+                ProviderKind::Claude,
+                11,
+                "AgentDesk-claude-42",
+                "spawn-7",
+                watched_range(100, 199),
+            ),
+            exact_coordinate(
+                ProviderKind::Claude,
+                11,
+                "AgentDesk-claude-42",
+                "spawn-7",
+                watched_range(101, 200),
+            ),
+            exact_coordinate(
+                ProviderKind::Claude,
+                11,
+                "AgentDesk-claude-42",
+                "spawn-7",
+                watched_range(150, 250),
+            ),
+            exact_coordinate(
+                ProviderKind::Claude,
+                11,
+                "AgentDesk-claude-42",
+                "spawn-7",
+                watched_range(200, 300),
+            ),
+        ];
+
+        for mismatch in mismatches {
+            assert_eq!(
+                classify_no_row_action(NoRowEvidence::Exact(current.clone()), Some(&mismatch)),
+                NoRowAction::ObserveOnly(ClosedNotice::NewerDispatchPending)
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_claim_admission_rejects_each_coordinate_field_mismatch() {
+        let authority = authority(8);
+        let mismatches = [
+            coordinate_from_fields(CoordinateFields {
+                provider: ProviderKind::Claude,
+                channel_id: 43,
+                turn_id: "turn-7",
+                dispatch_id: "dispatch-9",
+                generation: 8,
+                session_name: "AgentDesk-claude-42",
+                spawn_identity: "spawn-7",
+                range: watched_range(100, 200),
+            }),
+            coordinate_from_fields(CoordinateFields {
+                provider: ProviderKind::Claude,
+                channel_id: 42,
+                turn_id: "turn-other",
+                dispatch_id: "dispatch-9",
+                generation: 8,
+                session_name: "AgentDesk-claude-42",
+                spawn_identity: "spawn-7",
+                range: watched_range(100, 200),
+            }),
+            coordinate_from_fields(CoordinateFields {
+                provider: ProviderKind::Claude,
+                channel_id: 42,
+                turn_id: "turn-7",
+                dispatch_id: "dispatch-other",
+                generation: 8,
+                session_name: "AgentDesk-claude-42",
+                spawn_identity: "spawn-7",
+                range: watched_range(100, 200),
+            }),
+            coordinate_from_fields(CoordinateFields {
+                provider: ProviderKind::Claude,
+                channel_id: 42,
+                turn_id: "turn-7",
+                dispatch_id: "dispatch-9",
+                generation: 9,
+                session_name: "AgentDesk-claude-42",
+                spawn_identity: "spawn-7",
+                range: watched_range(100, 200),
+            }),
+            exact_coordinate(
+                ProviderKind::Codex,
+                8,
+                "AgentDesk-claude-42",
+                "spawn-7",
+                watched_range(100, 200),
+            ),
+            exact_coordinate(
+                ProviderKind::Claude,
+                8,
+                "AgentDesk-claude-other",
+                "spawn-7",
+                watched_range(100, 200),
+            ),
+            exact_coordinate(
+                ProviderKind::Claude,
+                8,
+                "AgentDesk-claude-42",
+                "spawn-other",
+                watched_range(100, 200),
+            ),
+            exact_coordinate(
+                ProviderKind::Claude,
+                8,
+                "AgentDesk-claude-42",
+                "spawn-7",
+                watched_range(100, 199),
+            ),
+            exact_coordinate(
+                ProviderKind::Claude,
+                8,
+                "AgentDesk-claude-42",
+                "spawn-7",
+                watched_range(101, 200),
+            ),
+            exact_coordinate(
+                ProviderKind::Claude,
+                8,
+                "AgentDesk-claude-42",
+                "spawn-7",
+                watched_range(150, 250),
+            ),
+            exact_coordinate(
+                ProviderKind::Claude,
+                8,
+                "AgentDesk-claude-42",
+                "spawn-7",
+                watched_range(200, 300),
+            ),
+        ];
+        for (index, mismatch) in mismatches.into_iter().enumerate() {
+            let claim = DispatchClaim::new(mismatch, format!("claim-{index}")).unwrap();
+            assert_eq!(
+                admit_dispatch_claim(&authority, None, claim),
+                DispatchAdmission::ObserveOnly(ClosedNotice::CoordinateMismatch)
+            );
+        }
     }
 
     #[test]
@@ -589,6 +926,56 @@ mod tests {
     }
 
     #[test]
+    fn auth_attempt_overflow_becomes_manual_recovery_and_never_reuses_max() {
+        let pending_max_minus_one =
+            AuthClearObligation::Pending(attempt(5, u32::MAX.saturating_sub(1)));
+        let advanced_to_max = reduce_auth_clear_obligation(
+            &pending_max_minus_one,
+            AuthClearOutcome::PersistFailed(attempt(5, u32::MAX.saturating_sub(1))),
+        );
+        assert_eq!(
+            advanced_to_max.obligation,
+            AuthClearObligation::Pending(attempt(5, u32::MAX))
+        );
+        assert_eq!(
+            advanced_to_max.retry,
+            AuthRetryObligation::Pending(attempt(5, u32::MAX))
+        );
+        assert_eq!(advanced_to_max.settlement, SettlementPermission::Blocked);
+
+        let exhausted = reduce_auth_clear_obligation(
+            &advanced_to_max.obligation,
+            AuthClearOutcome::PersistFailed(attempt(5, u32::MAX)),
+        );
+        let manual = AuthClearExhausted {
+            last_failed: attempt(5, u32::MAX),
+        };
+        assert_eq!(
+            exhausted.obligation,
+            AuthClearObligation::Exhausted(manual.clone())
+        );
+        assert_eq!(
+            exhausted.retry,
+            AuthRetryObligation::ManualRecovery(manual.clone())
+        );
+        assert_eq!(exhausted.settlement, SettlementPermission::Blocked);
+
+        let reused_max_success = reduce_auth_clear_obligation(
+            &exhausted.obligation,
+            AuthClearOutcome::Cleared(attempt(5, u32::MAX)),
+        );
+        assert_eq!(
+            reused_max_success.obligation,
+            AuthClearObligation::Exhausted(manual.clone())
+        );
+        assert_eq!(
+            reused_max_success.retry,
+            AuthRetryObligation::ManualRecovery(manual)
+        );
+        assert_eq!(reused_max_success.settlement, SettlementPermission::Blocked);
+    }
+
+    #[test]
     fn auth_retry_success_is_consumed_exactly_once() {
         let failed = reduce_auth_clear_obligation(
             &AuthClearObligation::Pending(attempt(5, 1)),
@@ -615,13 +1002,118 @@ mod tests {
     }
 
     #[test]
-    fn auth_outcomes_are_attempt_and_generation_ordered() {
-        let pending = AuthClearObligation::Pending(attempt(7, 2));
-        for stale in [attempt(7, 1), attempt(7, 3), attempt(8, 2)] {
+    fn auth_outcomes_are_attempt_and_full_coordinate_ordered() {
+        let expected = attempt(7, 2);
+        let pending = AuthClearObligation::Pending(expected.clone());
+        let stale_coordinates = [
+            coordinate_from_fields(CoordinateFields {
+                provider: ProviderKind::Codex,
+                channel_id: 42,
+                turn_id: "turn-7",
+                dispatch_id: "dispatch-9",
+                generation: 7,
+                session_name: "AgentDesk-claude-42",
+                spawn_identity: "spawn-7",
+                range: watched_range(100, 200),
+            }),
+            coordinate_from_fields(CoordinateFields {
+                provider: ProviderKind::Claude,
+                channel_id: 43,
+                turn_id: "turn-7",
+                dispatch_id: "dispatch-9",
+                generation: 7,
+                session_name: "AgentDesk-claude-42",
+                spawn_identity: "spawn-7",
+                range: watched_range(100, 200),
+            }),
+            coordinate_from_fields(CoordinateFields {
+                provider: ProviderKind::Claude,
+                channel_id: 42,
+                turn_id: "turn-other",
+                dispatch_id: "dispatch-9",
+                generation: 7,
+                session_name: "AgentDesk-claude-42",
+                spawn_identity: "spawn-7",
+                range: watched_range(100, 200),
+            }),
+            coordinate_from_fields(CoordinateFields {
+                provider: ProviderKind::Claude,
+                channel_id: 42,
+                turn_id: "turn-7",
+                dispatch_id: "dispatch-other",
+                generation: 7,
+                session_name: "AgentDesk-claude-42",
+                spawn_identity: "spawn-7",
+                range: watched_range(100, 200),
+            }),
+            coordinate_from_fields(CoordinateFields {
+                provider: ProviderKind::Claude,
+                channel_id: 42,
+                turn_id: "turn-7",
+                dispatch_id: "dispatch-9",
+                generation: 8,
+                session_name: "AgentDesk-claude-42",
+                spawn_identity: "spawn-7",
+                range: watched_range(100, 200),
+            }),
+            exact_coordinate(
+                ProviderKind::Claude,
+                7,
+                "AgentDesk-claude-other",
+                "spawn-7",
+                watched_range(100, 200),
+            ),
+            exact_coordinate(
+                ProviderKind::Claude,
+                7,
+                "AgentDesk-claude-42",
+                "spawn-other",
+                watched_range(100, 200),
+            ),
+            exact_coordinate(
+                ProviderKind::Claude,
+                7,
+                "AgentDesk-claude-42",
+                "spawn-7",
+                watched_range(100, 199),
+            ),
+            exact_coordinate(
+                ProviderKind::Claude,
+                7,
+                "AgentDesk-claude-42",
+                "spawn-7",
+                watched_range(101, 200),
+            ),
+            exact_coordinate(
+                ProviderKind::Claude,
+                7,
+                "AgentDesk-claude-42",
+                "spawn-7",
+                watched_range(150, 250),
+            ),
+            exact_coordinate(
+                ProviderKind::Claude,
+                7,
+                "AgentDesk-claude-42",
+                "spawn-7",
+                watched_range(200, 300),
+            ),
+        ];
+        let mut stale = vec![attempt(7, 1), attempt(7, 3)];
+        stale.extend(
+            stale_coordinates
+                .into_iter()
+                .map(|coordinate| AuthClearAttempt::new(coordinate, 2).unwrap()),
+        );
+
+        for stale in stale {
             let reduction =
                 reduce_auth_clear_obligation(&pending, AuthClearOutcome::Cleared(stale));
             assert_eq!(reduction.obligation, pending);
-            assert_eq!(reduction.retry, AuthRetryObligation::Pending(attempt(7, 2)));
+            assert_eq!(
+                reduction.retry,
+                AuthRetryObligation::Pending(expected.clone())
+            );
             assert_eq!(reduction.settlement, SettlementPermission::Blocked);
             assert_eq!(
                 reduction.closed_notice,
