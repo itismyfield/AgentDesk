@@ -3,9 +3,14 @@ use crate::services::discord::http::{edit_channel_message, send_channel_message}
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[path = "streaming_status_tick/panel_creation.rs"]
+mod panel_creation;
 #[path = "streaming_status_tick/panel_refresh.rs"]
 mod panel_refresh;
 mod provider_output_guard;
+use panel_creation::{
+    record_status_panel_send_failure, status_panel_send_is_due, status_panel_send_payload,
+};
 use panel_refresh::refresh_existing_status_panel;
 use provider_output_guard::{guard_rollover, guard_streaming_frame};
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -464,29 +469,33 @@ pub(super) async fn update_streaming_status_tick(
                         return StreamingStatusTickOutcome::ContinueStreamingLoop;
                     }
                 };
-                rate_limit_wait(&shared, channel_id).await;
-                let send_result = match prepared.as_ref() {
-                    Some(prepared) => {
-                        crate::services::discord::http::send_channel_message_with_nonce(
-                            &http,
-                            channel_id,
-                            &panel_seed,
-                            &prepared.nonce,
-                        )
-                        .await
-                    }
-                    None => {
-                        crate::services::discord::http::send_channel_message(
-                            &http,
-                            channel_id,
-                            &panel_seed,
-                        )
-                        .await
-                    }
+                let send_result = if status_panel_send_is_due(prepared.as_ref()) {
+                    rate_limit_wait(&shared, channel_id).await;
+                    Some(match prepared.as_ref() {
+                        Some(prepared) => {
+                            crate::services::discord::http::send_channel_message_with_nonce(
+                                &http,
+                                channel_id,
+                                status_panel_send_payload(Some(prepared), &panel_seed),
+                                &prepared.nonce,
+                            )
+                            .await
+                        }
+                        None => {
+                            crate::services::discord::http::send_channel_message(
+                                &http,
+                                channel_id,
+                                status_panel_send_payload(None, &panel_seed),
+                            )
+                            .await
+                        }
+                    })
+                } else {
+                    None
                 };
                 match send_result {
-                    Ok(panel_msg) => {
-                        protect_or_discard_watcher_two_message_panel((
+                    Some(Ok(panel_msg)) => {
+                        let protection = protect_or_discard_watcher_two_message_panel((
                             (&http, &shared, &watcher_provider),
                             (
                                 channel_id,
@@ -496,6 +505,17 @@ pub(super) async fn update_streaming_status_tick(
                             ),
                         ))
                         .await;
+                        if !watcher_status_panel_protection_allows_bind(protection) {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            tracing::warn!(
+                                "  [{ts}] ⚠ watcher: aborted status-panel-v2 bind after pending-bind protection failure in channel {} (panel_msg={}, disposition={:?})",
+                                channel_id.get(),
+                                panel_msg.id.get(),
+                                protection
+                            );
+                            commit_streaming_status_tick_state!();
+                            return StreamingStatusTickOutcome::ContinueStreamingLoop;
+                        }
                         let fresh_inflight =
                             crate::services::discord::inflight::load_inflight_state(
                                 &watcher_provider,
@@ -551,20 +571,6 @@ pub(super) async fn update_streaming_status_tick(
                             let decision = resolve_tui_status_panel_bind_decision(bind_outcome);
                             if decision.delete_sent_panel {
                                 // The inflight row did NOT record our panel:
-                                //  - SkippedPanelAlreadySet → the row already carries a
-                                //    DIFFERENT (real) panel id; ours is a duplicate.
-                                //  - GuardMismatch / Missing / IoError → the bind never
-                                //    happened (the row changed/disappeared or a guard
-                                //    failed); we must not claim ownership of a panel the
-                                //    row doesn't know about.
-                                // Delete the just-sent duplicate so it never leaks. This
-                                // reuses the same delete path the "inflight changed
-                                // during send" branch below uses
-                                // (delete_nonterminal_placeholder → tmux.rs:803). It
-                                // never double-deletes a legitimately-bound panel: we
-                                // only reach here when our bind did NOT record
-                                // `panel_msg.id`, so the row's owned panel (if any) is a
-                                // *different* id we never delete.
                                 let discard_outcome = delete_nonterminal_placeholder(
                                     &http,
                                     channel_id,
@@ -578,11 +584,6 @@ pub(super) async fn update_streaming_status_tick(
                                 if !discard_outcome.is_committed()
                                     && !discard_outcome.is_permanent_failure()
                                 {
-                                    // Transient delete failure: the duplicate panel
-                                    // still exists and this path does not persist it to
-                                    // inflight, so record it in the durable store for
-                                    // the sweeper drain to reclaim independent of turn
-                                    // lifecycle (#3003 codex P2 r14 pattern).
                                     enqueue_watcher_status_panel_orphan(
                                         shared.as_ref(),
                                         &watcher_provider,
@@ -598,9 +599,6 @@ pub(super) async fn update_streaming_status_tick(
                                         panel_msg.id,
                                     );
                                 }
-                                // Use the bind-observed CURRENT owned id, not the duplicate or
-                                // stale pre-bind snapshot (#3077 P2 #2). GuardMismatch/Missing/
-                                // IoError own none; adopt only for the same turn, never a replacement.
                                 let resolved_handle = if identity_matches {
                                     decision.owned_panel_id.map(serenity::MessageId::new)
                                 } else {
@@ -621,13 +619,6 @@ pub(super) async fn update_streaming_status_tick(
                                 // Bound / AlreadyBound: the row now owns this exact id.
                                 debug_assert!(decision.adopt_sent_panel);
                                 status_panel_msg_id = Some(panel_msg.id);
-                                // #3805 P2 (PR-C): a FRESH Bound opened this
-                                // turn's panel epoch (the generation the
-                                // guard just persisted); mirror it into the
-                                // local so the completion guard proves the
-                                // SAME epoch. AlreadyBound re-binds do NOT
-                                // re-open it (the local already carries the
-                                // on-disk seed). None/OFF → local untouched.
                                 if shared.ui.two_message_panel_enabled
                                     && let Some(adopted_generation) =
                                         adopt_watcher_singleton_panel_after_fresh_bind(
@@ -651,10 +642,6 @@ pub(super) async fn update_streaming_status_tick(
                                 );
                             }
                         } else {
-                            // The turn vanished/changed during the send await, or an
-                            // overlapping watcher already owns the panel; ours is a
-                            // duplicate/orphan — reclaim it instead of persisting stale
-                            // state (the next interval adopts the canonical panel).
                             let discard_outcome = delete_nonterminal_placeholder(
                                 &http,
                                 channel_id,
@@ -668,21 +655,12 @@ pub(super) async fn update_streaming_status_tick(
                             if !discard_outcome.is_committed()
                                 && !discard_outcome.is_permanent_failure()
                             {
-                                // #3003 (codex P2 r14): transient delete failure but the
-                                // duplicate exists and this path never persists it —
-                                // record it for the sweeper drain to reclaim.
                                 enqueue_watcher_status_panel_orphan(
                                     shared.as_ref(),
                                     &watcher_provider,
                                     channel_id,
                                     panel_msg.id,
                                 );
-                                // #3003 (codex P2 r19/r22): adopt the CANONICAL persisted
-                                // panel ONLY for a same-turn overlapping-watcher duplicate
-                                // (`identity_matches`), so edits/completion hit the real
-                                // panel. For a *replacement* turn the persisted id is the
-                                // new turn's; adopting it would let the old frame's abandon
-                                // cleanup delete it — keep the just-sent duplicate locally.
                                 if fresh_panel_already_set && identity_matches {
                                     status_panel_msg_id = watcher_persisted_status_panel_msg_id(
                                         fresh_inflight.as_ref(),
@@ -709,14 +687,23 @@ pub(super) async fn update_streaming_status_tick(
                             );
                         }
                     }
-                    Err(error) => {
+                    Some(Err(error)) => {
+                        let disposition = record_status_panel_send_failure(
+                            shared.as_ref(),
+                            &watcher_provider,
+                            channel_id,
+                            prepared.as_ref(),
+                            &error,
+                        );
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::warn!(
-                            "  [{ts}] ⚠ watcher: failed to create status-panel-v2 for TUI-direct turn in channel {}: {}",
+                            "  [{ts}] ⚠ watcher: failed to create status-panel-v2 for TUI-direct turn in channel {} (disposition={:?}): {}",
                             channel_id.get(),
+                            disposition,
                             error
                         );
                     }
+                    None => {}
                 }
             }
         }

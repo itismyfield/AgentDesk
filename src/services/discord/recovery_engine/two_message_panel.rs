@@ -196,12 +196,26 @@ async fn recover_two_message_panel_with_gateway<G: RecoveryPanelGateway + ?Sized
             return false;
         }
     };
+    if !prepared.send_now {
+        return false;
+    }
     let new_panel_id = match gateway
-        .send_panel(channel_id, &panel_text, &prepared.nonce)
+        .send_panel(channel_id, &prepared.content, &prepared.nonce)
         .await
     {
         Ok(message_id) => message_id,
         Err(error) => {
+            if let Err(durability_error) =
+                crate::services::discord::status_panel_transition::record_create_failure(
+                    provider,
+                    &shared.token_hash,
+                    channel_id.get(),
+                    &prepared,
+                    crate::services::discord::status_panel_transition::StatusPanelCreateFailureDisposition::RetrySameNonce,
+                )
+            {
+                tracing::warn!(provider = %provider.as_str(), channel_id = channel_id.get(), error = %durability_error, "two-message recovery could not persist ambiguous send disposition");
+            }
             tracing::warn!(
                 provider = %provider.as_str(),
                 channel_id = channel_id.get(),

@@ -776,6 +776,8 @@ src/
 │   │   │   └── write.rs
 │   │   ├── status_panel_orphan_store/
 │   │   │   └── persistence.rs
+│   │   ├── status_panel_transition/
+│   │   │   └── prepare_recovery.rs
 │   │   ├── task_notification_delivery/
 │   │   │   ├── store/
 │   │   │   │   ├── card_claim.rs
@@ -803,6 +805,7 @@ src/
 │   │   │   └── ops.rs
 │   │   ├── tmux_watcher/
 │   │   │   ├── streaming_status_tick/
+│   │   │   │   ├── panel_creation.rs
 │   │   │   │   ├── panel_refresh.rs
 │   │   │   │   └── types.rs
 │   │   │   ├── commit_decisions.rs

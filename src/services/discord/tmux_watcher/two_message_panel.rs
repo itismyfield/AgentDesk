@@ -185,6 +185,49 @@ pub(in crate::services::discord) fn remove_watcher_two_message_panel_orphan_regi
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum WatcherStatusPanelProtectionDisposition {
+    Protected,
+    Discarded,
+    RetainedForRetry,
+}
+
+pub(in crate::services::discord) fn watcher_status_panel_protection_allows_bind(
+    disposition: WatcherStatusPanelProtectionDisposition,
+) -> bool {
+    disposition == WatcherStatusPanelProtectionDisposition::Protected
+}
+
+fn watcher_status_panel_failed_protection_disposition(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    panel_msg_id: serenity::MessageId,
+    discard: &crate::services::discord::placeholder_cleanup::PlaceholderCleanupOutcome,
+) -> WatcherStatusPanelProtectionDisposition {
+    if watcher_status_panel_delete_needs_orphan_retry(discard) {
+        return WatcherStatusPanelProtectionDisposition::RetainedForRetry;
+    }
+    let retirement = if discard.is_committed() {
+        crate::services::discord::status_panel_transition::StatusPanelRetirementOutcome::Removed
+    } else {
+        crate::services::discord::status_panel_transition::StatusPanelRetirementOutcome::PermanentAbsent
+    };
+    if crate::services::discord::status_panel_transition::finalize_retirement(
+        provider,
+        &shared.token_hash,
+        channel_id.get(),
+        panel_msg_id.get(),
+        retirement,
+    )
+    .unwrap_or(false)
+    {
+        WatcherStatusPanelProtectionDisposition::Discarded
+    } else {
+        WatcherStatusPanelProtectionDisposition::RetainedForRetry
+    }
+}
+
 pub(in crate::services::discord) async fn protect_or_discard_watcher_two_message_panel(
     request: (
         (&Arc<serenity::Http>, &Arc<SharedData>, &ProviderKind),
@@ -197,7 +240,7 @@ pub(in crate::services::discord) async fn protect_or_discard_watcher_two_message
             >,
         ),
     ),
-) {
+) -> WatcherStatusPanelProtectionDisposition {
     let ((http, shared, provider), (channel_id, tmux_session_name, panel_msg_id, prepared)) =
         request;
     let Err(error) = acknowledge_watcher_two_message_panel(
@@ -208,7 +251,7 @@ pub(in crate::services::discord) async fn protect_or_discard_watcher_two_message
         prepared,
         panel_msg_id,
     ) else {
-        return;
+        return WatcherStatusPanelProtectionDisposition::Protected;
     };
     tracing::warn!(
         channel_id = channel_id.get(),
@@ -222,7 +265,7 @@ pub(in crate::services::discord) async fn protect_or_discard_watcher_two_message
         channel_id.get(),
         panel_msg_id.get(),
     );
-    let _ = delete_nonterminal_placeholder(
+    let discard = delete_nonterminal_placeholder(
         http,
         channel_id,
         shared,
@@ -232,6 +275,13 @@ pub(in crate::services::discord) async fn protect_or_discard_watcher_two_message
         "watcher_status_panel_pending_bind_failed",
     )
     .await;
+    watcher_status_panel_failed_protection_disposition(
+        shared.as_ref(),
+        provider,
+        channel_id,
+        panel_msg_id,
+        &discard,
+    )
 }
 
 fn watcher_status_panel_delete_needs_orphan_retry(
@@ -489,17 +539,35 @@ pub(in crate::services::discord) async fn reanchor_watcher_two_message_status_pa
             return false;
         }
     };
+    if !prepared.send_now {
+        return false;
+    }
     rate_limit_wait(shared, channel_id).await;
     let new_panel = match crate::services::discord::http::send_channel_message_with_nonce(
         http,
         channel_id,
-        panel_text,
+        &prepared.content,
         &prepared.nonce,
     )
     .await
     {
         Ok(message) => message,
         Err(error) => {
+            if let Err(durability_error) =
+                crate::services::discord::status_panel_transition::record_serenity_create_failure(
+                    provider,
+                    &shared.token_hash,
+                    channel_id.get(),
+                    &prepared,
+                    &error,
+                )
+            {
+                tracing::warn!(
+                    channel_id = channel_id.get(),
+                    error = %durability_error,
+                    "watcher could not persist re-anchor send disposition"
+                );
+            }
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 "  [{ts}] ⚠ watcher: #3805 P2 re-anchor panel send failed in channel {}: {}",
@@ -509,30 +577,12 @@ pub(in crate::services::discord) async fn reanchor_watcher_two_message_status_pa
             return false;
         }
     };
-    if let Err(error) = acknowledge_watcher_two_message_panel(
-        true,
-        shared.as_ref(),
-        provider,
-        channel_id,
-        Some(&prepared),
-        new_panel.id,
-    ) {
-        tracing::warn!(
-            channel_id = channel_id.get(),
-            panel_message_id = new_panel.id.get(),
-            error = %error,
-            "failed to persist watcher re-anchor pending-bind protection"
-        );
-        let _ = delete_nonterminal_placeholder(
-            http,
-            channel_id,
-            shared,
-            provider,
-            tmux_session_name,
-            new_panel.id,
-            "watcher_two_message_reanchor_pending_bind_failed",
-        )
-        .await;
+    let protection = protect_or_discard_watcher_two_message_panel((
+        (http, shared, provider),
+        (channel_id, tmux_session_name, new_panel.id, Some(&prepared)),
+    ))
+    .await;
+    if !watcher_status_panel_protection_allows_bind(protection) {
         return false;
     }
 

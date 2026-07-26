@@ -11,8 +11,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::inflight::{self, InflightTurnIdentity};
 use super::runtime_store;
@@ -21,8 +23,22 @@ use super::status_panel_singleton_store::{self, StatusPanelSingletonBinding};
 use crate::services::provider::ProviderKind;
 
 static TRANSITION_LOCK: Mutex<()> = Mutex::new(());
+const PREPARED_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+const PREPARED_RETENTION: Duration = Duration::from_secs(15 * 60);
+
+mod prepare_recovery;
+pub(in crate::services::discord) use prepare_recovery::{
+    classify_create_failure_status, prepare_candidate, record_create_failure,
+    record_serenity_create_failure, recover_unreconciled_with_delete, recover_with_transport,
+};
+use prepare_recovery::{
+    duration_millis, now_unix_ms, prepare_candidate_at, prepared_recovery_disposition_at,
+    record_create_failure_at,
+};
 #[cfg(test)]
 static FAIL_NEXT_INTENT_REMOVE: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FAIL_NEXT_PENDING_BIND_WRITE: AtomicBool = AtomicBool::new(false);
 
 struct TransitionFileLock {
     _file: fs::File,
@@ -101,6 +117,19 @@ pub(in crate::services::discord) enum StatusPanelRetirementOutcome {
     Deferred,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum StatusPanelCreateFailureDisposition {
+    PermanentRejected,
+    RetrySameNonce,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreparedRecoveryDisposition {
+    RetryNow,
+    Deferred,
+    Retired,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::services::discord) struct StatusPanelTransitionIntent {
     #[serde(default)]
@@ -122,11 +151,17 @@ pub(in crate::services::discord) struct StatusPanelTransitionIntent {
     pub content: String,
     #[serde(default)]
     pub state: StatusPanelTransitionState,
+    #[serde(default)]
+    pub prepared_at_unix_ms: u64,
+    #[serde(default)]
+    pub next_retry_at_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) struct PreparedStatusPanelTransition {
     pub nonce: String,
+    pub content: String,
+    pub send_now: bool,
 }
 
 fn root() -> Result<PathBuf, String> {
@@ -209,6 +244,43 @@ fn validate_intent_scope(
     Ok(())
 }
 
+fn validate_intent_shape(intent: &StatusPanelTransitionIntent) -> Result<(), String> {
+    if intent.channel_id == 0 || intent.content.is_empty() {
+        return Err("status panel transition requires channel and content".to_string());
+    }
+    if intent.prior_panel_id.is_some() != intent.prior_generation.is_some() {
+        return Err("status panel transition prior binding is incomplete".to_string());
+    }
+    if intent.candidate_panel_id == Some(0) {
+        return Err("status panel transition candidate id must be non-zero".to_string());
+    }
+    match intent.state {
+        StatusPanelTransitionState::Prepared => {
+            if intent.candidate_panel_id.is_some() || intent.generation.is_some() {
+                return Err("prepared status panel transition has resolved fields".to_string());
+            }
+        }
+        StatusPanelTransitionState::CandidateAcknowledged
+        | StatusPanelTransitionState::PendingBindDurable
+        | StatusPanelTransitionState::OwnershipCommitted
+        | StatusPanelTransitionState::Retiring
+        | StatusPanelTransitionState::CandidateSent
+        | StatusPanelTransitionState::Unreconciled => {
+            if intent.candidate_panel_id.is_none() || intent.generation.is_some() {
+                return Err(
+                    "acknowledged status panel transition has impossible fields".to_string()
+                );
+            }
+        }
+        StatusPanelTransitionState::Settled => {
+            if intent.candidate_panel_id.is_none() || intent.generation.is_none() {
+                return Err("settled status panel transition is incomplete".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn load_scoped_in_root(
     path: &Path,
     provider: &ProviderKind,
@@ -219,6 +291,7 @@ fn load_scoped_in_root(
         return Ok(None);
     };
     validate_intent_scope(path, &intent, provider, token_hash, channel_id)?;
+    validate_intent_shape(&intent)?;
     Ok(Some(intent))
 }
 
@@ -237,48 +310,6 @@ fn remove_in_root(path: &Path) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.to_string()),
     }
-}
-
-fn new_nonce() -> String {
-    let raw = uuid::Uuid::new_v4().simple().to_string();
-    format!("adksp{}", &raw[..20])
-}
-
-pub(in crate::services::discord) fn prepare_candidate(
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: u64,
-    prior_binding: Option<StatusPanelSingletonBinding>,
-    identity: Option<InflightTurnIdentity>,
-    operation: StatusPanelTransitionOperation,
-    content: &str,
-) -> Result<PreparedStatusPanelTransition, String> {
-    if channel_id == 0 || content.is_empty() {
-        return Err("status panel transition requires channel and content".to_string());
-    }
-    let _guard = TRANSITION_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let root = root()?;
-    let nonce = new_nonce();
-    let path = path_in_root(&root, provider, token_hash, channel_id, &nonce);
-    let _file_guard = lock_intent_path(&path)?;
-    let intent = StatusPanelTransitionIntent {
-        nonce: nonce.clone(),
-        provider: provider.as_str().to_string(),
-        token_hash: token_hash.to_string(),
-        channel_id,
-        candidate_panel_id: None,
-        prior_panel_id: prior_binding.map(|binding| binding.panel_message_id),
-        prior_generation: prior_binding.map(|binding| binding.generation),
-        generation: None,
-        identity,
-        operation,
-        content: content.to_string(),
-        state: StatusPanelTransitionState::Prepared,
-    };
-    save_in_root(&path, &intent)?;
-    Ok(PreparedStatusPanelTransition { nonce })
 }
 
 fn find_by_candidate_in_root(
@@ -364,6 +395,7 @@ where
         }
     };
     update(&mut intent)?;
+    validate_intent_shape(&intent)?;
     save_in_root(&path, &intent)?;
     Ok(intent)
 }
@@ -424,7 +456,12 @@ fn protect_acknowledged_candidate(
     }
     intent.candidate_panel_id = Some(candidate_panel_id);
     intent.state = StatusPanelTransitionState::CandidateAcknowledged;
+    validate_intent_shape(&intent)?;
     save_in_root(&path, &intent)?;
+    #[cfg(test)]
+    if FAIL_NEXT_PENDING_BIND_WRITE.swap(false, Ordering::SeqCst) {
+        return Err("injected status panel pending-bind persistence failure".to_string());
+    }
     status_panel_orphan_store::enqueue_pending_bind(
         provider,
         token_hash,
@@ -433,8 +470,14 @@ fn protect_acknowledged_candidate(
         intent.identity.clone(),
     )?;
     intent.state = StatusPanelTransitionState::PendingBindDurable;
+    validate_intent_shape(&intent)?;
     save_in_root(&path, &intent)?;
     Ok(intent)
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn fail_next_pending_bind_write_for_test() {
+    FAIL_NEXT_PENDING_BIND_WRITE.store(true, Ordering::SeqCst);
 }
 
 pub(in crate::services::discord) fn acknowledge_candidate(
@@ -489,6 +532,7 @@ fn mark_intent_terminal_for_candidate(
     )? {
         intent.state = StatusPanelTransitionState::Settled;
         intent.generation = Some(generation);
+        validate_intent_shape(&intent)?;
         save_in_root(&path, &intent)?;
     }
     Ok(())
@@ -857,127 +901,6 @@ pub(in crate::services::discord) fn load_unreconciled(
     Ok(intents.into_values().collect())
 }
 
-pub(in crate::services::discord) async fn recover_with_transport<S, SendFuture, D, DeleteFuture>(
-    provider: &ProviderKind,
-    token_hash: &str,
-    mut send_candidate: S,
-    mut delete_candidate: D,
-) -> usize
-where
-    S: FnMut(u64, String, String) -> SendFuture,
-    SendFuture: std::future::Future<Output = Result<u64, String>>,
-    D: FnMut(u64, u64) -> DeleteFuture,
-    DeleteFuture: std::future::Future<Output = StatusPanelRetirementOutcome>,
-{
-    let intents = match load_unreconciled(provider, token_hash) {
-        Ok(intents) => intents,
-        Err(error) => {
-            tracing::warn!(error = %error, "failed to load status-panel transition intents");
-            return 0;
-        }
-    };
-    let mut resolved = 0;
-    for mut intent in intents {
-        if intent.state == StatusPanelTransitionState::Settled {
-            let Some(candidate) = intent.candidate_panel_id else {
-                continue;
-            };
-            // Settled is written only after singleton ownership commits. It no
-            // longer participates in owner selection, so a newer generation may
-            // safely replace the candidate while this bounded residue is removed.
-            if status_panel_orphan_store::remove_pending_bind_checked(
-                provider,
-                token_hash,
-                intent.channel_id,
-                candidate,
-            )
-            .is_ok()
-                && remove_intent_for_candidate(provider, token_hash, intent.channel_id, candidate)
-                    .is_ok()
-            {
-                resolved += 1;
-            }
-            continue;
-        }
-        if intent.state == StatusPanelTransitionState::Prepared {
-            let sent = send_candidate(
-                intent.channel_id,
-                intent.content.clone(),
-                intent.nonce.clone(),
-            )
-            .await;
-            let candidate = match sent {
-                Ok(candidate) => candidate,
-                Err(error) => {
-                    tracing::debug!(
-                        channel_id = intent.channel_id,
-                        nonce = %intent.nonce,
-                        error = %error,
-                        "status-panel intent send remains pending"
-                    );
-                    continue;
-                }
-            };
-            let action = acknowledge_candidate(
-                provider,
-                token_hash,
-                intent.channel_id,
-                &PreparedStatusPanelTransition {
-                    nonce: intent.nonce.clone(),
-                },
-                candidate,
-            );
-            if matches!(action, StatusPanelTransitionAction::DeferDurability { .. }) {
-                continue;
-            }
-            intent.candidate_panel_id = Some(candidate);
-            intent.state = StatusPanelTransitionState::PendingBindDurable;
-        }
-        let Some(candidate) = intent.candidate_panel_id else {
-            continue;
-        };
-        let action = reconcile_acknowledged(&intent);
-        match action {
-            StatusPanelTransitionAction::KeepCurrent { .. } => resolved += 1,
-            StatusPanelTransitionAction::RetireCandidate => {
-                let retirement = delete_candidate(intent.channel_id, candidate).await;
-                if finalize_retirement(
-                    provider,
-                    token_hash,
-                    intent.channel_id,
-                    candidate,
-                    retirement,
-                )
-                .unwrap_or(false)
-                {
-                    resolved += 1;
-                }
-            }
-            StatusPanelTransitionAction::DeferDurability { .. }
-            | StatusPanelTransitionAction::RecoverUnreconciled => {}
-        }
-    }
-    resolved
-}
-
-pub(in crate::services::discord) async fn recover_unreconciled_with_delete<D, DeleteFuture>(
-    provider: &ProviderKind,
-    token_hash: &str,
-    delete_candidate: D,
-) -> usize
-where
-    D: FnMut(u64, u64) -> DeleteFuture,
-    DeleteFuture: std::future::Future<Output = StatusPanelRetirementOutcome>,
-{
-    recover_with_transport(
-        provider,
-        token_hash,
-        |_, _, _| async { Err("no create transport available".to_string()) },
-        delete_candidate,
-    )
-    .await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1007,6 +930,232 @@ mod tests {
         assert_eq!(intents[0].nonce, prepared.nonce);
         assert_eq!(intents[0].candidate_panel_id, None);
         assert_eq!(intents[0].state, StatusPanelTransitionState::Prepared);
+    }
+
+    #[test]
+    fn exact_prepared_authority_coalesces_and_bounds_retry_window_4891() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let token = "tok";
+        let channel_id = 4_891;
+        let identity = InflightTurnIdentity {
+            user_msg_id: 77,
+            started_at: "2026-07-26T00:00:00Z".to_string(),
+            tmux_session_name: Some("AgentDesk-test".to_string()),
+            turn_start_offset: Some(9),
+        };
+        let first = prepare_candidate_at(
+            &provider,
+            token,
+            channel_id,
+            None,
+            Some(identity.clone()),
+            StatusPanelTransitionOperation::LiveBind,
+            "frame-1",
+            1_000,
+        )
+        .expect("prepare first authority");
+        assert!(first.send_now);
+        record_create_failure_at(
+            &provider,
+            token,
+            channel_id,
+            &first,
+            StatusPanelCreateFailureDisposition::RetrySameNonce,
+            1_000,
+        )
+        .expect("record ambiguous failure");
+        let retry_at = load_unreconciled(&provider, token).expect("load retry authority")[0]
+            .next_retry_at_unix_ms;
+        let coalesced = prepare_candidate_at(
+            &provider,
+            token,
+            channel_id,
+            None,
+            Some(identity.clone()),
+            StatusPanelTransitionOperation::LiveBind,
+            "frame-2",
+            retry_at.saturating_sub(1),
+        )
+        .expect("coalesce retry authority");
+        assert_eq!(coalesced.nonce, first.nonce);
+        assert_eq!(coalesced.content, "frame-2");
+        assert!(
+            !coalesced.send_now,
+            "retry interval must suppress tick sends"
+        );
+        assert_eq!(
+            load_unreconciled(&provider, token)
+                .expect("one coalesced intent")
+                .len(),
+            1
+        );
+        let replacement = prepare_candidate_at(
+            &provider,
+            token,
+            channel_id,
+            None,
+            Some(identity),
+            StatusPanelTransitionOperation::LiveBind,
+            "frame-3",
+            1_000 + duration_millis(PREPARED_RETENTION),
+        )
+        .expect("replace expired authority");
+        assert_ne!(replacement.nonce, first.nonce);
+        assert_eq!(
+            load_unreconciled(&provider, token)
+                .expect("expired intent retired before replacement")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn create_failure_classification_retains_ambiguous_and_retires_permanent_4891() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let token = "tok";
+        let channel_id = 4_892;
+        let prepared = prepare_candidate(
+            &provider,
+            token,
+            channel_id,
+            None,
+            None,
+            StatusPanelTransitionOperation::LiveBind,
+            "frame",
+        )
+        .expect("prepare authority");
+        assert_eq!(
+            classify_create_failure_status(Some(500)),
+            StatusPanelCreateFailureDisposition::RetrySameNonce
+        );
+        assert_eq!(
+            classify_create_failure_status(None),
+            StatusPanelCreateFailureDisposition::RetrySameNonce
+        );
+        record_create_failure(
+            &provider,
+            token,
+            channel_id,
+            &prepared,
+            StatusPanelCreateFailureDisposition::RetrySameNonce,
+        )
+        .expect("retain ambiguous authority");
+        assert_eq!(
+            load_unreconciled(&provider, token).expect("retained").len(),
+            1
+        );
+        for status in [403, 404, 410] {
+            assert_eq!(
+                classify_create_failure_status(Some(status)),
+                StatusPanelCreateFailureDisposition::PermanentRejected
+            );
+        }
+        record_create_failure(
+            &provider,
+            token,
+            channel_id,
+            &prepared,
+            StatusPanelCreateFailureDisposition::PermanentRejected,
+        )
+        .expect("retire permanent rejection");
+        assert!(
+            load_unreconciled(&provider, token)
+                .expect("retired")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn impossible_transition_shapes_are_quarantined_on_exact_and_discovery_paths_4891() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let token = "tok";
+        let channel_id = 4_893;
+        for state in [
+            StatusPanelTransitionState::CandidateAcknowledged,
+            StatusPanelTransitionState::Settled,
+        ] {
+            let prepared = prepare_candidate(
+                &provider,
+                token,
+                channel_id,
+                None,
+                None,
+                StatusPanelTransitionOperation::LiveBind,
+                "frame",
+            )
+            .expect("prepare shape fixture");
+            let path = path_in_root(
+                &root().expect("root"),
+                &provider,
+                token,
+                channel_id,
+                &prepared.nonce,
+            );
+            let mut impossible = load_in_root(&path)
+                .expect("load fixture")
+                .expect("fixture exists");
+            impossible.state = state;
+            impossible.candidate_panel_id = None;
+            impossible.generation = None;
+            save_in_root(&path, &impossible).expect("write impossible fixture");
+            let exact = cancel_prepared_candidate(&provider, token, channel_id, &prepared);
+            assert!(exact.is_err(), "exact impossible mutation must fail closed");
+            assert!(!path.exists(), "exact impossible path must be isolated");
+        }
+
+        let prepared = prepare_candidate(
+            &provider,
+            token,
+            channel_id + 1,
+            None,
+            None,
+            StatusPanelTransitionOperation::LiveBind,
+            "discovery",
+        )
+        .expect("prepare discovery fixture");
+        let path = path_in_root(
+            &root().expect("root"),
+            &provider,
+            token,
+            channel_id + 1,
+            &prepared.nonce,
+        );
+        let mut impossible = load_in_root(&path)
+            .expect("load discovery fixture")
+            .expect("fixture exists");
+        impossible.state = StatusPanelTransitionState::PendingBindDurable;
+        impossible.candidate_panel_id = None;
+        save_in_root(&path, &impossible).expect("write discovery poison");
+        assert!(
+            load_unreconciled(&provider, token)
+                .expect("discovery isolates impossible intent")
+                .is_empty()
+        );
+        assert!(!path.exists());
     }
 
     #[test]
@@ -1353,6 +1502,8 @@ mod tests {
             operation: StatusPanelTransitionOperation::LiveBind,
             content: "poison".to_string(),
             state: StatusPanelTransitionState::Prepared,
+            prepared_at_unix_ms: 0,
+            next_retry_at_unix_ms: 0,
         };
         save_in_root(&poison_path, &poison).expect("scope poison");
 

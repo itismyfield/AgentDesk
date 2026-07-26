@@ -271,6 +271,179 @@ async fn status_panel_watcher_wrapper_reclassifies_superseded_pending_bind_4891(
 }
 
 #[test]
+fn failed_pending_bind_protection_never_allows_bind_and_preserves_retry_authority_4891() {
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root_for_two_message_tests();
+    let mut shared = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut shared)
+        .expect("fresh shared data should be uniquely owned")
+        .ui
+        .two_message_panel_enabled = true;
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_891_301);
+    let candidate = serenity::MessageId::new(1_500_000_000_489_301);
+    let prepared = prepare_watcher_two_message_panel(
+        true,
+        shared.as_ref(),
+        &provider,
+        channel_id,
+        None,
+        None,
+        "panel",
+    )
+    .expect("prepare candidate")
+    .expect("flag-on intent");
+    crate::services::discord::status_panel_transition::fail_next_pending_bind_write_for_test();
+    assert!(
+        acknowledge_watcher_two_message_panel(
+            true,
+            shared.as_ref(),
+            &provider,
+            channel_id,
+            Some(&prepared),
+            candidate,
+        )
+        .is_err()
+    );
+    crate::services::discord::status_panel_orphan_store::enqueue(
+        &provider,
+        &shared.token_hash,
+        channel_id.get(),
+        candidate.get(),
+    );
+
+    let transient = watcher_status_panel_failed_protection_disposition(
+        shared.as_ref(),
+        &provider,
+        channel_id,
+        candidate,
+        &crate::services::discord::placeholder_cleanup::PlaceholderCleanupOutcome::failed(
+            "http 500",
+        ),
+    );
+    assert_eq!(
+        transient,
+        WatcherStatusPanelProtectionDisposition::RetainedForRetry
+    );
+    assert!(!watcher_status_panel_protection_allows_bind(transient));
+    assert!(!watcher_status_panel_protection_allows_bind(
+        WatcherStatusPanelProtectionDisposition::Discarded
+    ));
+    assert!(watcher_status_panel_protection_allows_bind(
+        WatcherStatusPanelProtectionDisposition::Protected
+    ));
+    assert!(
+        crate::services::discord::status_panel_orphan_store::is_queued(
+            &provider,
+            &shared.token_hash,
+            channel_id.get(),
+            candidate.get(),
+        )
+    );
+    let intents = crate::services::discord::status_panel_transition::load_unreconciled(
+        &provider,
+        &shared.token_hash,
+    )
+    .expect("retry intent");
+    assert_eq!(intents.len(), 1);
+    assert_eq!(intents[0].candidate_panel_id, Some(candidate.get()));
+    assert_eq!(
+        intents[0].state,
+        crate::services::discord::status_panel_transition::StatusPanelTransitionState::CandidateAcknowledged
+    );
+
+    let discarded = watcher_status_panel_failed_protection_disposition(
+        shared.as_ref(),
+        &provider,
+        channel_id,
+        candidate,
+        &crate::services::discord::placeholder_cleanup::PlaceholderCleanupOutcome::Succeeded,
+    );
+    assert_eq!(
+        discarded,
+        WatcherStatusPanelProtectionDisposition::Discarded
+    );
+    assert!(
+        !crate::services::discord::status_panel_orphan_store::is_queued(
+            &provider,
+            &shared.token_hash,
+            channel_id.get(),
+            candidate.get(),
+        )
+    );
+    assert!(
+        crate::services::discord::status_panel_transition::load_unreconciled(
+            &provider,
+            &shared.token_hash,
+        )
+        .expect("terminal cleanup")
+        .is_empty()
+    );
+
+    let absent_candidate = serenity::MessageId::new(1_500_000_000_489_302);
+    let absent_prepared = prepare_watcher_two_message_panel(
+        true,
+        shared.as_ref(),
+        &provider,
+        channel_id,
+        None,
+        None,
+        "replacement panel",
+    )
+    .expect("prepare permanent-absence candidate")
+    .expect("flag-on permanent-absence intent");
+    crate::services::discord::status_panel_transition::fail_next_pending_bind_write_for_test();
+    assert!(
+        acknowledge_watcher_two_message_panel(
+            true,
+            shared.as_ref(),
+            &provider,
+            channel_id,
+            Some(&absent_prepared),
+            absent_candidate,
+        )
+        .is_err()
+    );
+    crate::services::discord::status_panel_orphan_store::enqueue(
+        &provider,
+        &shared.token_hash,
+        channel_id.get(),
+        absent_candidate.get(),
+    );
+    let permanently_absent = watcher_status_panel_failed_protection_disposition(
+        shared.as_ref(),
+        &provider,
+        channel_id,
+        absent_candidate,
+        &crate::services::discord::placeholder_cleanup::PlaceholderCleanupOutcome::failed(
+            "http 403 forbidden",
+        ),
+    );
+    assert_eq!(
+        permanently_absent,
+        WatcherStatusPanelProtectionDisposition::Discarded
+    );
+    assert!(!watcher_status_panel_protection_allows_bind(
+        permanently_absent
+    ));
+    assert!(
+        !crate::services::discord::status_panel_orphan_store::is_queued(
+            &provider,
+            &shared.token_hash,
+            channel_id.get(),
+            absent_candidate.get(),
+        )
+    );
+    assert!(
+        crate::services::discord::status_panel_transition::load_unreconciled(
+            &provider,
+            &shared.token_hash,
+        )
+        .expect("permanent-absence cleanup")
+        .is_empty()
+    );
+}
+
+#[test]
 fn watcher_orphan_preregistration_is_flag_gated_and_removed_after_persist() {
     let _env = isolate_agentdesk_runtime_root_for_two_message_tests();
     let mut shared = crate::services::discord::make_shared_data_for_tests();

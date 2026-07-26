@@ -20,7 +20,16 @@ pub(super) async fn recover_status_panel_transition_intents(
             )
             .await
             .map(|message| message.id.get())
-            .map_err(|error| error.to_string())
+            .map_err(|error| {
+                super::super::status_panel_transition::classify_create_failure_status(
+                    match &error {
+                        serenity::Error::Http(
+                            serenity::http::HttpError::UnsuccessfulRequest(response),
+                        ) => Some(response.status_code.as_u16()),
+                        _ => None,
+                    },
+                )
+            })
         },
         |channel_id, message_id| async move {
             match serenity::ChannelId::new(channel_id)

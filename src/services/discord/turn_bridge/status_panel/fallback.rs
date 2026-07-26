@@ -309,10 +309,13 @@ async fn complete_status_panel_v2_fallback_with_http_fenced(
     if cancel_prepared_if_stale(&request, &prepared, missing_panel_fence.as_ref()) {
         return reject_stale_missing_panel_recovery(&request);
     }
+    if !prepared.send_now {
+        return super::StatusPanelCompletionResult::durable_recovery();
+    }
     match super::http::send_channel_message_with_nonce(
         http,
         request.channel_id,
-        request.panel_text.as_str(),
+        &prepared.content,
         &prepared.nonce,
     )
     .await
@@ -333,6 +336,17 @@ async fn complete_status_panel_v2_fallback_with_http_fenced(
             finalize_fallback_binding(&mut request, message.id)
         }
         Err(error) => {
+            if let Err(durability_error) =
+                crate::services::discord::status_panel_transition::record_serenity_create_failure(
+                    request.provider,
+                    &request.shared.token_hash,
+                    request.channel_id.get(),
+                    &prepared,
+                    &error,
+                )
+            {
+                tracing::warn!(channel_id = request.channel_id.get(), source = request.source, error = %durability_error, "failed to persist completion fallback send disposition");
+            }
             tracing::warn!(
                 channel_id = request.channel_id.get(),
                 source = request.source,
@@ -376,19 +390,18 @@ async fn complete_status_panel_v2_fallback_with_gateway_fenced<G: TurnGateway + 
     if cancel_prepared_if_stale(&request, &prepared, missing_panel_fence.as_ref()) {
         return reject_stale_missing_panel_recovery(&request);
     }
+    if !prepared.send_now {
+        return super::StatusPanelCompletionResult::durable_recovery();
+    }
     let send_result = if gateway.can_chain_locally() {
         gateway
-            .send_message_with_nonce(
-                request.channel_id,
-                request.panel_text.as_str(),
-                &prepared.nonce,
-            )
+            .send_message_with_nonce(request.channel_id, &prepared.content, &prepared.nonce)
             .await
     } else if let Some(http) = request.shared.serenity_http_or_token_fallback() {
         super::http::send_channel_message_with_nonce(
             &http,
             request.channel_id,
-            request.panel_text.as_str(),
+            &prepared.content,
             &prepared.nonce,
         )
         .await
@@ -415,6 +428,17 @@ async fn complete_status_panel_v2_fallback_with_gateway_fenced<G: TurnGateway + 
             finalize_fallback_binding(&mut request, message_id)
         }
         Err(error) => {
+            if let Err(durability_error) =
+                crate::services::discord::status_panel_transition::record_create_failure(
+                    request.provider,
+                    &request.shared.token_hash,
+                    request.channel_id.get(),
+                    &prepared,
+                    crate::services::discord::status_panel_transition::StatusPanelCreateFailureDisposition::RetrySameNonce,
+                )
+            {
+                tracing::warn!(channel_id = request.channel_id.get(), source = request.source, error = %durability_error, "failed to persist completion fallback ambiguous send disposition");
+            }
             tracing::warn!(
                 channel_id = request.channel_id.get(),
                 source = request.source,

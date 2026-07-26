@@ -123,8 +123,12 @@ pub(super) async fn create_bridge_two_message_status_panel_below_answer<G: TurnG
             return;
         }
     };
+    if !prepared.send_now {
+        *status_panel_dirty = false;
+        return;
+    }
     match gateway
-        .send_message_with_nonce(channel_id, &panel_block, &prepared.nonce)
+        .send_message_with_nonce(channel_id, &prepared.content, &prepared.nonce)
         .await
     {
         Ok(panel_msg_id) => {
@@ -255,6 +259,17 @@ pub(super) async fn create_bridge_two_message_status_panel_below_answer<G: TurnG
             *status_panel_generation = next_generation;
         }
         Err(error) => {
+            if let Err(durability_error) =
+                crate::services::discord::status_panel_transition::record_create_failure(
+                    provider,
+                    &shared.token_hash,
+                    channel_id.get(),
+                    &prepared,
+                    crate::services::discord::status_panel_transition::StatusPanelCreateFailureDisposition::RetrySameNonce,
+                )
+            {
+                tracing::warn!(channel_id = channel_id.get(), error = %durability_error, "failed to persist ambiguous bridge panel send disposition");
+            }
             tracing::warn!(
                 "[turn_bridge] #3805 P2 failed to create two-message status panel below answer in channel {}: {}",
                 channel_id,
@@ -368,8 +383,11 @@ pub(super) async fn reanchor_bridge_two_message_status_panel_below_answer<
             return false;
         }
     };
+    if !prepared.send_now {
+        return false;
+    }
     match gateway
-        .send_message_with_nonce(channel_id, panel_text, &prepared.nonce)
+        .send_message_with_nonce(channel_id, &prepared.content, &prepared.nonce)
         .await
     {
         Ok(new_panel_id) => {
@@ -464,6 +482,17 @@ pub(super) async fn reanchor_bridge_two_message_status_panel_below_answer<
             true
         }
         Err(error) => {
+            if let Err(durability_error) =
+                crate::services::discord::status_panel_transition::record_create_failure(
+                    provider,
+                    &shared.token_hash,
+                    channel_id.get(),
+                    &prepared,
+                    crate::services::discord::status_panel_transition::StatusPanelCreateFailureDisposition::RetrySameNonce,
+                )
+            {
+                tracing::warn!(channel_id = channel_id.get(), error = %durability_error, "failed to persist ambiguous bridge re-anchor send disposition");
+            }
             tracing::warn!(
                 "[turn_bridge] #3805 P2 failed to re-anchor two-message status panel below answer in channel {}: {}",
                 channel_id,
