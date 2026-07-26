@@ -492,6 +492,17 @@ pub(in crate::services::discord) mod tests {
             };
             assert_eq!(render_completed_turn_footer(&snapshot), None, "{malicious}");
         }
+        for malicious_model in ["host.example.com", "12345"] {
+            let snapshot = CompletedTurnFooterSnapshot {
+                model: Some(malicious_model.to_string()),
+                ..Default::default()
+            };
+            assert_eq!(
+                render_completed_turn_footer(&snapshot),
+                None,
+                "{malicious_model}"
+            );
+        }
         for malicious_host in ["host.example.com", "12345", "mac-1234", "맥북"] {
             let snapshot = CompletedTurnFooterSnapshot {
                 host: Some(malicious_host.to_string()),
