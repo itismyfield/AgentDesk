@@ -352,17 +352,19 @@ plan.
 - Producer: confirmed ranged transport commits through
   `SessionBoundDiscordRelaySink::advance_idle_range_after_confirmed_post`
   (`sym:session_relay_sink::SessionBoundDiscordRelaySink::advance_idle_range_after_confirmed_post`),
-  which first persists the generation-scoped frontier via
+  which first persists the transcript-identity-scoped frontier via
   `commit_ordered_jsonl_range`
   (`sym:outbound::delivery_record::commit_ordered_jsonl_range`) and then advances
-  the in-memory watermark.
+  the in-memory watermark. The producer captures the exact tmux session name,
+  generation-marker mtime, and per-spawn nonce when it enqueues the range.
 - Consumer: the idle loop advances its local cursor only when the range is an
-  intentional drop or current-generation committed coverage reaches its end;
+  intentional drop or current-transcript committed coverage reaches its end;
   enqueue acceptance alone leaves the pending range retryable.
 - Invariant: active-turn, post-inflight-grace, and new-session-grace suppression
   never consumes an uncommitted byte. A confirmed ranged POST must match the
-  queued wrapper generation and remain EOF-bounded before either authority is
-  advanced.
+  queued exact session, generation marker, and spawn nonce and remain EOF-bounded
+  before either authority is advanced. Legacy records without the complete
+  identity fail closed for suppression.
 - Violation surface: enqueue followed by transport/commit failure permanently
   skips a wake/background answer, or a delayed range commits against a replaced
   transcript and suppresses unrelated output.
@@ -375,17 +377,19 @@ plan.
   (`sym:formatting::replace_long_message_raw_deferred`) returns a typed edit
   failure without issuing a fallback POST.
 - Producer: before awaiting the edit, the range owner captures the expected
-  watcher output path and nonzero generation. After edit failure it re-reads a
-  stable path+generation+EOF+durable-frontier snapshot with
+  watcher output path and complete transcript identity: exact tmux session name,
+  nonzero generation-marker mtime, and per-spawn nonce. After edit failure it
+  re-reads a stable path+identity+EOF+durable-frontier snapshot with
   `range_committed_after_edit_failure`
   (`sym:outbound::delivery_record::range_committed_after_edit_failure`) while the
   same `DeliveryLease` is still held. The delivery-record lock serializes
-  conforming frontier writes, and post-read path/generation/file-identity checks
-  reject wrapper rotation or transcript replacement during the snapshot.
+  conforming frontier writes, and post-read path/transcript/file-identity checks
+  reject wrapper rotation, same-name respawn, or transcript replacement during
+  the snapshot.
 - Consumer: controller and legacy watcher short-replace paths suppress fallback
   delivery only when the pre-edit identity still matches and fresh,
-  generation-matching, EOF-bounded coverage reaches the range end. Missing
-  markers, path or generation changes, unstable file metadata, unknown EOF, and
+  identity-matching, EOF-bounded coverage reaches the range end. Missing markers
+  or nonce, path or identity changes, unstable file metadata, unknown EOF, and
   frontier past EOF remain fail-open for delivery and retain the existing
   one-shot fallback.
 - Invariant: an edit failure is not fresh-send authority. Confirmed committed

@@ -1975,6 +1975,8 @@ fn delivery_frontier_without_ledger_append_is_not_settled() {
         crate::services::discord::outbound::delivery_record::DeliveredCommit {
             range: (0, 128),
             generation_mtime_ns: 1,
+            tmux_session_name: None,
+            spawn_nonce: None,
             attempts: 1,
             panel_msg_id: Some(message.message_id),
             panel_channel_id: Some(channel_id.get()),

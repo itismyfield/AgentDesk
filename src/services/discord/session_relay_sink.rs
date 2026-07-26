@@ -41,11 +41,12 @@ use self::idle_jsonl::{
     IdleJsonlSessionInitRearm, IdleJsonlSuppression, IdleRelayRangeAction,
     idle_jsonl_apply_active_inflight_gate,
     idle_jsonl_clear_session_init_on_generation_signature_change, idle_jsonl_consume_offset,
-    idle_jsonl_current_eof, idle_jsonl_payload_contains_init_event,
-    idle_jsonl_payload_contains_schedule_wakeup_setup, idle_jsonl_payload_contains_user_event,
-    idle_jsonl_prepare_dedup_shared, idle_jsonl_relay_source_for_matched,
-    idle_jsonl_session_has_init, idle_jsonl_suppressed_range_action, idle_relay_range_action,
-    prune_idle_jsonl_session_state, read_jsonl_range,
+    idle_jsonl_current_eof, idle_jsonl_frame_identity_current,
+    idle_jsonl_payload_contains_init_event, idle_jsonl_payload_contains_schedule_wakeup_setup,
+    idle_jsonl_payload_contains_user_event, idle_jsonl_prepare_dedup_shared,
+    idle_jsonl_relay_source_for_matched, idle_jsonl_session_has_init,
+    idle_jsonl_suppressed_range_action, idle_relay_range_action, prune_idle_jsonl_session_state,
+    read_jsonl_range,
 };
 use self::task_notification_context::ensure_card_and_route;
 use self::turn_parser::{SessionRelayDelivery, SessionRelayParser};
@@ -536,9 +537,6 @@ impl SessionBoundDiscordRelaySink {
             .ingest_frame(frame)
     }
 
-    /// Commit a confirmed idle/catch-up delivery in the frame's ordered JSONL
-    /// coordinate space. The wrapper generation and current EOF are rechecked
-    /// after transport before either durable or in-memory authority advances.
     pub(in crate::services::discord) fn advance_idle_range_after_confirmed_post(
         &self,
         shared: &super::SharedData,
@@ -556,12 +554,14 @@ impl SessionBoundDiscordRelaySink {
         else {
             return false;
         };
-        let current_generation = dr::current_generation_mtime_ns(session_name);
-        let current_eof = idle_jsonl_current_eof(provider, session_name);
-        if current_generation == 0
-            || current_generation != frame_generation
-            || current_eof.is_none_or(|eof| end > eof)
-        {
+        let frame_spawn_nonce = delivery.relay_spawn_nonce.as_deref().unwrap_or_default();
+        if !idle_jsonl_frame_identity_current(
+            provider,
+            session_name,
+            end,
+            frame_generation,
+            frame_spawn_nonce,
+        ) {
             return false;
         }
         if !matches!(
@@ -571,6 +571,7 @@ impl SessionBoundDiscordRelaySink {
                 session_name,
                 (start, end),
                 frame_generation,
+                frame_spawn_nonce,
             ),
             Ok(true)
         ) {
@@ -604,13 +605,20 @@ impl SessionBoundDiscordRelaySink {
         let Some((_, end)) = delivery.relay_range else {
             return false;
         };
-        let Some(frame_generation) = delivery.relay_generation_mtime_ns else {
+        let (Some(frame_generation), Some(frame_spawn_nonce)) = (
+            delivery.relay_generation_mtime_ns,
+            delivery.relay_spawn_nonce.as_deref(),
+        ) else {
             return false;
         };
-        let current_generation = dr::current_generation_mtime_ns(session_name);
         let current_eof = idle_jsonl_current_eof(provider, session_name);
-        if frame_generation == 0 || current_generation != frame_generation || current_eof.is_none()
-        {
+        if !idle_jsonl_frame_identity_current(
+            provider,
+            session_name,
+            end,
+            frame_generation,
+            frame_spawn_nonce,
+        ) {
             return false;
         }
         dr::effective_committed_offset(
@@ -1041,12 +1049,14 @@ impl SessionBoundDiscordRelaySink {
                 return Ok(SessionRelayDeliveryOutcome::Delivered);
             }
             let frame_generation = delivery.relay_generation_mtime_ns.unwrap_or(0);
-            let current_generation = dr::current_generation_mtime_ns(&delivery.session_name);
-            let current_eof = idle_jsonl_current_eof(&provider, &delivery.session_name);
-            if frame_generation == 0
-                || current_generation != frame_generation
-                || current_eof.is_none_or(|eof| lease_range.1 > eof)
-            {
+            let frame_spawn_nonce = delivery.relay_spawn_nonce.as_deref().unwrap_or_default();
+            if !idle_jsonl_frame_identity_current(
+                &provider,
+                &delivery.session_name,
+                lease_range.1,
+                frame_generation,
+                frame_spawn_nonce,
+            ) {
                 return Ok(SessionRelayDeliveryOutcome::NotDelivered);
             }
         }
@@ -1455,6 +1465,9 @@ async fn run_idle_jsonl_relay_loop(
             }
             let current_generation_signature =
                 super::tmux::read_generation_file_mtime_ns(&session_name);
+            let Some(current_spawn_nonce) = super::tmux::read_spawn_nonce(&session_name) else {
+                continue;
+            };
             if idle_jsonl_clear_session_init_on_generation_signature_change(
                 &mut session_init_seen,
                 &mut session_generation_signatures,
@@ -1633,6 +1646,7 @@ async fn run_idle_jsonl_relay_loop(
                         from,
                         end,
                         current_generation_signature,
+                        current_spawn_nonce.clone(),
                     ) {
                         pending_ends.insert(session_name.clone(), end);
                     }
@@ -1727,6 +1741,7 @@ mod tests {
             turn_start_offset: None,
             relay_range: None,
             relay_generation_mtime_ns: None,
+            relay_spawn_nonce: None,
         }
     }
 
@@ -1742,6 +1757,8 @@ mod tests {
         frame.relay_generation_mtime_ns = Some(dr::current_generation_mtime_ns(
             &binding.expected_session_name,
         ));
+        frame.relay_spawn_nonce =
+            super::super::tmux::read_spawn_nonce(&binding.expected_session_name);
         frame
     }
 
@@ -1785,6 +1802,7 @@ mod tests {
             turn_start_offset,
             relay_range: None,
             relay_generation_mtime_ns: None,
+            relay_spawn_nonce: None,
         }
     }
 
@@ -3134,6 +3152,7 @@ mod tests {
             frame_turn_start_offset: turn_start_offset,
             relay_range: None,
             relay_generation_mtime_ns: None,
+            relay_spawn_nonce: None,
         }
     }
 
@@ -3157,6 +3176,7 @@ mod tests {
             .expect("generation dir");
         std::fs::write(&output_path, vec![b'x'; 256]).expect("output file");
         std::fs::write(&generation_path, b"1").expect("generation marker");
+        let spawn_nonce = super::super::write_spawn_nonce(session).expect("spawn nonce");
         let generation = dr::current_generation_mtime_ns(session);
         assert_ne!(generation, 0);
         assert_eq!(
@@ -3171,6 +3191,7 @@ mod tests {
                 &numeric_session,
                 (128, 256),
                 generation,
+                &spawn_nonce,
             )
             .expect("numeric identity mutation is a clean refusal"),
             "reconstructing the runtime identity from the numeric channel must fail"
@@ -3182,6 +3203,7 @@ mod tests {
         delivery.channel_id = channel.get();
         delivery.relay_range = Some((128, 256));
         delivery.relay_generation_mtime_ns = Some(generation);
+        delivery.relay_spawn_nonce = Some(spawn_nonce);
         let mut transport_posts = 0;
 
         for _attempt in 0..2 {
@@ -3252,6 +3274,98 @@ mod tests {
             &delivery,
         ));
         assert_eq!(shared.committed_relay_offset(channel), 256);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_range_same_mtime_restart_rejects_stale_frame_nonce() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+        let channel = ChannelId::new(45_361);
+        let session = "AgentDesk-claude-same-mtime-restart";
+        let output_path =
+            crate::services::cluster::session_matcher::expected_rollout_path_for(session);
+        let generation_path =
+            crate::services::tmux_common::session_temp_path(session, "generation");
+        std::fs::create_dir_all(std::path::Path::new(&output_path).parent().unwrap())
+            .expect("output dir");
+        std::fs::create_dir_all(std::path::Path::new(&generation_path).parent().unwrap())
+            .expect("generation dir");
+        std::fs::write(&output_path, vec![b'x'; 300]).expect("output file");
+        std::fs::write(&generation_path, b"1").expect("generation marker");
+        let first_nonce = super::super::write_spawn_nonce(session).expect("first spawn nonce");
+        let generation = dr::current_generation_mtime_ns(session);
+        assert_ne!(generation, 0);
+
+        let shared = super::super::make_shared_data_for_tests();
+        let sink = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
+        let mut stale = delivery_with_fence_offset(session, None, 0, "", None);
+        stale.channel_id = channel.get();
+        stale.relay_range = Some((128, 256));
+        stale.relay_generation_mtime_ns = Some(generation);
+        stale.relay_spawn_nonce = Some(first_nonce);
+
+        let second_nonce = super::super::write_spawn_nonce(session).expect("second spawn nonce");
+        assert_ne!(
+            stale.relay_spawn_nonce.as_deref(),
+            Some(second_nonce.as_str()),
+            "restart must replace the per-spawn nonce"
+        );
+        assert_eq!(
+            dr::current_generation_mtime_ns(session),
+            generation,
+            "the regression deliberately preserves the generation mtime"
+        );
+        assert!(
+            !sink.idle_range_already_committed_before_transport(
+                &shared,
+                &ProviderKind::Claude,
+                channel.get(),
+                session,
+                &stale,
+            ),
+            "a stale frame must not inherit current-spawn dedup authority"
+        );
+        assert!(
+            !sink.advance_idle_range_after_confirmed_post(
+                &shared,
+                &ProviderKind::Claude,
+                channel.get(),
+                session,
+                &stale,
+            ),
+            "mutation: removing the nonce comparison commits a prior-spawn frame"
+        );
+        assert_eq!(shared.committed_relay_offset(channel), 0);
+        assert_eq!(
+            dr::delivered_frontier_end_current_generation(
+                &ProviderKind::Claude,
+                channel,
+                session,
+                Some(300),
+            ),
+            0
+        );
+
+        let mut current = stale;
+        current.relay_spawn_nonce = Some(second_nonce);
+        assert!(sink.advance_idle_range_after_confirmed_post(
+            &shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            session,
+            &current,
+        ));
+        assert_eq!(shared.committed_relay_offset(channel), 256);
+        assert_eq!(
+            dr::delivered_frontier_end_current_generation(
+                &ProviderKind::Claude,
+                channel,
+                session,
+                Some(300),
+            ),
+            256
+        );
     }
 
     #[test]
@@ -4708,6 +4822,7 @@ mod tests {
             frame_turn_start_offset: None,
             relay_range: None,
             relay_generation_mtime_ns: None,
+            relay_spawn_nonce: None,
         }
     }
 

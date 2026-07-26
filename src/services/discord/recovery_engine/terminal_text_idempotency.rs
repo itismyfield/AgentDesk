@@ -292,6 +292,8 @@ impl RecoveryDeliveryContext {
         let commit = delivery_record::DeliveredCommit {
             range,
             generation_mtime_ns,
+            tmux_session_name: None,
+            spawn_nonce: None,
             attempts: self.attempts,
             panel_msg_id: Some(anchor.get()),
             panel_channel_id: Some(self.channel_id.get()),
@@ -817,6 +819,8 @@ mod tests {
             delivery_record::DeliveredCommit {
                 range: (128, 256),
                 generation_mtime_ns,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: Some(77_008),
                 panel_channel_id: Some(state.channel_id),
@@ -880,6 +884,8 @@ mod tests {
             delivery_record::DeliveredCommit {
                 range: (128, 256),
                 generation_mtime_ns,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: Some(77_004),
                 panel_channel_id: Some(state.channel_id),

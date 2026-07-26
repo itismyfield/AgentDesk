@@ -98,7 +98,7 @@ pub(in crate::services::discord) struct DeliveryRecord {
     pub recent_delivered_contents: Vec<DeliveredContentFingerprint>,
 }
 
-/// The offset-authority channel for a delivery channel and tmux generation.
+/// The offset-authority channel for a delivery channel and transcript identity.
 ///
 /// Stored under the DELIVERY channel in its own sidecar subtree, while the
 /// delivered frontier itself is stored under `watcher_owner_channel_id`.
@@ -107,6 +107,8 @@ pub(in crate::services::discord) struct WatcherOwnerContext {
     pub watcher_owner_channel_id: u64,
     pub tmux_session_name: String,
     pub generation_mtime_ns: i64,
+    #[serde(default)]
+    pub spawn_nonce: Option<String>,
 }
 
 /// The transient lease (design §4.3). `deadline_epoch_ms` is ABSOLUTE
@@ -129,11 +131,20 @@ pub(in crate::services::discord) struct DurableLease {
 /// The release-surviving delivered frontier (design §4.3) — the durable mirror
 /// of `confirmed_end_offset`. Written only after a confirmed Discord POST and
 /// the identity-gated inline advance (I1), never the removed pre-sink Part(a)
-/// write. `generation_mtime_ns` guards the #1270 rotation-vs-respawn watermark.
+/// write. The exact session, generation-marker mtime, and spawn nonce jointly
+/// guard the #1270 rotation-vs-respawn watermark.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::services::discord) struct DeliveredCommit {
     pub range: (u64, u64),
     pub generation_mtime_ns: i64,
+    /// Exact runtime session whose JSONL coordinate space this frontier belongs to.
+    /// Missing legacy values fail closed at every production reader.
+    #[serde(default)]
+    pub tmux_session_name: Option<String>,
+    /// Stable UUID minted once per wrapper spawn. Mtime alone is not unique.
+    /// Missing legacy values fail closed rather than suppressing a rebound session.
+    #[serde(default)]
+    pub spawn_nonce: Option<String>,
     pub attempts: u32,
     /// #3610 (Phase B PR-1): the durable TERMINAL ANCHOR — the Discord message id
     /// terminal-replace edited in place (the assistant response `current_msg_id`).
@@ -157,6 +168,10 @@ pub(in crate::services::discord) struct DeliveredContentFingerprint {
     pub content_hash: String,
     pub content_len: u64,
     pub generation_mtime_ns: i64,
+    #[serde(default)]
+    pub tmux_session_name: Option<String>,
+    #[serde(default)]
+    pub spawn_nonce: Option<String>,
     pub delivered_at_epoch_ms: u64,
 }
 
@@ -349,6 +364,110 @@ pub(in crate::services::discord) fn upsert_lease(
     upsert_lease_at(&record_path_or_err(provider, channel_id)?, lease)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::services::discord) struct DurableTranscriptIdentity {
+    pub tmux_session_name: String,
+    pub generation_mtime_ns: i64,
+    pub spawn_nonce: String,
+}
+
+pub(in crate::services::discord) fn current_transcript_identity(
+    tmux_session_name: &str,
+) -> Option<DurableTranscriptIdentity> {
+    let tmux_session_name = tmux_session_name.trim();
+    if tmux_session_name.is_empty() {
+        return None;
+    }
+    let generation_mtime_ns = current_generation_mtime_ns(tmux_session_name);
+    let spawn_nonce = crate::services::discord::tmux::read_spawn_nonce(tmux_session_name)?;
+    (generation_mtime_ns != 0).then(|| DurableTranscriptIdentity {
+        tmux_session_name: tmux_session_name.to_string(),
+        generation_mtime_ns,
+        spawn_nonce,
+    })
+}
+
+pub(in crate::services::discord) fn current_transcript_identity_matches(
+    tmux_session_name: &str,
+    generation_mtime_ns: i64,
+    spawn_nonce: &str,
+) -> bool {
+    current_transcript_identity(tmux_session_name).is_some_and(|identity| {
+        identity.generation_mtime_ns == generation_mtime_ns && identity.spawn_nonce == spawn_nonce
+    })
+}
+
+const LEGACY_TEST_SESSION: &str = "__delivery_record_legacy_test__";
+#[cfg(test)]
+const LEGACY_TEST_NONCE: &str = "delivery-record-legacy-test-nonce";
+
+pub(in crate::services::discord) trait DurableIdentityInput {
+    fn into_identity(self) -> Option<DurableTranscriptIdentity>;
+}
+
+impl DurableIdentityInput for Option<DurableTranscriptIdentity> {
+    fn into_identity(self) -> Option<DurableTranscriptIdentity> {
+        self
+    }
+}
+
+impl DurableIdentityInput for DurableTranscriptIdentity {
+    fn into_identity(self) -> Option<DurableTranscriptIdentity> {
+        Some(self)
+    }
+}
+
+impl DurableIdentityInput for &DurableTranscriptIdentity {
+    fn into_identity(self) -> Option<DurableTranscriptIdentity> {
+        Some(self.clone())
+    }
+}
+
+#[cfg(test)]
+impl DurableIdentityInput for i64 {
+    fn into_identity(self) -> Option<DurableTranscriptIdentity> {
+        (self != 0).then(|| DurableTranscriptIdentity {
+            tmux_session_name: LEGACY_TEST_SESSION.to_string(),
+            generation_mtime_ns: self,
+            spawn_nonce: LEGACY_TEST_NONCE.to_string(),
+        })
+    }
+}
+
+fn frontier_matches_identity(
+    frontier: &DeliveredCommit,
+    identity: &DurableTranscriptIdentity,
+) -> bool {
+    if frontier.generation_mtime_ns != identity.generation_mtime_ns {
+        return false;
+    }
+    let exact = frontier.tmux_session_name.as_deref() == Some(identity.tmux_session_name.as_str())
+        && frontier.spawn_nonce.as_deref() == Some(identity.spawn_nonce.as_str());
+    #[cfg(test)]
+    let legacy_fixture = identity.tmux_session_name == LEGACY_TEST_SESSION
+        && frontier.tmux_session_name.is_none()
+        && frontier.spawn_nonce.is_none();
+    #[cfg(not(test))]
+    let legacy_fixture = false;
+    exact || legacy_fixture
+}
+
+fn stamp_frontier_identity(
+    frontier: &mut DeliveredCommit,
+    identity: &DurableTranscriptIdentity,
+) -> bool {
+    if frontier.generation_mtime_ns != identity.generation_mtime_ns {
+        return false;
+    }
+    #[cfg(test)]
+    if identity.tmux_session_name == LEGACY_TEST_SESSION {
+        return true;
+    }
+    frontier.tmux_session_name = Some(identity.tmux_session_name.clone());
+    frontier.spawn_nonce = Some(identity.spawn_nonce.clone());
+    true
+}
+
 fn has_complete_terminal_anchor(frontier: &DeliveredCommit) -> bool {
     matches!(frontier.panel_msg_id, Some(id) if id != 0)
         && matches!(frontier.panel_channel_id, Some(id) if id != 0)
@@ -423,6 +542,8 @@ fn merge_delivered_frontier(
         return true;
     };
     if current.generation_mtime_ns != frontier.generation_mtime_ns
+        || current.tmux_session_name != frontier.tmux_session_name
+        || current.spawn_nonce != frontier.spawn_nonce
         || frontier.range.1 > current.range.1
     {
         record.delivered_frontier = Some(frontier);
@@ -443,11 +564,11 @@ fn write_delivered_frontier_at(path: &Path, frontier: DeliveredCommit) -> Result
     })
 }
 
-fn write_current_generation_frontier_at(
+fn write_current_generation_frontier_at<I: DurableIdentityInput>(
     path: &Path,
-    frontier: DeliveredCommit,
+    mut frontier: DeliveredCommit,
     anchor_update: EqualEndAnchorUpdate,
-    current_generation: impl FnOnce() -> i64,
+    current_identity: impl FnOnce() -> I,
 ) -> Result<bool, String> {
     if frontier.generation_mtime_ns == 0 {
         return Ok(false);
@@ -456,7 +577,10 @@ fn write_current_generation_frontier_at(
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     let _lock = lock_record_path(path)?;
-    if current_generation() != frontier.generation_mtime_ns {
+    let Some(identity) = current_identity().into_identity() else {
+        return Ok(false);
+    };
+    if !stamp_frontier_identity(&mut frontier, &identity) {
         return Ok(false);
     }
     let mut record = read_record_at(path).unwrap_or_default();
@@ -477,7 +601,7 @@ pub(in crate::services::discord) fn write_current_generation_frontier(
         &record_path_or_err(provider, channel_id)?,
         frontier,
         EqualEndAnchorUpdate::PreserveCommitted,
-        || current_generation_mtime_ns(tmux_session_name),
+        || current_transcript_identity(tmux_session_name),
     )
 }
 
@@ -496,7 +620,7 @@ pub(in crate::services::discord) fn replace_current_generation_anchor(
             expected_msg_id,
             expected_channel_id,
         },
-        || current_generation_mtime_ns(tmux_session_name),
+        || current_transcript_identity(tmux_session_name),
     )
 }
 
@@ -509,11 +633,11 @@ pub(in crate::services::discord) fn write_delivered_frontier(
     write_delivered_frontier_at(&record_path_or_err(provider, channel_id)?, frontier)
 }
 
-fn commit_ordered_jsonl_range_at(
+fn commit_ordered_jsonl_range_at<I: DurableIdentityInput>(
     path: &Path,
     range: (u64, u64),
     generation_mtime_ns: i64,
-    current_generation: impl FnOnce() -> i64,
+    current_identity: impl FnOnce() -> I,
 ) -> Result<bool, String> {
     if generation_mtime_ns == 0 || range.1 <= range.0 {
         return Ok(false);
@@ -522,12 +646,15 @@ fn commit_ordered_jsonl_range_at(
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     let _lock = lock_record_path(path)?;
-    if current_generation() != generation_mtime_ns {
+    let Some(identity) = current_identity().into_identity() else {
+        return Ok(false);
+    };
+    if identity.generation_mtime_ns != generation_mtime_ns {
         return Ok(false);
     }
     let mut record = read_record_at(path).unwrap_or_default();
     if let Some(frontier) = record.delivered_frontier.as_ref()
-        && frontier.generation_mtime_ns == generation_mtime_ns
+        && frontier_matches_identity(frontier, &identity)
         && frontier.range.1 >= range.1
     {
         return Ok(true);
@@ -535,18 +662,21 @@ fn commit_ordered_jsonl_range_at(
     let previous_attempts = record
         .delivered_frontier
         .as_ref()
-        .filter(|frontier| frontier.generation_mtime_ns == generation_mtime_ns)
+        .filter(|frontier| frontier_matches_identity(frontier, &identity))
         .map(|frontier| frontier.attempts)
         .unwrap_or(0);
     let committed_range = record
         .delivered_frontier
         .as_ref()
-        .filter(|frontier| frontier.generation_mtime_ns == generation_mtime_ns)
+        .filter(|frontier| frontier_matches_identity(frontier, &identity))
         .map(|frontier| (frontier.range.0.min(range.0), frontier.range.1.max(range.1)))
         .unwrap_or(range);
+    let legacy_test_identity = cfg!(test) && identity.tmux_session_name == LEGACY_TEST_SESSION;
     record.delivered_frontier = Some(DeliveredCommit {
         range: committed_range,
         generation_mtime_ns,
+        tmux_session_name: (!legacy_test_identity).then_some(identity.tmux_session_name),
+        spawn_nonce: (!legacy_test_identity).then_some(identity.spawn_nonce),
         attempts: previous_attempts.saturating_add(1),
         panel_msg_id: None,
         panel_channel_id: None,
@@ -563,20 +693,23 @@ pub(in crate::services::discord) fn commit_ordered_jsonl_range(
     tmux_session_name: &str,
     range: (u64, u64),
     generation_mtime_ns: i64,
+    spawn_nonce: &str,
 ) -> Result<bool, String> {
     commit_ordered_jsonl_range_at(
         &record_path_or_err(provider, channel.get())?,
         range,
         generation_mtime_ns,
-        || current_generation_mtime_ns(tmux_session_name),
+        || {
+            current_transcript_identity(tmux_session_name)
+                .filter(|identity| identity.spawn_nonce == spawn_nonce)
+        },
     )
 }
 
 fn write_watcher_owner_context_at(
     path: &Path,
     watcher_owner_channel_id: u64,
-    tmux_session_name: &str,
-    generation_mtime_ns: i64,
+    identity: &DurableTranscriptIdentity,
 ) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -584,8 +717,9 @@ fn write_watcher_owner_context_at(
     let _lock = lock_record_path(path)?;
     let context = WatcherOwnerContext {
         watcher_owner_channel_id,
-        tmux_session_name: tmux_session_name.to_string(),
-        generation_mtime_ns,
+        tmux_session_name: identity.tmux_session_name.clone(),
+        generation_mtime_ns: identity.generation_mtime_ns,
+        spawn_nonce: Some(identity.spawn_nonce.clone()),
     };
     let data = serde_json::to_string_pretty(&context).map_err(|e| e.to_string())?;
     runtime_store::atomic_write(path, &data)
@@ -607,11 +741,13 @@ pub(in crate::services::discord) fn record_watcher_owner_channel_context(
     if tmux_session_name.is_empty() {
         return Ok(());
     }
+    let Some(identity) = current_transcript_identity(tmux_session_name) else {
+        return Ok(());
+    };
     write_watcher_owner_context_at(
         &owner_context_path_or_err(provider, delivery_channel.get())?,
         watcher_owner_channel.get(),
-        tmux_session_name,
-        current_generation_mtime_ns(tmux_session_name),
+        &identity,
     )
 }
 
@@ -622,15 +758,13 @@ fn read_watcher_owner_context_at(path: &Path) -> Option<WatcherOwnerContext> {
 
 fn watcher_owner_channel_from_context_at(
     path: &Path,
-    tmux_session_name: &str,
-    current_generation_mtime_ns: i64,
+    current_identity: &DurableTranscriptIdentity,
 ) -> Option<u64> {
     let context = read_watcher_owner_context_at(path)?;
-    if context.watcher_owner_channel_id == 0 || context.tmux_session_name != tmux_session_name {
-        return None;
-    }
-    if context.generation_mtime_ns == 0
-        || context.generation_mtime_ns != current_generation_mtime_ns
+    if context.watcher_owner_channel_id == 0
+        || context.tmux_session_name != current_identity.tmux_session_name
+        || context.generation_mtime_ns != current_identity.generation_mtime_ns
+        || context.spawn_nonce.as_deref() != Some(current_identity.spawn_nonce.as_str())
     {
         return None;
     }
@@ -646,12 +780,8 @@ pub(in crate::services::discord) fn watcher_owner_channel_for_delivery_channel(
         return None;
     }
     let path = delivery_owner_context_path(provider, delivery_channel.get())?;
-    watcher_owner_channel_from_context_at(
-        &path,
-        tmux_session_name,
-        current_generation_mtime_ns(tmux_session_name),
-    )
-    .map(ChannelId::new)
+    let identity = current_transcript_identity(tmux_session_name)?;
+    watcher_owner_channel_from_context_at(&path, &identity).map(ChannelId::new)
 }
 
 /// Release: clear the lease ONLY. `delivered_frontier` survives (design §4.3).
@@ -895,20 +1025,20 @@ pub(in crate::services::discord) fn durable_frontier_generation_current(
 }
 
 /// Path-based core (pure-ish, testable): the durable `delivered_frontier`, but
-/// ONLY when it was written by the CURRENT wrapper generation (#1270 guard, via
-/// [`durable_frontier_generation_current`]) AND its END is physically inside the
-/// current transcript byte length (#4188 EOF guard). `None` when the record is
-/// absent/malformed (I3 conservative), from a PRIOR generation (stale-high →
-/// distrust), or when the current transcript EOF is unavailable (cannot
-/// bound-check → distrust). `current_gen_mtime == 0` (no/unreadable
-/// `.generation` file) → the guard distrusts everything → `None`.
+/// ONLY when its exact tmux session name, generation-marker mtime, and per-spawn
+/// nonce match the CURRENT transcript identity AND its END is physically inside
+/// the current transcript byte length (#4188 EOF guard). `None` when the record is
+/// absent/malformed (I3 conservative), carries a legacy/incomplete or prior-spawn
+/// identity (stale-high → distrust), or when the current transcript EOF is
+/// unavailable (cannot bound-check → distrust). Missing current generation or
+/// spawn-nonce markers likewise distrust everything.
 pub(in crate::services::discord::outbound) fn current_generation_durable_frontier_at(
     path: &Path,
-    current_gen_mtime: i64,
+    current_identity: &DurableTranscriptIdentity,
     current_transcript_eof: Option<u64>,
 ) -> Option<DeliveredCommit> {
     let frontier = read_record_at(path).and_then(|r| r.delivered_frontier)?;
-    if !durable_frontier_generation_current(frontier.generation_mtime_ns, current_gen_mtime) {
+    if !frontier_matches_identity(&frontier, current_identity) {
         return None;
     }
 
@@ -917,7 +1047,7 @@ pub(in crate::services::discord::outbound) fn current_generation_durable_frontie
             delivery_record_path = %path.display(),
             frontier_end = frontier.range.1,
             frontier_generation_mtime_ns = frontier.generation_mtime_ns,
-            current_gen_mtime,
+            current_gen_mtime = current_identity.generation_mtime_ns,
             "durable delivered_frontier current transcript EOF unavailable — distrusting unbounded frontier"
         );
         return None;
@@ -929,7 +1059,7 @@ pub(in crate::services::discord::outbound) fn current_generation_durable_frontie
             frontier_end = frontier.range.1,
             current_transcript_eof,
             frontier_generation_mtime_ns = frontier.generation_mtime_ns,
-            current_gen_mtime,
+            current_gen_mtime = current_identity.generation_mtime_ns,
             "durable delivered_frontier end exceeds current transcript EOF — distrusting stale-length frontier (compaction/rotation)"
         );
         return None;
@@ -943,12 +1073,13 @@ pub(in crate::services::discord::outbound) fn current_generation_durable_frontie
 /// [`delivered_frontier_end_current_generation`] and the flag-gated
 /// [`effective_committed_offset`] both funnel through it so the generation and
 /// EOF-bounds gating logic exists in exactly one place.
-fn current_generation_durable_frontier_end_at(
+fn current_generation_durable_frontier_end_at<I: DurableIdentityInput>(
     path: &Path,
-    current_gen_mtime: i64,
+    current_identity: I,
     current_transcript_eof: Option<u64>,
 ) -> Option<u64> {
-    current_generation_durable_frontier_at(path, current_gen_mtime, current_transcript_eof)
+    let identity = current_identity.into_identity()?;
+    current_generation_durable_frontier_at(path, &identity, current_transcript_eof)
         .map(|f| f.range.1)
 }
 
@@ -985,20 +1116,23 @@ pub(in crate::services::discord) fn delivered_frontier_end_current_generation(
     let Some(path) = delivery_record_path(provider, channel.get()) else {
         return 0;
     };
-    let current_gen = current_generation_mtime_ns(tmux_session_name);
-    current_generation_durable_frontier_end_at(&path, current_gen, current_transcript_eof)
+    let Some(identity) = current_transcript_identity(tmux_session_name) else {
+        return 0;
+    };
+    current_generation_durable_frontier_end_at(&path, &identity, current_transcript_eof)
         .unwrap_or(0)
 }
 
-fn current_generation_frontier_exceeding_eof_at(
+fn current_generation_frontier_exceeding_eof_at<I: DurableIdentityInput>(
     path: &Path,
-    current_gen_mtime: i64,
+    current_identity: I,
     current_transcript_eof: u64,
 ) -> Option<u64> {
+    let current_identity = current_identity.into_identity()?;
     read_record_at(path)
         .and_then(|record| record.delivered_frontier)
         .filter(|frontier| {
-            durable_frontier_generation_current(frontier.generation_mtime_ns, current_gen_mtime)
+            frontier_matches_identity(frontier, &current_identity)
                 && frontier.range.1 > current_transcript_eof
         })
         .map(|frontier| frontier.range.1)
@@ -1017,19 +1151,19 @@ pub(in crate::services::discord) fn delivered_frontier_exceeding_current_eof(
     current_transcript_eof: u64,
 ) -> Option<u64> {
     let path = delivery_record_path(provider, channel.get())?;
-    current_generation_frontier_exceeding_eof_at(
-        &path,
-        current_generation_mtime_ns(tmux_session_name),
-        current_transcript_eof,
-    )
+    let identity = current_transcript_identity(tmux_session_name)?;
+    current_generation_frontier_exceeding_eof_at(&path, &identity, current_transcript_eof)
 }
 
-fn reanchor_current_generation_frontier_at(
+fn reanchor_current_generation_frontier_at<I: DurableIdentityInput>(
     path: &Path,
-    current_gen_mtime: i64,
+    current_identity: I,
     expected_frontier_end: u64,
     reanchor_offset: u64,
 ) -> Result<bool, String> {
+    let Some(current_identity) = current_identity.into_identity() else {
+        return Ok(false);
+    };
     let _lock = lock_record_path(path)?;
     let Some(mut record) = read_record_at(path) else {
         return Ok(false);
@@ -1037,7 +1171,7 @@ fn reanchor_current_generation_frontier_at(
     let Some(frontier) = record.delivered_frontier.as_mut() else {
         return Ok(false);
     };
-    if !durable_frontier_generation_current(frontier.generation_mtime_ns, current_gen_mtime)
+    if !frontier_matches_identity(frontier, &current_identity)
         || frontier.range.1 != expected_frontier_end
         || frontier.range.1 <= reanchor_offset
     {
@@ -1065,9 +1199,12 @@ pub(in crate::services::discord) fn reanchor_current_generation_frontier(
     let Some(path) = delivery_record_path(provider, channel.get()) else {
         return Ok(false);
     };
+    let Some(identity) = current_transcript_identity(tmux_session_name) else {
+        return Ok(false);
+    };
     reanchor_current_generation_frontier_at(
         &path,
-        current_generation_mtime_ns(tmux_session_name),
+        &identity,
         expected_frontier_end,
         reanchor_offset,
     )
@@ -1095,12 +1232,10 @@ pub(in crate::services::discord) fn effective_committed_offset(
     if !delivery_record_authority_enabled() {
         return in_memory;
     }
-    let durable_end = delivery_record_path(provider, channel.get()).and_then(|path| {
-        current_generation_durable_frontier_end_at(
-            &path,
-            current_generation_mtime_ns(tmux_session_name),
-            current_transcript_eof,
-        )
+    let durable_end = current_transcript_identity(tmux_session_name).and_then(|identity| {
+        delivery_record_path(provider, channel.get()).and_then(|path| {
+            current_generation_durable_frontier_end_at(&path, &identity, current_transcript_eof)
+        })
     });
     fuse_committed_offset(durable_end, in_memory)
 }
@@ -1145,7 +1280,7 @@ pub(in crate::services::discord) fn committed_floor_for_resend_dedup(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) struct EditFailureTranscriptIdentity {
     output_path: PathBuf,
-    generation_mtime_ns: i64,
+    transcript: DurableTranscriptIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1184,31 +1319,28 @@ pub(in crate::services::discord) fn capture_edit_failure_transcript_identity(
             .tmux_watchers
             .watcher_output_path(tmux_session_name)?,
     );
-    let generation_mtime_ns = current_generation_mtime_ns(tmux_session_name);
-    if generation_mtime_ns == 0 {
-        return None;
-    }
+    let transcript = current_transcript_identity(tmux_session_name)?;
     Some(EditFailureTranscriptIdentity {
         output_path,
-        generation_mtime_ns,
+        transcript,
     })
 }
 
-fn stable_edit_failure_frontier_at<P, G, H>(
+fn stable_edit_failure_frontier_at<P, I, H>(
     record_path: &Path,
     expected: &EditFailureTranscriptIdentity,
     mut current_output_path: P,
-    mut current_generation: G,
+    mut current_identity: I,
     after_first_snapshot: H,
 ) -> Option<DeliveredCommit>
 where
     P: FnMut() -> Option<PathBuf>,
-    G: FnMut() -> i64,
+    I: FnMut() -> Option<DurableTranscriptIdentity>,
     H: FnOnce(),
 {
     let _lock = lock_record_path(record_path).ok()?;
     if current_output_path().as_deref() != Some(expected.output_path.as_path())
-        || current_generation() != expected.generation_mtime_ns
+        || current_identity().as_ref() != Some(&expected.transcript)
     {
         return None;
     }
@@ -1216,19 +1348,16 @@ where
     after_first_snapshot();
 
     let frontier = read_record_at(record_path)?.delivered_frontier?;
-    if !durable_frontier_generation_current(
-        frontier.generation_mtime_ns,
-        expected.generation_mtime_ns,
-    ) || frontier.range.1 > before.eof
+    if !frontier_matches_identity(&frontier, &expected.transcript) || frontier.range.1 > before.eof
     {
         return None;
     }
 
     let after_path = current_output_path()?;
-    let after_generation = current_generation();
+    let after_identity = current_identity()?;
     let after = transcript_file_snapshot(&expected.output_path)?;
     if after_path != expected.output_path
-        || after_generation != expected.generation_mtime_ns
+        || after_identity != expected.transcript
         || after != before
     {
         return None;
@@ -1265,7 +1394,7 @@ pub(in crate::services::discord) fn range_committed_after_edit_failure(
                 .watcher_output_path(tmux_session_name)
                 .map(PathBuf::from)
         },
-        || current_generation_mtime_ns(tmux_session_name),
+        || current_transcript_identity(tmux_session_name),
         || {},
     );
     range_already_committed(
@@ -1315,14 +1444,16 @@ fn delivered_content_hash(channel_id: u64, body: &str) -> String {
 fn delivered_content_fingerprint(
     channel_id: u64,
     body: &str,
-    generation_mtime_ns: i64,
+    identity: &DurableTranscriptIdentity,
     delivered_at_epoch_ms: u64,
 ) -> Option<DeliveredContentFingerprint> {
     (!body.trim().is_empty()).then(|| DeliveredContentFingerprint {
         channel_id,
         content_hash: delivered_content_hash(channel_id, body),
         content_len: body.len() as u64,
-        generation_mtime_ns,
+        generation_mtime_ns: identity.generation_mtime_ns,
+        tmux_session_name: Some(identity.tmux_session_name.clone()),
+        spawn_nonce: Some(identity.spawn_nonce.clone()),
         delivered_at_epoch_ms,
     })
 }
@@ -1337,6 +1468,8 @@ fn recent_content_fingerprint_matches(
             && recent.content_len == fingerprint.content_len
             && recent.content_hash == fingerprint.content_hash
             && recent.generation_mtime_ns == fingerprint.generation_mtime_ns
+            && recent.tmux_session_name == fingerprint.tmux_session_name
+            && recent.spawn_nonce == fingerprint.spawn_nonce
             && now_ms.saturating_sub(recent.delivered_at_epoch_ms)
                 <= RECENT_DELIVERED_CONTENT_WINDOW_MS
     })
@@ -1351,15 +1484,18 @@ fn prune_recent_content_fingerprints(entries: &mut Vec<DeliveredContentFingerpri
     }
 }
 
-fn record_delivered_content_fingerprint_at(
+fn record_delivered_content_fingerprint_at<I: DurableIdentityInput>(
     path: &Path,
     channel_id: u64,
     body: &str,
-    generation_mtime_ns: i64,
+    identity: I,
     delivered_at_epoch_ms: u64,
 ) -> Result<(), String> {
+    let Some(identity) = identity.into_identity() else {
+        return Ok(());
+    };
     let Some(fingerprint) =
-        delivered_content_fingerprint(channel_id, body, generation_mtime_ns, delivered_at_epoch_ms)
+        delivered_content_fingerprint(channel_id, body, &identity, delivered_at_epoch_ms)
     else {
         return Ok(());
     };
@@ -1372,7 +1508,9 @@ fn record_delivered_content_fingerprint_at(
             !(recent.channel_id == fingerprint.channel_id
                 && recent.content_len == fingerprint.content_len
                 && recent.content_hash == fingerprint.content_hash
-                && recent.generation_mtime_ns == fingerprint.generation_mtime_ns)
+                && recent.generation_mtime_ns == fingerprint.generation_mtime_ns
+                && recent.tmux_session_name == fingerprint.tmux_session_name
+                && recent.spawn_nonce == fingerprint.spawn_nonce)
         });
         record.recent_delivered_contents.push(fingerprint);
         prune_recent_content_fingerprints(
@@ -1382,15 +1520,17 @@ fn record_delivered_content_fingerprint_at(
     })
 }
 
-fn recent_delivered_content_matches_at(
+fn recent_delivered_content_matches_at<I: DurableIdentityInput>(
     path: &Path,
     channel_id: u64,
     body: &str,
-    generation_mtime_ns: i64,
+    identity: I,
     now_ms: u64,
 ) -> bool {
-    let Some(fingerprint) =
-        delivered_content_fingerprint(channel_id, body, generation_mtime_ns, now_ms)
+    let Some(identity) = identity.into_identity() else {
+        return false;
+    };
+    let Some(fingerprint) = delivered_content_fingerprint(channel_id, body, &identity, now_ms)
     else {
         return false;
     };
@@ -1402,11 +1542,11 @@ fn recent_delivered_content_matches_at(
 // #4046 S1r-1 P3-2: module-local only — the sole callers are the two fresh-send
 // record sites in this file. Reverted from the transient `pub(in ...::outbound)`
 // widening (no caller outside this module; behavior unchanged).
-fn record_delivered_content_fingerprint_for_generation(
+fn record_delivered_content_fingerprint_for_identity(
     provider: &ProviderKind,
     channel_id: u64,
     body: &str,
-    generation_mtime_ns: i64,
+    identity: &DurableTranscriptIdentity,
 ) {
     let path = match record_path_or_err(provider, channel_id) {
         Ok(path) => path,
@@ -1420,13 +1560,9 @@ fn record_delivered_content_fingerprint_for_generation(
             return;
         }
     };
-    if let Err(error) = record_delivered_content_fingerprint_at(
-        &path,
-        channel_id,
-        body,
-        generation_mtime_ns,
-        now_epoch_ms(),
-    ) {
+    if let Err(error) =
+        record_delivered_content_fingerprint_at(&path, channel_id, body, identity, now_epoch_ms())
+    {
         tracing::warn!(
             provider = provider.as_str(),
             channel_id,
@@ -1439,18 +1575,14 @@ fn record_delivered_content_fingerprint_for_generation(
 pub(in crate::services::discord::outbound) fn record_fresh_send_content_fingerprint(
     provider: &ProviderKind,
     channel_id: u64,
+    tmux_session_name: &str,
     body: &str,
-    generation_mtime_ns: i64,
 ) -> Result<(), String> {
     let path = fresh_send_record_path(provider, channel_id)
         .ok_or_else(|| "fresh_send_record: runtime root unavailable".to_string())?;
-    record_delivered_content_fingerprint_at(
-        &path,
-        channel_id,
-        body,
-        generation_mtime_ns,
-        now_epoch_ms(),
-    )
+    let identity = current_transcript_identity(tmux_session_name)
+        .ok_or_else(|| "fresh_send_record: transcript identity unavailable".to_string())?;
+    record_delivered_content_fingerprint_at(&path, channel_id, body, &identity, now_epoch_ms())
 }
 
 pub(in crate::services::discord::outbound) fn recent_fresh_send_content_matches(
@@ -1462,13 +1594,10 @@ pub(in crate::services::discord::outbound) fn recent_fresh_send_content_matches(
     let Some(path) = fresh_send_record_path(provider, channel.get()) else {
         return false;
     };
-    recent_delivered_content_matches_at(
-        &path,
-        channel.get(),
-        body,
-        current_generation_mtime_ns(tmux_session_name),
-        now_epoch_ms(),
-    )
+    let Some(identity) = current_transcript_identity(tmux_session_name) else {
+        return false;
+    };
+    recent_delivered_content_matches_at(&path, channel.get(), body, &identity, now_epoch_ms())
 }
 
 pub(in crate::services::discord) fn record_delivered_content_fingerprint(
@@ -1477,12 +1606,10 @@ pub(in crate::services::discord) fn record_delivered_content_fingerprint(
     tmux_session_name: &str,
     body: &str,
 ) {
-    record_delivered_content_fingerprint_for_generation(
-        provider,
-        channel.get(),
-        body,
-        current_generation_mtime_ns(tmux_session_name),
-    );
+    let Some(identity) = current_transcript_identity(tmux_session_name) else {
+        return;
+    };
+    record_delivered_content_fingerprint_for_identity(provider, channel.get(), body, &identity);
 }
 
 pub(in crate::services::discord) fn recent_delivered_content_matches(
@@ -1494,13 +1621,10 @@ pub(in crate::services::discord) fn recent_delivered_content_matches(
     let Some(path) = delivery_record_path(provider, channel.get()) else {
         return false;
     };
-    recent_delivered_content_matches_at(
-        &path,
-        channel.get(),
-        body,
-        current_generation_mtime_ns(tmux_session_name),
-        now_epoch_ms(),
-    )
+    let Some(identity) = current_transcript_identity(tmux_session_name) else {
+        return false;
+    };
+    recent_delivered_content_matches_at(&path, channel.get(), body, &identity, now_epoch_ms())
 }
 
 /// I2 outcome map (pure, testable): the shadow-write fires ONLY for a confirmed
@@ -1532,7 +1656,7 @@ fn delivered_frontier_end_diverged(durable_end: u64, in_memory_confirmed_end: u6
 /// diverged from the in-memory authority. `Err` only when the durable write
 /// itself failed. Caller invokes this ONLY for a confirmed `Delivered` (I2).
 #[allow(clippy::too_many_arguments)]
-fn record_delivered_frontier_shadow_at(
+fn record_delivered_frontier_shadow_at<I: DurableIdentityInput>(
     path: &Path,
     range: (u64, u64),
     generation_mtime_ns: i64,
@@ -1540,19 +1664,21 @@ fn record_delivered_frontier_shadow_at(
     panel_msg_id: Option<u64>,
     panel_channel_id: Option<u64>,
     in_memory_confirmed_end: u64,
-    current_generation: impl FnOnce() -> i64,
+    current_identity: impl FnOnce() -> I,
 ) -> Result<bool, String> {
     if !write_current_generation_frontier_at(
         path,
         DeliveredCommit {
             range,
             generation_mtime_ns,
+            tmux_session_name: None,
+            spawn_nonce: None,
             attempts,
             panel_msg_id,
             panel_channel_id,
         },
         EqualEndAnchorUpdate::PreserveCommitted,
-        current_generation,
+        current_identity,
     )? {
         return Ok(false);
     }
@@ -1597,11 +1723,7 @@ fn record_delivered_frontier_shadow(
         panel_msg_id,
         panel_channel_id,
         in_memory_confirmed_end,
-        || {
-            tmux_session_name
-                .map(current_generation_mtime_ns)
-                .unwrap_or(0)
-        },
+        || tmux_session_name.and_then(current_transcript_identity),
     ) {
         Ok(false) => {}
         Ok(true) => tracing::error!(
@@ -1665,14 +1787,6 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
     let generation_mtime_ns = coord
         .confirmed_end_generation_mtime_ns
         .load(Ordering::Acquire);
-    if is_delivered && let Some(body) = delivered_body {
-        record_delivered_content_fingerprint_for_generation(
-            provider,
-            channel_id,
-            body,
-            generation_mtime_ns,
-        );
-    }
     // #4564: a confirmed terminal delivery is the ONLY event that appends the
     // durable completed-turn ledger — the authority the catch-up TooOld gate
     // consults so an already-answered inbound user message is never re-flagged
@@ -1712,6 +1826,15 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
         .tmux_watchers
         .channel_binding(&channel)
         .map(|binding| binding.tmux_session_name);
+    if is_delivered
+        && let Some(body) = delivered_body
+        && let Some(identity) = tmux_session_name
+            .as_deref()
+            .and_then(current_transcript_identity)
+        && identity.generation_mtime_ns == generation_mtime_ns
+    {
+        record_delivered_content_fingerprint_for_identity(provider, channel_id, body, &identity);
+    }
     let fresh = crate::services::discord::inflight::load_inflight_state(provider, channel_id);
     let attempts = fresh
         .as_ref()
@@ -1858,10 +1981,39 @@ mod tests {
         }
     }
 
+    fn identity(
+        session: &str,
+        generation_mtime_ns: i64,
+        spawn_nonce: &str,
+    ) -> DurableTranscriptIdentity {
+        DurableTranscriptIdentity {
+            tmux_session_name: session.to_string(),
+            generation_mtime_ns,
+            spawn_nonce: spawn_nonce.to_string(),
+        }
+    }
+
+    fn identified_frontier(
+        range: (u64, u64),
+        identity: &DurableTranscriptIdentity,
+    ) -> DeliveredCommit {
+        DeliveredCommit {
+            range,
+            generation_mtime_ns: identity.generation_mtime_ns,
+            tmux_session_name: Some(identity.tmux_session_name.clone()),
+            spawn_nonce: Some(identity.spawn_nonce.clone()),
+            attempts: 1,
+            panel_msg_id: None,
+            panel_channel_id: None,
+        }
+    }
+
     fn sample_frontier() -> DeliveredCommit {
         DeliveredCommit {
             range: (0, 42),
             generation_mtime_ns: 123_456_789,
+            tmux_session_name: None,
+            spawn_nonce: None,
             attempts: 1,
             panel_msg_id: Some(999),
             panel_channel_id: Some(1234),
@@ -1880,6 +2032,8 @@ mod tests {
             DeliveredCommit {
                 range: (100, 200),
                 generation_mtime_ns: 7,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: None,
                 panel_channel_id: None,
@@ -1914,10 +2068,95 @@ mod tests {
             Some(DeliveredCommit {
                 range: (0, 50),
                 generation_mtime_ns: 8,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: None,
                 panel_channel_id: None,
             })
+        );
+    }
+
+    #[test]
+    fn same_mtime_rebind_rejects_old_frontier_and_accepts_new_coordinate() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("record.json");
+        let session_a = identity("AgentDesk-claude-custom-a", 700, "spawn-a");
+        let session_b = identity("AgentDesk-claude-custom-b", 700, "spawn-b");
+        write_delivered_frontier_at(&path, identified_frontier((0, 900), &session_a)).unwrap();
+
+        assert_eq!(
+            current_generation_durable_frontier_end_at(&path, &session_b, Some(1_000)),
+            None,
+            "same mtime and sufficient EOF cannot authorize another runtime session"
+        );
+        assert!(
+            commit_ordered_jsonl_range_at(&path, (0, 100), 700, || { Some(session_b.clone()) })
+                .unwrap()
+        );
+        assert_eq!(
+            current_generation_durable_frontier_end_at(&path, &session_b, Some(1_000)),
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn same_session_same_mtime_restart_requires_new_nonce() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("record.json");
+        let first_spawn = identity("AgentDesk-claude-restart", 700, "spawn-a");
+        let second_spawn = identity("AgentDesk-claude-restart", 700, "spawn-b");
+        write_delivered_frontier_at(&path, identified_frontier((0, 900), &first_spawn)).unwrap();
+
+        assert_eq!(
+            current_generation_durable_frontier_end_at(&path, &second_spawn, Some(1_000)),
+            None
+        );
+        assert!(
+            commit_ordered_jsonl_range_at(&path, (0, 80), 700, || { Some(second_spawn.clone()) })
+                .unwrap()
+        );
+        assert_eq!(
+            current_generation_durable_frontier_end_at(&path, &second_spawn, Some(1_000)),
+            Some(80)
+        );
+        assert_eq!(
+            current_generation_durable_frontier_end_at(&path, &first_spawn, Some(1_000)),
+            None,
+            "a delayed frame from the prior spawn cannot reclaim current authority"
+        );
+    }
+
+    #[test]
+    fn legacy_frontier_without_nonce_fails_closed_and_is_safely_replaced() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("record.json");
+        let current = identity("AgentDesk-claude-current", 700, "spawn-current");
+        write_delivered_frontier_at(
+            &path,
+            DeliveredCommit {
+                range: (0, 900),
+                generation_mtime_ns: 700,
+                tmux_session_name: None,
+                spawn_nonce: None,
+                attempts: 9,
+                panel_msg_id: Some(90),
+                panel_channel_id: Some(900),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            current_generation_durable_frontier_end_at(&path, &current, Some(1_000)),
+            None
+        );
+        assert!(
+            commit_ordered_jsonl_range_at(&path, (0, 40), 700, || { Some(current.clone()) })
+                .unwrap()
+        );
+        assert_eq!(
+            current_generation_durable_frontier_end_at(&path, &current, Some(1_000)),
+            Some(40)
         );
     }
 
@@ -2105,6 +2344,8 @@ mod tests {
         let delayed_lower = DeliveredCommit {
             range: (10, 40),
             generation_mtime_ns: 700,
+            tmux_session_name: None,
+            spawn_nonce: None,
             attempts: 1,
             panel_msg_id: Some(40),
             panel_channel_id: Some(400),
@@ -2112,6 +2353,8 @@ mod tests {
         let higher_winner = DeliveredCommit {
             range: (60, 90),
             generation_mtime_ns: 700,
+            tmux_session_name: None,
+            spawn_nonce: None,
             attempts: 2,
             panel_msg_id: Some(90),
             panel_channel_id: Some(900),
@@ -2139,6 +2382,8 @@ mod tests {
         let delayed_old = DeliveredCommit {
             range: (500, 900),
             generation_mtime_ns: 7,
+            tmux_session_name: None,
+            spawn_nonce: None,
             attempts: 5,
             panel_msg_id: Some(900),
             panel_channel_id: Some(7),
@@ -2146,6 +2391,8 @@ mod tests {
         let current = DeliveredCommit {
             range: (0, 90),
             generation_mtime_ns: 3,
+            tmux_session_name: None,
+            spawn_nonce: None,
             attempts: 1,
             panel_msg_id: Some(90),
             panel_channel_id: Some(3),
@@ -2193,6 +2440,8 @@ mod tests {
         let delayed_equal = DeliveredCommit {
             range: (10, 90),
             generation_mtime_ns: 700,
+            tmux_session_name: None,
+            spawn_nonce: None,
             attempts: 1,
             panel_msg_id: Some(10),
             panel_channel_id: Some(100),
@@ -2200,6 +2449,8 @@ mod tests {
         let current = DeliveredCommit {
             range: (60, 90),
             generation_mtime_ns: 700,
+            tmux_session_name: None,
+            spawn_nonce: None,
             attempts: 3,
             panel_msg_id: Some(90),
             panel_channel_id: Some(900),
@@ -2222,6 +2473,8 @@ mod tests {
             DeliveredCommit {
                 range: (60, 90),
                 generation_mtime_ns: 700,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: None,
                 panel_channel_id: None,
@@ -2233,6 +2486,8 @@ mod tests {
             DeliveredCommit {
                 range: (60, 90),
                 generation_mtime_ns: 700,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 4,
                 panel_msg_id: Some(90),
                 panel_channel_id: Some(900),
@@ -2245,6 +2500,8 @@ mod tests {
             Some(DeliveredCommit {
                 range: (60, 90),
                 generation_mtime_ns: 700,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 4,
                 panel_msg_id: Some(90),
                 panel_channel_id: Some(900),
@@ -2259,6 +2516,8 @@ mod tests {
         let current = DeliveredCommit {
             range: (60, 90),
             generation_mtime_ns: 700,
+            tmux_session_name: None,
+            spawn_nonce: None,
             attempts: 2,
             panel_msg_id: Some(90),
             panel_channel_id: Some(900),
@@ -2266,6 +2525,8 @@ mod tests {
         let replacement = DeliveredCommit {
             range: (60, 90),
             generation_mtime_ns: 700,
+            tmux_session_name: None,
+            spawn_nonce: None,
             attempts: 3,
             panel_msg_id: Some(91),
             panel_channel_id: Some(900),
@@ -2315,6 +2576,8 @@ mod tests {
         let current = DeliveredCommit {
             range: (10, 90),
             generation_mtime_ns: 700,
+            tmux_session_name: None,
+            spawn_nonce: None,
             attempts: 2,
             panel_msg_id: Some(90),
             panel_channel_id: Some(900),
@@ -2325,6 +2588,8 @@ mod tests {
             DeliveredCommit {
                 range: (60, 90),
                 generation_mtime_ns: 700,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 4,
                 panel_msg_id: None,
                 panel_channel_id: None,
@@ -2347,12 +2612,17 @@ mod tests {
         let context_path =
             delivery_owner_context_path_in_root(dir.path(), &ProviderKind::Claude, 123);
         write_delivered_frontier_at(&record_path, sample_frontier()).unwrap();
-        write_watcher_owner_context_at(&context_path, 456, "AgentDesk-claude-foo", 700).unwrap();
+        let identity = DurableTranscriptIdentity {
+            tmux_session_name: "AgentDesk-claude-foo".to_string(),
+            generation_mtime_ns: 700,
+            spawn_nonce: "spawn-a".to_string(),
+        };
+        write_watcher_owner_context_at(&context_path, 456, &identity).unwrap();
 
         let after = read_record_at(&record_path).unwrap();
         assert_eq!(after.delivered_frontier, Some(sample_frontier()));
         assert_eq!(
-            watcher_owner_channel_from_context_at(&context_path, "AgentDesk-claude-foo", 700),
+            watcher_owner_channel_from_context_at(&context_path, &identity),
             Some(456)
         );
     }
@@ -2361,14 +2631,35 @@ mod tests {
     fn watcher_owner_context_rejects_stale_or_wrong_session_3751() {
         let dir = tempfile::tempdir().unwrap();
         let path = delivery_owner_context_path_in_root(dir.path(), &ProviderKind::Claude, 123);
-        write_watcher_owner_context_at(&path, 456, "AgentDesk-claude-foo", 700).unwrap();
+        let identity = DurableTranscriptIdentity {
+            tmux_session_name: "AgentDesk-claude-foo".to_string(),
+            generation_mtime_ns: 700,
+            spawn_nonce: "spawn-a".to_string(),
+        };
+        write_watcher_owner_context_at(&path, 456, &identity).unwrap();
 
+        let wrong_session = DurableTranscriptIdentity {
+            tmux_session_name: "AgentDesk-claude-bar".to_string(),
+            ..identity.clone()
+        };
         assert_eq!(
-            watcher_owner_channel_from_context_at(&path, "AgentDesk-claude-bar", 700),
+            watcher_owner_channel_from_context_at(&path, &wrong_session),
             None
         );
+        let wrong_generation = DurableTranscriptIdentity {
+            generation_mtime_ns: 701,
+            ..identity.clone()
+        };
         assert_eq!(
-            watcher_owner_channel_from_context_at(&path, "AgentDesk-claude-foo", 701),
+            watcher_owner_channel_from_context_at(&path, &wrong_generation),
+            None
+        );
+        let wrong_nonce = DurableTranscriptIdentity {
+            spawn_nonce: "spawn-b".to_string(),
+            ..identity
+        };
+        assert_eq!(
+            watcher_owner_channel_from_context_at(&path, &wrong_nonce),
             None
         );
     }
@@ -2379,7 +2670,12 @@ mod tests {
         let record_path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 123);
         let context_path =
             delivery_owner_context_path_in_root(dir.path(), &ProviderKind::Claude, 123);
-        write_watcher_owner_context_at(&context_path, 456, "AgentDesk-claude-foo", 700).unwrap();
+        let identity = DurableTranscriptIdentity {
+            tmux_session_name: "AgentDesk-claude-foo".to_string(),
+            generation_mtime_ns: 700,
+            spawn_nonce: "spawn-a".to_string(),
+        };
+        write_watcher_owner_context_at(&context_path, 456, &identity).unwrap();
 
         // Simulates an old binary that knows only the lease/frontier record shape:
         // it rewrites the delivery record JSON object, but never opens the separate
@@ -2389,7 +2685,7 @@ mod tests {
         clear_lease_at(&record_path).unwrap();
 
         assert_eq!(
-            watcher_owner_channel_from_context_at(&context_path, "AgentDesk-claude-foo", 700),
+            watcher_owner_channel_from_context_at(&context_path, &identity),
             Some(456)
         );
     }
@@ -2659,6 +2955,8 @@ mod tests {
             DeliveredCommit {
                 range: (3, 10),
                 generation_mtime_ns: 111,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 2,
                 panel_msg_id: Some(9),
                 panel_channel_id: Some(8),
@@ -2843,6 +3141,8 @@ mod tests {
             DeliveredCommit {
                 range: (0, 443_154),
                 generation_mtime_ns: gen_ns,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: Some(1),
                 panel_channel_id: None,
@@ -2875,6 +3175,8 @@ mod tests {
             DeliveredCommit {
                 range: (0, 443_154),
                 generation_mtime_ns: gen_ns,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: None,
                 panel_channel_id: None,
@@ -2901,6 +3203,8 @@ mod tests {
             DeliveredCommit {
                 range: (0, 443_154),
                 generation_mtime_ns: 100, // written by a PRIOR generation
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: None,
                 panel_channel_id: None,
@@ -2938,6 +3242,8 @@ mod tests {
             DeliveredCommit {
                 range: (0, 20_536_793),
                 generation_mtime_ns: gen_ns,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: None,
                 panel_channel_id: None,
@@ -2968,6 +3274,8 @@ mod tests {
             DeliveredCommit {
                 range: (0, 900),
                 generation_mtime_ns: 700,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: None,
                 panel_channel_id: None,
@@ -2998,6 +3306,8 @@ mod tests {
             DeliveredCommit {
                 range: (80, 900),
                 generation_mtime_ns: 700,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 3,
                 panel_msg_id: Some(42),
                 panel_channel_id: Some(84),
@@ -3028,6 +3338,8 @@ mod tests {
             DeliveredCommit {
                 range: (0, 900),
                 generation_mtime_ns: 700,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: None,
                 panel_channel_id: None,
@@ -3042,6 +3354,8 @@ mod tests {
             DeliveredCommit {
                 range: (250, 950),
                 generation_mtime_ns: 700,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 2,
                 panel_msg_id: Some(42),
                 panel_channel_id: Some(84),
@@ -3067,6 +3381,8 @@ mod tests {
             DeliveredCommit {
                 range: (0, 900),
                 generation_mtime_ns: 700,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: None,
                 panel_channel_id: None,
@@ -3122,6 +3438,8 @@ mod tests {
             DeliveredCommit {
                 range: (10, 443_154),
                 generation_mtime_ns: 700,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: Some(555),
                 panel_channel_id: Some(777),
@@ -3148,6 +3466,8 @@ mod tests {
             DeliveredCommit {
                 range: (0, 100),
                 generation_mtime_ns: 100, // PRIOR generation
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: Some(555),
                 panel_channel_id: Some(777),
@@ -3176,6 +3496,8 @@ mod tests {
             DeliveredCommit {
                 range: (0, 42),
                 generation_mtime_ns: 700,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: Some(0),
                 panel_channel_id: Some(777),
@@ -3194,6 +3516,8 @@ mod tests {
             DeliveredCommit {
                 range: (0, 42),
                 generation_mtime_ns: 700,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: Some(555),
                 panel_channel_id: Some(0),
@@ -3212,6 +3536,8 @@ mod tests {
             DeliveredCommit {
                 range: (0, 42),
                 generation_mtime_ns: 700,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: None,
                 panel_channel_id: None,
@@ -3369,6 +3695,8 @@ mod tests {
             DeliveredCommit {
                 range: (0, 443_154),
                 generation_mtime_ns: gen_ns,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: Some(999_888_777), // #3610: terminal anchor present
                 panel_channel_id: Some(111_222_333), // #3610b: anchor channel present
@@ -3383,6 +3711,8 @@ mod tests {
             DeliveredCommit {
                 range: (0, 443_154),
                 generation_mtime_ns: gen_ns,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: None, // pre-fix incident shape (status_message_id=null)
                 panel_channel_id: None,
@@ -3755,6 +4085,8 @@ mod tests {
             fs::create_dir_all(parent).expect("create sessions dir");
         }
         fs::write(&gen_path, b"1").expect("write generation marker");
+        let spawn_nonce = crate::services::discord::write_spawn_nonce(tmux_session_name)
+            .expect("write spawn nonce");
         let gen_ns = current_generation_mtime_ns(tmux_session_name);
         assert_ne!(
             gen_ns, 0,
@@ -3767,6 +4099,8 @@ mod tests {
             DeliveredCommit {
                 range: (0, durable_end),
                 generation_mtime_ns: gen_ns,
+                tmux_session_name: Some(tmux_session_name.to_string()),
+                spawn_nonce: Some(spawn_nonce),
                 attempts: 1,
                 panel_msg_id: Some(1),
                 panel_channel_id: None,
@@ -3784,9 +4118,14 @@ mod tests {
     ) -> EditFailureTranscriptIdentity {
         let output_path = root.path().join(format!("{tmux_session_name}.jsonl"));
         fs::write(&output_path, vec![b'x'; eof as usize]).expect("seed transcript");
+        let transcript = current_transcript_identity(tmux_session_name).unwrap_or_else(|| {
+            generation_mtime_ns
+                .into_identity()
+                .expect("test generation")
+        });
         EditFailureTranscriptIdentity {
             output_path,
-            generation_mtime_ns,
+            transcript,
         }
     }
 
@@ -3802,7 +4141,7 @@ mod tests {
             &record_path,
             expected,
             || Some(expected.output_path.clone()),
-            || expected.generation_mtime_ns,
+            || Some(expected.transcript.clone()),
             || {},
         );
         range_already_committed(
@@ -3998,6 +4337,8 @@ mod tests {
             DeliveredCommit {
                 range: (0, committed_end),
                 generation_mtime_ns: generation.saturating_add(1),
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: None,
                 panel_channel_id: None,
@@ -4034,7 +4375,7 @@ mod tests {
         let generation = seed_current_generation_frontier(&provider, channel, tmux, committed_end);
         let missing_output = EditFailureTranscriptIdentity {
             output_path: root.path().join("missing.jsonl"),
-            generation_mtime_ns: generation,
+            transcript: generation.into_identity().expect("test generation"),
         };
         assert!(!stable_edit_failure_committed_at(
             &provider,
@@ -4064,7 +4405,7 @@ mod tests {
             &record_path,
             &expected,
             || Some(current_path.borrow().clone()),
-            || current_generation.get(),
+            || current_generation.get().into_identity(),
             || {
                 current_path.replace(new_path.clone());
                 current_generation.set(old_generation.saturating_add(1));
@@ -4075,6 +4416,8 @@ mod tests {
                         delivered_frontier: Some(DeliveredCommit {
                             range: (0, committed_end),
                             generation_mtime_ns: old_generation.saturating_add(1),
+                            tmux_session_name: None,
+                            spawn_nonce: None,
                             attempts: 1,
                             panel_msg_id: None,
                             panel_channel_id: None,
@@ -4111,7 +4454,7 @@ mod tests {
             &record_path,
             &expected,
             || Some(expected.output_path.clone()),
-            || expected.generation_mtime_ns,
+            || Some(expected.transcript.clone()),
             || {
                 fs::write(
                     &expected.output_path,
@@ -4146,6 +4489,8 @@ mod tests {
             DeliveredCommit {
                 range: (0, 443_154),
                 generation_mtime_ns: 1, // PRIOR generation → distrusted
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: None,
                 panel_channel_id: None,

@@ -136,6 +136,9 @@ pub struct StreamFrame {
     /// Wrapper generation captured with `relay_range`. A queued range from a
     /// replaced wrapper must never commit against the replacement transcript.
     pub relay_generation_mtime_ns: Option<i64>,
+    /// Stable spawn UUID captured with `relay_range`. This closes same-mtime
+    /// wrapper replacement and same-name restart collisions.
+    pub relay_spawn_nonce: Option<String>,
 }
 
 /// Per-session counters. Exposed via the supervisor for diagnostics.
@@ -422,6 +425,7 @@ impl RelayProducer {
         start: u64,
         end: u64,
         generation_mtime_ns: i64,
+        spawn_nonce: String,
     ) -> bool {
         self.enqueue(
             payload,
@@ -429,6 +433,7 @@ impl RelayProducer {
             None,
             Some((start, end)),
             Some(generation_mtime_ns),
+            Some(spawn_nonce),
         )
         .is_alive()
     }
@@ -440,6 +445,7 @@ impl RelayProducer {
         identity: Option<RelayTurnIdentity>,
         range: Option<(u64, u64)>,
         relay_generation_mtime_ns: Option<i64>,
+        relay_spawn_nonce: Option<String>,
     ) -> RelaySendOutcome {
         try_send_frame_inner(
             &self.matched,
@@ -452,6 +458,7 @@ impl RelayProducer {
             identity,
             range,
             relay_generation_mtime_ns,
+            relay_spawn_nonce,
         )
     }
 
@@ -464,7 +471,7 @@ impl RelayProducer {
         payload: String,
         frame_identity: Option<RelayTurnIdentity>,
     ) -> RelaySendOutcome {
-        self.enqueue(payload, None, frame_identity, None, None)
+        self.enqueue(payload, None, frame_identity, None, None, None)
     }
 
     /// #3041 P1-3 (Part a, B1): forward the RESULT-bearing chunk as a terminal
@@ -477,7 +484,7 @@ impl RelayProducer {
         payload: String,
         terminal: TerminalCommitFence,
     ) -> RelaySendOutcome {
-        self.enqueue(payload, Some(terminal), None, None, None)
+        self.enqueue(payload, Some(terminal), None, None, None, None)
     }
 }
 
@@ -617,6 +624,7 @@ fn try_send_frame_inner(
     frame_identity: Option<RelayTurnIdentity>,
     relay_range: Option<(u64, u64)>,
     relay_generation_mtime_ns: Option<i64>,
+    relay_spawn_nonce: Option<String>,
 ) -> RelaySendOutcome {
     if shutdown.load(Ordering::Acquire) {
         return RelaySendOutcome::closed();
@@ -644,6 +652,7 @@ fn try_send_frame_inner(
         turn_start_offset: frame_identity.turn_start_offset,
         relay_range,
         relay_generation_mtime_ns,
+        relay_spawn_nonce,
     };
     metrics.frames_received.fetch_add(1, Ordering::AcqRel);
     match queue.push_drop_oldest(frame) {
@@ -703,6 +712,7 @@ impl StreamRelayHandle {
             &self.metrics,
             &self.sequence,
             payload,
+            None,
             None,
             None,
             None,
@@ -1090,13 +1100,20 @@ mod tests {
         let handle = spawn_stream_relay(matched_for("c-range"), sink.clone());
         let producer = handle.producer();
 
-        assert!(producer.try_send_frame_for_range("idle-result".into(), 640, 1_024, 77));
+        assert!(producer.try_send_frame_for_range(
+            "idle-result".into(),
+            640,
+            1_024,
+            77,
+            "spawn-77".to_string(),
+        ));
         flush_pending().await;
 
         let delivered = sink.delivered();
         assert_eq!(delivered.len(), 1);
         assert_eq!(delivered[0].relay_range, Some((640, 1_024)));
         assert_eq!(delivered[0].relay_generation_mtime_ns, Some(77));
+        assert_eq!(delivered[0].relay_spawn_nonce.as_deref(), Some("spawn-77"));
         assert_eq!(delivered[0].terminal_consumed_end, None);
         assert_eq!(delivered[0].turn_start_offset, None);
         handle.shutdown().await;

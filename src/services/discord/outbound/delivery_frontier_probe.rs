@@ -5,8 +5,8 @@ use std::path::Path;
 use poise::serenity_prelude::ChannelId;
 
 use super::delivery_record::{
-    DeliveredCommit, current_generation_durable_frontier_at, current_generation_mtime_ns,
-    delivery_record_path,
+    DeliveredCommit, DurableTranscriptIdentity, current_generation_durable_frontier_at,
+    current_transcript_identity, delivery_record_path,
 };
 use crate::services::provider::ProviderKind;
 
@@ -27,13 +27,16 @@ pub(in crate::services::discord) struct CurrentGenerationAnchor {
 /// `delivered_frontier` terminal anchor, but only when it belongs to the current
 /// wrapper generation, its END is inside the current transcript EOF, and the
 /// anchor pair is fully populated/non-zero.
-pub(in crate::services::discord) fn current_generation_delivered_anchor_at(
+pub(in crate::services::discord) fn current_generation_delivered_anchor_at<I>(
     path: &Path,
-    current_gen_mtime: i64,
+    current_identity: I,
     current_transcript_eof: Option<u64>,
-) -> Option<CurrentGenerationAnchor> {
-    let frontier =
-        current_generation_durable_frontier_at(path, current_gen_mtime, current_transcript_eof)?;
+) -> Option<CurrentGenerationAnchor>
+where
+    I: super::delivery_record::DurableIdentityInput,
+{
+    let identity = current_identity.into_identity()?;
+    let frontier = current_generation_durable_frontier_at(path, &identity, current_transcript_eof)?;
     let panel_msg_id = frontier.panel_msg_id.filter(|&id| id != 0)?;
     let panel_channel_id = frontier.panel_channel_id.filter(|&id| id != 0)?;
     Some(CurrentGenerationAnchor {
@@ -52,8 +55,8 @@ pub(in crate::services::discord) fn current_generation_delivered_anchor(
     current_transcript_eof: Option<u64>,
 ) -> Option<CurrentGenerationAnchor> {
     let path = delivery_record_path(provider, channel.get())?;
-    let current_gen = current_generation_mtime_ns(tmux_session_name);
-    current_generation_delivered_anchor_at(&path, current_gen, current_transcript_eof)
+    let identity = current_transcript_identity(tmux_session_name)?;
+    current_generation_delivered_anchor_at(&path, &identity, current_transcript_eof)
 }
 
 /// Current-generation durable delivered frontier with diagnostic details.
@@ -70,6 +73,6 @@ pub(in crate::services::discord) fn delivered_frontier_current_generation(
     current_transcript_eof: Option<u64>,
 ) -> Option<DeliveredCommit> {
     let path = delivery_record_path(provider, channel.get())?;
-    let current_gen = current_generation_mtime_ns(tmux_session_name);
-    current_generation_durable_frontier_at(&path, current_gen, current_transcript_eof)
+    let identity = current_transcript_identity(tmux_session_name)?;
+    current_generation_durable_frontier_at(&path, &identity, current_transcript_eof)
 }

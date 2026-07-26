@@ -447,16 +447,20 @@
 
 ### Audited touches
 - 2026-07-26 — #4890/#4926 delivery-record frontier repair: the worker-local
-  delivery-record sidecar rejects delayed same-generation writers whose END trails
-  the durable frontier, deterministically merges equal-END metadata, and checks the
-  current transcript generation marker under the record lock before a different
-  generation may replace it. Generation identity is equality-only; mtime numeric
-  order is not chronology. Recovery can replace a proved-gone equal-range anchor
-  only with an expected-anchor CAS, while compact/EOF lowering retains its separate
+  delivery-record sidecar rejects delayed same-identity writers whose END trails
+  the durable frontier, deterministically merges equal-END metadata, and checks
+  the exact tmux session name, generation-marker mtime, and stable per-spawn nonce
+  under the record lock before a different transcript coordinate may replace it.
+  Ordered frames capture that identity at enqueue time, so a queued prior-spawn
+  frame cannot be reauthenticated with the current nonce. Generation mtime is an
+  equality fence, not chronology; same-mtime rebinds and same-name restarts are
+  separated by session and nonce, while legacy records missing either fail closed
+  for suppression. Recovery can replace a proved-gone equal-range anchor only with
+  an expected-anchor CAS, while compact/EOF lowering retains its separate
   expected-END CAS. Production SHADOW/AUTHORITY remains code-level default-ON with
   no environment OFF rollback; `cfg(test)` OFF seams cover only legacy behavior.
-  Rollback is a prior binary or forward fix. No cross-node authority, PG lease,
-  leader-only side effect, schema, or hotfile changes are introduced.
+  Rollback is a prior binary or forward fix. This remains worker-local and adds no
+  cross-node authority, PG lease, leader-only side effect, or schema.
 - 2026-07-26 — #4898 untrusted deploy-gate containment: PostgreSQL migration
   0100 adds a validated cluster-wide `CHECK` constraint that rejects normalized
   `deploy-gate` provenance. The `ALTER TABLE` lock serializes concurrent legacy

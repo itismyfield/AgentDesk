@@ -187,6 +187,9 @@ fn range_fresh_send_commits_and_records_durable_frontier() {
         Some(delivery_record::DeliveredCommit {
             range,
             generation_mtime_ns,
+            tmux_session_name: Some(tmux.to_string()),
+            spawn_nonce: delivery_record::current_transcript_identity(tmux)
+                .map(|identity| identity.spawn_nonce),
             attempts: 2,
             panel_msg_id: Some(1),
             panel_channel_id: Some(channel.get()),

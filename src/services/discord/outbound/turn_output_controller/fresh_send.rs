@@ -188,6 +188,8 @@ fn record_success(
             let commit = delivery_record::DeliveredCommit {
                 range,
                 generation_mtime_ns,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: record.attempts,
                 panel_msg_id: Some(message_id.get()),
                 panel_channel_id: Some(record.record_channel_id.get()),
@@ -206,8 +208,8 @@ fn record_success(
             delivery_record::record_fresh_send_content_fingerprint(
                 &record.provider,
                 record.record_channel_id.get(),
+                &record.tmux_session_name,
                 body,
-                generation_mtime_ns,
             )
             .map(|_| true)
         }

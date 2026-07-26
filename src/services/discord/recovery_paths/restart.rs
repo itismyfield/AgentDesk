@@ -1001,6 +1001,8 @@ mod tests {
             delivery_record::DeliveredCommit {
                 range,
                 generation_mtime_ns,
+                tmux_session_name: None,
+                spawn_nonce: None,
                 attempts: 1,
                 panel_msg_id: Some(panel_msg_id),
                 panel_channel_id: Some(panel_channel_id),

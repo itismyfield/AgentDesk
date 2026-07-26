@@ -100,6 +100,23 @@ pub(super) fn idle_jsonl_current_eof(provider: &ProviderKind, session_name: &str
         .map(|metadata| metadata.len())
 }
 
+pub(super) fn idle_jsonl_frame_identity_current(
+    provider: &ProviderKind,
+    session_name: &str,
+    range_end: u64,
+    generation_mtime_ns: i64,
+    spawn_nonce: &str,
+) -> bool {
+    generation_mtime_ns != 0
+        && !spawn_nonce.is_empty()
+        && crate::services::discord::outbound::delivery_record::current_transcript_identity_matches(
+            session_name,
+            generation_mtime_ns,
+            spawn_nonce,
+        )
+        && idle_jsonl_current_eof(provider, session_name).is_some_and(|eof| range_end <= eof)
+}
+
 pub(super) fn idle_jsonl_inflight_mismatches_session(
     inflight: &InflightTurnState,
     tmux_session_name: &str,
