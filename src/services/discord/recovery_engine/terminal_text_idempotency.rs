@@ -542,6 +542,7 @@ mod tests {
             std::fs::create_dir_all(parent).expect("generation parent");
         }
         std::fs::write(path, "1").expect("generation marker");
+        crate::services::discord::write_spawn_nonce(tmux_session_name).expect("spawn nonce marker");
     }
 
     fn inflight_state_path_for_test(

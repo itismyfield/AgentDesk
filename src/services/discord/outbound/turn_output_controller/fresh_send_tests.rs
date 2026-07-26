@@ -100,6 +100,8 @@ fn seed_generation(tmux_session_name: &str) -> i64 {
     std::fs::create_dir_all(Path::new(&path).parent().expect("generation parent"))
         .expect("create generation parent");
     std::fs::write(&path, b"1").expect("write generation marker");
+    crate::services::discord::write_spawn_nonce(tmux_session_name)
+        .expect("write spawn nonce marker");
     let generation_mtime_ns = delivery_record::current_generation_mtime_ns(tmux_session_name);
     assert_ne!(generation_mtime_ns, 0, "generation marker must be readable");
     generation_mtime_ns
