@@ -1423,7 +1423,7 @@ mod tests {
         runtime_pool_settings, should_yield_for_counters, startup_pool_settings, startup_reseed,
         sync_agents_from_config_pg, with_startup_advisory_lock,
     };
-    use sqlx::Row;
+    use sqlx::{Executor as _, PgPool, Row};
     use std::collections::BTreeMap;
     use std::sync::{
         Arc,
@@ -1502,6 +1502,63 @@ mod tests {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "postgres".to_string());
         format!("{}/{}", base_database_url(), admin_db)
+    }
+
+    async fn migrate_through_version(pool: &PgPool, max_version: i64) -> Result<(), String> {
+        use sqlx::migrate::Migrator;
+        use std::borrow::Cow;
+
+        let migrator = Migrator {
+            migrations: Cow::Owned(
+                POSTGRES_MIGRATOR
+                    .iter()
+                    .filter(|migration| migration.version <= max_version)
+                    .cloned()
+                    .collect(),
+            ),
+            ..Migrator::DEFAULT
+        };
+        migrator
+            .run(pool)
+            .await
+            .map_err(|error| format!("run postgres migrations through {max_version}: {error}"))
+    }
+
+    async fn apply_deploy_gate_constraint(pool: &PgPool) -> Result<(), String> {
+        let migration = POSTGRES_MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 100)
+            .expect("deploy-gate constraint migration"); // agentdesk-audit: allow-unwrap — embedded migration 0100 is required by this test
+        pool.execute(migration.sql.as_ref())
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("apply deploy-gate constraint migration: {error}"))
+    }
+
+    async fn seed_auto_queue_run(pool: &PgPool, run_id: &str) {
+        sqlx::query("INSERT INTO auto_queue_runs (id, status) VALUES ($1, 'generated')")
+            .bind(run_id)
+            .execute(pool)
+            .await
+            .expect("seed auto-queue run"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+    }
+
+    async fn insert_phase_gate_kind(
+        pool: &PgPool,
+        entry_id: &str,
+        run_id: &str,
+        phase_gate_kind: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (id, run_id, status, phase_gate_kind)
+             VALUES ($1, $2, 'pending', $3)",
+        )
+        .bind(entry_id)
+        .bind(run_id)
+        .bind(phase_gate_kind)
+        .execute(pool)
+        .await
+        .map(|_| ())
     }
 
     fn postgres_test_config(test_db: &TestDatabase) -> crate::config::Config {
@@ -1620,6 +1677,167 @@ mod tests {
                 "filtered checksum map for version {version} must keep Up, not Down"
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deploy_gate_constraint_allows_supported_legacy_values_and_rejects_deploy_gate() {
+        let test_db = TestDatabase::create().await;
+        let pool = super::connect_test_pool_with_max_connections(
+            &test_db.database_url,
+            "deploy-gate constraint values",
+            4,
+        )
+        .await
+        .expect("connect deploy-gate constraint database");
+        super::migrate(&pool)
+            .await
+            .expect("migrate deploy-gate constraint database");
+        seed_auto_queue_run(&pool, "run-values").await;
+
+        for (entry_id, phase_gate_kind) in [
+            ("entry-null", None),
+            ("entry-blank", Some(" \t\n\r\u{000c}\u{000b}")),
+            ("entry-pr-confirm", Some("pr-confirm")),
+        ] {
+            insert_phase_gate_kind(&pool, entry_id, "run-values", phase_gate_kind)
+                .await
+                .expect("supported phase-gate kind remains writable");
+        }
+        for (entry_id, phase_gate_kind) in [
+            ("entry-deploy-gate", "deploy-gate"),
+            ("entry-deploy-gate-upper", "DEPLOY-GATE"),
+            (
+                "entry-deploy-gate-whitespace",
+                " \t\n\r\u{000c}\u{000b}DePlOy-GaTe\u{000b}\u{000c}\r\n\t ",
+            ),
+        ] {
+            let error =
+                insert_phase_gate_kind(&pool, entry_id, "run-values", Some(phase_gate_kind))
+                    .await
+                    .expect_err("deploy-gate variants must be rejected");
+            assert_eq!(
+                error
+                    .as_database_error()
+                    .and_then(|error| error.constraint()),
+                Some("auto_queue_entries_deploy_gate_unavailable_check")
+            );
+        }
+
+        pool.close().await;
+        test_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deploy_gate_constraint_migration_blocks_existing_deploy_gate_rows() {
+        let test_db = TestDatabase::create().await;
+        let pool = super::connect_test_pool_with_max_connections(
+            &test_db.database_url,
+            "deploy-gate existing-row migration",
+            4,
+        )
+        .await
+        .expect("connect existing-row migration database");
+        migrate_through_version(&pool, 99)
+            .await
+            .expect("migrate existing-row database through 99");
+        seed_auto_queue_run(&pool, "run-existing").await;
+        insert_phase_gate_kind(
+            &pool,
+            "entry-existing-deploy-gate",
+            "run-existing",
+            Some("deploy-gate"),
+        )
+        .await
+        .expect("seed pre-constraint deploy-gate row");
+
+        let error = apply_deploy_gate_constraint(&pool)
+            .await
+            .expect_err("existing deploy-gate row must block migration");
+        assert!(error.contains("auto_queue_entries_deploy_gate_unavailable_check"));
+        let constraint_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM pg_constraint
+             WHERE conname = 'auto_queue_entries_deploy_gate_unavailable_check'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count rolled-back constraint");
+        assert_eq!(constraint_count, 0);
+
+        pool.close().await;
+        test_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deploy_gate_constraint_serializes_concurrent_legacy_writer() {
+        let test_db = TestDatabase::create().await;
+        let pool = super::connect_test_pool_with_max_connections(
+            &test_db.database_url,
+            "deploy-gate concurrent migration",
+            6,
+        )
+        .await
+        .expect("connect concurrent migration database");
+        migrate_through_version(&pool, 99)
+            .await
+            .expect("migrate concurrent database through 99");
+        seed_auto_queue_run(&pool, "run-concurrent").await;
+
+        let mut writer = pool.acquire().await.expect("acquire legacy writer");
+        sqlx::query("BEGIN")
+            .execute(&mut *writer)
+            .await
+            .expect("begin legacy writer");
+        insert_phase_gate_kind(
+            &pool,
+            "entry-safe-before-lock",
+            "run-concurrent",
+            Some("pr-confirm"),
+        )
+        .await
+        .expect("seed safe row before migration");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (id, run_id, status, phase_gate_kind)
+             VALUES ('entry-legacy-writer', 'run-concurrent', 'pending', 'pr-confirm')",
+        )
+        .execute(&mut *writer)
+        .await
+        .expect("seed uncommitted legacy writer row");
+
+        let migration_pool = pool.clone();
+        let migration_task =
+            tokio::spawn(async move { apply_deploy_gate_constraint(&migration_pool).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !migration_task.is_finished(),
+            "ALTER TABLE must wait for the concurrent legacy writer"
+        );
+        sqlx::query("COMMIT")
+            .execute(&mut *writer)
+            .await
+            .expect("commit safe legacy writer");
+        migration_task
+            .await
+            .expect("join constraint migration")
+            .expect("apply constraint after writer commit");
+
+        let error = sqlx::query(
+            "INSERT INTO auto_queue_entries (id, run_id, status, phase_gate_kind)
+             VALUES ('entry-after-constraint', 'run-concurrent', 'pending', 'deploy-gate')",
+        )
+        .execute(&mut *writer)
+        .await
+        .expect_err("legacy writer cannot commit deploy-gate after constraint");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|error| error.constraint()),
+            Some("auto_queue_entries_deploy_gate_unavailable_check")
+        );
+
+        drop(writer);
+        pool.close().await;
+        test_db.drop().await;
     }
 
     #[test]

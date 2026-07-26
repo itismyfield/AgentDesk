@@ -124,6 +124,7 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "lib.rs": "Library crate boundary that exposes the server/CLI modules for the slim binary entry point and tests.",
     "logging.rs": "Tracing span helpers that stamp dispatch, card, agent, and hook context onto logs.",
     "main.rs": "Binary entry point. Dispatches CLI commands or boots the server runtime.",
+    "phase_gate.rs": "Immutable typed phase-gate declarations and snapshot compatibility checks shared by HTTP, policy dispatch, and durable reducers.",
     "pipeline.rs": "Pipeline stage loading, resolution, and transition helpers.",
     "receipt.rs": "Receipt parsing and workspace attribution helpers.",
     "reconcile.rs": "Boot-time reconciliation for persisted state and dispatch-runtime drift.",

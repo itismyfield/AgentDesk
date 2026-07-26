@@ -177,12 +177,11 @@ pub async fn resume_previous_session(
         );
     };
     let forward_context = crate::services::session_forwarding::ForwardCallerContext::from(&state);
-    let is_forwarded = crate::services::session_forwarding::is_forwarded_request(&headers);
     dispatch_resume_previous(
         pool,
         state.health_registry.as_deref(),
         &forward_context,
-        is_forwarded,
+        Some(&headers),
         &session_key,
         &opts,
     )
@@ -192,13 +191,14 @@ pub async fn resume_previous_session(
 /// Shared entry point for the HTTP route and the `/resume` slash command: load
 /// the owning node, forward cross-node when this node is not the owner (so a
 /// gateway node never mutates a session it does not run — S1), and otherwise
-/// run the local rebind. `is_forwarded` is `true` only when the request already
-/// arrived from a peer node (breaks forward loops).
+/// run the local rebind. HTTP callers pass the incoming headers so forwarded
+/// requests are fenced against both the expected and current database owner;
+/// in-process callers pass `None` and can originate (but never receive) forwarding.
 pub(crate) async fn dispatch_resume_previous(
     pool: &PgPool,
     registry: Option<&HealthRegistry>,
     forward_context: &crate::services::session_forwarding::ForwardCallerContext,
-    is_forwarded: bool,
+    request_headers: Option<&HeaderMap>,
     session_key: &str,
     opts: &ResumePreviousOptions,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -237,6 +237,17 @@ pub(crate) async fn dispatch_resume_previous(
             }
         };
 
+    let is_forwarded =
+        request_headers.is_some_and(crate::services::session_forwarding::is_forwarded_request);
+    if let Some(headers) = request_headers
+        && let Err(response) = crate::services::session_forwarding::enforce_receiver_fence(
+            headers,
+            owner_instance_id.as_deref(),
+            forward_context.cluster_instance_id.as_deref(),
+        )
+    {
+        return response;
+    }
     if !is_forwarded {
         match crate::services::session_forwarding::resolve_forward_target(
             forward_context,
