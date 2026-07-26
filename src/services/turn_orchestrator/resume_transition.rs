@@ -8,6 +8,14 @@ use super::{
     PurgeQueueResult, RecoveryKickoffResult, TakeNextSoftResult, TryStartTurnResult,
 };
 
+pub(super) fn runtime_clear_readiness_from_state(
+    state: &mut ChannelMailboxState,
+    now: Instant,
+) -> bool {
+    state.resume_transition.recover_expired(now);
+    !state.resume_transition.is_reserved()
+}
+
 pub(crate) const RESUME_TRANSITION_LEASE_DURATION: Duration = Duration::from_secs(120);
 pub(crate) const RESUME_TRANSITION_HISTORY_LIMIT: usize = 32;
 
@@ -312,6 +320,10 @@ pub(super) fn gate_reserved_arm(
             });
             None
         }
+        ChannelMailboxMsg::RuntimeClearReadiness { reply } => {
+            let _ = reply.send(false);
+            None
+        }
         ChannelMailboxMsg::TakeNextSoft { reply, .. } => {
             let _ = reply.send(TakeNextSoftResult {
                 intervention: None,
@@ -352,6 +364,14 @@ pub(super) fn gate_reserved_arm(
 }
 
 impl ChannelMailboxHandle {
+    pub(crate) async fn runtime_clear_ready(&self) -> bool {
+        self.request(
+            |reply| ChannelMailboxMsg::RuntimeClearReadiness { reply },
+            false,
+        )
+        .await
+    }
+
     pub(crate) async fn begin_resume_transition(
         &self,
         transition_id: Uuid,

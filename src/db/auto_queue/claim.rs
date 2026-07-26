@@ -254,6 +254,7 @@ pub struct SlotAllocation {
     pub slot_index: i64,
     pub newly_assigned: bool,
     pub reassigned_from_other_group: bool,
+    pub previous_thread_group: Option<i64>,
 }
 
 async fn bind_slot_index_for_group_entries_pg(
@@ -416,6 +417,7 @@ async fn allocate_slot_for_group_agent_pg_inner(
                 slot_index,
                 newly_assigned: false,
                 reassigned_from_other_group: false,
+                previous_thread_group: None,
             }));
         }
 
@@ -567,6 +569,7 @@ async fn allocate_slot_for_group_agent_pg_inner(
                 slot_index,
                 newly_assigned: false,
                 reassigned_from_other_group: true,
+                previous_thread_group,
             }));
         }
 
@@ -727,6 +730,7 @@ async fn allocate_slot_for_group_agent_pg_inner(
             slot_index,
             newly_assigned: true,
             reassigned_from_other_group: false,
+            previous_thread_group: None,
         }));
     }
 

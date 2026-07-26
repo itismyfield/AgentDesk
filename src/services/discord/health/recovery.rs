@@ -37,6 +37,14 @@ pub(crate) use watchdog_decisions::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeChannelClearResult {
+    Cleared,
+    Unavailable,
+    DeferredResumeTransition,
+    PersistenceFailed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeTurnStopResult {
     pub lifecycle_path: &'static str,
     pub had_active_turn: bool,
@@ -1346,6 +1354,29 @@ async fn runtime_turn_cleanup_by_lookup(
     HardStopRuntimeResult::default()
 }
 
+pub(crate) async fn provider_channel_runtime_clear_readiness(
+    registry: &HealthRegistry,
+    provider_name: &str,
+    channel_id: ChannelId,
+) -> RuntimeChannelClearResult {
+    let Some(provider) = ProviderKind::from_str(provider_name) else {
+        return RuntimeChannelClearResult::Unavailable;
+    };
+    let Some(shared) = shared_for_provider(registry, &provider, channel_id).await else {
+        return RuntimeChannelClearResult::Unavailable;
+    };
+    if shared
+        .mailboxes
+        .handle(channel_id)
+        .runtime_clear_ready()
+        .await
+    {
+        RuntimeChannelClearResult::Cleared
+    } else {
+        RuntimeChannelClearResult::DeferredResumeTransition
+    }
+}
+
 /// Best-effort runtime-side equivalent of `/clear` for an existing Discord channel session.
 /// Used by auto-queue slot recycling so pooled unified-thread slots start the next group fresh
 /// without killing the shared thread itself.
@@ -1354,20 +1385,13 @@ pub async fn clear_provider_channel_runtime(
     provider_name: &str,
     channel_id: ChannelId,
     session_key: Option<&str>,
-) -> bool {
+) -> RuntimeChannelClearResult {
     let Some(provider) = ProviderKind::from_str(provider_name) else {
-        return false;
+        return RuntimeChannelClearResult::Unavailable;
     };
 
-    let shared = {
-        let providers = registry.providers.lock().await;
-        providers
-            .iter()
-            .find(|entry| entry.name.eq_ignore_ascii_case(provider.as_str()))
-            .map(|entry| entry.shared.clone())
-    };
-    let Some(shared) = shared else {
-        return false;
+    let Some(shared) = shared_for_provider(registry, &provider, channel_id).await else {
+        return RuntimeChannelClearResult::Unavailable;
     };
 
     let tmux_name = {
@@ -1385,7 +1409,15 @@ pub async fn clear_provider_channel_runtime(
             channel_id = channel_id.get(),
             "runtime clear deferred while resume transition is active"
         );
-        return false;
+        return RuntimeChannelClearResult::DeferredResumeTransition;
+    }
+    if let Some(error) = cleared.persistence_error.as_deref() {
+        tracing::warn!(
+            channel_id = channel_id.get(),
+            %error,
+            "runtime clear stopped after mailbox persistence failed"
+        );
+        return RuntimeChannelClearResult::PersistenceFailed;
     }
     if let Some(token) = cleared.removed_token {
         discord::turn_bridge::stop_active_turn(
@@ -1416,7 +1448,64 @@ pub async fn clear_provider_channel_runtime(
         }
     }
 
-    true
+    RuntimeChannelClearResult::Cleared
+}
+
+#[cfg(test)]
+mod runtime_clear_readiness_tests {
+    use super::*;
+    use crate::services::provider::CancelToken;
+    use crate::services::turn_orchestrator::{
+        BeginResumeTransitionResult, EndResumeTransitionResult,
+    };
+    use poise::serenity_prelude::{MessageId, UserId};
+
+    #[tokio::test]
+    async fn resume_transition_readiness_is_non_destructive_and_retryable_after_release() {
+        let shared = discord::make_shared_data_for_tests();
+        let registry = HealthRegistry::new();
+        registry
+            .register("claude".to_string(), shared.clone())
+            .await;
+        let channel = ChannelId::new(4_916_401);
+        let handle = shared.mailboxes.handle(channel);
+        let token = Arc::new(CancelToken::new());
+        assert!(
+            handle
+                .try_start_turn(token.clone(), UserId::new(7), MessageId::new(4_916_411))
+                .await
+        );
+        let key = match handle.begin_resume_transition(uuid::Uuid::new_v4()).await {
+            BeginResumeTransitionResult::Begun(key) => key,
+            other => panic!("reserve transition: {other:?}"),
+        };
+
+        assert_eq!(
+            provider_channel_runtime_clear_readiness(&registry, "claude", channel).await,
+            RuntimeChannelClearResult::DeferredResumeTransition
+        );
+        let snapshot = discord::mailbox_snapshot(&shared, channel).await;
+        assert!(
+            Arc::ptr_eq(
+                snapshot
+                    .cancel_token
+                    .as_ref()
+                    .expect("reservation preserves token"),
+                &token,
+            ),
+            "readiness preflight must preserve mailbox and provider runtime authority"
+        );
+
+        assert!(matches!(
+            handle.abort_resume_transition(key).await,
+            EndResumeTransitionResult::Applied(_)
+        ));
+        assert_eq!(
+            provider_channel_runtime_clear_readiness(&registry, "claude", channel).await,
+            RuntimeChannelClearResult::Cleared,
+            "readiness must permit retry after the reservation is released"
+        );
+    }
 }
 
 /// #896: Handle `POST /api/inflight/rebind` — rebind a live tmux session to

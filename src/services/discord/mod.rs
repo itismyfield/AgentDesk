@@ -2467,6 +2467,14 @@ pub(super) fn make_shared_data_for_tests() -> Arc<SharedData> {
 }
 
 #[cfg(test)]
+pub(super) fn mailbox_handle_for_tests(
+    shared: &SharedData,
+    channel_id: ChannelId,
+) -> ChannelMailboxHandle {
+    shared.mailboxes.handle(channel_id)
+}
+
+#[cfg(test)]
 pub(super) fn make_shared_data_for_tests_with_storage(
     pg_pool: Option<sqlx::PgPool>,
 ) -> Arc<SharedData> {
@@ -2901,10 +2909,6 @@ async fn mailbox_recovery_kickoff(
     // (user_msg_id == 0, e.g. a TUI-direct turn).
     user_message_id: Option<MessageId>,
 ) -> RecoveryKickoffResult {
-    // #2443 — reset the per-channel `recovery_done` latch BEFORE recovery
-    // starts; a stale "done" flag would let `watchers/lifecycle.rs` graduate
-    // its skip early and race the ongoing recovery. Idempotent and cheap.
-    shared.mailboxes.recovery_done(channel_id).reset();
     // #3297 r3 — tombstone refusal ⇒ retry on a fresh registered actor.
     let result = shared
         .mailboxes
@@ -2915,10 +2919,87 @@ async fn mailbox_recovery_kickoff(
             user_message_id,
         )
         .await;
+    if !result.refused_resume_transition && !result.refused_closed {
+        // Reset only after the mailbox accepted recovery. A resume reservation
+        // refusal is a pure defer and must preserve the previous done latch.
+        shared.mailboxes.recovery_done(channel_id).reset();
+    }
     if result.activated_turn {
         increment_global_active(shared, "recovery_kickoff");
     }
     result
+}
+
+#[cfg(test)]
+mod recovery_kickoff_resume_transition_tests {
+    use super::*;
+    use crate::services::turn_orchestrator::{
+        BeginResumeTransitionResult, EndResumeTransitionResult,
+    };
+
+    #[tokio::test]
+    async fn refused_recovery_kickoff_preserves_done_latch_and_authority() {
+        let shared = make_shared_data_for_tests();
+        let channel = ChannelId::new(4_916_201);
+        let signal = shared.mailboxes.recovery_done(channel);
+        signal.mark_done();
+        let handle = shared.mailboxes.handle(channel);
+        let key = match handle.begin_resume_transition(uuid::Uuid::new_v4()).await {
+            BeginResumeTransitionResult::Begun(key) => key,
+            other => panic!("reserve transition: {other:?}"),
+        };
+        let before_active = shared.restart.global_active.load(Ordering::Relaxed);
+
+        let result = mailbox_recovery_kickoff(
+            &shared,
+            channel,
+            Arc::new(CancelToken::new()),
+            UserId::new(7),
+            Some(MessageId::new(4_916_211)),
+        )
+        .await;
+
+        assert!(result.refused_resume_transition);
+        assert!(!result.activated_turn);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), signal.wait())
+                .await
+                .is_ok(),
+            "a deferred kickoff must not reset the prior recovery-done latch"
+        );
+        assert_eq!(
+            shared.restart.global_active.load(Ordering::Relaxed),
+            before_active,
+            "a deferred kickoff must not consume active-turn authority"
+        );
+        assert!(
+            mailbox_snapshot(&shared, channel)
+                .await
+                .cancel_token
+                .is_none()
+        );
+
+        assert!(matches!(
+            handle.abort_resume_transition(key).await,
+            EndResumeTransitionResult::Applied(_)
+        ));
+        let retry = mailbox_recovery_kickoff(
+            &shared,
+            channel,
+            Arc::new(CancelToken::new()),
+            UserId::new(7),
+            Some(MessageId::new(4_916_211)),
+        )
+        .await;
+        assert!(!retry.refused_resume_transition);
+        assert!(retry.activated_turn);
+        assert!(
+            mailbox_snapshot(&shared, channel)
+                .await
+                .cancel_token
+                .is_some()
+        );
+    }
 }
 
 fn ensure_cancel_token_bound_from_inflight_state(
@@ -3953,21 +4034,35 @@ mod followup_retry_requeue_tests {
     }
 }
 
-async fn mailbox_cancel_soft_intervention(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    message_id: MessageId,
-) -> Option<Intervention> {
-    let result: CancelQueuedMessageResult = shared
-        .mailbox(channel_id)
-        .cancel_queued_message(
-            message_id,
-            queue_persistence_context(shared, provider, channel_id),
-        )
-        .await;
-    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
-    result.removed
+fn clear_result_completes_recovery_latch(result: &ClearChannelResult) -> bool {
+    !result.refused_resume_transition && result.persistence_error.is_none()
+}
+
+#[cfg(test)]
+mod clear_recovery_latch_tests {
+    use super::*;
+
+    fn result(
+        refused_resume_transition: bool,
+        persistence_error: Option<&str>,
+    ) -> ClearChannelResult {
+        ClearChannelResult {
+            removed_token: None,
+            queue_exit_events: Vec::new(),
+            persistence_error: persistence_error.map(str::to_string),
+            refused_resume_transition,
+        }
+    }
+
+    #[test]
+    fn recovery_latch_requires_committed_clear() {
+        assert!(clear_result_completes_recovery_latch(&result(false, None)));
+        assert!(!clear_result_completes_recovery_latch(&result(true, None)));
+        assert!(!clear_result_completes_recovery_latch(&result(
+            false,
+            Some("durable queue write failed")
+        )));
+    }
 }
 
 async fn mailbox_clear_channel(
@@ -3980,9 +4075,9 @@ async fn mailbox_clear_channel(
         .clear(queue_persistence_context(shared, provider, channel_id))
         .await;
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
-    // A refused resume reservation still owns the recovery latch. Successful
-    // cancel/teardown frees watchers subscribed to recovery completion (#2443).
-    if !result.refused_resume_transition {
+    // A refused resume reservation or failed durable queue clear still owns the
+    // recovery latch. Only committed teardown frees recovery subscribers (#2443).
+    if clear_result_completes_recovery_latch(&result) {
         shared.mailboxes.recovery_done(channel_id).mark_done();
     }
     result

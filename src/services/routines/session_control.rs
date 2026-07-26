@@ -98,18 +98,28 @@ impl RoutineSessionController {
         match command {
             RoutineSessionCommand::Reset => {
                 if let Some(registry) = self.health_registry.as_deref() {
-                    runtime_cleared = clear_provider_channel_runtime(
+                    match clear_provider_channel_runtime(
                         registry,
                         target.provider.as_str(),
                         target.channel_id,
                         target.session_key.as_deref(),
                     )
-                    .await;
-                    lifecycle_path = if runtime_cleared {
-                        "runtime-clear"
-                    } else {
-                        "runtime-clear-unavailable"
-                    };
+                    .await
+                    {
+                        crate::services::discord::health::RuntimeChannelClearResult::Cleared => {
+                            runtime_cleared = true;
+                            lifecycle_path = "runtime-clear";
+                        }
+                        crate::services::discord::health::RuntimeChannelClearResult::Unavailable => {
+                            lifecycle_path = "runtime-clear-unavailable";
+                        }
+                        crate::services::discord::health::RuntimeChannelClearResult::DeferredResumeTransition => {
+                            lifecycle_path = "runtime-clear-deferred-resume-transition";
+                        }
+                        crate::services::discord::health::RuntimeChannelClearResult::PersistenceFailed => {
+                            lifecycle_path = "runtime-clear-persistence-failed";
+                        }
+                    }
                 }
             }
             RoutineSessionCommand::Kill => {

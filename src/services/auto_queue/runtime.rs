@@ -22,6 +22,34 @@ struct SlotClearTarget {
     runtime_targets: Vec<RuntimeSlotClearTarget>,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum SlotRuntimeClearOutcome {
+    Cleared(usize),
+    DeferredResumeTransition,
+    FailedRuntimePersistence,
+}
+
+fn slot_runtime_clear_permits_persistence(
+    outcomes: impl IntoIterator<Item = crate::services::discord::health::RuntimeChannelClearResult>,
+) -> SlotRuntimeClearOutcome {
+    let mut cleared = 0usize;
+    for outcome in outcomes {
+        match outcome {
+            crate::services::discord::health::RuntimeChannelClearResult::Cleared
+            | crate::services::discord::health::RuntimeChannelClearResult::Unavailable => {
+                cleared += 1;
+            }
+            crate::services::discord::health::RuntimeChannelClearResult::DeferredResumeTransition => {
+                return SlotRuntimeClearOutcome::DeferredResumeTransition;
+            }
+            crate::services::discord::health::RuntimeChannelClearResult::PersistenceFailed => {
+                return SlotRuntimeClearOutcome::FailedRuntimePersistence;
+            }
+        }
+    }
+    SlotRuntimeClearOutcome::Cleared(cleared)
+}
+
 fn parse_slot_thread_channel_ids_from_value(value: &serde_json::Value) -> Vec<u64> {
     let mut thread_channel_ids = value
         .as_object()
@@ -152,34 +180,54 @@ pub async fn clear_slot_threads_for_slot_pg(
     pool: &PgPool,
     agent_id: &str,
     slot_index: i64,
-) -> Result<usize, String> {
+) -> Result<SlotRuntimeClearOutcome, String> {
     let target = build_slot_clear_target_pg(pool, agent_id, slot_index).await?;
     let safe_to_clear_thread_ids =
         filter_safe_slot_thread_reset_targets(pool, &target.thread_channel_ids).await?;
-    let cleared = clear_slot_sessions_pg(pool, &safe_to_clear_thread_ids).await?;
 
     if let Some(registry) = health_registry {
         let safe_to_clear: std::collections::HashSet<u64> =
             safe_to_clear_thread_ids.iter().copied().collect();
         let runtime_targets = target
             .runtime_targets
-            .into_iter()
+            .iter()
             .filter(|target| safe_to_clear.contains(&target.thread_channel_id))
             .collect::<Vec<_>>();
-        tokio::spawn(async move {
-            for runtime_target in runtime_targets {
+        let mut readiness = Vec::with_capacity(runtime_targets.len());
+        for runtime_target in &runtime_targets {
+            readiness.push(
+                crate::services::discord::health::provider_channel_runtime_clear_readiness(
+                    &registry,
+                    &runtime_target.provider_name,
+                    poise::serenity_prelude::ChannelId::new(runtime_target.thread_channel_id),
+                )
+                .await,
+            );
+        }
+        match slot_runtime_clear_permits_persistence(readiness) {
+            SlotRuntimeClearOutcome::Cleared(_) => {}
+            refused => return Ok(refused),
+        }
+        let mut outcomes = Vec::with_capacity(runtime_targets.len());
+        for runtime_target in runtime_targets {
+            outcomes.push(
                 crate::services::discord::health::clear_provider_channel_runtime(
                     &registry,
                     &runtime_target.provider_name,
                     poise::serenity_prelude::ChannelId::new(runtime_target.thread_channel_id),
                     runtime_target.session_key.as_deref(),
                 )
-                .await;
-            }
-        });
+                .await,
+            );
+        }
+        match slot_runtime_clear_permits_persistence(outcomes) {
+            SlotRuntimeClearOutcome::Cleared(_) => {}
+            refused => return Ok(refused),
+        }
     }
 
-    Ok(cleared)
+    let cleared = clear_slot_sessions_pg(pool, &safe_to_clear_thread_ids).await?;
+    Ok(SlotRuntimeClearOutcome::Cleared(cleared))
 }
 
 pub async fn slot_has_active_dispatch_excluding_pg(
@@ -386,4 +434,46 @@ async fn filter_safe_slot_thread_reset_targets(
         }
     }
     Ok(safe_to_reset)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::discord::health::RuntimeChannelClearResult;
+
+    #[test]
+    fn resume_transition_refusal_blocks_slot_persistence() {
+        assert_eq!(
+            slot_runtime_clear_permits_persistence([
+                RuntimeChannelClearResult::Cleared,
+                RuntimeChannelClearResult::DeferredResumeTransition,
+                RuntimeChannelClearResult::Unavailable,
+            ]),
+            SlotRuntimeClearOutcome::DeferredResumeTransition,
+            "one reserved runtime must keep the whole slot out of the persistence-clear phase"
+        );
+    }
+
+    #[test]
+    fn runtime_persistence_failure_blocks_slot_persistence() {
+        assert_eq!(
+            slot_runtime_clear_permits_persistence([
+                RuntimeChannelClearResult::Cleared,
+                RuntimeChannelClearResult::PersistenceFailed,
+            ]),
+            SlotRuntimeClearOutcome::FailedRuntimePersistence,
+            "runtime mailbox persistence failure must keep the PostgreSQL session authoritative"
+        );
+    }
+
+    #[test]
+    fn unavailable_runtime_does_not_block_pg_only_cleanup() {
+        assert_eq!(
+            slot_runtime_clear_permits_persistence([
+                RuntimeChannelClearResult::Unavailable,
+                RuntimeChannelClearResult::Cleared,
+            ]),
+            SlotRuntimeClearOutcome::Cleared(2)
+        );
+    }
 }

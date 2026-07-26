@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use super::auto_heal_attempts::{
     auto_heal_key, cancel_unapplied_auto_heal_attempt, commit_auto_heal_attempt,
-    record_auto_heal_confirm_failure, refund_auto_heal_attempt, remaining_auto_heal_attempts,
-    reserve_auto_heal_attempt,
+    defer_resume_transition_auto_heal_attempt, record_auto_heal_confirm_failure,
+    refund_auto_heal_attempt, remaining_auto_heal_attempts, reserve_auto_heal_attempt,
 };
 use super::auto_heal_confirm::{ReattachConfirmation, classify_reattach_confirmation};
 use super::*;
@@ -228,9 +228,14 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
     )
     .await;
     settle_auto_heal_confirmation(&mut apply_result, confirmation, &key, now_ms);
-    let skipped = apply_result.status == "reattach_episode_changed";
-    if skipped {
+    let skipped = matches!(
+        apply_result.status,
+        "reattach_episode_changed" | "deferred_resume_transition"
+    );
+    if apply_result.status == "reattach_episode_changed" {
         decision.auto_heal.skipped_reason = Some("durable_reattach_stale_identity");
+    } else if apply_result.status == "deferred_resume_transition" {
+        decision.auto_heal.skipped_reason = Some("resume_transition_reserved");
     }
     decision.auto_heal.remaining_attempts =
         remaining_auto_heal_attempts(&key, now_ms, decision.auto_heal.max_attempts_per_window);
@@ -281,13 +286,15 @@ fn settle_auto_heal_confirmation(
             record_auto_heal_confirm_failure(&key, now_ms);
         }
         ReattachConfirmation::NotRequired | ReattachConfirmation::Confirmed => {
-            if matches!(
+            if apply_result.status == "deferred_resume_transition" {
+                defer_resume_transition_auto_heal_attempt(key, now_ms);
+            } else if matches!(
                 apply_result.status,
                 "rebind_failed" | "provider_unavailable" | "reattach_episode_changed"
             ) {
-                refund_auto_heal_attempt(&key, now_ms);
+                refund_auto_heal_attempt(key, now_ms);
             } else {
-                commit_auto_heal_attempt(&key);
+                commit_auto_heal_attempt(key);
             }
         }
     }
@@ -300,8 +307,8 @@ mod tests {
     use poise::serenity_prelude::{ChannelId, Http, MessageId, UserId};
 
     use super::super::auto_heal_attempts::{
-        auto_heal_key, auto_heal_test_lock, clear_auto_heal_attempts_for_tests,
-        reserve_auto_heal_attempt,
+        AUTO_HEAL_RESUME_TRANSITION_DEFER_SECS, auto_heal_key, auto_heal_test_lock,
+        clear_auto_heal_attempts_for_tests, reserve_auto_heal_attempt,
     };
     use super::*;
     use crate::services::provider::CancelToken;
@@ -435,6 +442,51 @@ mod tests {
             Err("auto_heal_rate_limited"),
             "startup grace must not refund an automatic reattach reservation"
         );
+    }
+
+    #[tokio::test]
+    async fn relay_recovery_resume_transition_defer_is_skipped_and_retryable_after_lease() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let key = auto_heal_key(
+            "codex",
+            4_916_302,
+            RelayRecoveryActionKind::ClearOrphanPendingToken,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+        );
+        assert_eq!(reserve_auto_heal_attempt(&key, 1_000, 1), Ok(0));
+        let mut apply_result = RelayRecoveryApplyResult {
+            status: "deferred_resume_transition",
+            removed_thread_proofs: 0,
+            removed_mailbox_token: false,
+            post_mailbox_has_cancel_token: Some(true),
+            post_mailbox_queue_depth: Some(0),
+            reattach_watcher_spawned: None,
+            reattach_watcher_replaced: None,
+            reattach_initial_offset: None,
+            reattach_error: None,
+        };
+
+        settle_auto_heal_confirmation(
+            &mut apply_result,
+            ReattachConfirmation::NotRequired,
+            &key,
+            2_000,
+        );
+
+        assert_eq!(
+            reserve_auto_heal_attempt(&key, 3_000, 1),
+            Err("auto_heal_failure_backoff")
+        );
+        let retry_at = 2_000 + AUTO_HEAL_RESUME_TRANSITION_DEFER_SECS * 1000;
+        assert_eq!(
+            reserve_auto_heal_attempt(&key, retry_at, 1),
+            Ok(0),
+            "reservation defer must return the attempt after the mailbox lease window"
+        );
+        assert!(!relay_recovery_status_counts_as_applied(
+            apply_result.status
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

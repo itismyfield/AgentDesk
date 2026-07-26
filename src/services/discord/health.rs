@@ -64,7 +64,7 @@ pub use mailbox::purge_idle_channel_mailbox_registry_entry;
 #[allow(unused_imports)]
 pub use recovery::{
     HardStopRuntimeResult, IdleTmuxStaleTurnRepairResult, PendingQueueSnapshot,
-    PostCancelDrainOutcome, ProviderMailboxState, RuntimeTurnStopResult,
+    PostCancelDrainOutcome, ProviderMailboxState, RuntimeChannelClearResult, RuntimeTurnStopResult,
     clear_idle_tmux_stale_turn, clear_provider_channel_runtime,
     finish_cancelled_provider_channel_mailbox, force_kill_provider_channel_runtime,
     handle_rebind_inflight, handle_relay_recovery, hard_stop_runtime_turn,
@@ -74,8 +74,8 @@ pub use recovery::{
     stop_runtime_turn_preserving_watcher,
 };
 pub(crate) use recovery::{
-    channel_has_active_turn, rebind_channel_provider_session,
-    stop_provider_channel_runtime_with_policy,
+    channel_has_active_turn, provider_channel_runtime_clear_readiness,
+    rebind_channel_provider_session, stop_provider_channel_runtime_with_policy,
 };
 pub(crate) use runtime_resolve::resolve_utility_bot_http;
 pub use runtime_resolve::{fetch_channel_name, resolve_bot_http};
@@ -318,6 +318,11 @@ impl HealthRegistry {
     ) {
         self.register_with_role(name, shared, ProviderRuntimeRole::Gateway)
             .await;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn register_for_tests(&self, name: String, shared: Arc<SharedData>) {
+        self.register(name, shared).await;
     }
 
     async fn register_with_role(

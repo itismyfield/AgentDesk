@@ -8,6 +8,8 @@ pub(super) const AUTO_HEAL_WINDOW_SECS: i64 = 600;
 pub(super) const AUTO_HEAL_DEFAULT_MAX_ATTEMPTS_PER_WINDOW: u32 = 1;
 pub(super) const AUTO_HEAL_DEAD_FRONTIER_REATTACH_MAX_ATTEMPTS_PER_WINDOW: u32 = 2;
 pub(super) const AUTO_HEAL_REFUND_BACKOFF_THRESHOLD: u32 = 3;
+pub(super) const AUTO_HEAL_RESUME_TRANSITION_DEFER_SECS: i64 =
+    crate::services::turn_orchestrator::RESUME_TRANSITION_LEASE_DURATION.as_secs() as i64;
 const AUTO_HEAL_MAX_REFUND_BACKOFF_EXPONENT: u32 = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -168,6 +170,18 @@ pub(super) fn cancel_unapplied_auto_heal_attempt(key: &str) {
     if let Some(window) = attempts.get_mut(key) {
         window.attempts = window.attempts.saturating_sub(1);
     }
+}
+
+pub(super) fn defer_resume_transition_auto_heal_attempt(key: &str, now_ms: i64) {
+    let mut attempts = auto_heal_attempts()
+        .lock()
+        .expect("relay recovery attempt map poisoned");
+    let window = attempts
+        .entry(key.to_string())
+        .or_insert_with(|| AttemptWindow::new(now_ms));
+    window.attempts = window.attempts.saturating_sub(1);
+    window.retry_not_before_ms =
+        Some(now_ms.saturating_add(AUTO_HEAL_RESUME_TRANSITION_DEFER_SECS.saturating_mul(1000)));
 }
 
 pub(super) fn record_auto_heal_confirm_failure(key: &str, now_ms: i64) {
@@ -351,6 +365,26 @@ mod tests {
             Ok(0),
             "the third consecutive refund must expand the base 600s window to 1200s"
         );
+    }
+
+    #[tokio::test]
+    async fn relay_recovery_resume_transition_defer_refunds_budget_with_lease_cooldown() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let key = key();
+        assert_eq!(reserve_auto_heal_attempt(&key, 1_000, 1), Ok(0));
+
+        defer_resume_transition_auto_heal_attempt(&key, 2_000);
+
+        assert_eq!(remaining_auto_heal_attempts(&key, 3_000, 1), 0);
+        assert_eq!(
+            reserve_auto_heal_attempt(&key, 3_000, 1),
+            Err("auto_heal_failure_backoff"),
+            "deferred reservation must not hot-loop before the mailbox lease expires"
+        );
+        let retry_at = 2_000 + AUTO_HEAL_RESUME_TRANSITION_DEFER_SECS * 1000;
+        assert_eq!(remaining_auto_heal_attempts(&key, retry_at, 1), 1);
+        assert_eq!(reserve_auto_heal_attempt(&key, retry_at, 1), Ok(0));
     }
 
     #[tokio::test]

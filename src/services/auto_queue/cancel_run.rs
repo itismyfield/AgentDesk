@@ -774,25 +774,21 @@ pub(crate) async fn clear_and_release_slots_for_runs_pg(
     let mut warnings = Vec::new();
     for run_id in run_ids {
         match sqlx::query(
-            "UPDATE auto_queue_slots
-             SET assigned_run_id = NULL,
-                 assigned_thread_group = NULL,
-                 updated_at = NOW()
-             WHERE assigned_run_id = $1
-             RETURNING agent_id, slot_index",
+            "SELECT agent_id, slot_index
+             FROM auto_queue_slots
+             WHERE assigned_run_id = $1",
         )
         .bind(run_id)
         .fetch_all(pool)
         .await
         {
             Ok(rows) => {
-                released_slot_count += rows.len();
                 for row in rows {
                     let agent_id = match row.try_get::<String, _>("agent_id") {
                         Ok(value) => value,
                         Err(error) => {
                             warnings.push(format!(
-                                "failed to decode released slot agent for run {run_id}: {error}"
+                                "failed to decode assigned slot agent for run {run_id}: {error}"
                             ));
                             continue;
                         }
@@ -801,36 +797,76 @@ pub(crate) async fn clear_and_release_slots_for_runs_pg(
                         Ok(value) => value,
                         Err(error) => {
                             warnings.push(format!(
-                                "failed to decode released slot index for run {run_id}: {error}"
+                                "failed to decode assigned slot index for run {run_id}: {error}"
                             ));
                             continue;
                         }
                     };
-                    if released_slots.insert((agent_id.clone(), slot_index)) {
-                        match super::runtime::clear_slot_threads_for_slot_pg(
-                            health_registry.clone(),
-                            pool,
-                            &agent_id,
-                            slot_index,
-                        )
-                        .await
-                        {
-                            Ok(cleared) => cleared_sessions += cleared,
-                            Err(error) => {
-                                crate::auto_queue_log!(
-                                    warn,
-                                    "clear_slot_threads_pg_failed",
-                                    AutoQueueLogContext::new().agent(&agent_id),
-                                    "[auto-queue] failed to clear postgres slot thread sessions for {}:{}: {}",
-                                    agent_id,
-                                    slot_index,
-                                    error
-                                );
-                                warnings.push(format!(
-                                    "failed to clear slot thread sessions for {agent_id}:{slot_index}: {error}"
-                                ));
-                            }
+                    if !released_slots.insert((agent_id.clone(), slot_index)) {
+                        continue;
+                    }
+                    let clear_outcome = super::runtime::clear_slot_threads_for_slot_pg(
+                        health_registry.clone(),
+                        pool,
+                        &agent_id,
+                        slot_index,
+                    )
+                    .await;
+                    let cleared = match clear_outcome {
+                        Ok(super::runtime::SlotRuntimeClearOutcome::Cleared(cleared)) => cleared,
+                        Ok(super::runtime::SlotRuntimeClearOutcome::DeferredResumeTransition) => {
+                            warnings.push(format!(
+                                "deferred slot thread clear for {agent_id}:{slot_index}: resume transition active"
+                            ));
+                            continue;
                         }
+                        Ok(super::runtime::SlotRuntimeClearOutcome::FailedRuntimePersistence) => {
+                            warnings.push(format!(
+                                "deferred slot thread clear for {agent_id}:{slot_index}: runtime mailbox persistence failed"
+                            ));
+                            continue;
+                        }
+                        Err(error) => {
+                            crate::auto_queue_log!(
+                                warn,
+                                "clear_slot_threads_pg_failed",
+                                AutoQueueLogContext::new().agent(&agent_id),
+                                "[auto-queue] failed to clear postgres slot thread sessions for {}:{}: {}",
+                                agent_id,
+                                slot_index,
+                                error
+                            );
+                            warnings.push(format!(
+                                "failed to clear slot thread sessions for {agent_id}:{slot_index}: {error}"
+                            ));
+                            continue;
+                        }
+                    };
+                    match sqlx::query(
+                        "UPDATE auto_queue_slots
+                         SET assigned_run_id = NULL,
+                             assigned_thread_group = NULL,
+                             updated_at = NOW()
+                         WHERE agent_id = $1
+                           AND slot_index = $2
+                           AND assigned_run_id = $3",
+                    )
+                    .bind(&agent_id)
+                    .bind(slot_index)
+                    .bind(run_id)
+                    .execute(pool)
+                    .await
+                    {
+                        Ok(result) if result.rows_affected() == 1 => {
+                            released_slot_count += 1;
+                            cleared_sessions += cleared;
+                        }
+                        Ok(_) => warnings.push(format!(
+                            "slot assignment changed before release for {agent_id}:{slot_index} run {run_id}"
+                        )),
+                        Err(error) => warnings.push(format!(
+                            "failed to release cleared slot {agent_id}:{slot_index} for run {run_id}: {error}"
+                        )),
                     }
                 }
             }
@@ -839,11 +875,11 @@ pub(crate) async fn clear_and_release_slots_for_runs_pg(
                     warn,
                     "clear_slot_release_pg_failed",
                     AutoQueueLogContext::new().run(run_id),
-                    "[auto-queue] failed to release postgres slots while clearing run {}: {}",
+                    "[auto-queue] failed to inspect postgres slots while clearing run {}: {}",
                     run_id,
                     error
                 );
-                warnings.push(format!("failed to release slots for run {run_id}: {error}"));
+                warnings.push(format!("failed to inspect slots for run {run_id}: {error}"));
             }
         }
     }

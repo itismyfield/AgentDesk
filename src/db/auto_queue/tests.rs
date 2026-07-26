@@ -358,6 +358,7 @@ mod dispatch_terminal_sync_pg_tests {
                 slot_index: 1,
                 newly_assigned: true,
                 reassigned_from_other_group: false,
+                previous_thread_group: None,
             })
         );
 
@@ -367,6 +368,54 @@ mod dispatch_terminal_sync_pg_tests {
                 .await
                 .expect("next entry slot");
         assert_eq!(slot_index, Some(1));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn allocate_slot_for_group_agent_pg_reports_previous_reusable_group() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, slot_index, thread_group,
+                 batch_phase, completed_at)
+             VALUES ('entry-reusable-complete', 'run-1', NULL, 'agent-1', 'done', 0, 7, 0, NOW())",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed completed reusable entry");
+        sqlx::query(
+            "UPDATE auto_queue_slots
+             SET assigned_thread_group = 7
+             WHERE agent_id = 'agent-1' AND slot_index = 0",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed reusable slot group");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, thread_group, batch_phase)
+             VALUES ('entry-reusable-next', 'run-1', NULL, 'agent-1', 'pending', 9, 1)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed next reusable entry");
+
+        let allocation = allocate_slot_for_group_agent_pg(&pool, "run-1", 9, "agent-1")
+            .await
+            .expect("reuse allocation");
+        assert_eq!(
+            allocation,
+            Some(SlotAllocation {
+                slot_index: 0,
+                newly_assigned: false,
+                reassigned_from_other_group: true,
+                previous_thread_group: Some(7),
+            })
+        );
+        assert_eq!(slot_group(&pool, "agent-1", 0).await, Some(9));
 
         pool.close().await;
         pg_db.drop().await;
@@ -426,6 +475,7 @@ mod dispatch_terminal_sync_pg_tests {
                 slot_index: 1,
                 newly_assigned: true,
                 reassigned_from_other_group: false,
+                previous_thread_group: None,
             })
         );
         assert_eq!(slot_group(&pool, "agent-1", 0).await, Some(0));
@@ -484,6 +534,7 @@ mod dispatch_terminal_sync_pg_tests {
                 slot_index: 1,
                 newly_assigned: true,
                 reassigned_from_other_group: false,
+                previous_thread_group: None,
             })
         );
         assert_eq!(slot_group(&pool, "agent-1", 0).await, Some(0));
@@ -536,6 +587,7 @@ mod dispatch_terminal_sync_pg_tests {
                 slot_index: 1,
                 newly_assigned: true,
                 reassigned_from_other_group: false,
+                previous_thread_group: None,
             })
         );
         assert_eq!(slot_run(&pool, "agent-1", 0).await, None);
@@ -594,6 +646,7 @@ mod dispatch_terminal_sync_pg_tests {
                 slot_index: 1,
                 newly_assigned: true,
                 reassigned_from_other_group: false,
+                previous_thread_group: None,
             })
         );
         assert_eq!(slot_run(&pool, "agent-1", 0).await, None);
@@ -665,6 +718,7 @@ mod dispatch_terminal_sync_pg_tests {
                 slot_index: 1,
                 newly_assigned: true,
                 reassigned_from_other_group: false,
+                previous_thread_group: None,
             })
         );
         assert_eq!(slot_run(&pool, "agent-1", 0).await, None);

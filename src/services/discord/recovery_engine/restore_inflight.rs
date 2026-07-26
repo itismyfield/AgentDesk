@@ -103,6 +103,19 @@ pub(super) fn detect_live_tmux_output_path(
     detect_rebind_output_path_from_candidates(fallback_path, candidates)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecoveryKickoffDisposition {
+    DeferWithoutSideEffects,
+    Adopt,
+}
+
+fn recovery_kickoff_disposition(kickoff: &RecoveryKickoffResult) -> RecoveryKickoffDisposition {
+    if kickoff.refused_resume_transition || kickoff.refused_closed {
+        return RecoveryKickoffDisposition::DeferWithoutSideEffects;
+    }
+    RecoveryKickoffDisposition::Adopt
+}
+
 pub(in crate::services::discord) async fn restore_inflight_turns(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -2064,12 +2077,38 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         let cancel_token = Arc::new(CancelToken::from_persisted_turn_nonce(
             state.turn_nonce.clone(),
         ));
+        // Fully initialize the local token before publishing it through the mailbox.
+        // A refused kickoff drops this private token without creating watcher,
+        // relay, session, readopt, or status authority; an accepted kickoff never
+        // exposes a briefly-unbound token to concurrent stop/clear paths.
         super::turn_bridge::bind_cancel_token_tmux_runtime(
             provider,
             &cancel_token,
             &tmux_session_name,
-            "recovery kickoff",
+            "recovery kickoff candidate",
         );
+        let kickoff = mailbox_recovery_kickoff(
+            shared,
+            channel_id,
+            cancel_token.clone(),
+            UserId::new(state.request_owner_user_id),
+            // user_msg_id == 0 (TUI-direct turn) → no active user message to
+            // bind; `optional_message_id` yields None instead of panicking.
+            user_msg_id,
+        )
+        .await;
+        if recovery_kickoff_disposition(&kickoff)
+            == RecoveryKickoffDisposition::DeferWithoutSideEffects
+        {
+            tracing::info!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                refused_resume_transition = kickoff.refused_resume_transition,
+                refused_closed = kickoff.refused_closed,
+                "recovery kickoff deferred without consuming persisted authority"
+            );
+            continue;
+        }
 
         {
             let mut data = shared.core.lock().await;
@@ -2104,17 +2143,6 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             session.remote_profile_name = None;
             restore_recovered_session_worktree(session, &state);
         }
-
-        mailbox_recovery_kickoff(
-            shared,
-            channel_id,
-            cancel_token.clone(),
-            UserId::new(state.request_owner_user_id),
-            // user_msg_id == 0 (TUI-direct turn) → no active user message to
-            // bind; `optional_message_id` yields None instead of panicking.
-            user_msg_id,
-        )
-        .await;
 
         // Consume outgoing planned-restart authority (identity-guarded readoption)
         // before the reader publishes RuntimeReady; failed adoption stays fail-closed.
@@ -2313,6 +2341,34 @@ mod tests {
         self, GuardedSaveOutcome, InflightTurnIdentity, InflightTurnState, RelayOwnerKind,
     };
     use crate::services::provider::ProviderKind;
+
+    #[test]
+    fn refused_kickoff_is_a_hard_side_effect_boundary() {
+        assert_eq!(
+            super::recovery_kickoff_disposition(&super::RecoveryKickoffResult {
+                activated_turn: false,
+                refused_closed: false,
+                refused_resume_transition: true,
+            }),
+            super::RecoveryKickoffDisposition::DeferWithoutSideEffects,
+        );
+        assert_eq!(
+            super::recovery_kickoff_disposition(&super::RecoveryKickoffResult {
+                activated_turn: false,
+                refused_closed: true,
+                refused_resume_transition: false,
+            }),
+            super::RecoveryKickoffDisposition::DeferWithoutSideEffects,
+        );
+        assert_eq!(
+            super::recovery_kickoff_disposition(&super::RecoveryKickoffResult {
+                activated_turn: true,
+                refused_closed: false,
+                refused_resume_transition: false,
+            }),
+            super::RecoveryKickoffDisposition::Adopt,
+        );
+    }
 
     fn generic_recovery_runtime_ready(
         shared: &std::sync::Arc<super::SharedData>,

@@ -106,6 +106,10 @@ pub(super) fn gate_closed_arm(
             });
             None
         }
+        ChannelMailboxMsg::RuntimeClearReadiness { reply } => {
+            let _ = reply.send(false);
+            None
+        }
         // Pre-fix this arm accepted (and disk-persisted) queue content that
         // the unlink then orphaned out of every registered-mailbox scan.
         ChannelMailboxMsg::Enqueue { reply, .. } => {

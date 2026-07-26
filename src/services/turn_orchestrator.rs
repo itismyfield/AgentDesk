@@ -499,9 +499,8 @@ pub(crate) struct FinishTurnResult {
 pub(crate) struct ClearChannelResult {
     pub(crate) removed_token: Option<Arc<CancelToken>>,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
-    // Uniform queue-mutation persistence-result surface; written on the
-    // clear-channel path, no consumer yet. See `FinishTurnResult`.
-    #[allow(dead_code)]
+    // Durable clear commit result. Callers must not perform runtime teardown or
+    // complete recovery authority when this is `Some`.
     pub(crate) persistence_error: Option<String>,
     pub(crate) refused_resume_transition: bool,
 }
@@ -1785,6 +1784,9 @@ enum ChannelMailboxMsg {
     FinishCancelledTurn {
         reply: oneshot::Sender<FinishTurnResult>,
     },
+    RuntimeClearReadiness {
+        reply: oneshot::Sender<bool>,
+    },
     Clear {
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<ClearChannelResult>,
@@ -3021,18 +3023,14 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         });
                     }
                 }
+                ChannelMailboxMsg::RuntimeClearReadiness { reply } => {
+                    let _ = reply.send(resume_transition::runtime_clear_readiness_from_state(
+                        &mut state,
+                        Instant::now(),
+                    ));
+                }
                 ChannelMailboxMsg::Clear { persistence, reply } => {
                     state.last_persistence = Some(persistence.clone());
-                    let removed_token = state.cancel_token.take();
-                    state.active_request_owner = None;
-                    state.active_user_message_id = None;
-                    state.active_turn_nonce = None;
-                    // #3167 — clear the priority class with the anchor.
-                    state.active_turn_kind = ActiveTurnKind::default();
-                    state.recovery_started_at = None;
-                    state.turn_started_at = None;
-                    state.turn_started_instant = None;
-                    reset_watchdog_extension_state(&mut state);
                     let previous_queue = state.intervention_queue.clone();
                     let queue_exit_events = state
                         .intervention_queue
@@ -3049,12 +3047,22 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         "clear",
                     ) {
                         ClearChannelResult {
-                            removed_token,
+                            removed_token: None,
                             queue_exit_events: Vec::new(),
                             persistence_error: Some(error),
                             refused_resume_transition: false,
                         }
                     } else {
+                        let removed_token = state.cancel_token.take();
+                        state.active_request_owner = None;
+                        state.active_user_message_id = None;
+                        state.active_turn_nonce = None;
+                        // #3167 — clear the priority class with the anchor.
+                        state.active_turn_kind = ActiveTurnKind::default();
+                        state.recovery_started_at = None;
+                        state.turn_started_at = None;
+                        state.turn_started_instant = None;
+                        reset_watchdog_extension_state(&mut state);
                         clear_pending_user_dispatch(&mut state);
                         state.recently_valve_cleared_dispatch = None;
                         delete_pending_dispatch_marker_with_persistence(
@@ -3062,6 +3070,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             channel_id,
                             "clear",
                         );
+                        mark_turn_finished_signal_done(channel_id);
                         ClearChannelResult {
                             removed_token,
                             queue_exit_events,
@@ -3070,7 +3079,6 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         }
                     };
                     let _ = reply.send(result);
-                    mark_turn_finished_signal_done(channel_id);
                 }
                 ChannelMailboxMsg::PurgeQueue {
                     persistence,
@@ -6697,6 +6705,53 @@ mod persistence_tests {
             snapshot.intervention_queue.is_empty(),
             "mailbox must roll back non-durable queued work"
         );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn clear_persistence_failure_preserves_active_authority_and_queue() {
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = EnvGuard::set_root(tmp.path());
+
+        let provider = ProviderKind::Codex;
+        let token_hash = "unwritable-clear-queue";
+        let channel_id = ChannelId::new(4_916_402);
+        let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(channel_id);
+        let token = Arc::new(CancelToken::new());
+        let owner = UserId::new(17);
+        let message = MessageId::new(4_916_412);
+        assert!(handle.try_start_turn(token.clone(), owner, message).await);
+        assert!(
+            handle
+                .enqueue(
+                    make_intervention(4_916_413, "must survive failed clear", None),
+                    persistence.clone(),
+                )
+                .await
+                .enqueued
+        );
+        std::fs::write(tmp.path().join("runtime-blocker"), "not-a-directory").unwrap();
+        let _failing_root = EnvGuard::set_root(&tmp.path().join("runtime-blocker"));
+
+        let result = handle.clear(persistence).await;
+
+        assert!(result.persistence_error.is_some());
+        assert!(result.removed_token.is_none());
+        assert!(result.queue_exit_events.is_empty());
+        let after = handle.snapshot().await;
+        assert!(
+            after
+                .cancel_token
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(active, &token)),
+            "failed durable clear must preserve the active runtime token"
+        );
+        assert_eq!(after.active_request_owner, Some(owner));
+        assert_eq!(after.active_user_message_id, Some(message));
+        assert_eq!(after.intervention_queue.len(), 1);
     }
 
     #[test]

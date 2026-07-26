@@ -407,6 +407,15 @@ pub(crate) async fn activate_with_deps_pg(
         .await
         {
             Ok(true) => {
+                rollback_deferred_slot_allocation_pg(
+                    pool,
+                    &run_id,
+                    *group,
+                    &agent_id,
+                    allocation,
+                    &entry_log_ctx,
+                )
+                .await;
                 crate::auto_queue_log!(
                     info,
                     "activate_slot_terminal_cooldown_pg",
@@ -463,7 +472,9 @@ pub(crate) async fn activate_with_deps_pg(
             )
             .await
             {
-                Ok(cleared) => {
+                Ok(crate::services::auto_queue::runtime::SlotRuntimeClearOutcome::Cleared(
+                    cleared,
+                )) => {
                     if cleared > 0 {
                         crate::auto_queue_log!(
                             info,
@@ -473,18 +484,28 @@ pub(crate) async fn activate_with_deps_pg(
                             allocation.slot_index
                         );
                     }
+                    cleared_slots.insert(slot_key);
                 }
-                Err(error) => crate::auto_queue_log!(
-                    warn,
-                    "activate_slot_clear_failed_pg",
-                    entry_log_ctx.clone().slot_index(allocation.slot_index),
-                    "[auto-queue] failed to clear PG slot thread session(s) for {} slot {}: {}",
-                    agent_id,
-                    allocation.slot_index,
-                    error
-                ),
+                other => {
+                    rollback_deferred_slot_allocation_pg(
+                        pool,
+                        &run_id,
+                        *group,
+                        &agent_id,
+                        allocation,
+                        &entry_log_ctx,
+                    )
+                    .await;
+                    log_slot_clear_deferral(
+                        &other,
+                        &entry_log_ctx,
+                        &entry_id,
+                        &agent_id,
+                        allocation.slot_index,
+                    );
+                    continue;
+                }
             }
-            cleared_slots.insert(slot_key);
         }
 
         let retry_resume_session_id = if retry_count > 0 {
@@ -720,6 +741,149 @@ pub(crate) async fn activate_with_deps_pg(
 /// `body.run_id`, otherwise selects the most recent matching run. An empty
 /// match short-circuits with the canonical "No active run" OK response, and DB
 /// errors short-circuit with a 500 — both returned as `Err(ActivateResponse)`.
+async fn rollback_deferred_slot_allocation_pg(
+    pool: &sqlx::PgPool,
+    run_id: &str,
+    thread_group: i64,
+    agent_id: &str,
+    allocation: crate::db::auto_queue::SlotAllocation,
+    log_ctx: &AutoQueueLogContext<'_>,
+) {
+    if !allocation.newly_assigned && !allocation.reassigned_from_other_group {
+        return;
+    }
+    let rollback = async {
+        let mut tx = pool.begin().await?;
+        let slot_result = if allocation.newly_assigned {
+            sqlx::query(
+                "UPDATE auto_queue_slots
+                 SET assigned_run_id = NULL,
+                     assigned_thread_group = NULL,
+                     updated_at = NOW()
+                 WHERE agent_id = $1
+                   AND slot_index = $2
+                   AND assigned_run_id = $3
+                   AND COALESCE(assigned_thread_group, -1) = $4",
+            )
+            .bind(agent_id)
+            .bind(allocation.slot_index)
+            .bind(run_id)
+            .bind(thread_group)
+            .execute(&mut *tx)
+            .await?
+        } else {
+            sqlx::query(
+                "UPDATE auto_queue_slots
+                 SET assigned_thread_group = $1,
+                     updated_at = NOW()
+                 WHERE agent_id = $2
+                   AND slot_index = $3
+                   AND assigned_run_id = $4
+                   AND COALESCE(assigned_thread_group, -1) = $5",
+            )
+            .bind(allocation.previous_thread_group)
+            .bind(agent_id)
+            .bind(allocation.slot_index)
+            .bind(run_id)
+            .bind(thread_group)
+            .execute(&mut *tx)
+            .await?
+        };
+        if slot_result.rows_affected() != 1 {
+            tx.rollback().await?;
+            return Ok::<bool, sqlx::Error>(false);
+        }
+        // Allocation binds every pending entry in the target group. A deferred
+        // destructive clear must unwind that tentative binding together with
+        // the slot CAS so the next activation performs a fresh allocation.
+        sqlx::query(
+            "UPDATE auto_queue_entries
+             SET slot_index = NULL
+             WHERE run_id = $1
+               AND agent_id = $2
+               AND COALESCE(thread_group, 0) = $3
+               AND status = 'pending'
+               AND slot_index = $4",
+        )
+        .bind(run_id)
+        .bind(agent_id)
+        .bind(thread_group)
+        .bind(allocation.slot_index)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+    .await;
+    match rollback {
+        Ok(true) => {}
+        Ok(false) => crate::auto_queue_log!(
+            warn,
+            "activate_slot_allocation_rollback_not_applied_pg",
+            log_ctx.clone().slot_index(allocation.slot_index),
+            "[auto-queue] deferred slot allocation rollback was not applied for {agent_id} slot {} run {run_id} group {thread_group}",
+            allocation.slot_index
+        ),
+        Err(error) => crate::auto_queue_log!(
+            warn,
+            "activate_slot_allocation_rollback_failed_pg",
+            log_ctx.clone().slot_index(allocation.slot_index),
+            "[auto-queue] failed to roll back deferred slot allocation for {agent_id} slot {} run {run_id} group {thread_group}: {error}",
+            allocation.slot_index
+        ),
+    }
+}
+
+fn slot_clear_allows_dispatch(
+    outcome: &Result<crate::services::auto_queue::runtime::SlotRuntimeClearOutcome, String>,
+) -> bool {
+    matches!(
+        outcome,
+        Ok(crate::services::auto_queue::runtime::SlotRuntimeClearOutcome::Cleared(_))
+    )
+}
+
+fn log_slot_clear_deferral(
+    outcome: &Result<crate::services::auto_queue::runtime::SlotRuntimeClearOutcome, String>,
+    entry_log_ctx: &AutoQueueLogContext,
+    entry_id: &str,
+    agent_id: &str,
+    slot_index: i64,
+) {
+    debug_assert!(!slot_clear_allows_dispatch(outcome));
+    match outcome {
+        Ok(
+            crate::services::auto_queue::runtime::SlotRuntimeClearOutcome::DeferredResumeTransition,
+        ) => {
+            crate::auto_queue_log!(
+                info,
+                "activate_slot_clear_deferred_resume_transition_pg",
+                entry_log_ctx.clone().slot_index(slot_index),
+                "[auto-queue] deferred entry {entry_id} for {agent_id} slot {slot_index} while resume transition owns the existing runtime"
+            );
+        }
+        Ok(
+            crate::services::auto_queue::runtime::SlotRuntimeClearOutcome::FailedRuntimePersistence,
+        ) => {
+            crate::auto_queue_log!(
+                warn,
+                "activate_slot_clear_runtime_persistence_failed_pg",
+                entry_log_ctx.clone().slot_index(slot_index),
+                "[auto-queue] deferred entry {entry_id} for {agent_id} slot {slot_index} after runtime mailbox persistence failed"
+            );
+        }
+        Err(error) => {
+            crate::auto_queue_log!(
+                warn,
+                "activate_slot_clear_failed_pg",
+                entry_log_ctx.clone().slot_index(slot_index),
+                "[auto-queue] failed to clear PG slot thread session(s) for {agent_id} slot {slot_index}: {error}"
+            );
+        }
+        Ok(crate::services::auto_queue::runtime::SlotRuntimeClearOutcome::Cleared(_)) => {}
+    }
+}
+
 async fn resolve_activate_target_run_id(
     pool: &sqlx::PgPool,
     body: &ActivateBody,
@@ -1744,6 +1908,13 @@ mod tests {
         use super::super::activate_with_deps_pg;
         use super::super::{ActivateBody, AutoQueueActivateDeps};
         use crate::db::auto_queue::test_support::TestPostgresDb;
+        use crate::services::discord;
+        use crate::services::discord::health::HealthRegistry;
+        use crate::services::provider::CancelToken;
+        use crate::services::turn_orchestrator::{
+            BeginResumeTransitionResult, EndResumeTransitionResult,
+        };
+        use poise::serenity_prelude::{ChannelId, MessageId, UserId};
         use sqlx::PgPool;
         use std::sync::Arc;
 
@@ -1903,6 +2074,127 @@ mod tests {
             .fetch_one(pool)
             .await
             .expect("entry status")
+        }
+
+        #[tokio::test]
+        async fn resume_transition_refusal_keeps_entry_runtime_session_and_dispatch_unchanged_pg() {
+            let pg_db = TestPostgresDb::create().await;
+            let pool = pg_db.connect_and_migrate_with_max_connections(8).await;
+            seed_run_card_entry(&pool).await;
+            set_scope_status(&pool, None).await;
+            let channel_id = ChannelId::new(4_916_501);
+            sqlx::query(
+                "UPDATE auto_queue_slots
+                 SET thread_id_map = $1::jsonb
+                 WHERE agent_id = 'agent-dg' AND slot_index = 0",
+            )
+            .bind(serde_json::json!({"previous": channel_id.get().to_string()}).to_string())
+            .execute(&pool)
+            .await
+            .expect("seed slot thread map");
+            sqlx::query(
+                "INSERT INTO sessions
+                    (session_key, agent_id, provider, status, session_info, tokens,
+                     thread_channel_id, claude_session_id, active_dispatch_id, last_heartbeat)
+                 VALUES
+                    ('AgentDesk-Claude-slot-preserve', 'agent-dg', 'claude', 'idle',
+                     'preserve-session-info', 321, $1, 'preserve-provider-session',
+                     'preserve-dispatch', NOW())",
+            )
+            .bind(channel_id.get().to_string())
+            .execute(&pool)
+            .await
+            .expect("seed slot session");
+            sqlx::query(
+                "UPDATE auto_queue_entries
+                 SET thread_group = 1, batch_phase = 0
+                 WHERE id = 'entry-dg'",
+            )
+            .execute(&pool)
+            .await
+            .expect("move pending entry to reusable group");
+
+            let shared = discord::make_shared_data_for_tests();
+            let registry = Arc::new(HealthRegistry::new());
+            registry
+                .register_for_tests("claude".to_string(), shared.clone())
+                .await;
+            let token = Arc::new(CancelToken::new());
+            assert!(
+                discord::mailbox_handle_for_tests(&shared, channel_id)
+                    .try_start_turn(token.clone(), UserId::new(19), MessageId::new(4_916_511))
+                    .await
+            );
+            let transition_key = match discord::mailbox_handle_for_tests(&shared, channel_id)
+                .begin_resume_transition(uuid::Uuid::new_v4())
+                .await
+            {
+                BeginResumeTransitionResult::Begun(key) => key,
+                other => panic!("reserve resume transition: {other:?}"),
+            };
+
+            let mut deps = make_deps(&pool);
+            deps.health_registry = Some(registry);
+            let (status, _body) = activate_with_deps_pg(&deps, activate_body())
+                .await
+                .expect("activate response");
+            assert_eq!(status, axum::http::StatusCode::OK);
+            assert_eq!(entry_status(&pool).await, "pending");
+            let entry_slot = sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT slot_index FROM auto_queue_entries WHERE id = 'entry-dg'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("load deferred entry slot");
+            assert_eq!(
+                entry_slot, None,
+                "reservation refusal must unwind the tentative entry-slot binding"
+            );
+            assert_eq!(
+                dispatch_row_count_of_type(&pool, "implementation").await,
+                0,
+                "reservation refusal must not create a replacement dispatch"
+            );
+            let session =
+                sqlx::query_as::<_, (String, String, i64, Option<String>, Option<String>)>(
+                    "SELECT status, session_info, tokens, claude_session_id, active_dispatch_id
+                 FROM sessions WHERE thread_channel_id = $1",
+                )
+                .bind(channel_id.get().to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("load preserved session");
+            assert_eq!(session.0, "idle");
+            assert_eq!(session.1, "preserve-session-info");
+            assert_eq!(session.2, 321);
+            assert_eq!(session.3.as_deref(), Some("preserve-provider-session"));
+            assert_eq!(session.4.as_deref(), Some("preserve-dispatch"));
+            let slot_group = sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT assigned_thread_group FROM auto_queue_slots
+                 WHERE agent_id = 'agent-dg' AND slot_index = 0",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("load rolled-back slot group");
+            assert_eq!(slot_group, Some(0));
+            let runtime = discord::mailbox_handle_for_tests(&shared, channel_id)
+                .snapshot()
+                .await;
+            assert!(
+                runtime
+                    .cancel_token
+                    .as_ref()
+                    .is_some_and(|active| Arc::ptr_eq(active, &token))
+            );
+            assert!(matches!(
+                discord::mailbox_handle_for_tests(&shared, channel_id)
+                    .abort_resume_transition(transition_key)
+                    .await,
+                EndResumeTransitionResult::Applied(_)
+            ));
+
+            pool.close().await;
+            pg_db.drop().await;
         }
 
         #[tokio::test]
