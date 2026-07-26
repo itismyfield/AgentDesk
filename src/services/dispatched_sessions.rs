@@ -676,9 +676,15 @@ async fn force_kill_session_impl_with_reason_and_forwarding(
             }
         };
 
+    let forward_context = crate::services::session_forwarding::ForwardCallerContext::from(state);
+    if let Err(response) = crate::services::session_forwarding::enforce_receiver_fence(
+        headers,
+        owner_instance_id.as_deref(),
+        forward_context.cluster_instance_id.as_deref(),
+    ) {
+        return response;
+    }
     if !crate::services::session_forwarding::is_forwarded_request(headers) {
-        let forward_context =
-            crate::services::session_forwarding::ForwardCallerContext::from(state);
         match crate::services::session_forwarding::resolve_forward_target(
             &forward_context,
             owner_instance_id.as_deref(),
@@ -938,9 +944,15 @@ pub async fn tmux_output(
         );
     };
 
+    let forward_context = crate::services::session_forwarding::ForwardCallerContext::from(&state);
+    if let Err(response) = crate::services::session_forwarding::enforce_receiver_fence(
+        &headers,
+        owner_instance_id.as_deref(),
+        forward_context.cluster_instance_id.as_deref(),
+    ) {
+        return response;
+    }
     if !crate::services::session_forwarding::is_forwarded_request(&headers) {
-        let forward_context =
-            crate::services::session_forwarding::ForwardCallerContext::from(&state);
         match crate::services::session_forwarding::resolve_forward_target(
             &forward_context,
             owner_instance_id.as_deref(),
@@ -1489,9 +1501,15 @@ async fn kill_tmux_session_impl(
             }
         };
 
+    let forward_context = crate::services::session_forwarding::ForwardCallerContext::from(state);
+    if let Err(response) = crate::services::session_forwarding::enforce_receiver_fence(
+        headers,
+        owner_instance_id.as_deref(),
+        forward_context.cluster_instance_id.as_deref(),
+    ) {
+        return response;
+    }
     if !crate::services::session_forwarding::is_forwarded_request(headers) {
-        let forward_context =
-            crate::services::session_forwarding::ForwardCallerContext::from(state);
         match crate::services::session_forwarding::resolve_forward_target(
             &forward_context,
             owner_instance_id.as_deref(),
