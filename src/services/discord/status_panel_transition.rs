@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +21,8 @@ use super::status_panel_singleton_store::{self, StatusPanelSingletonBinding};
 use crate::services::provider::ProviderKind;
 
 static TRANSITION_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(test)]
+static FAIL_NEXT_INTENT_REMOVE: AtomicBool = AtomicBool::new(false);
 
 struct TransitionFileLock {
     _file: fs::File,
@@ -224,6 +228,10 @@ fn save_in_root(path: &Path, intent: &StatusPanelTransitionIntent) -> Result<(),
 }
 
 fn remove_in_root(path: &Path) -> Result<(), String> {
+    #[cfg(test)]
+    if FAIL_NEXT_INTENT_REMOVE.swap(false, Ordering::SeqCst) {
+        return Err("injected status panel transition removal failure".to_string());
+    }
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -280,6 +288,17 @@ fn find_by_candidate_in_root(
     channel_id: u64,
     candidate_panel_id: u64,
 ) -> Result<Option<(PathBuf, StatusPanelTransitionIntent)>, String> {
+    let _guard = TRANSITION_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let probe = path_in_root(
+        root,
+        provider,
+        token_hash,
+        channel_id,
+        &format!("lookup-{candidate_panel_id}"),
+    );
+    let _file_guard = lock_intent_path(&probe)?;
     find_by_candidate_locked_in_root(root, provider, token_hash, channel_id, candidate_panel_id)
 }
 
@@ -336,8 +355,14 @@ where
     let root = root()?;
     let path = path_in_root(&root, provider, token_hash, channel_id, nonce);
     let _file_guard = lock_intent_path(&path)?;
-    let mut intent = load_scoped_in_root(&path, provider, token_hash, channel_id)?
-        .ok_or_else(|| "status panel transition intent missing".to_string())?;
+    let mut intent = match load_scoped_in_root(&path, provider, token_hash, channel_id) {
+        Ok(Some(intent)) => intent,
+        Ok(None) => return Err("status panel transition intent missing".to_string()),
+        Err(error) => {
+            quarantine_malformed_strict(&path)?;
+            return Err(error);
+        }
+    };
     update(&mut intent)?;
     save_in_root(&path, &intent)?;
     Ok(intent)
@@ -355,8 +380,13 @@ pub(in crate::services::discord) fn cancel_prepared_candidate(
     let root = root()?;
     let path = path_in_root(&root, provider, token_hash, channel_id, &prepared.nonce);
     let _file_guard = lock_intent_path(&path)?;
-    let Some(intent) = load_scoped_in_root(&path, provider, token_hash, channel_id)? else {
-        return Ok(false);
+    let intent = match load_scoped_in_root(&path, provider, token_hash, channel_id) {
+        Ok(Some(intent)) => intent,
+        Ok(None) => return Ok(false),
+        Err(error) => {
+            quarantine_malformed_strict(&path)?;
+            return Err(error);
+        }
     };
     if intent.state != StatusPanelTransitionState::Prepared || intent.candidate_panel_id.is_some() {
         return Ok(false);
@@ -1167,6 +1197,76 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn candidate_lookup_waits_for_cross_process_channel_lock_4891() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let token = "tok";
+        let channel_id = 44;
+        let candidate = 5_002;
+        let prepared = prepare_candidate(
+            &provider,
+            token,
+            channel_id,
+            None,
+            None,
+            StatusPanelTransitionOperation::LiveBind,
+            "live",
+        )
+        .expect("prepare intent");
+        assert!(matches!(
+            acknowledge_candidate(&provider, token, channel_id, &prepared, candidate),
+            StatusPanelTransitionAction::KeepCurrent { generation: None }
+        ));
+
+        let transition_root = root().expect("root");
+        let held_probe = path_in_root(
+            &transition_root,
+            &provider,
+            token,
+            channel_id,
+            "held-by-peer",
+        );
+        let peer_lock = lock_intent_path(&held_probe).expect("peer channel lock");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let lookup_root = transition_root.clone();
+        let lookup_provider = provider.clone();
+        let lookup = std::thread::spawn(move || {
+            sender
+                .send(find_by_candidate_in_root(
+                    &lookup_root,
+                    &lookup_provider,
+                    token,
+                    channel_id,
+                    candidate,
+                ))
+                .expect("send lookup result");
+        });
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "candidate lookup must not scan while a peer owns the channel lock"
+        );
+        drop(peer_lock);
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("lookup resumes after unlock")
+                .expect("lookup succeeds")
+                .is_some()
+        );
+        lookup.join().expect("lookup thread");
+    }
+
     #[test]
     fn live_candidate_lookup_isolates_poison_and_finds_valid_intent_4891() {
         let _env_lock = crate::config::shared_test_env_lock()
@@ -1264,6 +1364,126 @@ mod tests {
                 .expect("poison dir")
                 .filter_map(Result::ok)
                 .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+        );
+    }
+
+    #[test]
+    fn exact_nonce_mutations_quarantine_malformed_intent_4891() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let token = "tok";
+        let channel_id = 46;
+
+        for cancel in [false, true] {
+            let prepared = prepare_candidate(
+                &provider,
+                token,
+                channel_id,
+                None,
+                None,
+                StatusPanelTransitionOperation::LiveBind,
+                "live",
+            )
+            .expect("prepare intent");
+            let path = path_in_root(
+                &root().expect("root"),
+                &provider,
+                token,
+                channel_id,
+                &prepared.nonce,
+            );
+            fs::write(&path, "{").expect("corrupt exact intent");
+
+            let result = if cancel {
+                cancel_prepared_candidate(&provider, token, channel_id, &prepared).map(|_| ())
+            } else {
+                update_intent_by_nonce(&provider, token, channel_id, &prepared.nonce, |_| Ok(()))
+                    .map(|_| ())
+            };
+            assert!(result.is_err(), "exact malformed mutation must fail closed");
+            assert!(!path.exists(), "malformed canonical path must be isolated");
+            assert!(
+                fs::read_dir(path.parent().expect("intent parent"))
+                    .expect("intent dir")
+                    .filter_map(Result::ok)
+                    .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-")),
+                "malformed exact intent must be quarantined"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn retirement_partial_failure_retains_intent_for_idempotent_replay_4891() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let token = "tok";
+        let channel_id = 47;
+        let candidate = 5_004;
+        let prepared = prepare_candidate(
+            &provider,
+            token,
+            channel_id,
+            None,
+            None,
+            StatusPanelTransitionOperation::LiveBind,
+            "live",
+        )
+        .expect("prepare intent");
+        assert!(matches!(
+            acknowledge_candidate(&provider, token, channel_id, &prepared, candidate),
+            StatusPanelTransitionAction::KeepCurrent { generation: None }
+        ));
+        FAIL_NEXT_INTENT_REMOVE.store(true, Ordering::SeqCst);
+        assert!(
+            finalize_retirement(
+                &provider,
+                token,
+                channel_id,
+                candidate,
+                StatusPanelRetirementOutcome::Removed,
+            )
+            .is_err(),
+            "orphan removal may succeed while intent removal reports failure"
+        );
+        assert!(
+            !status_panel_orphan_store::is_queued(&provider, token, channel_id, candidate),
+            "first retirement phase must have removed orphan protection"
+        );
+        assert_eq!(
+            load_unreconciled(&provider, token)
+                .expect("load crash residue")
+                .len(),
+            1,
+            "intent must retain retry authority after the partial failure"
+        );
+
+        assert_eq!(
+            recover_unreconciled_with_delete(&provider, token, |_, id| async move {
+                assert_eq!(id, candidate);
+                StatusPanelRetirementOutcome::PermanentAbsent
+            })
+            .await,
+            1,
+            "replay must converge through idempotent permanent absence"
+        );
+        assert!(
+            load_unreconciled(&provider, token)
+                .expect("load intents")
+                .is_empty()
         );
     }
 

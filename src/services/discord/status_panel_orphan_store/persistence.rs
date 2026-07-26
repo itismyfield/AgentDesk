@@ -2,10 +2,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, SystemTime};
 
 use super::*;
 
 static STORE_WRITE_LOCK: Mutex<()> = Mutex::new(());
+pub(super) const LEGACY_COMPATIBILITY_HORIZON: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const LEGACY_RETIRED_MARKER: &str = ".legacy-retired-v1";
 
 struct ChannelFileLock {
     _file: fs::File,
@@ -74,6 +77,91 @@ fn channel_dir_in_root(
     provider_dir_in_root(root, provider, token_hash).join(channel_id.to_string())
 }
 
+pub(super) fn legacy_retired_marker_path_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+) -> PathBuf {
+    channel_dir_in_root(root, provider, token_hash, channel_id).join(LEGACY_RETIRED_MARKER)
+}
+
+fn modified_at(path: &Path) -> Result<Option<SystemTime>, String> {
+    match fs::metadata(path) {
+        Ok(metadata) => metadata
+            .modified()
+            .map(Some)
+            .map_err(|error| error.to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn prune_legacy_tombstones_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+) -> Result<(), String> {
+    let dir = channel_dir_in_root(root, provider, token_hash, channel_id);
+    let files = match fs::read_dir(dir) {
+        Ok(files) => files,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    for file in files {
+        let path = file.map_err(|error| error.to_string())?.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("removed") {
+            continue;
+        }
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(())
+}
+
+fn legacy_compatibility_active_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+) -> Result<bool, String> {
+    let legacy = channel_file_path_in_root(root, provider, token_hash, channel_id);
+    let marker = legacy_retired_marker_path_in_root(root, provider, token_hash, channel_id);
+    if modified_at(&marker)?.is_some() {
+        prune_legacy_tombstones_in_root(root, provider, token_hash, channel_id)?;
+        return Ok(false);
+    }
+    let Some(modified) = modified_at(&legacy)? else {
+        return Ok(true);
+    };
+    let elapsed = SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or(Duration::ZERO);
+    if elapsed < LEGACY_COMPATIBILITY_HORIZON {
+        return Ok(true);
+    }
+    runtime_store::atomic_write(&marker, "retired\n")?;
+    prune_legacy_tombstones_in_root(root, provider, token_hash, channel_id)?;
+    Ok(false)
+}
+
+fn legacy_entries_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+) -> Result<Vec<StatusPanelOrphanEntry>, String> {
+    if legacy_compatibility_active_in_root(root, provider, token_hash, channel_id)? {
+        load_legacy_channel_in_root(root, provider, token_hash, channel_id)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
 pub(super) fn entry_path_in_root(
     root: &Path,
     provider: &ProviderKind,
@@ -122,14 +210,14 @@ fn load_entry_file(path: &Path) -> Result<Option<StatusPanelOrphanEntry>, String
     }
 }
 
-pub(super) fn load_channel_result_in_root(
+pub(super) fn load_channel_result_locked_in_root(
     root: &Path,
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: u64,
 ) -> Result<Vec<StatusPanelOrphanEntry>, String> {
     let mut entries: HashMap<u64, StatusPanelOrphanEntry> =
-        load_legacy_channel_in_root(root, provider, token_hash, channel_id)?
+        legacy_entries_in_root(root, provider, token_hash, channel_id)?
             .into_iter()
             .map(|entry| (entry.id, entry))
             .collect();
@@ -176,6 +264,19 @@ pub(super) fn load_channel_result_in_root(
     Ok(entries)
 }
 
+pub(super) fn load_channel_result_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+) -> Result<Vec<StatusPanelOrphanEntry>, String> {
+    let _process_guard = STORE_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _channel_guard = lock_channel_in_root(root, provider, token_hash, channel_id)?;
+    load_channel_result_locked_in_root(root, provider, token_hash, channel_id)
+}
+
 pub(super) fn load_channel_in_root(
     root: &Path,
     provider: &ProviderKind,
@@ -213,7 +314,7 @@ fn upsert_entry_in_root(
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let _channel_guard = lock_channel_in_root(root, provider, token_hash, channel_id)?;
-    let _ = load_channel_result_in_root(root, provider, token_hash, channel_id)?;
+    let _ = load_channel_result_locked_in_root(root, provider, token_hash, channel_id)?;
     let path = entry_path_in_root(root, provider, token_hash, channel_id, entry.id);
     if let Some(existing) = load_entry_file(&path)? {
         match (existing.kind, entry.kind) {
@@ -280,10 +381,10 @@ fn remove_in_root_checked_locked(
     channel_id: u64,
     panel_msg_id: u64,
 ) -> Result<(), String> {
-    let legacy_contains = load_legacy_channel_in_root(root, provider, token_hash, channel_id)?
+    let legacy_contains = legacy_entries_in_root(root, provider, token_hash, channel_id)?
         .iter()
         .any(|entry| entry.id == panel_msg_id);
-    let _ = load_channel_result_in_root(root, provider, token_hash, channel_id)?;
+    let _ = load_channel_result_locked_in_root(root, provider, token_hash, channel_id)?;
     let path = entry_path_in_root(root, provider, token_hash, channel_id, panel_msg_id);
     match fs::remove_file(path) {
         Ok(()) => {}
@@ -337,7 +438,7 @@ pub(super) fn remove_pending_bind_in_root_checked(
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let _channel_guard = lock_channel_in_root(root, provider, token_hash, channel_id)?;
-    let entries = load_channel_result_in_root(root, provider, token_hash, channel_id)?;
+    let entries = load_channel_result_locked_in_root(root, provider, token_hash, channel_id)?;
     if entries
         .iter()
         .any(|entry| entry.id == panel_msg_id && entry.is_pending_bind())

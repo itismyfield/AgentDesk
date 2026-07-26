@@ -65,25 +65,9 @@ direct_discord_sends = [
   # `shadow_register_bridge_panel` helper above it + renaming the now-unused
   # `shared`/`provider` params to `_shared`/`_provider` — no new direct send).
   "src/services/discord/turn_bridge/single_message_footer.rs#direct_discord_sends:d2d9f46d97bfa069",
-  # #3805 P2 PR-B: the two-message SINK create — same `gateway.send_message`
-  # status-panel placeholder send as the OFF separate-panel path above, but
-  # gated on `two_message_panel_enabled` and ordered answer-first (the panel is
-  # the NEW message BELOW the answer). Retires with the #1436 outbound v3
-  # extraction alongside the other bridge panel sends.
-  # 2026-07-24 #4860 re-fingerprint: same PR-B `gateway.send_message` panel
-  # create; context hash shifted by the singleton re-anchor sequence (prior-
-  # binding load + durable persist + old-panel retire) around the send.
-  "src/services/discord/turn_bridge/two_message_panel.rs#direct_discord_sends:c4e8a3a063c75061",
-  # #3805 P2 PR-D: the sink rollover re-anchor sends the NEW status panel BELOW
-  # the new tail answer chunk via the same TurnGateway used elsewhere in this
-  # module. Retires with the #1436 outbound v3 extraction alongside the create.
-  "src/services/discord/turn_bridge/two_message_panel.rs#direct_discord_sends:73363b7df625f87d",
-  # #3038 turn_bridge S1: status-panel completion direct gateway calls moved
-  # verbatim from turn_bridge/mod.rs to turn_bridge/status_panel.rs.
-
-  # 2026-07-24 #4860 size-cap relief: the completion fallback send moved verbatim
-  # from status_panel.rs to status_panel/fallback.rs (same call, same hash).
-  "src/services/discord/turn_bridge/status_panel/fallback.rs#direct_discord_sends:8b2d360d4176f47b",
+  # #4891: tests implement the nonce-aware gateway method by delegating to their
+  # in-memory send recorder; no production Discord side effect occurs here.
+  "src/services/discord/turn_bridge/two_message_panel.rs#direct_discord_sends:30353d423d8ebd64",
   # #3016 msg_id==0 recovery: bridge creates a fresh placeholder / posts a recovery
   # notice for turns with no anchored Discord message. Consistent with the bridge's
   # existing pre-migration direct sends; retire with the #1436 outbound v3 extraction.
@@ -95,11 +79,6 @@ direct_discord_sends = [
 # and must be removed from this allowlist when the live footer cascade moves into
 # footer_view_reconciler.
 footer_view_writes = [
-  "src/services/discord/tmux_watcher/two_message_panel.rs#footer_view_writes:5337251a73d4d11f",
-  # 2026-07-24 #4860 re-fingerprint: same S4-b2-owned live panel write (create);
-  # context hash shifted by the singleton re-anchor sequence around the send.
-  "src/services/discord/turn_bridge/two_message_panel.rs#footer_view_writes:1e52b256e43e9a29",
-  "src/services/discord/turn_bridge/two_message_panel.rs#footer_view_writes:0643731bca956b79"
 ]
 
 # Manual JSON row mapping: legacy mapping callsites pending typed migration.

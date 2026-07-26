@@ -1,5 +1,3 @@
-//! #3038 S1 status-panel completion helpers moved out of turn_bridge/mod.rs.
-
 use super::*;
 
 pub(super) fn status_panel_completion_ready_after_terminal_body(

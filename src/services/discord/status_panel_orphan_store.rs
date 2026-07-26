@@ -423,11 +423,15 @@ pub(in crate::services::discord) fn is_queued(
     is_queued_in_root(&root, provider, token_hash, channel_id, panel_msg_id)
 }
 
+fn delete_status_is_permanent(status: u16) -> bool {
+    matches!(status, 404 | 403 | 410)
+}
+
 pub(in crate::services::discord) fn delete_error_is_permanent(err: &serenity::Error) -> bool {
     matches!(err, serenity::Error::Http(http_err)
         if http_err
             .status_code()
-            .is_some_and(|status| matches!(status.as_u16(), 404 | 403 | 410)))
+            .is_some_and(|status| delete_status_is_permanent(status.as_u16())))
 }
 
 fn emit_orphan_drain_delete(
@@ -513,10 +517,11 @@ fn prepare_pending_bind_for_drain_in_root(
     inflight: Option<&InflightTurnState>,
 ) -> PendingBindDrainOutcome {
     persistence::with_channel_lock(root, provider, token_hash, channel_id, || {
-        let entries = match load_channel_result_in_root(root, provider, token_hash, channel_id) {
-            Ok(entries) => entries,
-            Err(_) => return PendingBindDrainOutcome::Deferred,
-        };
+        let entries =
+            match load_channel_result_locked_in_root(root, provider, token_hash, channel_id) {
+                Ok(entries) => entries,
+                Err(_) => return PendingBindDrainOutcome::Deferred,
+            };
         let Some(mut entry) = entries.into_iter().find(|entry| entry.id == panel_msg_id) else {
             return PendingBindDrainOutcome::Missing;
         };

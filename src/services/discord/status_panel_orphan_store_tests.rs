@@ -151,6 +151,47 @@ fn legacy_removal_keeps_suppression_tombstone_4891() {
 }
 
 #[test]
+fn expired_legacy_horizon_retires_aggregate_and_tombstone_4891() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let root = root.path();
+    let provider = ProviderKind::Claude;
+    let token = "tok";
+    let channel_id = 100;
+    let panel_id = 5001;
+    let legacy = channel_file_path_in_root(root, &provider, token, channel_id);
+    fs::create_dir_all(legacy.parent().expect("parent")).expect("mkdir");
+    fs::write(&legacy, "[5001]").expect("legacy seed");
+    let tombstone = tombstone_path_in_root(root, &provider, token, channel_id, panel_id);
+    fs::create_dir_all(tombstone.parent().expect("tombstone parent")).expect("mkdir tombstones");
+    fs::write(&tombstone, "removed\n").expect("legacy suppression tombstone");
+    let expired = std::time::SystemTime::now()
+        - LEGACY_COMPATIBILITY_HORIZON
+        - std::time::Duration::from_secs(1);
+    filetime::set_file_mtime(&legacy, filetime::FileTime::from_system_time(expired))
+        .expect("age legacy aggregate");
+
+    assert!(load_pending_in_root(root, &provider, token).is_empty());
+    let marker = legacy_retired_marker_path_in_root(root, &provider, token, channel_id);
+    assert!(
+        marker.exists(),
+        "expiry must leave durable migration-complete evidence"
+    );
+    assert!(
+        !tombstone.exists(),
+        "retiring legacy compatibility must bound suppression tombstone lifetime"
+    );
+
+    fs::write(&legacy, "[5001,5002]").expect("late rolling legacy rewrite");
+    remove_in_root_checked(root, &provider, token, channel_id, panel_id)
+        .expect("remove retired id");
+    assert!(load_pending_in_root(root, &provider, token).is_empty());
+    assert!(
+        !tombstone_path_in_root(root, &provider, token, channel_id, panel_id).exists(),
+        "retired legacy aggregates no longer require suppression tombstones"
+    );
+}
+
+#[test]
 fn reenqueue_removes_tombstone_and_restores_same_panel_4891() {
     let root = tempfile::tempdir().expect("tempdir");
     let root = root.path();
@@ -815,6 +856,15 @@ async fn watcher_orphan_drain_does_not_delete_completed_current_singleton_4891()
         is_queued(&provider, token, channel_id, completed_panel),
         "the completed current singleton must stay queued for the next turn's bind-then-retire convergence"
     );
+}
+
+#[test]
+fn orphan_delete_10008_status_is_terminal_not_replacement_authority_4891() {
+    assert!(delete_status_is_permanent(404));
+    assert!(delete_status_is_permanent(403));
+    assert!(delete_status_is_permanent(410));
+    assert!(!delete_status_is_permanent(429));
+    assert!(!delete_status_is_permanent(500));
 }
 
 #[test]
