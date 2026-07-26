@@ -111,10 +111,7 @@ fn context_percent_floor(used: u128, window: u128) -> Option<u8> {
 
 fn sanitize_model_label(value: &str) -> Option<String> {
     let value = sanitize_bounded_label(value, MAX_MODEL_LABEL_CHARS, true)?;
-    !value
-        .chars()
-        .all(|character| character.is_ascii_digit())
-        .then_some(value)
+    (!value.chars().all(|character| character.is_ascii_digit())).then_some(value)
 }
 
 fn sanitize_host_label(value: &str) -> Option<String> {
