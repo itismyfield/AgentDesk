@@ -341,6 +341,12 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     };
     if let Some(control) = relay_prompt_decision.local_only_control.as_ref() {
         let kind = control.kind.as_str();
+        let wake_provider = ProviderKind::from_str_or_unsupported(&prompt.provider);
+        super::schedule_local_only_slash_idle_queue_kickoff(
+            shared.clone(),
+            wake_provider,
+            channel_id,
+        );
         let Some(note) = prepare_local_only_slash_control_note(&prompt, kind) else {
             tracing::info!(
                 provider = %prompt.provider,

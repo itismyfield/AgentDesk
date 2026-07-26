@@ -639,6 +639,8 @@ src/
 │   │   │   ├── memory_guidance.rs
 │   │   │   ├── mod.rs
 │   │   │   └── section_dedupe.rs
+│   │   ├── queue_io/
+│   │   │   └── deferred_worker_state.rs
 │   │   ├── recovery_engine/
 │   │   │   ├── manual_rebind/
 │   │   │   │   ├── adoption.rs

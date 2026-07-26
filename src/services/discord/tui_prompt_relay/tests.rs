@@ -1426,6 +1426,70 @@ fn relay_prompt_decision_skips_model_two_half_transcript() {
     );
 }
 
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn model_two_halves_wake_queue_without_synthetic_lifecycle_or_lease() {
+    let temp = tempfile::tempdir().expect("temp runtime root");
+    let _env = crate::config::set_agentdesk_root_for_test(temp.path());
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(940_000_000_004_874);
+    let tmux = "AgentDesk-claude-4874-model-halves";
+    shared
+        .tmux_watchers
+        .restore_owner_channel_for_tmux_session(tmux, channel_id);
+
+    for (index, body) in [
+        "<command-message>x</command-message>\n<command-name>/model</command-name>",
+        "<local-command-stdout>Set model to Fable 5</local-command-stdout>",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        relay_observed_prompt(
+            &shared,
+            ObservedTuiPrompt {
+                provider: provider.as_str().to_string(),
+                tmux_session_name: tmux.to_string(),
+                prompt: body.to_string(),
+                source_event_id: Some(format!("model-half-{index}")),
+                observed_at: chrono::Utc::now(),
+                external_input_lease_generation: crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+                ssh_direct_observation_generation: crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
+            },
+        )
+        .await;
+    }
+
+    assert!(
+        shared
+            .restart
+            .deferred_hook_channels
+            .contains_key(&channel_id),
+        "both local transcript halves must reach the process-local wake coordinator before note/HTTP exits",
+    );
+    assert!(
+        super::super::inflight::load_inflight_state(&provider, channel_id.get()).is_none(),
+        "local-only queue wake must not mint synthetic inflight authority",
+    );
+    assert!(
+        crate::services::tui_prompt_dedupe::external_input_relay_lease(
+            provider.as_str(),
+            tmux,
+            channel_id.get(),
+        )
+        .is_none(),
+        "local-only queue wake must not create an external-input relay lease",
+    );
+    assert!(
+        super::super::tui_direct_pending_start::load_all()
+            .into_iter()
+            .all(|record| {
+                record.provider != provider.as_str() || record.channel_id != channel_id.get()
+            }),
+        "local-only queue wake must not create a synthetic pending start",
+    );
+}
+
 // #3178: the machine slash-command control trigger now resolves to a stable
 // command KIND that BOTH the raw `/loop` echo and the expanded `<command-*>`
 // wrapper for the SAME command map to (so the #3153 double-post collapses to
@@ -1773,13 +1837,20 @@ fn local_control_prompt(tmux: &str, body: &str, entry_id: &str) -> ObservedTuiPr
 }
 
 #[test]
-fn local_slash_control_note_emission_is_wired_through_prepare_gate() {
+fn local_slash_wake_precedes_note_dedupe_and_http_gates() {
     let relay_source = include_str!("../tui_prompt_relay.rs");
+    let wake = relay_source
+        .find("super::schedule_local_only_slash_idle_queue_kickoff(")
+        .expect("local-only branch schedules queue wake");
+    let note = relay_source
+        .find("let Some(note) = prepare_local_only_slash_control_note(&prompt, kind) else {")
+        .expect("local-only branch applies note dedupe");
+    let http = relay_source
+        .find("let Some(notify_http) = shared.serenity_http_or_token_fallback() else {")
+        .expect("local-only branch applies HTTP availability gate");
     assert!(
-        relay_source.contains(
-            "let Some(note) = prepare_local_only_slash_control_note(&prompt, kind) else {"
-        ),
-        "relay_observed_prompt must consume the gated note outcome before channel delivery"
+        wake < note && note < http,
+        "queue wake must happen before note dedupe and Discord HTTP availability exits",
     );
 }
 

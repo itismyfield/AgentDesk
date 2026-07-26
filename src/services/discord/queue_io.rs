@@ -11,13 +11,14 @@ use super::*;
 struct DeferredHookBacklogGuard {
     shared: Arc<SharedData>,
     channel_id: ChannelId,
+    entry: Arc<DeferredIdleQueueEntry>,
     active: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct IdleQueueBackstopRearm {
-    backlog_units: usize,
-}
+pub(in crate::services) mod deferred_worker_state;
+use self::deferred_worker_state::{
+    DeferredIdleQueueEntry, DeferredIdleQueuePhase, DeferredIdleQueueWaitOutcome,
+};
 
 const DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY: std::time::Duration =
     std::time::Duration::from_secs(2);
@@ -27,6 +28,9 @@ const IDLE_QUEUE_BACKSTOP_WARN_TARGET: &str = "agentdesk::discord::idle_queue_ba
 #[cfg(test)]
 static IDLE_QUEUE_BACKSTOP_FIRES_FOR_TESTS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static PANIC_DEFERRED_IDLE_QUEUE_WORKER_FOR_TESTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 tokio::task_local! {
     static SUPPRESS_POST_ENQUEUE_IDLE_QUEUE_KICK: bool;
@@ -185,7 +189,7 @@ impl DeferredIdleQueueKickoffProfile {
         }
     }
 
-    fn wakes_existing_task(self) -> bool {
+    fn is_immediate(self) -> bool {
         matches!(self, Self::ImmediateOnce)
     }
 }
@@ -233,7 +237,36 @@ fn idle_queue_snapshot_has_raw_rearm_backlog(
 
 impl Drop for DeferredHookBacklogGuard {
     fn drop(&mut self) {
+        let panicked = self.active;
+        let shared = self.shared.clone();
+        let channel_id = self.channel_id;
         self.release();
+        if panicked
+            && !shared
+                .restart
+                .shutting_down
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            super::task_supervisor::spawn_observed("deferred_idle_queue_panic_rearm", async move {
+                let provider = shared.provider.clone();
+                let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
+                let backlog_units = idle_queue_backstop_backlog_units(
+                    shared.as_ref(),
+                    &provider,
+                    channel_id,
+                    &snapshot,
+                );
+                if backlog_units > 0 {
+                    schedule_single_slow_idle_queue_backstop(
+                        shared,
+                        provider,
+                        channel_id,
+                        "panic_recovery",
+                        backlog_units,
+                    );
+                }
+            });
+        }
     }
 }
 
@@ -242,16 +275,21 @@ impl DeferredHookBacklogGuard {
         if !self.active {
             return false;
         }
-        self.shared
+        self.entry.set_phase(DeferredIdleQueuePhase::Releasing);
+        let removed = self
+            .shared
             .restart
             .deferred_hook_channels
-            .remove(&self.channel_id);
+            .remove_if(&self.channel_id, |_, current| {
+                Arc::ptr_eq(current, &self.entry) && current.worker_epoch == self.entry.worker_epoch
+            })
+            .is_some();
         self.shared
             .restart
             .deferred_hook_backlog
             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         self.active = false;
-        true
+        removed
     }
 }
 
@@ -285,6 +323,19 @@ pub(super) fn schedule_deferred_idle_queue_kickoff_immediate(
         channel_id,
         reason,
         DeferredIdleQueueKickoffProfile::ImmediateOnce,
+    );
+}
+
+pub(super) fn schedule_local_only_slash_idle_queue_kickoff(
+    shared: Arc<SharedData>,
+    provider: ProviderKind,
+    channel_id: ChannelId,
+) {
+    schedule_deferred_idle_queue_kickoff_immediate(
+        shared,
+        provider,
+        channel_id,
+        "local_only_slash_observation",
     );
 }
 
@@ -494,50 +545,105 @@ async fn idle_queue_backstop_backlog_units_all(
         .sum()
 }
 
-async fn run_single_slow_idle_queue_backstop(
+async fn wait_for_deferred_idle_queue_delay(
+    entry: &DeferredIdleQueueEntry,
+    delay: std::time::Duration,
+) -> DeferredIdleQueueWaitOutcome {
+    let deadline = tokio::time::Instant::now() + delay;
+    loop {
+        if entry.observe_pending_request() {
+            return DeferredIdleQueueWaitOutcome::Immediate;
+        }
+        let notified = entry.notify.notified();
+        if entry.observe_pending_request() {
+            return DeferredIdleQueueWaitOutcome::Immediate;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => {
+                return DeferredIdleQueueWaitOutcome::Deadline;
+            }
+            _ = notified => {
+                if entry.observe_pending_request() {
+                    return DeferredIdleQueueWaitOutcome::Immediate;
+                }
+            }
+        }
+    }
+}
+
+async fn deferred_idle_queue_worker(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     reason: &'static str,
-) -> Option<IdleQueueBackstopRearm> {
-    tokio::time::sleep(DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY).await;
-    let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
-    let backlog_units =
-        idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot);
-    if backlog_units == 0 {
-        return None;
+    profile: DeferredIdleQueueKickoffProfile,
+    entry: &DeferredIdleQueueEntry,
+) {
+    entry.set_phase(DeferredIdleQueuePhase::InitialDelay);
+    let initial_wait = profile.initial_presleep();
+    if initial_wait.is_zero() {
+        let _ = entry.observe_pending_request();
+    } else {
+        let _ = wait_for_deferred_idle_queue_delay(entry, initial_wait).await;
     }
 
-    emit_idle_queue_backstop_warn(
-        provider,
-        Some(channel_id),
-        reason,
-        backlog_units,
-        "channel_backstop",
-    );
-    let _outcome =
+    if shared
+        .restart
+        .shutting_down
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return;
+    }
+
+    entry.set_phase(DeferredIdleQueuePhase::Kicking);
+    let _ =
         kick_idle_queue_channel_if_context_available(shared, provider, channel_id, reason).await;
+    entry.coalesce_requests_during_kick();
 
-    // #4270 — decide the re-arm from the ACTUAL post-kick mailbox state, not
-    // from the kick's `started` flag. A kickoff can report `started == true`
-    // without a real turn owning the slot: the pre-claim readiness gate (#4270 A)
-    // re-preserves a still-busy hosted-TUI follow-up and returns `Ok`, so the
-    // kickoff reports `started` while the message is merely back in the queue.
-    // The previous `if outcome.started { return None; }` short-circuit then
-    // dropped this backstop (and the gate's own re-arm had coalesced onto this
-    // very still-registered task), stranding the follow-up with no fail-open net
-    // until the watcher-idle edge — a #4247-class lost-wakeup. Re-checking the
-    // real state below is strictly more precise: a genuinely started turn now
-    // owns the slot (`blocked_by_real_turn`) and still suppresses the successor,
-    // while a defer/no-start that leaves un-drained backlog re-arms as intended.
-    let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
-    let backlog_units =
-        idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot);
-    if backlog_units == 0 || idle_queue_snapshot_blocked_by_real_turn(&snapshot) {
-        return None;
+    loop {
+        let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
+        if idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot) == 0
+            || idle_queue_snapshot_blocked_by_real_turn(&snapshot)
+            || shared
+                .restart
+                .shutting_down
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+
+        entry.set_phase(DeferredIdleQueuePhase::BackstopWait);
+        let wait_outcome =
+            wait_for_deferred_idle_queue_delay(entry, DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY).await;
+        if shared
+            .restart
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+
+        let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
+        let backlog_units =
+            idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot);
+        if backlog_units == 0 || idle_queue_snapshot_blocked_by_real_turn(&snapshot) {
+            return;
+        }
+        if matches!(wait_outcome, DeferredIdleQueueWaitOutcome::Deadline) {
+            emit_idle_queue_backstop_warn(
+                provider,
+                Some(channel_id),
+                reason,
+                backlog_units,
+                "channel_backstop",
+            );
+        }
+
+        entry.set_phase(DeferredIdleQueuePhase::BackstopKicking);
+        let _ = kick_idle_queue_channel_if_context_available(shared, provider, channel_id, reason)
+            .await;
+        entry.coalesce_requests_during_kick();
     }
-
-    Some(IdleQueueBackstopRearm { backlog_units })
 }
 
 fn schedule_single_slow_idle_queue_backstop(
@@ -547,43 +653,134 @@ fn schedule_single_slow_idle_queue_backstop(
     reason: &'static str,
     backlog_units: usize,
 ) -> bool {
-    match shared.restart.deferred_hook_channels.entry(channel_id) {
-        dashmap::mapref::entry::Entry::Occupied(_) => {
-            tracing::debug!(
-                provider = provider.as_str(),
-                channel_id = channel_id.get(),
-                reason,
-                backlog_units,
-                "Idle queue slow backstop already active for channel; coalescing event-path no-start"
-            );
-            return false;
-        }
-        dashmap::mapref::entry::Entry::Vacant(entry) => {
-            entry.insert(Arc::new(tokio::sync::Notify::new()));
+    schedule_deferred_idle_queue_worker(
+        shared,
+        provider,
+        channel_id,
+        reason,
+        DeferredIdleQueueKickoffProfile::Normal,
+        Some(DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY),
+        backlog_units,
+    )
+}
+
+fn schedule_deferred_idle_queue_worker(
+    shared: Arc<SharedData>,
+    provider: ProviderKind,
+    channel_id: ChannelId,
+    reason: &'static str,
+    profile: DeferredIdleQueueKickoffProfile,
+    first_delay_override: Option<std::time::Duration>,
+    backlog_units: usize,
+) -> bool {
+    if shared
+        .restart
+        .shutting_down
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return false;
+    }
+
+    let entry = loop {
+        match shared.restart.deferred_hook_channels.entry(channel_id) {
+            dashmap::mapref::entry::Entry::Occupied(slot) => {
+                let entry = slot.get().clone();
+                let phase = entry.phase();
+                let accepted = !profile.is_immediate() || entry.request_immediate();
+                drop(slot);
+                if accepted {
+                    tracing::debug!(
+                        provider = provider.as_str(),
+                        channel_id = channel_id.get(),
+                        reason,
+                        backlog_units,
+                        immediate = profile.is_immediate(),
+                        phase = ?phase,
+                        worker_epoch = entry.worker_epoch,
+                        "Deferred drain worker already active for channel; coalescing request"
+                    );
+                    return false;
+                }
+                let _ =
+                    shared
+                        .restart
+                        .deferred_hook_channels
+                        .remove_if(&channel_id, |_, current| {
+                            Arc::ptr_eq(current, &entry)
+                                && current.worker_epoch == entry.worker_epoch
+                        });
+            }
+            dashmap::mapref::entry::Entry::Vacant(slot) => {
+                let entry = Arc::new(DeferredIdleQueueEntry::new(profile.is_immediate()));
+                slot.insert(entry.clone());
+                break entry;
+            }
         }
     };
+
     shared
         .restart
         .deferred_hook_backlog
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    super::task_supervisor::spawn_observed("event_idle_queue_backstop", async move {
+    super::task_supervisor::spawn_observed("deferred_idle_queue_worker", async move {
         let mut backlog_guard = DeferredHookBacklogGuard {
             shared: shared.clone(),
             channel_id,
+            entry: entry.clone(),
             active: true,
         };
-        let rearm =
-            run_single_slow_idle_queue_backstop(&shared, &provider, channel_id, reason).await;
-        backlog_guard.release();
-        if let Some(rearm) = rearm {
-            schedule_single_slow_idle_queue_backstop(
-                shared,
-                provider,
-                channel_id,
-                reason,
-                rearm.backlog_units,
-            );
+        #[cfg(test)]
+        if PANIC_DEFERRED_IDLE_QUEUE_WORKER_FOR_TESTS
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            panic!("deferred idle queue worker test panic");
         }
+        let worker_profile = match first_delay_override {
+            Some(delay) if delay == DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY => {
+                entry.set_phase(DeferredIdleQueuePhase::BackstopWait);
+                let wait = wait_for_deferred_idle_queue_delay(&entry, delay).await;
+                if shared
+                    .restart
+                    .shutting_down
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    backlog_guard.release();
+                    return;
+                }
+                let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
+                let units = idle_queue_backstop_backlog_units(
+                    shared.as_ref(),
+                    &provider,
+                    channel_id,
+                    &snapshot,
+                );
+                if units == 0 {
+                    backlog_guard.release();
+                    return;
+                }
+                if matches!(wait, DeferredIdleQueueWaitOutcome::Deadline) {
+                    emit_idle_queue_backstop_warn(
+                        &provider,
+                        Some(channel_id),
+                        reason,
+                        units,
+                        "channel_backstop",
+                    );
+                }
+                DeferredIdleQueueKickoffProfile::ImmediateOnce
+            }
+            _ => profile,
+        };
+        deferred_idle_queue_worker(
+            &shared,
+            &provider,
+            channel_id,
+            reason,
+            worker_profile,
+            &entry,
+        )
+        .await;
+        backlog_guard.release();
     });
     true
 }
@@ -724,60 +921,8 @@ fn schedule_deferred_idle_queue_kickoff_inner(
     reason: &'static str,
     profile: DeferredIdleQueueKickoffProfile,
 ) {
-    match shared.restart.deferred_hook_channels.entry(channel_id) {
-        dashmap::mapref::entry::Entry::Occupied(entry) => {
-            if profile.wakes_existing_task() {
-                entry.get().notify_one();
-            }
-            tracing::debug!(
-                provider = provider.as_str(),
-                channel_id = channel_id.get(),
-                reason,
-                immediate = matches!(profile, DeferredIdleQueueKickoffProfile::ImmediateOnce),
-                wake_existing = profile.wakes_existing_task(),
-                "Deferred drain: kickoff already active for channel; coalescing duplicate request"
-            );
-            return;
-        }
-        dashmap::mapref::entry::Entry::Vacant(entry) => {
-            entry.insert(Arc::new(tokio::sync::Notify::new()));
-        }
-    };
-    shared
-        .restart
-        .deferred_hook_backlog
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    super::task_supervisor::spawn_observed("deferred_idle_queue_kickoff", async move {
-        // #2044 F3: bind the decrement to a Drop guard so it fires on
-        // panic-unwind as well as on normal return.
-        let mut backlog_guard = DeferredHookBacklogGuard {
-            shared: shared.clone(),
-            channel_id,
-            active: true,
-        };
-
-        let initial_presleep = profile.initial_presleep();
-        if !initial_presleep.is_zero() {
-            tokio::time::sleep(initial_presleep).await;
-        }
-
-        let _ =
-            kick_idle_queue_channel_if_context_available(&shared, &provider, channel_id, reason)
-                .await;
-
-        let rearm =
-            run_single_slow_idle_queue_backstop(&shared, &provider, channel_id, reason).await;
-        backlog_guard.release();
-        if let Some(rearm) = rearm {
-            schedule_single_slow_idle_queue_backstop(
-                shared,
-                provider,
-                channel_id,
-                reason,
-                rearm.backlog_units,
-            );
-        }
-    });
+    let _ =
+        schedule_deferred_idle_queue_worker(shared, provider, channel_id, reason, profile, None, 0);
 }
 
 #[cfg(test)]
@@ -1015,11 +1160,11 @@ mod presleep_tests {
         let shared = make_shared_data_for_tests();
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(4_024_281);
-        let notify = Arc::new(tokio::sync::Notify::new());
+        let entry = Arc::new(DeferredIdleQueueEntry::new(false));
         shared
             .restart
             .deferred_hook_channels
-            .insert(channel_id, notify.clone());
+            .insert(channel_id, entry.clone());
 
         schedule_deferred_idle_queue_kickoff_immediate(
             shared,
@@ -1028,9 +1173,255 @@ mod presleep_tests {
             "coalesced-immediate-test",
         );
 
-        tokio::time::timeout(std::time::Duration::from_millis(1), notify.notified())
+        tokio::time::timeout(std::time::Duration::from_millis(1), entry.notify.notified())
             .await
             .expect("immediate coalesce should wake the existing task");
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn immediate_request_published_before_first_poll_is_observed() {
+        let entry = DeferredIdleQueueEntry::new(true);
+
+        assert_eq!(
+            wait_for_deferred_idle_queue_delay(&entry, DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY,)
+                .await,
+            DeferredIdleQueueWaitOutcome::Immediate,
+            "entry publication must not initialize observed epoch from the pending request",
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn normal_initial_delay_is_interrupted_by_immediate_request() {
+        let entry = Arc::new(DeferredIdleQueueEntry::new(false));
+        let waiter = tokio::spawn({
+            let entry = entry.clone();
+            async move {
+                wait_for_deferred_idle_queue_delay(
+                    &entry,
+                    DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY,
+                )
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert!(entry.request_immediate());
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            waiter.await.expect("waiter task"),
+            DeferredIdleQueueWaitOutcome::Immediate,
+            "an immediate request must interrupt the normal two-second delay",
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn stale_notify_permit_does_not_interrupt_epoch_wait() {
+        let entry = Arc::new(DeferredIdleQueueEntry::new(false));
+        entry.notify.notify_one();
+        let waiter = tokio::spawn({
+            let entry = entry.clone();
+            async move {
+                wait_for_deferred_idle_queue_delay(
+                    &entry,
+                    DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY,
+                )
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !waiter.is_finished(),
+            "a stale Notify permit is not authority"
+        );
+
+        tokio::time::advance(DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY).await;
+        assert_eq!(
+            waiter.await.expect("waiter task"),
+            DeferredIdleQueueWaitOutcome::Deadline,
+        );
+    }
+
+    #[test]
+    fn kick_phase_burst_coalesces_without_arming_a_second_epoch() {
+        let entry = DeferredIdleQueueEntry::new(false);
+        entry.set_phase(DeferredIdleQueuePhase::Kicking);
+        for _ in 0..32 {
+            assert!(entry.request_immediate());
+        }
+        assert_eq!(
+            entry
+                .coalesced_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+            32,
+        );
+        assert_eq!(
+            entry
+                .requested_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "requests during the admitted kick must not schedule a duplicate kick",
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn backstop_wait_is_interrupted_by_immediate_request() {
+        let entry = Arc::new(DeferredIdleQueueEntry::new(false));
+        entry.set_phase(DeferredIdleQueuePhase::BackstopWait);
+        let waiter = tokio::spawn({
+            let entry = entry.clone();
+            async move {
+                wait_for_deferred_idle_queue_delay(&entry, DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY).await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(entry.request_immediate());
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            waiter.await.expect("waiter task"),
+            DeferredIdleQueueWaitOutcome::Immediate,
+        );
+    }
+
+    #[test]
+    fn requested_epoch_overflow_never_wraps_or_loses_future_wake() {
+        let entry = DeferredIdleQueueEntry::new(false);
+        entry
+            .requested_epoch
+            .store(u64::MAX - 1, std::sync::atomic::Ordering::Release);
+        entry
+            .observed_epoch
+            .store(u64::MAX - 1, std::sync::atomic::Ordering::Release);
+
+        assert!(entry.request_immediate());
+        assert_eq!(
+            entry
+                .requested_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+            u64::MAX,
+        );
+        entry
+            .observed_epoch
+            .store(u64::MAX, std::sync::atomic::Ordering::Release);
+        assert!(entry.request_immediate());
+        assert_eq!(
+            entry
+                .requested_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+            1,
+            "overflow reset must be explicit, never wrapping MAX to zero",
+        );
+        assert_eq!(
+            entry
+                .observed_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+            0,
+        );
+        assert!(entry.observe_pending_request());
+    }
+
+    #[test]
+    fn exact_release_does_not_remove_successor_entry() {
+        let shared = make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_024_282);
+        let old = Arc::new(DeferredIdleQueueEntry::new(false));
+        let successor = Arc::new(DeferredIdleQueueEntry::new(false));
+        shared
+            .restart
+            .deferred_hook_channels
+            .insert(channel_id, successor.clone());
+        shared
+            .restart
+            .deferred_hook_backlog
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        let mut guard = DeferredHookBacklogGuard {
+            shared: shared.clone(),
+            channel_id,
+            entry: old,
+            active: true,
+        };
+
+        assert!(!guard.release(), "stale owner must lose exact removal");
+        let current = shared
+            .restart
+            .deferred_hook_channels
+            .get(&channel_id)
+            .expect("successor remains");
+        assert!(Arc::ptr_eq(current.value(), &successor));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn panic_releases_exact_owner_and_rearms_slow_backstop() {
+        let _root = scoped_runtime_root();
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_024_283);
+        shared
+            .mailbox(channel_id)
+            .replace_queue(
+                vec![user_intervention(4_024_284, "panic recovery backlog")],
+                queue_persistence_context(&shared, &provider, channel_id),
+            )
+            .await;
+        PANIC_DEFERRED_IDLE_QUEUE_WORKER_FOR_TESTS
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        schedule_deferred_idle_queue_kickoff_immediate(
+            shared.clone(),
+            provider,
+            channel_id,
+            "panic-test",
+        );
+        for _ in 0..12 {
+            tokio::task::yield_now().await;
+        }
+
+        let current = shared
+            .restart
+            .deferred_hook_channels
+            .get(&channel_id)
+            .expect("panic recovery must install a successor backstop");
+        assert_eq!(current.phase(), DeferredIdleQueuePhase::BackstopWait);
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "panicked owner decrements before its single successor increments",
+        );
+    }
+
+    #[test]
+    fn shutdown_refuses_new_deferred_worker() {
+        let shared = make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_024_283);
+        shared
+            .restart
+            .shutting_down
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        schedule_deferred_idle_queue_kickoff_immediate(
+            shared.clone(),
+            ProviderKind::Claude,
+            channel_id,
+            "shutdown-test",
+        );
+
+        assert!(
+            !shared
+                .restart
+                .deferred_hook_channels
+                .contains_key(&channel_id)
+        );
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2226,7 +2617,14 @@ mod presleep_tests {
             let intervention = taken
                 .intervention
                 .unwrap_or_else(|| panic!("cycle {cycle}: the follow-up must still be promotable"));
-            mailbox_requeue_intervention_front(&shared, &provider, channel_id, intervention).await;
+            mailbox_restore_dequeued_head(
+                &shared,
+                &provider,
+                channel_id,
+                intervention,
+                taken.dispatch_lease.expect("dispatch lease"),
+            )
+            .await;
             arm_slow_idle_queue_backstop_if_queue_nonempty(
                 &shared,
                 &provider,
@@ -2379,7 +2777,14 @@ mod presleep_tests {
             .take_next_soft(queue_persistence_context(&shared, &provider, channel_id))
             .await;
         let intervention = taken.intervention.expect("promote once");
-        mailbox_requeue_intervention_front(&shared, &provider, channel_id, intervention).await;
+        mailbox_restore_dequeued_head(
+            &shared,
+            &provider,
+            channel_id,
+            intervention,
+            taken.dispatch_lease.expect("dispatch lease"),
+        )
+        .await;
 
         // Watcher-idle drain: the TUI reached Idle, so the drain soft-takes and
         // claims. It must start exactly once and leave the queue empty.
