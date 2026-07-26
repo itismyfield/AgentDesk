@@ -216,8 +216,11 @@ pub(in crate::services::discord) use prompt_builder::load_channel_recent_context
 use prompt_builder::{RecoveryContextManifestInput, build_system_prompt_with_manifest};
 pub(in crate::services::discord) use queue_dispatch::MailboxEnqueueOutcome;
 use queue_dispatch::{
-    MailboxTakeNextSoftOutcome, mailbox_abandon_unclaimed_dispatch_after_success,
-    mailbox_requeue_intervention_front, mailbox_restore_dequeued_head,
+    AutomaticQueueProgression, MailboxTakeNextSoftOutcome,
+    automatic_progression as automatic_queue_progression,
+    mailbox_abandon_unclaimed_dispatch_after_success, mailbox_requeue_intervention_front,
+    mailbox_restore_dequeued_head, mailbox_take_next_automatic_intervention,
+    mailbox_take_next_soft_intervention,
 };
 use recovery_engine::restore_inflight_turns;
 use restart_report::flush_restart_reports;
@@ -2833,6 +2836,10 @@ async fn idle_queue_channel_has_kickable_backlog(
     snapshot: &ChannelMailboxSnapshot,
 ) -> bool {
     idle_queue_snapshot_has_kickable_backlog(shared, provider, channel_id, snapshot)
+        && !matches!(
+            automatic_queue_progression(shared, provider, channel_id, snapshot),
+            AutomaticQueueProgression::BlockedByCappedRetries
+        )
 }
 
 async fn mailbox_try_start_turn(
@@ -3480,112 +3487,6 @@ fn maybe_schedule_catch_up_retry_after_queue_drain(
     true
 }
 
-async fn mailbox_take_next_soft_intervention(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-) -> MailboxTakeNextSoftOutcome {
-    loop {
-        let result: TakeNextSoftResult = shared
-            .mailbox(channel_id)
-            .take_next_soft(queue_persistence_context(shared, provider, channel_id))
-            .await;
-        let queue_len_after = result.queue_len_after;
-        apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
-        if let Some(error) = result.persistence_error {
-            tracing::error!(
-                provider = provider.as_str(),
-                channel_id = channel_id.get(),
-                error = %error,
-                "mailbox dequeue failed durable pending-queue persistence"
-            );
-            return MailboxTakeNextSoftOutcome {
-                intervention: None,
-                dispatch_lease: None,
-                has_more: result.has_more,
-                persistence_error: Some(error),
-            };
-        }
-        maybe_schedule_catch_up_retry_after_queue_drain(
-            shared,
-            provider,
-            channel_id,
-            queue_len_after,
-        );
-        let Some(intervention) = result.intervention else {
-            return MailboxTakeNextSoftOutcome {
-                intervention: None,
-                dispatch_lease: None,
-                has_more: result.has_more,
-                persistence_error: None,
-            };
-        };
-
-        if let Some(stale) =
-            stale_dispatch_turn_for_queued_intervention(shared.pg_pool.as_ref(), &intervention)
-                .await
-        {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ⏭ DISPATCH-GUARD: dropped queued terminal dispatch {} in channel {} (status={})",
-                stale.dispatch_id,
-                channel_id,
-                stale.status
-            );
-            let queue_exit_events = [QueueExitEvent {
-                intervention: intervention.clone(),
-                kind: stale.queue_exit_kind,
-            }];
-            apply_queue_exit_feedback(shared, channel_id, &queue_exit_events).await;
-            mailbox_abandon_pending_dispatch(shared, provider, channel_id, intervention.message_id)
-                .await;
-            drop(result.dispatch_lease);
-            continue;
-        }
-
-        return MailboxTakeNextSoftOutcome {
-            intervention: Some(intervention),
-            dispatch_lease: result.dispatch_lease,
-            has_more: result.has_more,
-            persistence_error: None,
-        };
-    }
-}
-
-#[cfg(test)]
-mod queued_dequeue_dispatch_guard_wiring_tests {
-    #[test]
-    fn dequeue_uses_preservation_aware_stale_dispatch_guard() {
-        let source = include_str!("mod.rs");
-        let function_start = source
-            .find("async fn mailbox_take_next_soft_intervention(")
-            .expect("mailbox dequeue helper exists");
-        let function_end = source[function_start..]
-            .find("\nasync fn idle_queue_take_next_soft_if_ready(")
-            .map(|offset| function_start + offset)
-            .expect("mailbox dequeue helper has a stable following function");
-        let function_body = &source[function_start..function_end];
-        let queued_guard = format!(
-            "{}{}",
-            "stale_dispatch_turn_for_queued_",
-            "intervention(shared.pg_pool.as_ref(), &intervention)"
-        );
-        let text_guard = format!(
-            "{}{}",
-            "stale_dispatch_turn_for_", "text(shared.pg_pool.as_ref(), &intervention.text)"
-        );
-
-        assert!(
-            function_body.contains(&queued_guard),
-            "dequeue must retain the preservation-aware queued dispatch guard"
-        );
-        assert!(
-            !function_body.contains(&text_guard),
-            "dequeue must not bypass queued preservation with the raw text guard"
-        );
-    }
-}
-
 async fn idle_queue_take_next_soft_if_ready(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -3647,7 +3548,7 @@ async fn idle_queue_take_next_soft_if_ready(
         return MailboxTakeNextSoftOutcome::default();
     }
 
-    mailbox_take_next_soft_intervention(shared, provider, channel_id).await
+    mailbox_take_next_automatic_intervention(shared, provider, channel_id).await
 }
 
 pub(in crate::services::discord) async fn mailbox_abandon_pending_dispatch(

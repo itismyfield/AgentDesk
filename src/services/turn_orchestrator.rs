@@ -660,14 +660,7 @@ pub(crate) struct CancelQueuedMessageResult {
     pub(crate) persistence_error: Option<String>,
 }
 
-pub(crate) struct TakeNextSoftResult {
-    pub(crate) intervention: Option<Intervention>,
-    pub(crate) dispatch_lease: Option<Arc<DispatchLease>>,
-    pub(crate) has_more: bool,
-    pub(crate) queue_len_after: usize,
-    pub(crate) queue_exit_events: Vec<QueueExitEvent>,
-    pub(crate) persistence_error: Option<String>,
-}
+pub(crate) use queue_cancellation::TakeNextSoftResult;
 
 pub(crate) struct RequeueInterventionResult {
     pub(crate) enqueued: bool,
@@ -1072,8 +1065,20 @@ impl ChannelMailboxHandle {
         &self,
         persistence: QueuePersistenceContext,
     ) -> TakeNextSoftResult {
+        self.take_soft_matching(persistence, None).await
+    }
+
+    pub(crate) async fn take_soft_matching(
+        &self,
+        persistence: QueuePersistenceContext,
+        primary_message_id: Option<MessageId>,
+    ) -> TakeNextSoftResult {
         self.request(
-            |reply| ChannelMailboxMsg::TakeNextSoft { persistence, reply },
+            |reply| ChannelMailboxMsg::TakeNextSoft {
+                persistence,
+                primary_message_id,
+                reply,
+            },
             TakeNextSoftResult {
                 intervention: None,
                 dispatch_lease: None,
@@ -1729,6 +1734,7 @@ enum ChannelMailboxMsg {
     },
     TakeNextSoft {
         persistence: QueuePersistenceContext,
+        primary_message_id: Option<MessageId>,
         reply: oneshot::Sender<TakeNextSoftResult>,
     },
     RequeueFront {
@@ -2617,7 +2623,11 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     }
                     let _ = reply.send(pending_result);
                 }
-                ChannelMailboxMsg::TakeNextSoft { persistence, reply } => {
+                ChannelMailboxMsg::TakeNextSoft {
+                    persistence,
+                    primary_message_id,
+                    reply,
+                } => {
                     state.last_persistence = Some(persistence.clone());
                     let _ = clear_stale_pending_dispatch_reservation(&mut state, channel_id);
                     if let Some(result) = reconcile_pending_dispatch_marker_before_take_next(
@@ -2629,7 +2639,10 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         continue;
                     }
                     let previous_queue = state.intervention_queue.clone();
-                    let next_result = dequeue_next_soft_intervention(&mut state.intervention_queue);
+                    let next_result = dequeue_next_soft_intervention(
+                        &mut state.intervention_queue,
+                        primary_message_id,
+                    );
                     let queue_len_after = state.intervention_queue.len();
                     // #3167 BLOCKER-2 — capture the dispatched head id BEFORE the
                     // intervention is moved into the reply, so we can reserve the
