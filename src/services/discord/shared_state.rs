@@ -662,7 +662,7 @@ pub(in crate::services) struct RestartLifecycle {
     /// most one fast/slow deferred drain task active; the task removes its entry
     /// when its backlog guard drops.
     pub(in crate::services) deferred_hook_channels:
-        dashmap::DashMap<ChannelId, Arc<tokio::sync::Notify>>,
+        dashmap::DashMap<ChannelId, Arc<super::queue_io::DeferredIdleQueueWake>>,
     /// When this provider started reconcile/recovery for the current boot.
     pub(in crate::services) recovery_started_at: std::time::Instant,
     /// Captured reconcile/recovery duration for the current boot in milliseconds.
