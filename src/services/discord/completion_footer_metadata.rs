@@ -110,8 +110,101 @@ fn context_percent_floor(used: u128, window: u128) -> Option<u8> {
 }
 
 fn sanitize_model_label(value: &str) -> Option<String> {
-    let value = sanitize_bounded_label(value, MAX_MODEL_LABEL_CHARS, true)?;
-    (!value.chars().all(|character| character.is_ascii_digit())).then_some(value)
+    if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
+        return None;
+    }
+
+    let (core, effort_suffix) = match value.strip_suffix("[1m]") {
+        Some(core) => (core, Some("[1m]")),
+        None => (value, None),
+    };
+    if core.is_empty() || core.contains(['[', ']']) {
+        return None;
+    }
+
+    let mut components = core.split('/');
+    let first = components.next()?;
+    let second = components.next();
+    if components.next().is_some()
+        || !is_safe_model_component(first, second.is_some(), false)
+        || second.is_some_and(|model| !is_safe_model_component(model, true, true))
+        || core.split('/').any(looks_like_fqdn)
+        || core.split('/').any(looks_like_uuid)
+        || contains_private_identity_label(core)
+        || looks_like_credential(core)
+        || second.is_some() && core.split('/').any(is_filesystem_path_component)
+        || core.split('/').any(|component| {
+            component
+                .chars()
+                .all(|character| character.is_ascii_digit())
+        })
+    {
+        return None;
+    }
+
+    Some(truncate_model_label(core, effort_suffix))
+}
+
+fn is_safe_model_component(value: &str, ascii_only: bool, allow_colon: bool) -> bool {
+    !value.is_empty()
+        && value.chars().next().is_some_and(char::is_alphanumeric)
+        && value.chars().last().is_some_and(char::is_alphanumeric)
+        && value.chars().all(|character| {
+            (!ascii_only && character.is_alphanumeric())
+                || character.is_ascii_alphanumeric()
+                || matches!(character, '-' | '_' | '.')
+                || (allow_colon && character == ':')
+        })
+        && !value.contains("..")
+        && !value.contains("::")
+}
+
+fn truncate_model_label(core: &str, effort_suffix: Option<&str>) -> String {
+    let suffix_chars = effort_suffix.map_or(0, |suffix| suffix.chars().count());
+    let core_limit = MAX_MODEL_LABEL_CHARS.saturating_sub(suffix_chars);
+    let mut rendered = core.chars().take(core_limit).collect::<String>();
+    while rendered
+        .chars()
+        .last()
+        .is_some_and(|character| !character.is_alphanumeric())
+    {
+        rendered.pop();
+    }
+    if let Some(suffix) = effort_suffix {
+        rendered.push_str(suffix);
+    }
+    rendered
+}
+
+fn looks_like_credential(value: &str) -> bool {
+    let lowercase = value.to_ascii_lowercase();
+    let compact = lowercase
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>();
+    ["sk-", "sk_", "ghp_", "github_pat_", "xoxb-", "xoxp-"]
+        .iter()
+        .any(|prefix| lowercase.starts_with(prefix) || lowercase.contains(&format!("/{prefix}")))
+        || [
+            "apikey",
+            "accesstoken",
+            "refreshtoken",
+            "password",
+            "passwd",
+            "credential",
+            "bearertoken",
+        ]
+        .iter()
+        .any(|marker| compact.contains(marker))
+}
+
+fn is_filesystem_path_component(value: &str) -> bool {
+    [
+        "bin", "boot", "dev", "etc", "home", "lib", "lib64", "opt", "private", "proc", "root",
+        "run", "sbin", "srv", "sys", "tmp", "usr", "users", "var", "windows",
+    ]
+    .iter()
+    .any(|component| value.eq_ignore_ascii_case(component))
 }
 
 fn sanitize_host_label(value: &str) -> Option<String> {
@@ -145,7 +238,7 @@ fn sanitize_bounded_label(value: &str, max_chars: usize, allow_model_dots: bool)
 }
 
 fn contains_private_identity_label(value: &str) -> bool {
-    value.split(['-', '.']).any(|component| {
+    value.split(['-', '.', '_', ':', '/']).any(|component| {
         ["pid", "session", "channel", "thread", "dispatch"]
             .iter()
             .any(|reserved| component.eq_ignore_ascii_case(reserved))
@@ -470,6 +563,29 @@ pub(in crate::services::discord) mod tests {
     }
 
     #[test]
+    fn completed_footer_renders_supported_runtime_model_labels_4860() {
+        for model in [
+            "sonnet[1m]",
+            "opus[1m]",
+            "routed-sonnet[1m]",
+            "anthropic/claude-sonnet-4-5",
+            "anthropic/claude-sonnet-4-6[1m]",
+            "openai/gpt-5.1",
+            "openrouter/google-gemini-2.5-pro:free",
+        ] {
+            let snapshot = CompletedTurnFooterSnapshot {
+                model: Some(model.to_string()),
+                ..Default::default()
+            };
+            assert_eq!(
+                render_completed_turn_footer(&snapshot).as_deref(),
+                Some(format!("-# {model}").as_str()),
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
     fn completed_footer_sanitizes_injection_paths_and_private_identity_4860() {
         for malicious in [
             "fable-5\n@everyone",
@@ -492,7 +608,33 @@ pub(in crate::services::discord) mod tests {
             };
             assert_eq!(render_completed_turn_footer(&snapshot), None, "{malicious}");
         }
-        for malicious_model in ["host.example.com", "12345"] {
+        for malicious_model in [
+            "host.example.com",
+            "12345",
+            "anthropic/12345",
+            "anthropic/claude/sonnet",
+            "../claude-sonnet-4-5",
+            "opt/models",
+            "Users/alice",
+            "C:/Windows",
+            "anthropic/.env",
+            "anthropic/../secret",
+            "anthropic/claude-sonnet-4-5]",
+            "anthropic-/claude-sonnet-4-5",
+            "anthropic/claude-sonnet-4-5-",
+            "anthropic/claude[sonnet]",
+            "anthropic/claude-sonnet-4-5[2m]",
+            "anthropic/claude-sonnet-4-5[1m][1m]",
+            "anthropic/@everyone",
+            "anthropic/**claude**",
+            "anthropic/claude\nsonnet",
+            "anthropic/claude\tsonnet",
+            "anthropic/host.example.com",
+            "anthropic/session-deadbeef",
+            "anthropic/api-key-secret",
+            "openai/sk-proj-secret",
+            "github/ghp_secret",
+        ] {
             let snapshot = CompletedTurnFooterSnapshot {
                 model: Some(malicious_model.to_string()),
                 ..Default::default()
