@@ -1109,6 +1109,7 @@ src/
 │   │   ├── status_panel_orphan_store.rs
 │   │   ├── status_panel_orphan_store_tests.rs
 │   │   ├── status_panel_singleton_store.rs
+│   │   ├── status_panel_transition_v2.rs
 │   │   ├── streaming_finalizer.rs
 │   │   ├── subagent_notification_card.rs
 │   │   ├── task_supervisor.rs
