@@ -5,7 +5,9 @@
 //! very cheap hot-path writes and quick inspection via
 //! `/api/analytics/observability`.
 //!
-//! The buffer is bounded (`MAX_EVENTS`) — the oldest event is dropped when full.
+//! The buffer is bounded (`MAX_EVENTS`) and retains the most recent history.
+//! Evicting history already confirmed on disk is normal retention; only
+//! overwriting an event that has not been confirmed flushed is counted as loss.
 //! A background task (spawned by `ensure_flusher`) flushes new events to
 //! `~/.adk/release/logs/observability-events.jsonl` every 60 seconds.
 
@@ -58,21 +60,38 @@ fn now_millis() -> i64 {
         .unwrap_or(0)
 }
 
-/// #2049 Finding 13: all three pieces of state (buffer + two indices) move
-/// under a single mutex. Splitting them across three locks left a window
-/// where `push` had advanced `buffer.len()` but not yet `next_logical_idx`,
-/// causing `drain_unflushed` to compute a wrong absolute start and silently
-/// skip the most recent event for an entire flush cycle.
+/// Buffer contents, sequence allocation, durability state, and loss counters
+/// move under one mutex so snapshots and acknowledgements observe one order.
+#[derive(Debug)]
+struct SequencedEvent {
+    sequence: u64,
+    event: StructuredEvent,
+    flushed: bool,
+}
+
 #[derive(Debug, Default)]
 struct EventLogInner {
-    buffer: VecDeque<StructuredEvent>,
-    next_logical_idx: u64,
-    last_flushed_idx: u64,
-    /// Total number of events evicted from the ring buffer because the
-    /// capacity was reached before `drain_unflushed` could observe them.
-    /// Exposed via `dropped_total()` so operators see ring-eviction loss
-    /// instead of having to grep tracing for the warn line.
+    buffer: VecDeque<SequencedEvent>,
+    next_sequence: u64,
+    /// Events overwritten before their sequence was confirmed durable.
     dropped_total: u64,
+    /// Confirmed-durable history removed solely to retain the newest events.
+    retention_evicted_total: u64,
+}
+
+/// Immutable flush snapshot. A caller may acknowledge `flushed_through` only
+/// after every event in `events` has been written and the writer has flushed.
+#[derive(Debug, Clone)]
+pub struct FlushBatch {
+    events: Vec<StructuredEvent>,
+    first_sequence: u64,
+    flushed_through: u64,
+}
+
+impl FlushBatch {
+    pub fn events(&self) -> &[StructuredEvent] {
+        &self.events
+    }
 }
 
 /// Bounded ring buffer for structured events.
@@ -97,19 +116,41 @@ impl EventLog {
         let Ok(mut inner) = self.inner.lock() else {
             return;
         };
-        if inner.buffer.len() == self.capacity {
-            inner.buffer.pop_front();
-            // #2049 Finding 13: warn on ring eviction so silent event loss is
-            // observable. Increment a counter exposed via `dropped_total()`.
+        self.push_locked(&mut inner, event);
+    }
+
+    fn push_locked(&self, inner: &mut EventLogInner, event: StructuredEvent) {
+        let Some(sequence) = inner.next_sequence.checked_add(1) else {
             inner.dropped_total = inner.dropped_total.saturating_add(1);
             tracing::warn!(
-                "[observability] event ring buffer full (capacity={}); dropping oldest event (total_dropped={})",
-                self.capacity,
+                "[observability] event sequence exhausted; dropping new event (total_dropped={})",
                 inner.dropped_total,
             );
+            return;
+        };
+        if inner.buffer.len() == self.capacity {
+            let evicted = inner
+                .buffer
+                .pop_front()
+                .expect("a full event ring must have a front entry");
+            if evicted.flushed {
+                inner.retention_evicted_total = inner.retention_evicted_total.saturating_add(1);
+            } else {
+                inner.dropped_total = inner.dropped_total.saturating_add(1);
+                tracing::warn!(
+                    sequence = evicted.sequence,
+                    capacity = self.capacity,
+                    total_dropped = inner.dropped_total,
+                    "[observability] event ring overwrote unflushed event",
+                );
+            }
         }
-        inner.buffer.push_back(event);
-        inner.next_logical_idx = inner.next_logical_idx.saturating_add(1);
+        inner.buffer.push_back(SequencedEvent {
+            sequence,
+            event,
+            flushed: false,
+        });
+        inner.next_sequence = sequence;
     }
 
     /// Return up to `limit` most recent events (newest last).
@@ -119,47 +160,79 @@ impl EventLog {
         };
         let len = inner.buffer.len();
         let take = limit.min(len);
-        inner.buffer.iter().skip(len - take).cloned().collect()
+        inner
+            .buffer
+            .iter()
+            .skip(len - take)
+            .map(|entry| entry.event.clone())
+            .collect()
     }
 
-    /// Drain any events that haven't been flushed to disk yet. Returns
-    /// `(events, new_flushed_idx)` — caller must advance via
-    /// `commit_flushed(new_flushed_idx)` on successful persistence so that the
-    /// same events aren't emitted twice in a subsequent cycle.
-    pub fn drain_unflushed(&self) -> (Vec<StructuredEvent>, u64) {
-        let Ok(inner) = self.inner.lock() else {
-            return (Vec::new(), 0);
-        };
-
-        // Buffer holds at most `capacity` most recent events. The absolute
-        // index of `buf.front()` is `next_logical_idx - buffer.len()`.
-        let next_idx = inner.next_logical_idx;
-        let buf_start_abs = next_idx.saturating_sub(inner.buffer.len() as u64);
-        let begin_abs = inner.last_flushed_idx.max(buf_start_abs);
-        if begin_abs >= next_idx {
-            return (Vec::new(), next_idx);
-        }
-        let skip = (begin_abs - buf_start_abs) as usize;
-        let events: Vec<StructuredEvent> = inner.buffer.iter().skip(skip).cloned().collect();
-        (events, next_idx)
+    /// Snapshot every retained event not yet confirmed flushed.
+    /// Concurrent pushes receive higher sequences and are excluded until the
+    /// next snapshot. Failed or partial writes must leave this batch unacked.
+    pub fn snapshot_unflushed(&self) -> Option<FlushBatch> {
+        let inner = self.inner.lock().ok()?;
+        let unflushed: Vec<&SequencedEvent> =
+            inner.buffer.iter().filter(|entry| !entry.flushed).collect();
+        let flushed_through = unflushed.last()?.sequence;
+        let first_sequence = unflushed.first()?.sequence;
+        Some(FlushBatch {
+            events: unflushed
+                .into_iter()
+                .map(|entry| entry.event.clone())
+                .collect(),
+            first_sequence,
+            flushed_through,
+        })
     }
 
-    pub fn commit_flushed(&self, new_idx: u64) {
+    /// Mark only the events represented by a completed immutable snapshot.
+    /// Duplicate or out-of-order acknowledgements are harmless, including
+    /// concurrent flushers that snapshot overlapping ranges.
+    pub fn acknowledge_flushed(&self, batch: &FlushBatch) {
         let Ok(mut inner) = self.inner.lock() else {
             return;
         };
-        if new_idx > inner.last_flushed_idx {
-            inner.last_flushed_idx = new_idx;
+        for entry in &mut inner.buffer {
+            if entry.sequence >= batch.first_sequence && entry.sequence <= batch.flushed_through {
+                entry.flushed = true;
+            }
         }
+    }
+
+    /// Compatibility metric: only events lost before JSONL confirmation.
+    #[allow(dead_code)]
+    pub fn dropped_total(&self) -> u64 {
+        self.inner.lock().map(|i| i.dropped_total).unwrap_or(0)
+    }
+
+    /// Low-cardinality count of normal confirmed-history retention eviction.
+    #[allow(dead_code)]
+    pub fn retention_evicted_total(&self) -> u64 {
+        self.inner
+            .lock()
+            .map(|i| i.retention_evicted_total)
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    fn with_next_sequence_for_test(capacity: usize, next_sequence: u64) -> Self {
+        let log = Self::new(capacity);
+        log.inner
+            .lock()
+            .expect("test event log mutex should be available")
+            .next_sequence = next_sequence;
+        log
     }
 
     #[cfg(test)]
     pub fn clear(&self) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.buffer.clear();
-            inner.next_logical_idx = 0;
-            inner.last_flushed_idx = 0;
+            inner.next_sequence = 0;
             inner.dropped_total = 0;
+            inner.retention_evicted_total = 0;
         }
     }
 }
@@ -221,26 +294,234 @@ pub fn flush_target_path() -> PathBuf {
         .join("observability-events.jsonl")
 }
 
-/// Append the given events to the JSONL target. Returns `Ok(())` on success.
+fn write_events<W: std::io::Write>(
+    writer: &mut W,
+    events: &[StructuredEvent],
+) -> std::io::Result<()> {
+    for ev in events {
+        let line = serde_json::to_string(ev)
+            .unwrap_or_else(|_| "{\"event_type\":\"_serialize_error\"}".to_string());
+        writer.write_all(line.as_bytes())?;
+        writer.write_all(b"\n")?;
+    }
+    writer.flush()
+}
+
+/// Append the given events to the JSONL target and flush the userspace writer.
+/// The caller may advance its durability watermark only after this returns.
 pub fn flush_events_to_disk(events: &[StructuredEvent]) -> std::io::Result<()> {
     use std::fs::{OpenOptions, create_dir_all};
-    use std::io::Write;
     if events.is_empty() {
         return Ok(());
     }
     let path = flush_target_path();
     if let Some(parent) = path.parent() {
-        let _ = create_dir_all(parent);
+        create_dir_all(parent)?;
     }
-    let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
-    for ev in events {
-        // Serialize in a way that never fails for sane Value payloads.
-        let line = serde_json::to_string(ev)
-            .unwrap_or_else(|_| "{\"event_type\":\"_serialize_error\"}".to_string());
-        f.write_all(line.as_bytes())?;
-        f.write_all(b"\n")?;
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    write_events(&mut file, events)
+}
+
+fn flush_once_with<F>(log: &EventLog, persist: F) -> std::io::Result<usize>
+where
+    F: FnOnce(&[StructuredEvent]) -> std::io::Result<()>,
+{
+    let Some(batch) = log.snapshot_unflushed() else {
+        return Ok(0);
+    };
+    persist(batch.events())?;
+    let count = batch.events().len();
+    log.acknowledge_flushed(&batch);
+    Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Write};
+    use std::sync::{Arc, Barrier};
+
+    use serde_json::json;
+
+    use super::*;
+
+    fn event(name: impl Into<String>) -> StructuredEvent {
+        StructuredEvent::new(name, None, None, json!({}))
     }
-    Ok(())
+
+    fn event_names(events: &[StructuredEvent]) -> Vec<&str> {
+        events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn confirmed_history_eviction_is_retention_not_loss() {
+        let log = EventLog::new(2);
+        log.push(event("e1"));
+        log.push(event("e2"));
+        assert_eq!(flush_once_with(&log, |_| Ok(())).unwrap(), 2);
+
+        log.push(event("e3"));
+
+        assert_eq!(log.dropped_total(), 0);
+        assert_eq!(log.retention_evicted_total(), 1);
+        assert_eq!(event_names(&log.recent(10)), vec!["e2", "e3"]);
+        assert_eq!(
+            event_names(log.snapshot_unflushed().unwrap().events()),
+            vec!["e3"]
+        );
+    }
+
+    #[test]
+    fn failed_flush_does_not_confirm_and_overwrite_counts_loss() {
+        let log = EventLog::new(2);
+        log.push(event("e1"));
+        log.push(event("e2"));
+
+        let error = flush_once_with(&log, |_| Err(io::Error::other("injected failure")))
+            .expect_err("failed persistence must be returned");
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        log.push(event("e3"));
+
+        assert_eq!(log.dropped_total(), 1);
+        assert_eq!(log.retention_evicted_total(), 0);
+        assert_eq!(
+            event_names(log.snapshot_unflushed().unwrap().events()),
+            vec!["e2", "e3"]
+        );
+    }
+
+    struct PartialWriter {
+        remaining: usize,
+        bytes: Vec<u8>,
+    }
+
+    impl Write for PartialWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "injected partial write",
+                ));
+            }
+            let written = self.remaining.min(buf.len());
+            self.bytes.extend_from_slice(&buf[..written]);
+            self.remaining -= written;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn partial_jsonl_write_does_not_advance_confirmation() {
+        let log = EventLog::new(2);
+        log.push(event("event-with-enough-bytes"));
+        let mut writer = PartialWriter {
+            remaining: 8,
+            bytes: Vec::new(),
+        };
+
+        assert!(flush_once_with(&log, |events| write_events(&mut writer, events)).is_err());
+        assert_eq!(
+            event_names(log.snapshot_unflushed().unwrap().events()),
+            vec!["event-with-enough-bytes"]
+        );
+    }
+
+    #[test]
+    fn concurrent_push_after_snapshot_is_not_acknowledged() {
+        let log = Arc::new(EventLog::new(4));
+        log.push(event("e1"));
+        let persisted = Arc::new(Barrier::new(2));
+        let allow_return = Arc::new(Barrier::new(2));
+        let worker_log = Arc::clone(&log);
+        let worker_persisted = Arc::clone(&persisted);
+        let worker_allow_return = Arc::clone(&allow_return);
+        let worker = std::thread::spawn(move || {
+            flush_once_with(&worker_log, |_| {
+                worker_persisted.wait();
+                worker_allow_return.wait();
+                Ok(())
+            })
+        });
+
+        persisted.wait();
+        log.push(event("e2"));
+        allow_return.wait();
+        assert_eq!(worker.join().unwrap().unwrap(), 1);
+
+        assert_eq!(
+            event_names(log.snapshot_unflushed().unwrap().events()),
+            vec!["e2"]
+        );
+    }
+
+    #[test]
+    fn overlapping_out_of_order_acknowledgements_mark_only_their_snapshots() {
+        let log = EventLog::new(4);
+        log.push(event("e1"));
+        let first = log.snapshot_unflushed().unwrap();
+        log.push(event("e2"));
+        let second = log.snapshot_unflushed().unwrap();
+
+        log.acknowledge_flushed(&second);
+        log.acknowledge_flushed(&first);
+        log.acknowledge_flushed(&second);
+        assert!(log.snapshot_unflushed().is_none());
+
+        log.push(event("e3"));
+        assert_eq!(
+            event_names(log.snapshot_unflushed().unwrap().events()),
+            vec!["e3"]
+        );
+    }
+
+    #[test]
+    fn restart_initializes_without_claiming_existing_jsonl_history() {
+        let previous = EventLog::new(2);
+        previous.push(event("before-restart"));
+        assert_eq!(flush_once_with(&previous, |_| Ok(())).unwrap(), 1);
+
+        let restarted = EventLog::new(2);
+        restarted.push(event("after-restart"));
+        assert_eq!(
+            event_names(restarted.snapshot_unflushed().unwrap().events()),
+            vec!["after-restart"]
+        );
+        assert_eq!(restarted.dropped_total(), 0);
+        assert_eq!(restarted.retention_evicted_total(), 0);
+    }
+
+    #[test]
+    fn sequence_exhaustion_drops_new_event_without_aliasing() {
+        let log = EventLog::with_next_sequence_for_test(2, u64::MAX - 1);
+        log.push(event("last-sequence"));
+        log.push(event("overflow"));
+
+        assert_eq!(event_names(&log.recent(10)), vec!["last-sequence"]);
+        assert_eq!(log.dropped_total(), 1);
+        assert_eq!(
+            event_names(log.snapshot_unflushed().unwrap().events()),
+            vec!["last-sequence"]
+        );
+    }
+
+    #[test]
+    fn mutation_guard_unacknowledged_success_still_counts_overwrite_as_loss() {
+        let log = EventLog::new(1);
+        log.push(event("e1"));
+        let batch = log.snapshot_unflushed().unwrap();
+        assert_eq!(event_names(batch.events()), vec!["e1"]);
+
+        log.push(event("e2"));
+
+        assert_eq!(log.dropped_total(), 1);
+        assert_eq!(log.retention_evicted_total(), 0);
+    }
 }
 
 /// #2049 Finding 1: Dead-letter JSONL dump for event batches that failed to
@@ -281,30 +562,25 @@ pub fn flush_dead_letter_jsonl<T: serde::Serialize>(
 
 /// Spawn the background flush task (idempotent).
 pub fn ensure_flusher() {
+    // Do not consume the one-shot start guard until a runtime can accept the
+    // task; a later initialization call must still be able to start flushing.
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
     if FLUSHER_STARTED.set(()).is_err() {
         return;
     }
     let log = global();
-    // If there's no runtime yet, try_spawn. If we're outside tokio context,
-    // silently skip — tests or short-lived tools don't require flushing.
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.spawn(async move {
-            let mut ticker = tokio::time::interval(FLUSH_INTERVAL);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            // Skip the first immediate tick.
+    handle.spawn(async move {
+        let mut ticker = tokio::time::interval(FLUSH_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Skip the first immediate tick.
+        ticker.tick().await;
+        loop {
             ticker.tick().await;
-            loop {
-                ticker.tick().await;
-                let (events, new_idx) = log.drain_unflushed();
-                if events.is_empty() {
-                    continue;
-                }
-                if let Err(error) = flush_events_to_disk(&events) {
-                    tracing::warn!(%error, "observability events flush failed");
-                } else {
-                    log.commit_flushed(new_idx);
-                }
+            if let Err(error) = flush_once_with(&log, flush_events_to_disk) {
+                tracing::warn!(%error, "observability events flush failed");
             }
-        });
-    }
+        }
+    });
 }
