@@ -437,7 +437,7 @@ fn prompt_footer_marker_uses_summary_only_without_changing_identity() {
 
     assert_eq!(
         event.background_completion_marker(),
-        "⚙️ Background complete · Background command \"CI\" completed (exit code 0)"
+        "⚙️ Background complete · Background command \"CI\" completed \\(exit code 0\\)"
     );
     assert!(
         !event

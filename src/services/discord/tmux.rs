@@ -1557,7 +1557,7 @@ mod suppressed_task_notification_marker_tests {
         assert_eq!(background_reason, "lifecycle.background_task_complete");
         assert_eq!(
             background,
-            "⚙️ Background complete · Background command \"CI\" completed (exit code 0)"
+            "⚙️ Background complete · Background command \"CI\" completed \\(exit code 0\\)"
         );
 
         let replay_at_new_offset = suppressed_task_notification_marker(

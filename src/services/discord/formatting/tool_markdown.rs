@@ -217,6 +217,40 @@ pub(in crate::services::discord) fn extract_skill_description(content: &str) -> 
     "Custom skill".to_string()
 }
 
+/// Escape untrusted text so Discord renders it as readable, non-clickable plain text.
+///
+/// Markdown punctuation is backslash-escaped without parsing nested syntax.
+/// Zero-width separators after `@`, `:`, and `.` additionally break mentions
+/// and URI schemes/hosts, covering links/autolinks, spoilers, headings/quotes/
+/// lists, emphasis/strike, and code. Outbound lifecycle delivery independently
+/// disables every allowed-mention class.
+pub(in crate::services::discord) fn escape_discord_plain_text(s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '@' => {
+                escaped.push(ch);
+                escaped.push('\u{200B}');
+            }
+            ':' => {
+                escaped.push(ch);
+                escaped.push('\u{200B}');
+            }
+            '.' => {
+                escaped.push(ch);
+                escaped.push('\u{200B}');
+            }
+            '\\' | '`' | '*' | '_' | '~' | '|' | '>' | '#' | '-' | '+' | '!' | '[' | ']' | '('
+            | ')' | '<' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 /// Truncate a string to max_len bytes at a safe UTF-8 and line boundary
 /// Make a string safe to embed inside a Discord triple-backtick code fence.
 ///

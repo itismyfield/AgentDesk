@@ -235,7 +235,8 @@
   - `src/services/discord/tmux.rs` (frozen giant surface; #4912 routes the
     suppressed background-completion summary through the shared compact marker
     formatter while preserving the existing semantic event/session key and the
-    monitor/subagent branches; test-only #4277 re-exports
+    monitor/subagent branches; the exact-head repair updates only the pinned
+    escaped plain-text expectation, not watcher behavior; test-only #4277 re-exports
     the watcher delivery-lease key helper so session-sink production-entry tests
     prove bidirectional contention on the same idle JSONL range; -9 from the #4804
     Windows-compile hotfix moving `footer_background_marker_session_key` into
