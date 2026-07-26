@@ -137,6 +137,12 @@ pub(super) fn discord_status_panel_singletons_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_status_panel_singletons"))
 }
 
+/// #4891 Slice 1: dormant substrate storage root. No production caller binds,
+/// deletes, or creates a status panel through this path.
+pub(super) fn discord_status_panel_transition_v2_root() -> Option<PathBuf> {
+    runtime_root().map(|root| root.join("discord_status_panel_transition_v2"))
+}
+
 /// #4888: durable per-input busy-notice binding and aggregate retry budget.
 pub(super) fn discord_busy_followup_retries_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_busy_followup_retries"))
