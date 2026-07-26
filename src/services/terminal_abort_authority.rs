@@ -305,10 +305,10 @@ pub(crate) fn reduce_auth_clear_obligation(
     current: &AuthClearObligation,
     outcome: AuthClearOutcome,
 ) -> AuthClearReduction {
-    let attempted = match outcome {
+    let attempted = match &outcome {
         AuthClearOutcome::Cleared(attempt)
         | AuthClearOutcome::PersistFailed(attempt)
-        | AuthClearOutcome::Stale(attempt) => attempt,
+        | AuthClearOutcome::Stale(attempt) => attempt.clone(),
     };
 
     let AuthClearObligation::Pending(expected) = current else {
