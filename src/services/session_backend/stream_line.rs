@@ -62,6 +62,14 @@ pub fn process_stream_line(
         return true;
     }
 
+    match crate::services::task_completion_v1::admit_raw(line) {
+        crate::services::task_completion_v1::TaskCompletionV1Admission::Legacy => {}
+        crate::services::task_completion_v1::TaskCompletionV1Admission::TypedCandidate(_)
+        | crate::services::task_completion_v1::TaskCompletionV1Admission::Rejected(_) => {
+            return true;
+        }
+    }
+
     let json = match serde_json::from_str::<Value>(line) {
         Ok(json) => json,
         Err(_) => return true,
@@ -719,6 +727,56 @@ mod tests {
             !forwarded.is_empty(),
             "turn_duration must still reach the bridge as StatusUpdate telemetry"
         );
+    }
+
+    #[test]
+    fn typed_completion_shadow_has_zero_stream_authority_even_on_replay() {
+        let (sender, receiver) = mpsc::channel();
+        let mut state = StreamLineState::new();
+        let typed =
+            crate::services::task_completion_v1::TaskCompletionV1::codex_background_completed()
+                .encode_canonical()
+                .unwrap();
+
+        for _ in 0..4 {
+            assert!(process_stream_line(&typed, &sender, &mut state));
+        }
+
+        assert!(receiver.try_iter().next().is_none());
+        assert_eq!(state, StreamLineState::new());
+    }
+
+    #[test]
+    fn rejected_candidate_is_consumed_without_legacy_downgrade() {
+        let (sender, receiver) = mpsc::channel();
+        let mut state = StreamLineState::new();
+        let rejected = r#"{"type":"system","subtype":"task_completion","schema":"task_completion.v1","producer":"agentdesk.codex_tmux_wrapper","kind":"background","status":"completed","task_id":"codex-background-event","tool_use_id":null,"summary":"must not downgrade"}"#;
+
+        assert!(process_stream_line(rejected, &sender, &mut state));
+        assert!(receiver.try_iter().next().is_none());
+        assert_eq!(state, StreamLineState::new());
+    }
+
+    #[test]
+    fn legacy_plus_typed_emits_one_legacy_notification_only() {
+        let (sender, receiver) = mpsc::channel();
+        let mut state = StreamLineState::new();
+        let legacy = r#"{"type":"system","subtype":"task_notification","task_id":"codex-background-event","status":"completed","summary":"CI green","task_notification_kind":"background"}"#;
+        let typed =
+            crate::services::task_completion_v1::TaskCompletionV1::codex_background_completed()
+                .encode_canonical()
+                .unwrap();
+
+        assert!(process_stream_line(legacy, &sender, &mut state));
+        assert!(process_stream_line(&typed, &sender, &mut state));
+
+        let messages: Vec<_> = receiver.try_iter().collect();
+        assert!(matches!(
+            messages.as_slice(),
+            [StreamMessage::TaskNotification { summary, .. }] if summary == "CI green"
+        ));
+        assert_eq!(state.forwarded_message_count, 1);
+        assert!(state.final_result.is_none());
     }
 
     #[test]

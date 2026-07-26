@@ -63,6 +63,7 @@ dependencies = [
  "glob",
  "hex",
  "hound",
+ "icu_properties",
  "json5",
  "libc",
  "notify",
