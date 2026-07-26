@@ -119,6 +119,35 @@ async fn target_retirement_is_a_permanent_admission_tombstone_pg() {
     let (db, pool) = pool().await;
     let cleanup_target = target(&pool, "target-tombstone").await;
     assert!(
+        sqlx::query(
+            "UPDATE runtime_cleanup_targets SET channel_id = 'forged',
+             operation_high_watermark = operation_high_watermark + 1
+             WHERE target_id = $1",
+        )
+        .bind(cleanup_target.target_id)
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    assert!(
+        sqlx::query("DELETE FROM runtime_cleanup_targets WHERE target_id = $1")
+            .bind(cleanup_target.target_id)
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    let duplicate = sqlx::query(
+        "INSERT INTO runtime_cleanup_targets
+         (target_id, identity_kind, provider, discord_token_hash, channel_id,
+          operation_high_watermark)
+         VALUES ($1, 'discord_channel', 'claude', 'discord_0123456789abcdef',
+                 'target-tombstone', 0)",
+    )
+    .bind(Uuid::new_v4())
+    .execute(&pool)
+    .await;
+    assert!(duplicate.is_err());
+    assert!(
         retire_target(&pool, cleanup_target.target_id)
             .await
             .unwrap()
@@ -350,6 +379,19 @@ async fn capability_binding_expiry_replay_conflict_and_unknown_are_typed_pg() {
             .unwrap(),
         CapabilityUse::NeedsReconcile { request_id }
     );
+    let arbitrary_secret = [0_u8; 32];
+    assert_eq!(
+        replay_capability_request(
+            &pool,
+            &arbitrary_secret,
+            binding.clone(),
+            request_id,
+            fingerprint,
+        )
+        .await
+        .unwrap(),
+        CapabilityUse::BindingMismatch
+    );
     assert_eq!(
         begin_capability_request(&pool, &secret, binding.clone(), fingerprint)
             .await
@@ -373,10 +415,21 @@ async fn capability_binding_expiry_replay_conflict_and_unknown_are_typed_pg() {
             .unwrap(),
         CapabilityUse::BindingMismatch
     );
-    assert!(
-        record_receipt(&pool, request_id, ReceiptState::Applied, Some([9_u8; 32]))
-            .await
-            .unwrap()
+    assert_eq!(
+        record_receipt(
+            &pool,
+            &secret,
+            binding.clone(),
+            request_id,
+            fingerprint,
+            "worker",
+            attempt,
+            ReceiptState::Applied,
+            Some([9_u8; 32]),
+        )
+        .await
+        .unwrap(),
+        ReceiptWrite::Recorded
     );
     assert_eq!(
         replay_capability_request(&pool, &secret, binding.clone(), request_id, fingerprint)
@@ -522,10 +575,49 @@ async fn lost_response_replay_after_lease_expiry_needs_reconcile_pg() {
             .unwrap(),
         CapabilityUse::NeedsReconcile { request_id }
     );
-    assert!(
-        record_receipt(&pool, request_id, ReceiptState::Applied, None)
-            .await
-            .unwrap()
+    assert_eq!(
+        record_receipt(
+            &pool,
+            &secret,
+            binding.clone(),
+            request_id,
+            [2; 32],
+            "worker",
+            attempt,
+            ReceiptState::Applied,
+            None,
+        )
+        .await
+        .unwrap(),
+        ReceiptWrite::Expired
+    );
+    let takeover = claim_operation(
+        &pool,
+        operation.operation_id,
+        "worker-b",
+        Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+    let takeover_attempt = match takeover {
+        ClaimResult::Claimed { attempt_epoch, .. } => attempt_epoch,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        record_receipt(
+            &pool,
+            &secret,
+            binding.clone(),
+            request_id,
+            [2; 32],
+            "worker-b",
+            takeover_attempt,
+            ReceiptState::Applied,
+            None,
+        )
+        .await
+        .unwrap(),
+        ReceiptWrite::Recorded
     );
     assert_eq!(
         replay_capability_request(&pool, &secret, binding, request_id, [2; 32])
@@ -535,6 +627,142 @@ async fn lost_response_replay_after_lease_expiry_needs_reconcile_pg() {
             request_id,
             state: ReceiptState::Applied
         }
+    );
+    close(db, pool).await;
+}
+
+#[tokio::test]
+async fn receipt_state_graph_requires_current_reconciliation_authority_pg() {
+    let (db, pool) = pool().await;
+    let (target, operation) = operation(&pool, "receipt-state").await;
+    let first = claim_operation(
+        &pool,
+        operation.operation_id,
+        "worker-a",
+        Duration::milliseconds(250),
+    )
+    .await
+    .unwrap();
+    let (first_attempt, first_expiry) = match first {
+        ClaimResult::Claimed {
+            attempt_epoch,
+            expires_at,
+        } => (attempt_epoch, expires_at),
+        other => panic!("{other:?}"),
+    };
+    let (intent_id, idempotency_identity) = intent(&pool, operation.operation_id).await;
+    let binding = CapabilityBinding {
+        capability_id: Uuid::new_v4(),
+        target_id: target.target_id,
+        operation_id: operation.operation_id,
+        intent_id,
+        attempt_epoch: first_attempt,
+        audience: "receipt-state",
+        claim_owner: "worker-a",
+        expires_at: first_expiry - Duration::milliseconds(25),
+        idempotency_identity,
+    };
+    let secret = issue_capability(&pool, binding.clone()).await.unwrap();
+    let request_id = match begin_capability_request(&pool, &secret, binding.clone(), [6; 32])
+        .await
+        .unwrap()
+    {
+        CapabilityUse::Accepted { request_id } => request_id,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        record_receipt(
+            &pool,
+            &secret,
+            binding.clone(),
+            request_id,
+            [6; 32],
+            "worker-a",
+            first_attempt,
+            ReceiptState::Unknown,
+            None,
+        )
+        .await
+        .unwrap(),
+        ReceiptWrite::Recorded
+    );
+    assert!(
+        sqlx::query(
+            "UPDATE runtime_cleanup_receipts SET receipt_state = 'applied'
+             WHERE request_id = $1",
+        )
+        .bind(request_id)
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    assert!(
+        sqlx::query("DELETE FROM runtime_cleanup_receipts WHERE request_id = $1")
+            .bind(request_id)
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(275)).await;
+    let takeover = claim_operation(
+        &pool,
+        operation.operation_id,
+        "worker-b",
+        Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+    let takeover_attempt = match takeover {
+        ClaimResult::Claimed { attempt_epoch, .. } => attempt_epoch,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        record_receipt(
+            &pool,
+            &secret,
+            binding.clone(),
+            request_id,
+            [6; 32],
+            "worker-a",
+            first_attempt,
+            ReceiptState::Applied,
+            Some([7; 32]),
+        )
+        .await
+        .unwrap(),
+        ReceiptWrite::LostOwnership
+    );
+    assert_eq!(
+        record_receipt(
+            &pool,
+            &secret,
+            binding.clone(),
+            request_id,
+            [6; 32],
+            "worker-b",
+            takeover_attempt,
+            ReceiptState::Applied,
+            Some([7; 32]),
+        )
+        .await
+        .unwrap(),
+        ReceiptWrite::Reconciled
+    );
+    assert_eq!(
+        record_receipt(
+            &pool,
+            &secret,
+            binding,
+            request_id,
+            [6; 32],
+            "worker-b",
+            takeover_attempt,
+            ReceiptState::NotApplied,
+            Some([8; 32]),
+        )
+        .await
+        .unwrap(),
+        ReceiptWrite::Conflict
     );
     close(db, pool).await;
 }
@@ -592,9 +820,19 @@ async fn bounded_capability_gc_preserves_active_and_unresolved_pg() {
             CapabilityUse::Accepted { request_id } => request_id,
             other => panic!("{other:?}"),
         };
-    record_receipt(&pool, unresolved_request, ReceiptState::Unknown, None)
-        .await
-        .unwrap();
+    record_receipt(
+        &pool,
+        &secrets[1],
+        bindings[1].clone(),
+        unresolved_request,
+        [4; 32],
+        "worker",
+        attempt,
+        ReceiptState::Unknown,
+        None,
+    )
+    .await
+    .unwrap();
     let terminal_request =
         match begin_capability_request(&pool, &secrets[2], bindings[2].clone(), [5; 32])
             .await
@@ -603,9 +841,19 @@ async fn bounded_capability_gc_preserves_active_and_unresolved_pg() {
             CapabilityUse::Accepted { request_id } => request_id,
             other => panic!("{other:?}"),
         };
-    record_receipt(&pool, terminal_request, ReceiptState::Applied, None)
-        .await
-        .unwrap();
+    record_receipt(
+        &pool,
+        &secrets[2],
+        bindings[2].clone(),
+        terminal_request,
+        [5; 32],
+        "worker",
+        attempt,
+        ReceiptState::Applied,
+        None,
+    )
+    .await
+    .unwrap();
     sqlx::query(
         "UPDATE runtime_cleanup_capabilities
          SET expires_at = clock_timestamp() - INTERVAL '31 days'
@@ -627,6 +875,77 @@ async fn bounded_capability_gc_preserves_active_and_unresolved_pg() {
     assert_eq!(gc_expired_capabilities(&pool, 10).await.unwrap(), 0);
     assert!(gc_expired_capabilities(&pool, 0).await.is_err());
     assert!(gc_expired_capabilities(&pool, 1001).await.is_err());
+    close(db, pool).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn semantic_idempotency_concurrent_request_ids_converge_pg() {
+    let (db, pool) = pool().await;
+    let (target, operation) = operation(&pool, "semantic-race").await;
+    let claimed = claim_operation(
+        &pool,
+        operation.operation_id,
+        "worker",
+        Duration::seconds(3),
+    )
+    .await
+    .unwrap();
+    let attempt = match claimed {
+        ClaimResult::Claimed { attempt_epoch, .. } => attempt_epoch,
+        other => panic!("{other:?}"),
+    };
+    let (intent_id, idempotency_identity) = intent(&pool, operation.operation_id).await;
+    let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let binding = CapabilityBinding {
+        capability_id: Uuid::new_v4(),
+        target_id: target.target_id,
+        operation_id: operation.operation_id,
+        intent_id,
+        attempt_epoch: attempt,
+        audience: "semantic-race",
+        claim_owner: "worker",
+        expires_at: now + Duration::seconds(2),
+        idempotency_identity,
+    };
+    let secret = issue_capability(&pool, binding.clone()).await.unwrap();
+    let left = begin_capability_request(&pool, &secret, binding.clone(), [8; 32]);
+    let right = begin_capability_request(&pool, &secret, binding.clone(), [8; 32]);
+    let (left, right) = tokio::join!(left, right);
+    let left = left.unwrap();
+    let right = right.unwrap();
+    let request_id = match (&left, &right) {
+        (
+            CapabilityUse::Accepted { request_id },
+            CapabilityUse::Replay {
+                request_id: replay, ..
+            },
+        )
+        | (
+            CapabilityUse::Replay {
+                request_id: replay, ..
+            },
+            CapabilityUse::Accepted { request_id },
+        ) => {
+            assert_eq!(request_id, replay);
+            *request_id
+        }
+        other => panic!("{other:?}"),
+    };
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM runtime_cleanup_request_identities
+         WHERE operation_id = $1 AND intent_id = $2 AND idempotency_identity = $3",
+    )
+    .bind(operation.operation_id)
+    .bind(intent_id)
+    .bind(idempotency_identity)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    assert_ne!(request_id, Uuid::nil());
     close(db, pool).await;
 }
 
@@ -763,9 +1082,19 @@ async fn receipt_gc_preserves_request_target_and_locator_authority_pg() {
         CapabilityUse::Accepted { request_id } => request_id,
         other => panic!("{other:?}"),
     };
-    record_receipt(&pool, request_id, ReceiptState::Unknown, None)
-        .await
-        .unwrap();
+    record_receipt(
+        &pool,
+        &secret,
+        binding.clone(),
+        request_id,
+        [1; 32],
+        "worker",
+        epoch,
+        ReceiptState::Unknown,
+        None,
+    )
+    .await
+    .unwrap();
     sqlx::query(
         "ALTER TABLE runtime_cleanup_receipts
          DROP CONSTRAINT runtime_cleanup_receipts_check",
@@ -773,6 +1102,10 @@ async fn receipt_gc_preserves_request_target_and_locator_authority_pg() {
     .execute(&pool)
     .await
     .unwrap();
+    sqlx::query("DROP TRIGGER trg_runtime_cleanup_receipt_guard ON runtime_cleanup_receipts")
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query(
         "UPDATE runtime_cleanup_receipts
          SET retain_until = clock_timestamp() - INTERVAL '1 second'",

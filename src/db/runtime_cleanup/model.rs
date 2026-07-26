@@ -129,6 +129,18 @@ pub(crate) enum CapabilityUse {
     NotFound,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ReceiptWrite {
+    Recorded,
+    Reconciled,
+    Replay { state: ReceiptState },
+    Conflict,
+    BindingMismatch,
+    Expired,
+    LostOwnership,
+    NotFound,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct CapabilityBinding<'a> {
     pub(crate) capability_id: Uuid,

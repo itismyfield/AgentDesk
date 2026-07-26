@@ -17,6 +17,34 @@ CREATE TABLE runtime_cleanup_targets (
     UNIQUE (identity_kind, provider, discord_token_hash, channel_id)
 );
 
+CREATE OR REPLACE FUNCTION agentdesk_guard_runtime_cleanup_target()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE authority TEXT := current_setting('agentdesk.cleanup_authority', TRUE);
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'runtime cleanup targets are permanent authority';
+    END IF;
+    IF NEW.target_id IS DISTINCT FROM OLD.target_id
+       OR NEW.identity_kind IS DISTINCT FROM OLD.identity_kind
+       OR NEW.provider IS DISTINCT FROM OLD.provider
+       OR NEW.discord_token_hash IS DISTINCT FROM OLD.discord_token_hash
+       OR NEW.channel_id IS DISTINCT FROM OLD.channel_id
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at
+       OR NEW.operation_high_watermark < OLD.operation_high_watermark
+       OR (OLD.retired_at IS NOT NULL AND NEW.retired_at IS DISTINCT FROM OLD.retired_at)
+       OR (NEW.operation_high_watermark > OLD.operation_high_watermark
+           AND authority <> FORMAT('operation:%s', OLD.target_id))
+       OR (OLD.retired_at IS NULL AND NEW.retired_at IS NOT NULL
+           AND authority <> FORMAT('retire:%s', OLD.target_id)) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'runtime cleanup target authority is immutable or API-governed';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER trg_runtime_cleanup_target_guard
+BEFORE UPDATE OR DELETE ON runtime_cleanup_targets
+FOR EACH ROW EXECUTE FUNCTION agentdesk_guard_runtime_cleanup_target();
+
 CREATE TABLE runtime_cleanup_target_session_bindings (
     session_id BIGINT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
     target_id UUID NOT NULL REFERENCES runtime_cleanup_targets(target_id) ON DELETE RESTRICT,
@@ -169,13 +197,20 @@ CREATE TABLE runtime_cleanup_capabilities (
 -- a separate row so 30-day GC can never make the UUID reusable.
 CREATE TABLE runtime_cleanup_request_identities (
     request_id UUID PRIMARY KEY,
+    target_id UUID NOT NULL REFERENCES runtime_cleanup_targets(target_id) ON DELETE RESTRICT,
     operation_id UUID NOT NULL REFERENCES runtime_cleanup_operations(operation_id) ON DELETE RESTRICT,
     intent_id UUID NOT NULL,
     idempotency_identity UUID NOT NULL,
+    capability_id UUID NOT NULL,
+    capability_binding_digest BYTEA NOT NULL CHECK (OCTET_LENGTH(capability_binding_digest) = 32),
+    audience TEXT NOT NULL CHECK (BTRIM(audience) <> ''),
+    accepted_attempt_epoch BIGINT NOT NULL CHECK (accepted_attempt_epoch > 0),
+    accepted_claim_owner TEXT NOT NULL CHECK (BTRIM(accepted_claim_owner) <> ''),
     request_fingerprint BYTEA NOT NULL CHECK (OCTET_LENGTH(request_fingerprint) = 32),
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    FOREIGN KEY (operation_id, intent_id)
-        REFERENCES runtime_cleanup_intents(operation_id, intent_id) ON DELETE RESTRICT,
+    FOREIGN KEY (operation_id, intent_id, target_id, idempotency_identity)
+        REFERENCES runtime_cleanup_intents(operation_id, intent_id, target_id, idempotency_identity)
+        ON DELETE RESTRICT,
     UNIQUE (operation_id, intent_id, idempotency_identity)
 );
 
@@ -183,10 +218,37 @@ CREATE TABLE runtime_cleanup_receipts (
     request_id UUID PRIMARY KEY REFERENCES runtime_cleanup_request_identities(request_id) ON DELETE RESTRICT,
     receipt_state TEXT NOT NULL CHECK (receipt_state IN ('applied', 'not_applied', 'unknown')),
     result_fingerprint BYTEA CHECK (result_fingerprint IS NULL OR OCTET_LENGTH(result_fingerprint) = 32),
+    authority_attempt_epoch BIGINT NOT NULL CHECK (authority_attempt_epoch > 0),
+    authority_claim_owner TEXT NOT NULL CHECK (BTRIM(authority_claim_owner) <> ''),
     terminal_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     retain_until TIMESTAMPTZ NOT NULL,
     CHECK (retain_until >= terminal_at + INTERVAL '30 days')
 );
+
+CREATE OR REPLACE FUNCTION agentdesk_guard_runtime_cleanup_receipt()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE authority TEXT := current_setting('agentdesk.cleanup_authority', TRUE);
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        IF authority = 'receipt_gc' THEN
+            RETURN OLD;
+        END IF;
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'runtime cleanup receipts are API-governed';
+    END IF;
+    IF authority <> 'receipt'
+       OR NEW.request_id IS DISTINCT FROM OLD.request_id
+       OR NEW.terminal_at IS DISTINCT FROM OLD.terminal_at
+       OR NOT (OLD.receipt_state = 'unknown'
+               AND NEW.receipt_state IN ('applied', 'not_applied')
+               AND NEW.authority_attempt_epoch > OLD.authority_attempt_epoch) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'illegal runtime cleanup receipt transition';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER trg_runtime_cleanup_receipt_guard
+BEFORE UPDATE OR DELETE ON runtime_cleanup_receipts
+FOR EACH ROW EXECUTE FUNCTION agentdesk_guard_runtime_cleanup_receipt();
 
 CREATE OR REPLACE FUNCTION agentdesk_guard_runtime_cleanup_operation()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
@@ -240,6 +302,7 @@ BEGIN
     IF batch_size < 1 OR batch_size > 1000 THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'batch_size must be between 1 and 1000';
     END IF;
+    PERFORM set_config('agentdesk.cleanup_authority', 'receipt_gc', TRUE);
     WITH doomed AS (
         SELECT request_id FROM public.runtime_cleanup_receipts
         WHERE retain_until <= clock_timestamp()

@@ -80,6 +80,7 @@ pub(crate) async fn converge_target(
 pub(crate) async fn retire_target(pool: &PgPool, target_id: Uuid) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
     lock_target(&mut tx, target_id).await?;
+    set_authority(&mut tx, &format!("retire:{target_id}")).await?;
     let changed = sqlx::query(
         "UPDATE runtime_cleanup_targets SET retired_at = clock_timestamp()
          WHERE target_id = $1 AND retired_at IS NULL",
@@ -216,6 +217,7 @@ pub(crate) async fn create_operation(
 ) -> Result<CreatedOperation, sqlx::Error> {
     let mut tx = pool.begin().await?;
     lock_target(&mut tx, target_id).await?;
+    set_authority(&mut tx, &format!("operation:{target_id}")).await?;
     let operation_epoch: i64 = sqlx::query_scalar(
         "UPDATE runtime_cleanup_targets
          SET operation_high_watermark = operation_high_watermark + 1
@@ -499,18 +501,29 @@ async fn begin_or_replay_capability_request(
     let mut tx = pool.begin().await?;
     lock_request(&mut tx, request_id).await?;
     if replay_only {
+        let replay_hash = Sha256::digest(secret).to_vec();
+        let replay_binding_digest = capability_binding_digest(&binding, &replay_hash);
         if let Some(existing) = sqlx::query(
-            "SELECT operation_id, intent_id, idempotency_identity, request_fingerprint
+            "SELECT target_id, operation_id, intent_id, idempotency_identity,
+                    capability_id, capability_binding_digest, audience,
+                    accepted_attempt_epoch, accepted_claim_owner, request_fingerprint
              FROM runtime_cleanup_request_identities WHERE request_id = $1",
         )
         .bind(request_id)
         .fetch_optional(&mut *tx)
         .await?
         {
-            if existing.try_get::<Uuid, _>("operation_id")? != binding.operation_id
+            if existing.try_get::<Uuid, _>("target_id")? != binding.target_id
+                || existing.try_get::<Uuid, _>("operation_id")? != binding.operation_id
                 || existing.try_get::<Uuid, _>("intent_id")? != binding.intent_id
                 || existing.try_get::<Uuid, _>("idempotency_identity")?
                     != binding.idempotency_identity
+                || existing.try_get::<Uuid, _>("capability_id")? != binding.capability_id
+                || existing.try_get::<Vec<u8>, _>("capability_binding_digest")?
+                    != replay_binding_digest
+                || existing.try_get::<String, _>("audience")? != binding.audience
+                || existing.try_get::<i64, _>("accepted_attempt_epoch")? != binding.attempt_epoch
+                || existing.try_get::<String, _>("accepted_claim_owner")? != binding.claim_owner
             {
                 tx.commit().await?;
                 return Ok(CapabilityUse::BindingMismatch);
@@ -546,6 +559,7 @@ async fn begin_or_replay_capability_request(
         .fetch_one(&mut *tx)
         .await?;
     let capability_hash = Sha256::digest(secret).to_vec();
+    let binding_digest = capability_binding_digest(&binding, &capability_hash);
     let Some(row) = sqlx::query(
         "SELECT c.target_id, c.operation_id, c.intent_id, c.attempt_epoch,
                 c.audience, c.claim_owner, c.expires_at, c.idempotency_identity,
@@ -661,13 +675,21 @@ async fn begin_or_replay_capability_request(
     }
     sqlx::query(
         "INSERT INTO runtime_cleanup_request_identities
-         (request_id, operation_id, intent_id, idempotency_identity, request_fingerprint)
-         VALUES ($1,$2,$3,$4,$5)",
+         (request_id, target_id, operation_id, intent_id, idempotency_identity,
+          capability_id, capability_binding_digest, audience, accepted_attempt_epoch,
+          accepted_claim_owner, request_fingerprint)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
     )
     .bind(request_id)
+    .bind(binding.target_id)
     .bind(binding.operation_id)
     .bind(binding.intent_id)
     .bind(binding.idempotency_identity)
+    .bind(binding.capability_id)
+    .bind(binding_digest)
+    .bind(binding.audience)
+    .bind(binding.attempt_epoch)
+    .bind(binding.claim_owner)
     .bind(request_fingerprint.to_vec())
     .execute(&mut *tx)
     .await?;
@@ -677,23 +699,126 @@ async fn begin_or_replay_capability_request(
 
 pub(crate) async fn record_receipt(
     pool: &PgPool,
+    secret: &[u8],
+    binding: CapabilityBinding<'_>,
     request_id: Uuid,
+    request_fingerprint: [u8; 32],
+    authority_owner: &str,
+    authority_attempt_epoch: i64,
     state: ReceiptState,
     result_fingerprint: Option<[u8; 32]>,
-) -> Result<bool, sqlx::Error> {
-    Ok(sqlx::query(
+) -> Result<ReceiptWrite, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    lock_request(&mut tx, request_id).await?;
+    let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut *tx)
+        .await?;
+    let capability_hash = Sha256::digest(secret).to_vec();
+    let binding_digest = capability_binding_digest(&binding, &capability_hash);
+    let Some(request) = sqlx::query(
+        "SELECT target_id, operation_id, intent_id, idempotency_identity,
+                capability_id, capability_binding_digest, audience,
+                accepted_attempt_epoch, accepted_claim_owner, request_fingerprint
+         FROM runtime_cleanup_request_identities WHERE request_id = $1 FOR UPDATE",
+    )
+    .bind(request_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        tx.commit().await?;
+        return Ok(ReceiptWrite::NotFound);
+    };
+    if request.try_get::<Uuid, _>("target_id")? != binding.target_id
+        || request.try_get::<Uuid, _>("operation_id")? != binding.operation_id
+        || request.try_get::<Uuid, _>("intent_id")? != binding.intent_id
+        || request.try_get::<Uuid, _>("idempotency_identity")? != binding.idempotency_identity
+        || request.try_get::<Uuid, _>("capability_id")? != binding.capability_id
+        || request.try_get::<Vec<u8>, _>("capability_binding_digest")? != binding_digest
+        || request.try_get::<String, _>("audience")? != binding.audience
+        || request.try_get::<Vec<u8>, _>("request_fingerprint")? != request_fingerprint
+    {
+        tx.commit().await?;
+        return Ok(ReceiptWrite::BindingMismatch);
+    }
+    let operation = sqlx::query(
+        "SELECT state, attempt_epoch, claim_owner, claim_expires_at
+         FROM runtime_cleanup_operations WHERE operation_id = $1 FOR UPDATE",
+    )
+    .bind(binding.operation_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let operation_attempt: i64 = operation.try_get("attempt_epoch")?;
+    let operation_owner: Option<String> = operation.try_get("claim_owner")?;
+    let operation_expiry: Option<DateTime<Utc>> = operation.try_get("claim_expires_at")?;
+    if operation_expiry.is_none_or(|expires_at| expires_at <= now) {
+        tx.commit().await?;
+        return Ok(ReceiptWrite::Expired);
+    }
+    if operation_attempt != authority_attempt_epoch
+        || operation_owner.as_deref() != Some(authority_owner)
+        || authority_attempt_epoch < binding.attempt_epoch
+        || !matches!(
+            operation.try_get::<String, _>("state")?.as_str(),
+            "open" | "committed"
+        )
+    {
+        tx.commit().await?;
+        return Ok(ReceiptWrite::LostOwnership);
+    }
+    if let Some(existing) = sqlx::query(
+        "SELECT receipt_state, result_fingerprint, authority_attempt_epoch
+         FROM runtime_cleanup_receipts WHERE request_id = $1 FOR UPDATE",
+    )
+    .bind(request_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    {
+        let prior = parse_receipt(&existing.try_get::<String, _>("receipt_state")?);
+        let prior_result: Option<Vec<u8>> = existing.try_get("result_fingerprint")?;
+        if prior == state && prior_result == result_fingerprint.map(|value| value.to_vec()) {
+            tx.commit().await?;
+            return Ok(ReceiptWrite::Replay { state });
+        }
+        if prior != ReceiptState::Unknown
+            || state == ReceiptState::Unknown
+            || operation_attempt <= existing.try_get::<i64, _>("authority_attempt_epoch")?
+        {
+            tx.commit().await?;
+            return Ok(ReceiptWrite::Conflict);
+        }
+        set_authority(&mut tx, "receipt").await?;
+        sqlx::query(
+            "UPDATE runtime_cleanup_receipts
+             SET receipt_state = $2, result_fingerprint = $3,
+                 authority_attempt_epoch = $4, authority_claim_owner = $5,
+                 retain_until = clock_timestamp() + INTERVAL '30 days'
+             WHERE request_id = $1",
+        )
+        .bind(request_id)
+        .bind(state.as_str())
+        .bind(result_fingerprint.map(|value| value.to_vec()))
+        .bind(operation_attempt)
+        .bind(authority_owner)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        return Ok(ReceiptWrite::Reconciled);
+    }
+    sqlx::query(
         "INSERT INTO runtime_cleanup_receipts
-         (request_id, receipt_state, result_fingerprint, terminal_at, retain_until)
-         VALUES ($1,$2,$3,clock_timestamp(),clock_timestamp() + INTERVAL '30 days')
-         ON CONFLICT (request_id) DO NOTHING",
+         (request_id, receipt_state, result_fingerprint, authority_attempt_epoch,
+          authority_claim_owner, terminal_at, retain_until)
+         VALUES ($1,$2,$3,$4,$5,clock_timestamp(),clock_timestamp() + INTERVAL '30 days')",
     )
     .bind(request_id)
     .bind(state.as_str())
     .bind(result_fingerprint.map(|value| value.to_vec()))
-    .execute(pool)
-    .await?
-    .rows_affected()
-        == 1)
+    .bind(operation_attempt)
+    .bind(authority_owner)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(ReceiptWrite::Recorded)
 }
 
 pub(crate) async fn gc_terminal_receipts(
@@ -716,6 +841,21 @@ pub(crate) async fn gc_expired_capabilities(
         .await
 }
 
+fn capability_binding_digest(binding: &CapabilityBinding<'_>, capability_hash: &[u8]) -> Vec<u8> {
+    let mut digest = Sha256::new();
+    digest.update(capability_hash);
+    digest.update(binding.capability_id.as_bytes());
+    digest.update(binding.target_id.as_bytes());
+    digest.update(binding.operation_id.as_bytes());
+    digest.update(binding.intent_id.as_bytes());
+    digest.update(binding.attempt_epoch.to_be_bytes());
+    digest.update(binding.audience.as_bytes());
+    digest.update(binding.claim_owner.as_bytes());
+    digest.update(binding.expires_at.timestamp_micros().to_be_bytes());
+    digest.update(binding.idempotency_identity.as_bytes());
+    digest.finalize().to_vec()
+}
+
 fn parse_receipt(value: &str) -> ReceiptState {
     match value {
         "applied" => ReceiptState::Applied,
@@ -730,6 +870,17 @@ fn validate_duration(duration: Duration, maximum_seconds: i64) -> Result<(), sql
             "duration is outside database-clock bounds".into(),
         ));
     }
+    Ok(())
+}
+
+async fn set_authority(
+    tx: &mut Transaction<'_, Postgres>,
+    authority: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT set_config('agentdesk.cleanup_authority', $1, TRUE)")
+        .bind(authority)
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 
