@@ -40,6 +40,26 @@ CREATE TABLE runtime_cleanup_locator_claims (
 CREATE UNIQUE INDEX runtime_cleanup_locator_claims_one_active_idx
     ON runtime_cleanup_locator_claims (locator) WHERE active;
 
+CREATE OR REPLACE FUNCTION agentdesk_guard_runtime_cleanup_locator_claim()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'runtime cleanup locator generations are permanent authority';
+    END IF;
+    IF NEW.locator IS DISTINCT FROM OLD.locator
+       OR NEW.generation IS DISTINCT FROM OLD.generation
+       OR NEW.target_id IS DISTINCT FROM OLD.target_id
+       OR NEW.claimed_at IS DISTINCT FROM OLD.claimed_at
+       OR NOT (OLD.active AND NOT NEW.active AND OLD.retired_at IS NULL AND NEW.retired_at IS NOT NULL) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'runtime cleanup locator generations are immutable except retirement';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER trg_runtime_cleanup_locator_claim_guard
+BEFORE UPDATE OR DELETE ON runtime_cleanup_locator_claims
+FOR EACH ROW EXECUTE FUNCTION agentdesk_guard_runtime_cleanup_locator_claim();
+
 CREATE TABLE runtime_cleanup_operations (
     operation_id UUID PRIMARY KEY,
     target_id UUID NOT NULL REFERENCES runtime_cleanup_targets(target_id) ON DELETE RESTRICT,
@@ -55,6 +75,7 @@ CREATE TABLE runtime_cleanup_operations (
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (target_id, operation_epoch),
+    UNIQUE (operation_id, target_id),
     CHECK (
         (state = 'open' AND committed_at IS NULL AND completed_at IS NULL AND aborted_at IS NULL)
         OR (state = 'committed' AND committed_at IS NOT NULL AND completed_at IS NULL AND aborted_at IS NULL)
@@ -82,11 +103,49 @@ CREATE TABLE runtime_cleanup_intents (
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (operation_id, intent_id),
     UNIQUE (operation_id, ordinal),
-    UNIQUE (operation_id, idempotency_identity)
+    UNIQUE (operation_id, idempotency_identity),
+    UNIQUE (operation_id, intent_id, target_id, idempotency_identity),
+    FOREIGN KEY (operation_id, target_id)
+        REFERENCES runtime_cleanup_operations(operation_id, target_id) ON DELETE RESTRICT,
+    CHECK ((ordinal, intent_kind) IN (
+        (1, 'block_runtime_admission'),
+        (2, 'clear_queued_input'),
+        (3, 'expire_runtime_lease'),
+        (4, 'cancel_active_runtime'),
+        (5, 'clear_persisted_session'),
+        (6, 'release_runtime_slot')
+    ))
 );
 
 -- The plaintext capability is returned once by the API. Only its SHA-256 digest
 -- is stored. All binding fields are exact typed columns, never hash-only identity.
+CREATE OR REPLACE FUNCTION agentdesk_require_runtime_cleanup_plan()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE plan_is_canonical BOOLEAN;
+BEGIN
+    SELECT COUNT(*) = 6
+       AND BOOL_AND((ordinal, intent_kind) IN (
+           (1, 'block_runtime_admission'),
+           (2, 'clear_queued_input'),
+           (3, 'expire_runtime_lease'),
+           (4, 'cancel_active_runtime'),
+           (5, 'clear_persisted_session'),
+           (6, 'release_runtime_slot')
+       ))
+    INTO plan_is_canonical
+    FROM runtime_cleanup_intents
+    WHERE operation_id = NEW.operation_id;
+    IF NOT plan_is_canonical THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'runtime cleanup operation requires the canonical six-intent plan';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE CONSTRAINT TRIGGER trg_runtime_cleanup_operation_plan
+AFTER INSERT ON runtime_cleanup_operations
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION agentdesk_require_runtime_cleanup_plan();
+
 CREATE TABLE runtime_cleanup_capabilities (
     capability_id UUID PRIMARY KEY,
     capability_hash BYTEA NOT NULL UNIQUE CHECK (OCTET_LENGTH(capability_hash) = 32),
@@ -99,8 +158,9 @@ CREATE TABLE runtime_cleanup_capabilities (
     idempotency_identity UUID NOT NULL,
     consumed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    FOREIGN KEY (operation_id, intent_id)
-        REFERENCES runtime_cleanup_intents(operation_id, intent_id) ON DELETE RESTRICT,
+    FOREIGN KEY (operation_id, intent_id, target_id, idempotency_identity)
+        REFERENCES runtime_cleanup_intents(operation_id, intent_id, target_id, idempotency_identity)
+        ON DELETE RESTRICT,
     UNIQUE (operation_id, intent_id, attempt_epoch, audience, idempotency_identity)
 );
 

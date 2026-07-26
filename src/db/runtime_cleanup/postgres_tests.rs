@@ -92,6 +92,55 @@ async fn locator_retirement_never_reuses_generation_pg() {
     .await
     .unwrap();
     assert_eq!(history, vec![(1, false), (2, true)]);
+    assert!(
+        sqlx::query(
+            "DELETE FROM runtime_cleanup_locator_claims
+             WHERE locator = 'host:session' AND generation = 1",
+        )
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    assert!(
+        sqlx::query(
+            "UPDATE runtime_cleanup_locator_claims SET target_id = $1
+             WHERE locator = 'host:session' AND generation = 2",
+        )
+        .bind(first.target_id)
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    close(db, pool).await;
+}
+
+#[tokio::test]
+async fn target_retirement_is_a_permanent_admission_tombstone_pg() {
+    let (db, pool) = pool().await;
+    let cleanup_target = target(&pool, "target-tombstone").await;
+    assert!(
+        retire_target(&pool, cleanup_target.target_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !retire_target(&pool, cleanup_target.target_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        reserve_locator(&pool, "retired-target-locator", cleanup_target.target_id)
+            .await
+            .is_err()
+    );
+    assert!(
+        create_operation(&pool, cleanup_target.target_id, Uuid::new_v4())
+            .await
+            .is_err()
+    );
+    let converged = target(&pool, "target-tombstone").await;
+    assert_eq!(converged.target_id, cleanup_target.target_id);
+    assert!(converged.retired);
     close(db, pool).await;
 }
 
@@ -157,19 +206,37 @@ async fn operation_and_attempt_epochs_are_monotonic_and_stale_tokens_fail_pg() {
     };
     assert!(epoch2 > epoch1);
     assert!(
-        !transition_operation(&pool, first.operation_id, epoch1, OperationState::Committed)
-            .await
-            .unwrap()
+        !transition_operation(
+            &pool,
+            first.operation_id,
+            "worker-a",
+            epoch1,
+            OperationState::Committed,
+        )
+        .await
+        .unwrap()
     );
     assert!(
-        transition_operation(&pool, first.operation_id, epoch2, OperationState::Committed)
-            .await
-            .unwrap()
+        transition_operation(
+            &pool,
+            first.operation_id,
+            "worker-b",
+            epoch2,
+            OperationState::Committed,
+        )
+        .await
+        .unwrap()
     );
     assert!(
-        transition_operation(&pool, first.operation_id, epoch2, OperationState::Completed)
-            .await
-            .unwrap()
+        transition_operation(
+            &pool,
+            first.operation_id,
+            "worker-b",
+            epoch2,
+            OperationState::Completed,
+        )
+        .await
+        .unwrap()
     );
     let second = create_operation(&pool, target.target_id, Uuid::new_v4())
         .await
@@ -268,24 +335,34 @@ async fn capability_binding_expiry_replay_conflict_and_unknown_are_typed_pg() {
         idempotency_identity,
     };
     let secret = issue_capability(&pool, binding.clone()).await.unwrap();
-    let request_id = Uuid::new_v4();
     let fingerprint = [7_u8; 32];
+    let request_id = match begin_capability_request(&pool, &secret, binding.clone(), fingerprint)
+        .await
+        .unwrap()
+    {
+        CapabilityUse::Accepted { request_id } => request_id,
+        other => panic!("{other:?}"),
+    };
     assert_eq!(
-        begin_capability_request(&pool, &secret, binding.clone(), request_id, fingerprint)
-            .await
-            .unwrap(),
-        CapabilityUse::Accepted
-    );
-    assert_eq!(
-        begin_capability_request(&pool, &secret, binding.clone(), request_id, fingerprint)
+        replay_capability_request(&pool, &secret, binding.clone(), request_id, fingerprint)
             .await
             .unwrap(),
         CapabilityUse::Replay {
+            request_id,
             state: ReceiptState::Unknown
         }
     );
     assert_eq!(
-        begin_capability_request(&pool, &secret, binding.clone(), request_id, [8_u8; 32])
+        begin_capability_request(&pool, &secret, binding.clone(), fingerprint)
+            .await
+            .unwrap(),
+        CapabilityUse::Replay {
+            request_id,
+            state: ReceiptState::Unknown
+        }
+    );
+    assert_eq!(
+        replay_capability_request(&pool, &secret, binding.clone(), request_id, [8_u8; 32])
             .await
             .unwrap(),
         CapabilityUse::FingerprintConflict
@@ -293,7 +370,7 @@ async fn capability_binding_expiry_replay_conflict_and_unknown_are_typed_pg() {
     let mut wrong = binding.clone();
     wrong.audience = "other-worker";
     assert_eq!(
-        begin_capability_request(&pool, &secret, wrong, Uuid::new_v4(), fingerprint)
+        begin_capability_request(&pool, &secret, wrong, fingerprint)
             .await
             .unwrap(),
         CapabilityUse::BindingMismatch
@@ -304,20 +381,71 @@ async fn capability_binding_expiry_replay_conflict_and_unknown_are_typed_pg() {
             .unwrap()
     );
     assert_eq!(
-        begin_capability_request(&pool, &secret, binding.clone(), request_id, fingerprint)
+        replay_capability_request(&pool, &secret, binding.clone(), request_id, fingerprint)
             .await
             .unwrap(),
         CapabilityUse::Replay {
+            request_id,
             state: ReceiptState::Applied
         }
     );
     sqlx::query("UPDATE runtime_cleanup_capabilities SET expires_at = clock_timestamp() - INTERVAL '1 second' WHERE capability_id = $1")
         .bind(binding.capability_id).execute(&pool).await.unwrap();
     assert_eq!(
-        begin_capability_request(&pool, &secret, binding, Uuid::new_v4(), fingerprint)
+        begin_capability_request(&pool, &secret, binding, fingerprint)
             .await
             .unwrap(),
         CapabilityUse::Expired
+    );
+    close(db, pool).await;
+}
+
+#[tokio::test]
+async fn canonical_plan_and_intent_target_are_database_enforced_pg() {
+    let (db, pool) = pool().await;
+    let (cleanup_target, operation) = operation(&pool, "canonical-plan").await;
+    let rows: Vec<(i16, String)> = sqlx::query_as(
+        "SELECT ordinal, intent_kind FROM runtime_cleanup_intents
+         WHERE operation_id = $1 ORDER BY ordinal",
+    )
+    .bind(operation.operation_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        PLAN.into_iter()
+            .map(|(kind, ordinal)| (ordinal, kind.to_owned()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        sqlx::query(
+            "INSERT INTO runtime_cleanup_intents
+             (operation_id, intent_id, ordinal, intent_kind, target_id, idempotency_identity)
+             VALUES ($1, $2, 2, 'block_runtime_admission', $3, $4)",
+        )
+        .bind(operation.operation_id)
+        .bind(Uuid::new_v4())
+        .bind(cleanup_target.target_id)
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    let other = target(&pool, "canonical-plan-other").await;
+    assert!(
+        sqlx::query(
+            "INSERT INTO runtime_cleanup_intents
+             (operation_id, intent_id, ordinal, intent_kind, target_id, idempotency_identity)
+             VALUES ($1, $2, 7, 'release_runtime_slot', $3, $4)",
+        )
+        .bind(operation.operation_id)
+        .bind(Uuid::new_v4())
+        .bind(other.target_id)
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .is_err()
     );
     close(db, pool).await;
 }
@@ -347,6 +475,7 @@ async fn legal_state_graph_is_database_enforced_pg() {
         transition_operation(
             &pool,
             operation.operation_id,
+            "worker",
             epoch,
             OperationState::Aborted
         )
@@ -396,10 +525,13 @@ async fn receipt_gc_preserves_request_target_and_locator_authority_pg() {
         idempotency_identity: idem,
     };
     let secret = issue_capability(&pool, binding.clone()).await.unwrap();
-    let request_id = Uuid::new_v4();
-    begin_capability_request(&pool, &secret, binding.clone(), request_id, [1; 32])
+    let request_id = match begin_capability_request(&pool, &secret, binding.clone(), [1; 32])
         .await
-        .unwrap();
+        .unwrap()
+    {
+        CapabilityUse::Accepted { request_id } => request_id,
+        other => panic!("{other:?}"),
+    };
     record_receipt(&pool, request_id, ReceiptState::Unknown, None)
         .await
         .unwrap();
@@ -425,7 +557,7 @@ async fn receipt_gc_preserves_request_target_and_locator_authority_pg() {
     ).bind(target.target_id).bind(request_id).fetch_one(&pool).await.unwrap();
     assert_eq!(authority, (operation.operation_epoch, 1, 1));
     assert_eq!(
-        begin_capability_request(&pool, &secret, binding, request_id, [2; 32])
+        replay_capability_request(&pool, &secret, binding, request_id, [2; 32])
             .await
             .unwrap(),
         CapabilityUse::FingerprintConflict

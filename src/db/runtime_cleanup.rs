@@ -76,11 +76,30 @@ pub(crate) async fn converge_target(
     Ok(target)
 }
 
+pub(crate) async fn retire_target(pool: &PgPool, target_id: Uuid) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    lock_target(&mut tx, target_id).await?;
+    let changed = sqlx::query(
+        "UPDATE runtime_cleanup_targets SET retired_at = clock_timestamp()
+         WHERE target_id = $1 AND retired_at IS NULL",
+    )
+    .bind(target_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+    tx.commit().await?;
+    Ok(changed)
+}
+
 pub(crate) async fn bind_session(
     pool: &PgPool,
     target_id: Uuid,
     session_id: i64,
 ) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    lock_target(&mut tx, target_id).await?;
+    ensure_active_target(&mut tx, target_id).await?;
     sqlx::query(
         "INSERT INTO runtime_cleanup_target_session_bindings (session_id, target_id)
          VALUES ($1, $2)
@@ -89,8 +108,9 @@ pub(crate) async fn bind_session(
     )
     .bind(session_id)
     .bind(target_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -102,6 +122,7 @@ pub(crate) async fn reserve_locator(
     let mut tx = pool.begin().await?;
     lock_locators(&mut tx, &[locator]).await?;
     lock_target(&mut tx, target_id).await?;
+    ensure_active_target(&mut tx, target_id).await?;
     if let Some(row) = sqlx::query(
         "SELECT target_id, generation FROM runtime_cleanup_locator_claims
          WHERE locator = $1 AND active FOR UPDATE",
@@ -144,24 +165,25 @@ pub(crate) async fn resolve_locator(
     pool: &PgPool,
     locator: &str,
 ) -> Result<Option<LocatorClaim>, sqlx::Error> {
-    sqlx::query("SELECT agentdesk_lock_session_locator($1)")
-        .bind(locator)
-        .execute(pool)
-        .await?;
+    let mut tx = pool.begin().await?;
+    lock_locators(&mut tx, &[locator]).await?;
     let row = sqlx::query(
         "SELECT target_id, generation FROM runtime_cleanup_locator_claims
-         WHERE locator = $1 AND active",
+         WHERE locator = $1 AND active FOR UPDATE",
     )
     .bind(locator)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
-    row.map(|row| {
-        Ok(LocatorClaim {
-            target_id: row.try_get("target_id")?,
-            generation: row.try_get("generation")?,
+    let claim = row
+        .map(|row| -> Result<LocatorClaim, sqlx::Error> {
+            Ok(LocatorClaim {
+                target_id: row.try_get("target_id")?,
+                generation: row.try_get("generation")?,
+            })
         })
-    })
-    .transpose()
+        .transpose()?;
+    tx.commit().await?;
+    Ok(claim)
 }
 
 pub(crate) async fn retire_locator(
@@ -292,7 +314,10 @@ async fn claim_or_renew(
     let current_epoch: i64 = row.try_get("attempt_epoch")?;
     let current_expiry: Option<DateTime<Utc>> = row.try_get("claim_expires_at")?;
     if let Some(expected) = renew_epoch {
-        if current_owner.as_deref() != Some(owner) || current_epoch != expected {
+        if current_owner.as_deref() != Some(owner)
+            || current_epoch != expected
+            || current_expiry.is_none_or(|expires_at| expires_at <= database_now)
+        {
             tx.commit().await?;
             return Ok(ClaimResult::Stale);
         }
@@ -343,6 +368,7 @@ async fn claim_or_renew(
 pub(crate) async fn transition_operation(
     pool: &PgPool,
     operation_id: Uuid,
+    owner: &str,
     expected_attempt_epoch: i64,
     next: OperationState,
 ) -> Result<bool, sqlx::Error> {
@@ -353,11 +379,13 @@ pub(crate) async fn transition_operation(
         OperationState::Open => return Ok(false),
     };
     let query = format!(
-        "UPDATE runtime_cleanup_operations SET state = $3, {timestamp_column} = clock_timestamp(),
-         updated_at = clock_timestamp() WHERE operation_id = $1 AND attempt_epoch = $2"
+        "UPDATE runtime_cleanup_operations SET state = $4, {timestamp_column} = clock_timestamp(),
+         updated_at = clock_timestamp() WHERE operation_id = $1 AND claim_owner = $2
+         AND attempt_epoch = $3 AND claim_expires_at > clock_timestamp()"
     );
     Ok(sqlx::query(&query)
         .bind(operation_id)
+        .bind(owner)
         .bind(expected_attempt_epoch)
         .bind(next.as_str())
         .execute(pool)
@@ -407,8 +435,37 @@ pub(crate) async fn begin_capability_request(
     pool: &PgPool,
     secret: &[u8],
     binding: CapabilityBinding<'_>,
+    request_fingerprint: [u8; 32],
+) -> Result<CapabilityUse, sqlx::Error> {
+    begin_or_replay_capability_request(
+        pool,
+        secret,
+        binding,
+        Uuid::new_v4(),
+        request_fingerprint,
+        false,
+    )
+    .await
+}
+
+pub(crate) async fn replay_capability_request(
+    pool: &PgPool,
+    secret: &[u8],
+    binding: CapabilityBinding<'_>,
     request_id: Uuid,
     request_fingerprint: [u8; 32],
+) -> Result<CapabilityUse, sqlx::Error> {
+    begin_or_replay_capability_request(pool, secret, binding, request_id, request_fingerprint, true)
+        .await
+}
+
+async fn begin_or_replay_capability_request(
+    pool: &PgPool,
+    secret: &[u8],
+    binding: CapabilityBinding<'_>,
+    request_id: Uuid,
+    request_fingerprint: [u8; 32],
+    replay_only: bool,
 ) -> Result<CapabilityUse, sqlx::Error> {
     let mut tx = pool.begin().await?;
     lock_request(&mut tx, request_id).await?;
@@ -469,6 +526,44 @@ pub(crate) async fn begin_capability_request(
         .await?;
         tx.commit().await?;
         return Ok(CapabilityUse::Replay {
+            request_id,
+            state: receipt
+                .as_deref()
+                .map(parse_receipt)
+                .unwrap_or(ReceiptState::Unknown),
+        });
+    }
+    if replay_only {
+        tx.commit().await?;
+        return Ok(CapabilityUse::NotFound);
+    }
+    if let Some(existing) = sqlx::query(
+        "SELECT request_id, request_fingerprint
+         FROM runtime_cleanup_request_identities
+         WHERE operation_id = $1 AND intent_id = $2 AND idempotency_identity = $3
+         FOR UPDATE",
+    )
+    .bind(binding.operation_id)
+    .bind(binding.intent_id)
+    .bind(binding.idempotency_identity)
+    .fetch_optional(&mut *tx)
+    .await?
+    {
+        let existing_request_id: Uuid = existing.try_get("request_id")?;
+        let prior: Vec<u8> = existing.try_get("request_fingerprint")?;
+        if prior.as_slice() != request_fingerprint {
+            tx.commit().await?;
+            return Ok(CapabilityUse::FingerprintConflict);
+        }
+        let receipt = sqlx::query_scalar::<_, String>(
+            "SELECT receipt_state FROM runtime_cleanup_receipts WHERE request_id = $1",
+        )
+        .bind(existing_request_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        return Ok(CapabilityUse::Replay {
+            request_id: existing_request_id,
             state: receipt
                 .as_deref()
                 .map(parse_receipt)
@@ -488,7 +583,7 @@ pub(crate) async fn begin_capability_request(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(CapabilityUse::Accepted)
+    Ok(CapabilityUse::Accepted { request_id })
 }
 
 pub(crate) async fn record_receipt(
@@ -594,5 +689,21 @@ async fn lock_target(
         .bind(target_id)
         .fetch_one(&mut **tx)
         .await?;
+    Ok(())
+}
+
+async fn ensure_active_target(
+    tx: &mut Transaction<'_, Postgres>,
+    target_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let active: bool = sqlx::query_scalar(
+        "SELECT retired_at IS NULL FROM runtime_cleanup_targets WHERE target_id = $1",
+    )
+    .bind(target_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if !active {
+        return Err(sqlx::Error::Protocol("cleanup target is retired".into()));
+    }
     Ok(())
 }

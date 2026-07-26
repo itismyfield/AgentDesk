@@ -523,7 +523,7 @@
     },
     {
       "path": "migrations/postgres/0102_dormant_runtime_cleanup_substrate.sql",
-      "sha256": "4a57497594a554380197f233205102786fd8bd02bdc0c174a5bc9f0c6f0ebd3c",
+      "sha256": "43d64eea47b9cd36e85f99ce3894a86dc69429801af28124d169c56c12d6a58a",
       "version": 102
     }
   ],

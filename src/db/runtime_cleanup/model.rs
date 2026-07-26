@@ -111,8 +111,13 @@ impl ReceiptState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CapabilityUse {
-    Accepted,
-    Replay { state: ReceiptState },
+    Accepted {
+        request_id: Uuid,
+    },
+    Replay {
+        request_id: Uuid,
+        state: ReceiptState,
+    },
     FingerprintConflict,
     BindingMismatch,
     Expired,
