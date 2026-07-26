@@ -449,9 +449,13 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
                             outcome.is_auth_error = true;
                             outcome.auth_error_message.get_or_insert(result_str.clone());
                         }
-                        if let Some(message) = detect_provider_overload_message(&result_str) {
+                        if let Some(reason) =
+                            crate::services::discord::tmux_error_detect::detect_structured_provider_overload(&val)
+                        {
                             outcome.is_provider_overloaded = true;
-                            outcome.provider_overload_message.get_or_insert(message);
+                            outcome
+                                .provider_overload_message
+                                .get_or_insert_with(|| reason.public_reason().to_string());
                         }
                     }
 
@@ -619,46 +623,6 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
             state.final_result = Some(String::new());
             // #1216: see `result` arm — stop after a turn-terminating event.
             break;
-        } else if let Some(message) = detect_provider_overload_message(trimmed) {
-            if let Some(skip) = pre_turn_line_skip(
-                turn_start_offset,
-                line_start_offset,
-                Some(WatcherTerminalKind::ProviderOverload),
-            ) {
-                tracing::info!(
-                    terminal_kind = skip.terminal_kind.as_str(),
-                    evidence_offset = skip.evidence_offset,
-                    turn_start_offset = skip.turn_start_offset,
-                    "tmux watcher skipped terminal evidence before this turn's start offset"
-                );
-                outcome.pre_turn_bytes_skipped =
-                    outcome.pre_turn_bytes_skipped.saturating_add(line_len);
-                continue;
-            }
-            if pre_turn_line {
-                outcome.pre_turn_bytes_skipped =
-                    outcome.pre_turn_bytes_skipped.saturating_add(line_len);
-                continue;
-            }
-            outcome.found_result = true;
-            outcome.terminal_kind = Some(WatcherTerminalKind::ProviderOverload);
-            outcome.terminal_evidence_offset = line_start_offset;
-            outcome.is_provider_overloaded = true;
-            outcome.provider_overload_message.get_or_insert(message);
-            push_transcript_event(
-                &mut tool_state.transcript_events,
-                SessionTranscriptEvent {
-                    kind: SessionTranscriptEventKind::Error,
-                    tool_name: None,
-                    summary: Some("provider overload".to_string()),
-                    content: trimmed.to_string(),
-                    status: Some("error".to_string()),
-                    is_error: true,
-                },
-            );
-            state.final_result = Some(String::new());
-            // #1216: see `result` arm — stop after a turn-terminating event.
-            break;
         } else if pre_turn_line {
             outcome.pre_turn_bytes_skipped =
                 outcome.pre_turn_bytes_skipped.saturating_add(line_len);
@@ -769,6 +733,88 @@ mod tests {
 
     mod provider_output_guard_tests {
         include!("tmux_output_stream/provider_output_guard_tests.rs");
+    }
+
+    fn watcher_outcome_for_lines(lines: &[serde_json::Value]) -> WatcherLineOutcome {
+        let mut buffer = lines
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        buffer.push('\n');
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+        process_watcher_lines_for_turn(
+            &mut buffer,
+            &mut state,
+            &mut full_response,
+            &mut tool_state,
+            Some(0),
+            Some(0),
+        )
+    }
+
+    #[test]
+    fn overload_requires_structured_error_result_in_stream() {
+        let outcome = watcher_outcome_for_lines(&[
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "review says rate limit and overloaded"}]}
+            }),
+            serde_json::json!({
+                "type": "system",
+                "subtype": "task_notification",
+                "content": "provider returned 529 overloaded_error"
+            }),
+            serde_json::json!({
+                "type": "result",
+                "is_error": false,
+                "status": 429,
+                "result": "ordinary prose about a rate limit"
+            }),
+        ]);
+
+        assert!(!outcome.is_provider_overloaded);
+        assert_eq!(outcome.terminal_kind, Some(WatcherTerminalKind::HardResult));
+    }
+
+    #[test]
+    fn stream_accepts_structured_429_and_529_overload_results() {
+        for line in [
+            serde_json::json!({
+                "type": "result",
+                "is_error": true,
+                "error": {"status": 429},
+                "result": "request failed"
+            }),
+            serde_json::json!({
+                "type": "result",
+                "is_error": true,
+                "response": {"status_code": "529"},
+                "result": "request failed"
+            }),
+        ] {
+            let outcome = watcher_outcome_for_lines(&[line]);
+            assert!(outcome.is_provider_overloaded);
+            assert_eq!(outcome.terminal_kind, Some(WatcherTerminalKind::HardResult));
+            assert!(outcome.terminal_evidence_offset.is_some());
+        }
+    }
+
+    #[test]
+    fn raw_partial_prose_never_becomes_overload_terminal() {
+        let mut buffer =
+            "review quoted [API Error: 529 overloaded_error] before recovery\n".to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert!(!outcome.is_provider_overloaded);
+        assert!(!outcome.found_result);
+        assert_eq!(outcome.terminal_evidence_offset, None);
     }
 
     #[test]
