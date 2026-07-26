@@ -122,6 +122,7 @@ pub mod settings;
 pub mod shell_guard;
 pub mod slo;
 pub(crate) mod stale_turn_reconciler;
+pub(crate) mod task_completion_v1;
 // #3034: 1 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during termination_audit dead-code cleanup.
 pub(crate) mod terminal_status_formatting;

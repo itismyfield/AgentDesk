@@ -8,6 +8,7 @@ use crate::services::codex::{
     CODEX_BACKGROUND_TASK_NOTIFICATION_ID, CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
     CodexLaunchOptions, build_codex_exec_args, codex_background_event_summary,
 };
+use crate::services::task_completion_v1::TaskCompletionV1;
 use crate::services::tmux_common::RotatingJsonlWriter;
 use crate::services::tmux_wrapper::{InputMode, render_for_terminal};
 
@@ -1257,9 +1258,6 @@ mod modern_event_tests {
         CodexWrapperTurnState, emit_schema_drift_result, handle_codex_wrapper_event,
         schema_drift_reason,
     };
-    use crate::services::codex::{
-        CODEX_BACKGROUND_TASK_NOTIFICATION_ID, CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
-    };
     use crate::services::tmux_common::RotatingJsonlWriter;
     use serde_json::json;
 
@@ -2211,19 +2209,45 @@ mod modern_event_tests {
         )
         .unwrap();
 
-        let lines = read_jsonl(&path);
-        assert_eq!(lines.len(), 1);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let raw_lines: Vec<_> = raw.lines().collect();
+        assert_eq!(raw_lines.len(), 2);
         assert_eq!(
-            lines[0],
-            json!({
-                "type": "system",
-                "subtype": "task_notification",
-                "task_id": CODEX_BACKGROUND_TASK_NOTIFICATION_ID,
-                "status": CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS,
-                "summary": "CI green",
-                "task_notification_kind": "background",
-            })
+            raw_lines[0],
+            r#"{"status":"completed","subtype":"task_notification","summary":"CI green","task_id":"codex-background-event","task_notification_kind":"background","type":"system"}"#,
+            "legacy bytes and ordering must remain unchanged"
         );
+        assert_eq!(
+            raw_lines[1],
+            r#"{"type":"system","subtype":"task_completion","schema":"task_completion.v1","producer":"agentdesk.codex_tmux_wrapper","kind":"background","status":"completed","task_id":"codex-background-event","tool_use_id":null}"#
+        );
+        assert!(matches!(
+            crate::services::task_completion_v1::admit_raw(raw_lines[1]),
+            crate::services::task_completion_v1::TaskCompletionV1Admission::TypedCandidate(_)
+        ));
+        assert!(!raw_lines[1].contains("CI green"));
+
+        handle_codex_wrapper_event(
+            &mut output,
+            &json!({
+                "type": "background_event",
+                "message": "<@everyone> [link](https://invalid.example)"
+            }),
+            &mut thread_id,
+            &mut state,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let raw_lines: Vec<_> = raw.lines().collect();
+        assert_eq!(raw_lines.len(), 4);
+        assert_ne!(raw_lines[0], raw_lines[2]);
+        assert_eq!(
+            raw_lines[1], raw_lines[3],
+            "provider prose must not affect typed shadow bytes"
+        );
+        assert!(!raw_lines[3].contains("everyone"));
+        assert!(!raw_lines[3].contains("https"));
         assert!(!state.saw_turn_completed);
     }
 
@@ -2380,7 +2404,14 @@ fn handle_background_event(
             "summary": summary,
             "task_notification_kind": "background",
         }),
-    )
+    )?;
+
+    // The typed receipt is a dormant, non-visible shadow. Its declared producer
+    // is not trust authority, and failure must not change the legacy event path.
+    if let Ok(line) = TaskCompletionV1::codex_background_completed().encode_canonical() {
+        let _ = output.write_line(&line);
+    }
+    Ok(())
 }
 
 fn emit_status(message: &str) {
