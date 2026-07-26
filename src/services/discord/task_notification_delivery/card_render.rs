@@ -2,6 +2,28 @@
 
 use super::*;
 
+impl TaskNotificationContext {
+    pub(in crate::services::discord) fn summary(&self) -> Option<&str> {
+        (!self.summary.is_empty()).then_some(self.summary.as_str())
+    }
+}
+
+impl TaskCardEvent {
+    pub(in crate::services::discord) fn background_completion_marker(&self) -> String {
+        match &self.payload {
+            TaskCardPayload::Task(note) => {
+                super::super::tui_task_card::format_background_completion_marker(
+                    note.summary.as_deref(),
+                    note.result.as_deref(),
+                )
+            }
+            TaskCardPayload::Subagent(_) => {
+                super::super::tui_task_card::format_background_completion_marker(None, None)
+            }
+        }
+    }
+}
+
 impl TaskCardPayload {
     pub(super) fn render(&self, update_count: u64) -> String {
         match self {

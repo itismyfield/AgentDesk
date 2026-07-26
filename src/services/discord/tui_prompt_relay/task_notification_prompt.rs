@@ -199,18 +199,27 @@ fn enqueue_footer_only_background_marker(
     event: &super::super::task_notification_delivery::TaskCardEvent,
 ) {
     let target = format!("channel:{}", channel_id.get());
-    let session_key =
-        super::super::task_notification_delivery::footer_background_marker_session_key(
-            channel_id,
-            event.event_key(),
-        );
+    let (session_key, content) = footer_only_background_marker(channel_id, event);
     let _ = crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
         shared.pg_pool.as_ref(),
         target.as_str(),
         Some(session_key.as_str()),
         "lifecycle.background_task_complete",
-        "⚙️ Background complete",
+        content.as_str(),
     );
+}
+
+pub(super) fn footer_only_background_marker(
+    channel_id: ChannelId,
+    event: &super::super::task_notification_delivery::TaskCardEvent,
+) -> (String, String) {
+    (
+        super::super::task_notification_delivery::footer_background_marker_session_key(
+            channel_id,
+            event.event_key(),
+        ),
+        event.background_completion_marker(),
+    )
 }
 
 async fn legacy_notify_gate(

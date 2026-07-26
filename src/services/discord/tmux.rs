@@ -673,6 +673,7 @@ pub(super) fn suppressed_task_notification_marker(
     data_start_offset: u64,
     kind: TaskNotificationKind,
     footer_only_event_key: Option<&str>,
+    background_summary: Option<&str>,
     event_count: usize,
     monitor_entry_keys: &[String],
 ) -> Option<(String, &'static str, String)> {
@@ -689,7 +690,7 @@ pub(super) fn suppressed_task_notification_marker(
         TaskNotificationKind::Background => (
             footer_background_marker_session_key(channel_id, footer_only_event_key?),
             "lifecycle.background_task_complete",
-            "⚙️ Background complete".to_string(),
+            super::tui_task_card::format_background_completion_marker(background_summary, None),
         ),
         // Subagent completions are durable-card owned, so a suppressed watcher
         // terminal must not add a duplicate discrete marker.
@@ -704,6 +705,7 @@ pub(super) fn enqueue_suppressed_task_notification(
     data_start_offset: u64,
     kind: TaskNotificationKind,
     footer_only_event_key: Option<&str>,
+    background_summary: Option<&str>,
     event_count: usize,
     monitor_entry_keys: &[String],
 ) -> bool {
@@ -714,6 +716,7 @@ pub(super) fn enqueue_suppressed_task_notification(
         data_start_offset,
         kind,
         footer_only_event_key,
+        background_summary,
         event_count,
         monitor_entry_keys,
     ) else {
@@ -1545,13 +1548,17 @@ mod suppressed_task_notification_marker_tests {
             44,
             TaskNotificationKind::Background,
             Some("event-identity"),
+            Some("Background command \"CI\" completed (exit code 0)"),
             1,
             &[],
         )
         .expect("footer-owned background completion gets a marker");
         assert_eq!(background_key, "footer_background:ch:4799:event-identity");
         assert_eq!(background_reason, "lifecycle.background_task_complete");
-        assert_eq!(background, "⚙️ Background complete");
+        assert_eq!(
+            background,
+            "⚙️ Background complete · Background command \"CI\" completed (exit code 0)"
+        );
 
         let replay_at_new_offset = suppressed_task_notification_marker(
             channel_id,
@@ -1559,11 +1566,24 @@ mod suppressed_task_notification_marker_tests {
             99,
             TaskNotificationKind::Background,
             Some("event-identity"),
+            Some("Background command \"CI\" completed (exit code 0)"),
             1,
             &[],
         )
         .expect("same footer event remains marker eligible");
         assert_eq!(replay_at_new_offset.0, background_key);
+        let no_summary = suppressed_task_notification_marker(
+            channel_id,
+            "AgentDesk-claude-4799",
+            100,
+            TaskNotificationKind::Background,
+            Some("no-summary-event"),
+            None,
+            1,
+            &[],
+        )
+        .expect("summary-less background completion retains generic fallback");
+        assert_eq!(no_summary.2, "⚙️ Background complete");
         assert_eq!(
             footer_background_marker_session_key(channel_id, "event-identity"),
             background_key,
@@ -1576,6 +1596,7 @@ mod suppressed_task_notification_marker_tests {
                 45,
                 TaskNotificationKind::Subagent,
                 Some("subagent-event"),
+                Some("Agent completed"),
                 1,
                 &[],
             )

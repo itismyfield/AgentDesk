@@ -422,6 +422,34 @@ fn clients() -> CardDeliveryClients {
     )])
 }
 
+#[test]
+fn prompt_footer_marker_reuses_sanitized_task_preview_without_changing_identity() {
+    let raw = "<task-notification><task-id>preview-task</task-id>\
+        <tool-use-id>toolu-preview-task</tool-use-id><status>completed</status>\
+        <summary>Background command &quot;CI&quot; completed\n(exit code 0)</summary>\
+        <result>first line\nsecond line</result></task-notification>";
+    let event = TaskCardEvent::from_task_prompt(44_055, "claude", "AgentDesk-claude-4055", raw);
+    let event_key = event.event_key().to_string();
+    let session_key = super::footer_background_marker_session_key(
+        poise::serenity_prelude::ChannelId::new(44_055),
+        event.event_key(),
+    );
+
+    assert_eq!(
+        event.background_completion_marker(),
+        "⚙️ Background complete · Background command \"CI\" completed (exit code 0)\n> first line second line"
+    );
+    assert_eq!(event.event_key(), event_key);
+    assert_eq!(
+        session_key,
+        super::footer_background_marker_session_key(
+            poise::serenity_prelude::ChannelId::new(44_055),
+            event.event_key(),
+        ),
+        "formatting must not alter prompt/watcher dedupe identity",
+    );
+}
+
 fn event(task_id: &str) -> TaskCardEvent {
     TaskCardEvent::from_task_prompt(
         44_055,

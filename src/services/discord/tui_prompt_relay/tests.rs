@@ -7,6 +7,35 @@ fn compact_command_name_first_stub() -> &'static str {
     "<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>"
 }
 
+#[test]
+fn footer_only_background_delivery_uses_event_identity_and_preview() {
+    let channel_id = ChannelId::new(49_120);
+    let event = super::super::task_notification_delivery::TaskCardEvent::from_task_prompt(
+        channel_id.get(),
+        "claude",
+        "AgentDesk-claude-4912",
+        "<task-notification><task-id>background-4912</task-id>\
+         <tool-use-id>toolu-background-4912</tool-use-id>\
+         <summary>Background command &quot;focused tests&quot; completed</summary>\
+         <result>4 passed\n0 failed</result></task-notification>",
+    );
+
+    let (session_key, content) =
+        super::task_notification_prompt::footer_only_background_marker(channel_id, &event);
+
+    assert_eq!(
+        session_key,
+        super::super::task_notification_delivery::footer_background_marker_session_key(
+            channel_id,
+            event.event_key(),
+        )
+    );
+    assert_eq!(
+        content,
+        "⚙️ Background complete · Background command \"focused tests\" completed\n> 4 passed 0 failed"
+    );
+}
+
 // ====================================================================
 // #3154 P2-2 (c) — the KEY residual risk: prove there is NO relay GAP
 // (not merely no duplicate) on the deferred synthetic-start path.

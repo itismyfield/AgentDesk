@@ -30,7 +30,11 @@ const RESULT_PREVIEW_CHARS: usize = 1400;
 const RESULT_PREVIEW_LINES: usize = 10;
 
 const DISCORD_MESSAGE_LIMIT_CHARS: usize = super::DISCORD_MSG_LIMIT;
+pub(super) const BACKGROUND_COMPLETION_MARKER_CHARS: usize = 600;
+const BACKGROUND_COMPLETION_SUMMARY_CHARS: usize = 240;
+const BACKGROUND_COMPLETION_PREVIEW_CHARS: usize = 300;
 const RESULT_PREVIEW_TRUNCATED_MARKER: &str = "… (truncated)";
+const BACKGROUND_COMPLETION_PREFIX: &str = "⚙️ Background complete";
 
 /// Structured fields extracted from a `<task-notification>` payload (#3075).
 ///
@@ -307,6 +311,142 @@ pub(super) fn format_task_notification_card(note: &TaskNotification, update_coun
     }
 
     clamp_discord_message_content(&lines.join("\n"))
+}
+
+/// Render the lifecycle marker shared by prompt deferral and watcher
+/// suppression. Structured fields are sanitized independently so provider
+/// control envelopes can never be reconstructed in the emitted text.
+pub(super) fn format_background_completion_marker(
+    summary: Option<&str>,
+    result_preview: Option<&str>,
+) -> String {
+    let summary = background_completion_field(summary, BACKGROUND_COMPLETION_SUMMARY_CHARS);
+    let result_preview =
+        background_completion_field(result_preview, BACKGROUND_COMPLETION_PREVIEW_CHARS);
+    let mut marker = BACKGROUND_COMPLETION_PREFIX.to_string();
+    if let Some(summary) = summary.as_deref() {
+        marker.push_str(" · ");
+        marker.push_str(summary);
+    }
+    if let Some(result_preview) = result_preview.as_deref() {
+        marker.push_str("\n> ");
+        marker.push_str(result_preview);
+    }
+    truncate_preview_at_boundary(&marker, BACKGROUND_COMPLETION_MARKER_CHARS)
+}
+
+fn background_completion_field(value: Option<&str>, limit: usize) -> Option<String> {
+    value
+        .map(decode_entities_once)
+        .map(|value| strip_control_envelope_tokens(&value))
+        .map(|value| clean_single_line(&value))
+        .filter(|value| !value.is_empty())
+        .map(|value| truncate_preview_at_boundary(&value, limit))
+}
+
+fn strip_control_envelope_tokens(value: &str) -> String {
+    const SYSTEM_BANNER: &str = "[SYSTEM NOTIFICATION - NOT USER INPUT]";
+    const PRIVATE_CONTROL_FIELDS: &[&str] = &["task-id", "tool-use-id", "output-file"];
+    const PUBLIC_CONTROL_FIELDS: &[&str] = &[
+        "status",
+        "summary",
+        "result",
+        "usage",
+        "duration",
+        "tool-uses",
+        "subagent-tokens",
+        "agent-count",
+        "duration-ms",
+    ];
+    let has_task_envelope = value.contains("<task-notification")
+        || value.contains("</task-notification>")
+        || value.contains(SYSTEM_BANNER);
+    let mut cleaned = value.replace(SYSTEM_BANNER, " ");
+    for tag in PRIVATE_CONTROL_FIELDS {
+        cleaned = strip_named_control_element(&cleaned, tag);
+    }
+    if has_task_envelope {
+        for tag in PUBLIC_CONTROL_FIELDS {
+            cleaned = strip_named_control_tags(&cleaned, tag);
+        }
+    }
+    strip_named_control_tags(&cleaned, "task-notification")
+}
+
+fn strip_named_control_element(value: &str, tag: &str) -> String {
+    let mut cleaned = String::with_capacity(value.len());
+    let mut rest = value;
+    let closing = format!("</{tag}>");
+    loop {
+        let Some(open) = rest.find('<') else {
+            cleaned.push_str(rest);
+            return cleaned;
+        };
+        cleaned.push_str(&rest[..open]);
+        let candidate = &rest[open + 1..];
+        let Some(close) = candidate.find('>') else {
+            cleaned.push_str(&rest[open..]);
+            return cleaned;
+        };
+        let body = candidate[..close].trim();
+        let name = body
+            .strip_prefix('/')
+            .unwrap_or(body)
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_end_matches('/');
+        if name != tag {
+            cleaned.push_str(&rest[open..open + close + 2]);
+            rest = &candidate[close + 1..];
+            continue;
+        }
+        cleaned.push(' ');
+        rest = &candidate[close + 1..];
+        if !body.starts_with('/') && !body.ends_with('/') {
+            let Some(end) = rest.find(&closing) else {
+                return cleaned;
+            };
+            rest = &rest[end + closing.len()..];
+        }
+    }
+}
+
+fn strip_named_control_tags(value: &str, tag: &str) -> String {
+    let mut cleaned = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(open) = rest.find('<') {
+        cleaned.push_str(&rest[..open]);
+        let candidate = &rest[open + 1..];
+        let Some(close) = candidate.find('>') else {
+            cleaned.push_str(&rest[open..]);
+            return cleaned;
+        };
+        let body = candidate[..close].trim();
+        let name = body
+            .strip_prefix('/')
+            .unwrap_or(body)
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_end_matches('/');
+        if name == tag {
+            cleaned.push(' ');
+        } else {
+            cleaned.push_str(&rest[open..open + close + 2]);
+        }
+        rest = &candidate[close + 1..];
+    }
+    cleaned.push_str(rest);
+    cleaned
+}
+
+fn clean_single_line(value: &str) -> String {
+    strip_terminal_controls(value)
+        .replace("```", "` ` `")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn status_icon(status: &str) -> &'static str {
@@ -786,6 +926,59 @@ mod tests {
         }
         body.push_str("</task-notification>");
         body
+    }
+
+    #[test]
+    fn background_completion_marker_formats_summary_preview_and_empty_fallback() {
+        assert_eq!(
+            format_background_completion_marker(
+                Some("Background command \"CI\" completed (exit code 0)"),
+                Some("tests passed\nsecond line"),
+            ),
+            "⚙️ Background complete · Background command \"CI\" completed (exit code 0)\n> tests passed second line"
+        );
+        assert_eq!(
+            format_background_completion_marker(None, None),
+            "⚙️ Background complete"
+        );
+        assert_eq!(
+            format_background_completion_marker(Some(" \n\t "), Some("\r\n")),
+            "⚙️ Background complete"
+        );
+    }
+
+    #[test]
+    fn background_completion_marker_strips_controls_and_control_envelopes() {
+        let marker = format_background_completion_marker(
+            Some(
+                "\u{1b}[31mBackground\u{7} command\r\nfinished [SYSTEM NOTIFICATION - NOT USER INPUT]",
+            ),
+            Some(
+                "<task-notification><tool-use-id>toolu-secret</tool-use-id><output-file>/private/secret</output-file>result</task-notification>",
+            ),
+        );
+        assert_eq!(
+            marker,
+            "⚙️ Background complete · Background command finished\n> result"
+        );
+        assert!(!marker.contains('\u{1b}'));
+        assert!(!marker.contains("task-notification"));
+        assert!(!marker.contains("tool-use-id"));
+        assert!(!marker.contains("toolu-secret"));
+        assert!(!marker.contains("output-file"));
+        assert!(!marker.contains("/private/secret"));
+        assert!(!marker.contains("SYSTEM NOTIFICATION"));
+    }
+
+    #[test]
+    fn background_completion_marker_has_a_unicode_safe_hard_cap() {
+        let marker = format_background_completion_marker(
+            Some(&"요약 ".repeat(200)),
+            Some(&"결과 ".repeat(200)),
+        );
+        assert!(marker.chars().count() <= 600);
+        assert_eq!(BACKGROUND_COMPLETION_MARKER_CHARS, 600);
+        assert!(marker.ends_with(RESULT_PREVIEW_TRUNCATED_MARKER));
     }
 
     #[test]
