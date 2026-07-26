@@ -32,7 +32,7 @@ pub(super) async fn enqueue_suppressed_machine_trigger_marker(
     };
     let footer_only_event_key =
         task_notification_context.and_then(|context| context.footer_only_marker_event_key());
-    let background_summary = task_notification_context.and_then(|context| context.summary());
+    let background_status = task_notification_context.and_then(|context| context.status());
     let marker_kind = task_notification_kind.filter(|kind| {
         matches!(
             kind,
@@ -47,7 +47,7 @@ pub(super) async fn enqueue_suppressed_machine_trigger_marker(
             data_start_offset,
             kind,
             footer_only_event_key,
-            background_summary,
+            background_status,
             monitor_event_count,
             &monitor_entry_keys,
         );

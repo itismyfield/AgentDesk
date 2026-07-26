@@ -3,8 +3,8 @@
 use super::*;
 
 impl TaskNotificationContext {
-    pub(in crate::services::discord) fn summary(&self) -> Option<&str> {
-        (!self.summary.is_empty()).then_some(self.summary.as_str())
+    pub(in crate::services::discord) fn status(&self) -> Option<&str> {
+        (!self.status.is_empty()).then_some(self.status.as_str())
     }
 }
 
@@ -13,7 +13,7 @@ impl TaskCardEvent {
         match &self.payload {
             TaskCardPayload::Task(note) => {
                 super::super::tui_task_card::format_background_completion_marker(
-                    note.summary.as_deref(),
+                    note.status.as_deref(),
                 )
             }
             TaskCardPayload::Subagent(_) => {

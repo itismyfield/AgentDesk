@@ -8,7 +8,7 @@ fn compact_command_name_first_stub() -> &'static str {
 }
 
 #[test]
-fn footer_only_background_delivery_uses_event_identity_and_summary_only() {
+fn footer_only_background_delivery_uses_event_identity_and_status_only() {
     let channel_id = ChannelId::new(49_120);
     let event = super::super::task_notification_delivery::TaskCardEvent::from_task_prompt(
         channel_id.get(),
@@ -16,7 +16,8 @@ fn footer_only_background_delivery_uses_event_identity_and_summary_only() {
         "AgentDesk-claude-4912",
         "<task-notification><task-id>background-4912</task-id>\
          <tool-use-id>toolu-background-4912</tool-use-id>\
-         <summary>Background command &quot;focused tests&quot; completed</summary>\
+         <status>completed</status>\
+         <summary>Bearer live-token api_key=key1 alice@example.com @everyone [x](https://attacker.example) /private/summary.log</summary>\
          <result>token=secret /private/result.log</result></task-notification>",
     );
 
@@ -30,25 +31,33 @@ fn footer_only_background_delivery_uses_event_identity_and_summary_only() {
             event.event_key(),
         )
     );
-    assert_eq!(
-        content,
-        "⚙️ Background complete · Background command \"focused tests\" completed"
-    );
-    assert!(!content.contains("token=secret"));
-    assert!(!content.contains("/private/result.log"));
+    assert_eq!(content, "⚙️ Background complete · status: completed");
+    for excluded in [
+        "live-token",
+        "key1",
+        "alice@example.com",
+        "@everyone",
+        "attacker.example",
+        "/private/summary.log",
+        "token=secret",
+        "/private/result.log",
+    ] {
+        assert!(!content.contains(excluded), "payload leaked: {excluded}");
+    }
     let watcher = super::super::tmux::suppressed_task_notification_marker(
         channel_id,
         "AgentDesk-claude-4912",
         99,
         crate::services::agent_protocol::TaskNotificationKind::Background,
         Some(event.event_key()),
-        Some("Background command \"focused tests\" completed"),
+        Some("completed"),
         1,
         &[],
-    )
-    .expect("watcher marker");
-    assert_eq!(watcher.0, session_key);
-    assert_eq!(watcher.2, content);
+    );
+    assert_eq!(
+        watcher.as_ref().map(|marker| (&marker.0, &marker.2)),
+        Some((&session_key, &content))
+    );
 }
 
 // ====================================================================

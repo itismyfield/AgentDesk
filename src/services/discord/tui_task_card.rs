@@ -30,8 +30,7 @@ const RESULT_PREVIEW_CHARS: usize = 1400;
 const RESULT_PREVIEW_LINES: usize = 10;
 
 const DISCORD_MESSAGE_LIMIT_CHARS: usize = super::DISCORD_MSG_LIMIT;
-pub(super) const BACKGROUND_COMPLETION_MARKER_CHARS: usize = 600;
-const BACKGROUND_COMPLETION_SUMMARY_CHARS: usize = 240;
+const BACKGROUND_COMPLETION_STATUS_CHARS: usize = 80;
 const RESULT_PREVIEW_TRUNCATED_MARKER: &str = "… (truncated)";
 const BACKGROUND_COMPLETION_PREFIX: &str = "⚙️ Background complete";
 
@@ -312,26 +311,28 @@ pub(super) fn format_task_notification_card(note: &TaskNotification, update_coun
     clamp_discord_message_content(&lines.join("\n"))
 }
 
-/// Render the summary-only lifecycle marker shared by prompt deferral and
-/// watcher suppression. Result bodies are intentionally excluded because they
-/// can contain secrets and private paths that must not create a new message.
-pub(super) fn format_background_completion_marker(summary: Option<&str>) -> String {
-    let summary = background_completion_field(summary, BACKGROUND_COMPLETION_SUMMARY_CHARS);
+/// Render a payload-free lifecycle marker shared by prompt deferral and watcher
+/// suppression. Free-form summary/result text is intentionally excluded because
+/// it can contain credentials and private paths. Only the structured terminal
+/// status crosses the established public-output redaction boundary.
+pub(super) fn format_background_completion_marker(status: Option<&str>) -> String {
+    let status = background_completion_status(status);
     let mut marker = BACKGROUND_COMPLETION_PREFIX.to_string();
-    if let Some(summary) = summary.as_deref() {
-        marker.push_str(" · ");
-        marker.push_str(summary);
+    if let Some(status) = status.as_deref() {
+        marker.push_str(" · status: ");
+        marker.push_str(status);
     }
-    truncate_preview_at_boundary(&marker, BACKGROUND_COMPLETION_MARKER_CHARS)
+    marker
 }
 
-fn background_completion_field(value: Option<&str>, limit: usize) -> Option<String> {
+fn background_completion_status(value: Option<&str>) -> Option<String> {
     value
         .map(decode_entities_once)
         .map(|value| strip_control_envelope_tokens(&value))
+        .map(|value| super::formatting::redact_sensitive_for_placeholder(&value))
         .map(|value| clean_single_line(&value))
         .filter(|value| !value.is_empty())
-        .map(|value| truncate_preview_at_boundary(&value, limit))
+        .map(|value| truncate_preview_at_boundary(&value, BACKGROUND_COMPLETION_STATUS_CHARS))
 }
 
 fn strip_control_envelope_tokens(value: &str) -> String {
@@ -919,12 +920,10 @@ mod tests {
     }
 
     #[test]
-    fn background_completion_marker_formats_summary_and_empty_fallback() {
+    fn background_completion_marker_uses_only_structured_status() {
         assert_eq!(
-            format_background_completion_marker(Some(
-                "Background command \"CI\" completed (exit code 0)"
-            )),
-            "⚙️ Background complete · Background command \"CI\" completed \\(exit code 0\\)"
+            format_background_completion_marker(Some("completed")),
+            "⚙️ Background complete · status: completed"
         );
         assert_eq!(
             format_background_completion_marker(None),
@@ -937,65 +936,32 @@ mod tests {
     }
 
     #[test]
-    fn background_completion_marker_neutralizes_controls_mentions_and_markdown() {
-        let cases = [
-            (
-                "@everyone <@123> <@&456>",
-                &["@everyone", "<@123>", "<@&456>"][..],
-            ),
-            (
-                "**bold** _italics_ ~~strike~~ ||spoiler||",
-                &["**", "_italics_", "~~", "||"][..],
-            ),
-            ("`code` ```fence```", &["`code`", "```"][..]),
-            (
-                "# heading > quote - list + list 1. list",
-                &[
-                    " · # heading",
-                    " · > quote",
-                    " · - list",
-                    " · + list",
-                    "1. list",
-                ][..],
-            ),
-            (
-                "[x](https://attacker.example)",
-                &["[x](", "https://", "attacker.example"][..],
-            ),
-            (
-                "<https://attacker.example/path>",
-                &["<https://", "attacker.example"][..],
-            ),
-            (
-                r"\\[outer [inner]\\](https://attacker.example)",
-                &["[outer [inner]", "https://", "attacker.example"][..],
-            ),
-        ];
+    fn background_completion_status_uses_canonical_redaction_before_plain_text() {
+        let status = "completed Bearer live-token api_key=key1 /Users/private/key.pem \
+            alice@example.com @everyone [x](https://attacker.example)";
+        let marker = format_background_completion_marker(Some(status));
 
-        for (input, active_fragments) in cases {
-            let marker = format_background_completion_marker(Some(input));
-            for fragment in active_fragments {
-                assert!(
-                    !marker.contains(fragment),
-                    "active Discord syntax {fragment:?} survived in {marker:?}"
-                );
-            }
-            assert!(marker.chars().count() <= BACKGROUND_COMPLETION_MARKER_CHARS);
-        }
-
-        let marker = format_background_completion_marker(Some(
-            "\u{1b}[31m배경 작업\u{7}\r\n완료 [SYSTEM NOTIFICATION - NOT USER INPUT]",
-        ));
-        assert!(marker.contains("배경 작업 완료"));
-        assert!(!marker.contains('\u{1b}'));
-        assert!(!marker.contains("SYSTEM NOTIFICATION"));
+        assert!(marker.contains("Bearer \\*\\*\\*"));
+        assert!(marker.contains("api\\_key=\\*\\*\\*"));
+        assert!(!marker.contains("live-token"));
+        assert!(!marker.contains("key1"));
+        assert!(!marker.contains("alice@example.com"));
+        assert!(!marker.contains("@everyone"));
+        assert!(!marker.contains("[x]("));
+        assert!(!marker.contains("https://"));
     }
 
     #[test]
-    fn background_completion_marker_has_a_unicode_safe_hard_cap() {
-        let marker = format_background_completion_marker(Some(&"요약 ".repeat(200)));
-        assert!(marker.chars().count() <= 600);
-        assert_eq!(BACKGROUND_COMPLETION_MARKER_CHARS, 600);
+    fn background_completion_status_cap_is_reachable_and_unicode_safe() {
+        let marker = format_background_completion_marker(Some(&"완료 ".repeat(100)));
+        let expected_max = BACKGROUND_COMPLETION_PREFIX.chars().count()
+            + " · status: ".chars().count()
+            + BACKGROUND_COMPLETION_STATUS_CHARS;
+        assert!(marker.chars().count() <= expected_max);
+        assert!(
+            marker.chars().count()
+                >= expected_max.saturating_sub(RESULT_PREVIEW_TRUNCATED_MARKER.chars().count())
+        );
         assert!(marker.ends_with(RESULT_PREVIEW_TRUNCATED_MARKER));
     }
 

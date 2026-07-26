@@ -319,12 +319,12 @@ mod tests {
 
     #[test]
     fn lifecycle_allowed_mentions_suppresses_every_mention_class() {
-        let value = serde_json::to_value(lifecycle_allowed_mentions()).expect("serialize");
-        let parse = value
-            .get("parse")
-            .and_then(|value| value.as_array())
-            .expect("parse array");
-        assert!(parse.is_empty(), "lifecycle parse must be empty: {value}");
+        let value = serde_json::to_value(lifecycle_allowed_mentions()).unwrap_or_default();
+        let parse = value.get("parse").and_then(|value| value.as_array());
+        assert!(
+            parse.is_some_and(Vec::is_empty),
+            "lifecycle parse must be empty: {value}"
+        );
         assert!(
             value
                 .get("users")

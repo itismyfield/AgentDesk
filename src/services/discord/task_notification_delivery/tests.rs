@@ -423,7 +423,7 @@ fn clients() -> CardDeliveryClients {
 }
 
 #[test]
-fn prompt_footer_marker_uses_summary_only_without_changing_identity() {
+fn prompt_footer_marker_uses_status_only_without_changing_identity() {
     let raw = "<task-notification><task-id>preview-task</task-id>\
         <tool-use-id>toolu-preview-task</tool-use-id><status>completed</status>\
         <summary>Background command &quot;CI&quot; completed\n(exit code 0)</summary>\
@@ -437,7 +437,7 @@ fn prompt_footer_marker_uses_summary_only_without_changing_identity() {
 
     assert_eq!(
         event.background_completion_marker(),
-        "⚙️ Background complete · Background command \"CI\" completed \\(exit code 0\\)"
+        "⚙️ Background complete · status: completed"
     );
     assert!(
         !event

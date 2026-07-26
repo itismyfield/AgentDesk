@@ -684,15 +684,20 @@ mod manual_v3_delivery_tests {
             http: Arc::new(serenity::Http::new("test-token")),
             suppress_all_mentions: true,
         };
-        let value = serde_json::to_value(client.message("@everyone <@123> <@&456>"))
-            .expect("serialize message");
+        let value = serde_json::to_value(client.message("@everyone <@123> <@&456>"));
         assert_eq!(
-            value.get("content").and_then(serde_json::Value::as_str),
+            value
+                .as_ref()
+                .ok()
+                .and_then(|value| value.get("content"))
+                .and_then(serde_json::Value::as_str),
             Some("@everyone <@123> <@&456>")
         );
         assert_eq!(
             value
-                .get("allowed_mentions")
+                .as_ref()
+                .ok()
+                .and_then(|value| value.get("allowed_mentions"))
                 .and_then(|mentions| mentions.get("parse"))
                 .and_then(serde_json::Value::as_array)
                 .map(Vec::len),
@@ -706,13 +711,17 @@ mod manual_v3_delivery_tests {
             http: Arc::new(serenity::Http::new("test-token")),
             suppress_all_mentions: false,
         };
-        let value = serde_json::to_value(client.message("<@123>")).expect("serialize message");
+        let value = serde_json::to_value(client.message("<@123>"));
         let parse = value
-            .get("allowed_mentions")
+            .as_ref()
+            .ok()
+            .and_then(|value| value.get("allowed_mentions"))
             .and_then(|mentions| mentions.get("parse"))
-            .and_then(serde_json::Value::as_array)
-            .expect("parse array");
-        assert_eq!(parse, &[serde_json::Value::String("users".to_string())]);
+            .and_then(serde_json::Value::as_array);
+        assert_eq!(
+            parse,
+            Some(&vec![serde_json::Value::String("users".to_string())])
+        );
     }
 
     #[test]
