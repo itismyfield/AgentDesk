@@ -39,7 +39,7 @@ use super::{
     ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxRegistry, ChannelMailboxState,
     EnqueueInterventionResult, EnqueueRefusalReason, GLOBAL_CHANNEL_MAILBOXES,
     GLOBAL_RECOVERY_DONE_SIGNALS, GLOBAL_TURN_FINISHED_SIGNALS, Intervention,
-    QueuePersistenceContext, RecoveryKickoffResult, TryStartTurnResult,
+    PrepareChannelClearResult, QueuePersistenceContext, RecoveryKickoffResult, TryStartTurnResult,
 };
 use crate::services::provider::CancelToken;
 
@@ -126,6 +126,23 @@ pub(super) fn gate_closed_arm(
             let _ = reply.send(super::BeginResumeTransitionResult::MailboxClosed);
             None
         }
+        ChannelMailboxMsg::PrepareClear { reply, .. } => {
+            let _ = reply.send(PrepareChannelClearResult {
+                key: None,
+                persistence_error: None,
+                refused_resume_transition: true,
+            });
+            None
+        }
+        ChannelMailboxMsg::CommitPreparedClear { reply, .. } => {
+            let _ = reply.send(super::ClearChannelResult {
+                removed_token: None,
+                queue_exit_events: Vec::new(),
+                persistence_error: None,
+                refused_resume_transition: true,
+            });
+            None
+        }
         ChannelMailboxMsg::AdvanceResumeTransition { reply, .. } => {
             let _ = reply.send(super::AdvanceResumeTransitionResult::Refused(
                 super::ResumeTransitionMutationRefusal::MailboxClosed,
@@ -143,6 +160,15 @@ pub(super) fn gate_closed_arm(
             let _ = reply.send(super::EndResumeTransitionResult::Refused(
                 super::ResumeTransitionMutationRefusal::MailboxClosed,
             ));
+            None
+        }
+        ChannelMailboxMsg::AbortPreparedClear { reply, .. } => {
+            let _ = reply.send(super::AbortPreparedClearResult {
+                transition_result: super::EndResumeTransitionResult::Refused(
+                    super::ResumeTransitionMutationRefusal::MailboxClosed,
+                ),
+                persistence_error: None,
+            });
             None
         }
         other => Some(other),

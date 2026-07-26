@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use super::auto_heal_attempts::{
     auto_heal_key, cancel_unapplied_auto_heal_attempt, commit_auto_heal_attempt,
-    defer_resume_transition_auto_heal_attempt, record_auto_heal_confirm_failure,
-    refund_auto_heal_attempt, remaining_auto_heal_attempts, reserve_auto_heal_attempt,
+    defer_persistence_auto_heal_attempt, defer_resume_transition_auto_heal_attempt,
+    record_auto_heal_confirm_failure, refund_auto_heal_attempt, remaining_auto_heal_attempts,
+    reserve_auto_heal_attempt,
 };
 use super::auto_heal_confirm::{ReattachConfirmation, classify_reattach_confirmation};
 use super::*;
@@ -230,12 +231,14 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
     settle_auto_heal_confirmation(&mut apply_result, confirmation, &key, now_ms);
     let skipped = matches!(
         apply_result.status,
-        "reattach_episode_changed" | "deferred_resume_transition"
+        "reattach_episode_changed" | "deferred_resume_transition" | "deferred_runtime_persistence"
     );
     if apply_result.status == "reattach_episode_changed" {
         decision.auto_heal.skipped_reason = Some("durable_reattach_stale_identity");
     } else if apply_result.status == "deferred_resume_transition" {
         decision.auto_heal.skipped_reason = Some("resume_transition_reserved");
+    } else if apply_result.status == "deferred_runtime_persistence" {
+        decision.auto_heal.skipped_reason = Some("runtime_persistence_failed");
     }
     decision.auto_heal.remaining_attempts =
         remaining_auto_heal_attempts(&key, now_ms, decision.auto_heal.max_attempts_per_window);
@@ -288,6 +291,8 @@ fn settle_auto_heal_confirmation(
         ReattachConfirmation::NotRequired | ReattachConfirmation::Confirmed => {
             if apply_result.status == "deferred_resume_transition" {
                 defer_resume_transition_auto_heal_attempt(key, now_ms);
+            } else if apply_result.status == "deferred_runtime_persistence" {
+                defer_persistence_auto_heal_attempt(key, now_ms);
             } else if matches!(
                 apply_result.status,
                 "rebind_failed" | "provider_unavailable" | "reattach_episode_changed"

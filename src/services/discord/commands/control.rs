@@ -397,6 +397,9 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     if cleared.refused_resume_transition {
         anyhow::bail!("channel clear deferred while resume transition is active");
     }
+    if let Some(error) = cleared.persistence_error.as_deref() {
+        anyhow::bail!("channel clear deferred after durable mailbox persistence failed: {error}");
+    }
     let clear_boundary_result = crate::db::session_transcripts::record_channel_clear_boundary(
         shared.pg_pool.as_ref(),
         &channel_id.get().to_string(),

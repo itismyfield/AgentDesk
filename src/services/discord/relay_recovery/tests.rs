@@ -1453,6 +1453,125 @@ fn orphan_token_live_evidence_and_agentdesk_tmux_stay_protected() {
 }
 
 #[tokio::test]
+async fn orphan_clear_persistence_failure_preserves_authority_and_retries_after_backoff() {
+    let _guard = auto_heal_test_lock().lock().await;
+    clear_auto_heal_attempts_for_tests();
+    let (root_guard, root_dir) = isolated_agentdesk_root();
+    let provider = ProviderKind::Codex;
+    let (registry, shared) = registry_with_shared(provider.clone()).await;
+    let channel = ChannelId::new(4_920_401);
+    let message = MessageId::new(4_920_411);
+    let token = start_test_turn(&shared, channel, message).await;
+    shared.restart.global_active.store(1, Ordering::Relaxed);
+    let kickoff = super::super::mailbox_recovery_kickoff(
+        &shared,
+        channel,
+        token.clone(),
+        UserId::new(1),
+        Some(message),
+    )
+    .await;
+    assert!(!kickoff.activated_turn);
+    assert!(!kickoff.refused_closed);
+    assert!(!kickoff.refused_resume_transition);
+    let recovery_done = shared.mailboxes.recovery_done(channel);
+    let now_ms = chrono::Utc::now().timestamp_millis()
+        + ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64;
+
+    std::fs::write(root_dir.path().join("runtime-blocker"), "not-a-directory")
+        .expect("create persistence blocker");
+    unsafe {
+        std::env::set_var(
+            "AGENTDESK_ROOT_DIR",
+            root_dir.path().join("runtime-blocker"),
+        );
+    }
+    let failed = auto_apply_relay_recovery_for_shared_at(
+        &registry,
+        shared.clone(),
+        &provider,
+        channel.get(),
+        RelayRecoveryActionKind::ClearOrphanPendingToken,
+        RelayRecoveryApplySource::ProbeAutoHeal,
+        now_ms,
+    )
+    .await
+    .expect("persistence-failed orphan apply should return a typed result");
+
+    assert!(
+        !failed.applied,
+        "failed durable clear must not report applied"
+    );
+    assert!(failed.skipped);
+    assert_eq!(
+        failed.apply_result.as_ref().map(|result| result.status),
+        Some("deferred_runtime_persistence")
+    );
+    assert_eq!(
+        failed.decision.auto_heal.skipped_reason,
+        Some("runtime_persistence_failed")
+    );
+    let snapshot = super::super::mailbox_snapshot(&shared, channel).await;
+    assert!(
+        snapshot
+            .cancel_token
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(active, &token))
+    );
+    assert!(!token.cancelled.load(Ordering::Relaxed));
+    assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+    assert!(
+        snapshot.recovery_started_at.is_some(),
+        "failed clear must preserve the mailbox recovery marker"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), recovery_done.wait())
+            .await
+            .is_err(),
+        "failed clear must preserve the recovery latch and marker authority"
+    );
+
+    let key = auto_heal_key(
+        provider.as_str(),
+        channel.get(),
+        RelayRecoveryActionKind::ClearOrphanPendingToken,
+        RelayRecoveryApplySource::ProbeAutoHeal,
+    );
+    assert_eq!(
+        reserve_auto_heal_attempt(&key, now_ms + 1, 1),
+        Err("auto_heal_failure_backoff"),
+        "persistence failure must not hot-loop"
+    );
+    unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root_dir.path()) };
+    let retry_at = now_ms + AUTO_HEAL_PERSISTENCE_DEFER_SECS * 1000;
+    let retried = auto_apply_relay_recovery_for_shared_at(
+        &registry,
+        shared.clone(),
+        &provider,
+        channel.get(),
+        RelayRecoveryActionKind::ClearOrphanPendingToken,
+        RelayRecoveryApplySource::ProbeAutoHeal,
+        retry_at,
+    )
+    .await
+    .expect("orphan clear should retry after persistence backoff");
+    assert!(retried.applied);
+    assert!(!retried.skipped);
+    assert!(token.cancelled.load(Ordering::Relaxed));
+    assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+    let after_retry = super::super::mailbox_snapshot(&shared, channel).await;
+    assert!(after_retry.cancel_token.is_none());
+    assert!(after_retry.recovery_started_at.is_none());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), recovery_done.wait())
+            .await
+            .is_ok(),
+        "committed retry must complete the recovery latch"
+    );
+    std::mem::drop(root_guard);
+}
+
+#[tokio::test]
 async fn auto_heal_attempts_are_rate_limited_per_window() {
     let _guard = auto_heal_test_lock().lock().await;
     clear_auto_heal_attempts_for_tests();

@@ -73,8 +73,8 @@ use auto_heal_apply::apply_relay_recovery_plan;
 #[cfg(test)]
 use auto_heal_attempts::{
     AUTO_HEAL_DEAD_FRONTIER_REATTACH_MAX_ATTEMPTS_PER_WINDOW,
-    AUTO_HEAL_DEFAULT_MAX_ATTEMPTS_PER_WINDOW, auto_heal_test_lock,
-    clear_auto_heal_attempts_for_tests, reserve_auto_heal_attempt,
+    AUTO_HEAL_DEFAULT_MAX_ATTEMPTS_PER_WINDOW, AUTO_HEAL_PERSISTENCE_DEFER_SECS,
+    auto_heal_test_lock, clear_auto_heal_attempts_for_tests, reserve_auto_heal_attempt,
 };
 use auto_heal_attempts::{
     AUTO_HEAL_WINDOW_SECS, auto_heal_key, max_attempts_per_window_for_snapshot,

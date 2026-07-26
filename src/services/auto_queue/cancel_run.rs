@@ -891,6 +891,151 @@ pub(crate) async fn clear_and_release_slots_for_runs_pg(
     }
 }
 
+#[cfg(test)]
+mod slot_cleanup_tests {
+    use super::*;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::services::discord::{self, health::HealthRegistry};
+    use crate::services::provider::CancelToken;
+    use crate::services::turn_orchestrator::{
+        BeginResumeTransitionResult, EndResumeTransitionResult,
+    };
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+
+    #[tokio::test]
+    async fn deferred_multi_target_clear_keeps_cancelled_run_slot_and_sessions() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate_with_max_connections(8).await;
+        let first = ChannelId::new(4_916_701);
+        let second = ChannelId::new(4_916_702);
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-cancel-preserve', 'repo', 'agent-cancel-preserve', 'active')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed run");
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ('agent-cancel-preserve', 'Agent Cancel Preserve', 'claude', '123')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed agent");
+        sqlx::query(
+            "INSERT INTO auto_queue_slots
+                (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map)
+             VALUES ('agent-cancel-preserve', 0, 'run-cancel-preserve', 0, $1::jsonb)",
+        )
+        .bind(
+            serde_json::json!({
+                "first": first.get().to_string(),
+                "second": second.get().to_string(),
+            })
+            .to_string(),
+        )
+        .execute(&pool)
+        .await
+        .expect("seed slot");
+        for (channel, session_key) in [(first, "cancel-first"), (second, "cancel-second")] {
+            sqlx::query(
+                "INSERT INTO sessions
+                    (session_key, agent_id, provider, status, session_info, tokens,
+                     thread_channel_id, claude_session_id, active_dispatch_id, last_heartbeat)
+                 VALUES ($1, 'agent-cancel-preserve', 'claude', 'idle', 'preserve', 321,
+                         $2, 'provider-session', 'dispatch', NOW())",
+            )
+            .bind(session_key)
+            .bind(channel.get().to_string())
+            .execute(&pool)
+            .await
+            .expect("seed session");
+        }
+
+        let shared = discord::make_shared_data_for_tests();
+        let registry = Arc::new(HealthRegistry::new());
+        registry
+            .register_for_tests("claude".to_string(), shared.clone())
+            .await;
+        let first_token = Arc::new(CancelToken::new());
+        let second_token = Arc::new(CancelToken::new());
+        for (channel, token, message) in [
+            (first, first_token.clone(), 4_916_711),
+            (second, second_token.clone(), 4_916_712),
+        ] {
+            assert!(
+                discord::mailbox_handle_for_tests(&shared, channel)
+                    .try_start_turn(token, UserId::new(7), MessageId::new(message))
+                    .await
+            );
+        }
+        let blocking_key = match discord::mailbox_handle_for_tests(&shared, second)
+            .begin_resume_transition(uuid::Uuid::new_v4())
+            .await
+        {
+            BeginResumeTransitionResult::Begun(key) => key,
+            other => panic!("reserve second target: {other:?}"),
+        };
+
+        let cleanup = clear_and_release_slots_for_runs_pg(
+            Some(registry),
+            &pool,
+            &["run-cancel-preserve".to_string()],
+        )
+        .await;
+        assert_eq!(cleanup.released_slots, 0);
+        assert_eq!(cleanup.cleared_slot_sessions, 0);
+        assert!(
+            cleanup
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("resume transition active"))
+        );
+        let assigned_run = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT assigned_run_id FROM auto_queue_slots
+             WHERE agent_id = 'agent-cancel-preserve' AND slot_index = 0",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load slot assignment");
+        assert_eq!(assigned_run.as_deref(), Some("run-cancel-preserve"));
+        for (channel, expected_token) in [(first, &first_token), (second, &second_token)] {
+            let session =
+                sqlx::query_as::<_, (String, String, i64, Option<String>, Option<String>)>(
+                    "SELECT status, session_info, tokens, claude_session_id, active_dispatch_id
+                 FROM sessions WHERE thread_channel_id = $1",
+                )
+                .bind(channel.get().to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("load preserved session");
+            assert_eq!(session.0, "idle");
+            assert_eq!(session.1, "preserve");
+            assert_eq!(session.2, 321);
+            assert_eq!(session.3.as_deref(), Some("provider-session"));
+            assert_eq!(session.4.as_deref(), Some("dispatch"));
+            let snapshot = discord::mailbox_handle_for_tests(&shared, channel)
+                .snapshot()
+                .await;
+            assert!(
+                snapshot
+                    .cancel_token
+                    .as_ref()
+                    .is_some_and(|active| Arc::ptr_eq(active, expected_token))
+            );
+        }
+        assert!(matches!(
+            discord::mailbox_handle_for_tests(&shared, second)
+                .abort_resume_transition(blocking_key)
+                .await,
+            EndResumeTransitionResult::Applied(_)
+        ));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+}
+
 pub(crate) async fn cancel_selected_runs_with_pg(
     health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
     pool: &PgPool,

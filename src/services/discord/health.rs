@@ -74,8 +74,11 @@ pub use recovery::{
     stop_runtime_turn_preserving_watcher,
 };
 pub(crate) use recovery::{
-    channel_has_active_turn, provider_channel_runtime_clear_readiness,
-    rebind_channel_provider_session, stop_provider_channel_runtime_with_policy,
+    PrepareRuntimeChannelClearResult, PreparedRuntimeChannelClear,
+    abort_prepared_provider_channel_runtime_clear, channel_has_active_turn,
+    commit_prepared_provider_channel_runtime_clear, prepare_provider_channel_runtime_clear,
+    provider_channel_runtime_clear_readiness, rebind_channel_provider_session,
+    stop_provider_channel_runtime_with_policy,
 };
 pub(crate) use runtime_resolve::resolve_utility_bot_http;
 pub use runtime_resolve::{fetch_channel_name, resolve_bot_http};

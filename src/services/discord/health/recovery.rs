@@ -7,7 +7,6 @@ use serde::Serialize;
 use serenity::{ChannelId, MessageId};
 
 use crate::services::discord::inflight::opt_message_id;
-use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::discord::turn_view_reconciler::note_intake_turn_cleared_via_shared as tv_clear;
 use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::{CancelToken, ProviderKind};
@@ -18,8 +17,17 @@ use super::snapshot::WatcherStateSnapshot;
 use super::{relay_auto_heal, relay_dead_reattach, stall_liveness, watcher_respawn};
 
 mod leak_recovery_ledger;
+#[path = "runtime_clear.rs"]
+mod runtime_clear;
 mod stall_alert;
 mod watchdog_decisions;
+
+pub use runtime_clear::clear_provider_channel_runtime;
+pub(crate) use runtime_clear::{
+    PrepareRuntimeChannelClearResult, PreparedRuntimeChannelClear,
+    abort_prepared_provider_channel_runtime_clear, commit_prepared_provider_channel_runtime_clear,
+    prepare_provider_channel_runtime_clear,
+};
 
 use leak_recovery_ledger::{
     LeakRecoveryLedgerIdentity, leak_recovery_clear_chunk_ledger,
@@ -1377,80 +1385,6 @@ pub(crate) async fn provider_channel_runtime_clear_readiness(
     }
 }
 
-/// Best-effort runtime-side equivalent of `/clear` for an existing Discord channel session.
-/// Used by auto-queue slot recycling so pooled unified-thread slots start the next group fresh
-/// without killing the shared thread itself.
-pub async fn clear_provider_channel_runtime(
-    registry: &HealthRegistry,
-    provider_name: &str,
-    channel_id: ChannelId,
-    session_key: Option<&str>,
-) -> RuntimeChannelClearResult {
-    let Some(provider) = ProviderKind::from_str(provider_name) else {
-        return RuntimeChannelClearResult::Unavailable;
-    };
-
-    let Some(shared) = shared_for_provider(registry, &provider, channel_id).await else {
-        return RuntimeChannelClearResult::Unavailable;
-    };
-
-    let tmux_name = {
-        let data = shared.core.lock().await;
-        data.sessions
-            .get(&channel_id)
-            .and_then(|session| session.channel_name.as_ref())
-            .map(|channel_name| provider.build_tmux_session_name(channel_name))
-            .or_else(|| session_key.and_then(tmux_name_from_session_key))
-    };
-
-    let cleared = discord::mailbox_clear_channel(&shared, &provider, channel_id).await;
-    if cleared.refused_resume_transition {
-        tracing::warn!(
-            channel_id = channel_id.get(),
-            "runtime clear deferred while resume transition is active"
-        );
-        return RuntimeChannelClearResult::DeferredResumeTransition;
-    }
-    if let Some(error) = cleared.persistence_error.as_deref() {
-        tracing::warn!(
-            channel_id = channel_id.get(),
-            %error,
-            "runtime clear stopped after mailbox persistence failed"
-        );
-        return RuntimeChannelClearResult::PersistenceFailed;
-    }
-    if let Some(token) = cleared.removed_token {
-        discord::turn_bridge::stop_active_turn(
-            &provider,
-            &token,
-            discord::TmuxCleanupPolicy::PreserveSession,
-            "auto-queue slot clear",
-        )
-        .await;
-        discord::saturating_decrement_global_active(&shared);
-    }
-
-    {
-        let mut data = shared.core.lock().await;
-        if let Some(session) = data.sessions.get_mut(&channel_id) {
-            discord::settings::cleanup_channel_uploads(channel_id);
-            session.clear_provider_session();
-            session.history.clear();
-            session.pending_uploads.clear();
-            session.cleared = true;
-        }
-    }
-
-    #[cfg(unix)]
-    if let Some(name) = tmux_name {
-        if provider.uses_managed_tmux_backend() {
-            discord::commands::reset_managed_process_session(&name);
-        }
-    }
-
-    RuntimeChannelClearResult::Cleared
-}
-
 #[cfg(test)]
 mod runtime_clear_readiness_tests {
     use super::*;
@@ -1459,6 +1393,92 @@ mod runtime_clear_readiness_tests {
         BeginResumeTransitionResult, EndResumeTransitionResult,
     };
     use poise::serenity_prelude::{MessageId, UserId};
+
+    #[tokio::test]
+    async fn prepared_clear_abort_preserves_first_target_when_second_target_refuses() {
+        let shared = discord::make_shared_data_for_tests();
+        let registry = HealthRegistry::new();
+        registry
+            .register("claude".to_string(), shared.clone())
+            .await;
+        let first_channel = ChannelId::new(4_916_421);
+        let second_channel = ChannelId::new(4_916_422);
+        let first_token = Arc::new(CancelToken::new());
+        let second_token = Arc::new(CancelToken::new());
+        let first_handle = shared.mailboxes.handle(first_channel);
+        let second_handle = shared.mailboxes.handle(second_channel);
+        assert!(
+            first_handle
+                .try_start_turn(
+                    first_token.clone(),
+                    UserId::new(7),
+                    MessageId::new(4_916_431),
+                )
+                .await
+        );
+        assert!(
+            second_handle
+                .try_start_turn(
+                    second_token.clone(),
+                    UserId::new(8),
+                    MessageId::new(4_916_432),
+                )
+                .await
+        );
+        let blocking_key = match second_handle
+            .begin_resume_transition(uuid::Uuid::new_v4())
+            .await
+        {
+            BeginResumeTransitionResult::Begun(key) => key,
+            other => panic!("reserve second target: {other:?}"),
+        };
+        let transition_id = uuid::Uuid::new_v4();
+        let first_prepared = match prepare_provider_channel_runtime_clear(
+            &registry,
+            "claude",
+            first_channel,
+            None,
+            transition_id,
+        )
+        .await
+        {
+            PrepareRuntimeChannelClearResult::Prepared(prepared) => prepared,
+            _ => panic!("first target must prepare"),
+        };
+        assert_eq!(first_prepared.channel_id(), first_channel);
+        assert!(matches!(
+            prepare_provider_channel_runtime_clear(
+                &registry,
+                "claude",
+                second_channel,
+                None,
+                transition_id,
+            )
+            .await,
+            PrepareRuntimeChannelClearResult::DeferredResumeTransition
+        ));
+        abort_prepared_provider_channel_runtime_clear(first_prepared)
+            .await
+            .expect("abort first prepared target");
+
+        for (channel, expected_token) in [
+            (first_channel, &first_token),
+            (second_channel, &second_token),
+        ] {
+            let snapshot = shared.mailboxes.handle(channel).snapshot().await;
+            assert!(
+                snapshot
+                    .cancel_token
+                    .as_ref()
+                    .is_some_and(|token| Arc::ptr_eq(token, expected_token)),
+                "later target refusal must not clear either runtime authority"
+            );
+        }
+        assert!(matches!(
+            second_handle.abort_resume_transition(blocking_key).await,
+            EndResumeTransitionResult::Applied(_)
+        ));
+    }
 
     #[tokio::test]
     async fn resume_transition_readiness_is_non_destructive_and_retryable_after_release() {

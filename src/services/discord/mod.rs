@@ -28,6 +28,7 @@ mod inflight;
 mod inflight_heartbeat_sweeper;
 pub(crate) mod internal_api;
 mod jsonl_watcher;
+mod mailbox_clear;
 mod mailbox_finish;
 mod mcp_credential_watcher;
 pub(crate) mod meeting_artifact_store;
@@ -146,6 +147,11 @@ pub(in crate::services::discord) use catch_up::{
     CatchUpRetryState, catch_up_missed_messages, catch_up_missed_messages_for_retry,
     should_trigger_catch_up_retry, take_catch_up_retry_checkpoint_after_queue_drain,
 };
+pub(in crate::services::discord) use mailbox_clear::mailbox_clear_channel;
+pub(crate) use mailbox_clear::{
+    mailbox_abort_prepared_channel_clear, mailbox_commit_prepared_channel_clear,
+    mailbox_prepare_channel_clear,
+};
 pub(in crate::services::discord) use mailbox_finish::{
     mailbox_finish_cancelled_turn, mailbox_finish_owned_turn, mailbox_finish_turn,
     mailbox_finish_turn_if_matches, mailbox_finish_turn_if_matches_episode_started_before,
@@ -239,11 +245,11 @@ pub(crate) use runtime_bootstrap::run_bot;
 
 use crate::services::turn_orchestrator::{
     ActiveTurnKind, CancelActiveTurnResult, CancelQueuedMessageResult, ChannelMailboxSnapshot,
-    ClearChannelResult, FinishTurnResult, HydratePendingQueueResult,
-    PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER, QueueExitEvent, QueueExitKind,
-    QueuePersistenceContext, RecoveryKickoffResult, RequeueInterventionResult, TakeNextSoftResult,
-    VALVE_CLEARED_DISPATCH_MARKER_GRACE, load_channel_pending_dispatch_marker,
-    load_pending_dispatch_markers, load_pending_queues, warn_legacy_pending_queue_files,
+    FinishTurnResult, HydratePendingQueueResult, PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER,
+    QueueExitEvent, QueueExitKind, QueuePersistenceContext, RecoveryKickoffResult,
+    RequeueInterventionResult, TakeNextSoftResult, VALVE_CLEARED_DISPATCH_MARKER_GRACE,
+    load_channel_pending_dispatch_marker, load_pending_dispatch_markers, load_pending_queues,
+    warn_legacy_pending_queue_files,
 };
 pub(super) use crate::services::turn_orchestrator::{
     ChannelMailboxRegistry, Intervention, InterventionMode, MAX_INTERVENTIONS_PER_CHANNEL,
@@ -4034,55 +4040,6 @@ mod followup_retry_requeue_tests {
     }
 }
 
-fn clear_result_completes_recovery_latch(result: &ClearChannelResult) -> bool {
-    !result.refused_resume_transition && result.persistence_error.is_none()
-}
-
-#[cfg(test)]
-mod clear_recovery_latch_tests {
-    use super::*;
-
-    fn result(
-        refused_resume_transition: bool,
-        persistence_error: Option<&str>,
-    ) -> ClearChannelResult {
-        ClearChannelResult {
-            removed_token: None,
-            queue_exit_events: Vec::new(),
-            persistence_error: persistence_error.map(str::to_string),
-            refused_resume_transition,
-        }
-    }
-
-    #[test]
-    fn recovery_latch_requires_committed_clear() {
-        assert!(clear_result_completes_recovery_latch(&result(false, None)));
-        assert!(!clear_result_completes_recovery_latch(&result(true, None)));
-        assert!(!clear_result_completes_recovery_latch(&result(
-            false,
-            Some("durable queue write failed")
-        )));
-    }
-}
-
-async fn mailbox_clear_channel(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-) -> ClearChannelResult {
-    let result = shared
-        .mailbox(channel_id)
-        .clear(queue_persistence_context(shared, provider, channel_id))
-        .await;
-    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
-    // A refused resume reservation or failed durable queue clear still owns the
-    // recovery latch. Only committed teardown frees recovery subscribers (#2443).
-    if clear_result_completes_recovery_latch(&result) {
-        shared.mailboxes.recovery_done(channel_id).mark_done();
-    }
-    result
-}
-
 /// #3864: in-actor merge of SIGTERM-restored disk queue items into the live
 /// mailbox queue. Replaces the out-of-actor snapshot→build→`replace_queue`
 /// read-modify-write the startup restore path used, which silently lost any
@@ -4778,10 +4735,11 @@ async fn maybe_cleanup_sessions(shared: &Arc<SharedData>) {
     let mut cleared_expired = Vec::new();
     for expired_session in &expired {
         let cleared = mailbox_clear_channel(shared, &provider, expired_session.channel_id).await;
-        if cleared.refused_resume_transition {
+        if cleared.refused_resume_transition || cleared.persistence_error.is_some() {
             tracing::debug!(
                 channel_id = expired_session.channel_id.get(),
-                "idle session cleanup deferred while resume transition is active"
+                persistence_error = cleared.persistence_error.as_deref().unwrap_or("none"),
+                "idle session cleanup deferred before durable mailbox clear committed"
             );
             continue;
         }

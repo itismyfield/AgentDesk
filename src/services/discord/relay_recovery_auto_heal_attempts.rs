@@ -10,6 +10,7 @@ pub(super) const AUTO_HEAL_DEAD_FRONTIER_REATTACH_MAX_ATTEMPTS_PER_WINDOW: u32 =
 pub(super) const AUTO_HEAL_REFUND_BACKOFF_THRESHOLD: u32 = 3;
 pub(super) const AUTO_HEAL_RESUME_TRANSITION_DEFER_SECS: i64 =
     crate::services::turn_orchestrator::RESUME_TRANSITION_LEASE_DURATION.as_secs() as i64;
+pub(super) const AUTO_HEAL_PERSISTENCE_DEFER_SECS: i64 = 30;
 const AUTO_HEAL_MAX_REFUND_BACKOFF_EXPONENT: u32 = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -172,7 +173,7 @@ pub(super) fn cancel_unapplied_auto_heal_attempt(key: &str) {
     }
 }
 
-pub(super) fn defer_resume_transition_auto_heal_attempt(key: &str, now_ms: i64) {
+fn defer_auto_heal_attempt(key: &str, now_ms: i64, defer_secs: i64) {
     let mut attempts = auto_heal_attempts()
         .lock()
         .expect("relay recovery attempt map poisoned");
@@ -180,8 +181,15 @@ pub(super) fn defer_resume_transition_auto_heal_attempt(key: &str, now_ms: i64) 
         .entry(key.to_string())
         .or_insert_with(|| AttemptWindow::new(now_ms));
     window.attempts = window.attempts.saturating_sub(1);
-    window.retry_not_before_ms =
-        Some(now_ms.saturating_add(AUTO_HEAL_RESUME_TRANSITION_DEFER_SECS.saturating_mul(1000)));
+    window.retry_not_before_ms = Some(now_ms.saturating_add(defer_secs.saturating_mul(1000)));
+}
+
+pub(super) fn defer_resume_transition_auto_heal_attempt(key: &str, now_ms: i64) {
+    defer_auto_heal_attempt(key, now_ms, AUTO_HEAL_RESUME_TRANSITION_DEFER_SECS);
+}
+
+pub(super) fn defer_persistence_auto_heal_attempt(key: &str, now_ms: i64) {
+    defer_auto_heal_attempt(key, now_ms, AUTO_HEAL_PERSISTENCE_DEFER_SECS);
 }
 
 pub(super) fn record_auto_heal_confirm_failure(key: &str, now_ms: i64) {

@@ -19,6 +19,7 @@ mod front_requeue;
 mod intervention_merge;
 mod overflow;
 mod pending_queue_persistence;
+mod prepared_clear;
 mod queue_cancellation;
 pub(crate) mod registry_purge;
 mod resume_transition;
@@ -49,7 +50,6 @@ pub(crate) use overflow::SoftInterventionProbe;
 use overflow::drain_head_overflow;
 #[cfg(test)]
 use pending_queue_persistence::load_channel_pending_queue;
-use pending_queue_persistence::save_channel_pending_dispatch_marker;
 pub(crate) use pending_queue_persistence::{
     PendingQueueItem, cleanup_stale_pending_queue_tmp_files_all_tokens,
     load_channel_pending_dispatch_marker, load_pending_dispatch_markers, load_pending_queues,
@@ -59,6 +59,17 @@ pub(crate) use pending_queue_persistence::{
 #[cfg(test)]
 use pending_queue_persistence::{
     cleanup_stale_pending_queue_tmp_files_in_dir, cleanup_stale_pending_queue_tmp_files_under_root,
+};
+use pending_queue_persistence::{
+    log_queue_persistence_rollback, persist_queue, persist_queue_or_restore,
+    save_channel_pending_dispatch_marker,
+};
+pub(crate) use prepared_clear::{
+    AbortPreparedClearResult, ClearChannelResult, PrepareChannelClearResult,
+};
+use prepared_clear::{
+    PreparedChannelClear, abort_prepared_channel_clear, commit_prepared_channel_clear,
+    persist_and_apply_channel_clear, prepare_channel_clear,
 };
 pub(crate) use queue_cancellation::has_soft_intervention_at;
 use queue_cancellation::{
@@ -494,15 +505,6 @@ pub(crate) struct FinishTurnResult {
     // silently dropped.
     #[allow(dead_code)]
     pub(crate) persistence_error: Option<String>,
-}
-
-pub(crate) struct ClearChannelResult {
-    pub(crate) removed_token: Option<Arc<CancelToken>>,
-    pub(crate) queue_exit_events: Vec<QueueExitEvent>,
-    // Durable clear commit result. Callers must not perform runtime teardown or
-    // complete recovery authority when this is `Some`.
-    pub(crate) persistence_error: Option<String>,
-    pub(crate) refused_resume_transition: bool,
 }
 
 pub(crate) struct CancelActiveTurnResult {
@@ -1202,6 +1204,42 @@ impl ChannelMailboxHandle {
         .await
     }
 
+    pub(crate) async fn prepare_clear(
+        &self,
+        transition_id: uuid::Uuid,
+        persistence: QueuePersistenceContext,
+    ) -> PrepareChannelClearResult {
+        self.request(
+            |reply| ChannelMailboxMsg::PrepareClear {
+                transition_id,
+                persistence,
+                reply,
+            },
+            PrepareChannelClearResult {
+                key: None,
+                persistence_error: None,
+                refused_resume_transition: true,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn commit_prepared_clear(
+        &self,
+        key: ResumeTransitionKey,
+    ) -> ClearChannelResult {
+        self.request(
+            |reply| ChannelMailboxMsg::CommitPreparedClear { key, reply },
+            ClearChannelResult {
+                removed_token: None,
+                queue_exit_events: Vec::new(),
+                persistence_error: None,
+                refused_resume_transition: true,
+            },
+        )
+        .await
+    }
+
     /// #2706: queue-only purge. Drains the intervention queue without
     /// touching the active `cancel_token`, so a turn that entered the
     /// mailbox between a sibling force-kill and this call is not
@@ -1724,6 +1762,10 @@ enum ChannelMailboxMsg {
         key: ResumeTransitionKey,
         reply: oneshot::Sender<EndResumeTransitionResult>,
     },
+    AbortPreparedClear {
+        key: ResumeTransitionKey,
+        reply: oneshot::Sender<AbortPreparedClearResult>,
+    },
     Enqueue {
         intervention: Intervention,
         persistence: QueuePersistenceContext,
@@ -1789,6 +1831,15 @@ enum ChannelMailboxMsg {
     },
     Clear {
         persistence: QueuePersistenceContext,
+        reply: oneshot::Sender<ClearChannelResult>,
+    },
+    PrepareClear {
+        transition_id: uuid::Uuid,
+        persistence: QueuePersistenceContext,
+        reply: oneshot::Sender<PrepareChannelClearResult>,
+    },
+    CommitPreparedClear {
+        key: ResumeTransitionKey,
         reply: oneshot::Sender<ClearChannelResult>,
     },
     /// #2706: drain the intervention queue without touching the active
@@ -1953,6 +2004,7 @@ struct ChannelMailboxState {
     last_persistence: Option<QueuePersistenceContext>,
     recovery_started_at: Option<Instant>,
     resume_transition: ResumeTransitionState,
+    prepared_clear: Option<PreparedChannelClear>,
     /// #3297 r2 — purge tombstone set by `CloseIfIdle`; see `registry_purge.rs`.
     closed: bool,
     /// #1031: see `ChannelMailboxSnapshot::turn_started_at`. Mirrors the
@@ -1965,53 +2017,6 @@ struct ChannelMailboxState {
     watchdog_deadline_override: Option<WatchdogDeadlineExtension>,
     watchdog_extension_count: u32,
     watchdog_extension_total_secs: u64,
-}
-
-fn persist_queue(
-    channel_id: ChannelId,
-    queue: &[Intervention],
-    persistence: &QueuePersistenceContext,
-) -> Result<(), String> {
-    save_channel_queue(
-        &persistence.provider,
-        &persistence.token_hash,
-        channel_id,
-        queue,
-        persistence.dispatch_role_override,
-    )
-}
-
-fn log_queue_persistence_rollback(
-    operation: &str,
-    channel_id: ChannelId,
-    persistence: &QueuePersistenceContext,
-    error: &str,
-) {
-    tracing::error!(
-        operation,
-        provider = persistence.provider.as_str(),
-        token_hash = %persistence.token_hash,
-        channel_id = channel_id.get(),
-        error = %error,
-        "rolled back in-memory pending queue mutation after durable persistence failed"
-    );
-}
-
-fn persist_queue_or_restore(
-    state: &mut ChannelMailboxState,
-    channel_id: ChannelId,
-    persistence: &QueuePersistenceContext,
-    previous_queue: Vec<Intervention>,
-    operation: &str,
-) -> Result<(), String> {
-    match persist_queue(channel_id, &state.intervention_queue, persistence) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            state.intervention_queue = previous_queue;
-            log_queue_persistence_rollback(operation, channel_id, persistence, &error);
-            Err(error)
-        }
-    }
 }
 
 fn finalize_turn_state(
@@ -2564,6 +2569,9 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 ChannelMailboxMsg::AbortResumeTransition { key, reply } => {
                     let _ = reply.send(state.resume_transition.abort(key, Instant::now()));
                 }
+                ChannelMailboxMsg::AbortPreparedClear { key, reply } => {
+                    let _ = reply.send(abort_prepared_channel_clear(&mut state, channel_id, key));
+                }
                 ChannelMailboxMsg::Enqueue {
                     mut intervention,
                     persistence,
@@ -3030,55 +3038,28 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     ));
                 }
                 ChannelMailboxMsg::Clear { persistence, reply } => {
-                    state.last_persistence = Some(persistence.clone());
-                    let previous_queue = state.intervention_queue.clone();
-                    let queue_exit_events = state
-                        .intervention_queue
-                        .drain(..)
-                        .map(|intervention| {
-                            QueueExitEvent::new(intervention, QueueExitKind::Superseded)
-                        })
-                        .collect();
-                    let result = if let Err(error) = persist_queue_or_restore(
+                    let result = persist_and_apply_channel_clear(
                         &mut state,
                         channel_id,
-                        &persistence,
-                        previous_queue,
+                        persistence,
                         "clear",
-                    ) {
-                        ClearChannelResult {
-                            removed_token: None,
-                            queue_exit_events: Vec::new(),
-                            persistence_error: Some(error),
-                            refused_resume_transition: false,
-                        }
-                    } else {
-                        let removed_token = state.cancel_token.take();
-                        state.active_request_owner = None;
-                        state.active_user_message_id = None;
-                        state.active_turn_nonce = None;
-                        // #3167 — clear the priority class with the anchor.
-                        state.active_turn_kind = ActiveTurnKind::default();
-                        state.recovery_started_at = None;
-                        state.turn_started_at = None;
-                        state.turn_started_instant = None;
-                        reset_watchdog_extension_state(&mut state);
-                        clear_pending_user_dispatch(&mut state);
-                        state.recently_valve_cleared_dispatch = None;
-                        delete_pending_dispatch_marker_with_persistence(
-                            &persistence,
-                            channel_id,
-                            "clear",
-                        );
-                        mark_turn_finished_signal_done(channel_id);
-                        ClearChannelResult {
-                            removed_token,
-                            queue_exit_events,
-                            persistence_error: None,
-                            refused_resume_transition: false,
-                        }
-                    };
+                    );
                     let _ = reply.send(result);
+                }
+                ChannelMailboxMsg::PrepareClear {
+                    transition_id,
+                    persistence,
+                    reply,
+                } => {
+                    let _ = reply.send(prepare_channel_clear(
+                        &mut state,
+                        channel_id,
+                        transition_id,
+                        persistence,
+                    ));
+                }
+                ChannelMailboxMsg::CommitPreparedClear { key, reply } => {
+                    let _ = reply.send(commit_prepared_channel_clear(&mut state, channel_id, key));
                 }
                 ChannelMailboxMsg::PurgeQueue {
                     persistence,

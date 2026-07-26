@@ -4,8 +4,9 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use super::{
-    ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxState, InterventionMode,
-    PurgeQueueResult, RecoveryKickoffResult, TakeNextSoftResult, TryStartTurnResult,
+    AbortPreparedClearResult, ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxState,
+    InterventionMode, PrepareChannelClearResult, PurgeQueueResult, RecoveryKickoffResult,
+    TakeNextSoftResult, TryStartTurnResult,
 };
 
 pub(super) fn runtime_clear_readiness_from_state(
@@ -106,6 +107,10 @@ pub(super) struct ResumeTransitionState {
 impl ResumeTransitionState {
     pub(super) fn is_reserved(&self) -> bool {
         self.active.is_some()
+    }
+
+    pub(super) fn active_key(&self) -> Option<ResumeTransitionKey> {
+        self.active.map(|active| active.key)
     }
 
     pub(super) fn recover_expired(
@@ -296,8 +301,16 @@ pub(super) fn gate_reserved_arm(
     msg: ChannelMailboxMsg,
     now: Instant,
 ) -> Option<ChannelMailboxMsg> {
-    state.resume_transition.recover_expired(now);
-    if !state.resume_transition.is_reserved() {
+    if let Some(expired) = state.resume_transition.recover_expired(now)
+        && state.prepared_clear.as_ref().map(|prepared| prepared.key) == Some(expired.key)
+    {
+        tracing::error!(
+            transition_id = %expired.key.transition_id,
+            fence = expired.key.fence,
+            "prepared channel clear lease expired while durable empty-queue reservation remains; keeping mailbox fail-closed"
+        );
+    }
+    if state.prepared_clear.is_none() && !state.resume_transition.is_reserved() {
         return Some(msg);
     }
     match msg {
@@ -345,6 +358,56 @@ pub(super) fn gate_reserved_arm(
                 queue_exit_events: Vec::new(),
                 persistence_error: None,
                 refused_resume_transition: true,
+            });
+            None
+        }
+        ChannelMailboxMsg::PrepareClear {
+            transition_id,
+            persistence,
+            reply,
+        } => {
+            if state
+                .prepared_clear
+                .as_ref()
+                .is_some_and(|prepared| prepared.key.transition_id == transition_id)
+            {
+                return Some(ChannelMailboxMsg::PrepareClear {
+                    transition_id,
+                    persistence,
+                    reply,
+                });
+            }
+            let _ = reply.send(PrepareChannelClearResult {
+                key: None,
+                persistence_error: None,
+                refused_resume_transition: true,
+            });
+            None
+        }
+        ChannelMailboxMsg::CommitPreparedClear { key, reply } => {
+            if state.prepared_clear.as_ref().map(|prepared| prepared.key) == Some(key) {
+                return Some(ChannelMailboxMsg::CommitPreparedClear { key, reply });
+            }
+            let _ = reply.send(super::ClearChannelResult {
+                removed_token: None,
+                queue_exit_events: Vec::new(),
+                persistence_error: None,
+                refused_resume_transition: true,
+            });
+            None
+        }
+        ChannelMailboxMsg::AbortPreparedClear { key, reply } => {
+            if state.prepared_clear.as_ref().map(|prepared| prepared.key) == Some(key) {
+                return Some(ChannelMailboxMsg::AbortPreparedClear { key, reply });
+            }
+            let _ = reply.send(AbortPreparedClearResult {
+                transition_result: EndResumeTransitionResult::Refused(
+                    ResumeTransitionMutationRefusal::Stale {
+                        current: state.resume_transition.active_key(),
+                        terminal: None,
+                    },
+                ),
+                persistence_error: None,
             });
             None
         }
@@ -428,6 +491,22 @@ impl ChannelMailboxHandle {
         self.request(
             |reply| ChannelMailboxMsg::AbortResumeTransition { key, reply },
             EndResumeTransitionResult::Refused(ResumeTransitionMutationRefusal::ActorUnreachable),
+        )
+        .await
+    }
+
+    pub(crate) async fn abort_prepared_clear(
+        &self,
+        key: ResumeTransitionKey,
+    ) -> AbortPreparedClearResult {
+        self.request(
+            |reply| ChannelMailboxMsg::AbortPreparedClear { key, reply },
+            AbortPreparedClearResult {
+                transition_result: EndResumeTransitionResult::Refused(
+                    ResumeTransitionMutationRefusal::ActorUnreachable,
+                ),
+                persistence_error: None,
+            },
         )
         .await
     }

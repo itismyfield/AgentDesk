@@ -6,11 +6,59 @@ use std::time::{Duration, Instant, SystemTime};
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
 use super::{
-    Intervention, InterventionMode, SourceMessageQueuedGeneration, SourceMessageTextSegment,
+    ChannelMailboxState, Intervention, InterventionMode, QueuePersistenceContext,
+    SourceMessageQueuedGeneration, SourceMessageTextSegment,
 };
 use crate::services::provider::ProviderKind;
 
 const STALE_PENDING_QUEUE_TMP_AGE: Duration = Duration::from_secs(60);
+
+pub(super) fn persist_queue(
+    channel_id: ChannelId,
+    queue: &[Intervention],
+    persistence: &QueuePersistenceContext,
+) -> Result<(), String> {
+    save_channel_queue(
+        &persistence.provider,
+        &persistence.token_hash,
+        channel_id,
+        queue,
+        persistence.dispatch_role_override,
+    )
+}
+
+pub(super) fn log_queue_persistence_rollback(
+    operation: &str,
+    channel_id: ChannelId,
+    persistence: &QueuePersistenceContext,
+    error: &str,
+) {
+    tracing::error!(
+        operation,
+        provider = persistence.provider.as_str(),
+        token_hash = %persistence.token_hash,
+        channel_id = channel_id.get(),
+        error = %error,
+        "rolled back in-memory pending queue mutation after durable persistence failed"
+    );
+}
+
+pub(super) fn persist_queue_or_restore(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    persistence: &QueuePersistenceContext,
+    previous_queue: Vec<Intervention>,
+    operation: &str,
+) -> Result<(), String> {
+    match persist_queue(channel_id, &state.intervention_queue, persistence) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            state.intervention_queue = previous_queue;
+            log_queue_persistence_rollback(operation, channel_id, persistence, &error);
+            Err(error)
+        }
+    }
+}
 
 fn is_false(value: &bool) -> bool {
     !*value

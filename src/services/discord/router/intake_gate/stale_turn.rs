@@ -164,10 +164,11 @@ pub(super) async fn thread_guard_force_clean_stale_thread(
         thread_id
     );
     let cleared = mailbox_clear_channel(shared, provider, thread_id).await;
-    if cleared.refused_resume_transition {
+    if cleared.refused_resume_transition || cleared.persistence_error.is_some() {
         tracing::warn!(
             channel_id = thread_id.get(),
-            "THREAD-GUARD stale cleanup deferred while resume transition is active"
+            persistence_error = cleared.persistence_error.as_deref().unwrap_or("none"),
+            "THREAD-GUARD stale cleanup deferred before durable mailbox clear committed"
         );
         return false;
     }

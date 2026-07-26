@@ -175,6 +175,31 @@ pub async fn clear_slot_sessions_pg(
     Ok(cleared_sessions)
 }
 
+async fn abort_prepared_slot_runtime_clears(
+    prepared_targets: Vec<crate::services::discord::health::PreparedRuntimeChannelClear>,
+    reason: &str,
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for prepared in prepared_targets {
+        if let Err(error) =
+            crate::services::discord::health::abort_prepared_provider_channel_runtime_clear(
+                prepared,
+            )
+            .await
+        {
+            errors.push(error);
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "abort prepared slot runtime clear after {reason}: {}",
+            errors.join("; ")
+        ))
+    }
+}
+
 pub async fn clear_slot_threads_for_slot_pg(
     health_registry: Option<Arc<HealthRegistry>>,
     pool: &PgPool,
@@ -193,36 +218,52 @@ pub async fn clear_slot_threads_for_slot_pg(
             .iter()
             .filter(|target| safe_to_clear.contains(&target.thread_channel_id))
             .collect::<Vec<_>>();
-        let mut readiness = Vec::with_capacity(runtime_targets.len());
-        for runtime_target in &runtime_targets {
-            readiness.push(
-                crate::services::discord::health::provider_channel_runtime_clear_readiness(
-                    &registry,
-                    &runtime_target.provider_name,
-                    poise::serenity_prelude::ChannelId::new(runtime_target.thread_channel_id),
-                )
-                .await,
-            );
-        }
-        match slot_runtime_clear_permits_persistence(readiness) {
-            SlotRuntimeClearOutcome::Cleared(_) => {}
-            refused => return Ok(refused),
-        }
-        let mut outcomes = Vec::with_capacity(runtime_targets.len());
+        let transition_id = uuid::Uuid::new_v4();
+        let mut prepared_targets = Vec::with_capacity(runtime_targets.len());
         for runtime_target in runtime_targets {
-            outcomes.push(
-                crate::services::discord::health::clear_provider_channel_runtime(
+            let prepared =
+                crate::services::discord::health::prepare_provider_channel_runtime_clear(
                     &registry,
                     &runtime_target.provider_name,
                     poise::serenity_prelude::ChannelId::new(runtime_target.thread_channel_id),
                     runtime_target.session_key.as_deref(),
+                    transition_id,
                 )
-                .await,
-            );
+                .await;
+            match prepared {
+                crate::services::discord::health::PrepareRuntimeChannelClearResult::Prepared(
+                    prepared,
+                ) => prepared_targets.push(prepared),
+                crate::services::discord::health::PrepareRuntimeChannelClearResult::Unavailable => {}
+                crate::services::discord::health::PrepareRuntimeChannelClearResult::DeferredResumeTransition => {
+                    abort_prepared_slot_runtime_clears(prepared_targets, "deferred target").await?;
+                    return Ok(SlotRuntimeClearOutcome::DeferredResumeTransition);
+                }
+                crate::services::discord::health::PrepareRuntimeChannelClearResult::PersistenceFailed => {
+                    abort_prepared_slot_runtime_clears(
+                        prepared_targets,
+                        "persistence failure",
+                    )
+                    .await?;
+                    return Ok(SlotRuntimeClearOutcome::FailedRuntimePersistence);
+                }
+            }
         }
-        match slot_runtime_clear_permits_persistence(outcomes) {
-            SlotRuntimeClearOutcome::Cleared(_) => {}
-            refused => return Ok(refused),
+        for prepared in prepared_targets {
+            let outcome =
+                crate::services::discord::health::commit_prepared_provider_channel_runtime_clear(
+                    prepared,
+                )
+                .await;
+            debug_assert_eq!(
+                outcome,
+                crate::services::discord::health::RuntimeChannelClearResult::Cleared
+            );
+            if outcome != crate::services::discord::health::RuntimeChannelClearResult::Cleared {
+                return Err(format!(
+                    "prepared slot runtime clear commit violated infallible contract: {outcome:?}"
+                ));
+            }
         }
     }
 
@@ -439,7 +480,148 @@ async fn filter_safe_slot_thread_reset_targets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::discord::health::RuntimeChannelClearResult;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::services::discord::{self, health::RuntimeChannelClearResult};
+    use crate::services::provider::CancelToken;
+    use crate::services::turn_orchestrator::{
+        BeginResumeTransitionResult, EndResumeTransitionResult,
+    };
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+
+    async fn seed_two_target_slot(pool: &PgPool, first: ChannelId, second: ChannelId) {
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status)
+             VALUES ('run-two-target', 'repo', 'agent-two-target', 'active')",
+        )
+        .execute(pool)
+        .await
+        .expect("seed run");
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ('agent-two-target', 'Agent Two Target', 'claude', '123')",
+        )
+        .execute(pool)
+        .await
+        .expect("seed agent");
+        sqlx::query(
+            "INSERT INTO auto_queue_slots
+                (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map)
+             VALUES ('agent-two-target', 0, 'run-two-target', 0, $1::jsonb)",
+        )
+        .bind(
+            serde_json::json!({
+                "first": first.get().to_string(),
+                "second": second.get().to_string(),
+            })
+            .to_string(),
+        )
+        .execute(pool)
+        .await
+        .expect("seed slot");
+        for (channel, session_key) in [(first, "two-target-first"), (second, "two-target-second")] {
+            sqlx::query(
+                "INSERT INTO sessions
+                    (session_key, agent_id, provider, status, session_info, tokens,
+                     thread_channel_id, claude_session_id, active_dispatch_id, last_heartbeat)
+                 VALUES ($1, 'agent-two-target', 'claude', 'idle', 'preserve', 321,
+                         $2, 'provider-session', 'dispatch', NOW())",
+            )
+            .bind(session_key)
+            .bind(channel.get().to_string())
+            .execute(pool)
+            .await
+            .expect("seed session");
+        }
+    }
+
+    async fn assert_two_target_authority_preserved(
+        pool: &PgPool,
+        shared: &Arc<discord::SharedData>,
+        targets: [(ChannelId, &Arc<CancelToken>); 2],
+    ) {
+        for (channel, expected_token) in targets {
+            let session =
+                sqlx::query_as::<_, (String, String, i64, Option<String>, Option<String>)>(
+                    "SELECT status, session_info, tokens, claude_session_id, active_dispatch_id
+                 FROM sessions WHERE thread_channel_id = $1",
+                )
+                .bind(channel.get().to_string())
+                .fetch_one(pool)
+                .await
+                .expect("load preserved session");
+            assert_eq!(session.0, "idle");
+            assert_eq!(session.1, "preserve");
+            assert_eq!(session.2, 321);
+            assert_eq!(session.3.as_deref(), Some("provider-session"));
+            assert_eq!(session.4.as_deref(), Some("dispatch"));
+            let snapshot = discord::mailbox_handle_for_tests(shared, channel)
+                .snapshot()
+                .await;
+            assert!(
+                snapshot
+                    .cancel_token
+                    .as_ref()
+                    .is_some_and(|active| Arc::ptr_eq(active, expected_token)),
+                "later target refusal must preserve every runtime token"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn later_target_refusal_preserves_all_slot_runtime_and_pg_authority() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate_with_max_connections(8).await;
+        let first = ChannelId::new(4_916_601);
+        let second = ChannelId::new(4_916_602);
+        seed_two_target_slot(&pool, first, second).await;
+
+        let shared = discord::make_shared_data_for_tests();
+        let registry = Arc::new(HealthRegistry::new());
+        registry
+            .register_for_tests("claude".to_string(), shared.clone())
+            .await;
+        let first_token = Arc::new(CancelToken::new());
+        let second_token = Arc::new(CancelToken::new());
+        for (channel, token, message) in [
+            (first, first_token.clone(), 4_916_611),
+            (second, second_token.clone(), 4_916_612),
+        ] {
+            assert!(
+                discord::mailbox_handle_for_tests(&shared, channel)
+                    .try_start_turn(token, UserId::new(7), MessageId::new(message))
+                    .await
+            );
+        }
+        let blocking_key = match discord::mailbox_handle_for_tests(&shared, second)
+            .begin_resume_transition(uuid::Uuid::new_v4())
+            .await
+        {
+            BeginResumeTransitionResult::Begun(key) => key,
+            other => panic!("reserve second target: {other:?}"),
+        };
+
+        assert_eq!(
+            clear_slot_threads_for_slot_pg(Some(registry), &pool, "agent-two-target", 0)
+                .await
+                .expect("defer two-target clear"),
+            SlotRuntimeClearOutcome::DeferredResumeTransition
+        );
+        assert_two_target_authority_preserved(
+            &pool,
+            &shared,
+            [(first, &first_token), (second, &second_token)],
+        )
+        .await;
+        assert!(matches!(
+            discord::mailbox_handle_for_tests(&shared, second)
+                .abort_resume_transition(blocking_key)
+                .await,
+            EndResumeTransitionResult::Applied(_)
+        ));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
 
     #[test]
     fn resume_transition_refusal_blocks_slot_persistence() {
