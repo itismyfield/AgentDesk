@@ -19,7 +19,7 @@
 //! prior process crashed mid-record, the next append first writes a newline
 //! delimiter so later complete records remain independently parseable.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -80,6 +80,7 @@ struct SequencedEvent {
     sequence: u64,
     event: StructuredEvent,
     flushed: bool,
+    in_flight_batch: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
@@ -90,23 +91,32 @@ pub struct EventRingAccounting {
     pub retention_evicted_total: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct PendingEviction {
+    count: u64,
+}
+
 #[derive(Debug, Default)]
 struct EventLogInner {
     buffer: VecDeque<SequencedEvent>,
     next_sequence: u64,
+    next_batch_id: u64,
+    active_batch: Option<u64>,
+    /// In-flight events evicted before their persistence result was known.
+    /// There is at most one active batch, so this remains bounded by capacity.
+    pending_evictions: BTreeMap<u64, PendingEviction>,
     /// Events overwritten before their sequence was confirmed durable.
     dropped_total: u64,
     /// Confirmed-durable history removed solely to retain the newest events.
     retention_evicted_total: u64,
 }
 
-/// Immutable flush snapshot. A caller may acknowledge `flushed_through` only
-/// after every event in `events` has crossed the required durability boundary.
+/// Immutable flush snapshot. The issuing batch remains active until exactly one
+/// success or failure result resolves both retained and pending-evicted events.
 #[derive(Debug, Clone)]
 pub struct FlushBatch {
+    batch_id: u64,
     events: Vec<StructuredEvent>,
-    first_sequence: u64,
-    flushed_through: u64,
 }
 
 impl FlushBatch {
@@ -156,6 +166,9 @@ impl EventLog {
                 .expect("a full event ring must have a front entry");
             if evicted.flushed {
                 inner.retention_evicted_total = inner.retention_evicted_total.saturating_add(1);
+            } else if let Some(batch_id) = evicted.in_flight_batch {
+                let pending = inner.pending_evictions.entry(batch_id).or_default();
+                pending.count = pending.count.saturating_add(1);
             } else {
                 inner.dropped_total = inner.dropped_total.saturating_add(1);
                 tracing::warn!(
@@ -170,6 +183,7 @@ impl EventLog {
             sequence,
             event,
             flushed: false,
+            in_flight_batch: None,
         });
         inner.next_sequence = sequence;
     }
@@ -189,37 +203,78 @@ impl EventLog {
             .collect()
     }
 
-    /// Snapshot every retained event not yet confirmed flushed.
-    /// Concurrent pushes receive higher sequences and are excluded until the
-    /// next snapshot. Failed or partial writes must leave this batch unacked.
+    /// Issue one immutable in-flight snapshot without holding the ring mutex
+    /// during persistence. Concurrent flush attempts observe the active batch
+    /// and return no work; event recording remains non-blocking on disk I/O.
     pub fn snapshot_unflushed(&self) -> Option<FlushBatch> {
-        let inner = self.inner.lock().ok()?;
-        let unflushed: Vec<&SequencedEvent> =
-            inner.buffer.iter().filter(|entry| !entry.flushed).collect();
-        let flushed_through = unflushed.last()?.sequence;
-        let first_sequence = unflushed.first()?.sequence;
-        Some(FlushBatch {
-            events: unflushed
-                .into_iter()
-                .map(|entry| entry.event.clone())
-                .collect(),
-            first_sequence,
-            flushed_through,
-        })
+        let mut inner = self.inner.lock().ok()?;
+        if inner.active_batch.is_some() {
+            return None;
+        }
+        let sequences: Vec<u64> = inner
+            .buffer
+            .iter()
+            .filter(|entry| !entry.flushed && entry.in_flight_batch.is_none())
+            .map(|entry| entry.sequence)
+            .collect();
+        let first_sequence = *sequences.first()?;
+        let flushed_through = *sequences.last()?;
+        let batch_id = inner.next_batch_id.checked_add(1)?;
+        inner.next_batch_id = batch_id;
+        inner.active_batch = Some(batch_id);
+        let mut events = Vec::with_capacity(sequences.len());
+        for entry in &mut inner.buffer {
+            if entry.sequence >= first_sequence
+                && entry.sequence <= flushed_through
+                && !entry.flushed
+            {
+                entry.in_flight_batch = Some(batch_id);
+                events.push(entry.event.clone());
+            }
+        }
+        Some(FlushBatch { batch_id, events })
     }
 
-    /// Mark only the events represented by a completed immutable snapshot.
-    /// Duplicate or out-of-order acknowledgements are harmless, including
-    /// concurrent flushers that snapshot overlapping ranges.
-    pub fn acknowledge_flushed(&self, batch: &FlushBatch) {
+    /// Resolve an issued batch after its persistence attempt. Pending evictions
+    /// become normal retention only on durable success; failure counts them as
+    /// actual loss while retained members return to the retryable state.
+    pub fn complete_batch(&self, batch: &FlushBatch, durable: bool) {
         let Ok(mut inner) = self.inner.lock() else {
             return;
         };
-        for entry in &mut inner.buffer {
-            if entry.sequence >= batch.first_sequence && entry.sequence <= batch.flushed_through {
-                entry.flushed = true;
+        if inner.active_batch != Some(batch.batch_id) {
+            return;
+        }
+        let pending = inner
+            .pending_evictions
+            .remove(&batch.batch_id)
+            .unwrap_or_default()
+            .count;
+        if durable {
+            inner.retention_evicted_total = inner.retention_evicted_total.saturating_add(pending);
+        } else {
+            inner.dropped_total = inner.dropped_total.saturating_add(pending);
+            if pending > 0 {
+                tracing::warn!(
+                    batch_id = batch.batch_id,
+                    pending_evictions = pending,
+                    total_dropped = inner.dropped_total,
+                    "[observability] in-flight events were evicted before persistence failed",
+                );
             }
         }
+        for entry in &mut inner.buffer {
+            if entry.in_flight_batch == Some(batch.batch_id) {
+                entry.flushed = durable;
+                entry.in_flight_batch = None;
+            }
+        }
+        inner.active_batch = None;
+    }
+
+    /// Compatibility helper for callers that already know persistence succeeded.
+    pub fn acknowledge_flushed(&self, batch: &FlushBatch) {
+        self.complete_batch(batch, true);
     }
 
     /// Return low-cardinality ring accounting for the observability API.
@@ -258,6 +313,9 @@ impl EventLog {
         if let Ok(mut inner) = self.inner.lock() {
             inner.buffer.clear();
             inner.next_sequence = 0;
+            inner.next_batch_id = 0;
+            inner.active_batch = None;
+            inner.pending_evictions.clear();
             inner.dropped_total = 0;
             inner.retention_evicted_total = 0;
         }
@@ -445,10 +503,17 @@ where
     let Some(batch) = log.snapshot_unflushed() else {
         return Ok(0);
     };
-    persist(batch.events())?;
     let count = batch.events().len();
-    log.acknowledge_flushed(&batch);
-    Ok(count)
+    match persist(batch.events()) {
+        Ok(()) => {
+            log.complete_batch(&batch, true);
+            Ok(count)
+        }
+        Err(error) => {
+            log.complete_batch(&batch, false);
+            Err(error)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -739,10 +804,13 @@ mod tests {
         let log = EventLog::new(2);
         log.push(event("e1"));
         let first = log.snapshot_unflushed().unwrap();
-        let second = log.snapshot_unflushed().unwrap();
+        let snapshot_clone = first.clone();
         let first_value = serde_json::to_value(&first.events()[0]).unwrap();
 
-        assert_eq!(first.events()[0].event_id, second.events()[0].event_id);
+        assert_eq!(
+            first.events()[0].event_id,
+            snapshot_clone.events()[0].event_id
+        );
         assert_eq!(
             first_value["event_id"].as_str(),
             Some(first.events()[0].event_id.as_str())
@@ -752,27 +820,31 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_push_after_snapshot_is_not_acknowledged() {
-        let log = Arc::new(EventLog::new(4));
+    fn durable_success_before_ack_classifies_inflight_eviction_as_retention() {
+        let log = Arc::new(EventLog::new(1));
         log.push(event("e1"));
-        let persisted = Arc::new(Barrier::new(2));
-        let allow_return = Arc::new(Barrier::new(2));
+        let persistence_complete = Arc::new(Barrier::new(2));
+        let allow_ack = Arc::new(Barrier::new(2));
         let worker_log = Arc::clone(&log);
-        let worker_persisted = Arc::clone(&persisted);
-        let worker_allow_return = Arc::clone(&allow_return);
+        let worker_complete = Arc::clone(&persistence_complete);
+        let worker_allow_ack = Arc::clone(&allow_ack);
         let worker = std::thread::spawn(move || {
             flush_once_with(&worker_log, |_| {
-                worker_persisted.wait();
-                worker_allow_return.wait();
+                worker_complete.wait();
+                worker_allow_ack.wait();
                 Ok(())
             })
         });
 
-        persisted.wait();
+        persistence_complete.wait();
         log.push(event("e2"));
-        allow_return.wait();
+        assert_eq!(log.dropped_total(), 0);
+        assert_eq!(log.retention_evicted_total(), 0);
+        allow_ack.wait();
         assert_eq!(worker.join().unwrap().unwrap(), 1);
 
+        assert_eq!(log.dropped_total(), 0);
+        assert_eq!(log.retention_evicted_total(), 1);
         assert_eq!(
             event_names(log.snapshot_unflushed().unwrap().events()),
             vec!["e2"]
@@ -780,23 +852,63 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_out_of_order_acknowledgements_mark_only_their_snapshots() {
+    fn persistence_failure_after_inflight_eviction_counts_actual_loss() {
+        let log = Arc::new(EventLog::new(1));
+        log.push(event("e1"));
+        let attempt_complete = Arc::new(Barrier::new(2));
+        let allow_result = Arc::new(Barrier::new(2));
+        let worker_log = Arc::clone(&log);
+        let worker_complete = Arc::clone(&attempt_complete);
+        let worker_allow_result = Arc::clone(&allow_result);
+        let worker = std::thread::spawn(move || {
+            flush_once_with(&worker_log, |_| {
+                worker_complete.wait();
+                worker_allow_result.wait();
+                Err(io::Error::other("injected persistence failure"))
+            })
+        });
+
+        attempt_complete.wait();
+        log.push(event("e2"));
+        assert_eq!(log.dropped_total(), 0);
+        allow_result.wait();
+        assert!(worker.join().unwrap().is_err());
+
+        assert_eq!(log.dropped_total(), 1);
+        assert_eq!(log.retention_evicted_total(), 0);
+        assert_eq!(
+            event_names(log.snapshot_unflushed().unwrap().events()),
+            vec!["e2"]
+        );
+    }
+
+    #[test]
+    fn concurrent_flushers_are_serialized_without_blocking_recording() {
         let log = EventLog::new(4);
         log.push(event("e1"));
         let first = log.snapshot_unflushed().unwrap();
         log.push(event("e2"));
-        let second = log.snapshot_unflushed().unwrap();
 
-        log.acknowledge_flushed(&second);
-        log.acknowledge_flushed(&first);
-        log.acknowledge_flushed(&second);
         assert!(log.snapshot_unflushed().is_none());
+        assert_eq!(event_names(&log.recent(10)), vec!["e1", "e2"]);
+        log.complete_batch(&first, true);
 
-        log.push(event("e3"));
-        assert_eq!(
-            event_names(log.snapshot_unflushed().unwrap().events()),
-            vec!["e3"]
-        );
+        let second = log.snapshot_unflushed().unwrap();
+        assert_eq!(event_names(second.events()), vec!["e2"]);
+        log.complete_batch(&second, true);
+        assert!(log.snapshot_unflushed().is_none());
+    }
+
+    #[test]
+    fn duplicate_or_stale_batch_results_are_ignored() {
+        let log = EventLog::new(2);
+        log.push(event("e1"));
+        let first = log.snapshot_unflushed().unwrap();
+        log.complete_batch(&first, true);
+        log.complete_batch(&first, false);
+
+        assert_eq!(log.dropped_total(), 0);
+        assert!(log.snapshot_unflushed().is_none());
     }
 
     #[test]
@@ -830,16 +942,19 @@ mod tests {
     }
 
     #[test]
-    fn mutation_guard_unacknowledged_success_still_counts_overwrite_as_loss() {
+    fn mutation_guard_inflight_eviction_is_not_classified_from_flushed_flag() {
         let log = EventLog::new(1);
         log.push(event("e1"));
         let batch = log.snapshot_unflushed().unwrap();
         assert_eq!(event_names(batch.events()), vec!["e1"]);
 
         log.push(event("e2"));
-
-        assert_eq!(log.dropped_total(), 1);
+        assert_eq!(log.dropped_total(), 0);
         assert_eq!(log.retention_evicted_total(), 0);
+
+        log.complete_batch(&batch, true);
+        assert_eq!(log.dropped_total(), 0);
+        assert_eq!(log.retention_evicted_total(), 1);
     }
 }
 
