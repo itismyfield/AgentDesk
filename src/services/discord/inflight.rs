@@ -20,6 +20,16 @@ pub(in crate::services::discord) use model::{
     opt_message_id, optional_message_id,
 };
 
+impl InflightTurnState {
+    pub(in crate::services::discord) fn effective_busy_followup_retry_user_msg_id(&self) -> u64 {
+        if self.busy_followup_retry_user_msg_id == 0 {
+            self.user_msg_id
+        } else {
+            self.busy_followup_retry_user_msg_id
+        }
+    }
+}
+
 mod episode_guard;
 mod store;
 

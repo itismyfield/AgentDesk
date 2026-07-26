@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
@@ -8,6 +9,11 @@ use regex::Regex;
 use serde::Deserialize;
 
 use crate::services::provider::ProviderKind;
+
+mod bounded_cache_file;
+mod claude;
+
+pub(crate) const DISCORD_SELECT_OPTION_VALUE_LIMIT: usize = 100;
 
 /// Sentinel value stored in the picker's pending state when the user selects "Default".
 /// Callers use `is_default_picker_value()` rather than comparing this directly.
@@ -23,15 +29,43 @@ pub(in crate::services::discord) const SOURCE_DISPATCH_ROLE: &str = "dispatch ro
 pub(in crate::services::discord) const SOURCE_ROLE_MAP: &str = "role-map";
 pub(in crate::services::discord) const SOURCE_PROVIDER_DEFAULT: &str = "provider default";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ModelCatalogEntry {
-    pub value: &'static str,
-    pub label: &'static str,
-    pub primary_summary: &'static str,
-    pub secondary_summary: &'static str,
+    pub value: Cow<'static, str>,
+    pub label: Cow<'static, str>,
+    pub primary_summary: Cow<'static, str>,
+    pub secondary_summary: Cow<'static, str>,
 }
 
 impl ModelCatalogEntry {
+    const fn borrowed(
+        value: &'static str,
+        label: &'static str,
+        primary_summary: &'static str,
+        secondary_summary: &'static str,
+    ) -> Self {
+        Self {
+            value: Cow::Borrowed(value),
+            label: Cow::Borrowed(label),
+            primary_summary: Cow::Borrowed(primary_summary),
+            secondary_summary: Cow::Borrowed(secondary_summary),
+        }
+    }
+
+    pub(super) fn owned(
+        value: String,
+        label: String,
+        primary_summary: String,
+        secondary_summary: String,
+    ) -> Self {
+        Self {
+            value: Cow::Owned(value),
+            label: Cow::Owned(label),
+            primary_summary: Cow::Owned(primary_summary),
+            secondary_summary: Cow::Owned(secondary_summary),
+        }
+    }
+
     pub(crate) fn picker_description(&self) -> String {
         format!("{} | {}", self.primary_summary, self.secondary_summary)
     }
@@ -43,96 +77,75 @@ struct CatalogSummary {
     secondary: &'static str,
 }
 
-// Curated from installed provider CLIs and Anthropic Claude Code docs as of 2026-03-30.
-const CLAUDE_MODEL_CATALOG: &[ModelCatalogEntry] = &[
-    ModelCatalogEntry {
-        value: "sonnet",
-        label: "Sonnet 4.6",
-        primary_summary: "Latest Sonnet 4.6 alias",
-        secondary_summary: "Claude Code plan",
-    },
-    ModelCatalogEntry {
-        value: "opus",
-        label: "Opus 4.8",
-        primary_summary: "Highest quality 4.8 alias",
-        secondary_summary: "Claude Code plan",
-    },
-    ModelCatalogEntry {
-        value: "haiku",
-        label: "Haiku 4.5",
-        primary_summary: "Fast simple-task 4.5 alias",
-        secondary_summary: "Claude Code plan",
-    },
-    ModelCatalogEntry {
-        value: "sonnet[1m]",
-        label: "Sonnet 4.6 1M",
-        primary_summary: "1M context window",
-        secondary_summary: "Sonnet 4.6 alias",
-    },
-    ModelCatalogEntry {
-        value: "opus[1m]",
-        label: "Opus 4.8 1M",
-        primary_summary: "1M context window",
-        secondary_summary: "Opus 4.8 alias",
-    },
-    ModelCatalogEntry {
-        value: "opusplan",
-        label: "Opus Plan 4.8",
-        primary_summary: "Opus 4.8 planning",
-        secondary_summary: "Sonnet 4.6 executes",
-    },
-];
+#[derive(Clone, Copy)]
+struct StaticModelCatalogEntry {
+    value: &'static str,
+    label: &'static str,
+    primary_summary: &'static str,
+    secondary_summary: &'static str,
+}
 
-const CODEX_MODEL_CATALOG: &[ModelCatalogEntry] = &[
-    ModelCatalogEntry {
+impl From<&StaticModelCatalogEntry> for ModelCatalogEntry {
+    fn from(entry: &StaticModelCatalogEntry) -> Self {
+        Self::borrowed(
+            entry.value,
+            entry.label,
+            entry.primary_summary,
+            entry.secondary_summary,
+        )
+    }
+}
+
+const CODEX_MODEL_CATALOG: &[StaticModelCatalogEntry] = &[
+    StaticModelCatalogEntry {
         value: "gpt-5.5",
         label: "GPT-5.5",
         primary_summary: "Frontier complex work",
         secondary_summary: "Local CLI catalog",
     },
-    ModelCatalogEntry {
+    StaticModelCatalogEntry {
         value: "gpt-5.4",
         label: "gpt-5.4",
         primary_summary: "Frontier coding baseline",
         secondary_summary: "API $2.5/$15",
     },
-    ModelCatalogEntry {
+    StaticModelCatalogEntry {
         value: "gpt-5.4-mini",
         label: "GPT-5.4-Mini",
         primary_summary: "Fast strong mini",
         secondary_summary: "API $0.75/$4.5",
     },
-    ModelCatalogEntry {
+    StaticModelCatalogEntry {
         value: "gpt-5.3-codex",
         label: "gpt-5.3-codex",
         primary_summary: "Fast Codex line",
         secondary_summary: "API $1.75/$14",
     },
-    ModelCatalogEntry {
+    StaticModelCatalogEntry {
         value: "gpt-5.3-codex-spark",
         label: "GPT-5.3-Codex-Spark",
         primary_summary: "Text-only preview",
         secondary_summary: "No API",
     },
-    ModelCatalogEntry {
+    StaticModelCatalogEntry {
         value: "gpt-5.2-codex",
         label: "gpt-5.2-codex",
         primary_summary: "Long-horizon coding",
         secondary_summary: "API $1.75/$14",
     },
-    ModelCatalogEntry {
+    StaticModelCatalogEntry {
         value: "gpt-5.2",
         label: "gpt-5.2",
         primary_summary: "Long-running pro work",
         secondary_summary: "Local CLI catalog",
     },
-    ModelCatalogEntry {
+    StaticModelCatalogEntry {
         value: "gpt-5.1-codex-max",
         label: "gpt-5.1-codex-max",
         primary_summary: "Legacy max agent model",
         secondary_summary: "API $1.25/$10",
     },
-    ModelCatalogEntry {
+    StaticModelCatalogEntry {
         value: "gpt-5.1-codex-mini",
         label: "gpt-5.1-codex-mini",
         primary_summary: "Cheap fast codex mini",
@@ -140,56 +153,56 @@ const CODEX_MODEL_CATALOG: &[ModelCatalogEntry] = &[
     },
 ];
 
-const GEMINI_MODEL_CATALOG: &[ModelCatalogEntry] = &[
-    ModelCatalogEntry {
+const GEMINI_MODEL_CATALOG: &[StaticModelCatalogEntry] = &[
+    StaticModelCatalogEntry {
         value: "auto-gemini-3",
         label: "Auto (Gemini 3)",
         primary_summary: "Preview auto routing",
         secondary_summary: "Pro/Flash preview",
     },
-    ModelCatalogEntry {
+    StaticModelCatalogEntry {
         value: "auto-gemini-2.5",
         label: "Auto (Gemini 2.5)",
         primary_summary: "Stable auto routing",
         secondary_summary: "Pro/Flash stable",
     },
-    ModelCatalogEntry {
+    StaticModelCatalogEntry {
         value: "gemini-3.1-pro-preview",
         label: "gemini-3.1-pro-preview",
         primary_summary: "Gemini 3.1 Pro preview",
         secondary_summary: "Local CLI catalog",
     },
-    ModelCatalogEntry {
+    StaticModelCatalogEntry {
         value: "gemini-3-pro-preview",
         label: "gemini-3-pro-preview",
         primary_summary: "Frontier reasoning and coding",
         secondary_summary: "$2/$12",
     },
-    ModelCatalogEntry {
+    StaticModelCatalogEntry {
         value: "gemini-3-flash-preview",
         label: "gemini-3-flash-preview",
         primary_summary: "Low-latency frontier work",
         secondary_summary: "$0.5/$3",
     },
-    ModelCatalogEntry {
+    StaticModelCatalogEntry {
         value: "gemini-2.5-pro",
         label: "gemini-2.5-pro",
         primary_summary: "Stable advanced reasoning",
         secondary_summary: "$1.25/$10",
     },
-    ModelCatalogEntry {
+    StaticModelCatalogEntry {
         value: "gemini-2.5-flash",
         label: "gemini-2.5-flash",
         primary_summary: "Stable fast fallback",
         secondary_summary: "$0.3/$2.5",
     },
-    ModelCatalogEntry {
+    StaticModelCatalogEntry {
         value: "gemini-2.5-flash-lite",
         label: "gemini-2.5-flash-lite",
         primary_summary: "Low-cost flash-lite",
         secondary_summary: "Local CLI catalog",
     },
-    ModelCatalogEntry {
+    StaticModelCatalogEntry {
         value: "gemini-3.1-flash-lite-preview",
         label: "gemini-3.1-flash-lite-preview",
         primary_summary: "Preview flash-lite variant",
@@ -256,11 +269,7 @@ struct QwenModelProviderEntry {
 #[derive(Clone, Debug, Default)]
 struct QwenResolvedCatalog {
     entries: Vec<ModelCatalogEntry>,
-    default_model: Option<&'static str>,
-}
-
-fn intern_owned(value: String) -> &'static str {
-    Box::leak(value.into_boxed_str())
+    default_model: Option<String>,
 }
 
 fn codex_model_cache_path() -> Option<PathBuf> {
@@ -402,14 +411,14 @@ fn file_backed_catalog_cache_key(path: PathBuf) -> Option<FileBackedCatalogCache
 fn build_file_backed_catalog(
     cache: &'static OnceLock<Mutex<FileBackedCatalogCache>>,
     path: Option<PathBuf>,
-    fallback: &[ModelCatalogEntry],
+    fallback: &[StaticModelCatalogEntry],
     parse: fn(&str) -> Option<Vec<ModelCatalogEntry>>,
 ) -> Vec<ModelCatalogEntry> {
     let Some(path) = path else {
-        return fallback.to_vec();
+        return fallback.iter().map(ModelCatalogEntry::from).collect();
     };
     let Some(cache_key) = file_backed_catalog_cache_key(path) else {
-        return fallback.to_vec();
+        return fallback.iter().map(ModelCatalogEntry::from).collect();
     };
 
     let cache_cell = cache.get_or_init(|| Mutex::new(FileBackedCatalogCache::default()));
@@ -422,7 +431,7 @@ fn build_file_backed_catalog(
     let entries = fs::read_to_string(&cache_key.path)
         .ok()
         .and_then(|raw| parse(&raw))
-        .unwrap_or_else(|| fallback.to_vec());
+        .unwrap_or_else(|| fallback.iter().map(ModelCatalogEntry::from).collect());
 
     if let Ok(mut cached) = cache_cell.lock() {
         cached.key = Some(cache_key);
@@ -462,12 +471,12 @@ fn build_codex_model_catalog_from_cache(raw: &str) -> Option<Vec<ModelCatalogEnt
         } else {
             model.display_name
         };
-        entries.push(ModelCatalogEntry {
-            value: intern_owned(model.slug),
-            label: intern_owned(label),
-            primary_summary: summary.primary,
-            secondary_summary: summary.secondary,
-        });
+        entries.push(ModelCatalogEntry::owned(
+            model.slug,
+            label,
+            summary.primary.to_string(),
+            summary.secondary.to_string(),
+        ));
     }
 
     (!entries.is_empty()).then_some(entries)
@@ -558,22 +567,16 @@ fn build_gemini_model_catalog_from_models_js(raw: &str) -> Option<Vec<ModelCatal
             continue;
         }
         let summary = gemini_catalog_summary(model);
-        entries.push(ModelCatalogEntry {
-            value: intern_owned(model.clone()),
-            label: intern_owned(gemini_display_label(model)),
-            primary_summary: summary.primary,
-            secondary_summary: summary.secondary,
-        });
+        entries.push(ModelCatalogEntry::owned(
+            model.clone(),
+            gemini_display_label(model),
+            summary.primary.to_string(),
+            summary.secondary.to_string(),
+        ));
     }
 
     (!entries.is_empty()).then_some(entries)
 }
-
-const CLAUDE_MODEL_ALIASES: &[(&str, &str)] = &[
-    ("opus", "claude-opus-4-8"),
-    ("sonnet", "claude-sonnet-4-6"),
-    ("haiku", "claude-haiku-4-5-20251001"),
-];
 
 const CODEX_MODEL_ALIASES: &[(&str, &str)] = &[
     ("gpt-5-codex", "gpt-5-codex"),
@@ -687,7 +690,7 @@ fn resolve_qwen_model_catalog(working_dir: Option<&str>) -> QwenResolvedCatalog 
 
     let mut merged_entries: HashMap<String, (usize, ModelCatalogEntry)> = HashMap::new();
     let mut next_order = 0usize;
-    let mut default_model: Option<&'static str> = None;
+    let mut default_model: Option<String> = None;
 
     for settings in layers.iter().flatten().filter_map(load_qwen_settings_file) {
         if let Some(default_name) = settings
@@ -697,7 +700,7 @@ fn resolve_qwen_model_catalog(working_dir: Option<&str>) -> QwenResolvedCatalog 
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            default_model = Some(intern_owned(default_name.to_string()));
+            default_model = Some(default_name.to_string());
         }
 
         for (auth_type, models) in settings.model_providers {
@@ -728,12 +731,12 @@ fn resolve_qwen_model_catalog(working_dir: Option<&str>) -> QwenResolvedCatalog 
                     dedupe_key,
                     (
                         next_order,
-                        ModelCatalogEntry {
-                            value: intern_owned(model_id.to_string()),
-                            label: intern_owned(label.to_string()),
-                            primary_summary: intern_owned(primary_summary),
-                            secondary_summary: intern_owned(secondary_summary),
-                        },
+                        ModelCatalogEntry::owned(
+                            model_id.to_string(),
+                            label.to_string(),
+                            primary_summary,
+                            secondary_summary,
+                        ),
                     ),
                 );
             }
@@ -744,19 +747,19 @@ fn resolve_qwen_model_catalog(working_dir: Option<&str>) -> QwenResolvedCatalog 
     entries.sort_by_key(|(order, _)| *order);
     let mut entries: Vec<ModelCatalogEntry> = entries.into_iter().map(|(_, entry)| entry).collect();
 
-    if let Some(default_model) = default_model {
+    if let Some(default_model) = default_model.as_deref() {
         let exists = entries
             .iter()
             .any(|entry| entry.value.eq_ignore_ascii_case(default_model));
         if !exists {
             entries.insert(
                 0,
-                ModelCatalogEntry {
-                    value: default_model,
-                    label: default_model,
-                    primary_summary: "Configured default model",
-                    secondary_summary: "Qwen settings.model.name",
-                },
+                ModelCatalogEntry::owned(
+                    default_model.to_string(),
+                    default_model.to_string(),
+                    "Configured default model".to_string(),
+                    "Qwen settings.model.name".to_string(),
+                ),
             );
         }
     }
@@ -781,9 +784,7 @@ pub(crate) fn resolved_default_model(
     working_dir: Option<&str>,
 ) -> Option<String> {
     match provider {
-        ProviderKind::Qwen => resolve_qwen_model_catalog(working_dir)
-            .default_model
-            .map(str::to_string),
+        ProviderKind::Qwen => resolve_qwen_model_catalog(working_dir).default_model,
         _ => None,
     }
 }
@@ -838,7 +839,7 @@ pub(in crate::services::discord) fn model_hint(
 
 pub(crate) fn known_models(provider: &ProviderKind) -> Vec<ModelCatalogEntry> {
     match provider {
-        ProviderKind::Claude => CLAUDE_MODEL_CATALOG.to_vec(),
+        ProviderKind::Claude => claude::resolved_models(),
         ProviderKind::Codex => build_codex_model_catalog(),
         ProviderKind::Gemini => build_gemini_model_catalog(),
         ProviderKind::OpenCode | ProviderKind::Qwen => Vec::new(),
@@ -846,37 +847,74 @@ pub(crate) fn known_models(provider: &ProviderKind) -> Vec<ModelCatalogEntry> {
     }
 }
 
+pub(in crate::services::discord) fn spawn_claude_model_catalog_refresh(
+    provider: &ProviderKind,
+) -> Option<tokio::task::JoinHandle<()>> {
+    claude::spawn_background_refresh(provider)
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn spawn_test_claude_model_catalog_refresh(
+    refreshes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) -> tokio::task::JoinHandle<()> {
+    claude::spawn_test_background_refresh(refreshes)
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn spawn_test_claude_model_catalog_refresh_after_claim(
+    refreshes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    after_claim: impl Fn() + Send + Sync + 'static,
+) -> tokio::task::JoinHandle<()> {
+    claude::spawn_test_background_refresh_after_claim(refreshes, after_claim)
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn with_test_claude_model_catalog_refresh_state<T>(
+    operation: impl FnOnce() -> T,
+) -> T {
+    claude::with_test_refresh_task_state(operation)
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn test_claude_model_catalog_refresh_running() -> bool {
+    claude::test_refresh_task_running()
+}
+
 fn model_aliases(provider: &ProviderKind) -> &'static [(&'static str, &'static str)] {
     match provider {
-        ProviderKind::Claude => CLAUDE_MODEL_ALIASES,
         ProviderKind::Codex => CODEX_MODEL_ALIASES,
         ProviderKind::Gemini => GEMINI_MODEL_ALIASES,
-        ProviderKind::OpenCode | ProviderKind::Qwen => &[],
+        ProviderKind::Claude | ProviderKind::OpenCode | ProviderKind::Qwen => &[],
         ProviderKind::Unsupported(_) => &[],
     }
 }
 
-fn canonical_known_model(provider: &ProviderKind, raw: &str) -> Option<&'static str> {
+fn canonical_known_model(provider: &ProviderKind, raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     for entry in known_models(provider) {
         if entry.value.eq_ignore_ascii_case(trimmed) {
-            return Some(entry.value);
+            return Some(entry.value.into_owned());
         }
     }
 
     model_aliases(provider)
         .iter()
         .find(|(alias, _)| alias.eq_ignore_ascii_case(trimmed))
-        .map(|(_, canonical)| *canonical)
+        .map(|(_, canonical)| (*canonical).to_string())
 }
 
-fn looks_like_model_identifier(raw: &str) -> bool {
+fn is_safe_model_selector(raw: &str) -> bool {
     let trimmed = raw.trim();
     !trimmed.is_empty()
         && trimmed.len() <= 64
+        && trimmed.is_ascii()
         && trimmed
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']'))
+}
+
+pub(crate) fn is_valid_discord_select_option_value(raw: &str) -> bool {
+    !raw.is_empty() && raw.chars().count() <= DISCORD_SELECT_OPTION_VALUE_LIMIT
 }
 
 pub(in crate::services::discord) fn validate_model_input(
@@ -887,6 +925,11 @@ pub(in crate::services::discord) fn validate_model_input(
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("Model name cannot be empty.".to_string());
+    }
+    if !is_valid_discord_select_option_value(trimmed) {
+        return Err(format!(
+            "Model name cannot exceed {DISCORD_SELECT_OPTION_VALUE_LIMIT} characters."
+        ));
     }
 
     if matches!(provider, ProviderKind::Qwen) {
@@ -918,10 +961,10 @@ pub(in crate::services::discord) fn validate_model_input(
     }
 
     if let Some(canonical) = canonical_known_model(provider, trimmed) {
-        return Ok(canonical.to_string());
+        return Ok(canonical);
     }
 
-    if looks_like_model_identifier(trimmed) {
+    if is_safe_model_selector(trimmed) {
         return Ok(trimmed.to_string());
     }
 
@@ -939,8 +982,44 @@ fn is_valid_opencode_model_override(raw: &str) -> bool {
     };
     !provider_id.trim().is_empty()
         && !model_id.trim().is_empty()
-        && raw.len() <= 128
+        && is_valid_discord_select_option_value(raw)
         && raw.chars().all(|c| {
             c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '/' | '[' | ']')
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invariant_claude_model_alias_validation_preserves_runtime_selector() {
+        for selector in ["fable", "opus", "sonnet", "haiku"] {
+            assert_eq!(
+                validate_model_input(&ProviderKind::Claude, selector, None).unwrap(),
+                selector
+            );
+        }
+    }
+
+    #[test]
+    fn invariant_claude_model_selector_validation_is_ascii_and_bounded() {
+        assert!(validate_model_input(&ProviderKind::Claude, &"a".repeat(64), None).is_ok());
+        assert!(validate_model_input(&ProviderKind::Claude, &"a".repeat(65), None).is_err());
+        assert!(validate_model_input(&ProviderKind::Claude, "claude/unsafe", None).is_err());
+        assert!(validate_model_input(&ProviderKind::Claude, "클로드", None).is_err());
+    }
+
+    #[test]
+    fn invariant_model_input_rejects_values_over_discord_option_limit_without_truncating() {
+        let valid = format!("provider/{}", "x".repeat(91));
+        let invalid = format!("provider/{}", "x".repeat(92));
+
+        assert_eq!(valid.chars().count(), DISCORD_SELECT_OPTION_VALUE_LIMIT);
+        assert_eq!(
+            validate_model_input(&ProviderKind::OpenCode, &valid, None).unwrap(),
+            valid
+        );
+        assert!(validate_model_input(&ProviderKind::OpenCode, &invalid, None).is_err());
+    }
 }

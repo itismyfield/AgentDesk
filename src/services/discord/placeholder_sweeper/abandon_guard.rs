@@ -205,8 +205,8 @@ struct AbandonedCleanupPlan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AbandonedMailboxFinishActions {
     cancel_removed_token: bool,
-    schedule_queue_kickoff: bool,
-    publish_completion_after_cleanup: bool,
+    rearm_queue_backstop: bool,
+    settle_completion_admission: bool,
 }
 
 fn abandoned_mailbox_finish_actions(
@@ -215,8 +215,8 @@ fn abandoned_mailbox_finish_actions(
 ) -> AbandonedMailboxFinishActions {
     AbandonedMailboxFinishActions {
         cancel_removed_token: removed_token_present,
-        schedule_queue_kickoff: has_pending,
-        publish_completion_after_cleanup: removed_token_present,
+        rearm_queue_backstop: has_pending,
+        settle_completion_admission: removed_token_present,
     }
 }
 
@@ -359,24 +359,26 @@ pub(super) async fn finalize_abandoned_mailbox(
         );
         super::super::saturating_decrement_global_active(shared);
     }
-    // A restarted/tokenless mailbox can still own durable soft-queued work.
-    // Schedule from the actor's authoritative backlog flag independently of
-    // token removal so deleting the orphan inflight cannot strand that queue.
-    if actions.schedule_queue_kickoff {
-        super::super::schedule_deferred_idle_queue_kickoff(
-            shared.clone(),
-            provider.clone(),
+    // Mailbox release always re-arms the coalesced queue backstop when durable
+    // backlog remains. This is independent of ledger presence and token removal;
+    // the backstop rechecks the mailbox and cannot directly double-dequeue.
+    super::super::turn_finalizer::cleanup::rearm_queue_backstop_after_mailbox_release(
+        shared,
+        provider,
+        channel,
+        actions.rearm_queue_backstop,
+        "placeholder_sweeper_abandon",
+    )
+    .await;
+    if actions.settle_completion_admission {
+        let key = super::super::turn_finalizer::TurnKey::new(
             channel,
-            "placeholder_sweeper_abandon",
+            state.effective_finalizer_turn_id(),
+            shared.restart.current_generation,
         );
-    }
-    if actions.publish_completion_after_cleanup {
-        super::super::turn_completion_events::publish_mailbox_release_completion_event(
-            shared,
-            channel,
-            Some(user_msg_id.get()),
-            &finish,
-        );
+        shared
+            .turn_finalizer
+            .note_mailbox_released(key, shared.clone());
     }
     AbandonedTmuxCleanupOutcome::from_plan(plan)
 }
@@ -508,9 +510,12 @@ mod tests {
         claude_e_process_probe_decision, decision_for_user_identity, revived_visible_repair,
         run_blocking_cleanup_probe, runtime_activity_evidence_from, should_detach_after_cleanup,
     };
-    use crate::services::discord::inflight::InflightTurnState;
+    use crate::services::discord::inflight::{InflightTurnState, RelayOwnerKind};
+    use crate::services::discord::turn_completion_events::subscribe_turn_completion_events;
+    use crate::services::discord::turn_finalizer::{CompletionAdmissionPlan, TurnKey};
     use crate::services::platform::tmux::PaneLiveness;
-    use crate::services::provider::ProviderKind;
+    use crate::services::provider::{CancelToken, ProviderKind};
+    use poise::serenity_prelude as serenity;
 
     fn sweep_state() -> InflightTurnState {
         InflightTurnState::new(
@@ -836,26 +841,93 @@ mod tests {
         let tokenless_idle = abandoned_mailbox_finish_actions(false, false);
 
         assert!(!tokenless_pending.cancel_removed_token);
-        assert!(tokenless_pending.schedule_queue_kickoff);
-        assert!(!tokenless_pending.publish_completion_after_cleanup);
-        assert!(!tokenless_idle.schedule_queue_kickoff);
+        assert!(tokenless_pending.rearm_queue_backstop);
+        assert!(!tokenless_pending.settle_completion_admission);
+        assert!(!tokenless_idle.rearm_queue_backstop);
     }
 
     #[test]
-    fn destructive_finalize_publishes_only_after_cleanup_actions() {
+    fn destructive_finalize_defers_queue_to_completion_authority() {
         let actions = abandoned_mailbox_finish_actions(true, true);
-        let mut order = Vec::new();
-        if actions.cancel_removed_token {
-            order.push("cancel");
-        }
-        if actions.schedule_queue_kickoff {
-            order.push("kickoff");
-        }
-        if actions.publish_completion_after_cleanup {
-            order.push("publish");
-        }
 
-        assert_eq!(order, ["cancel", "kickoff", "publish"]);
+        assert!(actions.cancel_removed_token);
+        assert!(actions.rearm_queue_backstop);
+        assert!(actions.settle_completion_admission);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn destructive_finalize_records_only_mailbox_edge_for_strict_plan_4888() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let state = sweep_state();
+        let channel_id = serenity::ChannelId::new(state.channel_id);
+        let turn_id = state.effective_finalizer_turn_id();
+        let key = TurnKey::new(channel_id, turn_id, shared.restart.current_generation);
+        shared
+            .turn_finalizer
+            .register_start_with_completion_admission(
+                key,
+                provider.clone(),
+                RelayOwnerKind::Watcher,
+                CompletionAdmissionPlan::AfterTerminalProjectionAndDispositionSettled,
+                &shared,
+            );
+        let token = std::sync::Arc::new(CancelToken::from_persisted_turn_nonce(
+            state.turn_nonce.clone(),
+        ));
+        shared
+            .mailbox(channel_id)
+            .restore_active_turn(
+                token,
+                serenity::UserId::new(state.request_owner_user_id),
+                serenity::MessageId::new(state.user_msg_id),
+            )
+            .await;
+        let mut events = subscribe_turn_completion_events(&shared);
+        let sweep_started_before = std::time::Instant::now();
+
+        let outcome = super::finalize_abandoned_mailbox(
+            &shared,
+            &provider,
+            &state,
+            sweep_started_before,
+            AbandonedCleanupEvidence::OwnerDeath,
+        )
+        .await;
+        assert_eq!(outcome.decision, AbandonedTmuxCleanupDecision::Kill);
+        let _ = shared
+            .turn_finalizer
+            .has_live_watcher_pending(channel_id, shared.restart.current_generation)
+            .await;
+
+        assert!(
+            events.try_recv().is_err(),
+            "the sweeper owns mailbox release, not strict projection or retry disposition"
+        );
+        shared
+            .turn_finalizer
+            .note_terminal_projection_settled(key, true, shared.clone());
+        shared
+            .turn_finalizer
+            .note_terminal_disposition_settled(key, true, shared.clone());
+        let _ = shared
+            .turn_finalizer
+            .has_live_watcher_pending(channel_id, shared.restart.current_generation)
+            .await;
+        let eligible = events
+            .try_recv()
+            .expect("explicit strict producer edges must release admission");
+        assert!(eligible.queue_is_eligible());
+        assert_eq!(eligible.turn_id, Some(turn_id));
+        assert!(events.try_recv().is_err(), "admission must publish once");
     }
 
     #[test]

@@ -281,6 +281,7 @@ pub(super) async fn finish_admitted_local(
     let IntakeRequest {
         channel_id,
         user_msg_id,
+        busy_followup_retry_user_msg_id,
         request_owner,
         request_owner_name,
         user_text,
@@ -298,6 +299,7 @@ pub(super) async fn finish_admitted_local(
         deps,
         channel_id,
         user_msg_id,
+        busy_followup_retry_user_msg_id,
         request_owner,
         &request_owner_name,
         &user_text,

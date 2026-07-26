@@ -24,6 +24,7 @@ pub(crate) async fn dispatch_skill_intake(
         request: super::super::message_handler::IntakeRequest {
             channel_id,
             user_msg_id,
+            busy_followup_retry_user_msg_id: user_msg_id,
             request_owner,
             request_owner_name,
             user_text: prompt,

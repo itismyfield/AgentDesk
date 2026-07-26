@@ -162,7 +162,10 @@
 
 - canonical_modules: `src/engine/mod.rs` (driver) plus `src/engine/ops/*.rs`
   (per-domain op handlers). `src/pipeline.rs` (frozen giant surface, giant-file)
-  composes the policy pipeline.
+  composes the policy pipeline. `src/phase_gate.rs` owns immutable typed
+  phase-gate declarations shared by the HTTP catalog, policy host operation,
+  and Rust verdict reducers; pipeline configuration may select routing metadata
+  but cannot override declaration checks, authority, or pass verdict.
 - legacy_modules: none — there is no parallel engine. The whole surface is
   pre-migration giant-file territory.
 - do_not_edit_without_migration_plan:
@@ -256,7 +259,10 @@
     identity-guarded mailbox release + `global_active` decrement + the
     finalizer's D-side channel cleanup ahead of the awaited status-panel edit so
     a same-channel follow-up racing the edit can no longer make the late
-    finalizer identity-miss and permanently skip the decrement; the D-side
+    finalizer identity-miss and permanently skip the decrement; #4888 additionally
+    records the matching mailbox release with the actor-owned completion admission
+    ledger before the projection await, so queue eligibility cannot bypass terminal
+    projection/disposition settlement; the D-side
     role-override drop snapshots the owned value before any await and uses
     `remove_if` so a fresh counter-model follow-up inserting its own override
     during the release is not clobbered. The #4106r2 WARN-fix splits

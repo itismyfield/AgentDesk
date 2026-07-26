@@ -421,18 +421,21 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                     // immediately instead of arming the
                     // deadline-backstop. Registering here with
                     // the same finalizer id makes it defer.
-                    shared_owned.turn_finalizer.register_start(
-                        super::turn_finalizer::TurnKey::new(
-                            channel_id,
-                            inflight_state.effective_finalizer_turn_id(),
-                            shared_owned.restart.current_generation,
-                        ),
-                        provider.clone(),
-                        super::inflight::RelayOwnerKind::Watcher,
-                        // #3016 phase-5a: prime the reconcile cache
-                        // at register time.
-                        &shared_owned,
-                    );
+                    shared_owned
+                        .turn_finalizer
+                        .register_start_with_completion_admission(
+                            super::turn_finalizer::TurnKey::new(
+                                channel_id,
+                                inflight_state.effective_finalizer_turn_id(),
+                                shared_owned.restart.current_generation,
+                            ),
+                            provider.clone(),
+                            super::inflight::RelayOwnerKind::Watcher,
+                            super::turn_finalizer::CompletionAdmissionPlan::AfterTerminalProjectionAndDispositionSettled,
+                            // #3016 phase-5a: prime the reconcile cache
+                            // at register time.
+                            &shared_owned,
+                        );
                     // #1452 (Codex iter 3 P1) / #3016 phase-5b2:
                     // unpause uses Release ordering so a watcher
                     // observing `paused = false` is guaranteed to
@@ -965,17 +968,20 @@ fn handle_watcher_runtime_handoff(
             // the authority that superseded the legacy `mailbox_finalize_owed`
             // flag (removed in #3016 phase-5b2) and the CAS revoke deleted from
             // the bridge finalize branches below.
-            shared_owned.turn_finalizer.register_start(
-                super::turn_finalizer::TurnKey::new(
-                    channel_id,
-                    inflight_state.effective_finalizer_turn_id(),
-                    shared_owned.restart.current_generation,
-                ),
-                provider.clone(),
-                super::inflight::RelayOwnerKind::Watcher,
-                // #3016 phase-5a: prime the reconcile cache at register time.
-                shared_owned,
-            );
+            shared_owned
+                .turn_finalizer
+                .register_start_with_completion_admission(
+                    super::turn_finalizer::TurnKey::new(
+                        channel_id,
+                        inflight_state.effective_finalizer_turn_id(),
+                        shared_owned.restart.current_generation,
+                    ),
+                    provider.clone(),
+                    super::inflight::RelayOwnerKind::Watcher,
+                    super::turn_finalizer::CompletionAdmissionPlan::AfterTerminalProjectionAndDispositionSettled,
+                    // #3016 phase-5a: prime the reconcile cache at register time.
+                    shared_owned,
+                );
             watcher
                 .paused
                 .store(false, std::sync::atomic::Ordering::Release);

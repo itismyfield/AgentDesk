@@ -279,7 +279,7 @@ pub(in crate::services::discord) async fn cmd_resume(
         &pool,
         registry.as_deref(),
         &forward_context,
-        false,
+        None,
         &session_key,
         &opts,
     )

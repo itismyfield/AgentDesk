@@ -446,6 +446,39 @@
   before merging.
 
 ### Audited touches
+- 2026-07-26 — #4898 untrusted deploy-gate containment: PostgreSQL migration
+  0100 adds a validated cluster-wide `CHECK` constraint that rejects normalized
+  `deploy-gate` provenance. The `ALTER TABLE` lock serializes concurrent legacy
+  writers, so preflight row counts are diagnostic only and every old node is
+  fenced after commit. The release candidate applies migration 0100 after
+  staging, signing, and reversible tunnel readiness, but before requesting
+  `restart_pending` or any runtime self-exit trigger. Migration failure therefore
+  leaves the old process running; after commit, drain/persistence and bootout
+  proceed under a forward-only binary floor. Pre-0100 binaries must not restart
+  after commit. Existing
+  deploy-gate rows block rollout; no node converts or passes them. Enabling a
+  future trusted typed evidence capability requires a coordinated constraint
+  migration and capability rollout across the fleet.
+- 2026-07-25 — #4913 GO-C1 trusted session-forwarding prerequisite:
+  `session_forwarding` treats per-node `cluster.nodes.<instance>.trusted_forward_origin`
+  as operator-owned authority, requires exact agreement with fresh worker capability
+  advertisements, validates and pins every DNS answer, requires HTTPS by default,
+  disables proxies/redirects, and attaches forwarding credentials only after
+  validation. Cleartext HTTP requires separate private-address and insecure-
+  transport opt-ins and only private/Tailscale answers; public or mixed DNS stays
+  blocked. Deprecated IPv6 site-local `fec0::/10` is not an allowed private
+  topology and remains blocked with either opt-in. Receivers for tmux output,
+  force-kill, kill-tmux, cancel-turn, and
+  resume-previous fence the expected
+  owner header against the current PostgreSQL `sessions.instance_id` and local
+  instance before any node-local read/mutation; draft #4916 must apply the same
+  shared path to resume-candidates. Classification: leader/gateway-originated HTTP
+  routing to worker-local session state using existing PostgreSQL owner authority;
+  no new leader election, lease, schema, or durable outbox. Rolling order is (1)
+  configure trusted origins on every node, including explicit private/Tailscale
+  opt-in only where needed, (2) upgrade workers until matching origins and required
+  capabilities are advertised, then (3) upgrade the gateway/leader. Missing or
+  mismatched trust configuration is a typed 503 with no discovered-URL fallback.
 - 2026-07-25 — #4891 completed-panel orphan convergence: the completion outcome,
   singleton binding, and orphan retry records remain worker-local durable sidecars
   serialized by the existing inflight flock. The orphan drain now consults the
@@ -840,11 +873,13 @@
 - #4611 owner-targeted cancel forwarding: REST cancel and Discord `/stop` resolve
   the canonical active `sessions.instance_id` owner and fail closed instead of
   mutating leader-local state when ownership is remote or changes during cancel.
-  Rolling upgrade order is workers first, then leaders: a routable owner must
-  advertise `capabilities.agentdesk_api.cancel_forwarding_v1=true`; leaders do
-  not forward cancel to older workers that lack the capability. Keep old and new
-  nodes registered during rollout only after every potential owner advertises
-  the fence. No durable cancel outbox or new lease is introduced.
+  The #4913 GO-C1 prerequisite supersedes the original workers-first shorthand:
+  first configure `cluster.nodes.<instance>.trusted_forward_origin` for every
+  potential owner, then upgrade workers until they advertise the exact configured
+  origin and `capabilities.agentdesk_api.cancel_forwarding_v1=true`, and upgrade
+  leaders last. Leaders do not forward cancel to older or mismatched workers.
+  Keep old and new nodes registered during rollout only after every potential
+  owner advertises the fence. No durable cancel outbox or new lease is introduced.
 
 - #4350 session-owner intake affinity: leader-only routing resolves the existing
   PG `sessions.instance_id` owner before `/node` or preferred labels, and every

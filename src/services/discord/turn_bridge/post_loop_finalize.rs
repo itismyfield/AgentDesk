@@ -305,7 +305,6 @@ pub(super) async fn run_post_loop_finalize(
         full_response = CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE.to_string();
         inflight_state.full_response = full_response.clone();
     }
-
     let is_prompt_too_long = full_response.contains("__prompt too long__");
     let review_dispatch_warning = if !cancelled && !is_prompt_too_long {
         guard_review_dispatch_completion(

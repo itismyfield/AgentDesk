@@ -57,6 +57,7 @@ pub(super) struct DeliveryEpilogueState<'a> {
     pub(super) terminal_full_replay_cleanup_msg_ids: &'a mut Vec<MessageId>,
     pub(super) bridge_should_emit_completion: &'a mut bool,
     pub(super) status_panel_terminal_committed: &'a mut bool,
+    pub(super) busy_requeue_outcome: &'a mut Option<followup_requeue::FollowupRequeueOutcome>,
 }
 
 #[rustfmt::skip]
@@ -101,6 +102,7 @@ pub(super) async fn handle_delivery_epilogue(
         &mut *state.terminal_full_replay_cleanup_msg_ids;
     let mut bridge_should_emit_completion = *state.bridge_should_emit_completion;
     let mut status_panel_terminal_committed = *state.status_panel_terminal_committed;
+    let busy_requeue_outcome = &mut *state.busy_requeue_outcome;
 
     match message {
         DeliveryEpilogueMessage::PostCommit => {
@@ -323,21 +325,19 @@ pub(super) async fn handle_delivery_epilogue(
                         "TUI transport error was already delivered; skipping quiescence gate so inflight cleanup can complete"
                     );
                 }
-                // Skip only when the busy path already requeued; legacy must still requeue (#4610).
-                if claude_tui_followup_pre_submit_requeue_candidate
-                    && !claude_tui_busy_requeue_pending
-                {
-                    let _ = followup_requeue::requeue_claude_tui_followup_pre_submit_timeout(
-                        &shared_owned,
-                        &provider,
-                        channel_id,
-                        &inflight_state,
-                        dispatch_id.as_deref(),
-                        adk_session_key.as_deref(),
-                        turn_id.as_str(),
-                    )
-                    .await;
-                }
+                followup_requeue::requeue_if_needed(
+                    busy_requeue_outcome,
+                    claude_tui_followup_pre_submit_requeue_candidate,
+                    claude_tui_busy_requeue_pending,
+                    &shared_owned,
+                    &provider,
+                    channel_id,
+                    &inflight_state,
+                    dispatch_id.as_deref(),
+                    adk_session_key.as_deref(),
+                    turn_id.as_str(),
+                )
+                .await;
                 super::super::super::tmux::TuiCompletionGateOutcome::NotGated
             };
 

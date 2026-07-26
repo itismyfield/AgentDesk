@@ -13,6 +13,7 @@ use super::*;
 pub(crate) struct IntakeRequest {
     pub channel_id: ChannelId,
     pub user_msg_id: MessageId,
+    pub busy_followup_retry_user_msg_id: MessageId,
     pub request_owner: UserId,
     pub request_owner_name: String,
     pub user_text: String,
@@ -54,6 +55,7 @@ pub(crate) async fn execute_intake_turn_core(
         },
         request.channel_id,
         request.user_msg_id,
+        request.busy_followup_retry_user_msg_id,
         request.request_owner,
         &request.request_owner_name,
         &request.user_text,

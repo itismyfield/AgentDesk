@@ -575,6 +575,9 @@ src/
 │   │   │   ├── rounds.rs
 │   │   │   ├── selection.rs
 │   │   │   └── selection_runtime.rs
+│   │   ├── model_catalog/
+│   │   │   ├── bounded_cache_file.rs
+│   │   │   └── claude.rs
 │   │   ├── outbound/
 │   │   │   ├── turn_output_controller/
 │   │   │   │   ├── fresh_send.rs
@@ -702,6 +705,7 @@ src/
 │   │   │   │   │   ├── adk_thread.rs
 │   │   │   │   │   ├── claim_bootstrap.rs
 │   │   │   │   │   ├── inflight_create_log.rs
+│   │   │   │   │   ├── placeholder_handoff.rs
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── stale_dispatch_guard.rs
 │   │   │   │   │   ├── steering_hook.rs
@@ -881,7 +885,8 @@ src/
 │   │   │   │   ├── completion_context.rs
 │   │   │   │   └── completion_postgres.rs
 │   │   │   ├── completion_postlude/
-│   │   │   │   └── channel_writeback.rs
+│   │   │   │   ├── channel_writeback.rs
+│   │   │   │   └── contracts.rs
 │   │   │   ├── runtime_handoff_loop/
 │   │   │   │   ├── claude_e.rs
 │   │   │   │   ├── guarded_save.rs
@@ -907,6 +912,7 @@ src/
 │   │   │   │   │   └── handler.rs
 │   │   │   │   ├── busy_followup_retry.rs
 │   │   │   │   ├── cancel_prompt_replace.rs
+│   │   │   │   ├── contracts.rs
 │   │   │   │   ├── delivery_epilogue.rs
 │   │   │   │   ├── empty_response_recovery.rs
 │   │   │   │   ├── prompt_too_long_guidance.rs
@@ -963,7 +969,10 @@ src/
 │   │   │   ├── watcher_handoff.rs
 │   │   │   └── watcher_orphan_cleanup.rs
 │   │   ├── turn_finalizer/
+│   │   │   ├── actor_state.rs
 │   │   │   ├── cleanup.rs
+│   │   │   ├── completion_admission.rs
+│   │   │   ├── completion_admission_actor.rs
 │   │   │   ├── completion_signal.rs
 │   │   │   ├── delivery_lease.rs
 │   │   │   ├── finalize.rs
@@ -1018,6 +1027,7 @@ src/
 │   │   ├── agentdesk_config.rs
 │   │   ├── answer_flush_barrier.rs
 │   │   ├── bot_role.rs
+│   │   ├── busy_followup_retry_store.rs
 │   │   ├── catch_up.rs
 │   │   ├── compact_turn_authority.rs
 │   │   ├── completion_footer_metadata.rs
@@ -1235,6 +1245,8 @@ src/
 │   │   ├── tuning_aggregate.rs
 │   │   └── worktree_stale.rs
 │   ├── routines/
+│   │   ├── loader/
+│   │   │   └── discovery.rs
 │   │   ├── action.rs
 │   │   ├── agent_executor.rs
 │   │   ├── discord_log.rs
@@ -1254,6 +1266,8 @@ src/
 │   ├── session_backend/
 │   │   ├── stream_line.rs
 │   │   └── terminal_usage.rs
+│   ├── session_forwarding/
+│   │   └── trusted_target.rs
 │   ├── settings/
 │   │   └── runtime_config_put.rs
 │   ├── slo/
@@ -1422,6 +1436,7 @@ src/
 ├── logging.rs
 ├── main.rs
 ├── manual_intervention.rs
+├── phase_gate.rs
 ├── pipeline.rs
 ├── receipt.rs
 └── reconcile.rs
@@ -1467,6 +1482,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/logging.rs` | Tracing span helpers that stamp dispatch, card, agent, and hook context onto logs. |
 | `src/main.rs` | Binary entry point. Dispatches CLI commands or boots the server runtime. |
 | `src/manual_intervention.rs` | Manual intervention parsing and helpers shared by Discord reply/requeue flows. |
+| `src/phase_gate.rs` | Immutable typed phase-gate declarations and snapshot compatibility checks shared by HTTP, policy dispatch, and durable reducers. |
 | `src/pipeline.rs` | Pipeline stage loading, resolution, and transition helpers. |
 | `src/receipt.rs` | Receipt parsing and workspace attribution helpers. |
 | `src/reconcile.rs` | Boot-time reconciliation for persisted state and dispatch-runtime drift. |

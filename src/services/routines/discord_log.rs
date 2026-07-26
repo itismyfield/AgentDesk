@@ -1725,6 +1725,56 @@ mod tests {
     }
 
     #[test]
+    fn run_outcome_message_redacts_secret_but_keeps_diagnostic_class() {
+        let routine = RoutineRecord {
+            id: "routine-123456789".to_string(),
+            agent_id: None,
+            fallback_agent_id: None,
+            max_retries: 0,
+            script_ref: "secret.js".to_string(),
+            name: "Secret Routine".to_string(),
+            status: "enabled".to_string(),
+            execution_strategy: "fresh".to_string(),
+            schedule: None,
+            next_due_at: None,
+            last_run_at: None,
+            last_result: None,
+            checkpoint: None,
+            discord_thread_id: None,
+            timeout_secs: None,
+            in_flight_run_id: None,
+            pause_reason: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let diagnostic = "routine script secret.js tick(ctx) failed: api_key=sk-live-secret";
+        let outcome = RoutineRunOutcome {
+            run_id: "run-123456789".to_string(),
+            routine_id: routine.id.clone(),
+            script_ref: routine.script_ref.clone(),
+            action: "error".to_string(),
+            status: "failed".to_string(),
+            result_json: Some(json!({
+                "error": crate::services::routines::loader::ROUTINE_TICK_ERROR_PUBLIC_REASON,
+                "diagnostic_class": crate::services::routines::loader::ROUTINE_TICK_ERROR_PUBLIC_REASON,
+            })),
+            error: Some(
+                crate::services::routines::loader::ROUTINE_TICK_ERROR_PUBLIC_REASON.to_string(),
+            ),
+            fresh_context_guaranteed: false,
+        };
+
+        let message = run_outcome_message(&routine, &outcome);
+        let api_json = serde_json::to_string(&outcome).unwrap();
+        assert!(message.contains("routine_tick_exception"), "{message}");
+        assert!(api_json.contains("routine_tick_exception"), "{api_json}");
+        assert!(!message.contains("sk-live-secret"), "{message}");
+        assert!(!api_json.contains("sk-live-secret"), "{api_json}");
+        assert!(!message.contains(diagnostic), "{message}");
+        assert!(!api_json.contains(diagnostic), "{api_json}");
+    }
+
+    #[test]
     fn run_outcome_message_includes_result_summary_preview() {
         let routine = RoutineRecord {
             id: "routine-123456789".to_string(),

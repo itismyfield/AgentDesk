@@ -4,6 +4,7 @@ pub(crate) mod agent_handoff;
 pub(crate) mod agentdesk_config;
 mod answer_flush_barrier;
 pub(crate) mod bot_role;
+mod busy_followup_retry_store;
 // #3479 item-2: restart-gap message recovery extracted to its catch-up sibling.
 mod catch_up;
 mod commands;
@@ -216,8 +217,11 @@ pub(in crate::services::discord) use prompt_builder::load_channel_recent_context
 use prompt_builder::{RecoveryContextManifestInput, build_system_prompt_with_manifest};
 pub(in crate::services::discord) use queue_dispatch::MailboxEnqueueOutcome;
 use queue_dispatch::{
-    MailboxTakeNextSoftOutcome, mailbox_abandon_unclaimed_dispatch_after_success,
-    mailbox_requeue_intervention_front, mailbox_restore_dequeued_head,
+    AutomaticQueueProgression, MailboxTakeNextSoftOutcome,
+    automatic_progression as automatic_queue_progression,
+    mailbox_abandon_unclaimed_dispatch_after_success, mailbox_requeue_intervention_front,
+    mailbox_restore_dequeued_head, mailbox_take_next_automatic_intervention,
+    mailbox_take_next_soft_intervention,
 };
 use recovery_engine::restore_inflight_turns;
 use restart_report::flush_restart_reports;
@@ -2833,6 +2837,10 @@ async fn idle_queue_channel_has_kickable_backlog(
     snapshot: &ChannelMailboxSnapshot,
 ) -> bool {
     idle_queue_snapshot_has_kickable_backlog(shared, provider, channel_id, snapshot)
+        && !matches!(
+            automatic_queue_progression(shared, provider, channel_id, snapshot),
+            AutomaticQueueProgression::BlockedByCappedRetries
+        )
 }
 
 async fn mailbox_try_start_turn(
@@ -3480,112 +3488,6 @@ fn maybe_schedule_catch_up_retry_after_queue_drain(
     true
 }
 
-async fn mailbox_take_next_soft_intervention(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-) -> MailboxTakeNextSoftOutcome {
-    loop {
-        let result: TakeNextSoftResult = shared
-            .mailbox(channel_id)
-            .take_next_soft(queue_persistence_context(shared, provider, channel_id))
-            .await;
-        let queue_len_after = result.queue_len_after;
-        apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
-        if let Some(error) = result.persistence_error {
-            tracing::error!(
-                provider = provider.as_str(),
-                channel_id = channel_id.get(),
-                error = %error,
-                "mailbox dequeue failed durable pending-queue persistence"
-            );
-            return MailboxTakeNextSoftOutcome {
-                intervention: None,
-                dispatch_lease: None,
-                has_more: result.has_more,
-                persistence_error: Some(error),
-            };
-        }
-        maybe_schedule_catch_up_retry_after_queue_drain(
-            shared,
-            provider,
-            channel_id,
-            queue_len_after,
-        );
-        let Some(intervention) = result.intervention else {
-            return MailboxTakeNextSoftOutcome {
-                intervention: None,
-                dispatch_lease: None,
-                has_more: result.has_more,
-                persistence_error: None,
-            };
-        };
-
-        if let Some(stale) =
-            stale_dispatch_turn_for_queued_intervention(shared.pg_pool.as_ref(), &intervention)
-                .await
-        {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ⏭ DISPATCH-GUARD: dropped queued terminal dispatch {} in channel {} (status={})",
-                stale.dispatch_id,
-                channel_id,
-                stale.status
-            );
-            let queue_exit_events = [QueueExitEvent {
-                intervention: intervention.clone(),
-                kind: stale.queue_exit_kind,
-            }];
-            apply_queue_exit_feedback(shared, channel_id, &queue_exit_events).await;
-            mailbox_abandon_pending_dispatch(shared, provider, channel_id, intervention.message_id)
-                .await;
-            drop(result.dispatch_lease);
-            continue;
-        }
-
-        return MailboxTakeNextSoftOutcome {
-            intervention: Some(intervention),
-            dispatch_lease: result.dispatch_lease,
-            has_more: result.has_more,
-            persistence_error: None,
-        };
-    }
-}
-
-#[cfg(test)]
-mod queued_dequeue_dispatch_guard_wiring_tests {
-    #[test]
-    fn dequeue_uses_preservation_aware_stale_dispatch_guard() {
-        let source = include_str!("mod.rs");
-        let function_start = source
-            .find("async fn mailbox_take_next_soft_intervention(")
-            .expect("mailbox dequeue helper exists");
-        let function_end = source[function_start..]
-            .find("\nasync fn idle_queue_take_next_soft_if_ready(")
-            .map(|offset| function_start + offset)
-            .expect("mailbox dequeue helper has a stable following function");
-        let function_body = &source[function_start..function_end];
-        let queued_guard = format!(
-            "{}{}",
-            "stale_dispatch_turn_for_queued_",
-            "intervention(shared.pg_pool.as_ref(), &intervention)"
-        );
-        let text_guard = format!(
-            "{}{}",
-            "stale_dispatch_turn_for_", "text(shared.pg_pool.as_ref(), &intervention.text)"
-        );
-
-        assert!(
-            function_body.contains(&queued_guard),
-            "dequeue must retain the preservation-aware queued dispatch guard"
-        );
-        assert!(
-            !function_body.contains(&text_guard),
-            "dequeue must not bypass queued preservation with the raw text guard"
-        );
-    }
-}
-
 async fn idle_queue_take_next_soft_if_ready(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -3647,7 +3549,33 @@ async fn idle_queue_take_next_soft_if_ready(
         return MailboxTakeNextSoftOutcome::default();
     }
 
-    mailbox_take_next_soft_intervention(shared, provider, channel_id).await
+    mailbox_take_next_automatic_intervention(shared, provider, channel_id).await
+}
+
+#[cfg(test)]
+mod queued_dequeue_dispatch_guard_wiring_tests {
+    #[test]
+    fn dequeue_uses_preservation_aware_stale_dispatch_guard() {
+        let source = include_str!("queue_dispatch.rs");
+        let function_start = source
+            .find("async fn mailbox_take_soft_intervention(")
+            .expect("mailbox dequeue helper exists");
+        let function_body = &source[function_start..];
+        let queued_guard = format!("{}{}", "stale_dispatch_turn_for_queued_", "intervention(");
+        let text_guard = format!(
+            "{}{}",
+            "stale_dispatch_turn_for_", "text(shared.pg_pool.as_ref(), &intervention.text)"
+        );
+
+        assert!(
+            function_body.contains(&queued_guard),
+            "dequeue must retain the preservation-aware queued dispatch guard"
+        );
+        assert!(
+            !function_body.contains(&text_guard),
+            "dequeue must not bypass queued preservation with the raw text guard"
+        );
+    }
 }
 
 pub(in crate::services::discord) async fn mailbox_abandon_pending_dispatch(
@@ -3680,57 +3608,7 @@ async fn mailbox_clear_pending_dispatch_reservation(
         .await;
 }
 
-/// Front-restore an inflight Claude TUI follow-up that failed before submission;
-/// it predates queued interventions, and the deferred kickoff prevents hot loops.
-pub(in crate::services::discord) async fn mailbox_requeue_inflight_for_followup_retry(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    inflight_state: &InflightTurnState,
-) -> MailboxEnqueueOutcome {
-    let user_msg_id = inflight_state.user_msg_id;
-    if user_msg_id == 0 || inflight_state.user_text.trim().is_empty() {
-        return MailboxEnqueueOutcome::default();
-    }
-    let message_id = MessageId::new(user_msg_id);
-    // FIX #6 (Codex P2): rebuild the retry Intervention from the persisted
-    // follow-up requeue context instead of hardcoding empty values, so a
-    // PRE-submit busy-timeout requeue preserves the originating turn's reply
-    // context, attachments, and voice metadata. Legacy rows (pre-v9) default
-    // these to None/empty/false, matching the previous behavior exactly.
-    // #4247 FIX 2: rebuild the mark from the persisted `followup_preserve_on_cancel`
-    // decision; leaving it unmarked would regress a genuine-human-marked instruction
-    // to origin/main's drop-on-cancel behavior at the downstream preservation guards.
-    let queued_generation = shared.restart.current_generation;
-    let source_message_queued_generations = if inflight_state.followup_preserve_on_cancel {
-        vec![
-            crate::services::turn_orchestrator::SourceMessageQueuedGeneration::user_instruction(
-                message_id,
-                queued_generation,
-            ),
-        ]
-    } else {
-        Vec::new()
-    };
-    let intervention = Intervention {
-        author_id: UserId::new(inflight_state.request_owner_user_id),
-        author_is_bot: false,
-        message_id,
-        queued_generation,
-        source_message_ids: vec![message_id],
-        source_message_queued_generations,
-        source_text_segments: Vec::new(),
-        text: inflight_state.user_text.clone(),
-        mode: crate::services::turn_orchestrator::InterventionMode::Soft,
-        created_at: std::time::Instant::now(),
-        reply_context: inflight_state.followup_reply_context.clone(),
-        has_reply_boundary: inflight_state.followup_has_reply_boundary,
-        merge_consecutive: inflight_state.followup_merge_consecutive,
-        pending_uploads: inflight_state.followup_pending_uploads.clone(),
-        voice_announcement: inflight_state.followup_voice_announcement.clone(),
-    };
-    mailbox_requeue_intervention_front(shared, provider, channel_id, intervention).await
-}
+pub(in crate::services::discord) use busy_followup_retry_store::requeue_inflight_for_followup_retry as mailbox_requeue_inflight_for_followup_retry;
 
 #[cfg(test)]
 mod followup_retry_requeue_tests {
@@ -3801,7 +3679,9 @@ mod followup_retry_requeue_tests {
             let provider = ProviderKind::Claude;
             let channel_id = ChannelId::new(3_752_001);
             let user_msg_id = MessageId::new(3_752_101);
-            let state = followup_inflight(channel_id, user_msg_id, false);
+            let retry_user_msg_id = MessageId::new(3_752_100);
+            let mut state = followup_inflight(channel_id, user_msg_id, false);
+            state.busy_followup_retry_user_msg_id = retry_user_msg_id.get();
 
             let outcome =
                 mailbox_requeue_inflight_for_followup_retry(&shared, &provider, channel_id, &state)
@@ -3817,7 +3697,11 @@ mod followup_retry_requeue_tests {
             let intervention = &snapshot.intervention_queue[0];
             assert_eq!(intervention.author_id, UserId::new(42));
             assert_eq!(intervention.message_id, user_msg_id);
-            assert_eq!(intervention.source_message_ids, vec![user_msg_id]);
+            assert_eq!(
+                intervention.source_message_ids,
+                vec![user_msg_id, retry_user_msg_id],
+                "retry requeue must preserve the canonical source identity across another drain"
+            );
             assert_eq!(intervention.text, "please continue");
             assert_eq!(intervention.reply_context.as_deref(), Some("reply context"));
             assert!(intervention.has_reply_boundary);
@@ -3968,6 +3852,22 @@ async fn mailbox_cancel_soft_intervention(
         )
         .await;
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+    if let Some(removed) = result.removed.as_ref() {
+        let retry_identity = busy_followup_retry_store::resolve_identity(
+            provider,
+            channel_id.get(),
+            removed.message_id.get(),
+            &removed.source_message_ids,
+        );
+        if let Some(state) = retry_identity.state {
+            let _ = busy_followup_retry_store::clear_if_current(
+                provider,
+                channel_id.get(),
+                retry_identity.user_msg_id,
+                state.notice_message_id,
+            );
+        }
+    }
     result.removed
 }
 

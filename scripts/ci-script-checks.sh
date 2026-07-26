@@ -114,8 +114,12 @@ echo "=== Relay recovery targeted-lane wiring contract (#4423) ==="
 echo "=== Fast compile check PR/main/nightly split contract (#4747) ==="
 "$PYTHON" -m unittest tests.test_fast_check_ci_wiring
 
-echo "=== Rust test-lane coverage ratchet (#4846) ==="
-"$PYTHON" scripts/check_test_lane_coverage.py
+echo "=== Rust test-lane coverage ratchet (#4846/#4910) ==="
+if [[ -z "${TEST_LANE_BASELINE_REF:-}" ]]; then
+  echo "ERROR: TEST_LANE_BASELINE_REF must name an immutable comparison snapshot" >&2
+  exit 1
+fi
+"$PYTHON" scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"
 "$PYTHON" -m unittest tests.test_test_lane_coverage
 
 echo "=== Scheduled-message PG path-filter wiring contract ==="

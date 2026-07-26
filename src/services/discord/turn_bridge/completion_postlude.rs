@@ -8,79 +8,13 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use super::guards::InflightCleanupGuard;
+use super::guards::{CompletionGuard, InflightCleanupGuard};
 use super::*;
 
 mod channel_writeback;
+mod contracts;
 
-pub(super) struct CompletionPostludeContext {
-    pub(super) shared_owned: Arc<SharedData>,
-    pub(super) gateway: Arc<dyn TurnGateway>,
-    pub(super) channel_id: ChannelId,
-    pub(super) provider: ProviderKind,
-    pub(super) cancel_token: Arc<crate::services::provider::CancelToken>,
-    pub(super) user_msg_id: Option<MessageId>,
-    pub(super) turn_id: String,
-    pub(super) request_owner_name: String,
-    pub(super) final_session_status: &'static str,
-    pub(super) status_panel_started_at: i64,
-    pub(super) has_queued_turns: bool,
-    pub(super) defer_watcher_resume: bool,
-    pub(super) can_chain_locally: bool,
-    pub(super) single_message_panel_footer_mode: bool,
-    pub(super) is_external_input_tui_direct: bool,
-    pub(super) context_window_tokens: u64,
-    pub(super) context_compact_percent: u64,
-    pub(super) turn_start: std::time::Instant,
-}
-
-pub(super) struct CompletionPostludeState {
-    pub(super) full_response: String,
-    pub(super) user_text_owned: String,
-    pub(super) role_binding: Option<RoleBinding>,
-    pub(super) adk_session_key: Option<String>,
-    pub(super) adk_session_name: Option<String>,
-    pub(super) adk_session_info: Option<String>,
-    pub(super) adk_cwd: Option<String>,
-    pub(super) dispatch_id: Option<String>,
-    pub(super) dispatch_kind: Option<String>,
-    pub(super) new_session_id: Option<String>,
-    pub(super) new_raw_provider_session_id: Option<String>,
-    pub(super) status_panel_terminal_committed: bool,
-    pub(super) bridge_should_emit_completion: bool,
-    pub(super) current_msg_id: MessageId,
-    pub(super) status_panel_msg_id: Option<MessageId>,
-    pub(super) last_status_panel_text: String,
-    pub(super) completion_footer_terminal_text: Option<String>,
-    pub(super) spin_idx: usize,
-    pub(super) status_panel_generation: u64,
-    pub(super) preserve_inflight_for_cleanup_retry: bool,
-    pub(super) tmux_last_offset: Option<u64>,
-    pub(super) watcher_owner_channel_id: ChannelId,
-    pub(super) bridge_relay_delegated_to_watcher: bool,
-    pub(super) is_prompt_too_long: bool,
-    pub(super) resume_failure_detected: bool,
-    pub(super) recovery_retry: bool,
-    pub(super) rx_disconnected: bool,
-    pub(super) tmux_handed_off: bool,
-    pub(super) bridge_output_owner: Option<BridgeOutputOwner>,
-    pub(super) terminal_delivery_committed: bool,
-    pub(super) terminal_session_reset_required: bool,
-    pub(super) transcript_events: Vec<SessionTranscriptEvent>,
-    pub(super) accumulated_input_tokens: u64,
-    pub(super) accumulated_cache_create_tokens: u64,
-    pub(super) accumulated_cache_read_tokens: u64,
-    pub(super) accumulated_output_tokens: u64,
-    pub(super) accumulated_memory_input_tokens: u64,
-    pub(super) accumulated_memory_output_tokens: u64,
-    pub(super) transport_error: bool,
-    pub(super) api_friction_reports: Vec<crate::services::api_friction::ApiFrictionReport>,
-    pub(super) cancelled: bool,
-    pub(super) restart_followup_pending: bool,
-    pub(super) bridge_skip_holder_owns_inflight: bool,
-    pub(super) inflight_guard: InflightCleanupGuard,
-    pub(super) inflight_state: InflightTurnState,
-}
+pub(super) use contracts::{CompletionPostludeContext, CompletionPostludeState};
 
 pub(super) async fn run_completion_postlude(
     ctx: CompletionPostludeContext,
@@ -122,6 +56,7 @@ pub(super) async fn run_completion_postlude(
     let status_panel_msg_id = state.status_panel_msg_id;
     let mut last_status_panel_text = state.last_status_panel_text;
     let completion_footer_terminal_text = state.completion_footer_terminal_text;
+    let mut busy_requeue_outcome = state.busy_requeue_outcome;
     let spin_idx = state.spin_idx;
     let status_panel_generation = state.status_panel_generation;
     let preserve_inflight_for_cleanup_retry = state.preserve_inflight_for_cleanup_retry;
@@ -148,6 +83,7 @@ pub(super) async fn run_completion_postlude(
     let cancelled = state.cancelled;
     let restart_followup_pending = state.restart_followup_pending;
     let bridge_skip_holder_owns_inflight = state.bridge_skip_holder_owns_inflight;
+    let completion_guard = state.completion_guard;
     let mut inflight_guard = state.inflight_guard;
     let inflight_state = state.inflight_state;
 
@@ -199,24 +135,49 @@ pub(super) async fn run_completion_postlude(
         }
         let indicator =
             super::super::single_message_panel::single_message_panel_spinner_frame(spin_idx);
-        status_panel_completion_committed = complete_bridge_terminal_footer_or_status_panel(
-            shared_owned.as_ref(),
-            gateway.as_ref(),
-            channel_id,
-            current_msg_id,
-            user_msg_id,
-            status_panel_msg_id,
+        let (terminal_projection_settled, committed) =
+            followup_requeue::TerminalProjectionSettled::after(
+                complete_bridge_terminal_footer_or_status_panel(
+                    shared_owned.as_ref(),
+                    gateway.as_ref(),
+                    channel_id,
+                    current_msg_id,
+                    user_msg_id,
+                    status_panel_msg_id,
+                    &provider,
+                    status_panel_started_at,
+                    &mut last_status_panel_text,
+                    single_message_panel_footer_mode,
+                    is_external_input_tui_direct, // #3959: suppress mirror chrome footer
+                    completion_footer_terminal_text.as_deref(),
+                    indicator,
+                    status_panel_generation, // #3805 P2: prove this turn's panel epoch
+                    inflight_state.tmux_session_name.as_deref(),
+                ),
+            )
+            .await;
+        status_panel_completion_committed = committed;
+        terminal_projection_settled.release_completion_admission(
+            &completion_guard,
+            busy_requeue_outcome.take(),
+            &shared_owned,
             &provider,
-            status_panel_started_at,
-            &mut last_status_panel_text,
-            single_message_panel_footer_mode,
-            is_external_input_tui_direct, // #3959: suppress mirror chrome footer
-            completion_footer_terminal_text.as_deref(),
-            indicator,
-            status_panel_generation, // #3805 P2: prove this turn's panel epoch
-            inflight_state.tmux_session_name.as_deref(),
-        )
-        .await;
+            channel_id,
+            "claude_tui_followup_requeue_after_completion_postlude_projection",
+        );
+    } else {
+        // No terminal projection is needed, so entry to this branch is itself
+        // the settled boundary consumed by both queue-admission paths.
+        let (terminal_projection_settled, ()) =
+            followup_requeue::TerminalProjectionSettled::after(async {}).await;
+        terminal_projection_settled.release_completion_admission(
+            &completion_guard,
+            busy_requeue_outcome.take(),
+            &shared_owned,
+            &provider,
+            channel_id,
+            "claude_tui_followup_requeue_after_completion_postlude_projection",
+        );
     }
 
     if status_panel_terminal_committed

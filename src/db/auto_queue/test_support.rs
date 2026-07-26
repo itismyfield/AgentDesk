@@ -68,6 +68,16 @@ impl TestPostgresDb {
         .expect("connect + migrate postgres auto_queue test db")
     }
 
+    pub(crate) async fn emulate_pre_0100_deploy_gate_rows(pool: &PgPool) {
+        sqlx::query(
+            "ALTER TABLE auto_queue_entries
+             DROP CONSTRAINT auto_queue_entries_deploy_gate_unavailable_check",
+        )
+        .execute(pool)
+        .await
+        .expect("remove 0100 constraint for pre-migration legacy fixture");
+    }
+
     pub(crate) async fn drop(mut self) {
         let drop_result = crate::db::postgres::drop_test_database(
             &self.admin_url,

@@ -15,6 +15,7 @@ fn state_for_turn(user_msg_id: u64, tmux_session_name: &str) -> InflightTurnStat
         thread_title: None,
         request_owner_user_id: 7,
         user_msg_id,
+        busy_followup_retry_user_msg_id: user_msg_id,
         finalizer_turn_id: if user_msg_id == 0 {
             1_000_000_000_000_000_042
         } else {

@@ -60,6 +60,22 @@ unless document["concurrency"] == expected_concurrency
   exit 1
 end
 
+trigger = document[true] || document["on"]
+trigger_events = case trigger
+when Hash
+  trigger.keys.map(&:to_s)
+when Array
+  trigger.map(&:to_s)
+when String
+  [trigger]
+else
+  []
+end
+unless trigger_events == ["pull_request"]
+  warn "#{path}: required PR contexts must be triggered only by pull_request"
+  exit 1
+end
+
 targets = {
   "check_fast_cross_os" => {
     "label" => "cross-OS job",
@@ -84,9 +100,15 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.pg_db == 'true'",
     "runs_on" => "ubuntu-latest",
-    # #4747 (opt.3) re-pins after making PR cache access restore-only.
-    "job_sha256" => "038d897af037869047a114d10640751c62f0a7350d3748320bbabb171fadeeff",
+    # #4913 re-pins after adding the trusted session-forwarding test to the
+    # existing toolchain-provisioned targeted lane.
+    "job_sha256" => "86804b84bc35aacdf93d9f12607ec2fdf43d5c0bf1c67bb136b9b373365c16a4",
     "cargo_steps" => {
+      "Trusted session forwarding tests" => {
+        "commands" => ["env -u AGENTDESK_ROOT_DIR cargo test --lib services::session_forwarding -- --skip _pg --skip pg_ --skip postgres"],
+        "continue_on_error" => nil,
+        "timeout_minutes" => 10,
+      },
       "just test-postgres" => {
         "commands" => ["just test-postgres"],
         "continue_on_error" => nil,
@@ -202,6 +224,92 @@ RUBY
 trusted_workflow=".github/workflows/ci-macos-trusted.yml"
 pr_workflow=".github/workflows/ci-pr.yml"
 
+workflow_files() {
+  find .github/workflows -maxdepth 1 -type f \
+    \( -name '*.yml' -o -name '*.yaml' \) -print0
+}
+
+validate_workflow_entries() {
+  while IFS= read -r -d '' workflow; do
+    error "$workflow must not be a symlink; workflow hardening requires regular files"
+  done < <(find .github/workflows -type l -print0)
+}
+
+validate_required_context_uniqueness() {
+  if ! command -v ruby >/dev/null 2>&1; then
+    error "ruby is required to validate required workflow contexts structurally"
+    return
+  fi
+
+  while IFS= read -r -d '' workflow; do
+    if ! ruby - "$workflow" "$pr_workflow" <<'RUBY'
+require "yaml"
+
+path, pr_path = ARGV
+begin
+  # Workflow aliases are intentionally unsupported. Rejecting them keeps every
+  # audited job definition local and explicit instead of expanding YAML graphs.
+  document = YAML.safe_load(File.read(path), aliases: false, filename: path)
+rescue StandardError => error
+  warn "#{path}: cannot parse YAML: #{error.message}"
+  exit 1
+end
+jobs = document.is_a?(Hash) ? document["jobs"] : nil
+unless jobs.is_a?(Hash)
+  warn "#{path}: jobs must be a YAML mapping"
+  exit 1
+end
+required_context = "Script checks"
+required_context_jobs = []
+unsafe_dynamic_name_jobs = []
+jobs.each do |job_id, job|
+  next unless job.is_a?(Hash)
+
+  name = job["name"]
+  required_context_jobs << job_id.to_s if name.to_s.strip == required_context
+  next unless name.is_a?(String) && name.include?("${{")
+
+  # Do not evaluate Actions expressions. Permit exactly one matrix substitution
+  # whose static prefix/suffix make the required context impossible to render.
+  expression_shape_valid = name.scan("${{").length == 1 && name.scan("}}").length == 1
+  matrix_name = if expression_shape_valid
+    /\A([^{}]*)\$\{\{\s*matrix\.[A-Za-z_][A-Za-z0-9_.-]*\s*\}\}([^{}]*)\z/.match(name)
+  end
+  can_render_required = if matrix_name
+    static_fragments = [matrix_name[1], matrix_name[2]]
+    static_fragments.any? { |fragment| fragment.include?(required_context) } ||
+      (required_context.start_with?(matrix_name[1]) && required_context.end_with?(matrix_name[2]))
+  else
+    true
+  end
+  unsafe_dynamic_name_jobs << job_id.to_s if can_render_required
+end
+if path == pr_path
+  scripts = jobs["scripts"]
+  unless scripts.is_a?(Hash) && scripts["name"] == required_context
+    warn "#{path}: required Script checks context must be the exact literal name of jobs.scripts"
+    exit 1
+  end
+  unexpected_required = required_context_jobs - ["scripts"]
+  if unexpected_required.any?
+    warn "#{path}: required Script checks context must belong only to jobs.scripts"
+    exit 1
+  end
+elsif required_context_jobs.any?
+  warn "#{path}: must not publish required Script checks context (jobs: #{required_context_jobs.join(', ')})"
+  exit 1
+end
+if unsafe_dynamic_name_jobs.any?
+  warn "#{path}: dynamic job names must not be able to publish required Script checks context (jobs: #{unsafe_dynamic_name_jobs.join(', ')})"
+  exit 1
+end
+RUBY
+    then
+      error "$workflow violates required Script checks context uniqueness"
+    fi
+  done < <(workflow_files)
+}
+
 if [ ! -f "$trusted_workflow" ]; then
   error "missing $trusted_workflow"
 fi
@@ -209,9 +317,9 @@ if [ ! -f "$pr_workflow" ]; then
   error "missing $pr_workflow"
 fi
 
-for workflow in .github/workflows/*.yml; do
-  [ -f "$workflow" ] || continue
+validate_workflow_entries
 
+while IFS= read -r -d '' workflow; do
   if grep -Eq '^[[:space:]]+pull_request(_target)?:' "$workflow"; then
     if grep -Eq 'MACOS_RUNNER|self-hosted' "$workflow"; then
       error "$workflow is pull_request-triggered and must not reference self-hosted macOS routing"
@@ -225,7 +333,9 @@ for workflow in .github/workflows/*.yml; do
   if grep -q 'RUSTC_WRAPPER=' "$workflow" && ! grep -q 'SCCACHE_GHA_ENABLED=' "$workflow"; then
     error "$workflow clears RUSTC_WRAPPER but not SCCACHE_GHA_ENABLED"
   fi
-done
+done < <(workflow_files)
+
+validate_required_context_uniqueness
 
 if [ -f "$trusted_workflow" ]; then
   if grep -Eq '^[[:space:]]+pull_request(_target)?:' "$trusted_workflow"; then

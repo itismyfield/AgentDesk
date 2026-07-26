@@ -353,7 +353,7 @@ pub async fn run_routine_now(
     let requested_script_ref = routine.script_ref.clone();
     let script_ref_for_task = requested_script_ref.clone();
     let (loader, script) = tokio::task::spawn_blocking(move || {
-        let loader = RoutineScriptLoader::new()
+        let loader = RoutineScriptLoader::new_shared(&script_dirs_for_task)
             .map_err(|error| format!("routine script loader init failed: {error}"))?;
         loader
             .load_dirs(&script_dirs_for_task)

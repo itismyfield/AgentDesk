@@ -137,6 +137,11 @@ pub(super) fn discord_status_panel_singletons_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_status_panel_singletons"))
 }
 
+/// #4888: durable per-input busy-notice binding and aggregate retry budget.
+pub(super) fn discord_busy_followup_retries_root() -> Option<PathBuf> {
+    runtime_root().map(|root| root.join("discord_busy_followup_retries"))
+}
+
 /// #4891: intent-first journal for multi-file status-panel ownership changes.
 /// The journal is replayable because inflight, singleton, and orphan files do not
 /// share a filesystem transaction.

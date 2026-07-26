@@ -34,7 +34,10 @@ use super::SharedData;
 // #3041 P1-0: dormant lease types for the *Delivery messages below (mod.rs §2-§3).
 use super::{DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome};
 
+mod actor_state;
 pub(in crate::services::discord) mod cleanup;
+mod completion_admission;
+mod completion_admission_actor;
 pub(in crate::services::discord) mod completion_signal;
 mod delivery_lease;
 mod finalize;
@@ -46,6 +49,13 @@ pub(in crate::services::discord) use cleanup::SyntheticClaimSnapshot;
 // #3479 r9: completion-signal enum + pure derivation extracted; re-exported so
 // the `completion_signal_state` method and the watcher-backstop re-check below
 // reference them unqualified, byte-identical.
+use self::actor_state::{FinalizeMsg, LedgerEntry, PendingCompletionAdmission, Phase};
+pub(in crate::services::discord) use self::completion_admission::CompletionAdmissionPlan;
+use self::completion_admission::{CompletionAdmission, publish_claimed_queue_eligible};
+use self::completion_admission_actor::{
+    apply_pending_completion_admission, handle_completion_admission_message,
+    note_mailbox_release_after_finalize, take_exact_pending_completion_admission,
+};
 pub(in crate::services::discord) use self::completion_signal::{
     CompletionSignal, completion_signal_from_transcript,
 };
@@ -92,9 +102,11 @@ const GATE_BACKSTOP: Duration = Duration::from_secs(8);
 const WATCHER_REGISTER_BACKSTOP: Duration =
     Duration::from_secs(super::placeholder_sweeper::ABANDON_THRESHOLD_SECS);
 
-/// TTL after which a `Finalized` ledger entry is garbage-collected so the
-/// ledger stays bounded while still suppressing a late double-submit.
-const FINALIZED_TTL: Duration = Duration::from_secs(60);
+/// Keep finalized admission authority beyond the longest bounded retry lineage.
+/// Busy follow-up admission may settle up to five minutes after mailbox release;
+/// retaining ten minutes also covers delayed Discord 429 handling without making
+/// stale entries permanent. Pending pre-ledger edges use the same lifetime.
+const COMPLETION_ADMISSION_TTL: Duration = Duration::from_secs(10 * 60);
 
 /// Identity carried by a submission. The ledger key is the FULL identity
 /// (`channel_id`, `generation`, `user_msg_id`) so two SEQUENTIAL turns in the
@@ -150,7 +162,10 @@ pub(in crate::services::discord) struct LedgerKey {
 /// retained `Finalized` entry → `AlreadyFinalized`); a channel-only id-0
 /// terminal collapses per `resolve_channel_only` (never prematurely finalizing
 /// a queued follow-up).
-fn resolve_ledger_key(ledger: &HashMap<LedgerKey, LedgerEntry>, key: TurnKey) -> LedgerKey {
+pub(super) fn resolve_ledger_key(
+    ledger: &HashMap<LedgerKey, LedgerEntry>,
+    key: TurnKey,
+) -> LedgerKey {
     resolve_channel_only(
         key,
         ledger
@@ -268,127 +283,6 @@ pub(in crate::services::discord) enum FinalizeOutcome {
     Deferred,
 }
 
-/// Ledger phase for a single turn. Owned solely by the actor task; the
-/// check-and-set on this enum is the one place exactly-once is decided.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Phase {
-    Pending,
-    Finalizing,
-    Finalized,
-}
-
-struct LedgerEntry {
-    phase: Phase,
-    relay_owner: RelayOwnerKind,
-    provider: ProviderKind,
-    /// The originating identity, retained so the deadline-armed reconciler can
-    /// reconstruct a `TurnKey` for `do_finalize` (channel-scoped, so any of the
-    /// colliding ids is equivalent).
-    turn_key: TurnKey,
-    /// Backstop deadline for a deferred gate-timeout. `None` unless a
-    /// `GateTimeout{Some(false)}` armed it.
-    terminal_deadline: Option<Instant>,
-    /// #3016 phase-5a — FAR backstop deadline armed at `register_start` for a
-    /// watcher-owned turn (distinct from the short `terminal_deadline`): the
-    /// generous `WATCHER_REGISTER_BACKSTOP` horizon that makes a
-    /// never-terminated watcher handoff VISIBLE to the reconciler, which
-    /// re-checks liveness before finalizing. `None` for non-watcher owners.
-    watcher_backstop_deadline: Option<Instant>,
-    /// #3277 (Defect C) — when the proven-terminal fast path last probed this
-    /// entry (`None` = never probed; the first reconcile tick probes it).
-    watcher_backstop_probe_at: Option<Instant>,
-    /// #3277 (Defect C) — consecutive terminal probes observed so far. Reset
-    /// to 0 by any non-terminal probe and by an at-deadline deferral.
-    watcher_backstop_terminal_streak: u8,
-    /// #3277 codex r1 — true while `watcher_backstop_deadline` is the fast-path
-    /// PULLED one (its re-check stays STRICT); false on the natural horizon.
-    watcher_backstop_deadline_pulled: bool,
-    /// When the entry reached `Finalized`, for TTL-based GC.
-    finalized_at: Option<Instant>,
-}
-
-/// Messages the actor task drains. Each carries `Arc<SharedData>` so the
-/// finalize side-effects can run inside the task without the finalizer holding
-/// a `Weak<SharedData>` back-reference (which would re-introduce an Arc cycle
-/// and ordering ambiguity).
-enum FinalizeMsg {
-    /// #3018 register: submitted synchronously at intake/handoff BEFORE the
-    /// watcher can submit a terminal (arrival order replaces the deleted
-    /// Release/AcqRel `mailbox_finalize_owed.store` ordering). #3016 phase-5a:
-    /// carries a `Weak<SharedData>` (NOT `Arc` — no cycle) so the actor primes
-    /// `cached_shared` from the very FIRST `Start` and the far-backstop tick
-    /// runs even when no terminal ever arrives.
-    Start {
-        key: TurnKey,
-        provider: ProviderKind,
-        relay_owner: RelayOwnerKind,
-        shared: std::sync::Weak<SharedData>,
-    },
-    Terminal {
-        key: TurnKey,
-        provider: ProviderKind,
-        event: TerminalEvent,
-        ctx: FinalizeContext,
-        claim_snapshot: Option<SyntheticClaimSnapshot>,
-        shared: Arc<SharedData>,
-        ack: oneshot::Sender<FinalizeOutcome>,
-    },
-    /// #3041 §2-§3 (DORMANT until P1-2..): CAS-acquire `(key, [start,end))` for
-    /// `holder` via the actor. The watcher acquires the cell directly (B4
-    /// fast-path), so this variant has no sender yet — it is reserved for the
-    /// sink/bridge wiring.
-    #[allow(dead_code)] // #3041: no sender until sink/bridge wiring (P1-2..).
-    AcquireDelivery {
-        key: DeliveryLeaseKey,
-        lease: Arc<DeliveryLeaseCell>,
-        holder: LeaseHolder,
-        start: u64,
-        end: u64,
-        deadline_ms: u64,
-        ack: oneshot::Sender<bool>,
-    },
-    /// #3041 three-way commit; full-identity mismatch = no-op. A `Delivered`
-    /// commit also advances the channel's `confirmed_end_offset` watermark to
-    /// `end` (§5.2) via the SAME monotonic CAS the watcher's inline advance
-    /// uses. DORMANT (reverted in P1-1): the watcher commits + advances INLINE
-    /// (`watcher_lease_commit_advance`) because the actor-commit deferral
-    /// reopened the #3143 duplicate window; kept for the §5.3 phase.
-    #[allow(dead_code)] // #3041: wired in a later phase (ledger-coupled commit, §5.3).
-    CommitDelivery {
-        key: DeliveryLeaseKey,
-        lease: Arc<DeliveryLeaseCell>,
-        holder: LeaseHolder,
-        start: u64,
-        end: u64,
-        outcome: LeaseOutcome,
-        provider: ProviderKind,
-        tmux_session_name: String,
-        shared: Arc<SharedData>,
-        ack: oneshot::Sender<bool>,
-    },
-    /// #3041 compare-and-release; full-identity match only. DORMANT (reverted in
-    /// P1-1): the watcher releases its lease INLINE after the inline commit, NOT
-    /// via this awaited actor round-trip. Kept defined for a later phase.
-    #[allow(dead_code)] // #3041: wired in a later phase (alongside CommitDelivery).
-    ReleaseDelivery {
-        key: DeliveryLeaseKey,
-        lease: Arc<DeliveryLeaseCell>,
-        holder: LeaseHolder,
-        start: u64,
-        end: u64,
-        ack: oneshot::Sender<bool>,
-    },
-    /// #3016 S1 (A2-banked, read-only): ask the ledger whether the channel's
-    /// `generation` has a live (non-`Finalized`) entry that the watcher owns.
-    /// Pure read of the actor-owned ledger; mutates nothing. #3016 phase-5b1:
-    /// wired into production via `has_live_watcher_pending`.
-    QueryWatcherPending {
-        channel_id: ChannelId,
-        generation: u64,
-        ack: oneshot::Sender<bool>,
-    },
-}
-
 /// A per-runtime actor, held as `Arc<TurnFinalizer>` on `SharedData`. One
 /// owning task drains the `mpsc`; all public methods are cheap
 /// submit-or-await wrappers.
@@ -424,14 +318,63 @@ impl TurnFinalizer {
         relay_owner: RelayOwnerKind,
         shared: &Arc<SharedData>,
     ) {
-        // UnboundedSender::send only fails if the actor task is gone (process
-        // teardown); dropping the Start there is harmless because no terminal
-        // will be awaited either.
+        self.register_start_with_completion_admission(
+            key,
+            provider,
+            relay_owner,
+            CompletionAdmissionPlan::Immediate,
+            shared,
+        );
+    }
+
+    pub(in crate::services::discord) fn register_start_with_completion_admission(
+        &self,
+        key: TurnKey,
+        provider: ProviderKind,
+        relay_owner: RelayOwnerKind,
+        completion_admission_plan: CompletionAdmissionPlan,
+        shared: &Arc<SharedData>,
+    ) {
         let _ = self.tx.send(FinalizeMsg::Start {
             key,
             provider,
             relay_owner,
+            completion_admission_plan,
             shared: Arc::downgrade(shared),
+        });
+    }
+
+    pub(in crate::services::discord) fn note_mailbox_released(
+        &self,
+        key: TurnKey,
+        shared: Arc<SharedData>,
+    ) {
+        let _ = self.tx.send(FinalizeMsg::MailboxReleased { key, shared });
+    }
+
+    pub(in crate::services::discord) fn note_terminal_projection_settled(
+        &self,
+        key: TurnKey,
+        allow_queue: bool,
+        shared: Arc<SharedData>,
+    ) {
+        let _ = self.tx.send(FinalizeMsg::TerminalProjectionSettled {
+            key,
+            allow_queue,
+            shared,
+        });
+    }
+
+    pub(in crate::services::discord) fn note_terminal_disposition_settled(
+        &self,
+        key: TurnKey,
+        allow_queue: bool,
+        shared: Arc<SharedData>,
+    ) {
+        let _ = self.tx.send(FinalizeMsg::TerminalDispositionSettled {
+            key,
+            allow_queue,
+            shared,
         });
     }
 
@@ -653,6 +596,7 @@ fn panic_payload_summary(payload: &(dyn std::any::Any + Send)) -> String {
 /// cross-task nudge ordering to reason about).
 async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
     let mut ledger: HashMap<LedgerKey, LedgerEntry> = HashMap::new();
+    let mut pending_admission: HashMap<LedgerKey, PendingCompletionAdmission> = HashMap::new();
     // A `Weak` (NOT `Arc`) so the actor never keeps `SharedData` alive: the
     // cycle would otherwise be SharedData → Arc<TurnFinalizer> → sender →
     // actor → cached Arc<SharedData>, leaking the whole runtime across a
@@ -671,6 +615,7 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         key,
                         provider,
                         relay_owner,
+                        completion_admission_plan,
                         shared,
                     } => {
                         // #3016 phase-5a: prime the reconcile cache from the very
@@ -681,7 +626,7 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         // a dead `Weak` here just skips reconcile harmlessly until a
                         // live submission re-primes it.
                         if cached_shared.is_none() {
-                            cached_shared = Some(shared);
+                            cached_shared = Some(shared.clone());
                         }
                         // #3016 phase-5a: a watcher-owned handoff arms the FAR
                         // backstop so a never-terminated turn is visible to the
@@ -689,37 +634,61 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         // must never push an armed deadline forward (the EPIC's
                         // never-finalizing bug, mirrored from the gate-timeout arm).
                         let arm_watcher_backstop = relay_owner == RelayOwnerKind::Watcher;
-                        // A `Start` always carries the real `user_msg_id`, so it
-                        // registers under the exact full-identity key.
-                        ledger
-                            .entry(key.exact_key())
-                            .and_modify(|e| {
-                                // Only refresh the owner while still live; never
-                                // resurrect a finalized turn.
-                                if e.phase != Phase::Finalized {
-                                    e.relay_owner = relay_owner;
-                                    e.provider = provider.clone();
-                                    e.turn_key = key;
-                                    if arm_watcher_backstop {
-                                        e.watcher_backstop_deadline.get_or_insert_with(|| {
-                                            Instant::now() + WATCHER_REGISTER_BACKSTOP
-                                        });
-                                    }
-                                }
-                            })
-                            .or_insert(LedgerEntry {
-                                phase: Phase::Pending,
-                                relay_owner,
-                                provider,
-                                turn_key: key,
-                                terminal_deadline: None,
-                                watcher_backstop_deadline: arm_watcher_backstop
-                                    .then(|| Instant::now() + WATCHER_REGISTER_BACKSTOP),
-                                watcher_backstop_probe_at: None,
-                                watcher_backstop_terminal_streak: 0,
-                                watcher_backstop_deadline_pulled: false,
-                                finalized_at: None,
-                            });
+                        // A `Start` consumes only pre-ledger edges for its exact
+                        // generation. Older generation authority remains isolated
+                        // until TTL GC instead of pre-settling the current turn.
+                        let exact_key = key.exact_key();
+                        let pending = take_exact_pending_completion_admission(
+                            &mut pending_admission,
+                            exact_key,
+                        );
+                        let entry = ledger.entry(exact_key).or_insert(LedgerEntry {
+                            phase: Phase::Pending,
+                            relay_owner,
+                            provider: provider.clone(),
+                            turn_key: key,
+                            terminal_deadline: None,
+                            watcher_backstop_deadline: arm_watcher_backstop
+                                .then(|| Instant::now() + WATCHER_REGISTER_BACKSTOP),
+                            watcher_backstop_probe_at: None,
+                            watcher_backstop_terminal_streak: 0,
+                            watcher_backstop_deadline_pulled: false,
+                            completion_admission: CompletionAdmission::new(
+                                completion_admission_plan,
+                            ),
+                            finalized_at: None,
+                        });
+                        if entry.phase != Phase::Finalized {
+                            entry.relay_owner = relay_owner;
+                            entry.provider = provider;
+                            entry.turn_key = key;
+                            entry
+                                .completion_admission
+                                .update_plan(completion_admission_plan);
+                            apply_pending_completion_admission(entry, pending);
+                            if arm_watcher_backstop {
+                                entry.watcher_backstop_deadline.get_or_insert_with(|| {
+                                    Instant::now() + WATCHER_REGISTER_BACKSTOP
+                                });
+                            }
+                            if let Some(shared) = shared.upgrade() {
+                                publish_claimed_queue_eligible(&shared, entry);
+                            }
+                        } else if let Some(pending) = pending {
+                            apply_pending_completion_admission(entry, Some(pending));
+                            if let Some(shared) = shared.upgrade() {
+                                publish_claimed_queue_eligible(&shared, entry);
+                            }
+                        }
+                    }
+                    msg @ (FinalizeMsg::MailboxReleased { .. }
+                    | FinalizeMsg::TerminalProjectionSettled { .. }
+                    | FinalizeMsg::TerminalDispositionSettled { .. }) => {
+                        handle_completion_admission_message(
+                            &mut ledger,
+                            &mut pending_admission,
+                            msg,
+                        );
                     }
                     FinalizeMsg::Terminal {
                         key,
@@ -744,6 +713,7 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         // turn.
                         let outcome = match AssertUnwindSafe(handle_terminal(
                             &mut ledger,
+                            &mut pending_admission,
                             key,
                             provider,
                             event,
@@ -852,7 +822,11 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                     // Finalizing->Finalized and is never left stuck); this outer
                     // guard additionally contains the non-finalize reconcile
                     // surface and keeps the loop alive.
-                    if let Err(payload) = AssertUnwindSafe(reconcile(&mut ledger, &shared))
+                    if let Err(payload) = AssertUnwindSafe(reconcile(
+                        &mut ledger,
+                        &mut pending_admission,
+                        &shared,
+                    ))
                         .catch_unwind()
                         .await
                     {
@@ -920,6 +894,7 @@ mod test_panic_hook {
 
 async fn handle_terminal(
     ledger: &mut HashMap<LedgerKey, LedgerEntry>,
+    pending_admission: &mut HashMap<LedgerKey, PendingCompletionAdmission>,
     key: TurnKey,
     provider: ProviderKind,
     event: TerminalEvent,
@@ -956,6 +931,7 @@ async fn handle_terminal(
         }
     }
 
+    let pending = take_exact_pending_completion_admission(pending_admission, ledger_key);
     let entry = ledger.entry(ledger_key).or_insert(LedgerEntry {
         phase: Phase::Pending,
         relay_owner: RelayOwnerKind::None,
@@ -968,8 +944,10 @@ async fn handle_terminal(
         watcher_backstop_probe_at: None,
         watcher_backstop_terminal_streak: 0,
         watcher_backstop_deadline_pulled: false,
+        completion_admission: CompletionAdmission::new(CompletionAdmissionPlan::Immediate),
         finalized_at: None,
     });
+    apply_pending_completion_admission(entry, pending);
 
     match entry.phase {
         Phase::Finalizing | Phase::Finalized => {
@@ -1069,7 +1047,10 @@ async fn handle_terminal(
     .catch_unwind()
     .await
     {
-        Ok(outcome) => outcome,
+        Ok(outcome) => {
+            note_mailbox_release_after_finalize(&outcome, entry, shared);
+            outcome
+        }
         Err(payload) => {
             tracing::error!(
                 panic = %panic_payload_summary(payload.as_ref()),
@@ -1121,7 +1102,7 @@ mod tests {
     // env-dir Mutex is intentionally held across the test awaits (current-thread
     // runtime, serialization is the whole point). Test-only.
     #[allow(clippy::await_holding_lock)]
-    async fn with_isolated_runtime_root<F, Fut>(f: F)
+    pub(super) async fn with_isolated_runtime_root<F, Fut>(f: F)
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = ()>,

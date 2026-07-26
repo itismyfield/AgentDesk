@@ -2415,6 +2415,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         // the guard-miss-expected context so that EXPECTED no-op logs at debug
         // instead of spamming the wrong-turn WARN on every normal completion.
         let mut pre_panel_release_drove_finalize = false;
+        let mut terminal_projection_settled_turn_id = None;
         let mut completion_chrome_timed_out = false;
 
         if terminal_output_committed && watcher_tui_gate_outcome.should_emit_completion() {
@@ -2583,6 +2584,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                         &tmux_session_name,
                         current_offset,
                     );
+                    terminal_projection_settled_turn_id = (pre_panel_restored_finalizer_turn_id
+                        != 0)
+                        .then_some(pre_panel_restored_finalizer_turn_id);
                     if should_submit_restored_watcher_finalize(
                         pre_panel_completion_is_stale_for_newer_turn,
                         pre_panel_restored_finalizer_turn_id,
@@ -2638,6 +2642,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     );
                     completion_chrome_timed_out = true;
                 }
+                note_watcher_terminal_projection_settled(
+                    &shared,
+                    channel_id,
+                    terminal_projection_settled_turn_id,
+                );
             } // #3142: end `if !inflight_before_relay_is_stale_newer_turn` (EDIT/finalize gate)
             // #3003 single-chokepoint reclaim safety: after completion the turn
             // frame ends and the next frame re-seeds `status_panel_msg_id`, so the

@@ -234,7 +234,9 @@ jobs:
         run: sccache --show-stats || true
 
   scripts:
-    name: Script checks
+    # Distinct from the protected PR `Script checks` context. Main-push CI
+    # cannot enforce pre-merge anti-growth after a commit has already landed.
+    name: Main script checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -251,6 +253,10 @@ jobs:
 
       - name: Run script checks
         run: ./scripts/ci-script-checks.sh
+        env:
+          # Main-push CI verifies current coverage drift, but relative anti-growth
+          # authority lives in the protected PR candidate's required context.
+          TEST_LANE_BASELINE_REF: HEAD
 
       - name: Upload maintainability audit artifact
         if: always()

@@ -398,6 +398,24 @@ pub(super) fn ensure_synthetic_claim_marker_before_clear(
 /// Late `AlreadyFinalized` losers still perform guarded active-state cleanup.
 /// This is intentionally narrower than `do_finalize`: only the same real turn id
 /// can lose mailbox/inflight state, so a newer active turn is preserved.
+pub(in crate::services::discord) async fn rearm_queue_backstop_after_mailbox_release(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::model::id::ChannelId,
+    has_pending: bool,
+    reason: &'static str,
+) -> bool {
+    if !has_pending {
+        return false;
+    }
+    // The channel-scoped scheduler coalesces duplicate release/late-cleanup arms,
+    // and its worker rechecks the mailbox before every dispatch attempt.
+    crate::services::discord::arm_slow_idle_queue_backstop_if_queue_nonempty(
+        shared, provider, channel_id, reason,
+    )
+    .await
+}
+
 pub(super) async fn already_finalized_active_state(
     key: TurnKey,
     provider: &ProviderKind,
@@ -426,6 +444,17 @@ pub(super) async fn already_finalized_active_state(
     let Some(token) = finish.removed_token.as_ref() else {
         return;
     };
+    shared
+        .turn_finalizer
+        .note_mailbox_released(key, shared.clone());
+    rearm_queue_backstop_after_mailbox_release(
+        shared,
+        provider,
+        key.channel_id,
+        finish.has_pending,
+        "already_finalized_mailbox_release",
+    )
+    .await;
 
     if ctx.allow_completion_cleanup && !matches!(event, TerminalEvent::Cancel) {
         token.mark_completion_cleanup();
@@ -830,6 +859,97 @@ mod tests {
                 pending[0].1.terminal_status,
                 crate::services::discord::abandon_request_store::TerminalCardStatus::Aborted
             );
+        });
+    }
+
+    #[test]
+    fn mailbox_release_backstop_coalesces_duplicate_arms_and_eventually_fires_4906() {
+        with_isolated_runtime_root(|| {
+            test_rt().block_on(async {
+                use crate::services::turn_orchestrator::{
+                    Intervention, InterventionMode, SourceMessageTextSegment,
+                };
+                use std::sync::atomic::Ordering;
+
+                let shared = super::super::super::make_shared_data_for_tests();
+                let provider = ProviderKind::Claude;
+                let channel_id = ChannelId::new(4_906_201);
+                let queued_id = MessageId::new(4_906_202);
+                let intervention = Intervention {
+                    author_id: UserId::new(7),
+                    author_is_bot: false,
+                    message_id: queued_id,
+                    queued_generation: crate::services::discord::runtime_store::process_generation(),
+                    source_message_ids: vec![queued_id],
+                    source_message_queued_generations: Vec::new(),
+                    source_text_segments: vec![SourceMessageTextSegment::new(
+                        queued_id,
+                        "queued after mailbox release",
+                    )],
+                    text: "queued after mailbox release".to_string(),
+                    mode: InterventionMode::Soft,
+                    created_at: std::time::Instant::now(),
+                    reply_context: None,
+                    has_reply_boundary: false,
+                    merge_consecutive: false,
+                    pending_uploads: Vec::new(),
+                    voice_announcement: None,
+                };
+                let enqueued = shared
+                    .mailbox(channel_id)
+                    .enqueue(
+                        intervention,
+                        crate::services::discord::queue_persistence_context(
+                            &shared,
+                            &provider,
+                            channel_id,
+                        ),
+                    )
+                    .await;
+                assert!(enqueued.enqueued);
+                let fires_before =
+                    crate::services::discord::queue_io::idle_queue_backstop_fires_for_tests();
+
+                assert!(
+                    rearm_queue_backstop_after_mailbox_release(
+                        &shared,
+                        &provider,
+                        channel_id,
+                        true,
+                        "test_mailbox_release",
+                    )
+                    .await
+                );
+                assert!(
+                    !rearm_queue_backstop_after_mailbox_release(
+                        &shared,
+                        &provider,
+                        channel_id,
+                        true,
+                        "test_mailbox_release_duplicate",
+                    )
+                    .await,
+                    "duplicate release/late-cleanup arms must coalesce"
+                );
+                assert_eq!(
+                    shared.restart.deferred_hook_backlog.load(Ordering::Relaxed),
+                    1,
+                    "exactly one channel backstop is armed"
+                );
+
+                tokio::time::advance(
+                    crate::services::discord::queue_io::idle_queue_backstop_delay_for_tests(),
+                )
+                .await;
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+                assert!(
+                    crate::services::discord::queue_io::idle_queue_backstop_fires_for_tests()
+                        > fires_before,
+                    "the coalesced release backstop must eventually execute its snapshot reconciliation"
+                );
+            });
         });
     }
 
@@ -1677,6 +1797,143 @@ mod tests {
                     take_reaction_cleanup_records().is_empty(),
                     "reachable AlreadyFinalized losers inherit watcher/bridge/monitor context and must not masquerade as the backstop reaction owner"
                 );
+            });
+        });
+    }
+
+    #[test]
+    fn late_already_finalized_cleanup_releases_mailbox_and_rearms_once_4906() {
+        with_isolated_runtime_root(|| {
+            test_rt().block_on(async {
+                use crate::services::turn_orchestrator::{
+                    Intervention, InterventionMode, SourceMessageTextSegment,
+                };
+                use std::sync::atomic::Ordering;
+
+                let shared =
+                    super::super::super::make_shared_data_for_tests_with_storage(None);
+                let provider = ProviderKind::Claude;
+                let channel_id = ChannelId::new(4_906_301);
+                let turn_id = real_message_id(302);
+                let queued_id = MessageId::new(real_message_id(303));
+                let finalizer = shared.turn_finalizer.clone();
+                let key = TurnKey::new(channel_id, turn_id, 0);
+                let mut completion_events =
+                    crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+                        &shared,
+                    );
+                finalizer.register_start_with_completion_admission(
+                    key,
+                    provider.clone(),
+                    RelayOwnerKind::Watcher,
+                    super::super::CompletionAdmissionPlan::AfterTerminalProjectionSettled,
+                    &shared,
+                );
+
+                let winner = finalizer
+                    .submit_terminal(
+                        key,
+                        provider.clone(),
+                        TerminalEvent::Complete,
+                        FinalizeContext::watcher(),
+                        shared.clone(),
+                    )
+                    .await;
+                assert!(matches!(
+                    winner,
+                    FinalizeOutcome::Finalized {
+                        removed_token: None,
+                        ..
+                    }
+                ));
+                assert!(completion_events.try_recv().is_err());
+
+                let token = seed_active_turn(&shared, channel_id, turn_id).await;
+                shared.restart.global_active.store(1, Ordering::Relaxed);
+                let queued = Intervention {
+                    author_id: UserId::new(7),
+                    author_is_bot: false,
+                    message_id: queued_id,
+                    queued_generation: crate::services::discord::runtime_store::process_generation(),
+                    source_message_ids: vec![queued_id],
+                    source_message_queued_generations: Vec::new(),
+                    source_text_segments: vec![SourceMessageTextSegment::new(
+                        queued_id,
+                        "queued behind late finalized cleanup",
+                    )],
+                    text: "queued behind late finalized cleanup".to_string(),
+                    mode: InterventionMode::Soft,
+                    created_at: std::time::Instant::now(),
+                    reply_context: None,
+                    has_reply_boundary: false,
+                    merge_consecutive: false,
+                    pending_uploads: Vec::new(),
+                    voice_announcement: None,
+                };
+                assert!(
+                    shared
+                        .mailbox(channel_id)
+                        .enqueue(
+                            queued,
+                            crate::services::discord::queue_persistence_context(
+                                &shared,
+                                &provider,
+                                channel_id,
+                            ),
+                        )
+                        .await
+                        .enqueued
+                );
+
+                let late = finalizer
+                    .submit_terminal(
+                        key,
+                        provider.clone(),
+                        TerminalEvent::Complete,
+                        FinalizeContext::bridge(),
+                        shared.clone(),
+                    )
+                    .await;
+                assert!(matches!(late, FinalizeOutcome::AlreadyFinalized));
+                assert!(token.cancelled.load(Ordering::Relaxed));
+                assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+                assert!(
+                    crate::services::discord::mailbox_snapshot(&shared, channel_id)
+                        .await
+                        .cancel_token
+                        .is_none(),
+                    "the late loser must release the matching mailbox token"
+                );
+                assert_eq!(
+                    shared.restart.deferred_hook_backlog.load(Ordering::Relaxed),
+                    1,
+                    "mailbox release with backlog must arm one coalesced slow backstop"
+                );
+                assert!(
+                    !rearm_queue_backstop_after_mailbox_release(
+                        &shared,
+                        &provider,
+                        channel_id,
+                        true,
+                        "test_late_already_finalized_duplicate",
+                    )
+                    .await,
+                    "the admission edge and explicit duplicate backstop must not arm twice"
+                );
+
+                let released = completion_events
+                    .try_recv()
+                    .expect("late cleanup must publish mailbox release");
+                assert!(!released.queue_is_eligible());
+                assert!(completion_events.try_recv().is_err());
+                finalizer.note_terminal_projection_settled(key, true, shared.clone());
+                finalizer.note_terminal_projection_settled(key, true, shared.clone());
+                assert!(!finalizer.has_live_watcher_pending(channel_id, 0).await);
+                let eligible = completion_events
+                    .try_recv()
+                    .expect("late projection edge must release retained admission authority");
+                assert!(eligible.queue_is_eligible());
+                assert!(completion_events.try_recv().is_err());
             });
         });
     }
