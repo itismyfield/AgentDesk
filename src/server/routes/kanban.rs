@@ -168,21 +168,10 @@ async fn cancel_turn_targets(
             lifecycle.tmux_killed,
             lifecycle.lifecycle_path,
         );
-
-        if let Some(pool) = state.pg_pool_ref() {
-            kanban_db::clear_session_for_turn_target_pg(pool, &target.session_key)
-                .await
-                .ok();
-        } else {
-            tracing::warn!(
-                target = %target.session_key,
-                "[kanban] cancel_turn_targets skipped session-clear: postgres pool unavailable (#1239)"
-            );
-        }
     }
 }
 
-async fn transition_card_to_backlog_with_cleanup(
+pub(crate) async fn transition_card_to_backlog_with_cleanup(
     state: &AppState,
     card_id: &str,
     source: &str,
@@ -191,7 +180,11 @@ async fn transition_card_to_backlog_with_cleanup(
         anyhow::anyhow!("transition_card_to_backlog_with_cleanup requires postgres pool (#1239)")
     })?;
     let turn_targets = kanban_db::load_active_turn_targets_for_card_pg(pool, card_id).await?;
-    let result = crate::kanban::transition_status_with_opts_and_allowed_cleanup_pg_only(
+    let turn_target_session_keys: Vec<String> = turn_targets
+        .iter()
+        .map(|target| target.session_key.clone())
+        .collect();
+    let result = crate::kanban::transition_status_with_opts_and_turn_target_cleanup_pg_only(
         pool,
         &state.engine,
         card_id,
@@ -199,6 +192,7 @@ async fn transition_card_to_backlog_with_cleanup(
         source,
         crate::engine::transition::ForceIntent::SystemRecovery,
         crate::kanban::AllowedOnConnMutation::ForceTransitionRevertCleanup,
+        &turn_target_session_keys,
     )
     .await
     .map(|(result, _)| result)?;

@@ -238,6 +238,7 @@ async fn transition_status_with_opts_pg_inner(
     source: &str,
     force_intent: crate::engine::transition::ForceIntent,
     on_pg_policy: Option<AllowedOnConnMutation>,
+    turn_target_session_keys: &[String],
 ) -> Result<(TransitionResult, PgTransitionCleanupCounts)> {
     use crate::engine::transition::{
         self, CardState, GateSnapshot, TransitionContext, TransitionOutcome,
@@ -445,7 +446,12 @@ async fn transition_status_with_opts_pg_inner(
             rationale = policy.rationale(),
             "[kanban] executing allowlisted postgres cleanup after transition intents"
         );
-        execute_allowed_cleanup_on_pg_tx(&mut tx, card_id, new_status, policy).await?
+        let counts = execute_allowed_cleanup_on_pg_tx(&mut tx, card_id, new_status, policy).await?;
+        for session_key in turn_target_session_keys {
+            crate::db::kanban_cards::clear_session_for_turn_target_on_pg_tx(&mut tx, session_key)
+                .await?;
+        }
+        counts
     } else {
         let mut counts = PgTransitionCleanupCounts::default();
         if effective.is_terminal(new_status) {
@@ -565,6 +571,7 @@ pub async fn transition_status_with_opts_pg_only(
         source,
         force_intent,
         None,
+        &[],
     )
     .await
     .map(|(result, _)| result)
@@ -586,6 +593,7 @@ pub async fn transition_status_with_opts_pg(
         source,
         force_intent,
         None,
+        &[],
     )
     .await
     .map(|(result, _)| result)
@@ -637,6 +645,30 @@ pub async fn transition_status_with_opts_and_allowed_cleanup_pg_only(
         source,
         force_intent,
         Some(on_pg_policy),
+        &[],
+    )
+    .await
+}
+
+pub async fn transition_status_with_opts_and_turn_target_cleanup_pg_only(
+    pg_pool: &sqlx::PgPool,
+    engine: &PolicyEngine,
+    card_id: &str,
+    new_status: &str,
+    source: &str,
+    force_intent: crate::engine::transition::ForceIntent,
+    on_pg_policy: AllowedOnConnMutation,
+    turn_target_session_keys: &[String],
+) -> Result<(TransitionResult, PgTransitionCleanupCounts)> {
+    transition_status_with_opts_pg_inner(
+        pg_pool,
+        engine,
+        card_id,
+        new_status,
+        source,
+        force_intent,
+        Some(on_pg_policy),
+        turn_target_session_keys,
     )
     .await
 }
@@ -661,6 +693,7 @@ pub async fn transition_status_with_opts_and_allowed_cleanup_pg(
         source,
         force_intent,
         Some(on_pg_policy),
+        &[],
     )
     .await
 }

@@ -40,17 +40,13 @@ pub async fn load_active_turn_targets_for_card_pg(
         .collect()
 }
 
-pub async fn clear_session_for_turn_target_pg(
-    pool: &PgPool,
+pub(crate) async fn clear_session_for_turn_target_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     session_key: &str,
 ) -> anyhow::Result<()> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|error| anyhow::anyhow!("begin turn-target clear transaction: {error}"))?;
     let session_id =
         crate::db::dispatched_session_canonical_identity::resolve_session_id_for_mutation_pg(
-            &mut tx,
+            tx,
             session_key,
         )
         .await
@@ -64,10 +60,22 @@ pub async fn clear_session_for_turn_target_pg(
              WHERE id = $1",
         )
         .bind(session_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|error| anyhow::anyhow!("clear turn-target session row: {error}"))?;
     }
+    Ok(())
+}
+
+pub async fn clear_session_for_turn_target_pg(
+    pool: &PgPool,
+    session_key: &str,
+) -> anyhow::Result<()> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| anyhow::anyhow!("begin turn-target clear transaction: {error}"))?;
+    clear_session_for_turn_target_on_pg_tx(&mut tx, session_key).await?;
     tx.commit()
         .await
         .map_err(|error| anyhow::anyhow!("commit turn-target clear transaction: {error}"))?;

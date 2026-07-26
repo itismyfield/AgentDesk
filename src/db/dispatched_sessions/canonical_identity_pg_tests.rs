@@ -788,6 +788,262 @@ async fn canonical_identity_ambiguous_mutations_fail_closed_without_row_change_p
 }
 
 #[tokio::test]
+async fn canonical_identity_backlog_transition_rolls_back_on_divergent_alias_pg() {
+    let Some(test_db) = CanonicalIdentityPgDatabase::create().await else {
+        eprintln!("skipping canonical identity pg test: postgres unavailable");
+        return;
+    };
+    let pool = test_db.migrate().await;
+    let card_id = "card-canonical-divergent-backlog";
+    let dispatch_id = "dispatch-canonical-divergent-backlog";
+    let locator = "claude/discord_0123456789abcdef/host-a:AgentDesk-claude-divergent-backlog";
+    let alias_owner_key =
+        "claude/discord_0123456789abcdef/host-b:AgentDesk-claude-divergent-backlog-owner";
+    let channel_id = "1479671301387059218";
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (id, title, status, latest_dispatch_id)
+         VALUES ($1, 'Divergent backlog cleanup', 'in_progress', $2)",
+    )
+    .bind(card_id)
+    .bind(dispatch_id)
+    .execute(&pool)
+    .await
+    .expect("seed backlog transition card");
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+             id, kanban_card_id, dispatch_type, status, title, context
+         ) VALUES ($1, $2, 'implementation', 'dispatched', 'Divergent backlog cleanup', '{}')",
+    )
+    .bind(dispatch_id)
+    .bind(card_id)
+    .execute(&pool)
+    .await
+    .expect("seed active backlog dispatch");
+    upsert_hook_session_with_identity_pg(
+        &pool,
+        HookSessionUpsert {
+            status: "turn_active",
+            active_dispatch_id: Some(dispatch_id),
+            claude_session_id: Some("primary-selector"),
+            ..params(locator, channel_id)
+        },
+        Some(identity(channel_id)),
+    )
+    .await
+    .expect("seed exact backlog target");
+    let alias_owner_id: i64 = sqlx::query_scalar(
+        "INSERT INTO sessions (
+             session_key, provider, status, claude_session_id
+         ) VALUES ($1, 'claude', 'idle', 'alias-selector')
+         RETURNING id",
+    )
+    .bind(alias_owner_key)
+    .fetch_one(&pool)
+    .await
+    .expect("seed alternate backlog alias owner");
+    sqlx::query("DROP TRIGGER trg_session_key_aliases_locator_namespace ON session_key_aliases")
+        .execute(&pool)
+        .await
+        .expect("disable namespace trigger for divergent backlog fixture");
+    sqlx::query("DELETE FROM session_locator_namespace WHERE session_key = $1")
+        .bind(locator)
+        .execute(&pool)
+        .await
+        .expect("release divergent backlog locator claim");
+    sqlx::query("INSERT INTO session_key_aliases (session_key, session_id) VALUES ($1, $2)")
+        .bind(locator)
+        .bind(alias_owner_id)
+        .execute(&pool)
+        .await
+        .expect("seed divergent backlog alias evidence");
+
+    let mut config = crate::config::Config::default();
+    config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+    config.policies.hot_reload = false;
+    let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
+        .expect("create backlog transition policy engine");
+    let broadcast_tx = crate::eventbus::new_broadcast();
+    let batch_buffer = crate::eventbus::spawn_batch_flusher(broadcast_tx.clone());
+    let state = crate::app_state::AppState {
+        pg_pool: Some(pool.clone()),
+        engine,
+        config: std::sync::Arc::new(config),
+        broadcast_tx,
+        batch_buffer,
+        health_registry: None,
+        cluster_instance_id: None,
+    };
+    let error = crate::server::routes::kanban::transition_card_to_backlog_with_cleanup(
+        &state,
+        card_id,
+        "test:divergent-backlog",
+    )
+    .await
+    .expect_err("divergent alias evidence must fail the backlog transition");
+    assert!(
+        format!("{error:#}").contains("EvidenceDivergence"),
+        "error must preserve the closed conflict category: {error:#}"
+    );
+
+    let card_state: (String, Option<String>) =
+        sqlx::query_as("SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = $1")
+            .bind(card_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load rolled-back backlog card");
+    assert_eq!(card_state.0, "in_progress");
+    assert_eq!(card_state.1.as_deref(), Some(dispatch_id));
+    let dispatch_status: String =
+        sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+            .bind(dispatch_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load rolled-back backlog dispatch");
+    assert_eq!(dispatch_status, "dispatched");
+    let session_state: (String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT status, active_dispatch_id, claude_session_id
+         FROM sessions
+         WHERE session_key = $1",
+    )
+    .bind(locator)
+    .fetch_one(&pool)
+    .await
+    .expect("load unchanged backlog session");
+    assert_eq!(session_state.0, "turn_active");
+    assert_eq!(session_state.1.as_deref(), Some(dispatch_id));
+    assert_eq!(session_state.2.as_deref(), Some("primary-selector"));
+
+    test_db.drop().await;
+}
+
+#[tokio::test]
+async fn canonical_identity_backlog_transition_rolls_back_on_session_clear_db_failure_pg() {
+    let Some(test_db) = CanonicalIdentityPgDatabase::create().await else {
+        eprintln!("skipping canonical identity pg test: postgres unavailable");
+        return;
+    };
+    let pool = test_db.migrate().await;
+    let card_id = "card-canonical-clear-failure-backlog";
+    let dispatch_id = "dispatch-canonical-clear-failure-backlog";
+    let locator = "claude/discord_0123456789abcdef/host-a:AgentDesk-claude-clear-failure";
+    let channel_id = "1479671301387059219";
+
+    sqlx::query(
+        "INSERT INTO kanban_cards (id, title, status, latest_dispatch_id)
+         VALUES ($1, 'Clear failure backlog cleanup', 'in_progress', $2)",
+    )
+    .bind(card_id)
+    .bind(dispatch_id)
+    .execute(&pool)
+    .await
+    .expect("seed clear-failure backlog card");
+    sqlx::query(
+        "INSERT INTO task_dispatches (
+             id, kanban_card_id, dispatch_type, status, title, context
+         ) VALUES ($1, $2, 'implementation', 'dispatched', 'Clear failure backlog cleanup', '{}')",
+    )
+    .bind(dispatch_id)
+    .bind(card_id)
+    .execute(&pool)
+    .await
+    .expect("seed clear-failure backlog dispatch");
+    upsert_hook_session_with_identity_pg(
+        &pool,
+        HookSessionUpsert {
+            status: "turn_active",
+            active_dispatch_id: Some(dispatch_id),
+            claude_session_id: Some("clear-failure-selector"),
+            ..params(locator, channel_id)
+        },
+        Some(identity(channel_id)),
+    )
+    .await
+    .expect("seed clear-failure backlog session");
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION reject_backlog_session_clear()
+         RETURNS trigger
+         LANGUAGE plpgsql
+         AS $$
+         BEGIN
+             RAISE EXCEPTION 'injected session clear failure';
+         END;
+         $$;",
+    )
+    .execute(&pool)
+    .await
+    .expect("install deterministic session-clear failure function");
+    sqlx::query(
+        "CREATE TRIGGER trg_reject_backlog_session_clear
+         BEFORE UPDATE ON sessions
+         FOR EACH ROW
+         WHEN (NEW.status = 'disconnected')
+         EXECUTE FUNCTION reject_backlog_session_clear();",
+    )
+    .execute(&pool)
+    .await
+    .expect("install deterministic session-clear failure trigger");
+
+    let mut config = crate::config::Config::default();
+    config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+    config.policies.hot_reload = false;
+    let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
+        .expect("create clear-failure transition policy engine");
+    let broadcast_tx = crate::eventbus::new_broadcast();
+    let batch_buffer = crate::eventbus::spawn_batch_flusher(broadcast_tx.clone());
+    let state = crate::app_state::AppState {
+        pg_pool: Some(pool.clone()),
+        engine,
+        config: std::sync::Arc::new(config),
+        broadcast_tx,
+        batch_buffer,
+        health_registry: None,
+        cluster_instance_id: None,
+    };
+    let error = crate::server::routes::kanban::transition_card_to_backlog_with_cleanup(
+        &state,
+        card_id,
+        "test:clear-failure-backlog",
+    )
+    .await
+    .expect_err("session-clear database failure must fail the backlog transition");
+    assert!(
+        format!("{error:#}").contains("injected session clear failure"),
+        "error must propagate the session-clear database failure: {error:#}"
+    );
+
+    let card_state: (String, Option<String>) =
+        sqlx::query_as("SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = $1")
+            .bind(card_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load clear-failure rolled-back card");
+    assert_eq!(card_state.0, "in_progress");
+    assert_eq!(card_state.1.as_deref(), Some(dispatch_id));
+    let dispatch_status: String =
+        sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+            .bind(dispatch_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load clear-failure rolled-back dispatch");
+    assert_eq!(dispatch_status, "dispatched");
+    let session_state: (String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT status, active_dispatch_id, claude_session_id
+         FROM sessions
+         WHERE session_key = $1",
+    )
+    .bind(locator)
+    .fetch_one(&pool)
+    .await
+    .expect("load unchanged clear-failure session");
+    assert_eq!(session_state.0, "turn_active");
+    assert_eq!(session_state.1.as_deref(), Some(dispatch_id));
+    assert_eq!(session_state.2.as_deref(), Some("clear-failure-selector"));
+
+    test_db.drop().await;
+}
+
+#[tokio::test]
 async fn canonical_identity_alias_stale_cleanup_targets_primary_pg() {
     let Some(test_db) = CanonicalIdentityPgDatabase::create().await else {
         eprintln!("skipping canonical identity pg test: postgres unavailable");
