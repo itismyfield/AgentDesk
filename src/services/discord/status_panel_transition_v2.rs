@@ -483,6 +483,8 @@ pub enum Failpoint {
 
 #[cfg(test)]
 static ACTIVE_FAILPOINT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+#[cfg(test)]
+static PERSISTENCE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn failpoint(point: Failpoint) -> Result<(), PersistenceError> {
     #[cfg(test)]
@@ -562,6 +564,25 @@ mod tests {
     }
 
     #[test]
+    fn unknown_state_is_quarantined() {
+        let classification = classify_candidate(r#"{"state":{"state":"future_state"}}"#);
+        assert_eq!(classification, CandidateClassification::UnknownState);
+        assert_eq!(
+            plan_recovery(classification),
+            RecoveryDecision::QuarantineUnknownState
+        );
+    }
+
+    #[test]
+    fn delete_cannot_precede_retirement() {
+        let record = TransitionRecord::prepared(1);
+        assert_eq!(
+            reduce(record, ReduceEvent::DeleteObserved),
+            Err(ReduceError::InvalidTransition)
+        );
+    }
+
+    #[test]
     fn journal_owned_is_required_for_bind() {
         let mut record = reduce(
             TransitionRecord::prepared(1),
@@ -595,6 +616,7 @@ mod tests {
 
     #[test]
     fn stale_revision_is_rejected() {
+        let _guard = PERSISTENCE_TEST_LOCK.lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         let store =
             ChannelPersistence::new(root.path(), &ChannelKey::new("claude", "token", 9)).unwrap();
@@ -610,6 +632,7 @@ mod tests {
 
     #[test]
     fn parent_fsync_failure_is_fail_closed() {
+        let _guard = PERSISTENCE_TEST_LOCK.lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         let store =
             ChannelPersistence::new(root.path(), &ChannelKey::new("claude", "token", 10)).unwrap();
