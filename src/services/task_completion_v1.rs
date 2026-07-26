@@ -398,8 +398,9 @@ pub(crate) fn admit_raw(line: &str) -> TaskCompletionV1Admission {
 fn valid_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_ID_BYTES
-        && value.trim() == value
-        && !value.chars().any(char::is_control)
+        && !value
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
 }
 
 #[cfg(test)]
@@ -418,6 +419,12 @@ mod tests {
             matches!(admit_raw(raw), TaskCompletionV1Admission::Rejected(_)),
             "expected strict rejection: {raw}"
         );
+    }
+
+    fn with_id(key: &str, id: &str) -> String {
+        let mut mutated = serde_json::from_str::<Value>(&canonical()).unwrap();
+        mutated[key] = Value::String(id.to_string());
+        mutated.to_string()
     }
 
     #[test]
@@ -510,20 +517,77 @@ mod tests {
     }
 
     #[test]
-    fn malformed_ids_are_rejected() {
-        let base = serde_json::from_str::<Value>(&canonical()).unwrap();
-        let oversized = "x".repeat(257);
+    fn whitespace_controls_and_oversized_ids_are_rejected_for_both_id_fields() {
+        let oversized_ascii = "x".repeat(MAX_ID_BYTES + 1);
+        let oversized_multibyte = format!("{}x", "é".repeat(MAX_ID_BYTES / 2));
         for id in [
             "",
             " leading",
             "trailing ",
+            "internal space",
+            "internal\ttab",
             "line\nbreak",
-            oversized.as_str(),
+            "non\u{00a0}breaking",
+            "em\u{2003}space",
+            "narrow\u{202f}no-break",
+            "ideographic\u{3000}space",
+            "control\u{0007}bell",
+            "control\u{007f}delete",
+            oversized_ascii.as_str(),
+            oversized_multibyte.as_str(),
         ] {
             for key in ["task_id", "tool_use_id"] {
-                let mut mutated = base.clone();
-                mutated[key] = Value::String(id.to_string());
-                assert_rejected(&mutated.to_string());
+                assert_rejected(&with_id(key, id));
+            }
+        }
+    }
+
+    #[test]
+    fn escaped_whitespace_ids_are_rejected_before_value_normalization() {
+        for key in ["task_id", "tool_use_id"] {
+            for escaped_id in [
+                r#""internal space""#,
+                r#""internal\ttab""#,
+                r#""line\nbreak""#,
+                r#""non breaking""#,
+                r#""em space""#,
+            ] {
+                let canonical = canonical();
+                let raw = canonical.replacen(
+                    &format!(
+                        "\"{key}\":{}",
+                        if key == "task_id" {
+                            r#""codex-background-event""#
+                        } else {
+                            "null"
+                        }
+                    ),
+                    &format!("\"{key}\":{escaped_id}"),
+                    1,
+                );
+                assert_rejected(&raw);
+            }
+        }
+    }
+
+    #[test]
+    fn opaque_punctuation_and_utf8_byte_bound_are_admitted_for_both_id_fields() {
+        let exact_ascii = "x".repeat(MAX_ID_BYTES);
+        let exact_multibyte = "é".repeat(MAX_ID_BYTES / 2);
+        for id in [
+            "task-id_1:segment",
+            "opaque.id/@resource+token=1,2;3",
+            exact_ascii.as_str(),
+            exact_multibyte.as_str(),
+        ] {
+            for key in ["task_id", "tool_use_id"] {
+                assert!(
+                    matches!(
+                        admit_raw(&with_id(key, id)),
+                        TaskCompletionV1Admission::TypedCandidate(_)
+                    ),
+                    "expected opaque id admission for {key}: {id:?}"
+                );
             }
         }
     }
