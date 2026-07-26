@@ -446,6 +446,17 @@
   before merging.
 
 ### Audited touches
+- 2026-07-27 — #4916 Task #25 dormant cleanup substrate: PostgreSQL migration
+  0102 adds no worker, route, or production authority. It records session-independent
+  cleanup targets, monotonic operation/attempt epochs, locator generations,
+  hash-at-rest per-intent capabilities, permanent request UUID identities, and
+  bounded receipt GC as shared PG authority for future consumers. Session bindings
+  are disposable and cannot delete targets. Every API transaction follows the
+  documented request → identity → sorted locator → target → operation → intent →
+  capability/request/receipt lock order. Classification: PG-backed dormant substrate;
+  no leader-only action, runtime lease replacement, cross-node side effect, or deploy
+  cutover. PostgreSQL cannot prove an external destination fenced stale side effects;
+  destination high-watermark enforcement remains a future slice.
 - 2026-07-26 — #4898 untrusted deploy-gate containment: PostgreSQL migration
   0100 adds a validated cluster-wide `CHECK` constraint that rejects normalized
   `deploy-gate` provenance. The `ALTER TABLE` lock serializes concurrent legacy

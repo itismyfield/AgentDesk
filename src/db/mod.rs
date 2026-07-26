@@ -18,6 +18,7 @@ pub mod meetings;
 pub mod postgres;
 pub mod prompt_manifests;
 pub mod relay_dead_letter;
+pub(crate) mod runtime_cleanup;
 pub mod scheduled_messages;
 pub(crate) mod session_agent_resolution;
 pub mod session_observability;

@@ -520,6 +520,11 @@
       "path": "migrations/postgres/0101_canonical_discord_session_identity.sql",
       "sha256": "3f61d2c3944a55d7bce62312baed85a1f112d685fc4b733dc78c73066bfc867e",
       "version": 101
+    },
+    {
+      "path": "migrations/postgres/0102_dormant_runtime_cleanup_substrate.sql",
+      "sha256": "4a57497594a554380197f233205102786fd8bd02bdc0c174a5bc9f0c6f0ebd3c",
+      "version": 102
     }
   ],
   "version": 1
