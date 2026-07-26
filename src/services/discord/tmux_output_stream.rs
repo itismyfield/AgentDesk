@@ -780,26 +780,60 @@ mod tests {
     }
 
     #[test]
-    fn stream_accepts_structured_429_and_529_overload_results() {
+    fn actual_wrapper_error_producers_reach_structured_overload_parser() {
         for line in [
-            serde_json::json!({
-                "type": "result",
-                "is_error": true,
-                "error": {"status": 429},
-                "result": "request failed"
-            }),
-            serde_json::json!({
-                "type": "result",
-                "is_error": true,
-                "response": {"status_code": "529"},
-                "result": "request failed"
-            }),
+            crate::services::codex_tmux_wrapper::result_error_value(
+                "[API Error: 429 too many requests]",
+            ),
+            crate::services::qwen_tmux_wrapper::result_error_value(
+                "[API Error: 529 overloaded_error]",
+            ),
+            crate::services::codex_tmux_wrapper::result_error_value(
+                "[API Error: provider_overloaded]",
+            ),
         ] {
             let outcome = watcher_outcome_for_lines(&[line]);
             assert!(outcome.is_provider_overloaded);
             assert_eq!(outcome.terminal_kind, Some(WatcherTerminalKind::HardResult));
             assert!(outcome.terminal_evidence_offset.is_some());
         }
+    }
+
+    #[test]
+    fn actual_wrapper_error_producers_do_not_type_ordinary_prose() {
+        for line in [
+            crate::services::codex_tmux_wrapper::result_error_value(
+                "review says rate limit and 429 are ordinary prose",
+            ),
+            crate::services::qwen_tmux_wrapper::result_error_value(
+                "recovery quoted [API Error: 529 overloaded_error] before success",
+            ),
+        ] {
+            assert!(line.get("provider_error").is_none());
+            let outcome = watcher_outcome_for_lines(&[line]);
+            assert!(!outcome.is_provider_overloaded);
+            assert_eq!(outcome.terminal_kind, Some(WatcherTerminalKind::HardResult));
+        }
+    }
+
+    #[test]
+    fn partial_actual_wrapper_record_stays_buffered_without_terminal_authority() {
+        let line = crate::services::codex_tmux_wrapper::result_error_value(
+            "[API Error: 429 too many requests]",
+        )
+        .to_string();
+        let mut buffer = line[..line.len() - 1].to_string();
+        let original = buffer.clone();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+
+        assert_eq!(buffer, original);
+        assert!(!outcome.found_result);
+        assert!(!outcome.is_provider_overloaded);
+        assert_eq!(outcome.terminal_evidence_offset, None);
     }
 
     #[test]

@@ -77,21 +77,41 @@ enum WatcherSessionRole {
     Protected,
 }
 
+fn strictly_parse_provider_and_channel_from_tmux_name(
+    session_name: &str,
+) -> Option<(ProviderKind, String)> {
+    let prefix = format!("{}-", crate::services::provider::TMUX_SESSION_PREFIX);
+    let stripped = session_name.strip_prefix(&prefix)?;
+    let suffix = crate::services::provider::tmux_env_suffix();
+    let without_suffix = if suffix.is_empty() {
+        stripped
+    } else {
+        stripped.strip_suffix(suffix)?
+    };
+    crate::services::provider::provider_registry()
+        .iter()
+        .filter_map(|entry| {
+            let channel_name = without_suffix.strip_prefix(&format!("{}-", entry.id))?;
+            let provider = ProviderKind::from_str(entry.id)?;
+            (!channel_name.is_empty()).then(|| (provider, channel_name.to_string()))
+        })
+        .max_by_key(|(_, channel_name)| without_suffix.len().saturating_sub(channel_name.len()))
+}
+
 fn watcher_session_role(
     tmux_session_name: &str,
     watcher_provider: &ProviderKind,
     channel_id: serenity::ChannelId,
 ) -> WatcherSessionRole {
     let expected_suffix = format!("-t{}", channel_id.get());
-    let current_thread =
-        crate::services::provider::parse_provider_and_channel_from_tmux_name(tmux_session_name)
-            .filter(|(provider, _)| provider == watcher_provider)
-            .map(|(_, channel_name)| channel_name)
-            .is_some_and(|channel_name| {
-                channel_name.ends_with(&expected_suffix)
-                    && channel_name.len() > expected_suffix.len()
-                    && !channel_name[..channel_name.len() - expected_suffix.len()].ends_with("-t")
-            });
+    let current_thread = strictly_parse_provider_and_channel_from_tmux_name(tmux_session_name)
+        .filter(|(provider, _)| provider == watcher_provider)
+        .map(|(_, channel_name)| channel_name)
+        .is_some_and(|channel_name| {
+            channel_name.ends_with(&expected_suffix)
+                && channel_name.len() > expected_suffix.len()
+                && !channel_name[..channel_name.len() - expected_suffix.len()].ends_with("-t")
+        });
     if current_thread {
         WatcherSessionRole::DisposableCurrentThread
     } else {
@@ -99,11 +119,92 @@ fn watcher_session_role(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TmuxPaneIdentity {
+    session_id: String,
+    pane_id: String,
+    pane_pid: u32,
+}
+
+fn parse_tmux_pane_identity(value: &str) -> Option<TmuxPaneIdentity> {
+    let mut fields = value.trim().split('\t');
+    let identity = TmuxPaneIdentity {
+        session_id: fields.next()?.to_string(),
+        pane_id: fields.next()?.to_string(),
+        pane_pid: fields.next()?.parse().ok()?,
+    };
+    (fields.next().is_none()
+        && !identity.session_id.is_empty()
+        && !identity.pane_id.is_empty()
+        && identity.pane_pid != 0)
+        .then_some(identity)
+}
+
+fn tmux_pane_identity(tmux_session_name: &str) -> Option<TmuxPaneIdentity> {
+    let target = format!("={tmux_session_name}");
+    let output = std::process::Command::new("tmux")
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            &target,
+            "#{session_id}\t#{pane_id}\t#{pane_pid}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_tmux_pane_identity(&String::from_utf8(output.stdout).ok()?)
+}
+
+fn terminal_kill_identity_matches(
+    authorized: &TmuxPaneIdentity,
+    current: Option<&TmuxPaneIdentity>,
+) -> bool {
+    current == Some(authorized)
+}
+
 #[derive(Debug, Clone)]
 struct PinnedTerminalAbort {
     key: crate::services::discord::turn_finalizer::TurnKey,
     claim_snapshot: crate::services::discord::turn_finalizer::SyntheticClaimSnapshot,
+    identity: crate::services::discord::inflight::InflightTurnIdentity,
     dispatch_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum TerminalAbortAuthority {
+    Pinned(PinnedTerminalAbort),
+    LegacyNoRow,
+}
+
+impl TerminalAbortAuthority {
+    fn dispatch_id(&self) -> Option<&str> {
+        match self {
+            Self::Pinned(pinned) => pinned.dispatch_id.as_deref(),
+            Self::LegacyNoRow => None,
+        }
+    }
+}
+
+fn legacy_no_row_terminal_abort(
+    startup_snapshot_present: bool,
+    current_row_present: bool,
+    mailbox: &crate::services::turn_orchestrator::ChannelMailboxSnapshot,
+    terminal_evidence_offset: Option<u64>,
+    turn_data_start_offset: u64,
+    consumed_offset: u64,
+) -> bool {
+    let evidence_in_watched_range = terminal_evidence_offset
+        .is_some_and(|offset| offset >= turn_data_start_offset && offset < consumed_offset);
+    !startup_snapshot_present
+        && !current_row_present
+        && mailbox.cancel_token.is_none()
+        && mailbox.active_request_owner.is_none()
+        && mailbox.active_user_message_id.is_none()
+        && mailbox.active_turn_nonce.is_none()
+        && evidence_in_watched_range
 }
 
 fn pinned_terminal_abort(
@@ -144,6 +245,7 @@ fn pinned_terminal_abort(
         claim_snapshot: crate::services::discord::turn_finalizer::SyntheticClaimSnapshot::from_row(
             pinned,
         ),
+        identity: pinned_identity,
         dispatch_id: pinned.dispatch_id.clone().or_else(|| {
             crate::services::discord::adk_session::parse_dispatch_id(&pinned.user_text)
         }),
@@ -162,9 +264,10 @@ impl TerminalAbortPlan {
     }
 }
 
-async fn execute_terminal_abort_plan_with<D, DFut, K, KFut, F, FFut, P, PFut, S, SFut, E>(
+async fn execute_terminal_abort_plan_with<D, DFut, C, CFut, K, KFut, F, FFut, P, PFut, S, SFut, E>(
     plan: TerminalAbortPlan,
     dispatch: D,
+    clear_auth_session: C,
     kill: K,
     finalize: F,
     project: P,
@@ -173,6 +276,8 @@ async fn execute_terminal_abort_plan_with<D, DFut, K, KFut, F, FFut, P, PFut, S,
 where
     D: FnOnce(TerminalAbortDispatchAction, &'static str) -> DFut,
     DFut: std::future::Future<Output = ()>,
+    C: FnOnce(bool) -> CFut,
+    CFut: std::future::Future<Output = ()>,
     K: FnOnce(bool, TerminalAbortDiagnosis) -> KFut,
     KFut: std::future::Future<Output = ()>,
     F: FnOnce() -> FFut,
@@ -188,6 +293,7 @@ where
         plan.diagnosis.public_reason(),
     )
     .await;
+    clear_auth_session(plan.diagnosis == TerminalAbortDiagnosis::AuthenticationFailed).await;
     kill(plan.kills_session(), plan.diagnosis).await;
     finalize().await;
     if let Err(error) = project().await {
@@ -285,8 +391,11 @@ async fn execute_authorized_terminal_kill(
     diagnosis: TerminalAbortDiagnosis,
     shared: &Arc<SharedData>,
     channel_id: serenity::ChannelId,
+    watcher_provider: &ProviderKind,
     tmux_session_name: &str,
+    authorized_identity: Option<TmuxPaneIdentity>,
     terminal_evidence_offset: Option<u64>,
+    pinned_identity: Option<crate::services::discord::inflight::InflightTurnIdentity>,
 ) {
     if !should_kill {
         tracing::warn!(
@@ -297,6 +406,15 @@ async fn execute_authorized_terminal_kill(
         );
         return;
     }
+    let Some(authorized_identity) = authorized_identity else {
+        tracing::warn!(
+            tmux_session = tmux_session_name,
+            channel_id = channel_id.get(),
+            diagnosis = diagnosis.public_reason(),
+            "watcher preserved tmux session because destructive identity capture failed"
+        );
+        return;
+    };
 
     write_watcher_forced_kill_log(
         shared,
@@ -308,22 +426,48 @@ async fn execute_authorized_terminal_kill(
     let session = tmux_session_name.to_string();
     let detail = format!("watcher cleanup: {}", diagnosis.public_reason());
     let termination_reason = diagnosis.termination_reason();
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        tokio::task::spawn_blocking(move || {
-            crate::services::termination_audit::record_termination_for_tmux(
-                &session,
-                None,
-                "tmux_watcher",
-                termination_reason,
-                Some(&detail),
-                None,
-            );
-            record_tmux_exit_reason(&session, &detail);
-            crate::services::platform::tmux::kill_session(&session, &detail);
-        }),
-    )
+    let provider = watcher_provider.clone();
+    let kill_result = tokio::task::spawn_blocking(move || {
+        let inflight_still_owned = pinned_identity.is_none_or(|identity| {
+            crate::services::discord::inflight::load_inflight_state(&provider, channel_id.get())
+                .as_ref()
+                .is_some_and(|row| identity.matches_state(row))
+        });
+        if !inflight_still_owned
+            || watcher_session_role(&session, &provider, channel_id)
+                != WatcherSessionRole::DisposableCurrentThread
+            || !terminal_kill_identity_matches(
+                &authorized_identity,
+                tmux_pane_identity(&session).as_ref(),
+            )
+        {
+            return false;
+        }
+        crate::services::termination_audit::record_termination_for_tmux(
+            &session,
+            None,
+            "tmux_watcher",
+            termination_reason,
+            Some(&detail),
+            None,
+        );
+        record_tmux_exit_reason(&session, &detail);
+        crate::services::platform::tmux::kill_session_output_timeout(
+            &session,
+            &detail,
+            std::time::Duration::from_secs(10),
+        )
+        .is_ok_and(|output| output.status.success())
+    })
     .await;
+    if !matches!(kill_result, Ok(true)) {
+        tracing::warn!(
+            tmux_session = tmux_session_name,
+            channel_id = channel_id.get(),
+            diagnosis = diagnosis.public_reason(),
+            "watcher terminal cleanup did not kill the tmux session after identity revalidation"
+        );
+    }
 }
 
 async fn project_terminal_abort_notice(
@@ -465,7 +609,9 @@ pub(super) async fn handle_terminal_abort_exits(
         context.watcher_provider,
         context.channel_id.get(),
     );
-    let Some(pinned) = pinned_terminal_abort(
+    let mailbox =
+        crate::services::discord::mailbox_snapshot(context.shared, context.channel_id).await;
+    let authority = pinned_terminal_abort(
         context.shared,
         context.channel_id,
         context.tmux_session_name,
@@ -473,31 +619,89 @@ pub(super) async fn handle_terminal_abort_exits(
         locals.terminal_evidence_offset,
         locals.current_offset,
         current.as_ref(),
-    ) else {
+    )
+    .map(TerminalAbortAuthority::Pinned)
+    .or_else(|| {
+        legacy_no_row_terminal_abort(
+            locals.startup_inflight_snapshot.is_some(),
+            current.is_some(),
+            &mailbox,
+            locals.terminal_evidence_offset,
+            locals.turn_data_start_offset,
+            locals.current_offset,
+        )
+        .then_some(TerminalAbortAuthority::LegacyNoRow)
+    });
+    let Some(authority) = authority else {
         tracing::warn!(
             provider = context.watcher_provider.as_str(),
             channel_id = context.channel_id.get(),
             tmux_session = context.tmux_session_name,
             terminal_evidence_offset = locals.terminal_evidence_offset.unwrap_or_default(),
             diagnosis = diagnosis.public_reason(),
-            "watcher ignored terminal abort whose pinned turn identity no longer owns the evidence"
+            "watcher ignored terminal abort without current turn authority"
         );
         return AbortExitOutcome::ContinueWatcherLoop;
     };
 
-    let plan = TerminalAbortPlan {
-        diagnosis,
-        session_role: watcher_session_role(
+    let dispatch_id = match authority.dispatch_id() {
+        Some(dispatch_id) => Some(dispatch_id.to_string()),
+        None => resolve_watcher_dispatch_id(context.shared, context.channel_id, None).await,
+    };
+    if matches!(authority, TerminalAbortAuthority::LegacyNoRow) {
+        let current = crate::services::discord::inflight::load_inflight_state(
+            context.watcher_provider,
+            context.channel_id.get(),
+        );
+        let mailbox =
+            crate::services::discord::mailbox_snapshot(context.shared, context.channel_id).await;
+        if !legacy_no_row_terminal_abort(
+            false,
+            current.is_some(),
+            &mailbox,
+            locals.terminal_evidence_offset,
+            locals.turn_data_start_offset,
+            locals.current_offset,
+        ) {
+            tracing::warn!(
+                provider = context.watcher_provider.as_str(),
+                channel_id = context.channel_id.get(),
+                diagnosis = diagnosis.public_reason(),
+                "watcher preserved successor lifecycle discovered during legacy terminal admission"
+            );
+            return AbortExitOutcome::ContinueWatcherLoop;
+        }
+    }
+
+    let session_role = match authority {
+        TerminalAbortAuthority::Pinned(_) => watcher_session_role(
             context.tmux_session_name,
             context.watcher_provider,
             context.channel_id,
         ),
+        TerminalAbortAuthority::LegacyNoRow => WatcherSessionRole::Protected,
     };
+    let plan = TerminalAbortPlan {
+        diagnosis,
+        session_role,
+    };
+    let authorized_tmux_identity = plan
+        .kills_session()
+        .then(|| tmux_pane_identity(context.tmux_session_name))
+        .flatten();
     *state.prompt_too_long_killed = plan.kills_session();
     let notice = diagnosis.notice(plan.kills_session());
-    let dispatch_id = pinned.dispatch_id.clone();
-    let key = pinned.key;
-    let claim_snapshot = pinned.claim_snapshot;
+    let pinned_identity = match &authority {
+        TerminalAbortAuthority::Pinned(pinned) => Some(pinned.identity.clone()),
+        TerminalAbortAuthority::LegacyNoRow => None,
+    };
+    let fallback_session_id = locals
+        .startup_inflight_snapshot
+        .as_ref()
+        .and_then(|row| row.session_id.clone());
+    let auth_authority = authority.clone();
+    let finalize_authority = authority.clone();
+    let settle_authority = authority.clone();
 
     let outcome = execute_terminal_abort_plan_with(
         plan,
@@ -521,30 +725,72 @@ pub(super) async fn handle_terminal_abort_exits(
                 }
             }
         },
+        |clear_auth| async move {
+            if clear_auth {
+                let current = crate::services::discord::inflight::load_inflight_state(
+                    context.watcher_provider,
+                    context.channel_id.get(),
+                );
+                let still_owned = match &auth_authority {
+                    TerminalAbortAuthority::Pinned(pinned) => current
+                        .as_ref()
+                        .is_some_and(|row| pinned.identity.matches_state(row)),
+                    TerminalAbortAuthority::LegacyNoRow => {
+                        let mailbox = crate::services::discord::mailbox_snapshot(
+                            context.shared,
+                            context.channel_id,
+                        )
+                        .await;
+                        legacy_no_row_terminal_abort(
+                            false,
+                            current.is_some(),
+                            &mailbox,
+                            locals.terminal_evidence_offset,
+                            locals.turn_data_start_offset,
+                            locals.current_offset,
+                        )
+                    }
+                };
+                if still_owned {
+                    clear_provider_session_for_retry(
+                        context.shared,
+                        context.channel_id,
+                        context.tmux_session_name,
+                        fallback_session_id.as_deref(),
+                    )
+                    .await;
+                }
+            }
+        },
         |should_kill, diagnosis| async move {
             execute_authorized_terminal_kill(
                 should_kill,
                 diagnosis,
                 context.shared,
                 context.channel_id,
+                context.watcher_provider,
                 context.tmux_session_name,
+                authorized_tmux_identity,
                 locals.terminal_evidence_offset,
+                pinned_identity,
             )
             .await;
         },
         || async move {
-            let _ = context
-                .shared
-                .turn_finalizer
-                .submit_terminal_with_claim_snapshot(
-                    key,
-                    context.watcher_provider.clone(),
-                    crate::services::discord::turn_finalizer::TerminalEvent::Cancel,
-                    crate::services::discord::turn_finalizer::FinalizeContext::stale_busy_mailbox(),
-                    Some(claim_snapshot),
-                    context.shared.clone(),
-                )
-                .await;
+            if let TerminalAbortAuthority::Pinned(pinned) = &finalize_authority {
+                let _ = context
+                    .shared
+                    .turn_finalizer
+                    .submit_terminal_with_claim_snapshot(
+                        pinned.key,
+                        context.watcher_provider.clone(),
+                        crate::services::discord::turn_finalizer::TerminalEvent::Cancel,
+                        crate::services::discord::turn_finalizer::FinalizeContext::stale_busy_mailbox(),
+                        Some(pinned.claim_snapshot.clone()),
+                        context.shared.clone(),
+                    )
+                    .await;
+            }
         },
         || async move {
             project_terminal_abort_notice(
@@ -557,10 +803,13 @@ pub(super) async fn handle_terminal_abort_exits(
             .await
         },
         || async move {
-            context
-                .shared
-                .turn_finalizer
-                .note_terminal_projection_settled(key, true, context.shared.clone());
+            if let TerminalAbortAuthority::Pinned(pinned) = &settle_authority {
+                context.shared.turn_finalizer.note_terminal_projection_settled(
+                    pinned.key,
+                    true,
+                    context.shared.clone(),
+                );
+            }
         },
     )
     .await;
@@ -610,6 +859,10 @@ mod tests {
         let sessions = [
             ("AgentDesk-claude-adk-cc-t42", true),
             ("AgentDesk-codex-worker-t42", false),
+            ("AgentDesk-unknown-t42", false),
+            ("AgentDesk-unknown-worker-t42", false),
+            ("AgentDesk--adk-cc-t42", false),
+            ("AgentDesk-claude--t42", false),
             ("AgentDesk-claude-adk-cc", false),
             ("AgentDesk-claude-adk-cc-t41", false),
             ("AgentDesk-claude-adk-cc-t42-extra", false),
@@ -634,6 +887,7 @@ mod tests {
                 runtime.block_on(execute_terminal_abort_plan_with(
                     plan,
                     |_action, _reason| async {},
+                    |_clear_auth| async {},
                     move |kill, diagnosis| {
                         let recorded = Arc::clone(&recorded);
                         async move {
@@ -651,6 +905,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn replacement_tmux_identity_invalidates_authorized_kill() {
+        let authorized = parse_tmux_pane_identity("$1\t%2\t300").expect("authorized identity");
+        let same = parse_tmux_pane_identity("$1\t%2\t300").expect("same identity");
+        let replacement_session =
+            parse_tmux_pane_identity("$3\t%2\t300").expect("replacement session");
+        let replacement_pane = parse_tmux_pane_identity("$1\t%4\t301").expect("replacement pane");
+
+        assert!(terminal_kill_identity_matches(&authorized, Some(&same)));
+        assert!(!terminal_kill_identity_matches(
+            &authorized,
+            Some(&replacement_session)
+        ));
+        assert!(!terminal_kill_identity_matches(
+            &authorized,
+            Some(&replacement_pane)
+        ));
+        assert!(!terminal_kill_identity_matches(&authorized, None));
+        assert!(parse_tmux_pane_identity("$1\t%2\t0").is_none());
     }
 
     #[test]
@@ -706,11 +981,80 @@ mod tests {
         );
     }
 
+    #[test]
+    fn legacy_no_row_authority_is_bounded_to_idle_mailbox_and_watched_bytes() {
+        let idle = crate::services::turn_orchestrator::ChannelMailboxSnapshot::default();
+        assert!(legacy_no_row_terminal_abort(
+            false,
+            false,
+            &idle,
+            Some(150),
+            100,
+            180,
+        ));
+        for diagnosis in [
+            TerminalAbortDiagnosis::PromptTooLong,
+            TerminalAbortDiagnosis::AuthenticationFailed,
+            TerminalAbortDiagnosis::ProviderOverload,
+        ] {
+            let plan = TerminalAbortPlan {
+                diagnosis,
+                session_role: WatcherSessionRole::Protected,
+            };
+            assert!(
+                !plan.kills_session(),
+                "legacy {diagnosis:?} must preserve tmux"
+            );
+        }
+
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+        let active = crate::services::turn_orchestrator::ChannelMailboxSnapshot {
+            cancel_token: Some(token),
+            active_request_owner: Some(UserId::new(1)),
+            active_user_message_id: Some(MessageId::new(2)),
+            active_turn_nonce: Some("successor".to_string()),
+            ..Default::default()
+        };
+        assert!(!legacy_no_row_terminal_abort(
+            false,
+            false,
+            &active,
+            Some(150),
+            100,
+            180,
+        ));
+        assert!(!legacy_no_row_terminal_abort(
+            false,
+            true,
+            &idle,
+            Some(150),
+            100,
+            180,
+        ));
+        assert!(!legacy_no_row_terminal_abort(
+            false,
+            false,
+            &idle,
+            Some(99),
+            100,
+            180,
+        ));
+        assert!(!legacy_no_row_terminal_abort(
+            false,
+            false,
+            &idle,
+            Some(180),
+            100,
+            180,
+        ));
+    }
+
     #[tokio::test(flavor = "current_thread")]
-    async fn executor_finalizes_once_and_settles_after_projection_failure() {
+    async fn auth_session_clear_is_exactly_once_before_kill_and_finalize() {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         enum Step {
             Dispatch,
+            Clear,
             Kill,
             Finalize,
             Project,
@@ -718,6 +1062,121 @@ mod tests {
         }
         let steps = Arc::new(Mutex::new(Vec::new()));
         let dispatch = Arc::clone(&steps);
+        let clear = Arc::clone(&steps);
+        let kill = Arc::clone(&steps);
+        let finalize = Arc::clone(&steps);
+        let project = Arc::clone(&steps);
+        let settle = Arc::clone(&steps);
+        execute_terminal_abort_plan_with(
+            TerminalAbortPlan {
+                diagnosis: TerminalAbortDiagnosis::AuthenticationFailed,
+                session_role: WatcherSessionRole::DisposableCurrentThread,
+            },
+            move |action, _reason| {
+                let steps = Arc::clone(&dispatch);
+                async move {
+                    assert_eq!(action, TerminalAbortDispatchAction::FailAuthExpired);
+                    steps.lock().expect("steps").push(Step::Dispatch);
+                }
+            },
+            move |clear_auth| {
+                let steps = Arc::clone(&clear);
+                async move {
+                    assert!(clear_auth);
+                    steps.lock().expect("steps").push(Step::Clear);
+                }
+            },
+            move |should_kill, diagnosis| {
+                let steps = Arc::clone(&kill);
+                async move {
+                    assert!(should_kill);
+                    assert_eq!(diagnosis, TerminalAbortDiagnosis::AuthenticationFailed);
+                    steps.lock().expect("steps").push(Step::Kill);
+                }
+            },
+            move || {
+                let steps = Arc::clone(&finalize);
+                async move { steps.lock().expect("steps").push(Step::Finalize) }
+            },
+            move || {
+                let steps = Arc::clone(&project);
+                async move {
+                    steps.lock().expect("steps").push(Step::Project);
+                    Ok::<(), &str>(())
+                }
+            },
+            move || {
+                let steps = Arc::clone(&settle);
+                async move { steps.lock().expect("steps").push(Step::Settle) }
+            },
+        )
+        .await;
+
+        assert_eq!(
+            steps.lock().expect("steps").as_slice(),
+            &[
+                Step::Dispatch,
+                Step::Clear,
+                Step::Kill,
+                Step::Finalize,
+                Step::Project,
+                Step::Settle,
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn finalization_waits_past_old_timeout_for_definitive_kill_completion() {
+        let (release_kill, wait_for_release) = tokio::sync::oneshot::channel::<()>();
+        let finalized = Arc::new(AtomicBool::new(false));
+        let finalized_spy = Arc::clone(&finalized);
+        let task = tokio::spawn(async move {
+            execute_terminal_abort_plan_with(
+                TerminalAbortPlan {
+                    diagnosis: TerminalAbortDiagnosis::ProviderOverload,
+                    session_role: WatcherSessionRole::DisposableCurrentThread,
+                },
+                |_action, _reason| async {},
+                |_clear_auth| async {},
+                move |_should_kill, _diagnosis| async move {
+                    let _ = wait_for_release.await;
+                },
+                move || {
+                    let finalized = Arc::clone(&finalized_spy);
+                    async move { finalized.store(true, Ordering::SeqCst) }
+                },
+                || async { Ok::<(), &str>(()) },
+                || async {},
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(11)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !finalized.load(Ordering::SeqCst),
+            "mailbox/finalizer settlement must not race ahead of a kill blocked past 10 seconds"
+        );
+        release_kill.send(()).expect("release blocked kill");
+        task.await.expect("executor task");
+        assert!(finalized.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn executor_finalizes_once_and_settles_after_projection_failure() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Step {
+            Dispatch,
+            AuthClear,
+            Kill,
+            Finalize,
+            Project,
+            Settle,
+        }
+        let steps = Arc::new(Mutex::new(Vec::new()));
+        let dispatch = Arc::clone(&steps);
+        let auth_clear = Arc::clone(&steps);
         let kill = Arc::clone(&steps);
         let finalize = Arc::clone(&steps);
         let project = Arc::clone(&steps);
@@ -730,6 +1189,13 @@ mod tests {
             move |_action, _reason| {
                 let steps = Arc::clone(&dispatch);
                 async move { steps.lock().expect("steps").push(Step::Dispatch) }
+            },
+            move |clear_auth| {
+                let steps = Arc::clone(&auth_clear);
+                async move {
+                    assert!(!clear_auth);
+                    steps.lock().expect("steps").push(Step::AuthClear)
+                }
             },
             move |_should_kill, _diagnosis| {
                 let steps = Arc::clone(&kill);
@@ -758,6 +1224,7 @@ mod tests {
             steps.lock().expect("steps").as_slice(),
             &[
                 Step::Dispatch,
+                Step::AuthClear,
                 Step::Kill,
                 Step::Finalize,
                 Step::Project,

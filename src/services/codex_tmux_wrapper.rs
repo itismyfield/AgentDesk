@@ -2387,16 +2387,23 @@ fn emit_status(message: &str) {
     eprintln!("\x1b[90m{}\x1b[0m", message);
 }
 
+pub(crate) fn result_error_value(message: &str) -> serde_json::Value {
+    let mut result = serde_json::json!({
+        "type": "result",
+        "subtype": "error_during_execution",
+        "is_error": true,
+        "errors": [message],
+    });
+    if let Some(metadata) =
+        crate::services::provider_error_transcript::provider_overload_metadata(message)
+    {
+        result["provider_error"] = metadata;
+    }
+    result
+}
+
 fn emit_result_error(output: &mut RotatingJsonlWriter, message: &str) {
-    let _ = emit_json_line(
-        output,
-        serde_json::json!({
-            "type": "result",
-            "subtype": "error_during_execution",
-            "is_error": true,
-            "errors": [message],
-        }),
-    );
+    let _ = emit_json_line(output, result_error_value(message));
 }
 
 fn emit_json_line(
