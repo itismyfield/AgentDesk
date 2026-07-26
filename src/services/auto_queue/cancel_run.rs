@@ -914,14 +914,14 @@ mod slot_cleanup_tests {
         )
         .execute(&pool)
         .await
-        .expect("seed run");
+        .expect("seed run"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
         sqlx::query(
             "INSERT INTO agents (id, name, provider, discord_channel_id)
              VALUES ('agent-cancel-preserve', 'Agent Cancel Preserve', 'claude', '123')",
         )
         .execute(&pool)
         .await
-        .expect("seed agent");
+        .expect("seed agent"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
         sqlx::query(
             "INSERT INTO auto_queue_slots
                 (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map)
@@ -936,7 +936,7 @@ mod slot_cleanup_tests {
         )
         .execute(&pool)
         .await
-        .expect("seed slot");
+        .expect("seed slot"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
         for (channel, session_key) in [(first, "cancel-first"), (second, "cancel-second")] {
             sqlx::query(
                 "INSERT INTO sessions
@@ -949,7 +949,7 @@ mod slot_cleanup_tests {
             .bind(channel.get().to_string())
             .execute(&pool)
             .await
-            .expect("seed session");
+            .expect("seed session"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
         }
 
         let shared = discord::make_shared_data_for_tests();
@@ -974,7 +974,7 @@ mod slot_cleanup_tests {
             .await
         {
             BeginResumeTransitionResult::Begun(key) => key,
-            other => panic!("reserve second target: {other:?}"),
+            other => panic!("reserve second target: {other:?}"), // agentdesk-audit: allow-unwrap — test-only invariant assertion
         };
 
         let cleanup = clear_and_release_slots_for_runs_pg(
@@ -997,7 +997,7 @@ mod slot_cleanup_tests {
         )
         .fetch_one(&pool)
         .await
-        .expect("load slot assignment");
+        .expect("load slot assignment"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
         assert_eq!(assigned_run.as_deref(), Some("run-cancel-preserve"));
         for (channel, expected_token) in [(first, &first_token), (second, &second_token)] {
             let session =
@@ -1008,7 +1008,7 @@ mod slot_cleanup_tests {
                 .bind(channel.get().to_string())
                 .fetch_one(&pool)
                 .await
-                .expect("load preserved session");
+                .expect("load preserved session"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
             assert_eq!(session.0, "idle");
             assert_eq!(session.1, "preserve");
             assert_eq!(session.2, 321);
