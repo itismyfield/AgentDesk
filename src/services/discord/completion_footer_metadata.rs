@@ -473,6 +473,7 @@ pub(in crate::services::discord) mod tests {
     fn completed_footer_sanitizes_injection_paths_and_private_identity_4860() {
         for malicious in [
             "fable-5\n@everyone",
+            "fable\n5",
             "<@123456789>",
             "**fable-5**",
             "../fable-5",
