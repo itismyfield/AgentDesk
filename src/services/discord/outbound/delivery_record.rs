@@ -349,10 +349,27 @@ pub(in crate::services::discord) fn upsert_lease(
     upsert_lease_at(&record_path_or_err(provider, channel_id)?, lease)
 }
 
-/// Advance the delivered frontier. The ONLY writer of `delivered_frontier`
-/// (I2 — only a `Delivered` outcome calls this). Preserves the current lease.
+/// Advance the delivered frontier. The general `Delivered` writer preserves the
+/// current lease and compares under the record lock so a delayed writer cannot
+/// replace a higher END from the same generation. A different generation starts
+/// a new coordinate space; the ordered-range writer also merges under this lock,
+/// while the EOF-validated reanchor path is the only intentional same-generation
+/// lowering operation and uses its own expected-END CAS.
 fn write_delivered_frontier_at(path: &Path, frontier: DeliveredCommit) -> Result<(), String> {
-    mutate_record_at(path, |record| record.delivered_frontier = Some(frontier))
+    mutate_record_at(path, |record| {
+        let Some(current) = record.delivered_frontier.as_ref() else {
+            record.delivered_frontier = Some(frontier);
+            return;
+        };
+        if current.generation_mtime_ns != frontier.generation_mtime_ns {
+            record.delivered_frontier = Some(frontier);
+            return;
+        }
+
+        if frontier.range.1 >= current.range.1 {
+            record.delivered_frontier = Some(frontier);
+        }
+    })
 }
 
 #[allow(dead_code)] // #3089 B1 uses the `_at` core directly; the provider/channel form is wired in B2.
@@ -594,10 +611,10 @@ pub(in crate::services::discord) fn delivery_record_authority_enabled() -> bool 
     true
 }
 
-/// #3933 test seam: a per-thread override of `delivery_record_authority_enabled()`
-/// so a unit test can drive the authority-ON enforce path (the release config)
-/// deterministically. Housed in a `#[cfg(test)] mod` (not inline `#[cfg(test)]`
-/// items) so the seam counts as test — not production — review surface.
+/// #3933/#4890 test seam: a per-thread override of
+/// `delivery_record_authority_enabled()` so unit tests can deterministically drive
+/// both the production ON path and the legacy OFF path. Housed in a `#[cfg(test)]
+/// mod` so the seam counts as test — not production — review surface.
 #[cfg(test)]
 pub(in crate::services::discord) mod authority_test_seam {
     use std::cell::Cell;
@@ -613,11 +630,9 @@ pub(in crate::services::discord) mod authority_test_seam {
     }
 
     /// RAII: force `delivery_record_authority_enabled()` to `value` on the
-    /// current thread until the returned guard drops (then restore the prior
-    /// override). The env-cached `OnceLock` cannot be re-set once initialized,
-    /// and mutating the process-global env would race sibling tests, so a
-    /// thread-local + RAII keeps the authority-ON honor path order-independent
-    /// and leak-free.
+    /// current thread until the returned guard drops, then restore the prior
+    /// override. A thread-local guard keeps ON/OFF tests order-independent and
+    /// leak-free without mutating process-global environment state.
     #[must_use]
     pub(in crate::services::discord) fn force(value: bool) -> Guard {
         Guard {
@@ -1461,12 +1476,12 @@ fn record_delivered_frontier_shadow(
     }
 }
 
-/// Integration wrapper for owner `Delivered` arms. Gated by [`should_shadow_mirror`]
-/// (flag ON AND `is_delivered`, I2). When it fires it extracts the in-memory
-/// authority (`confirmed_end_offset` + `confirmed_end_generation_mtime_ns`) from
-/// the relay coord and the `attempts` mirror from the fresh inflight, then
-/// shadow-writes. OFF or non-`Delivered` → returns immediately (no coord/inflight
-/// access, no write) → behavioral no-op.
+/// Integration wrapper for owner `Delivered` arms. Production records every
+/// `is_delivered` outcome; the test seam can still force the legacy OFF path.
+/// When it fires it extracts the in-memory authority (`confirmed_end_offset` +
+/// `confirmed_end_generation_mtime_ns`) from the relay coord and the `attempts`
+/// mirror from the fresh inflight, then writes the durable frontier. A
+/// non-`Delivered` outcome never writes (I2).
 ///
 /// #3610 (Phase B PR-1): `terminal_anchor_msg_id` is the durable TERMINAL ANCHOR
 /// the caller resolved — the Discord message id terminal-replace edits in place
@@ -1913,6 +1928,40 @@ mod tests {
     }
 
     #[test]
+    fn delayed_same_generation_lower_writer_cannot_replace_durable_frontier_4890() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 48_900);
+        let delayed_lower = DeliveredCommit {
+            range: (10, 40),
+            generation_mtime_ns: 700,
+            attempts: 1,
+            panel_msg_id: Some(40),
+            panel_channel_id: Some(400),
+        };
+        let higher_winner = DeliveredCommit {
+            range: (60, 90),
+            generation_mtime_ns: 700,
+            attempts: 2,
+            panel_msg_id: Some(90),
+            panel_channel_id: Some(900),
+        };
+
+        // The lower writer captured its commit while it owned the lease, then
+        // released. A later writer durably commits the higher frontier first.
+        upsert_lease_at(&path, sample_lease()).unwrap();
+        clear_lease_at(&path).unwrap();
+        write_delivered_frontier_at(&path, higher_winner.clone()).unwrap();
+
+        // Resume the delayed writer after lease release and reload from disk.
+        // Replacing the lock-held merge with blind assignment makes this assert
+        // fail at runtime with END=40 (not merely fail to compile).
+        write_delivered_frontier_at(&path, delayed_lower).unwrap();
+        let reloaded = read_record_at(&path).unwrap();
+        assert_eq!(reloaded.delivery_lease, None);
+        assert_eq!(reloaded.delivered_frontier, Some(higher_winner));
+    }
+
+    #[test]
     fn watcher_owner_context_preserves_frontier_and_resolves_current_generation_3751() {
         let dir = tempfile::tempdir().unwrap();
         let record_path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 123);
@@ -2063,11 +2112,11 @@ mod tests {
 
     #[test]
     fn should_shadow_mirror_requires_delivered_and_enabled() {
-        // I2: a non-Delivered outcome must NEVER advance the durable frontier,
-        // and OFF is a no-op. Pins the AND of both conjuncts.
+        // I2: a non-Delivered outcome must NEVER advance the durable frontier.
+        // The disabled input pins the cfg(test)-only legacy no-op seam.
         assert!(should_shadow_mirror(true, true));
         assert!(!should_shadow_mirror(false, true)); // not delivered → no write (I2)
-        assert!(!should_shadow_mirror(true, false)); // flag OFF → no write
+        assert!(!should_shadow_mirror(true, false)); // test-only OFF → no write
         assert!(!should_shadow_mirror(false, false));
     }
 
@@ -2601,7 +2650,7 @@ mod tests {
         write_delivered_frontier_at(
             &path,
             DeliveredCommit {
-                range: (250, 400),
+                range: (250, 950),
                 generation_mtime_ns: 700,
                 attempts: 2,
                 panel_msg_id: Some(42),
@@ -2614,7 +2663,7 @@ mod tests {
             !reanchor_current_generation_frontier_at(&path, 700, observed_frontier, 250).unwrap()
         );
         let winner = read_record_at(&path).unwrap().delivered_frontier.unwrap();
-        assert_eq!(winner.range, (250, 400));
+        assert_eq!(winner.range, (250, 950));
         assert_eq!(winner.attempts, 2);
         assert_eq!(winner.panel_msg_id, Some(42));
     }
@@ -2975,11 +3024,10 @@ mod tests {
 
     #[test]
     fn shadow_off_is_anchor_noop_3610() {
-        // SHADOW OFF → no write at all, so the anchor (whatever the caller resolves)
-        // is never recorded. `shadow_mirror_delivered_frontier`'s first gate is
-        // `should_shadow_mirror(is_delivered, enabled)`; OFF short-circuits before
-        // any coord/inflight access or write. Pinned here at the gate level.
-        assert!(!should_shadow_mirror(true, false)); // flag OFF → no anchor write
+        // The cfg(test)-only SHADOW OFF seam writes nothing, so the anchor (whatever
+        // the caller resolves) is never recorded. `should_shadow_mirror` short-circuits
+        // before any coord/inflight access or write. Pinned here at the gate level.
+        assert!(!should_shadow_mirror(true, false)); // test-only OFF → no anchor write
         assert!(!should_shadow_mirror(false, true)); // not delivered → no anchor write (I2)
     }
 
@@ -2992,7 +3040,8 @@ mod tests {
     // chunk failure rolls back and returns `Err`, so an `Ok` means every chunk
     // committed). These pin the recorded shape via the path-based core the helper
     // funnels into (same approach as the PR-1/PR-1b tests above), since the full
-    // helper's flag (OnceLock) + runtime-root resolution are env-global.
+    // helper resolves the runtime root globally; the cfg(test) seam separately
+    // covers the legacy no-op path without changing production rollout state.
 
     #[test]
     fn long_chunk_full_commit_records_last_chunk_anchor_3610c() {
@@ -3080,18 +3129,18 @@ mod tests {
         // Gate (A): the helper hardcodes `is_delivered = true` because the mod.rs
         // call site lives ONLY inside the full-commit `Ok` arm — the long-chunk send
         // (`send_long_message_with_rollback`) rolls back and returns `Err` on ANY
-        // chunk failure, so a partial delivery NEVER reaches the helper. The shadow
-        // gate then still requires the flag ON. This pins that an ambiguous/failed
-        // outcome (modelled here as `is_delivered = false`) can never advance the
-        // durable frontier, and that OFF is a full no-op.
+        // chunk failure, so a partial delivery NEVER reaches the helper. This pins
+        // that an ambiguous/failed outcome (modelled here as `is_delivered = false`)
+        // can never advance the durable frontier. The false-enabled case is only the
+        // cfg(test) legacy no-op seam; production is always enabled.
         assert!(!should_shadow_mirror(false, true)); // not-delivered → no anchor (I2)
-        assert!(!should_shadow_mirror(true, false)); // flag OFF → no anchor (deploy no-op)
+        assert!(!should_shadow_mirror(true, false)); // test-only OFF → no anchor
     }
 
     #[test]
     fn record_long_chunk_terminal_delivery_off_is_noop_3610c() {
-        // The REAL helper end-to-end under the forced-OFF shadow flag: it must be a
-        // complete no-op (no panic, no write) regardless of the resolved anchor.
+        // The REAL helper end-to-end under the cfg(test)-only forced-OFF seam: it
+        // must be a complete no-op (no panic, no write) regardless of the anchor.
         // The scoped root holds the crate-wide test-env lock, so both the helper and
         // the assertions stay inside one throw-away tree and can never inspect the
         // operator's runtime.
@@ -3202,7 +3251,8 @@ mod tests {
     // into `record_long_chunk_terminal_delivery`. So the frontier key (record path)
     // and the recorded `panel_channel_id` are the SAME channel — UNLIKE the bridge's
     // cross-channel `long_chunk_cross_channel_separates_owner_and_delivery_3610c`.
-    // Pinned here via the path-core (the helper's flag is env-global OnceLock).
+    // Pinned here via the path-core; the helper's production persistence is
+    // always enabled and its cfg(test) OFF seam is covered separately.
 
     #[test]
     fn watcher_long_chunk_same_channel_anchor_pair_3610d() {
@@ -3240,10 +3290,10 @@ mod tests {
         // only when the anchor is `Some` (the full-commit `Ok` arm of
         // `send_long_message_raw_with_rollback`, which is all-or-nothing — a partial
         // chunk failure rolls back and returns `Err`). So a non-advanced commit
-        // (modelled as `is_delivered = false`) NEVER reaches the durable write, and
-        // OFF is a full no-op. Same gate the shared helper enforces.
+        // (modelled as `is_delivered = false`) NEVER reaches the durable write.
+        // The false-enabled case is the cfg(test)-only legacy no-op seam.
         assert!(!should_shadow_mirror(false, true)); // not-advanced/partial → no record (M4/I2)
-        assert!(!should_shadow_mirror(true, false)); // flag OFF → no record (deploy no-op)
+        assert!(!should_shadow_mirror(true, false)); // test-only OFF → no record
     }
 
     // ---- #3933 item 1: read-authority (authority-ON) end-to-end wiring --------
@@ -3368,10 +3418,10 @@ mod tests {
         shared
     }
 
-    /// authority-ON fuses the CURRENT-generation durable frontier into the dedup
-    /// floor (`max(durable, in_memory)`) through the ENV-RESOLVED public reader,
-    /// while authority-OFF returns the in-memory value verbatim (deploy no-op).
-    /// This proves the flag actually gates the wiring — not just the pure `fuse`
+    /// The production authority path fuses the CURRENT-generation durable frontier
+    /// into the dedup floor (`max(durable, in_memory)`) through the root-resolved
+    /// public reader. The cfg(test)-only OFF seam returns the in-memory value verbatim.
+    /// This proves the seam gates the wiring — not just the pure `fuse`
     /// arithmetic already covered above.
     #[test]
     fn effective_committed_offset_authority_on_fuses_durable_3933() {

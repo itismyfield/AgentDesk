@@ -267,10 +267,10 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
         }
     };
 
-    // #3089 B2a: shadow-mirror durable delivered frontier — flag-gated,
-    // observe-only, Delivered-only (I2). #4081 still records confirmed body
-    // fingerprints when the frontier mirror is OFF. Extends B1's sink coverage to
-    // the watcher (A4) before B2b's authority flip.
+    // #3089 B2a/#4890: record the durable delivered frontier for confirmed
+    // Delivered outcomes (I2). Production persistence is always enabled; the
+    // cfg(test) seam alone can exercise the legacy OFF path. #4081 independently
+    // records confirmed body fingerprints.
     // #3610 PR-1: anchor = `msg_id` — the controller active-slot `current_msg_id`
     // (the assistant response message terminal-replace edits in place), NOT
     // `status_message_id`. Records the true terminal anchor for PR-2.
@@ -579,9 +579,9 @@ pub(in crate::services::discord) fn apply_watcher_short_replace_result(
 /// `watcher_should_send_ordered_new_chunks_for_terminal_fallback` branch:
 /// `send_long_message_raw_with_rollback` send-new-chunks + placeholder delete).
 /// This arm is the watcher-owned counterpart of the bridge long-chunk arm PR-1c
-/// instrumented. S1-d routes the flag-ON long-chunk path through the controller;
-/// this helper remains the shared durable-anchor record point for the controller
-/// path and the flag-OFF legacy path.
+/// instrumented. S1-d routes the controller-selected long-chunk path through this
+/// shared durable-anchor record point. Production persistence is always enabled;
+/// only the cfg(test) seam can exercise the legacy no-op path.
 ///
 /// The caller (the FROZEN giant `tmux_watcher.rs`) invokes this with a SINGLE line,
 /// ONLY when BOTH gates hold (matching PR-1c's M4 discipline at the bridge):
@@ -602,8 +602,8 @@ pub(in crate::services::discord) fn apply_watcher_short_replace_result(
 /// is `(watcher_lease_start, watcher_lease_end)` — the SAME offset range the lease
 /// committed and `confirmed_end_offset` advanced to (never mix offset spaces).
 /// Delegates to the shared `dr::record_long_chunk_terminal_delivery` (PR-1c) with
-/// `watcher_owner_channel_id == delivery_channel_id == channel_id`; the delivered
-/// frontier still obeys the shadow flag, while #4081 records the confirmed body
+/// `watcher_owner_channel_id == delivery_channel_id == channel_id`; production
+/// always persists the delivered frontier, while #4081 records the confirmed body
 /// fingerprint for degenerate-key duplicate refusal.
 pub(in crate::services::discord) fn record_watcher_long_chunk_terminal_delivery(
     shared: &Arc<SharedData>,
@@ -673,12 +673,10 @@ mod tests {
     use super::*;
     use poise::serenity_prelude::ChannelId;
 
-    /// #3610 PR-1d: the watcher long-chunk delivery helper under the default-OFF
-    /// shadow flag must be a COMPLETE no-op (no panic, no durable write) regardless
-    /// of the resolved anchor — the deploy-safe property (tests never set
-    /// `AGENTDESK_DELIVERY_RECORD_SHADOW`, so the OnceLock reads OFF and the call
-    /// short-circuits inside `shadow_mirror_delivered_frontier`). This is the
-    /// watcher-arm counterpart of delivery_record.rs's
+    /// #3610 PR-1d/#4890: the cfg(test)-only OFF seam must keep the watcher
+    /// long-chunk helper a complete no-op regardless of the resolved anchor. This
+    /// is legacy-path regression coverage only; production persistence is binary
+    /// default-ON. It is the watcher-arm counterpart of delivery_record.rs's
     /// `record_long_chunk_terminal_delivery_off_is_noop_3610c`.
     #[test]
     fn watcher_long_chunk_delivery_off_is_noop_3610d() {

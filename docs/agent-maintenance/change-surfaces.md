@@ -95,7 +95,7 @@
     + delivered-anchor / effective-committed-offset call-sites so a stale
     prior-generation frontier whose end exceeds the compacted transcript EOF is
     distrusted (fixes the delivered_frontier message-loss after `/compact`); +8
-    from #4130 cfg(test) shadow_test_seam — per-thread override so default-OFF
+    from #4130 cfg(test) shadow_test_seam — per-thread override so legacy-path
     tests retain a cfg(test)-only OFF seam for the production-default-ON shadow
     path; production env parsing is removed; durable delivery lease/frontier/owner-context sidecar, plus
     the #4081 bounded recent-content fingerprint guard; +133 from #4508 adding the
@@ -1981,7 +1981,7 @@ these contextual numbers to match ordinary LoC churn.
   replaces the #4046 provisional fresh-send rejection with typed confirmed-fresh
   provenance carried through the exact-sequence watcher ACK; -59 from #3998 S1-f2
   retiring the A2b rollout getter/cache
-  and flag-OFF pin tests; +7 from #3610 PR-1 passing the terminal anchor into the
+  and legacy OFF-path pin tests; +7 from #3610 PR-1 passing the terminal anchor into the
   delivered-frontier shadow mirror; -1 prod from #4055 thin
   card-before-answer/context wiring, with task policy extracted to
   `session_relay_sink/task_notification_context.rs`; -135 prod from #4365 moving

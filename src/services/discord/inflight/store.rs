@@ -161,18 +161,18 @@ pub(super) fn validate_inflight_state_for_save_with_delivery_rewind_reason(
     // and preserve the offset (zero data loss), the offset-monotonic violation
     // has already been safely handled — record it at WARN instead of ERROR so
     // the paired `#3416 enforce` WARN is the only operator-facing log, killing
-    // the duplicate ERROR-log noise. When enforce is OFF a GENUINE (non-reset)
-    // backward write actually persists below, so that violation stays ERROR (a
-    // real breach); the legitimate re-stream reset (#3933) is handled separately
-    // just before the records below. Computed BEFORE the records so the severity
-    // is correct; the enforce branch itself (skip + return false) is unchanged.
+    // the duplicate ERROR-log noise. Production enforcement is binary default-ON;
+    // only the cfg(test) OFF seam permits a genuine non-reset backward write, where
+    // the violation stays ERROR. The legitimate re-stream reset (#3933) is handled
+    // separately just before the records below. Computed BEFORE the records so the
+    // severity is correct; the enforce branch itself is unchanged.
     // #3933: a legitimate Gemini/Qwen `RetryBoundary` reset rewinds the SAME
     // turn's frontier to the start — `full_response` cleared and
     // `response_sent_offset` back to 0 — to re-stream the answer
     // (turn_bridge/retry_state.rs::clear_response_delivery_state). That backward
-    // move is NOT a stale-snapshot regression, so the enforce guard must permit
-    // it (the release runs AGENTDESK_DELIVERY_RECORD_AUTHORITY=1; blocking it
-    // drops the re-streamed body). A genuine backward regression carries a
+    // move is NOT a stale-snapshot regression, so the production-default enforce
+    // guard must permit it; blocking it drops the re-streamed body. A genuine
+    // backward regression carries a
     // non-empty body, so it never matches this rewind signature and stays
     // blocked. The signal is derived here from the incoming state — no call-site
     // change — so the guard stays self-contained.
@@ -230,9 +230,9 @@ pub(super) fn validate_inflight_state_for_save_with_delivery_rewind_reason(
     // #3933: when the enforce guard is about to SKIP this backward write it never
     // persists, so the debug tripwire has nothing to catch — asserting there would
     // panic on a write we already discard. Relax the tripwire for that skipped
-    // case only; a backward move that actually PERSISTS (enforce OFF, or a
-    // permitted legitimate reset in release) still trips it, preserving the
-    // tripwire's purpose and every existing observe-only test verbatim.
+    // case only; a backward move that actually PERSISTS (the cfg(test) OFF seam,
+    // or a permitted legitimate reset in production) still trips it, preserving
+    // the tripwire's purpose and the legacy observe-only coverage.
     debug_assert!(
         monotonic_offset || enforce_skips_backward_write || is_legitimate_reasoned_delivery_rewind,
         "inflight response_sent_offset must not move backwards for the same turn identity"

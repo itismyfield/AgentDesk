@@ -446,6 +446,14 @@
   before merging.
 
 ### Audited touches
+- 2026-07-26 — #4890/#4926 delivery-record frontier repair: the worker-local
+  delivery-record sidecar now rejects delayed same-generation writers whose END
+  trails the durable frontier while preserving generation replacement and the
+  EOF-validated expected-END reanchor CAS. Production SHADOW/AUTHORITY remains
+  code-level default-ON with no environment OFF rollback; `cfg(test)` OFF seams
+  cover only legacy behavior. Rollback is a prior binary or forward fix. No
+  cross-node authority, PG lease, leader-only side effect, schema, or hotfile
+  changes are introduced.
 - 2026-07-26 — #4898 untrusted deploy-gate containment: PostgreSQL migration
   0100 adds a validated cluster-wide `CHECK` constraint that rejects normalized
   `deploy-gate` provenance. The `ALTER TABLE` lock serializes concurrent legacy
@@ -917,10 +925,12 @@
   anchor PAIR is `(panel_channel_id = delivery channel_id, panel_msg_id = last chunk)`;
   the helper body + gating live in `outbound/delivery_record.rs`
   (`record_long_chunk_terminal_delivery`). This is purely worker-local delivery
-  instrumentation behind the existing shadow flag (`AGENTDESK_DELIVERY_RECORD_SHADOW`,
-  default OFF → no-op): the recorded panel fields have NO production reader (the sole
-  durable-frontier reader consumes only `.range.1`), so the #3593/#3520 dedup, #3604
-  window, and the `watcher_owner_channel_id` offset-authority key are all unaffected.
+  persistence: production binaries always write the durable frontier (SHADOW is
+  code-level default-ON, with no production environment OFF path), while only a
+  `cfg(test)` seam retains the legacy no-op path. The recorded panel fields have NO
+  production reader (the sole durable-frontier reader consumes only `.range.1`), so
+  the #3593/#3520 dedup, #3604 window, and the `watcher_owner_channel_id`
+  offset-authority key are all unaffected.
   No leader election, gateway lease, PG ownership, startup order, worker ownership, or
   singleton assumption is touched; the recovery-fallback re-post criterion remains
   deferred to a later #3610 PR.

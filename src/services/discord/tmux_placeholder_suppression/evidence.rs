@@ -204,8 +204,7 @@ pub(crate) fn guarded_nonterminal_delete_decision(
 /// correct for the no-response arm (nothing was delivered, so the placeholder is
 /// disposable chrome), but in the terminal-committed arm that same row would
 /// delete a sink-delivered body whenever no positive delivered-elsewhere anchor
-/// exists — e.g. the durable delivered-frontier shadow is disabled
-/// (`AGENTDESK_DELIVERY_RECORD_SHADOW` default OFF), so
+/// exists — e.g. a legacy or malformed record has no usable durable anchor, so
 /// `current_generation_delivered_anchor` returns `None` → `NotFound`, and the
 /// sink's delivery marks `session_bound_delivered`, NOT the
 /// `terminal_delivery_committed` that `committed_terminal_anchor_protects_delete`
@@ -215,9 +214,9 @@ pub(crate) fn guarded_nonterminal_delete_decision(
 /// ONLY on POSITIVE `Found` proof (a DIFFERENT message demonstrably holds the
 /// committed range); every non-`Found` `Delete` is downgraded to a fail-safe
 /// preserve. `Protected`/`Ambiguous`/body-exposure preserve paths are unchanged.
-/// With the shadow anchor ENABLED (production) a real #4158 residue still yields
-/// `Found` → delete, so the fix is unchanged there; this only closes the
-/// shadow-disabled message-loss window.
+/// With the production-default durable anchor present, a real #4158 residue still
+/// yields `Found` → delete; the fail-safe additionally closes missing, malformed,
+/// stale-generation, or EOF-distrusted anchor windows.
 pub(super) fn apply_terminal_committed_delete_proof_gate(
     decision: GuardedNonterminalDeleteDecision,
     has_positive_delivered_elsewhere: bool,
