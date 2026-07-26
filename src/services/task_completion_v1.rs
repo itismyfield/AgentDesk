@@ -3,6 +3,8 @@
 //! This module validates shadow receipts only. It does not grant completion,
 //! lifecycle, delivery, or rendering authority.
 
+use icu_properties::props::{BidiControl, DefaultIgnorableCodePoint, GeneralCategory};
+use icu_properties::{CodePointMapData, CodePointSetData};
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -395,12 +397,16 @@ pub(crate) fn admit_raw(line: &str) -> TaskCompletionV1Admission {
     probe.validate()
 }
 
+fn forbidden_id_character(character: char) -> bool {
+    character.is_whitespace()
+        || character.is_control()
+        || CodePointMapData::<GeneralCategory>::new().get(character) == GeneralCategory::Format
+        || CodePointSetData::new::<DefaultIgnorableCodePoint>().contains(character)
+        || CodePointSetData::new::<BidiControl>().contains(character)
+}
+
 fn valid_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_ID_BYTES
-        && !value
-            .chars()
-            .any(|character| character.is_whitespace() || character.is_control())
+    !value.is_empty() && value.len() <= MAX_ID_BYTES && !value.chars().any(forbidden_id_character)
 }
 
 #[cfg(test)]
@@ -543,6 +549,75 @@ mod tests {
     }
 
     #[test]
+    fn unicode_format_default_ignorable_and_bidi_controls_are_rejected_exhaustively() {
+        let general_category = CodePointMapData::<GeneralCategory>::new();
+        let default_ignorable = CodePointSetData::new::<DefaultIgnorableCodePoint>();
+        let bidi_control = CodePointSetData::new::<BidiControl>();
+        let mut covered = 0usize;
+        let mut format_only = 0usize;
+        let mut default_ignorable_only = 0usize;
+
+        for scalar in 0..=char::MAX as u32 {
+            let Some(character) = char::from_u32(scalar) else {
+                continue;
+            };
+            let is_format = general_category.get(character) == GeneralCategory::Format;
+            let is_default_ignorable = default_ignorable.contains(character);
+            let is_bidi_control = bidi_control.contains(character);
+            if is_format || is_default_ignorable || is_bidi_control {
+                covered += 1;
+                format_only += usize::from(is_format && !character.is_control());
+                default_ignorable_only += usize::from(
+                    is_default_ignorable && !character.is_control() && !character.is_whitespace(),
+                );
+                let id = format!("visible{character}suffix");
+                assert!(
+                    !valid_id(&id),
+                    "U+{scalar:04X} must be rejected by the opaque ID profile"
+                );
+            }
+        }
+
+        assert!(
+            covered > 4_000,
+            "expected the full default-ignorable profile"
+        );
+        assert!(format_only > 100, "format predicate must be exercised");
+        assert!(
+            default_ignorable_only > 4_000,
+            "default-ignorable predicate must be exercised beyond controls and whitespace"
+        );
+        for character in ['\u{202e}', '\u{200b}', '\u{feff}', '\u{2066}'] {
+            assert!(forbidden_id_character(character));
+        }
+    }
+
+    #[test]
+    fn format_and_default_ignorable_json_mutations_reject_both_id_fields() {
+        for character in [
+            '\u{00ad}',
+            '\u{034f}',
+            '\u{061c}',
+            '\u{180b}',
+            '\u{200b}',
+            '\u{200e}',
+            '\u{202e}',
+            '\u{2066}',
+            '\u{2069}',
+            '\u{fe00}',
+            '\u{feff}',
+            '\u{e0001}',
+            '\u{e0020}',
+            '\u{e007f}',
+            '\u{e0100}',
+        ] {
+            for key in ["task_id", "tool_use_id"] {
+                assert_rejected(&with_id(key, &format!("opaque{character}id")));
+            }
+        }
+    }
+
+    #[test]
     fn escaped_whitespace_ids_are_rejected_before_value_normalization() {
         for key in ["task_id", "tool_use_id"] {
             for escaped_id in [
@@ -577,6 +652,8 @@ mod tests {
         for id in [
             "task-id_1:segment",
             "opaque.id/@resource+token=1,2;3",
+            "작업-識別子_é:δ",
+            "cafe\u{0301}-नमस्ते",
             exact_ascii.as_str(),
             exact_multibyte.as_str(),
         ] {
