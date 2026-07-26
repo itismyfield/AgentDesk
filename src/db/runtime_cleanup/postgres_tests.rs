@@ -331,6 +331,7 @@ async fn capability_binding_expiry_replay_conflict_and_unknown_are_typed_pg() {
         intent_id,
         attempt_epoch: attempt,
         audience: "cleanup-worker",
+        claim_owner: "worker",
         expires_at: now + Duration::seconds(3),
         idempotency_identity,
     };
@@ -347,10 +348,7 @@ async fn capability_binding_expiry_replay_conflict_and_unknown_are_typed_pg() {
         replay_capability_request(&pool, &secret, binding.clone(), request_id, fingerprint)
             .await
             .unwrap(),
-        CapabilityUse::Replay {
-            request_id,
-            state: ReceiptState::Unknown
-        }
+        CapabilityUse::NeedsReconcile { request_id }
     );
     assert_eq!(
         begin_capability_request(&pool, &secret, binding.clone(), fingerprint)
@@ -389,14 +387,246 @@ async fn capability_binding_expiry_replay_conflict_and_unknown_are_typed_pg() {
             state: ReceiptState::Applied
         }
     );
-    sqlx::query("UPDATE runtime_cleanup_capabilities SET expires_at = clock_timestamp() - INTERVAL '1 second' WHERE capability_id = $1")
-        .bind(binding.capability_id).execute(&pool).await.unwrap();
+    let expired: DateTime<Utc> = sqlx::query_scalar(
+        "UPDATE runtime_cleanup_capabilities
+         SET expires_at = clock_timestamp() - INTERVAL '1 second'
+         WHERE capability_id = $1 RETURNING expires_at",
+    )
+    .bind(binding.capability_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let mut expired_binding = binding;
+    expired_binding.expires_at = expired;
     assert_eq!(
-        begin_capability_request(&pool, &secret, binding, fingerprint)
+        begin_capability_request(&pool, &secret, expired_binding, fingerprint)
             .await
             .unwrap(),
         CapabilityUse::Expired
     );
+    close(db, pool).await;
+}
+
+#[tokio::test]
+async fn capability_admission_requires_live_exact_claim_pg() {
+    let (db, pool) = pool().await;
+    let (target, operation) = operation(&pool, "capability-claim").await;
+    let claimed = claim_operation(
+        &pool,
+        operation.operation_id,
+        "worker-a",
+        Duration::milliseconds(250),
+    )
+    .await
+    .unwrap();
+    let (attempt, claim_expiry) = match claimed {
+        ClaimResult::Claimed {
+            attempt_epoch,
+            expires_at,
+        } => (attempt_epoch, expires_at),
+        other => panic!("{other:?}"),
+    };
+    let (intent_id, idempotency_identity) = intent(&pool, operation.operation_id).await;
+    let binding = CapabilityBinding {
+        capability_id: Uuid::new_v4(),
+        target_id: target.target_id,
+        operation_id: operation.operation_id,
+        intent_id,
+        attempt_epoch: attempt,
+        audience: "claim-bound",
+        claim_owner: "worker-a",
+        expires_at: claim_expiry - Duration::milliseconds(50),
+        idempotency_identity,
+    };
+    let mut too_long = binding.clone();
+    too_long.capability_id = Uuid::new_v4();
+    too_long.expires_at = claim_expiry + Duration::milliseconds(1);
+    assert!(issue_capability(&pool, too_long).await.is_err());
+    let secret = issue_capability(&pool, binding.clone()).await.unwrap();
+    let mut wrong_owner = binding.clone();
+    wrong_owner.claim_owner = "worker-b";
+    assert_eq!(
+        begin_capability_request(&pool, &secret, wrong_owner, [1; 32])
+            .await
+            .unwrap(),
+        CapabilityUse::BindingMismatch
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(275)).await;
+    assert_eq!(
+        begin_capability_request(&pool, &secret, binding.clone(), [1; 32])
+            .await
+            .unwrap(),
+        CapabilityUse::Expired
+    );
+    let takeover = claim_operation(
+        &pool,
+        operation.operation_id,
+        "worker-b",
+        Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(takeover, ClaimResult::Claimed { .. }));
+    assert_eq!(
+        begin_capability_request(&pool, &secret, binding, [1; 32])
+            .await
+            .unwrap(),
+        CapabilityUse::LostOwnership
+    );
+    close(db, pool).await;
+}
+
+#[tokio::test]
+async fn lost_response_replay_after_lease_expiry_needs_reconcile_pg() {
+    let (db, pool) = pool().await;
+    let (target, operation) = operation(&pool, "capability-reconcile").await;
+    let claimed = claim_operation(
+        &pool,
+        operation.operation_id,
+        "worker",
+        Duration::milliseconds(250),
+    )
+    .await
+    .unwrap();
+    let (attempt, claim_expiry) = match claimed {
+        ClaimResult::Claimed {
+            attempt_epoch,
+            expires_at,
+        } => (attempt_epoch, expires_at),
+        other => panic!("{other:?}"),
+    };
+    let (intent_id, idempotency_identity) = intent(&pool, operation.operation_id).await;
+    let binding = CapabilityBinding {
+        capability_id: Uuid::new_v4(),
+        target_id: target.target_id,
+        operation_id: operation.operation_id,
+        intent_id,
+        attempt_epoch: attempt,
+        audience: "reconcile",
+        claim_owner: "worker",
+        expires_at: claim_expiry - Duration::milliseconds(25),
+        idempotency_identity,
+    };
+    let secret = issue_capability(&pool, binding.clone()).await.unwrap();
+    let request_id = match begin_capability_request(&pool, &secret, binding.clone(), [2; 32])
+        .await
+        .unwrap()
+    {
+        CapabilityUse::Accepted { request_id } => request_id,
+        other => panic!("{other:?}"),
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(275)).await;
+    assert_eq!(
+        replay_capability_request(&pool, &secret, binding.clone(), request_id, [2; 32])
+            .await
+            .unwrap(),
+        CapabilityUse::NeedsReconcile { request_id }
+    );
+    assert!(
+        record_receipt(&pool, request_id, ReceiptState::Applied, None)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        replay_capability_request(&pool, &secret, binding, request_id, [2; 32])
+            .await
+            .unwrap(),
+        CapabilityUse::Replay {
+            request_id,
+            state: ReceiptState::Applied
+        }
+    );
+    close(db, pool).await;
+}
+
+#[tokio::test]
+async fn bounded_capability_gc_preserves_active_and_unresolved_pg() {
+    let (db, pool) = pool().await;
+    let (target, operation) = operation(&pool, "capability-gc").await;
+    let claimed = claim_operation(
+        &pool,
+        operation.operation_id,
+        "worker",
+        Duration::seconds(5),
+    )
+    .await
+    .unwrap();
+    let attempt = match claimed {
+        ClaimResult::Claimed { attempt_epoch, .. } => attempt_epoch,
+        other => panic!("{other:?}"),
+    };
+    let intents: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT intent_id, idempotency_identity FROM runtime_cleanup_intents
+         WHERE operation_id = $1 ORDER BY ordinal LIMIT 3",
+    )
+    .bind(operation.operation_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mut bindings = Vec::new();
+    let mut secrets = Vec::new();
+    for (index, (intent_id, idempotency_identity)) in intents.into_iter().enumerate() {
+        let binding = CapabilityBinding {
+            capability_id: Uuid::new_v4(),
+            target_id: target.target_id,
+            operation_id: operation.operation_id,
+            intent_id,
+            attempt_epoch: attempt,
+            audience: "gc",
+            claim_owner: "worker",
+            expires_at: now + Duration::seconds(index as i64 + 1),
+            idempotency_identity,
+        };
+        secrets.push(issue_capability(&pool, binding.clone()).await.unwrap());
+        bindings.push(binding);
+    }
+    let unresolved_request =
+        match begin_capability_request(&pool, &secrets[1], bindings[1].clone(), [4; 32])
+            .await
+            .unwrap()
+        {
+            CapabilityUse::Accepted { request_id } => request_id,
+            other => panic!("{other:?}"),
+        };
+    record_receipt(&pool, unresolved_request, ReceiptState::Unknown, None)
+        .await
+        .unwrap();
+    let terminal_request =
+        match begin_capability_request(&pool, &secrets[2], bindings[2].clone(), [5; 32])
+            .await
+            .unwrap()
+        {
+            CapabilityUse::Accepted { request_id } => request_id,
+            other => panic!("{other:?}"),
+        };
+    record_receipt(&pool, terminal_request, ReceiptState::Applied, None)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE runtime_cleanup_capabilities
+         SET expires_at = clock_timestamp() - INTERVAL '31 days'
+         WHERE capability_id <> $1",
+    )
+    .bind(bindings[0].capability_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(gc_expired_capabilities(&pool, 1).await.unwrap(), 1);
+    let remaining: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT capability_id FROM runtime_cleanup_capabilities ORDER BY capability_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(remaining.len(), 2);
+    assert!(remaining.contains(&bindings[1].capability_id));
+    assert_eq!(gc_expired_capabilities(&pool, 10).await.unwrap(), 0);
+    assert!(gc_expired_capabilities(&pool, 0).await.is_err());
+    assert!(gc_expired_capabilities(&pool, 1001).await.is_err());
     close(db, pool).await;
 }
 
@@ -521,7 +751,8 @@ async fn receipt_gc_preserves_request_target_and_locator_authority_pg() {
         intent_id,
         attempt_epoch: epoch,
         audience: "gc",
-        expires_at: now + Duration::seconds(2),
+        claim_owner: "worker",
+        expires_at: now + Duration::seconds(1),
         idempotency_identity: idem,
     };
     let secret = issue_capability(&pool, binding.clone()).await.unwrap();

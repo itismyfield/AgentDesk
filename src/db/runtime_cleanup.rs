@@ -6,9 +6,10 @@
 //! cannot prove that an external destination fenced a side effect already sent by
 //! a stale actor. Destination high-watermark enforcement is a future slice.
 //!
-//! Lock order is global and mandatory: request UUID advisory lock, canonical
-//! identity advisory lock, sorted locator locks, target row, operation row,
-//! intent row, then capability/request/receipt row.
+//! Lock order is global and mandatory: request UUID advisory lock, semantic
+//! idempotency advisory lock, canonical identity advisory lock, sorted locator
+//! locks, target row, operation row, intent row, then capability/request/receipt
+//! row.
 
 mod model;
 
@@ -398,14 +399,40 @@ pub(crate) async fn issue_capability(
     pool: &PgPool,
     binding: CapabilityBinding<'_>,
 ) -> Result<Vec<u8>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
     let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
-        .fetch_one(pool)
+        .fetch_one(&mut *tx)
         .await?;
-    if binding.expires_at <= database_now
-        || binding.expires_at > database_now + Duration::seconds(MAX_CAPABILITY_DURATION_SECONDS)
+    let operation = sqlx::query(
+        "SELECT target_id, state, claim_owner, attempt_epoch, claim_expires_at
+         FROM runtime_cleanup_operations WHERE operation_id = $1 FOR UPDATE",
+    )
+    .bind(binding.operation_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let claim_expires_at: Option<DateTime<Utc>> = operation.try_get("claim_expires_at")?;
+    if operation.try_get::<Uuid, _>("target_id")? != binding.target_id
+        || operation.try_get::<i64, _>("attempt_epoch")? != binding.attempt_epoch
+        || operation
+            .try_get::<Option<String>, _>("claim_owner")?
+            .as_deref()
+            != Some(binding.claim_owner)
+        || !matches!(
+            operation.try_get::<String, _>("state")?.as_str(),
+            "open" | "committed"
+        )
     {
         return Err(sqlx::Error::Protocol(
-            "capability duration is outside database-clock bounds".into(),
+            "capability binding does not own the current operation claim".into(),
+        ));
+    }
+    if binding.expires_at <= database_now
+        || binding.expires_at > database_now + Duration::seconds(MAX_CAPABILITY_DURATION_SECONDS)
+        || claim_expires_at
+            .is_none_or(|expires_at| expires_at <= database_now || binding.expires_at > expires_at)
+    {
+        return Err(sqlx::Error::Protocol(
+            "capability expiry exceeds database-clock claim bounds".into(),
         ));
     }
     let mut secret = vec![0_u8; 32];
@@ -414,8 +441,8 @@ pub(crate) async fn issue_capability(
     sqlx::query(
         "INSERT INTO runtime_cleanup_capabilities
          (capability_id, capability_hash, target_id, operation_id, intent_id,
-          attempt_epoch, audience, expires_at, idempotency_identity)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+          attempt_epoch, audience, claim_owner, expires_at, idempotency_identity)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
     )
     .bind(binding.capability_id)
     .bind(hash)
@@ -424,10 +451,12 @@ pub(crate) async fn issue_capability(
     .bind(binding.intent_id)
     .bind(binding.attempt_epoch)
     .bind(binding.audience)
+    .bind(binding.claim_owner)
     .bind(binding.expires_at)
     .bind(binding.idempotency_identity)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(secret)
 }
 
@@ -469,14 +498,59 @@ async fn begin_or_replay_capability_request(
 ) -> Result<CapabilityUse, sqlx::Error> {
     let mut tx = pool.begin().await?;
     lock_request(&mut tx, request_id).await?;
+    if replay_only {
+        if let Some(existing) = sqlx::query(
+            "SELECT operation_id, intent_id, idempotency_identity, request_fingerprint
+             FROM runtime_cleanup_request_identities WHERE request_id = $1",
+        )
+        .bind(request_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            if existing.try_get::<Uuid, _>("operation_id")? != binding.operation_id
+                || existing.try_get::<Uuid, _>("intent_id")? != binding.intent_id
+                || existing.try_get::<Uuid, _>("idempotency_identity")?
+                    != binding.idempotency_identity
+            {
+                tx.commit().await?;
+                return Ok(CapabilityUse::BindingMismatch);
+            }
+            let prior: Vec<u8> = existing.try_get("request_fingerprint")?;
+            if prior.as_slice() != request_fingerprint {
+                tx.commit().await?;
+                return Ok(CapabilityUse::FingerprintConflict);
+            }
+            let receipt = sqlx::query_scalar::<_, String>(
+                "SELECT receipt_state FROM runtime_cleanup_receipts WHERE request_id = $1",
+            )
+            .bind(request_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(match receipt.as_deref().map(parse_receipt) {
+                Some(ReceiptState::Applied) => CapabilityUse::Replay {
+                    request_id,
+                    state: ReceiptState::Applied,
+                },
+                Some(ReceiptState::NotApplied) => CapabilityUse::Replay {
+                    request_id,
+                    state: ReceiptState::NotApplied,
+                },
+                _ => CapabilityUse::NeedsReconcile { request_id },
+            });
+        }
+    } else {
+        lock_semantic_request(&mut tx, &binding).await?;
+    }
     let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(&mut *tx)
         .await?;
     let capability_hash = Sha256::digest(secret).to_vec();
     let Some(row) = sqlx::query(
         "SELECT c.target_id, c.operation_id, c.intent_id, c.attempt_epoch,
-                c.audience, c.expires_at, c.idempotency_identity,
-                o.attempt_epoch AS operation_attempt_epoch
+                c.audience, c.claim_owner, c.expires_at, c.idempotency_identity,
+                o.attempt_epoch AS operation_attempt_epoch, o.claim_owner AS operation_claim_owner,
+                o.claim_expires_at AS operation_claim_expires_at, o.state AS operation_state
          FROM runtime_cleanup_capabilities c
          JOIN runtime_cleanup_operations o USING (operation_id)
          WHERE c.capability_hash = $1 FOR UPDATE OF c, o",
@@ -493,18 +567,33 @@ async fn begin_or_replay_capability_request(
         || row.try_get::<Uuid, _>("intent_id")? != binding.intent_id
         || row.try_get::<i64, _>("attempt_epoch")? != binding.attempt_epoch
         || row.try_get::<String, _>("audience")? != binding.audience
+        || row.try_get::<String, _>("claim_owner")? != binding.claim_owner
+        || row.try_get::<DateTime<Utc>, _>("expires_at")? != binding.expires_at
         || row.try_get::<Uuid, _>("idempotency_identity")? != binding.idempotency_identity
     {
         tx.commit().await?;
         return Ok(CapabilityUse::BindingMismatch);
     }
-    if row.try_get::<DateTime<Utc>, _>("expires_at")? <= now {
+    let capability_expired = row.try_get::<DateTime<Utc>, _>("expires_at")? <= now;
+    let claim_expired = row
+        .try_get::<Option<DateTime<Utc>>, _>("operation_claim_expires_at")?
+        .is_none_or(|expires_at| expires_at <= now);
+    let lost_ownership = row
+        .try_get::<Option<String>, _>("operation_claim_owner")?
+        .as_deref()
+        != Some(binding.claim_owner)
+        || row.try_get::<i64, _>("operation_attempt_epoch")? != binding.attempt_epoch
+        || !matches!(
+            row.try_get::<String, _>("operation_state")?.as_str(),
+            "open" | "committed"
+        );
+    if capability_expired || claim_expired || lost_ownership {
         tx.commit().await?;
-        return Ok(CapabilityUse::Expired);
-    }
-    if row.try_get::<i64, _>("operation_attempt_epoch")? != binding.attempt_epoch {
-        tx.commit().await?;
-        return Ok(CapabilityUse::StaleAttempt);
+        return Ok(if lost_ownership {
+            CapabilityUse::LostOwnership
+        } else {
+            CapabilityUse::Expired
+        });
     }
     if let Some(existing) = sqlx::query(
         "SELECT request_fingerprint FROM runtime_cleanup_request_identities WHERE request_id = $1",
@@ -617,6 +706,16 @@ pub(crate) async fn gc_terminal_receipts(
         .await
 }
 
+pub(crate) async fn gc_expired_capabilities(
+    pool: &PgPool,
+    batch_size: i32,
+) -> Result<i32, sqlx::Error> {
+    sqlx::query_scalar("SELECT agentdesk_gc_runtime_cleanup_capabilities($1)")
+        .bind(batch_size)
+        .fetch_one(pool)
+        .await
+}
+
 fn parse_receipt(value: &str) -> ReceiptState {
     match value {
         "applied" => ReceiptState::Applied,
@@ -641,6 +740,21 @@ async fn lock_request(
     sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2))")
         .bind(LOCK_NAMESPACE)
         .bind(format!("request:{request_id}"))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn lock_semantic_request(
+    tx: &mut Transaction<'_, Postgres>,
+    binding: &CapabilityBinding<'_>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2))")
+        .bind(LOCK_NAMESPACE)
+        .bind(format!(
+            "semantic:{}:{}:{}",
+            binding.operation_id, binding.intent_id, binding.idempotency_identity
+        ))
         .execute(&mut **tx)
         .await?;
     Ok(())

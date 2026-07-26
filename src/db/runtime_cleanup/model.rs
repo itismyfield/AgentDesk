@@ -121,6 +121,10 @@ pub(crate) enum CapabilityUse {
     FingerprintConflict,
     BindingMismatch,
     Expired,
+    LostOwnership,
+    NeedsReconcile {
+        request_id: Uuid,
+    },
     StaleAttempt,
     NotFound,
 }
@@ -133,6 +137,7 @@ pub(crate) struct CapabilityBinding<'a> {
     pub(crate) intent_id: Uuid,
     pub(crate) attempt_epoch: i64,
     pub(crate) audience: &'a str,
+    pub(crate) claim_owner: &'a str,
     pub(crate) expires_at: DateTime<Utc>,
     pub(crate) idempotency_identity: Uuid,
 }

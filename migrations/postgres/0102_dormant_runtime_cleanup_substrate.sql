@@ -154,6 +154,7 @@ CREATE TABLE runtime_cleanup_capabilities (
     intent_id UUID NOT NULL,
     attempt_epoch BIGINT NOT NULL CHECK (attempt_epoch > 0),
     audience TEXT NOT NULL CHECK (BTRIM(audience) <> ''),
+    claim_owner TEXT NOT NULL CHECK (BTRIM(claim_owner) <> ''),
     expires_at TIMESTAMPTZ NOT NULL,
     idempotency_identity UUID NOT NULL,
     consumed_at TIMESTAMPTZ,
@@ -227,9 +228,10 @@ BEFORE UPDATE OR DELETE ON runtime_cleanup_request_identities
 FOR EACH ROW EXECUTE FUNCTION agentdesk_guard_runtime_cleanup_immutable();
 
 -- Explicit lock order for every API transaction:
--- request UUID advisory lock -> canonical identity advisory lock -> sorted locator
--- locks via agentdesk_lock_session_locator -> target row -> operation row -> intent
--- row -> capability/request/receipt row. Callers must never acquire in reverse.
+-- request UUID advisory lock -> semantic idempotency advisory lock -> canonical
+-- identity advisory lock -> sorted locator locks via agentdesk_lock_session_locator
+-- -> target row -> operation row -> intent row -> capability/request/receipt row.
+-- Callers must never acquire in reverse.
 
 CREATE OR REPLACE FUNCTION agentdesk_gc_runtime_cleanup_receipts(batch_size INTEGER)
 RETURNS INTEGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
@@ -251,3 +253,39 @@ BEGIN
 END;
 $$;
 REVOKE ALL ON FUNCTION agentdesk_gc_runtime_cleanup_receipts(INTEGER) FROM PUBLIC;
+
+-- Capability secrets are disposable only after they cannot authorize work and no
+-- unresolved request depends on them. Permanent operation/request authority and
+-- terminal receipt evidence remain in their respective tables.
+CREATE OR REPLACE FUNCTION agentdesk_gc_runtime_cleanup_capabilities(batch_size INTEGER)
+RETURNS INTEGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE deleted_count INTEGER;
+BEGIN
+    IF batch_size < 1 OR batch_size > 1000 THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'batch_size must be between 1 and 1000';
+    END IF;
+    WITH doomed AS (
+        SELECT capability_id FROM public.runtime_cleanup_capabilities capability
+        JOIN public.runtime_cleanup_operations operation USING (operation_id)
+        WHERE capability.expires_at <= clock_timestamp() - INTERVAL '30 days'
+          AND (operation.state IN ('completed', 'aborted')
+               OR capability.expires_at <= clock_timestamp())
+          AND NOT EXISTS (
+              SELECT 1
+              FROM public.runtime_cleanup_request_identities request
+              LEFT JOIN public.runtime_cleanup_receipts receipt USING (request_id)
+              WHERE request.operation_id = capability.operation_id
+                AND request.intent_id = capability.intent_id
+                AND request.idempotency_identity = capability.idempotency_identity
+                AND (receipt.request_id IS NULL OR receipt.receipt_state = 'unknown')
+          )
+        ORDER BY capability.expires_at, capability.capability_id
+        FOR UPDATE OF capability SKIP LOCKED LIMIT batch_size
+    )
+    DELETE FROM public.runtime_cleanup_capabilities capability
+    USING doomed WHERE capability.capability_id = doomed.capability_id;
+    GET DIAGNOSTICS deleted_count = ROW_COUNT;
+    RETURN deleted_count;
+END;
+$$;
+REVOKE ALL ON FUNCTION agentdesk_gc_runtime_cleanup_capabilities(INTEGER) FROM PUBLIC;
