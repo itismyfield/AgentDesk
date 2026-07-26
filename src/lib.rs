@@ -116,6 +116,7 @@ mod logging;
 pub(crate) mod manual_intervention;
 // Pipeline policy structs include retry/override fields retained for policy
 // compatibility across staged rollout paths.
+pub(crate) mod phase_gate;
 pub(crate) mod pipeline;
 pub(crate) mod receipt;
 // Reconciliation sweep jobs are invoked by maintenance scheduling, not by every

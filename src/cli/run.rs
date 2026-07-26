@@ -114,6 +114,7 @@ fn command_supports_json(command: &Commands) -> bool {
         | Commands::InstallMementoSessionHook { .. }
         | Commands::Deploy
         | Commands::Migrate { .. }
+        | Commands::ReleaseMigratePostgres
         | Commands::Show { .. } => false,
 
         #[cfg(unix)]
@@ -683,6 +684,9 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
         Commands::Migrate { action } => exit_for_cli(match action {
             MigrateAction::Openclaw(args) => super::migrate::cmd_migrate_openclaw(args),
         }),
+        Commands::ReleaseMigratePostgres => exit_for_cli(super::direct::run_async(
+            super::direct::cmd_release_migrate_postgres(),
+        )),
         Commands::ProviderCli(args) => exit_for_cli(super::provider_cli::cmd_provider_cli(args)),
         Commands::Show { action } => exit_for_cli(handle_show(action)),
         Commands::Health => exit_for_cli(super::client::cmd_health(json)),

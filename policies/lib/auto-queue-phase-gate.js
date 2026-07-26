@@ -50,8 +50,8 @@ var PHASE_GATE_GRACE_WINDOW_MS = 30 * 1000; // 30s
 // #699 (round 2): mirror of src/dispatch/dispatch_status.rs
 // maybe_inject_phase_gate_verdict. Infers `pass_verdict` for a phase-gate
 // result only when (a) no explicit verdict/decision/phase_gate_verdict is present, (b) every
-// declared `context.phase_gate.checks` entry is present in `result.checks`
-// and passes, and (c) every present entry passes. Returns the inferred
+// declared dispatch-result check in `context.phase_gate.required_checks` is present in
+// `result.checks` and passes, and (c) every present entry passes. Returns the inferred
 // verdict or null. Pure function — caller applies the value.
 function _inferPhaseGatePassVerdict(ctx, result) {
   if (_explicitPhaseGateVerdict(result)) return null;
@@ -62,13 +62,112 @@ function _explicitPhaseGateVerdict(result) {
   return result && (result.verdict || result.decision || result.phase_gate_verdict || null);
 }
 
+function _phaseGateDiagnosticVerdict(result, verdict) {
+  if (typeof verdict === "string" && verdict.length > 0) return verdict;
+  if (!result || typeof result !== "object") return null;
+  var keys = ["verdict", "decision", "phase_gate_verdict"];
+  for (var i = 0; i < keys.length; i++) {
+    var value = result[keys[i]];
+    if (!value) continue;
+    if (Array.isArray(value)) return "<non-string:array>";
+    if (value !== null && typeof value === "object") return "<non-string:object>";
+    if (typeof value === "boolean") return "<non-string:boolean>";
+    if (typeof value === "number") return "<non-string:number>";
+    return "<non-string:unknown>";
+  }
+  return null;
+}
+
+function _phaseGateFailureReason(result, passVerdict, diagnostic) {
+  var summary = result && typeof result.summary === "string" ? result.summary : null;
+  var reason = result && typeof result.reason === "string" ? result.reason : null;
+  return summary || reason || ("expected " + passVerdict + ", got " + (diagnostic || "none"));
+}
+
+function _phaseGateDeclarationMatches(phaseGate) {
+  if (!phaseGate || typeof phaseGate !== "object" || typeof phaseGate.kind !== "string") {
+    return false;
+  }
+  var current = agentdesk.pipeline.resolvePhaseGateDeclaration(phaseGate.kind);
+  if (!current || current.available !== true) return false;
+  var fields = [
+    "kind",
+    "declaration_version",
+    "pass_verdict",
+    "evidence_requirement",
+    "required_checks"
+  ];
+  for (var i = 0; i < fields.length; i++) {
+    var field = fields[i];
+    if (JSON.stringify(phaseGate[field]) !== JSON.stringify(current[field])) return false;
+  }
+  return true;
+}
+
+function _phaseGateLegacySnapshotMissing(phaseGate) {
+  if (!phaseGate || typeof phaseGate !== "object") return false;
+  var fields = ["kind", "declaration_version", "required_checks", "evidence_requirement"];
+  for (var i = 0; i < fields.length; i++) {
+    if (Object.prototype.hasOwnProperty.call(phaseGate, fields[i])) return false;
+  }
+  return true;
+}
+
+function authoritativePhaseGateContext(runId, phase, context) {
+  var gate = context && context.phase_gate;
+  if (_phaseGateDeclarationMatches(gate)) return context;
+  if (!_phaseGateLegacySnapshotMissing(gate)) return null;
+
+  var rows = agentdesk.db.query(
+    "SELECT COUNT(*) as entry_count, " +
+    "SUM(CASE WHEN phase_gate_kind IS NULL OR BTRIM(phase_gate_kind, E' \\t\\n\\r\\f\\v') = '' THEN 1 ELSE 0 END) as legacy_default_count " +
+    "FROM auto_queue_entries WHERE run_id = ? AND COALESCE(batch_phase, 0) = ?",
+    [runId, phase]
+  );
+  var entryCount = rows.length > 0 ? Number(rows[0].entry_count || 0) : 0;
+  var legacyCount = rows.length > 0 ? Number(rows[0].legacy_default_count || 0) : 0;
+  if (entryCount <= 0 || legacyCount !== entryCount) return null;
+
+  var declaration = agentdesk.pipeline.resolvePhaseGateDeclaration("pr-confirm");
+  if (!declaration || declaration.available !== true) return null;
+  var normalized = JSON.parse(JSON.stringify(context));
+  var fields = [
+    "kind",
+    "declaration_version",
+    "pass_verdict",
+    "evidence_requirement",
+    "required_checks"
+  ];
+  for (var i = 0; i < fields.length; i++) {
+    normalized.phase_gate[fields[i]] = declaration[fields[i]];
+  }
+  return normalized;
+}
+
+function _dispatchResultCheckNames(phaseGate) {
+  if (!_phaseGateDeclarationMatches(phaseGate) || !Array.isArray(phaseGate.required_checks)) {
+    return null;
+  }
+  var names = [];
+  for (var i = 0; i < phaseGate.required_checks.length; i++) {
+    var required = phaseGate.required_checks[i];
+    if (!required || typeof required !== "object" ||
+        required.authority !== "dispatch_result" || typeof required.check !== "string") {
+      return null;
+    }
+    names.push(required.check);
+  }
+  return names.length > 0 ? names : null;
+}
+
 function _inferPhaseGatePassVerdictFromChecks(ctx, result) {
   if (!result || typeof result !== "object") return null;
   var phaseGate = ctx && ctx.phase_gate;
-  if (!phaseGate || typeof phaseGate !== "object") return null;
+  var declared = _dispatchResultCheckNames(phaseGate);
+  if (!declared) return null;
 
   var checks = result.checks;
-  if (!checks || typeof checks !== "object") return null;
+  if (!checks || typeof checks !== "object" || Array.isArray(checks)) return null;
 
   var checkNames = Object.keys(checks);
   if (checkNames.length === 0) return null;
@@ -84,26 +183,33 @@ function _inferPhaseGatePassVerdictFromChecks(ctx, result) {
     return normalized === "pass" || normalized === "passed";
   }
 
-  var declared = Array.isArray(phaseGate.checks) ? phaseGate.checks : [];
   for (var di = 0; di < declared.length; di++) {
-    var required = declared[di];
-    if (!required) continue;
-    var entry = checks[required];
-    if (!entryIsPass(entry)) return null;
+    if (!entryIsPass(checks[declared[di]])) return null;
   }
 
   for (var ci = 0; ci < checkNames.length; ci++) {
     if (!entryIsPass(checks[checkNames[ci]])) return null;
   }
 
-  return phaseGate.pass_verdict || "phase_gate_passed";
+  return phaseGate.pass_verdict;
 }
 
 function _phaseGateVerdictMatches(actualVerdict, expectedVerdict, ctx, result) {
-  if (!actualVerdict) return false;
-  if (actualVerdict === expectedVerdict) return true;
-  if (actualVerdict !== "pass" && actualVerdict !== "passed") return false;
+  if (!actualVerdict || (actualVerdict !== expectedVerdict && actualVerdict !== "pass" && actualVerdict !== "passed")) {
+    return false;
+  }
   return _inferPhaseGatePassVerdictFromChecks(ctx, result) === expectedVerdict;
+}
+
+function _phaseGateGroupKey(sourceAgentId, targetAgentId, dispatchType, declaration) {
+  return [
+    sourceAgentId || "",
+    targetAgentId || "",
+    dispatchType || "phase-gate",
+    declaration.kind,
+    declaration.declaration_version,
+    JSON.stringify(declaration.required_checks)
+  ].join("::");
 }
 
 function phaseGateFailureKey(cardId, phase) {
@@ -192,8 +298,10 @@ function _phaseGateOnlyIssueClosedFailing(context, result) {
     }
     return null;
   }
-  var declared = Array.isArray(context.phase_gate.checks) ? context.phase_gate.checks : [];
-  var names = declared.length > 0 ? declared : Object.keys(checks);
+  var names = _dispatchResultCheckNames(context.phase_gate);
+  if (!names) {
+    return { eligible: false, reason: "incompatible_phase_gate_declaration" };
+  }
   var sawIssueClosedFail = false;
   var sawMergeVerifiedPass = false;
   var sawBuildPassedPass = false;
@@ -549,7 +657,7 @@ function _phaseGateRequired(runId, phase) {
 function _buildPhaseGateGroups(runId, phase) {
   var rows = agentdesk.db.query(
     "SELECT e.id as entry_id, e.kanban_card_id, e.agent_id, e.status, e.priority_rank, " +
-    "kc.title, kc.github_issue_number, kc.repo_id, " +
+    "e.phase_gate_kind, kc.title, kc.github_issue_number, kc.repo_id, " +
     "(SELECT td.result FROM task_dispatches td " +
     " WHERE td.kanban_card_id = e.kanban_card_id " +
     "   AND td.status = 'completed' " +
@@ -566,23 +674,37 @@ function _buildPhaseGateGroups(runId, phase) {
 
   for (var i = 0; i < rows.length; i++) {
     var row = rows[i];
-    var gate = agentdesk.pipeline.resolvePhaseGateForCard(row.kanban_card_id);
+    var rawKind = row.phase_gate_kind;
+    var kind = (rawKind === null || rawKind === undefined || String(rawKind).trim() === "")
+      ? "pr-confirm"
+      : String(rawKind).trim();
+    var gate = agentdesk.pipeline.resolvePhaseGateForCard(row.kanban_card_id, kind);
+    var declaration = gate && gate.declaration;
+    if (!gate || !declaration) {
+      var unknown = [];
+      unknown.groups = unknown;
+      unknown.error = "unknown phase_gate_kind '" + kind + "' requires reconciliation";
+      return unknown;
+    }
+    if (declaration.available !== true) {
+      var unavailable = [];
+      unavailable.groups = unavailable;
+      unavailable.error = declaration.unavailable_reason || "phase gate kind unavailable";
+      return unavailable;
+    }
     var targetAgentId = gate.dispatch_to === "self" ? row.agent_id : gate.dispatch_to;
-    var checks = Array.isArray(gate.checks) ? gate.checks.slice() : [];
-    var key = [
-      row.agent_id || "",
-      targetAgentId || "",
-      gate.dispatch_type || "phase-gate",
-      gate.pass_verdict || "phase_gate_passed",
-      checks.join("|")
-    ].join("::");
+    var key = _phaseGateGroupKey(
+      row.agent_id,
+      targetAgentId,
+      gate.dispatch_type,
+      declaration
+    );
     if (!groups[key]) {
       groups[key] = {
         source_agent_id: row.agent_id,
         target_agent_id: targetAgentId,
         dispatch_type: gate.dispatch_type || "phase-gate",
-        pass_verdict: gate.pass_verdict || "phase_gate_passed",
-        checks: checks,
+        declaration: declaration,
         anchor_card_id: row.kanban_card_id,
         repo_id: row.repo_id || null,
         card_ids: [],
@@ -613,6 +735,8 @@ function _buildPhaseGateGroups(runId, phase) {
     });
   }
 
+  ordered.groups = ordered;
+  ordered.error = null;
   return ordered;
 }
 
@@ -644,7 +768,8 @@ function _createPhaseGateDispatches(runId, phase, nextPhase, finalPhase, anchorC
     return existing;
   }
 
-  var groups = _buildPhaseGateGroups(runId, phase);
+  var groupBuild = _buildPhaseGateGroups(runId, phase);
+  var groups = groupBuild.groups;
   var state = {
     run_id: runId,
     batch_phase: phase,
@@ -658,9 +783,9 @@ function _createPhaseGateDispatches(runId, phase, nextPhase, finalPhase, anchorC
   };
   pauseRun(runId);
 
-  if (groups.length === 0) {
+  if (groupBuild.error || groups.length === 0) {
     state.status = "failed";
-    state.failed_reason = "no phase gate targets found";
+    state.failed_reason = groupBuild.error || "no phase gate targets found";
     savePhaseGateState(runId, phase, state);
     handlePhaseGateFailure(
       anchorCardId,
@@ -695,8 +820,11 @@ function _createPhaseGateDispatches(runId, phase, nextPhase, finalPhase, anchorC
             source_agent_id: group.source_agent_id,
             target_agent_id: group.target_agent_id,
             dispatch_type: group.dispatch_type,
-            pass_verdict: group.pass_verdict,
-            checks: group.checks,
+            kind: group.declaration.kind,
+            declaration_version: group.declaration.declaration_version,
+            required_checks: group.declaration.required_checks,
+            evidence_requirement: group.declaration.evidence_requirement,
+            pass_verdict: group.declaration.pass_verdict,
             card_ids: group.card_ids,
             issue_numbers: group.issue_numbers,
             work_items: group.work_items,
@@ -710,8 +838,11 @@ function _createPhaseGateDispatches(runId, phase, nextPhase, finalPhase, anchorC
         source_agent_id: group.source_agent_id,
         target_agent_id: group.target_agent_id,
         dispatch_type: group.dispatch_type,
-        pass_verdict: group.pass_verdict,
-        checks: group.checks,
+        kind: group.declaration.kind,
+        declaration_version: group.declaration.declaration_version,
+        required_checks: group.declaration.required_checks,
+        evidence_requirement: group.declaration.evidence_requirement,
+        pass_verdict: group.declaration.pass_verdict,
         card_ids: group.card_ids
       });
     } catch (e) {
@@ -758,6 +889,10 @@ module.exports = {
   PHASE_GATE_GRACE_WINDOW_MS: PHASE_GATE_GRACE_WINDOW_MS,
   inferPhaseGatePassVerdict: _inferPhaseGatePassVerdict,
   phaseGateVerdictMatches: _phaseGateVerdictMatches,
+  phaseGateDiagnosticVerdict: _phaseGateDiagnosticVerdict,
+  phaseGateFailureReason: _phaseGateFailureReason,
+  phaseGateGroupKey: _phaseGateGroupKey,
+  authoritativePhaseGateContext: authoritativePhaseGateContext,
   phaseGateFailureKey: phaseGateFailureKey,
   incrementPhaseGateFailureCount: incrementPhaseGateFailureCount,
   resetPhaseGateFailureCount: resetPhaseGateFailureCount,

@@ -28,6 +28,26 @@ fn print_json(value: &Value) {
     );
 }
 
+/// Apply embedded PostgreSQL migrations before the release binary is activated.
+/// This command intentionally initializes no runtime services or policy engine.
+pub(crate) async fn cmd_release_migrate_postgres() -> Result<(), String> {
+    let config = crate::config::load().map_err(|error| format!("load release config: {error}"))?;
+    if !crate::db::postgres::database_enabled(&config) {
+        return Err("PostgreSQL is disabled; release migrations cannot be applied".to_string());
+    }
+    let pool = crate::db::postgres::connect_for_bootstrap(&config)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "PostgreSQL connection unavailable".to_string())?;
+    crate::db::postgres::with_startup_advisory_lock(&pool, || async {
+        crate::db::postgres::migrate(&pool).await
+    })
+    .await?;
+    pool.close().await;
+    println!("PostgreSQL release migrations applied");
+    Ok(())
+}
+
 fn extract_error_message(value: &Value) -> Option<String> {
     value
         .get("error")
