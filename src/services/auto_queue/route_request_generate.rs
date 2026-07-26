@@ -167,6 +167,9 @@ fn validate_allowed_gate_kinds(kinds: Option<&[String]>) -> Result<Option<Vec<St
                 "unknown phase_gate_kind '{trimmed}' (see GET /api/queue/phase-gates/catalog)"
             ));
         }
+        if let Some(reason) = crate::phase_gate::kind_unavailable_reason(trimmed) {
+            return Err(reason.to_string());
+        }
         if !normalized
             .iter()
             .any(|existing: &String| existing == trimmed)
@@ -314,14 +317,13 @@ mod tests {
         assert!(!text.contains("allowed_gate_kinds:"));
     }
 
-    /// Regression for codex review P1 on #2126: when allowed_gate_kinds
-    /// excludes the catalog default (`pr-confirm`), the synthesised call
-    /// example must not bleed the default back into the prompt and the
-    /// guide must explicitly forbid kinds outside the restriction.
+    /// Regression for codex review P1 on #2126: the synthesised call example
+    /// must use only an available kind from the restriction, and the guide must
+    /// explicitly forbid kinds outside it.
     #[test]
     fn instruction_example_kind_respects_allowed_restriction() {
         let issues = vec![42i64];
-        let allowed = vec!["deploy-gate".to_string()];
+        let allowed = vec!["pr-confirm".to_string()];
         let text = build_request_generate_instruction(&RequestGenerateInput {
             repo: "r",
             agent_id: "a",
@@ -330,12 +332,12 @@ mod tests {
             request_id: "r1",
         });
         assert!(
-            text.contains("\"phase_gate_kind\": \"deploy-gate\""),
+            text.contains("\"phase_gate_kind\": \"pr-confirm\""),
             "call example should use the first allowed kind: {text}"
         );
         assert!(
-            !text.contains("\"phase_gate_kind\": \"pr-confirm\""),
-            "pr-confirm must not appear when restricted to deploy-gate: {text}"
+            !text.contains("\"phase_gate_kind\": \"deploy-gate\""),
+            "unavailable deploy-gate must not appear outside the allowed restriction: {text}"
         );
         assert!(
             text.contains("반드시 allowed_gate_kinds"),
@@ -344,10 +346,19 @@ mod tests {
     }
 
     #[test]
-    fn validate_allowed_gate_kinds_accepts_catalog_values() {
-        let input = vec!["pr-confirm".to_string(), "deploy-gate".to_string()];
+    fn validate_allowed_gate_kinds_accepts_available_catalog_values() {
+        let input = vec!["pr-confirm".to_string()];
         let validated = validate_allowed_gate_kinds(Some(&input)).expect("valid");
-        assert_eq!(validated.as_deref().map(|v| v.len()), Some(2));
+        assert_eq!(validated.as_deref(), Some(&["pr-confirm".to_string()][..]));
+    }
+
+    #[test]
+    fn validate_allowed_gate_kinds_rejects_unavailable_deploy_gate() {
+        let input = vec!["deploy-gate".to_string()];
+        assert_eq!(
+            validate_allowed_gate_kinds(Some(&input)).unwrap_err(),
+            crate::phase_gate::DEPLOY_GATE_UNAVAILABLE_REASON
+        );
     }
 
     #[test]

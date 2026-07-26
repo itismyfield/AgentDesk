@@ -171,15 +171,9 @@ class DeploymentWiringTests(unittest.TestCase):
     def _pg_block() -> str:
         deploy = DEPLOY.read_text(encoding="utf-8")
         start = deploy.index("PG_TUNNEL_LABEL=\"com.agentdesk.pg-tunnel\"")
-        # #4735 replaced the old "# #4381: a deploy restarts dcserver" boundary
-        # comment (which touched the watchdog deploy-marker to suppress relay
-        # gaps) with the durable restart-persistence fence. That fence comment
-        # now marks the same boundary — right after the PG-tunnel migration and
-        # before dcserver is stopped — so the extracted block is unchanged.
-        end = deploy.index(
-            "# Fence new relay admissions and let dcserver atomically persist",
-            start,
-        )
+        # The runtime PID snapshot now follows the reversible tunnel migration
+        # and precedes the candidate database migration/restart boundary.
+        end = deploy.index('LOCK_FILE="$ADK_REL/runtime/dcserver.lock"', start)
         return deploy[start:end]
 
     def test_ci_script_checks_runs_this_suite(self):
@@ -250,6 +244,91 @@ class DeploymentWiringTests(unittest.TestCase):
         stop_at = deploy.index('echo "▸ Stopping release..."', migrate_at)
         self.assertLess(migrate_at, stop_at)
         self.assertLess(stop_at, deploy.index("DEPLOY_OK=1", stop_at))
+
+    def test_database_migration_precedes_restart_request_and_release_stop(self):
+        deploy = DEPLOY.read_text(encoding="utf-8")
+        stage_at = deploy.index('echo "▸ Staging signed binary from $SOURCE_BINARY..."')
+        tunnel_at = deploy.index("_migrate_pg_tunnel_before_release_stop", stage_at)
+        migration_at = deploy.index(
+            'if ! "$STAGED_BINARY" release-migrate-postgres; then', tunnel_at
+        )
+        restart_at = deploy.index("request_restart_drain_mode_or_fail", migration_at)
+        persistence_at = deploy.index("wait_for_restart_persistence_or_fail", restart_at)
+        stop_at = deploy.index('echo "▸ Stopping release..."', persistence_at)
+        self.assertLess(stage_at, tunnel_at)
+        self.assertLess(tunnel_at, migration_at)
+        self.assertLess(migration_at, restart_at)
+        self.assertLess(restart_at, persistence_at)
+        self.assertLess(persistence_at, stop_at)
+
+    def test_database_migration_failure_cannot_request_restart_or_bootout(self):
+        deploy = DEPLOY.read_text(encoding="utf-8")
+        migration_at = deploy.index(
+            'if ! "$STAGED_BINARY" release-migrate-postgres; then'
+        )
+        failure_exit_at = deploy.index("    exit 1", migration_at)
+        restart_at = deploy.index("request_restart_drain_mode_or_fail", migration_at)
+        stop_at = deploy.index('echo "▸ Stopping release..."', restart_at)
+        migration_failure = deploy[migration_at:failure_exit_at]
+        self.assertLess(failure_exit_at, restart_at)
+        self.assertLess(restart_at, stop_at)
+        self.assertNotIn("request_restart_drain_mode_or_fail", migration_failure)
+        self.assertNotIn("restart_pending", migration_failure)
+        self.assertNotIn("launchctl bootout", migration_failure)
+        self.assertNotIn("clear_restart_drain_mode", migration_failure)
+        self.assertIn("the existing runtime remains active", migration_failure)
+
+    def test_database_migration_failure_preserves_live_runtime_without_marker(self):
+        deploy = DEPLOY.read_text(encoding="utf-8")
+        start = deploy.index('LOCK_FILE="$ADK_REL/runtime/dcserver.lock"')
+        end = deploy.index("# Migration 0100 is now a forward-only binary floor", start)
+        migration_block = deploy[start:end]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = root / "runtime"
+            runtime.mkdir()
+            events = root / "events.log"
+            health = runtime / "health"
+            health.write_text("healthy\n", encoding="utf-8")
+            candidate = root / "candidate"
+            candidate.write_text(
+                "#!/bin/sh\nprintf 'migration:%s\\n' \"$*\" >> \"$EVENT_LOG\"\nexit 1\n",
+                encoding="utf-8",
+            )
+            candidate.chmod(0o755)
+            old_runtime = subprocess.Popen(["sleep", "30"])
+            try:
+                (runtime / "dcserver.lock").write_text(
+                    f"{old_runtime.pid}\n", encoding="utf-8"
+                )
+                script = (
+                    "set -euo pipefail\n"
+                    f"ADK_REL={shlex.quote(str(root))}\n"
+                    f"STAGED_BINARY={shlex.quote(str(candidate))}\n"
+                    f"EVENT_LOG={shlex.quote(str(events))}\n"
+                    "PLIST_REL=com.agentdesk.release\n"
+                    "REL_PORT=8791\n"
+                    "export EVENT_LOG\n"
+                    "request_restart_drain_mode_or_fail() { "
+                    "printf 'restart-request\\n' >> \"$EVENT_LOG\"; }\n"
+                    "launchctl() { printf 'bootout:%s\\n' \"$*\" >> \"$EVENT_LOG\"; }\n"
+                    + migration_block
+                )
+                result = subprocess.run(
+                    ["bash", "-c", script], capture_output=True, text=True, timeout=10
+                )
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIsNone(old_runtime.poll(), "old runtime exited on migration failure")
+                self.assertEqual(health.read_text(encoding="utf-8"), "healthy\n")
+                self.assertFalse((runtime / "restart_pending").exists())
+                self.assertEqual(
+                    events.read_text(encoding="utf-8"),
+                    "migration:release-migrate-postgres\n",
+                )
+            finally:
+                old_runtime.terminate()
+                old_runtime.wait(timeout=5)
 
     def _run_block(
         self,

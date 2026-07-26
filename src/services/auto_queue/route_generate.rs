@@ -718,3 +718,100 @@ pub(crate) async fn active_dispatch_id_for_card_pg(
     .fetch_optional(pool)
     .await
 }
+
+#[cfg(test)]
+mod deploy_gate_request_rejection_tests {
+    use super::*;
+
+    fn body(kind: &str) -> GenerateBody {
+        GenerateBody {
+            repo: Some("itismyfield/AgentDesk".to_string()),
+            agent_id: Some("project-agentdesk".to_string()),
+            auto_assign_agent: None,
+            issue_numbers: None,
+            entries: Some(vec![GenerateEntryBody {
+                issue_number: 4898,
+                batch_phase: Some(0),
+                thread_group: Some(1),
+                phase_gate_kind: Some(kind.to_string()),
+            }]),
+            review_mode: None,
+            mode: None,
+            unified_thread: None,
+            parallel: None,
+            max_concurrent_threads: None,
+            force: None,
+            max_concurrent_per_agent: None,
+        }
+    }
+
+    fn state_with_postgres(pg_pool: Option<sqlx::PgPool>) -> AppState {
+        let config = crate::config::Config::default();
+        let broadcast_tx = crate::eventbus::new_broadcast();
+        let batch_buffer = crate::eventbus::spawn_batch_flusher(broadcast_tx.clone());
+        AppState {
+            pg_pool,
+            engine: crate::engine::PolicyEngine::new(&config)
+                .expect("construct policy engine for validation test"), // agentdesk-audit: allow-unwrap — test fixture construction
+            config: Arc::new(config),
+            broadcast_tx,
+            batch_buffer,
+            health_registry: None,
+            cluster_instance_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_deploy_gate_is_a_typed_client_error_before_database_access() {
+        let error = generate(State(state_with_postgres(None)), Json(body("deploy-gate")))
+            .await
+            .expect_err("unavailable deploy-gate must be rejected");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.code(), ErrorCode::AutoQueue);
+        assert_eq!(
+            error.message(),
+            crate::phase_gate::DEPLOY_GATE_UNAVAILABLE_REASON
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_deploy_gate_creates_no_database_rows() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let runs_before =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM auto_queue_runs")
+                .fetch_one(&pool)
+                .await
+                .expect("count auto-queue runs before request"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        let entries_before =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM auto_queue_entries")
+                .fetch_one(&pool)
+                .await
+                .expect("count auto-queue entries before request"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+
+        let error = generate(
+            State(state_with_postgres(Some(pool.clone()))),
+            Json(body("deploy-gate")),
+        )
+        .await
+        .expect_err("unavailable deploy-gate must be rejected");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM auto_queue_runs")
+                .fetch_one(&pool)
+                .await
+                .expect("count auto-queue runs after request"), // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+            runs_before
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM auto_queue_entries")
+                .fetch_one(&pool)
+                .await
+                .expect("count auto-queue entries after request"), // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+            entries_before
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+}
