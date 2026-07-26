@@ -1364,6 +1364,7 @@ src/
 │   ├── settings.rs
 │   ├── shell_guard.rs
 │   ├── stale_turn_reconciler.rs
+│   ├── terminal_abort_authority.rs
 │   ├── terminal_status_formatting.rs
 │   ├── termination_audit.rs
 │   ├── tmux_common.rs

@@ -74,6 +74,8 @@ test-non-pg:
     # #4913 GO-A1: retain canonical Discord identity validation, collision, and observability contracts.
     cargo test --lib canonical_identity::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib session_canonical_identity::tests -- --skip _pg --skip pg_ --skip postgres
+    # #4895 Slice 1: retain every dormant terminal-abort authority reducer contract.
+    cargo test --lib services::terminal_abort_authority::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::observability::metrics::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib cli::args::tests::legacy_queue_help_directs_users_to_query_without_changing_compatibility_contract
     cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1
