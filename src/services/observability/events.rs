@@ -6,10 +6,15 @@
 //! `/api/analytics/observability`.
 //!
 //! The buffer is bounded (`MAX_EVENTS`) and retains the most recent history.
-//! Evicting history already confirmed on disk is normal retention; only
-//! overwriting an event that has not been confirmed flushed is counted as loss.
-//! A background task (spawned by `ensure_flusher`) flushes new events to
+//! Evicting history already confirmed durable is normal retention; only
+//! overwriting an event that has not been confirmed durable is counted as loss.
+//! A background task (spawned by `ensure_flusher`) appends new events to
 //! `~/.adk/release/logs/observability-events.jsonl` every 60 seconds.
+//!
+//! The JSONL file is at-least-once: an append can complete before `flush` or
+//! `sync_all` reports failure, so a retry may append the same event again. Every
+//! newly recorded event carries a stable `event_id`; consumers that need
+//! exactly-once interpretation must deduplicate by that additive field.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -28,6 +33,9 @@ pub const FLUSH_INTERVAL: Duration = Duration::from_secs(60);
 /// infrastructure timestamps with milliseconds since the Unix epoch.
 #[derive(Debug, Clone, Serialize)]
 pub struct StructuredEvent {
+    /// Stable identity across persistence retries. This additive field lets
+    /// JSONL consumers deduplicate the log's documented at-least-once writes.
+    pub event_id: String,
     pub event_type: String,
     pub channel_id: Option<u64>,
     pub provider: Option<String>,
@@ -43,6 +51,7 @@ impl StructuredEvent {
         payload: Value,
     ) -> Self {
         Self {
+            event_id: uuid::Uuid::new_v4().to_string(),
             event_type: event_type.into(),
             channel_id,
             provider: provider.map(|p| p.trim().to_ascii_lowercase()),
@@ -80,7 +89,7 @@ struct EventLogInner {
 }
 
 /// Immutable flush snapshot. A caller may acknowledge `flushed_through` only
-/// after every event in `events` has been written and the writer has flushed.
+/// after every event in `events` has crossed the required durability boundary.
 #[derive(Debug, Clone)]
 pub struct FlushBatch {
     events: Vec<StructuredEvent>,
@@ -294,21 +303,40 @@ pub fn flush_target_path() -> PathBuf {
         .join("observability-events.jsonl")
 }
 
-fn write_events<W: std::io::Write>(
+fn append_events<W: std::io::Write>(
     writer: &mut W,
     events: &[StructuredEvent],
 ) -> std::io::Result<()> {
     for ev in events {
-        let line = serde_json::to_string(ev)
-            .unwrap_or_else(|_| "{\"event_type\":\"_serialize_error\"}".to_string());
+        let line = serde_json::to_string(ev).map_err(std::io::Error::other)?;
         writer.write_all(line.as_bytes())?;
         writer.write_all(b"\n")?;
     }
     writer.flush()
 }
 
-/// Append the given events to the JSONL target and flush the userspace writer.
-/// The caller may advance its durability watermark only after this returns.
+trait DurableEventWriter: std::io::Write {
+    fn sync_durable(&mut self) -> std::io::Result<()>;
+}
+
+impl DurableEventWriter for std::fs::File {
+    fn sync_durable(&mut self) -> std::io::Result<()> {
+        self.sync_all()
+    }
+}
+
+fn append_and_sync<W: DurableEventWriter>(
+    writer: &mut W,
+    events: &[StructuredEvent],
+) -> std::io::Result<()> {
+    append_events(writer, events)?;
+    writer.sync_durable()
+}
+
+/// Append the given events to the at-least-once JSONL target and synchronize
+/// file data and metadata. The caller may confirm durability only after this
+/// returns. A failed `flush` or `sync_all` leaves the batch unconfirmed; retry
+/// can append duplicates carrying the same stable `event_id`.
 pub fn flush_events_to_disk(events: &[StructuredEvent]) -> std::io::Result<()> {
     use std::fs::{OpenOptions, create_dir_all};
     if events.is_empty() {
@@ -319,7 +347,7 @@ pub fn flush_events_to_disk(events: &[StructuredEvent]) -> std::io::Result<()> {
         create_dir_all(parent)?;
     }
     let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
-    write_events(&mut file, events)
+    append_and_sync(&mut file, events)
 }
 
 fn flush_once_with<F>(log: &EventLog, persist: F) -> std::io::Result<usize>
@@ -416,6 +444,52 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct FailingDurableWriter {
+        bytes: Vec<u8>,
+        fail_flush: bool,
+        fail_sync: bool,
+        sync_calls: usize,
+    }
+
+    impl Write for FailingDurableWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if self.fail_flush {
+                Err(io::Error::other("injected flush failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl DurableEventWriter for FailingDurableWriter {
+        fn sync_durable(&mut self) -> io::Result<()> {
+            self.sync_calls += 1;
+            if self.fail_sync {
+                Err(io::Error::other("injected sync failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn jsonl_event_ids(bytes: &[u8]) -> Vec<String> {
+        String::from_utf8_lossy(bytes)
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<Value>(line).unwrap()["event_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    }
+
     #[test]
     fn partial_jsonl_write_does_not_advance_confirmation() {
         let log = EventLog::new(2);
@@ -425,11 +499,120 @@ mod tests {
             bytes: Vec::new(),
         };
 
-        assert!(flush_once_with(&log, |events| write_events(&mut writer, events)).is_err());
+        assert!(flush_once_with(&log, |events| append_events(&mut writer, events)).is_err());
         assert_eq!(
             event_names(log.snapshot_unflushed().unwrap().events()),
             vec!["event-with-enough-bytes"]
         );
+    }
+
+    #[test]
+    fn full_write_then_flush_failure_retries_with_stable_event_id() {
+        let log = EventLog::new(2);
+        log.push(event("e1"));
+        let original_id = log.recent(1)[0].event_id.clone();
+        let mut first = FailingDurableWriter {
+            fail_flush: true,
+            ..FailingDurableWriter::default()
+        };
+
+        assert!(flush_once_with(&log, |events| append_and_sync(&mut first, events)).is_err());
+        assert_eq!(first.sync_calls, 0);
+        assert_eq!(jsonl_event_ids(&first.bytes), vec![original_id.clone()]);
+        assert_eq!(
+            log.snapshot_unflushed().unwrap().events()[0].event_id,
+            original_id
+        );
+
+        let mut retry = FailingDurableWriter::default();
+        assert_eq!(
+            flush_once_with(&log, |events| append_and_sync(&mut retry, events)).unwrap(),
+            1
+        );
+        assert_eq!(retry.sync_calls, 1);
+        assert_eq!(jsonl_event_ids(&retry.bytes), vec![original_id]);
+        assert!(log.snapshot_unflushed().is_none());
+        assert_eq!(log.dropped_total(), 0);
+    }
+
+    #[test]
+    fn full_write_then_sync_failure_does_not_confirm_or_quietly_evict() {
+        let log = EventLog::new(1);
+        log.push(event("e1"));
+        let original_id = log.recent(1)[0].event_id.clone();
+        let mut writer = FailingDurableWriter {
+            fail_sync: true,
+            ..FailingDurableWriter::default()
+        };
+
+        assert!(flush_once_with(&log, |events| append_and_sync(&mut writer, events)).is_err());
+        assert_eq!(writer.sync_calls, 1);
+        assert_eq!(jsonl_event_ids(&writer.bytes), vec![original_id.clone()]);
+        assert!(log.snapshot_unflushed().is_some());
+
+        writer.fail_sync = false;
+        assert_eq!(
+            flush_once_with(&log, |events| append_and_sync(&mut writer, events)).unwrap(),
+            1
+        );
+        assert_eq!(writer.sync_calls, 2);
+        assert_eq!(
+            jsonl_event_ids(&writer.bytes),
+            vec![original_id.clone(), original_id]
+        );
+        assert_eq!(log.dropped_total(), 0);
+        assert!(log.snapshot_unflushed().is_none());
+    }
+
+    #[test]
+    fn sync_failure_followed_by_overwrite_counts_unconfirmed_loss() {
+        let log = EventLog::new(1);
+        log.push(event("e1"));
+        let mut writer = FailingDurableWriter {
+            fail_sync: true,
+            ..FailingDurableWriter::default()
+        };
+
+        assert!(flush_once_with(&log, |events| append_and_sync(&mut writer, events)).is_err());
+        log.push(event("e2"));
+
+        assert_eq!(log.dropped_total(), 1);
+        assert_eq!(log.retention_evicted_total(), 0);
+    }
+
+    #[test]
+    fn durable_sync_success_is_required_before_confirmation() {
+        let log = EventLog::new(1);
+        log.push(event("e1"));
+        let mut writer = FailingDurableWriter::default();
+
+        assert_eq!(
+            flush_once_with(&log, |events| append_and_sync(&mut writer, events)).unwrap(),
+            1
+        );
+        assert_eq!(writer.sync_calls, 1);
+        assert!(log.snapshot_unflushed().is_none());
+
+        log.push(event("e2"));
+        assert_eq!(log.dropped_total(), 0);
+        assert_eq!(log.retention_evicted_total(), 1);
+    }
+
+    #[test]
+    fn serialized_event_id_is_additive_and_stable_across_snapshot_clones() {
+        let log = EventLog::new(2);
+        log.push(event("e1"));
+        let first = log.snapshot_unflushed().unwrap();
+        let second = log.snapshot_unflushed().unwrap();
+        let first_value = serde_json::to_value(&first.events()[0]).unwrap();
+
+        assert_eq!(first.events()[0].event_id, second.events()[0].event_id);
+        assert_eq!(
+            first_value["event_id"].as_str(),
+            Some(first.events()[0].event_id.as_str())
+        );
+        assert_eq!(first_value["event_type"], "e1");
+        assert!(first_value["payload"].is_object());
     }
 
     #[test]
