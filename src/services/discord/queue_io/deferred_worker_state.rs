@@ -56,56 +56,116 @@ impl DeferredIdleQueueEntry {
             .store(phase as u8, std::sync::atomic::Ordering::Release);
     }
 
+    pub(super) fn try_begin_releasing(&self, expected: DeferredIdleQueuePhase) -> bool {
+        self.phase
+            .compare_exchange(
+                expected as u8,
+                DeferredIdleQueuePhase::Releasing as u8,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub(super) fn request_checkpoint(&self) -> (u64, u64) {
+        (
+            self.requested_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+            self.coalesced_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+        )
+    }
+
+    pub(super) fn exactly_owned_by(&self, current: &std::sync::Arc<Self>) -> bool {
+        std::ptr::eq(std::sync::Arc::as_ptr(current), self)
+            && current.worker_epoch == self.worker_epoch
+    }
+
+    pub(super) fn try_retire_exact(
+        &self,
+        channels: &dashmap::DashMap<
+            serenity::all::ChannelId,
+            std::sync::Arc<DeferredIdleQueueEntry>,
+        >,
+        channel_id: serenity::all::ChannelId,
+        expected_phase: DeferredIdleQueuePhase,
+        request_checkpoint: (u64, u64),
+    ) -> bool {
+        if !self.try_begin_releasing(expected_phase) {
+            return false;
+        }
+        let owns_entry = channels
+            .get(&channel_id)
+            .is_some_and(|current| self.exactly_owned_by(current.value()));
+        if !owns_entry || self.request_checkpoint() != request_checkpoint {
+            self.set_phase(expected_phase);
+            return false;
+        }
+        true
+    }
+
     pub(super) fn request_immediate(&self) -> bool {
-        match self.phase() {
-            DeferredIdleQueuePhase::InitialDelay | DeferredIdleQueuePhase::BackstopWait => loop {
-                let requested = self
-                    .requested_epoch
-                    .load(std::sync::atomic::Ordering::Acquire);
-                if requested == u64::MAX {
-                    let observed = self
-                        .observed_epoch
-                        .load(std::sync::atomic::Ordering::Acquire);
-                    if observed != requested {
-                        self.notify.notify_one();
-                        return true;
+        loop {
+            let phase = self.phase();
+            match phase {
+                DeferredIdleQueuePhase::InitialDelay | DeferredIdleQueuePhase::BackstopWait => {
+                    loop {
+                        let requested = self
+                            .requested_epoch
+                            .load(std::sync::atomic::Ordering::Acquire);
+                        if requested == u64::MAX {
+                            let observed = self
+                                .observed_epoch
+                                .load(std::sync::atomic::Ordering::Acquire);
+                            if observed != requested {
+                                self.notify.notify_one();
+                                break;
+                            }
+                            if self
+                                .requested_epoch
+                                .compare_exchange(
+                                    requested,
+                                    1,
+                                    std::sync::atomic::Ordering::AcqRel,
+                                    std::sync::atomic::Ordering::Acquire,
+                                )
+                                .is_ok()
+                            {
+                                self.observed_epoch
+                                    .store(0, std::sync::atomic::Ordering::Release);
+                                self.notify.notify_one();
+                                break;
+                            }
+                            continue;
+                        }
+                        if self
+                            .requested_epoch
+                            .compare_exchange_weak(
+                                requested,
+                                requested + 1,
+                                std::sync::atomic::Ordering::AcqRel,
+                                std::sync::atomic::Ordering::Acquire,
+                            )
+                            .is_ok()
+                        {
+                            self.notify.notify_one();
+                            break;
+                        }
                     }
-                    if self
-                        .requested_epoch
-                        .compare_exchange(
-                            requested,
-                            1,
-                            std::sync::atomic::Ordering::AcqRel,
-                            std::sync::atomic::Ordering::Acquire,
-                        )
-                        .is_ok()
-                    {
-                        self.observed_epoch
-                            .store(0, std::sync::atomic::Ordering::Release);
-                        self.notify.notify_one();
-                        return true;
-                    }
-                    continue;
                 }
-                if self
-                    .requested_epoch
-                    .compare_exchange_weak(
-                        requested,
-                        requested + 1,
-                        std::sync::atomic::Ordering::AcqRel,
-                        std::sync::atomic::Ordering::Acquire,
-                    )
-                    .is_ok()
-                {
-                    self.notify.notify_one();
-                    return true;
+                DeferredIdleQueuePhase::Kicking | DeferredIdleQueuePhase::BackstopKicking => {
+                    saturating_increment(&self.coalesced_epoch);
                 }
-            },
-            DeferredIdleQueuePhase::Kicking | DeferredIdleQueuePhase::BackstopKicking => {
-                saturating_increment(&self.coalesced_epoch);
-                true
+                DeferredIdleQueuePhase::Releasing => return false,
             }
-            DeferredIdleQueuePhase::Releasing => false,
+
+            let current = self.phase();
+            if current == phase {
+                return true;
+            }
+            if current == DeferredIdleQueuePhase::Releasing {
+                return false;
+            }
         }
     }
 
@@ -149,6 +209,32 @@ fn saturating_increment(counter: &std::sync::atomic::AtomicU64) {
         std::sync::atomic::Ordering::Acquire,
         |value| Some(value.saturating_add(1)),
     );
+}
+
+pub(super) async fn wait_for_deferred_idle_queue_delay(
+    entry: &DeferredIdleQueueEntry,
+    delay: std::time::Duration,
+) -> DeferredIdleQueueWaitOutcome {
+    let deadline = tokio::time::Instant::now() + delay;
+    loop {
+        if entry.observe_pending_request() {
+            return DeferredIdleQueueWaitOutcome::Immediate;
+        }
+        let notified = entry.notify.notified();
+        if entry.observe_pending_request() {
+            return DeferredIdleQueueWaitOutcome::Immediate;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => {
+                return DeferredIdleQueueWaitOutcome::Deadline;
+            }
+            _ = notified => {
+                if entry.observe_pending_request() {
+                    return DeferredIdleQueueWaitOutcome::Immediate;
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

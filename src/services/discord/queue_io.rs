@@ -18,7 +18,25 @@ struct DeferredHookBacklogGuard {
 pub(in crate::services) mod deferred_worker_state;
 use self::deferred_worker_state::{
     DeferredIdleQueueEntry, DeferredIdleQueuePhase, DeferredIdleQueueWaitOutcome,
+    wait_for_deferred_idle_queue_delay,
 };
+
+async fn retire_deferred_idle_queue_worker_if_quiescent(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    entry: &DeferredIdleQueueEntry,
+    expected_phase: DeferredIdleQueuePhase,
+    request_checkpoint: (u64, u64),
+) -> bool {
+    #[cfg(test)]
+    pause_before_deferred_idle_queue_empty_exit_for_tests().await;
+    entry.try_retire_exact(
+        &shared.restart.deferred_hook_channels,
+        channel_id,
+        expected_phase,
+        request_checkpoint,
+    )
+}
 
 const DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY: std::time::Duration =
     std::time::Duration::from_secs(2);
@@ -31,6 +49,10 @@ static IDLE_QUEUE_BACKSTOP_FIRES_FOR_TESTS: std::sync::atomic::AtomicUsize =
 #[cfg(test)]
 static PANIC_DEFERRED_IDLE_QUEUE_WORKER_FOR_TESTS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static PAUSE_DEFERRED_IDLE_QUEUE_EMPTY_EXIT_FOR_TESTS: std::sync::Mutex<
+    Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>,
+> = std::sync::Mutex::new(None);
 
 tokio::task_local! {
     static SUPPRESS_POST_ENQUEUE_IDLE_QUEUE_KICK: bool;
@@ -87,6 +109,41 @@ async fn idle_queue_kick_hook_outcome_for_tests(
         .expect("idle queue kick hook lock")
         .clone();
     hook?(shared, provider, channel_id, reason).await
+}
+
+#[cfg(test)]
+struct DeferredIdleQueueEmptyExitPauseResetForTests;
+
+#[cfg(test)]
+impl Drop for DeferredIdleQueueEmptyExitPauseResetForTests {
+    fn drop(&mut self) {
+        *PAUSE_DEFERRED_IDLE_QUEUE_EMPTY_EXIT_FOR_TESTS
+            .lock()
+            .expect("empty-exit pause lock") = None;
+    }
+}
+
+#[cfg(test)]
+fn pause_deferred_idle_queue_empty_exit_for_tests(
+    reached: Arc<tokio::sync::Barrier>,
+    resume: Arc<tokio::sync::Barrier>,
+) -> DeferredIdleQueueEmptyExitPauseResetForTests {
+    *PAUSE_DEFERRED_IDLE_QUEUE_EMPTY_EXIT_FOR_TESTS
+        .lock()
+        .expect("empty-exit pause lock") = Some((reached, resume));
+    DeferredIdleQueueEmptyExitPauseResetForTests
+}
+
+#[cfg(test)]
+async fn pause_before_deferred_idle_queue_empty_exit_for_tests() {
+    let pause = PAUSE_DEFERRED_IDLE_QUEUE_EMPTY_EXIT_FOR_TESTS
+        .lock()
+        .expect("empty-exit pause lock")
+        .clone();
+    if let Some((reached, resume)) = pause {
+        reached.wait().await;
+        resume.wait().await;
+    }
 }
 
 pub(in crate::services::discord) async fn mailbox_cancel_queued_primary_message(
@@ -188,15 +245,11 @@ impl DeferredIdleQueueKickoffProfile {
             Self::ImmediateOnce => std::time::Duration::ZERO,
         }
     }
-
     fn is_immediate(self) -> bool {
         matches!(self, Self::ImmediateOnce)
     }
 }
 
-/// #3005/#4048: pre-sleep before the one non-event deferred-drain attempt.
-/// Completion events bypass this helper and kick their channel immediately.
-/// Every other caller keeps the 2s delay to avoid restart-window spin.
 #[cfg(test)]
 fn deferred_idle_queue_initial_presleep(immediate_once: bool) -> std::time::Duration {
     if immediate_once {
@@ -545,32 +598,6 @@ async fn idle_queue_backstop_backlog_units_all(
         .sum()
 }
 
-async fn wait_for_deferred_idle_queue_delay(
-    entry: &DeferredIdleQueueEntry,
-    delay: std::time::Duration,
-) -> DeferredIdleQueueWaitOutcome {
-    let deadline = tokio::time::Instant::now() + delay;
-    loop {
-        if entry.observe_pending_request() {
-            return DeferredIdleQueueWaitOutcome::Immediate;
-        }
-        let notified = entry.notify.notified();
-        if entry.observe_pending_request() {
-            return DeferredIdleQueueWaitOutcome::Immediate;
-        }
-        tokio::select! {
-            _ = tokio::time::sleep_until(deadline) => {
-                return DeferredIdleQueueWaitOutcome::Deadline;
-            }
-            _ = notified => {
-                if entry.observe_pending_request() {
-                    return DeferredIdleQueueWaitOutcome::Immediate;
-                }
-            }
-        }
-    }
-}
-
 async fn deferred_idle_queue_worker(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -601,15 +628,38 @@ async fn deferred_idle_queue_worker(
     entry.coalesce_requests_during_kick();
 
     loop {
+        let request_checkpoint = entry.request_checkpoint();
         let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
-        if idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot) == 0
-            || idle_queue_snapshot_blocked_by_real_turn(&snapshot)
-            || shared
-                .restart
-                .shutting_down
-                .load(std::sync::atomic::Ordering::Acquire)
+        if shared
+            .restart
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
         {
             return;
+        }
+        let backlog_units =
+            idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot);
+        if backlog_units == 0 || idle_queue_snapshot_blocked_by_real_turn(&snapshot) {
+            if retire_deferred_idle_queue_worker_if_quiescent(
+                shared,
+                channel_id,
+                entry,
+                entry.phase(),
+                request_checkpoint,
+            )
+            .await
+            {
+                return;
+            }
+            if entry.request_checkpoint() != request_checkpoint {
+                entry.set_phase(DeferredIdleQueuePhase::Kicking);
+                let _ = kick_idle_queue_channel_if_context_available(
+                    shared, provider, channel_id, reason,
+                )
+                .await;
+                entry.coalesce_requests_during_kick();
+            }
+            continue;
         }
 
         entry.set_phase(DeferredIdleQueuePhase::BackstopWait);
@@ -623,11 +673,31 @@ async fn deferred_idle_queue_worker(
             return;
         }
 
+        let request_checkpoint = entry.request_checkpoint();
         let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
         let backlog_units =
             idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot);
+        if entry.request_checkpoint() != request_checkpoint {
+            entry.set_phase(DeferredIdleQueuePhase::BackstopKicking);
+            let _ =
+                kick_idle_queue_channel_if_context_available(shared, provider, channel_id, reason)
+                    .await;
+            entry.coalesce_requests_during_kick();
+            continue;
+        }
         if backlog_units == 0 || idle_queue_snapshot_blocked_by_real_turn(&snapshot) {
-            return;
+            if retire_deferred_idle_queue_worker_if_quiescent(
+                shared,
+                channel_id,
+                entry,
+                DeferredIdleQueuePhase::BackstopWait,
+                request_checkpoint,
+            )
+            .await
+            {
+                return;
+            }
+            continue;
         }
         if matches!(wait_outcome, DeferredIdleQueueWaitOutcome::Deadline) {
             emit_idle_queue_backstop_warn(
@@ -701,14 +771,16 @@ fn schedule_deferred_idle_queue_worker(
                     );
                     return false;
                 }
-                let _ =
-                    shared
-                        .restart
-                        .deferred_hook_channels
-                        .remove_if(&channel_id, |_, current| {
-                            Arc::ptr_eq(current, &entry)
-                                && current.worker_epoch == entry.worker_epoch
-                        });
+                let removed = shared
+                    .restart
+                    .deferred_hook_channels
+                    .remove_if(&channel_id, |_, current| {
+                        Arc::ptr_eq(current, &entry) && current.worker_epoch == entry.worker_epoch
+                    })
+                    .is_some();
+                if !removed {
+                    std::thread::yield_now();
+                }
             }
             dashmap::mapref::entry::Entry::Vacant(slot) => {
                 let entry = Arc::new(DeferredIdleQueueEntry::new(profile.is_immediate()));
@@ -1349,6 +1421,116 @@ mod presleep_tests {
             .get(&channel_id)
             .expect("successor remains");
         assert!(Arc::ptr_eq(current.value(), &successor));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn empty_snapshot_race_preserves_request_without_lost_wake() {
+        let _root = scoped_runtime_root();
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_024_286);
+        let reached = Arc::new(tokio::sync::Barrier::new(2));
+        let resume = Arc::new(tokio::sync::Barrier::new(2));
+        let _pause =
+            pause_deferred_idle_queue_empty_exit_for_tests(reached.clone(), resume.clone());
+        let kick_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_calls = kick_calls.clone();
+        let _hook = set_idle_queue_kick_hook_for_tests(Arc::new(
+            move |_shared, _provider, channel, _reason| {
+                let hook_calls = hook_calls.clone();
+                Box::pin(async move {
+                    if channel != channel_id {
+                        return None;
+                    }
+                    hook_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Some(IdleQueueKickoffChannelOutcome { started: false })
+                })
+            },
+        ));
+
+        schedule_deferred_idle_queue_kickoff_immediate(
+            shared.clone(),
+            provider.clone(),
+            channel_id,
+            "empty-exit-race-test",
+        );
+        reached.wait().await;
+        let old_epoch = shared
+            .restart
+            .deferred_hook_channels
+            .get(&channel_id)
+            .expect("old worker remains published at the empty-exit barrier")
+            .worker_epoch;
+        shared
+            .mailbox(channel_id)
+            .replace_queue(
+                vec![user_intervention(4_024_287, "enqueue during empty exit")],
+                queue_persistence_context(&shared, &provider, channel_id),
+            )
+            .await;
+        schedule_deferred_idle_queue_kickoff_immediate(
+            shared.clone(),
+            provider,
+            channel_id,
+            "empty-exit-race-request",
+        );
+        resume.wait().await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+
+        let current = shared
+            .restart
+            .deferred_hook_channels
+            .get(&channel_id)
+            .expect("current worker or successor retains the slow backstop");
+        assert_eq!(
+            current.worker_epoch, old_epoch,
+            "a request accepted before retirement keeps the exact current owner alive",
+        );
+        assert_eq!(
+            kick_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the initial attempt and exactly one retry cover the durable enqueue race",
+        );
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the retained guard and map owner stay balanced",
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn request_observed_after_releasing_installs_successor_without_busy_spin() {
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_024_288);
+        let old = Arc::new(DeferredIdleQueueEntry::new(false));
+        old.set_phase(DeferredIdleQueuePhase::Releasing);
+        shared
+            .restart
+            .deferred_hook_channels
+            .insert(channel_id, old.clone());
+
+        assert!(schedule_deferred_idle_queue_worker(
+            shared.clone(),
+            provider,
+            channel_id,
+            "releasing-successor-test",
+            DeferredIdleQueueKickoffProfile::ImmediateOnce,
+            None,
+            0,
+        ));
+        let current = shared
+            .restart
+            .deferred_hook_channels
+            .get(&channel_id)
+            .expect("successor installed");
+        assert!(!Arc::ptr_eq(current.value(), &old));
+        assert_ne!(current.worker_epoch, old.worker_epoch);
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
