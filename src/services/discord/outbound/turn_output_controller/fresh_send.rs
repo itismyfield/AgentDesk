@@ -192,9 +192,10 @@ fn record_success(
                 panel_msg_id: Some(message_id.get()),
                 panel_channel_id: Some(record.record_channel_id.get()),
             };
-            delivery_record::write_delivered_frontier(
+            delivery_record::write_current_generation_frontier(
                 &record.provider,
                 record.record_channel_id.get(),
+                &record.tmux_session_name,
                 commit,
             )
         }
@@ -208,11 +209,12 @@ fn record_success(
                 body,
                 generation_mtime_ns,
             )
+            .map(|_| true)
         }
     };
 
     match result {
-        Ok(()) => true,
+        Ok(recorded) => recorded,
         Err(error) => {
             tracing::warn!(
                 provider = record.provider.as_str(),

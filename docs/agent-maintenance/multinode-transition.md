@@ -447,13 +447,16 @@
 
 ### Audited touches
 - 2026-07-26 — #4890/#4926 delivery-record frontier repair: the worker-local
-  delivery-record sidecar now rejects delayed same-generation writers whose END
-  trails the durable frontier while preserving generation replacement and the
-  EOF-validated expected-END reanchor CAS. Production SHADOW/AUTHORITY remains
-  code-level default-ON with no environment OFF rollback; `cfg(test)` OFF seams
-  cover only legacy behavior. Rollback is a prior binary or forward fix. No
-  cross-node authority, PG lease, leader-only side effect, schema, or hotfile
-  changes are introduced.
+  delivery-record sidecar rejects delayed same-generation writers whose END trails
+  the durable frontier, deterministically merges equal-END metadata, and checks the
+  current transcript generation marker under the record lock before a different
+  generation may replace it. Generation identity is equality-only; mtime numeric
+  order is not chronology. Recovery can replace a proved-gone equal-range anchor
+  only with an expected-anchor CAS, while compact/EOF lowering retains its separate
+  expected-END CAS. Production SHADOW/AUTHORITY remains code-level default-ON with
+  no environment OFF rollback; `cfg(test)` OFF seams cover only legacy behavior.
+  Rollback is a prior binary or forward fix. No cross-node authority, PG lease,
+  leader-only side effect, schema, or hotfile changes are introduced.
 - 2026-07-26 — #4898 untrusted deploy-gate containment: PostgreSQL migration
   0100 adds a validated cluster-wide `CHECK` constraint that rejects normalized
   `deploy-gate` provenance. The `ALTER TABLE` lock serializes concurrent legacy
@@ -927,13 +930,13 @@
   (`record_long_chunk_terminal_delivery`). This is purely worker-local delivery
   persistence: production binaries always write the durable frontier (SHADOW is
   code-level default-ON, with no production environment OFF path), while only a
-  `cfg(test)` seam retains the legacy no-op path. The recorded panel fields have NO
-  production reader (the sole durable-frontier reader consumes only `.range.1`), so
-  the #3593/#3520 dedup, #3604 window, and the `watcher_owner_channel_id`
-  offset-authority key are all unaffected.
-  No leader election, gateway lease, PG ownership, startup order, worker ownership, or
-  singleton assumption is touched; the recovery-fallback re-post criterion remains
-  deferred to a later #3610 PR.
+  `cfg(test)` seam retains the legacy no-op path. The offset-dedup readers consume
+  `.range.1`, while `delivery_frontier_probe` validates and exposes the anchor pair
+  to restart recovery; therefore START and anchor metadata must remain coherent with
+  the END-winning commit. The #3593/#3520 dedup, #3604 window, and the
+  `watcher_owner_channel_id` offset-authority key are otherwise unaffected.
+  No leader election, gateway lease, PG ownership, startup order, worker ownership,
+  or singleton assumption is touched.
 - #3593 synthetic-resume relay-duplicate guard: `tmux_watcher.rs` extends the
   resend-dedup decision so a non-reconciled, already-committed JSONL range (the
   background-agent-completion synthetic resume that restores the placeholder and

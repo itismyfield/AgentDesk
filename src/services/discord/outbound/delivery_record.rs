@@ -349,30 +349,158 @@ pub(in crate::services::discord) fn upsert_lease(
     upsert_lease_at(&record_path_or_err(provider, channel_id)?, lease)
 }
 
-/// Advance the delivered frontier. The general `Delivered` writer preserves the
-/// current lease and compares under the record lock so a delayed writer cannot
-/// replace a higher END from the same generation. A different generation starts
-/// a new coordinate space; the ordered-range writer also merges under this lock,
-/// while the EOF-validated reanchor path is the only intentional same-generation
-/// lowering operation and uses its own expected-END CAS.
+fn has_complete_terminal_anchor(frontier: &DeliveredCommit) -> bool {
+    matches!(frontier.panel_msg_id, Some(id) if id != 0)
+        && matches!(frontier.panel_channel_id, Some(id) if id != 0)
+}
+
+#[derive(Clone, Copy)]
+enum EqualEndAnchorUpdate {
+    PreserveCommitted,
+    ReplaceIfMatches {
+        expected_msg_id: Option<u64>,
+        expected_channel_id: Option<u64>,
+    },
+}
+
+fn anchor_matches_expected(
+    current: &DeliveredCommit,
+    expected_msg_id: Option<u64>,
+    expected_channel_id: Option<u64>,
+) -> bool {
+    if !has_complete_terminal_anchor(current) {
+        return true;
+    }
+    current.panel_msg_id == expected_msg_id && current.panel_channel_id == expected_channel_id
+}
+
+/// Merge equal-END commits without letting a delayed writer regress field authority.
+/// Complete anchors outrank incomplete anchors; among equally complete commits the
+/// larger START owns the range/anchor pair. An exact-range complete anchor is
+/// first-commit-wins unless a recovery caller presents the previous anchor as a CAS.
+/// Attempts are a counter mirror and only increase.
+fn merge_equal_end_frontier(
+    current: &mut DeliveredCommit,
+    incoming: DeliveredCommit,
+    anchor_update: EqualEndAnchorUpdate,
+) -> bool {
+    let current_complete = has_complete_terminal_anchor(current);
+    let incoming_complete = has_complete_terminal_anchor(&incoming);
+    let replace_anchor = match anchor_update {
+        EqualEndAnchorUpdate::PreserveCommitted => false,
+        EqualEndAnchorUpdate::ReplaceIfMatches {
+            expected_msg_id,
+            expected_channel_id,
+        } => {
+            incoming.range == current.range
+                && incoming_complete
+                && anchor_matches_expected(current, expected_msg_id, expected_channel_id)
+        }
+    };
+    if matches!(anchor_update, EqualEndAnchorUpdate::ReplaceIfMatches { .. }) && !replace_anchor {
+        return false;
+    }
+
+    current.attempts = current.attempts.max(incoming.attempts);
+    if replace_anchor
+        || (incoming_complete && !current_complete)
+        || (incoming_complete == current_complete && incoming.range.0 > current.range.0)
+    {
+        current.range.0 = incoming.range.0;
+        current.panel_msg_id = incoming.panel_msg_id;
+        current.panel_channel_id = incoming.panel_channel_id;
+    }
+    true
+}
+
+fn merge_delivered_frontier(
+    record: &mut DeliveryRecord,
+    frontier: DeliveredCommit,
+    anchor_update: EqualEndAnchorUpdate,
+) -> bool {
+    let Some(current) = record.delivered_frontier.as_mut() else {
+        record.delivered_frontier = Some(frontier);
+        return true;
+    };
+    if current.generation_mtime_ns != frontier.generation_mtime_ns
+        || frontier.range.1 > current.range.1
+    {
+        record.delivered_frontier = Some(frontier);
+        return true;
+    }
+    if frontier.range.1 == current.range.1 {
+        return merge_equal_end_frontier(current, frontier, anchor_update);
+    }
+    false
+}
+
+/// Test/store core without an external generation marker. Production writers use
+/// `write_current_generation_frontier_at`, which fences this merge under the same
+/// record lock.
 fn write_delivered_frontier_at(path: &Path, frontier: DeliveredCommit) -> Result<(), String> {
     mutate_record_at(path, |record| {
-        let Some(current) = record.delivered_frontier.as_ref() else {
-            record.delivered_frontier = Some(frontier);
-            return;
-        };
-        if current.generation_mtime_ns != frontier.generation_mtime_ns {
-            record.delivered_frontier = Some(frontier);
-            return;
-        }
-
-        if frontier.range.1 >= current.range.1 {
-            record.delivered_frontier = Some(frontier);
-        }
+        let _ = merge_delivered_frontier(record, frontier, EqualEndAnchorUpdate::PreserveCommitted);
     })
 }
 
-#[allow(dead_code)] // #3089 B1 uses the `_at` core directly; the provider/channel form is wired in B2.
+fn write_current_generation_frontier_at(
+    path: &Path,
+    frontier: DeliveredCommit,
+    anchor_update: EqualEndAnchorUpdate,
+    current_generation: impl FnOnce() -> i64,
+) -> Result<bool, String> {
+    if frontier.generation_mtime_ns == 0 {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let _lock = lock_record_path(path)?;
+    if current_generation() != frontier.generation_mtime_ns {
+        return Ok(false);
+    }
+    let mut record = read_record_at(path).unwrap_or_default();
+    let applied = merge_delivered_frontier(&mut record, frontier, anchor_update);
+    if applied {
+        write_record_at(path, &record)?;
+    }
+    Ok(applied)
+}
+
+pub(in crate::services::discord) fn write_current_generation_frontier(
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_session_name: &str,
+    frontier: DeliveredCommit,
+) -> Result<bool, String> {
+    write_current_generation_frontier_at(
+        &record_path_or_err(provider, channel_id)?,
+        frontier,
+        EqualEndAnchorUpdate::PreserveCommitted,
+        || current_generation_mtime_ns(tmux_session_name),
+    )
+}
+
+pub(in crate::services::discord) fn replace_current_generation_anchor(
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_session_name: &str,
+    expected_msg_id: Option<u64>,
+    expected_channel_id: Option<u64>,
+    frontier: DeliveredCommit,
+) -> Result<bool, String> {
+    write_current_generation_frontier_at(
+        &record_path_or_err(provider, channel_id)?,
+        frontier,
+        EqualEndAnchorUpdate::ReplaceIfMatches {
+            expected_msg_id,
+            expected_channel_id,
+        },
+        || current_generation_mtime_ns(tmux_session_name),
+    )
+}
+
+#[cfg(test)]
 pub(in crate::services::discord) fn write_delivered_frontier(
     provider: &ProviderKind,
     channel_id: u64,
@@ -385,6 +513,7 @@ fn commit_ordered_jsonl_range_at(
     path: &Path,
     range: (u64, u64),
     generation_mtime_ns: i64,
+    current_generation: impl FnOnce() -> i64,
 ) -> Result<bool, String> {
     if generation_mtime_ns == 0 || range.1 <= range.0 {
         return Ok(false);
@@ -393,6 +522,9 @@ fn commit_ordered_jsonl_range_at(
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     let _lock = lock_record_path(path)?;
+    if current_generation() != generation_mtime_ns {
+        return Ok(false);
+    }
     let mut record = read_record_at(path).unwrap_or_default();
     if let Some(frontier) = record.delivered_frontier.as_ref()
         && frontier.generation_mtime_ns == generation_mtime_ns
@@ -431,10 +563,12 @@ pub(in crate::services::discord) fn commit_ordered_jsonl_range(
     range: (u64, u64),
     generation_mtime_ns: i64,
 ) -> Result<bool, String> {
+    let tmux_session_name = provider.build_tmux_session_name(&channel.get().to_string());
     commit_ordered_jsonl_range_at(
         &record_path_or_err(provider, channel.get())?,
         range,
         generation_mtime_ns,
+        || current_generation_mtime_ns(&tmux_session_name),
     )
 }
 
@@ -1406,8 +1540,9 @@ fn record_delivered_frontier_shadow_at(
     panel_msg_id: Option<u64>,
     panel_channel_id: Option<u64>,
     in_memory_confirmed_end: u64,
+    current_generation: impl FnOnce() -> i64,
 ) -> Result<bool, String> {
-    write_delivered_frontier_at(
+    if !write_current_generation_frontier_at(
         path,
         DeliveredCommit {
             range,
@@ -1416,7 +1551,11 @@ fn record_delivered_frontier_shadow_at(
             panel_msg_id,
             panel_channel_id,
         },
-    )?;
+        EqualEndAnchorUpdate::PreserveCommitted,
+        current_generation,
+    )? {
+        return Ok(false);
+    }
     Ok(delivered_frontier_end_diverged(
         range.1,
         in_memory_confirmed_end,
@@ -1436,6 +1575,7 @@ fn record_delivered_frontier_shadow(
     panel_msg_id: Option<u64>,
     panel_channel_id: Option<u64>,
     in_memory_confirmed_end: u64,
+    tmux_session_name: Option<&str>,
 ) {
     let path = match record_path_or_err(provider, channel_id) {
         Ok(path) => path,
@@ -1457,6 +1597,11 @@ fn record_delivered_frontier_shadow(
         panel_msg_id,
         panel_channel_id,
         in_memory_confirmed_end,
+        || {
+            tmux_session_name
+                .map(current_generation_mtime_ns)
+                .unwrap_or(0)
+        },
     ) {
         Ok(false) => {}
         Ok(true) => tracing::error!(
@@ -1563,6 +1708,10 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
         return;
     }
     let in_memory_confirmed_end = coord.confirmed_end_offset.load(Ordering::Acquire);
+    let tmux_session_name = shared
+        .tmux_watchers
+        .channel_binding(&channel)
+        .map(|binding| binding.tmux_session_name);
     let fresh = crate::services::discord::inflight::load_inflight_state(provider, channel_id);
     let attempts = fresh
         .as_ref()
@@ -1577,6 +1726,7 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
         terminal_anchor_msg_id,
         terminal_anchor_channel_id,
         in_memory_confirmed_end,
+        tmux_session_name.as_deref(),
     );
 }
 
@@ -1723,8 +1873,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("record.json");
 
-        assert!(commit_ordered_jsonl_range_at(&path, (100, 200), 7).unwrap());
-        assert!(commit_ordered_jsonl_range_at(&path, (150, 180), 7).unwrap());
+        assert!(commit_ordered_jsonl_range_at(&path, (100, 200), 7, || 7).unwrap());
+        assert!(commit_ordered_jsonl_range_at(&path, (150, 180), 7, || 7).unwrap());
         assert_eq!(
             read_record_at(&path).unwrap().delivered_frontier.unwrap(),
             DeliveredCommit {
@@ -1736,7 +1886,7 @@ mod tests {
             }
         );
 
-        assert!(commit_ordered_jsonl_range_at(&path, (0, 50), 8).unwrap());
+        assert!(commit_ordered_jsonl_range_at(&path, (0, 50), 8, || 8).unwrap());
         assert_eq!(
             read_record_at(&path)
                 .unwrap()
@@ -1746,8 +1896,29 @@ mod tests {
             (0, 50),
             "a replacement wrapper starts a new coordinate space"
         );
-        assert!(!commit_ordered_jsonl_range_at(&path, (50, 50), 8).unwrap());
-        assert!(!commit_ordered_jsonl_range_at(&path, (50, 60), 0).unwrap());
+        assert!(!commit_ordered_jsonl_range_at(&path, (50, 50), 8, || 8).unwrap());
+        assert!(!commit_ordered_jsonl_range_at(&path, (50, 60), 0, || 0).unwrap());
+    }
+
+    #[test]
+    fn ordered_jsonl_commit_rejects_delayed_prior_generation_after_rollover_4890() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("record.json");
+
+        assert!(commit_ordered_jsonl_range_at(&path, (100, 200), 7, || 7).unwrap());
+        assert!(commit_ordered_jsonl_range_at(&path, (0, 50), 8, || 8).unwrap());
+        assert!(!commit_ordered_jsonl_range_at(&path, (200, 300), 7, || 8).unwrap());
+
+        assert_eq!(
+            read_record_at(&path).unwrap().delivered_frontier,
+            Some(DeliveredCommit {
+                range: (0, 50),
+                generation_mtime_ns: 8,
+                attempts: 1,
+                panel_msg_id: None,
+                panel_channel_id: None,
+            })
+        );
     }
 
     #[test]
@@ -1959,6 +2130,214 @@ mod tests {
         let reloaded = read_record_at(&path).unwrap();
         assert_eq!(reloaded.delivery_lease, None);
         assert_eq!(reloaded.delivered_frontier, Some(higher_winner));
+    }
+
+    #[test]
+    fn delayed_prior_generation_writer_cannot_replace_current_rollover_frontier_4890() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 48_903);
+        let delayed_old = DeliveredCommit {
+            range: (500, 900),
+            generation_mtime_ns: 7,
+            attempts: 5,
+            panel_msg_id: Some(900),
+            panel_channel_id: Some(7),
+        };
+        let current = DeliveredCommit {
+            range: (0, 90),
+            generation_mtime_ns: 3,
+            attempts: 1,
+            panel_msg_id: Some(90),
+            panel_channel_id: Some(3),
+        };
+
+        assert!(
+            write_current_generation_frontier_at(
+                &path,
+                delayed_old.clone(),
+                EqualEndAnchorUpdate::PreserveCommitted,
+                || 7,
+            )
+            .unwrap()
+        );
+        assert!(
+            write_current_generation_frontier_at(
+                &path,
+                current.clone(),
+                EqualEndAnchorUpdate::PreserveCommitted,
+                || 3,
+            )
+            .unwrap()
+        );
+
+        assert!(
+            !write_current_generation_frontier_at(
+                &path,
+                delayed_old,
+                EqualEndAnchorUpdate::PreserveCommitted,
+                || 3,
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            read_record_at(&path).unwrap().delivered_frontier,
+            Some(current),
+            "generation identity is equality-only; numeric mtime order is irrelevant"
+        );
+    }
+
+    #[test]
+    fn delayed_equal_end_writer_merges_without_regressing_frontier_metadata_4890() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 48_901);
+        let delayed_equal = DeliveredCommit {
+            range: (10, 90),
+            generation_mtime_ns: 700,
+            attempts: 1,
+            panel_msg_id: Some(10),
+            panel_channel_id: Some(100),
+        };
+        let current = DeliveredCommit {
+            range: (60, 90),
+            generation_mtime_ns: 700,
+            attempts: 3,
+            panel_msg_id: Some(90),
+            panel_channel_id: Some(900),
+        };
+
+        write_delivered_frontier_at(&path, current.clone()).unwrap();
+        write_delivered_frontier_at(&path, delayed_equal).unwrap();
+        assert_eq!(
+            read_record_at(&path).unwrap().delivered_frontier,
+            Some(current)
+        );
+    }
+
+    #[test]
+    fn equal_end_merge_can_improve_attempts_and_fill_missing_anchor_4890() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 48_902);
+        write_delivered_frontier_at(
+            &path,
+            DeliveredCommit {
+                range: (60, 90),
+                generation_mtime_ns: 700,
+                attempts: 1,
+                panel_msg_id: None,
+                panel_channel_id: None,
+            },
+        )
+        .unwrap();
+        write_delivered_frontier_at(
+            &path,
+            DeliveredCommit {
+                range: (60, 90),
+                generation_mtime_ns: 700,
+                attempts: 4,
+                panel_msg_id: Some(90),
+                panel_channel_id: Some(900),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_record_at(&path).unwrap().delivered_frontier,
+            Some(DeliveredCommit {
+                range: (60, 90),
+                generation_mtime_ns: 700,
+                attempts: 4,
+                panel_msg_id: Some(90),
+                panel_channel_id: Some(900),
+            })
+        );
+    }
+
+    #[test]
+    fn equal_end_anchor_replacement_requires_exact_previous_anchor_cas_4890() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 48_904);
+        let current = DeliveredCommit {
+            range: (60, 90),
+            generation_mtime_ns: 700,
+            attempts: 2,
+            panel_msg_id: Some(90),
+            panel_channel_id: Some(900),
+        };
+        let replacement = DeliveredCommit {
+            range: (60, 90),
+            generation_mtime_ns: 700,
+            attempts: 3,
+            panel_msg_id: Some(91),
+            panel_channel_id: Some(900),
+        };
+        write_delivered_frontier_at(&path, current.clone()).unwrap();
+
+        assert!(
+            !write_current_generation_frontier_at(
+                &path,
+                replacement.clone(),
+                EqualEndAnchorUpdate::ReplaceIfMatches {
+                    expected_msg_id: Some(89),
+                    expected_channel_id: Some(900),
+                },
+                || 700,
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            read_record_at(&path).unwrap().delivered_frontier,
+            Some(current),
+            "a delayed/stale replacement cannot overwrite another complete anchor"
+        );
+
+        assert!(
+            write_current_generation_frontier_at(
+                &path,
+                replacement.clone(),
+                EqualEndAnchorUpdate::ReplaceIfMatches {
+                    expected_msg_id: Some(90),
+                    expected_channel_id: Some(900),
+                },
+                || 700,
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            read_record_at(&path).unwrap().delivered_frontier,
+            Some(replacement)
+        );
+    }
+
+    #[test]
+    fn larger_start_with_incomplete_anchor_keeps_complete_equal_end_authority_4890() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 48_905);
+        let current = DeliveredCommit {
+            range: (10, 90),
+            generation_mtime_ns: 700,
+            attempts: 2,
+            panel_msg_id: Some(90),
+            panel_channel_id: Some(900),
+        };
+        write_delivered_frontier_at(&path, current.clone()).unwrap();
+        write_delivered_frontier_at(
+            &path,
+            DeliveredCommit {
+                range: (60, 90),
+                generation_mtime_ns: 700,
+                attempts: 4,
+                panel_msg_id: None,
+                panel_channel_id: None,
+            },
+        )
+        .unwrap();
+
+        let mut expected = current;
+        expected.attempts = 4;
+        assert_eq!(
+            read_record_at(&path).unwrap().delivered_frontier,
+            Some(expected)
+        );
     }
 
     #[test]
@@ -2262,9 +2641,17 @@ mod tests {
         // divergence when the durable END equals the in-memory authority.
         let dir = tempfile::tempdir().unwrap();
         let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 11);
-        let diverged =
-            record_delivered_frontier_shadow_at(&path, (3, 10), 111, 2, Some(9), Some(8), 10)
-                .unwrap();
+        let diverged = record_delivered_frontier_shadow_at(
+            &path,
+            (3, 10),
+            111,
+            2,
+            Some(9),
+            Some(8),
+            10,
+            || 111,
+        )
+        .unwrap();
         assert!(!diverged);
         let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
         assert_eq!(
@@ -2298,6 +2685,7 @@ mod tests {
                 Some(555),
                 Some(999),
                 77,
+                || 123,
             )
             .unwrap();
         }
@@ -2323,6 +2711,7 @@ mod tests {
                 Some(555),
                 Some(999),
                 0,
+                || 123,
             )
             .unwrap();
         }
@@ -2336,7 +2725,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 12);
         let diverged =
-            record_delivered_frontier_shadow_at(&path, (3, 10), 222, 0, None, None, 9).unwrap();
+            record_delivered_frontier_shadow_at(&path, (3, 10), 222, 0, None, None, 9, || 222)
+                .unwrap();
         assert!(diverged); // 10 (durable end) != 9 (in-memory)
         assert_eq!(
             read_record_at(&path)
@@ -2354,7 +2744,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 13);
         upsert_lease_at(&path, sample_lease()).unwrap();
-        record_delivered_frontier_shadow_at(&path, (0, 5), 5, 0, None, None, 5).unwrap();
+        record_delivered_frontier_shadow_at(&path, (0, 5), 5, 0, None, None, 5, || 5).unwrap();
         let after = read_record_at(&path).unwrap();
         assert_eq!(after.delivery_lease, Some(sample_lease()));
         assert_eq!(after.delivered_frontier.unwrap().range, (0, 5));
@@ -2885,6 +3275,7 @@ mod tests {
             Some(terminal_anchor),
             Some(anchor_channel),
             100,
+            || 700,
         )
         .unwrap();
         let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
@@ -2914,6 +3305,7 @@ mod tests {
             Some(edit_msg),
             Some(edit_channel),
             100,
+            || 700,
         )
         .unwrap();
         let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
@@ -2929,7 +3321,8 @@ mod tests {
         // frontier still advances normally.
         let dir = tempfile::tempdir().unwrap();
         let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36101);
-        record_delivered_frontier_shadow_at(&path, (0, 100), 700, 0, None, None, 100).unwrap();
+        record_delivered_frontier_shadow_at(&path, (0, 100), 700, 0, None, None, 100, || 700)
+            .unwrap();
         let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
         assert_eq!(written.panel_msg_id, None);
         assert_eq!(written.panel_channel_id, None);
@@ -3064,6 +3457,7 @@ mod tests {
             Some(last_chunk_anchor),
             Some(delivery_channel),
             4096,
+            || 700,
         )
         .unwrap();
         let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
@@ -3095,6 +3489,7 @@ mod tests {
             Some(777_111_222),
             Some(delivery_channel),
             8192,
+            || 700,
         )
         .unwrap();
         let written = read_record_at(&owner_path)
@@ -3117,8 +3512,17 @@ mod tests {
         // advances (END = range.1) so the dedup floor is correct.
         let dir = tempfile::tempdir().unwrap();
         let path = delivery_record_path_in_root(dir.path(), &ProviderKind::Claude, 36111);
-        record_delivered_frontier_shadow_at(&path, (0, 2048), 700, 0, None, Some(444), 2048)
-            .unwrap();
+        record_delivered_frontier_shadow_at(
+            &path,
+            (0, 2048),
+            700,
+            0,
+            None,
+            Some(444),
+            2048,
+            || 700,
+        )
+        .unwrap();
         let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();
         assert_eq!(written.panel_msg_id, None);
         assert_eq!(written.range, (0, 2048));
@@ -3274,6 +3678,7 @@ mod tests {
             Some(last_chunk_anchor),
             Some(watcher_channel), // == the record path channel (same-channel)
             16384,
+            || 700,
         )
         .unwrap();
         let written = read_record_at(&path).unwrap().delivered_frontier.unwrap();

@@ -229,7 +229,11 @@ impl RecoveryDeliveryContext {
             bind,
             inflight::GuardedSaveOutcome::Saved | inflight::GuardedSaveOutcome::Missing
         ) {
-            self.record_durable_frontier(anchor);
+            self.record_durable_frontier(
+                anchor,
+                (self.expected_current_msg_id != 0)
+                    .then_some((self.expected_current_msg_id, self.channel_id.get())),
+            );
         } else {
             tracing::warn!(
                 provider = %self.provider.as_str(),
@@ -241,7 +245,7 @@ impl RecoveryDeliveryContext {
         }
     }
 
-    fn record_durable_frontier(&self, anchor: MessageId) {
+    fn record_durable_frontier(&self, anchor: MessageId, expected_anchor: Option<(u64, u64)>) {
         // #4564: reaching here means a recovery terminal delivery was CONFIRMED
         // (the caller bound the anchor after a successful send), so append the
         // inbound turn to the completed-turn ledger. Keyed by the delivery
@@ -292,18 +296,40 @@ impl RecoveryDeliveryContext {
             panel_msg_id: Some(anchor.get()),
             panel_channel_id: Some(self.channel_id.get()),
         };
-        if let Err(error) = delivery_record::write_delivered_frontier(
-            &self.provider,
-            self.record_channel_id.get(),
-            commit,
-        ) {
-            tracing::warn!(
+        let write = match expected_anchor {
+            Some((expected_msg_id, expected_channel_id)) => {
+                delivery_record::replace_current_generation_anchor(
+                    &self.provider,
+                    self.record_channel_id.get(),
+                    tmux_session_name,
+                    Some(expected_msg_id),
+                    Some(expected_channel_id),
+                    commit,
+                )
+            }
+            None => delivery_record::write_current_generation_frontier(
+                &self.provider,
+                self.record_channel_id.get(),
+                tmux_session_name,
+                commit,
+            ),
+        };
+        match write {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(
+                provider = %self.provider.as_str(),
+                channel_id = self.channel_id.get(),
+                record_channel = self.record_channel_id.get(),
+                generation_mtime_ns,
+                "recovery no-anchor delivery: durable anchor write lost generation/anchor CAS"
+            ),
+            Err(error) => tracing::warn!(
                 provider = %self.provider.as_str(),
                 channel_id = self.channel_id.get(),
                 record_channel = self.record_channel_id.get(),
                 error = %error,
                 "recovery no-anchor delivery: durable anchor write failed"
-            );
+            ),
         }
     }
 }
