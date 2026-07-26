@@ -205,11 +205,29 @@ async fn hook_session_pg(
 
             Ok((StatusCode::OK, Json(json!({"ok": true}))))
         }
-        Err(error) => Err(
-            crate::db::dispatched_session_canonical_identity::hook_session_upsert_error_to_app_error(
-                error,
-            ),
-        ),
+        Err(error) => {
+            if let Some(kind) = error.conflict_kind() {
+                let channel_id = body
+                    .channel_id
+                    .as_deref()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(0);
+                crate::services::observability::metrics::record_session_identity_conflict(
+                    channel_id, provider, kind,
+                );
+                tracing::warn!(
+                    conflict_kind = kind.as_str(),
+                    provider,
+                    channel_id,
+                    "canonical session identity write rejected"
+                );
+            }
+            Err(
+                crate::db::dispatched_session_canonical_identity::hook_session_upsert_error_to_app_error(
+                    error,
+                ),
+            )
+        }
     }
 }
 
@@ -441,10 +459,7 @@ pub async fn get_claude_session_id(
             Ok(Some(ids)) => {
                 let selected_session_id =
                     selected_provider_resume_selector_for_provider_recording_observation(
-                        pool,
-                        &params.session_key,
-                        provider,
-                        &ids,
+                        pool, provider, &ids,
                     )
                     .await;
                 Ok((
@@ -1145,7 +1160,6 @@ pub(crate) fn selected_provider_resume_selector_for_provider<'a>(
 
 pub(crate) async fn selected_provider_resume_selector_for_provider_recording_observation(
     pool: &sqlx::PgPool,
-    session_key: &str,
     provider_name: Option<&str>,
     ids: &dispatched_sessions_db::ProviderSessionIds,
 ) -> Option<String> {
@@ -1153,7 +1167,7 @@ pub(crate) async fn selected_provider_resume_selector_for_provider_recording_obs
         selected_provider_resume_selector_for_provider(provider_name, ids).map(str::to_string);
     record_raw_provider_transcript_len_watermark_if_observed(
         pool,
-        session_key,
+        &ids.resolved_session_key,
         provider_name,
         ids,
         None,
@@ -1636,7 +1650,7 @@ async fn kill_tmux_session_impl(
             let resumable = provider_resume_selector_is_effective(effective_provider_name, &ids);
             record_raw_provider_transcript_len_watermark_if_observed(
                 pool,
-                session_key,
+                &ids.resolved_session_key,
                 effective_provider_name,
                 &ids,
                 None,
@@ -1823,6 +1837,7 @@ mod kill_tmux_resume_tests {
         raw_provider_transcript_growth_proven: bool,
     ) -> ProviderSessionIds {
         ProviderSessionIds {
+            resolved_session_key: "test-session".to_string(),
             claude_session_id: claude_session_id.map(str::to_string),
             raw_provider_session_id: raw_provider_session_id.map(str::to_string),
             cwd: cwd.map(|path| path.display().to_string()),

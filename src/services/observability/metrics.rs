@@ -69,6 +69,13 @@ pub struct AtomicCounters {
     /// cleanly assigned across the three relay-launch paths, root cause #3). A
     /// phantom/unknown owner can make the bridge skip its own delivery.
     pub relay_owner_unknown: AtomicU64,
+    /// #4913: canonical Discord identity writes rejected with a typed conflict.
+    pub session_identity_conflicts: AtomicU64,
+    pub session_identity_conflict_ambiguous_canonical: AtomicU64,
+    pub session_identity_conflict_ambiguous_legacy: AtomicU64,
+    pub session_identity_conflict_evidence_divergence: AtomicU64,
+    pub session_identity_conflict_locator_namespace: AtomicU64,
+    pub session_identity_conflict_ownership_mismatch: AtomicU64,
 }
 
 impl AtomicCounters {
@@ -89,6 +96,22 @@ impl AtomicCounters {
                 .relay_uncommitted_inflight_cleared
                 .load(Ordering::Relaxed),
             relay_owner_unknown: self.relay_owner_unknown.load(Ordering::Relaxed),
+            session_identity_conflicts: self.session_identity_conflicts.load(Ordering::Relaxed),
+            session_identity_conflict_ambiguous_canonical: self
+                .session_identity_conflict_ambiguous_canonical
+                .load(Ordering::Relaxed),
+            session_identity_conflict_ambiguous_legacy: self
+                .session_identity_conflict_ambiguous_legacy
+                .load(Ordering::Relaxed),
+            session_identity_conflict_evidence_divergence: self
+                .session_identity_conflict_evidence_divergence
+                .load(Ordering::Relaxed),
+            session_identity_conflict_locator_namespace: self
+                .session_identity_conflict_locator_namespace
+                .load(Ordering::Relaxed),
+            session_identity_conflict_ownership_mismatch: self
+                .session_identity_conflict_ownership_mismatch
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -110,6 +133,13 @@ pub struct AtomicCountersSnapshot {
     pub relay_uncommitted_inflight_cleared: u64,
     /// #2838: see [`AtomicCounters::relay_owner_unknown`].
     pub relay_owner_unknown: u64,
+    /// #4913: see [`AtomicCounters::session_identity_conflicts`].
+    pub session_identity_conflicts: u64,
+    pub session_identity_conflict_ambiguous_canonical: u64,
+    pub session_identity_conflict_ambiguous_legacy: u64,
+    pub session_identity_conflict_evidence_divergence: u64,
+    pub session_identity_conflict_locator_namespace: u64,
+    pub session_identity_conflict_ownership_mismatch: u64,
 }
 
 /// One row emitted by `ObservabilityCounters::snapshot()`.
@@ -141,6 +171,13 @@ pub struct CounterSnapshotRow {
     /// #2838: turns that began relay with an Unknown owner kind. See
     /// [`AtomicCounters::relay_owner_unknown`].
     pub relay_owner_unknown: u64,
+    /// #4913: canonical identity writes rejected with a typed conflict.
+    pub session_identity_conflicts: u64,
+    pub session_identity_conflict_ambiguous_canonical: u64,
+    pub session_identity_conflict_ambiguous_legacy: u64,
+    pub session_identity_conflict_evidence_divergence: u64,
+    pub session_identity_conflict_locator_namespace: u64,
+    pub session_identity_conflict_ownership_mismatch: u64,
 }
 
 /// In-process registry of `(channel_id, provider) -> AtomicCounters`.
@@ -232,6 +269,35 @@ impl ObservabilityCounters {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_session_identity_conflict(
+        &self,
+        channel_id: u64,
+        provider: &str,
+        kind: crate::db::dispatched_session_canonical_identity::SessionIdentityConflictKind,
+    ) {
+        let slot = self.slot(channel_id, provider);
+        slot.session_identity_conflicts
+            .fetch_add(1, Ordering::Relaxed);
+        match kind {
+            crate::db::dispatched_session_canonical_identity::SessionIdentityConflictKind::AmbiguousCanonical => {
+                &slot.session_identity_conflict_ambiguous_canonical
+            }
+            crate::db::dispatched_session_canonical_identity::SessionIdentityConflictKind::AmbiguousLegacy => {
+                &slot.session_identity_conflict_ambiguous_legacy
+            }
+            crate::db::dispatched_session_canonical_identity::SessionIdentityConflictKind::EvidenceDivergence => {
+                &slot.session_identity_conflict_evidence_divergence
+            }
+            crate::db::dispatched_session_canonical_identity::SessionIdentityConflictKind::LocatorNamespace => {
+                &slot.session_identity_conflict_locator_namespace
+            }
+            crate::db::dispatched_session_canonical_identity::SessionIdentityConflictKind::OwnershipMismatch => {
+                &slot.session_identity_conflict_ownership_mismatch
+            }
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// #1085: record whether the turn entered with an existing provider session.
     /// `session_id_present == true` increments `session_reused`, else `session_new`.
     pub fn record_session_entry(&self, channel_id: u64, provider: &str, session_id_present: bool) {
@@ -279,6 +345,17 @@ impl ObservabilityCounters {
                     relay_terminal_ack_timeout: snap.relay_terminal_ack_timeout,
                     relay_uncommitted_inflight_cleared: snap.relay_uncommitted_inflight_cleared,
                     relay_owner_unknown: snap.relay_owner_unknown,
+                    session_identity_conflicts: snap.session_identity_conflicts,
+                    session_identity_conflict_ambiguous_canonical: snap
+                        .session_identity_conflict_ambiguous_canonical,
+                    session_identity_conflict_ambiguous_legacy: snap
+                        .session_identity_conflict_ambiguous_legacy,
+                    session_identity_conflict_evidence_divergence: snap
+                        .session_identity_conflict_evidence_divergence,
+                    session_identity_conflict_locator_namespace: snap
+                        .session_identity_conflict_locator_namespace,
+                    session_identity_conflict_ownership_mismatch: snap
+                        .session_identity_conflict_ownership_mismatch,
                 }
             })
             .collect();
@@ -331,6 +408,14 @@ pub fn record_session_entry(channel_id: u64, provider: &str, session_id_present:
     global().record_session_entry(channel_id, provider, session_id_present);
 }
 
+pub fn record_session_identity_conflict(
+    channel_id: u64,
+    provider: &str,
+    kind: crate::db::dispatched_session_canonical_identity::SessionIdentityConflictKind,
+) {
+    global().record_session_identity_conflict(channel_id, provider, kind);
+}
+
 /// #2838: convenience wrapper for `ObservabilityCounters::record_relay_terminal_ack_timeout`.
 pub fn record_relay_terminal_ack_timeout(channel_id: u64, provider: &str) {
     global().record_relay_terminal_ack_timeout(channel_id, provider);
@@ -359,4 +444,36 @@ pub fn record_relay_circuit_activate_unknown() {
 
 pub fn snapshot() -> Vec<CounterSnapshotRow> {
     global().snapshot()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::dispatched_session_canonical_identity::SessionIdentityConflictKind;
+
+    #[test]
+    fn identity_conflict_snapshot_preserves_closed_categories() {
+        let counters = ObservabilityCounters::new();
+        counters.record_session_identity_conflict(
+            4913,
+            "Claude",
+            SessionIdentityConflictKind::LocatorNamespace,
+        );
+        counters.record_session_identity_conflict(
+            4913,
+            "claude",
+            SessionIdentityConflictKind::OwnershipMismatch,
+        );
+
+        let rows = counters.snapshot();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.provider, "claude");
+        assert_eq!(row.session_identity_conflicts, 2);
+        assert_eq!(row.session_identity_conflict_locator_namespace, 1);
+        assert_eq!(row.session_identity_conflict_ownership_mismatch, 1);
+        assert_eq!(row.session_identity_conflict_ambiguous_canonical, 0);
+        assert_eq!(row.session_identity_conflict_ambiguous_legacy, 0);
+        assert_eq!(row.session_identity_conflict_evidence_divergence, 0);
+    }
 }

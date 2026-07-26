@@ -416,6 +416,13 @@ CREATE TABLE session_key_aliases (
   created_at          TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- One locator cannot exist in both primary and alias tables. Trigger-maintained
+-- claims make this invariant race-safe for current and old direct SQL writers.
+CREATE TABLE session_locator_namespace (
+  session_key         TEXT PRIMARY KEY,
+  owner_kind          TEXT CHECK (owner_kind IN ('primary', 'alias'))
+);
+
 -- Only identity_kind='discord_channel' rows are unique by
 -- (provider, discord_token_hash, channel_id). Scheduled snapshots and nullable
 -- legacy rows are excluded; ambiguous legacy rows are never auto-merged.

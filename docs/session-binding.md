@@ -97,10 +97,29 @@ ambiguous legacy rows therefore return a typed conflict instead of selecting,
 merging, deleting, renaming, or killing a session.
 
 Scheduled snapshots use the explicit `scheduled_snapshot` identity kind and are
-excluded from ordinary-channel uniqueness. The columns are nullable and hook
-fields optional so older binaries continue using exact locator behavior. This
-foundation does not rename live tmux sessions or change the operator-facing
-naming convention above.
+excluded from ordinary-channel uniqueness. Migration and runtime legacy
+promotion share the database-owned
+`agentdesk_legacy_discord_locator_is_ordinary` classifier, so a generated
+`AgentDesk-{provider}-scheduled-*` locator cannot be promoted into the ordinary
+channel tuple even when provider, token namespace, and channel metadata overlap.
+
+The columns are nullable and hook fields optional for rolling upgrades. A legacy
+writer may update an exact locator only when its provider/channel ownership agrees
+with the durable row. If its locator is already an alias, the current write path
+converges on the alias owner; a truly old direct SQL writer is rejected by the
+cross-table `session_locator_namespace` invariant rather than creating a second
+primary row. Provider, channel, token-namespace, canonical-evidence, and
+primary/alias collisions are closed conflict categories and never use
+last-writer-wins recovery.
+
+Operator remediation is non-destructive: upgrade the stale writer, verify the
+provider plus exact Discord channel/thread snowflake and `discord_<16hex>` bot
+namespace, then retry through the canonical hook or `/resume` path. Token rotation
+creates a distinct canonical namespace; it is not proof that an existing row can
+be reassigned. Do not delete aliases, rewrite identity columns, rename tmux, or
+kill a live turn to force convergence. Raw Discord tokens remain outside every
+row, hook body, metric, and diagnostic. This foundation does not rename live tmux
+sessions or change the operator-facing naming convention above.
 
 ## Provider fingerprint
 

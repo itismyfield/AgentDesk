@@ -1,8 +1,13 @@
 use super::{
-    CanonicalSessionIdentity, HookSessionUpsertError, SessionIdentityKind,
-    upsert_hook_session_with_identity_pg,
+    CanonicalSessionIdentity, HookSessionUpsertError, SessionIdentityConflictKind,
+    SessionIdentityKind, upsert_hook_session_with_identity_pg,
 };
-use crate::db::dispatched_sessions::HookSessionUpsert;
+use crate::db::dispatched_sessions::{
+    HookSessionUpsert, disconnect_stale_fixed_session_by_key_pg, load_force_kill_session_pg,
+    load_provider_session_ids_pg, load_session_rebind_context_pg, rebind_session_provider_pg,
+    refresh_session_heartbeat_by_key_to_unix_nanos_pg, session_last_seen_unix_nanos_pg,
+    update_raw_provider_transcript_len_watermark_pg,
+};
 
 struct CanonicalIdentityPgDatabase {
     _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
@@ -185,7 +190,10 @@ async fn canonical_identity_ambiguous_legacy_rows_are_untouched_pg() {
     )
     .await
     .expect_err("ambiguous legacy rows must fail closed");
-    assert!(matches!(error, HookSessionUpsertError::Conflict(_)));
+    assert_eq!(
+        error.conflict_kind(),
+        Some(SessionIdentityConflictKind::AmbiguousLegacy)
+    );
 
     let untouched: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sessions
@@ -257,6 +265,61 @@ async fn canonical_identity_safe_legacy_promotion_pg() {
 }
 
 #[tokio::test]
+async fn canonical_identity_scheduled_legacy_row_is_not_promoted_as_ordinary_pg() {
+    let Some(test_db) = CanonicalIdentityPgDatabase::create().await else {
+        eprintln!("skipping canonical identity pg test: postgres unavailable");
+        return;
+    };
+    let pool = test_db.migrate().await;
+    let scheduled_key =
+        "claude/discord_0123456789abcdef/host-a:AgentDesk-claude-scheduled-smsg_shared";
+    let ordinary_key = "claude/discord_0123456789abcdef/host-b:AgentDesk-claude-ordinary-shared";
+    let channel_id = "1479671301387059205";
+    sqlx::query(
+        "INSERT INTO sessions (session_key, provider, status, channel_id)
+         VALUES ($1, 'claude', 'disconnected', $2)",
+    )
+    .bind(scheduled_key)
+    .bind(channel_id)
+    .execute(&pool)
+    .await
+    .expect("seed scheduled legacy row");
+
+    let outcome = upsert_hook_session_with_identity_pg(
+        &pool,
+        params(ordinary_key, channel_id),
+        Some(identity(channel_id)),
+    )
+    .await
+    .expect("ordinary identity inserts beside scheduled legacy row");
+    assert!(outcome.inserted);
+    assert_eq!(outcome.session_key, ordinary_key);
+
+    let scheduled: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT identity_kind, discord_token_hash FROM sessions WHERE session_key = $1",
+    )
+    .bind(scheduled_key)
+    .fetch_one(&pool)
+    .await
+    .expect("load scheduled legacy row");
+    assert_eq!(scheduled, (None, None));
+    let ordinary_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sessions
+         WHERE provider = 'claude'
+           AND discord_token_hash = 'discord_0123456789abcdef'
+           AND channel_id = $1
+           AND identity_kind = 'discord_channel'",
+    )
+    .bind(channel_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count ordinary row");
+    assert_eq!(ordinary_count, 1);
+
+    test_db.drop().await;
+}
+
+#[tokio::test]
 async fn canonical_identity_locator_collision_never_reassigns_channel_pg() {
     let Some(test_db) = CanonicalIdentityPgDatabase::create().await else {
         eprintln!("skipping canonical identity pg test: postgres unavailable");
@@ -282,7 +345,10 @@ async fn canonical_identity_locator_collision_never_reassigns_channel_pg() {
     )
     .await
     .expect_err("same locator must not be reassigned to another channel");
-    assert!(matches!(error, HookSessionUpsertError::Conflict(_)));
+    assert_eq!(
+        error.conflict_kind(),
+        Some(SessionIdentityConflictKind::OwnershipMismatch)
+    );
 
     let owner: (String, String) = sqlx::query_as(
         "SELECT channel_id, discord_token_hash FROM sessions WHERE session_key = $1",
@@ -343,7 +409,10 @@ async fn canonical_identity_resolver_requires_convergent_exact_alias_and_canonic
     )
     .await
     .expect_err("conflicting exact and canonical evidence must fail closed");
-    assert!(matches!(error, HookSessionUpsertError::Conflict(_)));
+    assert_eq!(
+        error.conflict_kind(),
+        Some(SessionIdentityConflictKind::EvidenceDivergence)
+    );
 
     test_db.drop().await;
 }
@@ -403,6 +472,444 @@ async fn canonical_identity_old_alias_hook_updates_one_row_without_duplicate_pg(
         .await
         .expect("load mixed-version target status");
     assert_eq!(status, "awaiting_user");
+
+    test_db.drop().await;
+}
+
+#[tokio::test]
+async fn canonical_identity_alias_provider_resume_read_and_write_seams_pg() {
+    let Some(test_db) = CanonicalIdentityPgDatabase::create().await else {
+        eprintln!("skipping canonical identity pg test: postgres unavailable");
+        return;
+    };
+    let pool = test_db.migrate().await;
+    let primary_key = "claude/discord_0123456789abcdef/host-a:AgentDesk-claude-resume-primary";
+    let alias_key = "claude/discord_0123456789abcdef/host-b:AgentDesk-claude-resume-primary";
+    let channel_id = "1479671301387059206";
+    let resume_id = "4c474e5d-37e7-4b6a-bcf7-d68854a31c49";
+    let rebound_id = "2d941d6e-a582-4a2d-8fc4-f61b876f2bf2";
+
+    upsert_hook_session_with_identity_pg(
+        &pool,
+        HookSessionUpsert {
+            claude_session_id: Some(resume_id),
+            raw_provider_session_id: Some(resume_id),
+            cwd: Some("/before"),
+            ..params(primary_key, channel_id)
+        },
+        Some(identity(channel_id)),
+    )
+    .await
+    .expect("seed canonical resume owner");
+    upsert_hook_session_with_identity_pg(
+        &pool,
+        params(alias_key, channel_id),
+        Some(identity(channel_id)),
+    )
+    .await
+    .expect("preserve resume alias");
+
+    let force_kill = load_force_kill_session_pg(&pool, alias_key, Some("claude"))
+        .await
+        .expect("load force-kill metadata through alias")
+        .expect("aliased force-kill session row");
+    assert_eq!(force_kill.3.as_deref(), Some("claude"));
+
+    let ids = load_provider_session_ids_pg(&pool, alias_key, Some("claude"))
+        .await
+        .expect("load selectors through alias")
+        .expect("aliased session row");
+    assert_eq!(ids.resolved_session_key, primary_key);
+    assert_eq!(ids.claude_session_id.as_deref(), Some(resume_id));
+    assert_eq!(ids.raw_provider_session_id.as_deref(), Some(resume_id));
+    assert_eq!(
+        update_raw_provider_transcript_len_watermark_pg(
+            &pool,
+            &ids.resolved_session_key,
+            Some("claude"),
+            resume_id,
+            42,
+        )
+        .await
+        .expect("record watermark on resolved owner"),
+        1
+    );
+
+    let context = load_session_rebind_context_pg(&pool, alias_key)
+        .await
+        .expect("load rebind context through alias")
+        .expect("rebind context");
+    assert_eq!(context.resolved_session_key, primary_key);
+    assert!(context.session_id > 0);
+    assert_eq!(context.cwd.as_deref(), Some("/before"));
+    assert_eq!(context.claude_session_id.as_deref(), Some(resume_id));
+    assert_eq!(
+        rebind_session_provider_pg(&pool, alias_key, "/after", rebound_id)
+            .await
+            .expect("rebind through alias"),
+        1
+    );
+    let rebound: (Option<String>, Option<String>, Option<i64>) = sqlx::query_as(
+        "SELECT cwd, claude_session_id, raw_provider_transcript_len_watermark
+         FROM sessions WHERE session_key = $1",
+    )
+    .bind(primary_key)
+    .fetch_one(&pool)
+    .await
+    .expect("load rebound primary");
+    assert_eq!(rebound.0.as_deref(), Some("/after"));
+    assert_eq!(rebound.1.as_deref(), Some(rebound_id));
+    assert_eq!(rebound.2, Some(42));
+    let previous_last_seen = session_last_seen_unix_nanos_pg(&pool, alias_key)
+        .await
+        .expect("load aliased last-seen timestamp");
+    assert!(
+        refresh_session_heartbeat_by_key_to_unix_nanos_pg(
+            &pool,
+            alias_key,
+            previous_last_seen + 1_000_000_000,
+        )
+        .await
+    );
+    let refreshed_last_seen = session_last_seen_unix_nanos_pg(&pool, primary_key)
+        .await
+        .expect("load refreshed primary timestamp");
+    assert!(refreshed_last_seen >= previous_last_seen + 1_000_000_000);
+
+    test_db.drop().await;
+}
+
+#[tokio::test]
+async fn canonical_identity_alias_stale_cleanup_targets_primary_pg() {
+    let Some(test_db) = CanonicalIdentityPgDatabase::create().await else {
+        eprintln!("skipping canonical identity pg test: postgres unavailable");
+        return;
+    };
+    let pool = test_db.migrate().await;
+    let primary_key = "claude/discord_0123456789abcdef/host-a:AgentDesk-claude-stale-primary";
+    let alias_key = "claude/discord_0123456789abcdef/host-b:AgentDesk-claude-stale-primary";
+    let channel_id = "1479671301387059207";
+
+    upsert_hook_session_with_identity_pg(
+        &pool,
+        params(primary_key, channel_id),
+        Some(identity(channel_id)),
+    )
+    .await
+    .expect("seed stale primary");
+    upsert_hook_session_with_identity_pg(
+        &pool,
+        params(alias_key, channel_id),
+        Some(identity(channel_id)),
+    )
+    .await
+    .expect("preserve stale alias");
+    sqlx::query(
+        "UPDATE sessions
+         SET status = 'turn_active', last_heartbeat = NOW() - INTERVAL '7 hours'
+         WHERE session_key = $1",
+    )
+    .bind(primary_key)
+    .execute(&pool)
+    .await
+    .expect("age primary session");
+
+    assert_eq!(
+        disconnect_stale_fixed_session_by_key_pg(&pool, alias_key).await,
+        1
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM sessions WHERE session_key = $1")
+        .bind(primary_key)
+        .fetch_one(&pool)
+        .await
+        .expect("load cleaned primary");
+    assert_eq!(status, "disconnected");
+
+    test_db.drop().await;
+}
+
+#[tokio::test]
+async fn canonical_identity_manual_rebind_alias_converges_without_new_primary_pg() {
+    let Some(test_db) = CanonicalIdentityPgDatabase::create().await else {
+        eprintln!("skipping canonical identity pg test: postgres unavailable");
+        return;
+    };
+    let pool = test_db.migrate().await;
+    let primary_key = "claude/discord_0123456789abcdef/host-a:AgentDesk-claude-rebind-primary";
+    let alias_key = "claude/discord_0123456789abcdef/host-b:AgentDesk-claude-rebind-primary";
+    let channel_id = "1479671301387059208";
+    let override_id = "4c474e5d-37e7-4b6a-bcf7-d68854a31c49";
+
+    upsert_hook_session_with_identity_pg(
+        &pool,
+        params(primary_key, channel_id),
+        Some(identity(channel_id)),
+    )
+    .await
+    .expect("seed manual rebind primary");
+    upsert_hook_session_with_identity_pg(
+        &pool,
+        params(alias_key, channel_id),
+        Some(identity(channel_id)),
+    )
+    .await
+    .expect("preserve manual rebind alias");
+
+    crate::db::dispatched_session_rebind_override::upsert_rebind_session_override_pg(
+        &pool,
+        alias_key,
+        "claude",
+        override_id,
+    )
+    .await
+    .expect("manual rebind converges through alias");
+    let primary_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE session_key IN ($1, $2)")
+            .bind(primary_key)
+            .bind(alias_key)
+            .fetch_one(&pool)
+            .await
+            .expect("count manual rebind primary rows");
+    assert_eq!(primary_count, 1);
+    let stored_id: Option<String> =
+        sqlx::query_scalar("SELECT claude_session_id FROM sessions WHERE session_key = $1")
+            .bind(primary_key)
+            .fetch_one(&pool)
+            .await
+            .expect("load override from primary");
+    assert_eq!(stored_id.as_deref(), Some(override_id));
+    assert_eq!(
+        super::resolve_session_key_pg(&pool, alias_key)
+            .await
+            .expect("resolve manual rebind alias")
+            .as_deref(),
+        Some(primary_key)
+    );
+
+    test_db.drop().await;
+}
+
+#[tokio::test]
+async fn canonical_identity_manual_rebind_provider_mismatch_fails_closed_pg() {
+    let Some(test_db) = CanonicalIdentityPgDatabase::create().await else {
+        eprintln!("skipping canonical identity pg test: postgres unavailable");
+        return;
+    };
+    let pool = test_db.migrate().await;
+    let primary_key = "claude/discord_0123456789abcdef/host-a:AgentDesk-claude-rebind-owner";
+    let alias_key = "claude/discord_0123456789abcdef/host-b:AgentDesk-claude-rebind-owner";
+    let channel_id = "1479671301387059213";
+
+    upsert_hook_session_with_identity_pg(
+        &pool,
+        params(primary_key, channel_id),
+        Some(identity(channel_id)),
+    )
+    .await
+    .expect("seed manual rebind owner");
+    upsert_hook_session_with_identity_pg(
+        &pool,
+        params(alias_key, channel_id),
+        Some(identity(channel_id)),
+    )
+    .await
+    .expect("preserve manual rebind owner alias");
+
+    let error = crate::db::dispatched_session_rebind_override::upsert_rebind_session_override_pg(
+        &pool,
+        alias_key,
+        "codex",
+        "4c474e5d-37e7-4b6a-bcf7-d68854a31c49",
+    )
+    .await
+    .expect_err("manual rebind cannot cross provider ownership");
+    assert!(error.contains("provider ownership mismatch"));
+    let primary_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE session_key IN ($1, $2)")
+            .bind(primary_key)
+            .bind(alias_key)
+            .fetch_one(&pool)
+            .await
+            .expect("count provider-owned rows");
+    assert_eq!(primary_count, 1);
+
+    test_db.drop().await;
+}
+
+#[tokio::test]
+async fn canonical_identity_namespace_trigger_blocks_old_primary_on_alias_pg() {
+    let Some(test_db) = CanonicalIdentityPgDatabase::create().await else {
+        eprintln!("skipping canonical identity pg test: postgres unavailable");
+        return;
+    };
+    let pool = test_db.migrate().await;
+    let primary_key = "claude/discord_0123456789abcdef/host-a:AgentDesk-claude-trigger-primary";
+    let alias_key = "claude/discord_0123456789abcdef/host-b:AgentDesk-claude-trigger-primary";
+    let channel_id = "1479671301387059209";
+
+    upsert_hook_session_with_identity_pg(
+        &pool,
+        params(primary_key, channel_id),
+        Some(identity(channel_id)),
+    )
+    .await
+    .expect("seed trigger primary");
+    upsert_hook_session_with_identity_pg(
+        &pool,
+        params(alias_key, channel_id),
+        Some(identity(channel_id)),
+    )
+    .await
+    .expect("preserve trigger alias");
+
+    let error = sqlx::query(
+        "INSERT INTO sessions (session_key, provider, status)
+         VALUES ($1, 'claude', 'idle')
+         ON CONFLICT(session_key) DO UPDATE SET status = EXCLUDED.status",
+    )
+    .bind(alias_key)
+    .execute(&pool)
+    .await
+    .expect_err("old direct writer must not claim alias locator");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database_error| database_error.constraint()),
+        Some("session_locator_namespace")
+    );
+    let primary_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE session_key IN ($1, $2)")
+            .bind(primary_key)
+            .bind(alias_key)
+            .fetch_one(&pool)
+            .await
+            .expect("count trigger-protected rows");
+    assert_eq!(primary_count, 1);
+
+    test_db.drop().await;
+}
+
+#[tokio::test]
+async fn canonical_identity_namespace_claim_follows_key_update_and_delete_pg() {
+    let Some(test_db) = CanonicalIdentityPgDatabase::create().await else {
+        eprintln!("skipping canonical identity pg test: postgres unavailable");
+        return;
+    };
+    let pool = test_db.migrate().await;
+    let old_key = "claude/discord_0123456789abcdef/host-a:AgentDesk-claude-claim-old";
+    let new_key = "claude/discord_0123456789abcdef/host-b:AgentDesk-claude-claim-new";
+
+    let session_id: i64 = sqlx::query_scalar(
+        "INSERT INTO sessions (session_key, provider, status)
+         VALUES ($1, 'claude', 'idle') RETURNING id",
+    )
+    .bind(old_key)
+    .fetch_one(&pool)
+    .await
+    .expect("seed claim owner");
+    sqlx::query("UPDATE sessions SET session_key = $2 WHERE id = $1")
+        .bind(session_id)
+        .bind(new_key)
+        .execute(&pool)
+        .await
+        .expect("move primary locator claim");
+    let old_claim: Option<String> = sqlx::query_scalar(
+        "SELECT owner_kind FROM session_locator_namespace WHERE session_key = $1",
+    )
+    .bind(old_key)
+    .fetch_optional(&pool)
+    .await
+    .expect("load released old claim");
+    assert_eq!(old_claim, None);
+    let new_claim: String = sqlx::query_scalar(
+        "SELECT owner_kind FROM session_locator_namespace WHERE session_key = $1",
+    )
+    .bind(new_key)
+    .fetch_one(&pool)
+    .await
+    .expect("load moved primary claim");
+    assert_eq!(new_claim, "primary");
+
+    sqlx::query("DELETE FROM sessions WHERE id = $1")
+        .bind(session_id)
+        .execute(&pool)
+        .await
+        .expect("delete primary locator owner");
+    let released_claim: Option<String> = sqlx::query_scalar(
+        "SELECT owner_kind FROM session_locator_namespace WHERE session_key = $1",
+    )
+    .bind(new_key)
+    .fetch_optional(&pool)
+    .await
+    .expect("load released deleted claim");
+    assert_eq!(released_claim, None);
+
+    test_db.drop().await;
+}
+
+#[tokio::test]
+async fn canonical_identity_namespace_primary_alias_race_has_one_owner_pg() {
+    let Some(test_db) = CanonicalIdentityPgDatabase::create().await else {
+        eprintln!("skipping canonical identity pg test: postgres unavailable");
+        return;
+    };
+    let pool = test_db.migrate().await;
+    let owner_key = "claude/discord_0123456789abcdef/host-a:AgentDesk-claude-race-owner";
+    let racing_key = "claude/discord_0123456789abcdef/host-b:AgentDesk-claude-race-key";
+    let channel_id = "1479671301387059212";
+    let owner_id: i64 = sqlx::query_scalar(
+        "INSERT INTO sessions (session_key, provider, status, channel_id)
+         VALUES ($1, 'claude', 'idle', $2) RETURNING id",
+    )
+    .bind(owner_key)
+    .bind(channel_id)
+    .fetch_one(&pool)
+    .await
+    .expect("seed race alias owner");
+
+    let primary = sqlx::query(
+        "INSERT INTO sessions (session_key, provider, status)
+         VALUES ($1, 'claude', 'idle')",
+    )
+    .bind(racing_key)
+    .execute(&pool);
+    let alias =
+        sqlx::query("INSERT INTO session_key_aliases (session_key, session_id) VALUES ($1, $2)")
+            .bind(racing_key)
+            .bind(owner_id)
+            .execute(&pool);
+    let (primary, alias) = tokio::join!(primary, alias);
+    assert_eq!(primary.is_ok() as u8 + alias.is_ok() as u8, 1);
+    let failed = if primary.is_err() {
+        primary.expect_err("primary loses race")
+    } else {
+        alias.expect_err("alias loses race")
+    };
+    assert_eq!(
+        failed
+            .as_database_error()
+            .and_then(|database_error| database_error.constraint()),
+        Some("session_locator_namespace")
+    );
+    let primary_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE session_key = $1")
+            .bind(racing_key)
+            .fetch_one(&pool)
+            .await
+            .expect("count racing primary owner");
+    let alias_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM session_key_aliases WHERE session_key = $1")
+            .bind(racing_key)
+            .fetch_one(&pool)
+            .await
+            .expect("count racing alias owner");
+    assert_eq!(primary_count + alias_count, 1);
+    assert!(
+        super::resolve_session_key_pg(&pool, racing_key)
+            .await
+            .expect("resolve race winner")
+            .is_some()
+    );
 
     test_db.drop().await;
 }
@@ -485,9 +992,11 @@ async fn canonical_identity_provider_token_thread_and_scheduled_dimensions_pg() 
 
 #[test]
 fn canonical_identity_conflict_is_http_409_ready() {
-    let error = super::hook_session_upsert_error_to_app_error(HookSessionUpsertError::Conflict(
-        "ambiguous canonical identity".to_string(),
-    ));
+    let error =
+        super::hook_session_upsert_error_to_app_error(HookSessionUpsertError::test_conflict(
+            SessionIdentityConflictKind::AmbiguousCanonical,
+            "ambiguous canonical identity",
+        ));
     assert_eq!(error.status(), axum::http::StatusCode::CONFLICT);
     assert_eq!(error.code(), crate::error::ErrorCode::Conflict);
 }

@@ -1793,7 +1793,9 @@ these contextual numbers to match ordinary LoC churn.
   growth-evidence selector cross-check wiring, claude_tui transcript-mtime
   runtime-activity anchors, and the flip-back window guard; #4913 GO-A1 keeps
   hook identity validation in `src/services/dispatched_sessions/canonical_identity.rs`
-  and limits the giant root to optional wire fields plus thin typed routing), and
+  and limits the giant root to optional wire fields plus thin typed routing; the
+  follow-up adds only conflict-category observation and resolved-primary selector
+  propagation, while PostgreSQL identity authority stays under `src/db/`), and
   `src/services/settings.rs` (frozen giant surface) — service-layer route support surfaces
   split out of the large dashboard route modules. (`src/services/onboarding.rs`
   and `src/services/api_friction.rs` have been removed/decomposed.)

@@ -302,7 +302,6 @@ async fn session_cache_selector_state_for_rebind(
                 let selected_session_id =
                     crate::services::dispatched_sessions::selected_provider_resume_selector_for_provider_recording_observation(
                         pool,
-                        &session_key,
                         Some(provider.as_str()),
                         &ids,
                     )

@@ -513,7 +513,7 @@
     },
     {
       "path": "migrations/postgres/0100_canonical_discord_session_identity.sql",
-      "sha256": "239d109bf7a987f19fb0ea8787457a1043c70f09c2c3d0be2b9b9e427db5ba48",
+      "sha256": "3f61d2c3944a55d7bce62312baed85a1f112d685fc4b733dc78c73066bfc867e",
       "version": 100
     }
   ],

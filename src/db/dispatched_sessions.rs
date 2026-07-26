@@ -8,6 +8,16 @@ use crate::db::session_agent_resolution::{
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::session_activity::SessionActivityResolver;
 
+async fn resolve_session_locator_pg(
+    pool: &PgPool,
+    session_key: &str,
+    operation: &str,
+) -> Result<Option<String>, String> {
+    crate::db::dispatched_session_canonical_identity::resolve_session_key_pg(pool, session_key)
+        .await
+        .map_err(|error| format!("resolve {operation} locator: {error:?}"))
+}
+
 pub(crate) async fn load_dispatch_thread_id_pg(pool: &PgPool, dispatch_id: &str) -> Option<String> {
     let thread_id = sqlx::query_scalar::<_, Option<String>>(
         "SELECT thread_id FROM task_dispatches WHERE id = $1",
@@ -45,12 +55,17 @@ pub(crate) async fn load_force_kill_session_pg(
     )>,
     String,
 > {
+    let resolved_session_key =
+        resolve_session_locator_pg(pool, session_key, "force-kill session").await?;
+    let Some(resolved_session_key) = resolved_session_key else {
+        return Ok(None);
+    };
     let row = sqlx::query(
         "SELECT active_dispatch_id, agent_id, thread_channel_id, provider, instance_id
          FROM sessions
          WHERE session_key = $1",
     )
-    .bind(session_key)
+    .bind(&resolved_session_key)
     .fetch_optional(pool)
     .await
     .map_err(|error| {
@@ -167,6 +182,8 @@ pub(crate) async fn load_session_channel_id_pg(
 /// currently-bound `cwd` and `claude_session_id` that the rebind will replace.
 /// `Ok(None)` means no session row exists for `session_key`.
 pub(crate) struct SessionRebindContext {
+    pub(crate) resolved_session_key: String,
+    pub(crate) session_id: i64,
     pub(crate) active_dispatch_id: Option<String>,
     pub(crate) cwd: Option<String>,
     pub(crate) claude_session_id: Option<String>,
@@ -176,12 +193,17 @@ pub(crate) async fn load_session_rebind_context_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> Result<Option<SessionRebindContext>, String> {
+    let resolved_session_key =
+        resolve_session_locator_pg(pool, session_key, "rebind context").await?;
+    let Some(resolved_session_key) = resolved_session_key else {
+        return Ok(None);
+    };
     let row = sqlx::query(
-        "SELECT active_dispatch_id, cwd, claude_session_id
+        "SELECT id, active_dispatch_id, cwd, claude_session_id
          FROM sessions
          WHERE session_key = $1",
     )
-    .bind(session_key)
+    .bind(&resolved_session_key)
     .fetch_optional(pool)
     .await
     .map_err(|error| {
@@ -195,6 +217,9 @@ pub(crate) async fn load_session_rebind_context_pg(
         return Ok(None);
     };
 
+    let session_id: i64 = row
+        .try_get("id")
+        .map_err(|error| format!("decode session id: {error}"))?;
     let active_dispatch_id: Option<String> = row
         .try_get("active_dispatch_id")
         .map_err(|error| format!("decode active_dispatch_id for {session_key}: {error}"))?;
@@ -206,6 +231,8 @@ pub(crate) async fn load_session_rebind_context_pg(
         .map_err(|error| format!("decode claude_session_id for {session_key}: {error}"))?;
 
     Ok(Some(SessionRebindContext {
+        resolved_session_key,
+        session_id,
         active_dispatch_id,
         cwd,
         claude_session_id,
@@ -254,6 +281,11 @@ pub(crate) async fn rebind_session_provider_pg(
     target_cwd: &str,
     target_session_id: &str,
 ) -> Result<u64, String> {
+    let resolved_session_key =
+        resolve_session_locator_pg(pool, session_key, "provider rebind").await?;
+    let Some(resolved_session_key) = resolved_session_key else {
+        return Ok(0);
+    };
     sqlx::query(
         "UPDATE sessions
          SET cwd = $2,
@@ -265,13 +297,39 @@ pub(crate) async fn rebind_session_provider_pg(
              END
          WHERE session_key = $1",
     )
-    .bind(session_key)
+    .bind(&resolved_session_key)
     .bind(target_cwd)
     .bind(target_session_id)
     .execute(pool)
     .await
     .map(|result| result.rows_affected())
     .map_err(|error| format!("rebind session {session_key} provider binding: {error}"))
+}
+
+pub(crate) async fn rebind_session_provider_by_id_pg(
+    pool: &PgPool,
+    session_id: i64,
+    target_cwd: &str,
+    target_session_id: &str,
+) -> Result<u64, String> {
+    sqlx::query(
+        "UPDATE sessions
+         SET cwd = $2,
+             claude_session_id = $3,
+             raw_provider_session_id = $3,
+             claude_session_id_recorded_at = CASE
+               WHEN claude_session_id IS DISTINCT FROM $3 THEN NOW()
+               ELSE COALESCE(claude_session_id_recorded_at, NOW())
+             END
+         WHERE id = $1",
+    )
+    .bind(session_id)
+    .bind(target_cwd)
+    .bind(target_session_id)
+    .execute(pool)
+    .await
+    .map(|result| result.rows_affected())
+    .map_err(|error| format!("rebind session #{session_id} provider binding: {error}"))
 }
 
 pub(crate) async fn disconnect_session_and_prepare_retry_pg(
@@ -2071,6 +2129,18 @@ pub(crate) async fn reconcile_orphaned_tmuxless_session_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> bool {
+    let resolved_session_key =
+        match resolve_session_locator_pg(pool, session_key, "orphan reconcile").await {
+            Ok(Some(resolved_session_key)) => resolved_session_key,
+            Ok(None) => return false,
+            Err(error) => {
+                tracing::warn!(
+                    error = %crate::utils::redact::redact_known_secrets(&error),
+                    "[dispatched-sessions] orphan reconciliation locator resolution failed"
+                );
+                return false;
+            }
+        };
     match sqlx::query(
         "UPDATE sessions
          SET status = 'disconnected'
@@ -2078,7 +2148,7 @@ pub(crate) async fn reconcile_orphaned_tmuxless_session_pg(
            AND status = 'idle'
            AND active_dispatch_id IS NULL",
     )
-    .bind(session_key)
+    .bind(&resolved_session_key)
     .execute(pool)
     .await
     {
@@ -2103,10 +2173,14 @@ pub(crate) async fn session_last_seen_unix_nanos_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> Option<i64> {
+    let resolved_session_key = resolve_session_locator_pg(pool, session_key, "last-seen session")
+        .await
+        .ok()
+        .flatten()?;
     let last_seen: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
         "SELECT COALESCE(last_heartbeat, created_at) FROM sessions WHERE session_key = $1",
     )
-    .bind(session_key)
+    .bind(&resolved_session_key)
     .fetch_optional(pool)
     .await
     .ok()
@@ -2122,6 +2196,18 @@ pub(crate) async fn refresh_session_heartbeat_by_key_to_unix_nanos_pg(
     session_key: &str,
     unix_nanos: i64,
 ) -> bool {
+    let resolved_session_key =
+        match resolve_session_locator_pg(pool, session_key, "heartbeat session").await {
+            Ok(Some(resolved_session_key)) => resolved_session_key,
+            Ok(None) => return false,
+            Err(error) => {
+                tracing::warn!(
+                    error = %crate::utils::redact::redact_known_secrets(&error),
+                    "[dispatched-sessions] heartbeat locator resolution failed"
+                );
+                return false;
+            }
+        };
     let secs = unix_nanos.div_euclid(1_000_000_000);
     let nanos = unix_nanos.rem_euclid(1_000_000_000) as u32;
     let Some(activity_at) = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nanos) else {
@@ -2135,7 +2221,7 @@ pub(crate) async fn refresh_session_heartbeat_by_key_to_unix_nanos_pg(
          )
          WHERE session_key = $1",
     )
-    .bind(session_key)
+    .bind(&resolved_session_key)
     .bind(activity_at)
     .execute(pool)
     .await
@@ -2222,6 +2308,18 @@ pub(crate) async fn disconnect_stale_fixed_session_by_key_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> usize {
+    let resolved_session_key =
+        match resolve_session_locator_pg(pool, session_key, "stale session").await {
+            Ok(Some(resolved_session_key)) => resolved_session_key,
+            Ok(None) => return 0,
+            Err(error) => {
+                tracing::warn!(
+                    error = %crate::utils::redact::redact_known_secrets(&error),
+                    "[dispatched-sessions] stale-session locator resolution failed"
+                );
+                return 0;
+            }
+        };
     let stale_dispatches = match sqlx::query_scalar::<_, String>(
         "SELECT active_dispatch_id
          FROM sessions
@@ -2231,7 +2329,7 @@ pub(crate) async fn disconnect_stale_fixed_session_by_key_pg(
            AND active_dispatch_id IS NOT NULL
            AND COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '6 hours'",
     )
-    .bind(session_key)
+    .bind(&resolved_session_key)
     .fetch_all(pool)
     .await
     {
@@ -2277,7 +2375,7 @@ pub(crate) async fn disconnect_stale_fixed_session_by_key_pg(
            AND status IN ('working', 'turn_active')
            AND COALESCE(last_heartbeat, created_at) < NOW() - INTERVAL '6 hours'",
     )
-    .bind(session_key)
+    .bind(&resolved_session_key)
     .execute(pool)
     .await
     {
@@ -2372,6 +2470,7 @@ pub(crate) struct DeleteSessionResult {
 }
 
 pub(crate) struct ProviderSessionIds {
+    pub(crate) resolved_session_key: String,
     pub(crate) claude_session_id: Option<String>,
     pub(crate) raw_provider_session_id: Option<String>,
     pub(crate) cwd: Option<String>,
@@ -2403,97 +2502,10 @@ pub(crate) async fn upsert_hook_session_pg(
     pool: &PgPool,
     params: HookSessionUpsert<'_>,
 ) -> Result<bool, String> {
-    // `tokens` is now an `Option<i64>`. The UPSERT preserves the previous
-    // value when the caller didn't supply one (metadata-only hook), and only
-    // refreshes `tokens_updated_at` when an explicit snapshot arrives.
-    let row = sqlx::query(
-        "INSERT INTO sessions (
-            session_key,
-            instance_id,
-            agent_id,
-            provider,
-            status,
-            session_info,
-            model,
-            tokens,
-            tokens_updated_at,
-            cwd,
-            active_dispatch_id,
-            thread_channel_id,
-            channel_id,
-            claude_session_id,
-            raw_provider_session_id,
-            active_turn_nonce,
-            dispatched_origin_turn_nonce,
-            claude_session_id_recorded_at,
-            last_heartbeat
-         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7,
-            COALESCE($8, 0),
-            CASE WHEN $8 IS NOT NULL THEN NOW() ELSE NULL END,
-            $9, $10, $11, $12, $13, $14, $15,
-            CASE WHEN $16 THEN $15 ELSE NULL END,
-            CASE WHEN NULLIF(BTRIM($13), '') IS NOT NULL THEN NOW() ELSE NULL END,
-            NOW()
-         )
-         ON CONFLICT(session_key) DO UPDATE SET
-            status = EXCLUDED.status,
-            instance_id = COALESCE(NULLIF(BTRIM(EXCLUDED.instance_id), ''), sessions.instance_id),
-            provider = EXCLUDED.provider,
-            session_info = COALESCE(EXCLUDED.session_info, sessions.session_info),
-            model = COALESCE(EXCLUDED.model, sessions.model),
-            tokens = CASE WHEN $8 IS NOT NULL THEN EXCLUDED.tokens ELSE sessions.tokens END,
-            tokens_updated_at = CASE WHEN $8 IS NOT NULL THEN NOW() ELSE sessions.tokens_updated_at END,
-            cwd = COALESCE(EXCLUDED.cwd, sessions.cwd),
-            active_dispatch_id = CASE
-              WHEN lower(EXCLUDED.status) IN ('disconnected', 'aborted') THEN NULL
-              WHEN EXCLUDED.active_dispatch_id IS NOT NULL THEN EXCLUDED.active_dispatch_id
-              ELSE sessions.active_dispatch_id
-            END,
-            agent_id = COALESCE(NULLIF(BTRIM(EXCLUDED.agent_id), ''), NULLIF(BTRIM(sessions.agent_id), '')),
-            thread_channel_id = COALESCE(EXCLUDED.thread_channel_id, sessions.thread_channel_id),
-            channel_id = COALESCE(EXCLUDED.channel_id, sessions.channel_id),
-            claude_session_id = COALESCE(EXCLUDED.claude_session_id, sessions.claude_session_id),
-            claude_session_id_recorded_at = CASE
-              WHEN EXCLUDED.claude_session_id IS NULL THEN sessions.claude_session_id_recorded_at
-              WHEN sessions.claude_session_id IS DISTINCT FROM EXCLUDED.claude_session_id THEN NOW()
-              ELSE COALESCE(sessions.claude_session_id_recorded_at, NOW())
-            END,
-            raw_provider_session_id = COALESCE(EXCLUDED.raw_provider_session_id, sessions.raw_provider_session_id),
-            active_turn_nonce = COALESCE(EXCLUDED.active_turn_nonce, sessions.active_turn_nonce),
-            dispatched_origin_turn_nonce = CASE
-              WHEN EXCLUDED.active_turn_nonce IS NULL THEN sessions.dispatched_origin_turn_nonce
-              WHEN EXCLUDED.dispatched_origin_turn_nonce IS NULL THEN NULL
-              ELSE EXCLUDED.dispatched_origin_turn_nonce
-            END,
-            last_heartbeat = NOW()
-         RETURNING (xmax = 0) AS inserted",
-    )
-    .bind(params.session_key)
-    .bind(params.instance_id)
-    .bind(params.agent_id)
-    .bind(params.provider)
-    .bind(params.status)
-    .bind(params.session_info)
-    .bind(params.model)
-    .bind(params.tokens)
-    .bind(params.cwd)
-    .bind(params.active_dispatch_id)
-    .bind(params.thread_channel_id)
-    .bind(params.channel_id)
-    .bind(params.claude_session_id)
-    .bind(params.raw_provider_session_id)
-    .bind(params.turn_start_nonce)
-    .bind(params.dispatched_origin)
-    .fetch_one(pool)
-    .await
-    .map_err(|error| format!("upsert postgres session {}: {error}", params.session_key))?;
-    row.try_get::<bool, _>("inserted").map_err(|error| {
-        format!(
-            "decode upsert outcome for session {}: {error}",
-            params.session_key
-        )
-    })
+    crate::db::dispatched_session_canonical_identity::upsert_legacy_hook_session_pg(pool, params)
+        .await
+        .map(|outcome| outcome.inserted)
+        .map_err(|error| format!("upsert postgres session: {error:?}"))
 }
 
 pub(crate) async fn cleanup_disconnected_sessions_pg(pool: &PgPool) -> Result<u64, String> {
@@ -2532,6 +2544,11 @@ pub(crate) async fn load_provider_session_ids_pg(
     session_key: &str,
     provider: Option<&str>,
 ) -> Result<Option<ProviderSessionIds>, String> {
+    let resolved_session_key =
+        resolve_session_locator_pg(pool, session_key, "provider-session").await?;
+    let Some(resolved_session_key) = resolved_session_key else {
+        return Ok(None);
+    };
     let result = if let Some(provider) = provider {
         sqlx::query(
             "SELECT claude_session_id, raw_provider_session_id, cwd,
@@ -2543,7 +2560,7 @@ pub(crate) async fn load_provider_session_ids_pg(
              FROM sessions
              WHERE session_key = $1 AND provider = $2",
         )
-        .bind(session_key)
+        .bind(&resolved_session_key)
         .bind(provider)
         .fetch_optional(pool)
         .await
@@ -2558,7 +2575,7 @@ pub(crate) async fn load_provider_session_ids_pg(
              FROM sessions
              WHERE session_key = $1",
         )
-        .bind(session_key)
+        .bind(&resolved_session_key)
         .fetch_optional(pool)
         .await
     };
@@ -2566,6 +2583,7 @@ pub(crate) async fn load_provider_session_ids_pg(
     let row = result.map_err(|error| format!("{error}"))?;
     row.map(|row| {
         Ok(ProviderSessionIds {
+            resolved_session_key: resolved_session_key.clone(),
             claude_session_id: row.try_get("claude_session_id")?,
             raw_provider_session_id: row.try_get("raw_provider_session_id")?,
             cwd: row.try_get("cwd")?,

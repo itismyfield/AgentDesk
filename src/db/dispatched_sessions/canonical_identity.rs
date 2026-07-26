@@ -36,10 +36,51 @@ pub(crate) struct CanonicalSessionIdentity<'a> {
     pub(crate) channel_id: &'a str,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SessionIdentityConflictKind {
+    AmbiguousCanonical,
+    AmbiguousLegacy,
+    EvidenceDivergence,
+    LocatorNamespace,
+    OwnershipMismatch,
+}
+
+impl SessionIdentityConflictKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::AmbiguousCanonical => "ambiguous_canonical",
+            Self::AmbiguousLegacy => "ambiguous_legacy",
+            Self::EvidenceDivergence => "evidence_divergence",
+            Self::LocatorNamespace => "locator_namespace",
+            Self::OwnershipMismatch => "ownership_mismatch",
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SessionIdentityConflict {
+    pub(crate) kind: SessionIdentityConflictKind,
+    message: String,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum HookSessionUpsertError {
-    Conflict(String),
+    Conflict(SessionIdentityConflict),
     Database(String),
+}
+
+impl HookSessionUpsertError {
+    pub(crate) fn conflict_kind(&self) -> Option<SessionIdentityConflictKind> {
+        match self {
+            Self::Conflict(conflict) => Some(conflict.kind),
+            Self::Database(_) => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_conflict(kind: SessionIdentityConflictKind, message: &str) -> Self {
+        conflict(kind, message)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -85,7 +126,7 @@ pub(crate) async fn upsert_hook_session_with_identity_pg(
         _ => None,
     };
 
-    let target = resolve_evidence(params.session_key, exact, alias, canonical, promotion)?;
+    let target = resolve_evidence(exact, alias, canonical, promotion)?;
     let outcome = match target {
         Some(target) => {
             validate_target_identity(&target, params.provider, params.channel_id, identity)?;
@@ -108,6 +149,13 @@ pub(crate) async fn resolve_session_key_pg(
     session_key: &str,
 ) -> Result<Option<String>, HookSessionUpsertError> {
     resolve_session_key_with_identity_pg(pool, session_key, None, None).await
+}
+
+pub(crate) async fn upsert_legacy_hook_session_pg(
+    pool: &PgPool,
+    params: HookSessionUpsert<'_>,
+) -> Result<HookSessionUpsertOutcome, HookSessionUpsertError> {
+    upsert_hook_session_with_identity_pg(pool, params, None).await
 }
 
 /// Resolve a runtime locator in compatibility order: exact current key, exact
@@ -161,9 +209,10 @@ pub(crate) async fn resolve_session_key_with_identity_pg(
         if let Some((resolved_id, _)) = resolved.as_ref()
             && *resolved_id != id
         {
-            return Err(conflict(format!(
-                "session locator {session_key} resolves to multiple rows"
-            )));
+            return Err(conflict(
+                SessionIdentityConflictKind::EvidenceDivergence,
+                "session locator resolves to multiple rows",
+            ));
         }
         resolved = Some((id, key));
     }
@@ -174,9 +223,8 @@ async fn acquire_locator_lock(
     tx: &mut Transaction<'_, Postgres>,
     session_key: &str,
 ) -> Result<(), HookSessionUpsertError> {
-    sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2))")
-        .bind(ADVISORY_LOCK_NAMESPACE)
-        .bind(format!("locator:{session_key}"))
+    sqlx::query("SELECT agentdesk_lock_session_locator($1)")
+        .bind(session_key)
         .execute(&mut **tx)
         .await
         .map_err(database_error)?;
@@ -269,7 +317,10 @@ async fn load_canonical_for_update(
     .map_err(database_error)?;
 
     if rows.len() > 1 {
-        return Err(conflict("canonical Discord identity is ambiguous"));
+        return Err(conflict(
+            SessionIdentityConflictKind::AmbiguousCanonical,
+            "canonical Discord identity is ambiguous",
+        ));
     }
     rows.into_iter().next().map(decode_evidence).transpose()
 }
@@ -286,32 +337,21 @@ async fn load_unique_legacy_candidate_for_update(
            AND discord_token_hash IS NULL
            AND provider = $1
            AND channel_id = $2
+           AND agentdesk_legacy_discord_locator_is_ordinary(session_key, $1, $3)
          FOR UPDATE",
     )
     .bind(provider)
     .bind(identity.channel_id)
+    .bind(identity.discord_token_hash)
     .fetch_all(&mut **tx)
     .await
     .map_err(database_error)?;
 
-    let mut candidates = Vec::new();
-    for row in rows {
-        let evidence = decode_evidence(row)?;
-        let locator = crate::services::discord::session_identity::SessionIdentity::parse(
-            &evidence.session_key,
-        );
-        let owns_tuple = locator.as_ref().is_some_and(|locator| {
-            locator.provider_from_key.as_deref() == Some(provider)
-                && locator.token_hash.as_deref() == Some(identity.discord_token_hash)
-        });
-        if owns_tuple {
-            candidates.push(evidence);
-        }
-    }
-    match candidates.len() {
+    match rows.len() {
         0 => Ok(None),
-        1 => Ok(candidates.pop()),
+        1 => rows.into_iter().next().map(decode_evidence).transpose(),
         _ => Err(conflict(
+            SessionIdentityConflictKind::AmbiguousLegacy,
             "multiple legacy session rows claim the canonical Discord identity",
         )),
     }
@@ -329,7 +369,6 @@ fn decode_evidence(row: sqlx::postgres::PgRow) -> Result<SessionEvidence, HookSe
 }
 
 fn resolve_evidence(
-    session_key: &str,
     exact: Option<SessionEvidence>,
     alias: Option<SessionEvidence>,
     canonical: Option<SessionEvidence>,
@@ -340,9 +379,10 @@ fn resolve_evidence(
         if let Some(current) = target.as_ref()
             && current.id != evidence.id
         {
-            return Err(conflict(format!(
-                "session identity evidence for {session_key} resolves to multiple rows"
-            )));
+            return Err(conflict(
+                SessionIdentityConflictKind::EvidenceDivergence,
+                "session identity evidence resolves to multiple rows",
+            ));
         }
         target = Some(evidence);
     }
@@ -353,7 +393,9 @@ pub(crate) fn hook_session_upsert_error_to_app_error(
     error: HookSessionUpsertError,
 ) -> crate::error::AppError {
     match error {
-        HookSessionUpsertError::Conflict(error) => crate::error::AppError::conflict(error),
+        HookSessionUpsertError::Conflict(conflict) => {
+            crate::error::AppError::conflict(conflict.message)
+        }
         HookSessionUpsertError::Database(error) => {
             crate::error::AppError::internal(error).with_code(crate::error::ErrorCode::Database)
         }
@@ -377,6 +419,7 @@ fn validate_target_identity(
             }
         {
             return Err(conflict(
+                SessionIdentityConflictKind::OwnershipMismatch,
                 "legacy session locator has conflicting provider or channel ownership",
             ));
         }
@@ -386,6 +429,7 @@ fn validate_target_identity(
     if identity.kind == SessionIdentityKind::ScheduledSnapshot {
         if target.identity_kind.as_deref() == Some(DISCORD_CHANNEL_KIND) {
             return Err(conflict(
+                SessionIdentityConflictKind::OwnershipMismatch,
                 "scheduled snapshot locator belongs to a Discord channel",
             ));
         }
@@ -396,7 +440,10 @@ fn validate_target_identity(
             return if matches {
                 Ok(())
             } else {
-                Err(conflict("scheduled snapshot row has conflicting ownership"))
+                Err(conflict(
+                    SessionIdentityConflictKind::OwnershipMismatch,
+                    "scheduled snapshot row has conflicting ownership",
+                ))
             };
         }
         let legacy_matches = target.identity_kind.is_none()
@@ -406,7 +453,10 @@ fn validate_target_identity(
         return if legacy_matches {
             Ok(())
         } else {
-            Err(conflict("scheduled snapshot row has conflicting ownership"))
+            Err(conflict(
+                SessionIdentityConflictKind::OwnershipMismatch,
+                "scheduled snapshot row has conflicting ownership",
+            ))
         };
     }
 
@@ -426,6 +476,7 @@ fn validate_target_identity(
         Ok(())
     } else {
         Err(conflict(
+            SessionIdentityConflictKind::OwnershipMismatch,
             "legacy session row has conflicting Discord ownership",
         ))
     }
@@ -443,9 +494,10 @@ async fn preserve_alias(
         .map_err(database_error)?;
     if let Some(primary_id) = primary_id {
         if primary_id != session_id {
-            return Err(conflict(format!(
-                "session locator {session_key} is owned by another row"
-            )));
+            return Err(conflict(
+                SessionIdentityConflictKind::OwnershipMismatch,
+                "session locator is owned by another row",
+            ));
         }
         return Ok(());
     }
@@ -461,11 +513,12 @@ async fn preserve_alias(
     .bind(session_id)
     .fetch_one(&mut **tx)
     .await
-    .map_err(database_error)?;
+    .map_err(classify_write_error)?;
     if alias_id != session_id {
-        return Err(conflict(format!(
-            "session alias {session_key} is owned by another row"
-        )));
+        return Err(conflict(
+            SessionIdentityConflictKind::OwnershipMismatch,
+            "session alias is owned by another row",
+        ));
     }
     Ok(())
 }
@@ -578,7 +631,7 @@ async fn insert_target(
     .bind(params.dispatched_origin)
     .fetch_one(&mut **tx)
     .await
-    .map_err(|error| database_error(format!("insert session {}: {error}", params.session_key)))?;
+    .map_err(classify_write_error)?;
 
     preserve_alias(tx, params.session_key, inserted).await?;
     Ok(HookSessionUpsertOutcome {
@@ -587,8 +640,28 @@ async fn insert_target(
     })
 }
 
-fn conflict(message: impl Into<String>) -> HookSessionUpsertError {
-    HookSessionUpsertError::Conflict(message.into())
+fn conflict(
+    kind: SessionIdentityConflictKind,
+    message: impl Into<String>,
+) -> HookSessionUpsertError {
+    HookSessionUpsertError::Conflict(SessionIdentityConflict {
+        kind,
+        message: message.into(),
+    })
+}
+
+fn classify_write_error(error: sqlx::Error) -> HookSessionUpsertError {
+    let locator_namespace_collision = error
+        .as_database_error()
+        .and_then(|database_error| database_error.constraint())
+        == Some("session_locator_namespace");
+    if locator_namespace_collision {
+        return conflict(
+            SessionIdentityConflictKind::LocatorNamespace,
+            "session locator is already owned in the primary/alias namespace",
+        );
+    }
+    database_error(error)
 }
 
 fn database_error(error: impl std::fmt::Display) -> HookSessionUpsertError {
@@ -622,27 +695,23 @@ mod tests {
     #[test]
     fn resolver_order_accepts_matching_exact_alias_and_canonical_evidence() {
         let resolved = resolve_evidence(
-            "incoming",
             Some(evidence(7, "current")),
             Some(evidence(7, "current")),
             Some(evidence(7, "current")),
             None,
-        )
-        .expect("matching evidence resolves");
-        assert_eq!(resolved.map(|row| row.id), Some(7));
+        );
+        assert!(matches!(resolved, Ok(Some(row)) if row.id == 7));
     }
 
     #[test]
     fn resolver_fails_closed_when_evidence_disagrees() {
         let error = resolve_evidence(
-            "incoming",
             Some(evidence(7, "current")),
             Some(evidence(8, "other")),
             None,
             None,
-        )
-        .expect_err("different rows must conflict");
-        assert!(matches!(error, HookSessionUpsertError::Conflict(_)));
+        );
+        assert!(matches!(error, Err(HookSessionUpsertError::Conflict(_))));
     }
 
     #[test]

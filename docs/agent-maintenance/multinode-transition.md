@@ -449,11 +449,15 @@
 - 2026-07-25 — #4913 GO-A1 canonical Discord session identity: nullable
   `(provider, discord_token_hash, channel_id, identity_kind)` metadata and
   `session_key_aliases` are shared PostgreSQL authority. Canonical writes serialize
-  with a tuple-scoped PostgreSQL transaction advisory lock and row locks; ambiguous
-  exact/alias/canonical or legacy evidence fails closed. Existing tmux names,
-  processes, panes, FIFOs, gateway leases, leader election, and worker placement
-  remain unchanged; no cross-node tmux adoption, rename, kill, or routing cutover is
-  introduced.
+  with tuple/locator-scoped PostgreSQL transaction advisory locks and row locks;
+  `session_locator_namespace` unique claims prevent concurrent primary/alias
+  ownership across tables even for old direct writers. Migration and runtime share
+  the scheduled-snapshot exclusion classifier; alias-aware provider-selector,
+  `/resume`, force-kill ownership, and idle-heartbeat reads converge on one durable
+  row. Ambiguous exact/alias/canonical or legacy evidence fails closed with
+  categorical diagnostics. Existing tmux names, processes, panes, FIFOs, gateway
+  leases, leader election, and worker placement remain unchanged; no cross-node
+  tmux adoption, rename, kill, or routing cutover is introduced.
 - 2026-07-24 — #4712 lifecycle de-giant rebase: `runtime_bootstrap.rs` changes only
   update the restart-marker characterization fixture to the current nonce/version
   encoding, while watcher lifecycle logic moves verbatim behind the existing facade.
