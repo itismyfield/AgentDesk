@@ -111,12 +111,15 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches(
     if result.removed_token.is_some() {
         shared.mailboxes.recovery_done(channel_id).mark_done();
     }
-    turn_completion_events::publish_mailbox_release_completion_event(
-        shared,
-        channel_id,
-        Some(expected_user_message_id.get()),
-        &result,
-    );
+    if result.removed_token.is_some() {
+        turn_completion_events::publish_turn_completion_event(
+            shared,
+            turn_completion_events::TurnCompletionEvent::mailbox_released(
+                channel_id,
+                Some(expected_user_message_id.get()),
+            ),
+        );
+    }
     result
 }
 

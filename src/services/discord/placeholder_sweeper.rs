@@ -953,16 +953,21 @@ pub(super) fn spawn_placeholder_sweeper(
             let drained_abandon_requests =
                 super::abandon_request_store::drain(&http, &shared, &provider, &shared.token_hash)
                     .await;
+            // #4888: cleanup guards and process crashes can leave a retry binding
+            // without a surviving turn to clear it. Bound those durable sidecars
+            // independently of the normal terminal clear path.
+            let swept_busy_retry_bindings = super::busy_followup_retry_store::sweep_expired();
             sweeps_since_heartbeat = sweeps_since_heartbeat.saturating_add(1);
             if should_log_sweep_report(report, sweeps_since_heartbeat)
                 || drained > 0
                 || drained_abort_markers > 0
                 || drained_abandon_requests > 0
+                || swept_busy_retry_bindings > 0
                 || swept_orphan_anchors > 0
             {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
-                    "  [{ts}] 🧹 placeholder sweeper ({}): scanned={} stalled={} abandoned={} reclaimed_panels={} drained_orphans={} drained_abort_markers={} drained_abandon_requests={} swept_orphan_anchors={}",
+                    "  [{ts}] 🧹 placeholder sweeper ({}): scanned={} stalled={} abandoned={} reclaimed_panels={} drained_orphans={} drained_abort_markers={} drained_abandon_requests={} swept_busy_retry_bindings={} swept_orphan_anchors={}",
                     provider.as_str(),
                     report.scanned,
                     report.stalled,
@@ -971,6 +976,7 @@ pub(super) fn spawn_placeholder_sweeper(
                     drained,
                     drained_abort_markers,
                     drained_abandon_requests,
+                    swept_busy_retry_bindings,
                     swept_orphan_anchors
                 );
                 sweeps_since_heartbeat = 0;

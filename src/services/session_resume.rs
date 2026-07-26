@@ -9,7 +9,7 @@
 //!     `services::discord::commands::session`).
 //!
 //! The rebind is durable-first: it UPDATEs `sessions.cwd` +
-//! `sessions.claude_session_id` (via [`rebind_session_provider_pg`]) so the
+//! `sessions.claude_session_id` (via [`rebind_session_provider_by_id_pg`]) so the
 //! change survives a restart, then mirrors the same target into the in-memory
 //! `DiscordSession` (via `health::rebind_channel_provider_session`) so it takes
 //! effect on the very next turn without a restart. A DB-only rebind would be
@@ -32,7 +32,7 @@ use sqlx::PgPool;
 use crate::app_state::AppState;
 use crate::db::dispatched_sessions::{
     self as dispatched_sessions_db, SessionRebindContext, load_force_kill_session_pg,
-    load_session_rebind_context_pg, rebind_session_provider_pg,
+    load_session_rebind_context_pg, rebind_session_provider_by_id_pg,
 };
 use crate::services::discord::health::{
     HealthRegistry, channel_has_active_turn, rebind_channel_provider_session,
@@ -316,6 +316,8 @@ pub(crate) async fn perform_resume_rebind(
     opts: &ResumePreviousOptions,
 ) -> Result<ResumeRebindOutcome, ResumeRebindError> {
     let Some(SessionRebindContext {
+        resolved_session_key: _,
+        session_id,
         active_dispatch_id,
         cwd: current_cwd,
         claude_session_id: current_session_id,
@@ -391,7 +393,7 @@ pub(crate) async fn perform_resume_rebind(
     // having destroyed the live session (teardown is skipped), so the channel
     // keeps working on its old binding and the operator can retry. Only once
     // the row is repointed do we kill the old tmux and mirror in memory.
-    let rows = rebind_session_provider_pg(pool, session_key, &target_cwd, &target_session_id)
+    let rows = rebind_session_provider_by_id_pg(pool, session_id, &target_cwd, &target_session_id)
         .await
         .map_err(ResumeRebindError::Database)?;
     if rows == 0 {

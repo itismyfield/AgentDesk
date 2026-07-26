@@ -51,11 +51,30 @@ test-non-pg:
     cargo test --lib queue_marker::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib queue_status_presentation::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib status_panel_singleton_store -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib busy_followup_retry_store -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib services::claude_tui::input::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib services::tmux_common::sentinel_tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib services::discord::turn_bridge::followup_requeue::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib services::discord::turn_bridge::terminal_outcome_delivery::busy_followup_retry::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib services::discord::gateway::tests -- --skip _pg --skip pg_ --skip postgres
+    env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::gateway::outbound_messages::classified_edit_tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
+    env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_dispatch::queued::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
+    env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::intake_turn::placeholder_handoff::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
+    env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::completion_admission::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
+    env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::completion_admission_actor::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1
+    env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::cleanup::tests::late_already_finalized_cleanup_releases_mailbox_and_rearms_once_4906 -- --exact --test-threads=1
+    env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::cleanup::tests::mailbox_release_backstop_coalesces_duplicate_arms_and_eventually_fires_4906 -- --exact --test-threads=1
+    env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::recovery_engine::runtime::reregister_ledger_reseed_tests -- --test-threads=1
+    env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::placeholder_sweeper::abandon_guard::tests -- --test-threads=1
     # #4892: keep the live panel and spinner-merged latest-tool contracts in the retained lane.
     env -u AGENTDESK_ROOT_DIR cargo test --lib placeholder_live_events -- --skip _pg --skip pg_ --skip postgres
     env -u AGENTDESK_ROOT_DIR cargo test --lib single_message_panel::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::outbound::serenity_reference::tests::lifecycle_notice_nonce_is_stable_and_semantic_event_scoped -- --exact
     cargo test --lib services::discord::outbound::delivery::tests::v3_referenced_send_preserves_reference_and_dedupes -- --exact
+    # #4913 GO-A1: retain canonical Discord identity validation, collision, and observability contracts.
+    cargo test --lib canonical_identity::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib session_canonical_identity::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib services::observability::metrics::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib cli::args::tests::legacy_queue_help_directs_users_to_query_without_changing_compatibility_contract
     # #4916: deferred lifecycle cleanup must preserve authority and retry safely.
     cargo test --lib services::auto_queue::runtime::tests
@@ -69,6 +88,10 @@ test-non-pg:
     # Run health first so a fail-fast relay_recovery failure cannot hide it.
     python3 scripts/ci-timeout.py 900 env -u AGENTDESK_ROOT_DIR cargo test --lib health -- --skip _pg --skip pg_ --skip postgres
     env -u AGENTDESK_ROOT_DIR cargo test --lib relay_recovery -- --skip _pg --skip pg_ --skip postgres
+    # #4875: keep the Claude catalog and picker test modules fully selected.
+    cargo test --lib services::discord::model_catalog -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib services::discord::commands::model_ui::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib services::discord::runtime_bootstrap::shutdown::lifecycle_tests -- --skip _pg --skip pg_ --skip postgres
     cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
     # `ClaudeBinary` capability invariants are compile-fail doctests in src/lib.rs.
     # Filter the real rustdoc harness to this public capability contract.

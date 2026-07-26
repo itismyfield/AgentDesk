@@ -1,11 +1,7 @@
 //! Inflight turn-state domain model (#3479 extraction).
 //!
-//! Pure data types for the inflight turn state contract: the
-//! [`InflightTurnState`] row, its turn-identity projection
-//! [`InflightTurnIdentity`], the [`TurnSource`] / [`RelayOwnerKind`] audit
-//! enums, the `opt_message_id` zero-id helper, and the version-tolerant serde
-//! adapters. Behaviour-preserving move out of `inflight.rs`; the parent
-//! re-exports every public item so existing `inflight::*` paths still resolve.
+//! Inflight state, turn identity, relay ownership, zero-id helpers, and
+//! version-tolerant serde adapters extracted from `inflight.rs`.
 
 use std::num::NonZeroU64;
 
@@ -121,6 +117,9 @@ pub(in crate::services::discord) struct InflightTurnState {
     pub thread_title: Option<String>,
     pub request_owner_user_id: u64,
     pub user_msg_id: u64,
+    /// Queue-merge source identity for the durable retry budget and notice.
+    #[serde(default)]
+    pub busy_followup_retry_user_msg_id: u64,
     /// Nonzero identity used by the single-authority finalizer ledger. It is
     /// independent of Discord user-message anchoring: real user id wins, then a
     /// pinned injected prompt id, then a persisted synthetic id for id-0 turns.
@@ -975,6 +974,7 @@ impl InflightTurnState {
             thread_title: None,
             request_owner_user_id,
             user_msg_id,
+            busy_followup_retry_user_msg_id: user_msg_id,
             finalizer_turn_id,
             status_message_id: None,
             status_panel_generation: 0,

@@ -583,6 +583,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     // label so they never share (and thus never overwrite) the channel's live
     // session_key row.
     let scheduled_snapshot_label = scheduled_snapshot_session_label(metadata.as_ref());
+    let scheduled_snapshot_turn = scheduled_snapshot_label.is_some();
     let adk_session_key = build_adk_session_key(
         shared,
         channel_id,
@@ -590,7 +591,8 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         scheduled_snapshot_label.as_deref(),
     )
     .await;
-    if valid_routine_metadata(metadata.as_ref()).is_some()
+    if !scheduled_snapshot_turn
+        && valid_routine_metadata(metadata.as_ref()).is_some()
         && let (Some(pool), Some(binding), Some(session_key)) = (
             shared.pg_pool.as_ref(),
             role_binding.as_ref(),
@@ -665,7 +667,6 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     // writeback is keyed by session_key, so it never touches the channel row.
     // Its cold start + live-context suppression are handled separately below,
     // WITHOUT disturbing the channel (F1: non-disruption is the design contract).
-    let scheduled_snapshot_turn = scheduled_snapshot_label.is_some();
     let fresh_context_severance = goal_fresh || fresh_routine;
     // Fresh routines use the same provider-severance machinery as `/goal fresh`:
     // clear in-memory, DB, stale IDs, and live-TUI bindings; skip restoration;
@@ -1074,7 +1075,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     let adk_thread_channel_id = adk_session_name
         .as_deref()
         .and_then(super::super::super::adk_session::parse_thread_channel_id_from_name);
-    post_adk_session_status(
+    post_adk_session_status_with_canonical_identity(
         adk_session_key.as_deref(),
         adk_session_name.as_deref(),
         model_for_turn.as_deref(),
@@ -1089,6 +1090,8 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         role_binding
             .as_ref()
             .map(|binding| binding.role_id.as_str()),
+        &shared.token_hash,
+        scheduled_snapshot_turn,
         shared.api_port,
     )
     .await;
@@ -1790,6 +1793,24 @@ mod fresh_routine_tests {
         assert!(
             src.contains(&local_cold_start),
             "snapshot cold-start must null the LOCAL session_id, not wipe the channel"
+        );
+    }
+
+    // #4913 GO-A1: snapshot metadata must gate the legacy channel-key refresh.
+    // Mutation proof: remove `!scheduled_snapshot_turn &&` from the production
+    // guard and this source-contract test fails before a snapshot can rewrite the
+    // live channel row by channel_id.
+    #[test]
+    fn scheduled_snapshot_skips_channel_session_key_refresh() {
+        let src = include_str!("headless_turn.rs");
+        let guarded_refresh = format!(
+            "{}{}",
+            "if !scheduled_snapshot_turn\n        && ",
+            "valid_routine_metadata(metadata.as_ref()).is_some()"
+        );
+        assert!(
+            src.contains(&guarded_refresh),
+            "scheduled snapshots must not enter the channel-scoped session_key refresh"
         );
     }
 

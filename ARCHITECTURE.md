@@ -76,6 +76,8 @@ src/
 │   ├── automation_candidates/
 │   │   └── verdict_tests.rs
 │   ├── dispatched_sessions/
+│   │   ├── canonical_identity.rs
+│   │   ├── canonical_identity_pg_tests.rs
 │   │   └── rebind_override.rs
 │   ├── dispatches/
 │   │   ├── outbox/
@@ -575,6 +577,9 @@ src/
 │   │   │   ├── rounds.rs
 │   │   │   ├── selection.rs
 │   │   │   └── selection_runtime.rs
+│   │   ├── model_catalog/
+│   │   │   ├── bounded_cache_file.rs
+│   │   │   └── claude.rs
 │   │   ├── outbound/
 │   │   │   ├── turn_output_controller/
 │   │   │   │   ├── fresh_send.rs
@@ -701,6 +706,7 @@ src/
 │   │   │   │   │   ├── adk_thread.rs
 │   │   │   │   │   ├── claim_bootstrap.rs
 │   │   │   │   │   ├── inflight_create_log.rs
+│   │   │   │   │   ├── placeholder_handoff.rs
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── stale_dispatch_guard.rs
 │   │   │   │   │   ├── steering_hook.rs
@@ -877,7 +883,8 @@ src/
 │   │   │   │   ├── completion_context.rs
 │   │   │   │   └── completion_postgres.rs
 │   │   │   ├── completion_postlude/
-│   │   │   │   └── channel_writeback.rs
+│   │   │   │   ├── channel_writeback.rs
+│   │   │   │   └── contracts.rs
 │   │   │   ├── runtime_handoff_loop/
 │   │   │   │   ├── claude_e.rs
 │   │   │   │   ├── guarded_save.rs
@@ -903,6 +910,7 @@ src/
 │   │   │   │   │   └── handler.rs
 │   │   │   │   ├── busy_followup_retry.rs
 │   │   │   │   ├── cancel_prompt_replace.rs
+│   │   │   │   ├── contracts.rs
 │   │   │   │   ├── delivery_epilogue.rs
 │   │   │   │   ├── empty_response_recovery.rs
 │   │   │   │   ├── prompt_too_long_guidance.rs
@@ -959,7 +967,10 @@ src/
 │   │   │   ├── watcher_handoff.rs
 │   │   │   └── watcher_orphan_cleanup.rs
 │   │   ├── turn_finalizer/
+│   │   │   ├── actor_state.rs
 │   │   │   ├── cleanup.rs
+│   │   │   ├── completion_admission.rs
+│   │   │   ├── completion_admission_actor.rs
 │   │   │   ├── completion_signal.rs
 │   │   │   ├── delivery_lease.rs
 │   │   │   ├── finalize.rs
@@ -1014,6 +1025,7 @@ src/
 │   │   ├── agentdesk_config.rs
 │   │   ├── answer_flush_barrier.rs
 │   │   ├── bot_role.rs
+│   │   ├── busy_followup_retry_store.rs
 │   │   ├── catch_up.rs
 │   │   ├── compact_turn_authority.rs
 │   │   ├── completion_footer_metadata.rs
@@ -1083,9 +1095,11 @@ src/
 │   │   ├── runtime_store.rs
 │   │   ├── semantic_boundaries.rs
 │   │   ├── session_banner.rs
+│   │   ├── session_canonical_identity.rs
 │   │   ├── session_identity.rs
 │   │   ├── session_relay_sink.rs
 │   │   ├── session_runtime.rs
+│   │   ├── session_status_hook.rs
 │   │   ├── settings.rs
 │   │   ├── shared_memory.rs
 │   │   ├── shared_state.rs
@@ -1127,6 +1141,8 @@ src/
 │   │   ├── voice_lifecycle.rs
 │   │   ├── voice_routing.rs
 │   │   └── voice_sensitivity.rs
+│   ├── dispatched_sessions/
+│   │   └── canonical_identity.rs
 │   ├── dispatches/
 │   │   ├── discord_delivery/
 │   │   │   ├── guard.rs

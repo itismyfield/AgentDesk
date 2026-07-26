@@ -73,7 +73,10 @@ pub(super) async fn finalize_and_drain_queued_turns(
                     reason
                 );
             } else {
-                let next_intervention = super::super::mailbox_take_next_soft_intervention(
+                // The caller's queue flag predates terminal disposition. Select
+                // from the current mailbox under the automatic-progression cap
+                // policy so a capped retry stays parked while later work can run.
+                let next_intervention = super::super::mailbox_take_next_automatic_intervention(
                     &shared_owned,
                     &bot_owner_provider,
                     channel_id,
@@ -277,6 +280,74 @@ mod tests {
             pending_uploads: Vec::new(),
             voice_announcement: None,
         }
+    }
+
+    #[test]
+    fn stale_queue_flag_skips_capped_retry_and_dispatches_unrelated_backlog_4893() {
+        let tmp = tempfile::tempdir().expect("runtime root");
+        let _root_guard = crate::config::set_agentdesk_root_for_test(tmp.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                shared.restart.finalizing_turns.store(1, Ordering::Relaxed);
+                shared.restart.global_finalizing.store(1, Ordering::Relaxed);
+                let provider = ProviderKind::Claude;
+                let channel_id = ChannelId::new(4_893_320);
+                let capped = queued_intervention(4_893_321);
+                let unrelated = queued_intervention(4_893_322);
+                let notice_id = MessageId::new(4_893_323);
+                super::super::busy_followup_retry_store::bind_notice_if_absent(
+                    &provider,
+                    channel_id.get(),
+                    capped.message_id.get(),
+                    notice_id.get(),
+                )
+                .expect("bind capped retry");
+                for _ in 0..super::super::busy_followup_retry_store::MAX_BUSY_RETRY_COUNT {
+                    super::super::busy_followup_retry_store::record_busy_retry(
+                        &provider,
+                        channel_id.get(),
+                        capped.message_id.get(),
+                        notice_id.get(),
+                    )
+                    .expect("record capped retry");
+                }
+                shared
+                    .mailbox(channel_id)
+                    .replace_queue(
+                        vec![capped.clone(), unrelated.clone()],
+                        super::super::queue_persistence_context(&shared, &provider, channel_id),
+                    )
+                    .await;
+
+                finalize_and_drain_queued_turns(
+                    shared.clone(),
+                    true,
+                    false,
+                    Arc::new(FailingQueuedDispatchGateway),
+                    channel_id,
+                    provider,
+                    "requester".to_string(),
+                    None,
+                    channel_id,
+                )
+                .await;
+
+                let snapshot = super::super::mailbox_snapshot(&shared, channel_id).await;
+                assert_eq!(
+                    snapshot
+                        .intervention_queue
+                        .iter()
+                        .map(|item| item.message_id)
+                        .collect::<Vec<_>>(),
+                    vec![unrelated.message_id, capped.message_id],
+                    "the stale epilogue flag must select unrelated B; its forced dispatch failure restores B without dispatching capped A"
+                );
+            });
     }
 
     #[test]

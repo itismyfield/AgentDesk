@@ -208,11 +208,16 @@ fn idle_queue_backstop_backlog_units(
     channel_id: ChannelId,
     snapshot: &ChannelMailboxSnapshot,
 ) -> usize {
-    if idle_queue_snapshot_has_raw_rearm_backlog(shared, provider, channel_id, snapshot) {
-        snapshot.intervention_queue.len().max(1)
-    } else {
-        0
+    if !idle_queue_snapshot_has_raw_rearm_backlog(shared, provider, channel_id, snapshot) {
+        return 0;
     }
+    if matches!(
+        super::automatic_queue_progression(shared, provider, channel_id, snapshot),
+        AutomaticQueueProgression::BlockedByCappedRetries
+    ) {
+        return 0;
+    }
+    snapshot.intervention_queue.len().max(1)
 }
 
 fn idle_queue_snapshot_has_raw_rearm_backlog(
@@ -624,11 +629,20 @@ pub(in crate::services::discord) fn spawn_turn_completion_idle_queue_listener(
         loop {
             match rx.recv().await {
                 Ok(event) => {
+                    if !event.queue_is_eligible() {
+                        tracing::debug!(
+                            target: "agentdesk::discord::turn_completion_events",
+                            provider = provider.as_str(),
+                            channel_id = event.channel_id.get(),
+                            "mailbox release observed before terminal projection settled; queue kick withheld"
+                        );
+                        continue;
+                    }
                     tracing::debug!(
                         target: "agentdesk::discord::turn_completion_events",
                         provider = provider.as_str(),
                         channel_id = event.channel_id.get(),
-                        "turn completion event received; kicking idle queue channel"
+                        "queue-eligible completion event received; kicking idle queue channel"
                     );
                     let outcome = kick_idle_queue_channel_if_context_available(
                         &shared,
@@ -694,12 +708,12 @@ pub(in crate::services::discord) fn spawn_turn_completion_idle_queue_listener(
 }
 
 #[cfg(test)]
-fn idle_queue_backstop_fires_for_tests() -> usize {
+pub(in crate::services::discord) fn idle_queue_backstop_fires_for_tests() -> usize {
     IDLE_QUEUE_BACKSTOP_FIRES_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(test)]
-fn idle_queue_backstop_delay_for_tests() -> std::time::Duration {
+pub(in crate::services::discord) fn idle_queue_backstop_delay_for_tests() -> std::time::Duration {
     DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY
 }
 
@@ -1079,6 +1093,161 @@ mod presleep_tests {
                 .deferred_hook_channels
                 .contains_key(&channel_id),
             "the armed backstop is channel-scoped and coalescible"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn capped_retry_is_parked_while_unrelated_backlog_progresses_and_backstop_disarms_4893() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+        let shared = make_shared_data_for_tests();
+        drop(_lock);
+
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_893_310);
+        let capped_id = MessageId::new(4_893_311);
+        let eligible_id = MessageId::new(4_893_312);
+        let notice_id = MessageId::new(4_893_313);
+        super::super::busy_followup_retry_store::bind_notice_if_absent(
+            &provider,
+            channel_id.get(),
+            capped_id.get(),
+            notice_id.get(),
+        )
+        .expect("bind capped retry");
+        for _ in 0..super::super::busy_followup_retry_store::MAX_BUSY_RETRY_COUNT {
+            super::super::busy_followup_retry_store::record_busy_retry(
+                &provider,
+                channel_id.get(),
+                capped_id.get(),
+                notice_id.get(),
+            )
+            .expect("record capped retry");
+        }
+        shared
+            .mailbox(channel_id)
+            .replace_queue(
+                vec![
+                    user_intervention(capped_id.get(), "capped A"),
+                    user_intervention(eligible_id.get(), "unrelated B"),
+                ],
+                queue_persistence_context(&shared, &provider, channel_id),
+            )
+            .await;
+
+        let kick_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dispatched = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hook_calls = kick_calls.clone();
+        let hook_dispatched = dispatched.clone();
+        let _hook = set_idle_queue_kick_hook_for_tests(Arc::new(
+            move |shared, provider, channel, _reason| {
+                let hook_calls = hook_calls.clone();
+                let hook_dispatched = hook_dispatched.clone();
+                Box::pin(async move {
+                    if channel != channel_id {
+                        return None;
+                    }
+                    hook_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let taken = super::super::mailbox_take_next_automatic_intervention(
+                        &shared, &provider, channel,
+                    )
+                    .await;
+                    if let Some(intervention) = taken.intervention.as_ref() {
+                        hook_dispatched
+                            .lock()
+                            .expect("dispatch observations")
+                            .push(intervention.message_id);
+                        super::super::mailbox_abandon_unclaimed_dispatch_after_success(
+                            &shared,
+                            &provider,
+                            channel,
+                            intervention.message_id,
+                            taken
+                                .dispatch_lease
+                                .as_ref()
+                                .expect("automatic dequeue lease")
+                                .clone(),
+                        )
+                        .await;
+                    }
+                    Some(IdleQueueKickoffChannelOutcome {
+                        started: taken.intervention.is_some(),
+                    })
+                })
+            },
+        ));
+
+        assert!(
+            arm_slow_idle_queue_backstop_if_queue_nonempty(
+                &shared,
+                &provider,
+                channel_id,
+                "prearmed-before-terminal-disposition",
+            )
+            .await,
+            "mailbox release can pre-arm the slow backstop before cap settlement"
+        );
+        let direct =
+            super::super::mailbox_take_next_automatic_intervention(&shared, &provider, channel_id)
+                .await;
+        assert_eq!(
+            direct.intervention.as_ref().map(|item| item.message_id),
+            Some(eligible_id),
+            "stale epilogue progression must skip capped A and select unrelated B"
+        );
+        super::super::mailbox_abandon_unclaimed_dispatch_after_success(
+            &shared,
+            &provider,
+            channel_id,
+            eligible_id,
+            direct
+                .dispatch_lease
+                .as_ref()
+                .expect("direct automatic dequeue lease")
+                .clone(),
+        )
+        .await;
+
+        tokio::time::advance(idle_queue_backstop_delay_for_tests()).await;
+        yield_backstop_tasks().await;
+        let snapshot = mailbox_snapshot(&shared, channel_id).await;
+        assert_eq!(
+            snapshot
+                .intervention_queue
+                .iter()
+                .map(|item| item.message_id)
+                .collect::<Vec<_>>(),
+            vec![capped_id],
+            "capped A remains available for explicit operator recovery"
+        );
+        assert_eq!(
+            kick_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the prearmed backstop must become a cap-aware no-op"
+        );
+        assert!(
+            dispatched.lock().expect("dispatch observations").is_empty(),
+            "the prearmed backstop must never redispatch capped A"
+        );
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "the capped-only queue must not rearm the backstop"
+        );
+
+        let manual =
+            super::super::mailbox_take_next_soft_intervention(&shared, &provider, channel_id).await;
+        assert_eq!(
+            manual.intervention.as_ref().map(|item| item.message_id),
+            Some(capped_id),
+            "explicit/manual dequeue retains recovery authority"
         );
     }
 

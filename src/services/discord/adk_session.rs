@@ -224,6 +224,8 @@ pub(super) async fn record_turn_start_origin(
         claude_session_id: None,
         session_id: None,
         channel_id: Some(channel_id.get().to_string()),
+        identity_kind: None,
+        discord_token_hash: None,
         turn_start_nonce: Some(turn_nonce.to_string()),
         dispatched_origin: Some(dispatched_origin),
     };
@@ -232,55 +234,7 @@ pub(super) async fn record_turn_start_origin(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn post_adk_session_status(
-    session_key: Option<&str>,
-    name: Option<&str>,
-    model: Option<&str>,
-    status: &str,
-    provider: &ProviderKind,
-    session_info: Option<&str>,
-    tokens: Option<u64>,
-    cwd: Option<&str>,
-    dispatch_id: Option<&str>,
-    thread_channel_id: Option<u64>,
-    channel_id: Option<serenity::ChannelId>,
-    agent_id: Option<&str>,
-    _api_port: u16,
-) {
-    let Some(session_key) = session_key else {
-        return;
-    };
-    let status = crate::db::session_status::normalize_incoming_session_status(Some(status));
-
-    let body = crate::services::dispatched_sessions::HookSessionBody {
-        session_key: session_key.to_string(),
-        instance_id: None,
-        agent_id: agent_id.map(str::to_string),
-        status: Some(status.to_string()),
-        provider: Some(provider.as_str().to_string()),
-        session_info: session_info.map(str::to_string),
-        name: name.and_then(clean_nonempty).map(str::to_string),
-        model: model
-            .and_then(clean_nonempty)
-            .filter(|value| !value.eq_ignore_ascii_case(provider.as_str()))
-            .map(str::to_string),
-        tokens,
-        cwd: cwd.and_then(clean_nonempty).map(str::to_string),
-        dispatch_id: dispatch_id.and_then(clean_nonempty).map(str::to_string),
-        thread_channel_id: thread_channel_id.map(|id| id.to_string()),
-        claude_session_id: None,
-        session_id: None,
-        channel_id: channel_id.map(|id| id.get().to_string()),
-        turn_start_nonce: None,
-        dispatched_origin: None,
-    };
-
-    if let Err(err) = super::internal_api::hook_session(body).await {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::warn!("  [{ts}] ⚠ ADK session POST failed: {err}");
-    }
-}
+pub(super) use super::session_status_hook::post_legacy as post_adk_session_status;
 
 /// Delete a session row from the DB by session_key.
 /// Used to clean up thread sessions after dispatch completion.
@@ -336,6 +290,8 @@ pub(super) async fn save_provider_session_id(
         claude_session_id: Some(session_id.to_string()),
         session_id: raw_provider_session_id.map(str::to_string),
         channel_id: Some(channel_id.get().to_string()),
+        identity_kind: None,
+        discord_token_hash: None,
         turn_start_nonce: None,
         dispatched_origin: None,
     };

@@ -19,6 +19,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+#[path = "dispatched_sessions/canonical_identity.rs"]
+mod canonical_identity;
+
 async fn hook_session_pg(
     state: &AppState,
     pool: &sqlx::PgPool,
@@ -70,47 +73,61 @@ async fn hook_session_pg(
         .or(state.cluster_instance_id.as_deref());
     let claude_session_id = body.claude_session_id.as_deref().filter(|s| !s.is_empty());
     let raw_provider_session_id = body.session_id.as_deref().filter(|s| !s.is_empty());
+    let identity = canonical_identity::parse_hook_identity(
+        &body.session_key,
+        provider,
+        body.identity_kind.as_deref(),
+        body.discord_token_hash.as_deref(),
+        body.channel_id.as_deref(),
+    )
+    .map_err(|error| {
+        AppError::bad_request(format!("invalid canonical session identity: {error:?}"))
+    })?;
 
     // #2045 Finding 7 (P2): the upsert helper now reports whether the row
     // was inserted in this transaction (`xmax = 0` RETURNING). The earlier
     // pattern of "SELECT exists, then upsert" raced under cluster hand-off
     // and could broadcast `dispatched_session_new` twice for the same
     // session_key — once per concurrent webhook.
-    let result = dispatched_sessions_db::upsert_hook_session_pg(
-        pool,
-        dispatched_sessions_db::HookSessionUpsert {
-            session_key: &body.session_key,
-            instance_id,
-            agent_id: agent_id.as_deref(),
-            provider,
-            status,
-            session_info: body.session_info.as_deref(),
-            model: body.model.as_deref(),
-            tokens,
-            cwd: body.cwd.as_deref(),
-            active_dispatch_id: active_dispatch_id.as_deref(),
-            thread_channel_id: thread_channel_id.as_deref(),
-            // #3207 (part 2) P0: persist the unique channel id so worktree reuse
-            // can require an exact channel match. Prefer the explicit channel id
-            // from the hook body; fall back to the resolved thread channel id so
-            // thread sessions (which set `thread_channel_id` but may omit
-            // `channel_id`) still scope correctly.
-            channel_id: body
-                .channel_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .or(thread_channel_id.as_deref()),
-            claude_session_id,
-            raw_provider_session_id,
-            turn_start_nonce,
-            dispatched_origin,
-        },
-    )
-    .await;
+    let result =
+        crate::db::dispatched_session_canonical_identity::upsert_hook_session_with_identity_pg(
+            pool,
+            dispatched_sessions_db::HookSessionUpsert {
+                session_key: &body.session_key,
+                instance_id,
+                agent_id: agent_id.as_deref(),
+                provider,
+                status,
+                session_info: body.session_info.as_deref(),
+                model: body.model.as_deref(),
+                tokens,
+                cwd: body.cwd.as_deref(),
+                active_dispatch_id: active_dispatch_id.as_deref(),
+                thread_channel_id: thread_channel_id.as_deref(),
+                // #3207 (part 2) P0: persist the unique channel id so worktree reuse
+                // can require an exact channel match. Prefer the explicit channel id
+                // from the hook body; fall back to the resolved thread channel id so
+                // thread sessions (which set `thread_channel_id` but may omit
+                // `channel_id`) still scope correctly.
+                channel_id: body
+                    .channel_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .or(thread_channel_id.as_deref()),
+                claude_session_id,
+                raw_provider_session_id,
+                turn_start_nonce,
+                dispatched_origin,
+            },
+            identity,
+        )
+        .await;
 
     match result {
-        Ok(is_new_session) => {
+        Ok(outcome) => {
+            let is_new_session = outcome.inserted;
+            let resolved_session_key = outcome.session_key;
             let dispatch_id = body.dispatch_id.clone();
 
             crate::kanban::fire_event_hooks_with_backends(
@@ -118,7 +135,7 @@ async fn hook_session_pg(
                 "on_session_status_change",
                 "OnSessionStatusChange",
                 json!({
-                    "session_key": body.session_key,
+                    "session_key": resolved_session_key,
                     "instance_id": instance_id,
                     "status": status,
                     "agent_id": agent_id,
@@ -133,7 +150,7 @@ async fn hook_session_pg(
                 spawn_auto_queue_activate_for_agent(state.clone(), aid.clone());
             }
 
-            match dispatched_sessions_db::load_session_event_payload_pg(pool, &body.session_key)
+            match dispatched_sessions_db::load_session_event_payload_pg(pool, &resolved_session_key)
                 .await
             {
                 Ok(Some(payload)) => {
@@ -147,7 +164,7 @@ async fn hook_session_pg(
                         crate::eventbus::emit_batched_event(
                             &state.batch_buffer,
                             "dispatched_session_update",
-                            &body.session_key,
+                            &resolved_session_key,
                             payload,
                         );
                     }
@@ -164,7 +181,7 @@ async fn hook_session_pg(
                 match dispatched_sessions_db::load_agent_status_payload_pg(
                     pool,
                     aid,
-                    &body.session_key,
+                    &resolved_session_key,
                 )
                 .await
                 {
@@ -188,7 +205,29 @@ async fn hook_session_pg(
 
             Ok((StatusCode::OK, Json(json!({"ok": true}))))
         }
-        Err(error) => Err(AppError::internal(error).with_code(ErrorCode::Database)),
+        Err(error) => {
+            if let Some(kind) = error.conflict_kind() {
+                let channel_id = body
+                    .channel_id
+                    .as_deref()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(0);
+                crate::services::observability::metrics::record_session_identity_conflict(
+                    channel_id, provider, kind,
+                );
+                tracing::warn!(
+                    conflict_kind = kind.as_str(),
+                    provider,
+                    channel_id,
+                    "canonical session identity write rejected"
+                );
+            }
+            Err(
+                crate::db::dispatched_session_canonical_identity::hook_session_upsert_error_to_app_error(
+                    error,
+                ),
+            )
+        }
     }
 }
 
@@ -263,6 +302,12 @@ pub struct HookSessionBody {
     /// satisfy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_id: Option<String>,
+    /// Explicit semantic owner kind. Omitted by old binaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_kind: Option<String>,
+    /// Existing SHA-256-derived Discord bot namespace; never a raw token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discord_token_hash: Option<String>,
     /// Durable turn-start identity. Present only for an authoritative new turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_start_nonce: Option<String>,
@@ -414,10 +459,7 @@ pub async fn get_claude_session_id(
             Ok(Some(ids)) => {
                 let selected_session_id =
                     selected_provider_resume_selector_for_provider_recording_observation(
-                        pool,
-                        &params.session_key,
-                        provider,
-                        &ids,
+                        pool, provider, &ids,
                     )
                     .await;
                 Ok((
@@ -1130,7 +1172,6 @@ pub(crate) fn selected_provider_resume_selector_for_provider<'a>(
 
 pub(crate) async fn selected_provider_resume_selector_for_provider_recording_observation(
     pool: &sqlx::PgPool,
-    session_key: &str,
     provider_name: Option<&str>,
     ids: &dispatched_sessions_db::ProviderSessionIds,
 ) -> Option<String> {
@@ -1138,7 +1179,7 @@ pub(crate) async fn selected_provider_resume_selector_for_provider_recording_obs
         selected_provider_resume_selector_for_provider(provider_name, ids).map(str::to_string);
     record_raw_provider_transcript_len_watermark_if_observed(
         pool,
-        session_key,
+        &ids.resolved_session_key,
         provider_name,
         ids,
         None,
@@ -1627,7 +1668,7 @@ async fn kill_tmux_session_impl(
             let resumable = provider_resume_selector_is_effective(effective_provider_name, &ids);
             record_raw_provider_transcript_len_watermark_if_observed(
                 pool,
-                session_key,
+                &ids.resolved_session_key,
                 effective_provider_name,
                 &ids,
                 None,
@@ -1814,6 +1855,7 @@ mod kill_tmux_resume_tests {
         raw_provider_transcript_growth_proven: bool,
     ) -> ProviderSessionIds {
         ProviderSessionIds {
+            resolved_session_key: "test-session".to_string(),
             claude_session_id: claude_session_id.map(str::to_string),
             raw_provider_session_id: raw_provider_session_id.map(str::to_string),
             cwd: cwd.map(|path| path.display().to_string()),

@@ -11,32 +11,85 @@ pub(crate) async fn upsert_rebind_session_override_pg(
     session_id: &str,
 ) -> Result<(), String> {
     let claude_session_id = (provider == "claude").then_some(session_id);
-    sqlx::query(
-        "INSERT INTO sessions (
-            session_key, provider, status, claude_session_id,
-            raw_provider_session_id, claude_session_id_recorded_at, last_heartbeat
-         ) VALUES (
-            $1, $2, 'idle', $3, $4,
-            CASE WHEN $3 IS NOT NULL THEN NOW() ELSE NULL END, NOW()
-         )
-         ON CONFLICT(session_key) DO UPDATE SET
-            claude_session_id = COALESCE(EXCLUDED.claude_session_id, sessions.claude_session_id),
-            claude_session_id_recorded_at = CASE
-              WHEN EXCLUDED.claude_session_id IS NULL THEN sessions.claude_session_id_recorded_at
-              WHEN sessions.claude_session_id IS DISTINCT FROM EXCLUDED.claude_session_id THEN NOW()
-              ELSE COALESCE(sessions.claude_session_id_recorded_at, NOW())
-            END,
-            raw_provider_session_id = COALESCE(EXCLUDED.raw_provider_session_id, sessions.raw_provider_session_id),
-            last_heartbeat = NOW()",
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("begin rebind session override: {error}"))?;
+    sqlx::query("SELECT agentdesk_lock_session_locator($1)")
+        .bind(session_key)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("lock rebind session override locator: {error}"))?;
+
+    let targets = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT session_key, provider
+         FROM (
+             SELECT s.session_key, s.provider, 1 AS source_rank
+             FROM sessions s
+             WHERE s.session_key = $1
+             UNION ALL
+             SELECT s.session_key, s.provider, 2 AS source_rank
+             FROM session_key_aliases a
+             JOIN sessions s ON s.id = a.session_id
+             WHERE a.session_key = $1
+         ) evidence
+         ORDER BY source_rank",
     )
     .bind(session_key)
-    .bind(provider)
-    .bind(claude_session_id)
-    .bind(session_id)
-    .execute(pool)
+    .fetch_all(&mut *tx)
     .await
-    .map(|_| ())
-    .map_err(|error| format!("upsert rebind session override {session_key}: {error}"))
+    .map_err(|error| format!("resolve rebind session override: {error}"))?;
+    if targets.len() > 1 {
+        return Err("rebind session override locator has divergent evidence".to_string());
+    }
+
+    if let Some((resolved_session_key, owner_provider)) = targets.into_iter().next() {
+        if owner_provider
+            .as_deref()
+            .is_some_and(|owner| owner != provider)
+        {
+            return Err("rebind session override provider ownership mismatch".to_string());
+        }
+        sqlx::query(
+            "UPDATE sessions
+             SET claude_session_id = COALESCE($2, claude_session_id),
+                 claude_session_id_recorded_at = CASE
+                   WHEN $2 IS NULL THEN claude_session_id_recorded_at
+                   WHEN claude_session_id IS DISTINCT FROM $2 THEN NOW()
+                   ELSE COALESCE(claude_session_id_recorded_at, NOW())
+                 END,
+                 raw_provider_session_id = COALESCE($3, raw_provider_session_id),
+                 last_heartbeat = NOW()
+             WHERE session_key = $1",
+        )
+        .bind(resolved_session_key)
+        .bind(claude_session_id)
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("update rebind session override: {error}"))?;
+    } else {
+        sqlx::query(
+            "INSERT INTO sessions (
+                session_key, provider, status, claude_session_id,
+                raw_provider_session_id, claude_session_id_recorded_at, last_heartbeat
+             ) VALUES (
+                $1, $2, 'idle', $3, $4,
+                CASE WHEN $3 IS NOT NULL THEN NOW() ELSE NULL END, NOW()
+             )",
+        )
+        .bind(session_key)
+        .bind(provider)
+        .bind(claude_session_id)
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("insert rebind session override: {error}"))?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit rebind session override: {error}"))
 }
 
 #[cfg(test)]

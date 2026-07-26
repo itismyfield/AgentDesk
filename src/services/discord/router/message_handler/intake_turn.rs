@@ -9,6 +9,7 @@ use super::*;
 mod adk_thread;
 mod claim_bootstrap;
 pub(crate) mod inflight_create_log;
+mod placeholder_handoff;
 pub(super) mod race_loss;
 mod stale_dispatch_guard;
 mod steering_hook;
@@ -47,6 +48,7 @@ pub(super) async fn handle_text_message(
     deps: &IntakeDeps<'_>,
     channel_id: ChannelId,
     user_msg_id: MessageId,
+    busy_followup_retry_user_msg_id: MessageId,
     request_owner: UserId,
     request_owner_name: &str,
     user_text: &str,
@@ -1254,22 +1256,7 @@ pub(super) async fn handle_text_message(
     )
     .await;
 
-    // #1332 dispatch hand-off: if this turn was previously enqueued and is now
-    // being dispatched, reuse the Queued placeholder card so the user sees a
-    // single message transition `📬 → 🔄` instead of two distinct placeholders.
-    //
-    // codex review P2 (round-after-#1332): merged interventions accumulate
-    // multiple `source_message_ids`; each lost a separate race and registered
-    // its own queued placeholder. Drain mappings for ALL of them — the head
-    // (intervention.message_id) becomes the live Active card, and any
-    // additional source ids' Discord cards must be tidied up so the user does
-    // not see duplicate `📬` cards left behind for the merged tail.
     let queued_placeholder_handoff = if started {
-        // Use the write-through helper so the on-disk snapshot stays in sync
-        // with the in-memory map (codex review round-3 P2). Round-5 P2: the
-        // helper now takes the per-channel async persistence mutex, so this
-        // dispatch hand-off serializes against any concurrent race-loss
-        // render path on the same channel.
         shared
             .remove_queued_placeholder(channel_id, user_msg_id)
             .await
@@ -1356,7 +1343,18 @@ pub(super) async fn handle_text_message(
         .await;
     }
 
-    let placeholder_msg_id = if let Some(existing) = queued_placeholder_handoff {
+    let reusable_busy_notice = placeholder_handoff::reuse_bound_busy_notice(
+        http,
+        shared,
+        &provider,
+        channel_id,
+        busy_followup_retry_user_msg_id,
+        queued_placeholder_handoff,
+    )
+    .await;
+    let placeholder_msg_id = if let Some(existing_notice) = reusable_busy_notice {
+        existing_notice
+    } else if let Some(existing) = queued_placeholder_handoff {
         // #3480: the queued `📬 대기 중` card is now BURIED under what the active
         // turn streamed while this message waited; reusing it as the live anchor
         // edits that buried card (looks like a relay drop / huge 2000-char gaps).
@@ -1819,22 +1817,18 @@ pub(super) async fn handle_text_message(
     )
     .await
     .or_else(|| super::super::super::adk_session::parse_dispatch_id(user_text));
-    post_adk_session_status(
+    post_adk_session_status_for_channel(
+        shared,
+        channel_id,
         adk_session_key.as_deref(),
         adk_session_name.as_deref(),
         model_for_turn.as_deref(),
-        "working",
         &provider,
-        Some(&adk_session_info),
-        None,
-        Some(&current_path),
+        &adk_session_info,
+        &current_path,
         dispatch_id.as_deref(),
         adk_thread_channel_id,
-        Some(channel_id),
-        role_binding
-            .as_ref()
-            .map(|binding| binding.role_id.as_str()),
-        shared.api_port,
+        role_binding.as_ref(),
     )
     .await;
 
@@ -2259,6 +2253,7 @@ pub(super) async fn handle_text_message(
         inflight_input_fifo.clone(),
         inflight_offset,
     );
+    inflight_state.busy_followup_retry_user_msg_id = busy_followup_retry_user_msg_id.get();
     inflight_state.turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
     apply_prelaunch_runtime_kind(&mut inflight_state, prelaunch_runtime_kind);
     let (worktree_path, worktree_branch, base_commit) = {
