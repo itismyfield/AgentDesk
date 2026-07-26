@@ -104,7 +104,13 @@ class FastCheckCiWiringTests(unittest.TestCase):
         )
         self.assertIn("os: [ubuntu-latest]", job)
         self.assertIn("- name: Policy JS unit tests", job)
-        self.assertIn("- name: cargo check\n        run: just cargo-check", job)
+        self.assertIn(
+            "- name: Compiler test manifest authority\n"
+            "        timeout-minutes: 30\n"
+            "        run: just check-compiler-test-manifest",
+            job,
+        )
+        self.assertNotIn("- name: cargo check", job)
         self.assertNotIn("just test-non-pg", job)
         self.assertNotRegex(job, r"(?m)^\s*cargo test\b")
 

@@ -18,6 +18,11 @@ lint-strict:
 cargo-check:
     cargo check --workspace --all-features --all-targets
 
+# Compiles test harnesses once in a fresh isolated Cargo target, then compares
+# authoritative records/targets with the baseline. Host metadata is provenance.
+check-compiler-test-manifest:
+    python3 scripts/generate_compiler_test_manifest.py --check
+
 test: test-non-pg
 
 # Active Claude usage compact-trigger contract.

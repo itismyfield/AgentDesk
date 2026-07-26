@@ -50,9 +50,11 @@ class TestModuleScannerTests(unittest.TestCase):
             (root / "src/lib.rs").write_text(
                 "#[cfg(test)] mod root_tests;\n", encoding="utf-8"
             )
+            (root / "src/root_tests.rs").write_text("", encoding="utf-8")
             (root / "src/services/foo/mod.rs").write_text(
                 "#[cfg(test)] mod tests;\n", encoding="utf-8"
             )
+            (root / "src/services/foo/tests.rs").write_text("", encoding="utf-8")
             (root / "src/services/foo/helper.rs").write_text(
                 "#[cfg(test)] mod helper_tests {}\n", encoding="utf-8"
             )
@@ -128,6 +130,86 @@ class TestModuleScannerTests(unittest.TestCase):
                 {"outer::renamed::tests": {"outer::renamed::tests::visible"}},
             )
             self.assertNotIn("outer::leaf::tests", inventory)
+
+    def test_external_cfg_test_module_owns_direct_and_nested_tests(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "src/domain").mkdir(parents=True)
+            (root / "src/lib.rs").write_text("mod domain;\n", encoding="utf-8")
+            (root / "src/domain.rs").write_text(
+                "#[cfg(test)] mod verdict_tests;\n", encoding="utf-8"
+            )
+            (root / "src/domain/verdict_tests.rs").write_text(
+                "#[test] fn direct() {}\n"
+                "mod nested { #[test] fn child() {} }\n",
+                encoding="utf-8",
+            )
+
+            inventory = coverage.discover_test_inventory(
+                root, include_external_tests=True
+            )
+
+            self.assertEqual(
+                inventory["domain::verdict_tests"],
+                {
+                    "domain::verdict_tests::direct",
+                    "domain::verdict_tests::nested::child",
+                },
+            )
+
+    def test_external_cfg_test_path_alias_uses_logical_test_names(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "src/fixtures").mkdir(parents=True)
+            (root / "src/lib.rs").write_text(
+                '#[cfg(test)] #[path = "fixtures/shared.rs"] mod renamed_tests;\n',
+                encoding="utf-8",
+            )
+            (root / "src/fixtures/shared.rs").write_text(
+                "#[test] fn visible() {}\n", encoding="utf-8"
+            )
+
+            self.assertEqual(
+                coverage.discover_test_inventory(root, include_external_tests=True),
+                {"renamed_tests": {"renamed_tests::visible"}},
+            )
+
+    def test_nested_external_module_below_external_test_module_is_owned(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "src/domain/verdict_tests").mkdir(parents=True)
+            (root / "src/lib.rs").write_text("mod domain;\n", encoding="utf-8")
+            (root / "src/domain.rs").write_text(
+                "#[cfg(test)] mod verdict_tests;\n", encoding="utf-8"
+            )
+            (root / "src/domain/verdict_tests.rs").write_text(
+                "mod nested;\n", encoding="utf-8"
+            )
+            (root / "src/domain/verdict_tests/nested.rs").write_text(
+                "#[test] fn visible() {}\n", encoding="utf-8"
+            )
+
+            inventory = coverage.discover_test_inventory(
+                root, include_external_tests=True
+            )
+
+            self.assertIn(
+                "domain::verdict_tests::nested::visible",
+                inventory["domain::verdict_tests"],
+            )
+
+    def test_ambiguous_external_cfg_test_module_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "src/tests").mkdir(parents=True)
+            (root / "src/lib.rs").write_text(
+                "#[cfg(test)] mod tests;\n", encoding="utf-8"
+            )
+            (root / "src/tests.rs").write_text("", encoding="utf-8")
+            (root / "src/tests/mod.rs").write_text("", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "resolves to 2 source files"):
+                coverage.discover_test_inventory(root, include_external_tests=True)
 
 
 class LaneFilterTests(unittest.TestCase):

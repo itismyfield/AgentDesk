@@ -210,12 +210,36 @@ def file_module_path(src_root: Path, path: Path) -> tuple[str, ...]:
     return (*rel.parent.parts, rel.stem)
 
 
+def _resolve_declared_module_file(
+    declaring_file: Path,
+    module: tuple[str, ...],
+    relative_target: str | None,
+    inline_parents: tuple[str, ...],
+) -> list[Path]:
+    """Resolve one out-of-line module using Rust's file-relative rules."""
+    if relative_target is not None:
+        return [
+            (declaring_file.parent.joinpath(*inline_parents) / relative_target).resolve()
+        ]
+    if declaring_file.name == "mod.rs":
+        base_dir = declaring_file.parent
+    else:
+        base_dir = declaring_file.parent / declaring_file.stem
+    leaf = module[-1]
+    return [
+        (base_dir / f"{leaf}.rs").resolve(),
+        (base_dir / leaf / "mod.rs").resolve(),
+    ]
+
+
 def _module_records(
     source: str, base: tuple[str, ...]
 ) -> tuple[
     set[str],
     dict[str, set[str]],
     list[tuple[tuple[str, ...], str, tuple[str, ...]]],
+    set[str],
+    list[tuple[tuple[str, ...], str | None, tuple[str, ...]]],
 ]:
     """Return test modules/functions and path aliases from one source file.
 
@@ -251,7 +275,9 @@ def _module_records(
     modules: set[str] = set()
     tests_by_module: dict[str, set[str]] = {}
     aliases: list[tuple[tuple[str, ...], str, tuple[str, ...]]] = []
-    inline_stack: list[tuple[int, str, bool]] = []
+    external_test_modules: set[str] = set()
+    external_modules: list[tuple[tuple[str, ...], str | None, tuple[str, ...]]] = []
+    inline_stack: list[tuple[int, str, bool, str | None]] = []
     depth = 0
     cursor = 0
     for offset, kind, payload in events:
@@ -287,24 +313,77 @@ def _module_records(
         end, name, term, attrs = payload
         parent_names = tuple(item[1] for item in inline_stack)
         logical = (*base, *parent_names, name)
+        inherited_test_module = next(
+            (item[3] for item in reversed(inline_stack) if item[3] is not None), None
+        )
         is_test_module = bool(CFG_TEST_RE.search(attrs))
         if is_test_module:
-            modules.add("::".join(logical))
-            tests_by_module.setdefault("::".join(logical), set())
+            logical_name = "::".join(logical)
+            modules.add(logical_name)
+            tests_by_module.setdefault(logical_name, set())
+            if term == ";":
+                external_test_modules.add(logical_name)
         path_attr = PATH_ATTR_RE.search(attrs)
-        if path_attr and term == ";":
-            aliases.append((logical, path_attr.group("path"), parent_names))
+        if term == ";":
+            relative_target = path_attr.group("path") if path_attr else None
+            external_modules.append((logical, relative_target, parent_names))
+            if inherited_test_module is not None:
+                tests_by_module.setdefault(inherited_test_module, set())
+            if relative_target is not None:
+                aliases.append((logical, relative_target, parent_names))
 
         if term == "{":
             depth += 1
-            inline_stack.append((depth, name, is_test_module))
+            test_owner = "::".join(logical) if is_test_module else inherited_test_module
+            inline_stack.append((depth, name, is_test_module, test_owner))
         cursor = end
-    return modules, tests_by_module, aliases
+    return modules, tests_by_module, aliases, external_test_modules, external_modules
+
+
+def _test_function_paths(source: str, base: tuple[str, ...]) -> set[tuple[str, ...]]:
+    """Return every attributed Rust test function with its inline module path."""
+    clean = strip_rust(source)
+    declarations = [
+        (match.start(), match.end(), match.group("name"), match.group("term"))
+        for match in MOD_RE.finditer(clean)
+    ]
+    functions = [
+        (match.start("name"), match.group("name"))
+        for match in ATTRIBUTED_FN_RE.finditer(clean)
+        if TEST_ATTR_RE.search(source[match.start("attrs") : match.end("attrs")])
+    ]
+    events = sorted(
+        [(start, "mod", (end, name, term)) for start, end, name, term in declarations]
+        + [(start, "test_fn", name) for start, name in functions],
+        key=lambda event: event[0],
+    )
+    paths: set[tuple[str, ...]] = set()
+    inline_stack: list[tuple[int, str]] = []
+    depth = 0
+    cursor = 0
+    for offset, kind, payload in events:
+        for brace in re.finditer(r"[{}]", clean[cursor:offset]):
+            if brace.group() == "{":
+                depth += 1
+            else:
+                depth -= 1
+                while inline_stack and inline_stack[-1][0] > depth:
+                    inline_stack.pop()
+        if kind == "test_fn":
+            paths.add((*base, *(item[1] for item in inline_stack), str(payload)))
+            cursor = offset
+            continue
+        end, name, term = payload
+        if term == "{":
+            depth += 1
+            inline_stack.append((depth, name))
+        cursor = end
+    return paths
 
 
 def test_modules_in_source(source: str, base: tuple[str, ...]) -> set[str]:
     """Find cfg(test) module paths in one Rust source file."""
-    modules, _, _ = _module_records(source, base)
+    modules, _, _, _, _ = _module_records(source, base)
     return modules
 
 
@@ -337,11 +416,20 @@ def _normalize_alias_path(
     return current
 
 
-def discover_test_inventory(repo_root: Path) -> dict[str, set[str]]:
-    """Inventory logical test modules and test paths without building."""
+def discover_test_inventory(
+    repo_root: Path, *, include_external_tests: bool = False
+) -> dict[str, set[str]]:
+    """Inventory logical test modules and test paths without building.
+
+    The lane-coverage ratchet preserves its reviewed module-level baseline by
+    default. Compiler-manifest ownership opts into direct test functions from
+    external cfg(test) module files.
+    """
     src_root = (repo_root / "src").resolve()
     physical_inventory: dict[tuple[str, ...], set[tuple[str, ...]]] = {}
     raw_aliases: dict[tuple[str, ...], tuple[str, ...]] = {}
+    external_test_modules: set[tuple[str, ...]] = set()
+    parsed_files: dict[Path, tuple[str, dict[str, set[str]]]] = {}
 
     for path in sorted(src_root.rglob("*.rs")):
         rel = path.relative_to(src_root)
@@ -349,7 +437,9 @@ def discover_test_inventory(repo_root: Path) -> dict[str, set[str]]:
             continue
         base = file_module_path(src_root, path)
         source = path.read_text(encoding="utf-8")
-        modules, tests_by_module, aliases = _module_records(source, base)
+        modules, tests_by_module, aliases, external, _ = _module_records(source, base)
+        parsed_files[path.resolve()] = (source, tests_by_module)
+        external_test_modules.update(tuple(module.split("::")) for module in external)
         for module in modules:
             physical = tuple(module.split("::"))
             physical_inventory.setdefault(physical, set()).update(
@@ -375,6 +465,113 @@ def discover_test_inventory(repo_root: Path) -> dict[str, set[str]]:
                     f"{'::'.join(previous)} vs {'::'.join(logical)}"
                 )
             raw_aliases[physical_target] = logical
+
+    if include_external_tests:
+        for logical in sorted(external_test_modules):
+            logical_name = "::".join(logical)
+            for physical_module in tuple(physical_inventory):
+                physical_name = "::".join(physical_module)
+                if physical_name.startswith(logical_name + "::"):
+                    physical_inventory[physical_module].clear()
+            physical = next(
+                (
+                    candidate
+                    for candidate, alias in raw_aliases.items()
+                    if alias == logical
+                ),
+                logical,
+            )
+            file_path = src_root.joinpath(*physical).with_suffix(".rs")
+            mod_path = src_root.joinpath(*physical, "mod.rs")
+            candidates = [
+                path.resolve() for path in (file_path, mod_path) if path.is_file()
+            ]
+            if len(candidates) != 1:
+                raise ValueError(
+                    f"external cfg(test) module {'::'.join(logical)} resolves to "
+                    f"{len(candidates)} source files"
+                )
+            target = candidates[0]
+            source, _ = parsed_files[target]
+            physical_inventory.setdefault(logical, set()).update(
+                _test_function_paths(source, logical)
+            )
+
+            def collect_nested_modules(
+                declaring_file: Path,
+                declaring_source: str,
+                declaring_base: tuple[str, ...],
+                seen: set[Path],
+            ) -> None:
+                _, _, _, _, nested_modules = _module_records(
+                    declaring_source, declaring_base
+                )
+                for nested_logical, relative_target, inline_parents in nested_modules:
+                    nested_candidates = _resolve_declared_module_file(
+                        declaring_file,
+                        nested_logical,
+                        relative_target,
+                        inline_parents,
+                    )
+                    try:
+                        for candidate in nested_candidates:
+                            candidate.relative_to(src_root)
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"external module target escapes src/: "
+                            f"{declaring_file.relative_to(repo_root)} -> "
+                            f"{'::'.join(nested_logical)}"
+                        ) from exc
+                    existing = [
+                        candidate for candidate in nested_candidates if candidate.is_file()
+                    ]
+                    if len(existing) != 1:
+                        raise ValueError(
+                            f"external module {'::'.join(nested_logical)} resolves to "
+                            f"{len(existing)} source files"
+                        )
+                    nested_target = existing[0]
+                    if nested_target in seen:
+                        raise ValueError(
+                            f"external module cycle at {nested_target.relative_to(repo_root)}"
+                        )
+                    nested_source = nested_target.read_text(encoding="utf-8")
+                    physical_inventory[logical].update(
+                        _test_function_paths(nested_source, nested_logical)
+                    )
+                    collect_nested_modules(
+                        nested_target,
+                        nested_source,
+                        nested_logical,
+                        {*seen, nested_target},
+                    )
+
+                clean = strip_rust(declaring_source)
+                for match in re.finditer(
+                    r'include!\s*\(\s*"(?P<path>[^"]+)"\s*\)', clean
+                ):
+                    included = (declaring_file.parent / match.group("path")).resolve()
+                    try:
+                        included.relative_to(src_root)
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"include! target escapes src/: "
+                            f"{declaring_file.relative_to(repo_root)} -> "
+                            f"{match.group('path')}"
+                        ) from exc
+                    if not included.is_file():
+                        raise ValueError(
+                            f"include! target is missing: "
+                            f"{declaring_file.relative_to(repo_root)} -> "
+                            f"{match.group('path')}"
+                        )
+                    physical_inventory[logical].update(
+                        _test_function_paths(
+                            included.read_text(encoding="utf-8"), declaring_base
+                        )
+                    )
+
+            collect_nested_modules(target, source, logical, {target})
 
     aliases = dict(raw_aliases)
     for _ in range(len(aliases) + 1):

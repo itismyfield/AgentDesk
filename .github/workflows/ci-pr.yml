@@ -358,8 +358,12 @@ jobs:
       # `lint` owns fmt/clippy in its independent required mirror. Keep this
       # required Ubuntu lane to compilation and policy tests; main and nightly
       # retain the longer non-PG test coverage outside the PR critical path.
-      - name: cargo check
-        run: just cargo-check
+      # The bootstrap manifest is immutable reviewed authority. Its one fresh,
+      # all-target test-harness compile replaces the prior cargo-check compile in
+      # this protected lane; no base revision is compiled.
+      - name: Compiler test manifest authority
+        timeout-minutes: 30
+        run: just check-compiler-test-manifest
 
       - name: sccache stats
         if: always()
