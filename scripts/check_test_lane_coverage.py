@@ -217,14 +217,13 @@ def _resolve_declared_module_file(
     inline_parents: tuple[str, ...],
 ) -> list[Path]:
     """Resolve one out-of-line module using Rust's file-relative rules."""
-    if relative_target is not None:
-        return [
-            (declaring_file.parent.joinpath(*inline_parents) / relative_target).resolve()
-        ]
     if declaring_file.name == "mod.rs":
         base_dir = declaring_file.parent
     else:
         base_dir = declaring_file.parent / declaring_file.stem
+    if relative_target is not None:
+        path_base = base_dir if inline_parents else declaring_file.parent
+        return [(path_base.joinpath(*inline_parents) / relative_target).resolve()]
     leaf = module[-1]
     return [
         (base_dir / f"{leaf}.rs").resolve(),

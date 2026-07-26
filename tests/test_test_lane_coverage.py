@@ -23,6 +23,21 @@ _spec.loader.exec_module(coverage)
 
 
 class TestModuleScannerTests(unittest.TestCase):
+    @staticmethod
+    def write_nested_external_path_fixture(root: Path) -> None:
+        (root / "src/domain/verdict_tests/outer/inner").mkdir(parents=True)
+        (root / "src/lib.rs").write_text("mod domain;\n", encoding="utf-8")
+        (root / "src/domain.rs").write_text(
+            "#[cfg(test)] mod verdict_tests;\n", encoding="utf-8"
+        )
+        (root / "src/domain/verdict_tests.rs").write_text(
+            'mod outer { #[path = "inner/cases.rs"] mod cases; }\n',
+            encoding="utf-8",
+        )
+        (root / "src/domain/verdict_tests/outer/inner/cases.rs").write_text(
+            "#[test] fn visible() {}\n", encoding="utf-8"
+        )
+
     def test_discovers_inline_and_external_cfg_test_modules(self) -> None:
         source = r'''
             // #[cfg(test)] mod comment_fake;
@@ -197,6 +212,50 @@ class TestModuleScannerTests(unittest.TestCase):
                 "domain::verdict_tests::nested::visible",
                 inventory["domain::verdict_tests"],
             )
+
+    def test_nested_path_alias_below_external_test_module_is_owned(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.write_nested_external_path_fixture(root)
+
+            inventory = coverage.discover_test_inventory(
+                root, include_external_tests=True
+            )
+
+            self.assertIn(
+                "domain::verdict_tests::outer::cases::visible",
+                inventory["domain::verdict_tests"],
+            )
+
+    def test_old_nested_path_alias_anchor_fails_fixture(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        corrected = "path_base.joinpath(*inline_parents) / relative_target"
+        old_anchor = "declaring_file.parent.joinpath(*inline_parents) / relative_target"
+        self.assertEqual(source.count(corrected), 1)
+        mutated_source = source.replace(corrected, old_anchor, 1)
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.write_nested_external_path_fixture(root)
+            mutated_script = root / "check_test_lane_coverage_mutated.py"
+            mutated_script.write_text(mutated_source, encoding="utf-8")
+            spec = importlib.util.spec_from_file_location(
+                "check_test_lane_coverage_mutated", mutated_script
+            )
+            assert spec and spec.loader
+            mutated = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = mutated
+            try:
+                spec.loader.exec_module(mutated)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "external module domain::verdict_tests::outer::cases resolves to 0 source files",
+                ):
+                    mutated.discover_test_inventory(
+                        root, include_external_tests=True
+                    )
+            finally:
+                sys.modules.pop(spec.name, None)
 
     def test_ambiguous_external_cfg_test_module_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
