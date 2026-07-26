@@ -37,11 +37,17 @@ pub(super) fn observe(
             .placeholder_live_events
             .bridge_task_notification_xml(channel_id, &prompt.prompt);
     }
-    // #4912: parse schema-bearing XML strictly as shadow-only diagnostics.
+    // #4912: parse the exact normalized payload which classification accepted.
     // This field cannot affect cards, marker copy, event identity, or routing.
     let task_completion_v1_shadow =
         matches!(injected_class, InjectedPromptClass::TaskNotificationEvent)
-            .then(|| crate::services::task_completion_v1::parse_xml(&prompt.prompt));
+            .then(|| {
+                injected_prompt_policy::normalized_start_anchored_task_notification_payload(
+                    &prompt.prompt,
+                )
+            })
+            .flatten()
+            .map(|payload| crate::services::task_completion_v1::parse_xml(&payload));
     let event = if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
         Some(
             super::super::task_notification_delivery::TaskCardEvent::from_task_prompt_with_source_event_id(

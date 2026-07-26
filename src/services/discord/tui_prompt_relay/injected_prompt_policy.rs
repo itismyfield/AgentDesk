@@ -172,8 +172,15 @@ pub(super) fn is_task_notification_prompt(prompt: &str) -> bool {
 /// false-close attack where a quoted live tool-use-id would otherwise finalize a
 /// real running slot.
 pub(super) fn is_start_anchored_task_notification(prompt: &str) -> bool {
+    normalized_start_anchored_task_notification_payload(prompt).is_some()
+}
+
+/// Returns the exact wrapper-free payload accepted by the task-notification
+/// start-anchor classifier. Callers that parse a classified notification must
+/// use this value rather than the original observed prompt.
+pub(super) fn normalized_start_anchored_task_notification_payload(prompt: &str) -> Option<String> {
     let normalized = normalized_start_anchored_injection(prompt);
-    starts_with_xmlish_tag(&normalized, "task-notification")
+    starts_with_xmlish_tag(&normalized, "task-notification").then_some(normalized)
 }
 
 /// Detects Codex `<subagent_notification>` envelopes as neutral machine events.

@@ -311,11 +311,18 @@ pub fn parse_xml(raw: &str) -> TaskCompletionV1Admission {
                 TaskCompletionV1Rejection::NestedStructuralTag,
             );
         }
-        let decoded = decode_entities_once(content.trim());
+        let decoded = match decode_entities_once(content.trim()) {
+            Ok(decoded) => decoded,
+            Err(()) => {
+                return TaskCompletionV1Admission::Rejected(
+                    TaskCompletionV1Rejection::MalformedXml,
+                );
+            }
+        };
         match name {
             "task-id" => task_id = nonempty(decoded),
             "tool-use-id" => tool_use_id = nonempty(decoded),
-            // Prose is deliberately not exposed or used as authority.
+            // Prose is validated but never exposed or used as authority.
             "summary" | "result" => {}
             _ => unreachable!(),
         }
@@ -406,12 +413,23 @@ fn parse_open_tag(
     let end = find_tag_end(input).ok_or(TaskCompletionV1Rejection::MalformedXml)?;
     let source = &input[prefix.len()..end];
     let mut attributes = std::collections::BTreeMap::new();
-    let mut rest = source.trim();
-    while !rest.is_empty() {
-        let equals = rest
-            .find('=')
+    let mut rest = source;
+    loop {
+        if rest.is_empty() {
+            break;
+        }
+        let whitespace = rest.len() - rest.trim_start().len();
+        if whitespace == 0 {
+            return Err(TaskCompletionV1Rejection::XmlRootAttribute);
+        }
+        rest = &rest[whitespace..];
+        if rest.is_empty() {
+            break;
+        }
+        let name_end = rest
+            .find(|character: char| character == '=' || character.is_whitespace())
             .ok_or(TaskCompletionV1Rejection::XmlRootAttribute)?;
-        let name = rest[..equals].trim();
+        let name = &rest[..name_end];
         if name.is_empty()
             || !name
                 .bytes()
@@ -419,7 +437,11 @@ fn parse_open_tag(
         {
             return Err(TaskCompletionV1Rejection::XmlRootAttribute);
         }
-        let after_equals = rest[equals + 1..].trim_start();
+        let after_name = rest[name_end..].trim_start();
+        let Some(after_equals) = after_name.strip_prefix('=') else {
+            return Err(TaskCompletionV1Rejection::XmlRootAttribute);
+        };
+        let after_equals = after_equals.trim_start();
         let quote = after_equals
             .chars()
             .next()
@@ -429,11 +451,12 @@ fn parse_open_tag(
         let value_end = after_equals[value_start..]
             .find(quote)
             .ok_or(TaskCompletionV1Rejection::XmlRootAttribute)?;
-        let value = decode_entities_once(&after_equals[value_start..value_start + value_end]);
+        let value = decode_entities_once(&after_equals[value_start..value_start + value_end])
+            .map_err(|()| TaskCompletionV1Rejection::MalformedXml)?;
         if attributes.insert(name.to_string(), value).is_some() {
             return Err(TaskCompletionV1Rejection::DuplicateXmlField);
         }
-        rest = after_equals[value_start + value_end + quote.len_utf8()..].trim_start();
+        rest = &after_equals[value_start + value_end + quote.len_utf8()..];
     }
     Ok((end + 1, attributes))
 }
@@ -461,46 +484,60 @@ fn find_tag_end(input: &str) -> Option<usize> {
     None
 }
 
-fn decode_entities_once(input: &str) -> String {
+/// Decodes XML entities exactly once and rejects all entity spellings outside
+/// the closed XML subset used by the version-one payload. Both literal and
+/// numeric values must be permitted XML scalar values.
+fn decode_entities_once(input: &str) -> Result<String, ()> {
     let mut output = String::with_capacity(input.len());
     let mut remainder = input;
     while let Some(start) = remainder.find('&') {
-        output.push_str(&remainder[..start]);
+        let literal = &remainder[..start];
+        if !literal.chars().all(is_valid_xml_scalar) {
+            return Err(());
+        }
+        output.push_str(literal);
         let entity = &remainder[start + 1..];
-        let Some(end) = entity.find(';') else {
-            output.push_str(&remainder[start..]);
-            break;
-        };
+        let end = entity.find(';').ok_or(())?;
         let body = &entity[..end];
         let decoded = match body {
-            "amp" => Some('&'),
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "quot" => Some('"'),
-            "apos" => Some('\''),
-            _ => body
-                .strip_prefix('#')
-                .and_then(|number| {
-                    number.strip_prefix(['x', 'X']).map_or_else(
-                        || number.parse().ok(),
-                        |hex| u32::from_str_radix(hex, 16).ok(),
-                    )
-                })
-                .and_then(char::from_u32),
+            "amp" => '&',
+            "lt" => '<',
+            "gt" => '>',
+            "quot" => '"',
+            "apos" => '\'',
+            _ => parse_numeric_entity(body).ok_or(())?,
         };
-        if let Some(decoded) = decoded {
-            output.push(decoded);
-        } else {
-            output.push_str(&remainder[start..start + end + 2]);
+        if !is_valid_xml_scalar(decoded) {
+            return Err(());
         }
+        output.push(decoded);
         remainder = &entity[end + 1..];
     }
-    if remainder.is_empty() {
-        output
-    } else {
-        output.push_str(remainder);
-        output
+    if !remainder.chars().all(is_valid_xml_scalar) {
+        return Err(());
     }
+    output.push_str(remainder);
+    Ok(output)
+}
+
+fn parse_numeric_entity(body: &str) -> Option<char> {
+    let digits = body.strip_prefix('#')?;
+    let scalar = if let Some(hex) = digits.strip_prefix(['x', 'X']) {
+        (!hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then(|| u32::from_str_radix(hex, 16).ok())??
+    } else {
+        (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| digits.parse().ok())??
+    };
+    char::from_u32(scalar)
+}
+
+fn is_valid_xml_scalar(character: char) -> bool {
+    let scalar = character as u32;
+    matches!(scalar, 0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF)
+        && !(0xFDD0..=0xFDEF).contains(&scalar)
+        && scalar & 0xFFFF != 0xFFFE
+        && scalar & 0xFFFF != 0xFFFF
 }
 
 #[cfg(test)]
@@ -591,6 +628,38 @@ mod tests {
             parse_xml(&format!("{XML} trailing")),
             TaskCompletionV1Admission::Rejected(TaskCompletionV1Rejection::XmlRootNotBounded),
         );
+    }
+
+    #[test]
+    fn xml_rejects_concatenated_attributes_and_invalid_entities() {
+        let concatenated = XML.replacen("\" type=\"system\"", "\"type=\"system\"", 1);
+        assert_eq!(
+            parse_xml(&concatenated),
+            TaskCompletionV1Admission::Rejected(TaskCompletionV1Rejection::XmlRootAttribute),
+        );
+        for raw in [
+            XML.replacen("task&amp;1", "task&bogus;1", 1),
+            XML.replacen("task&amp;1", "task&amp1", 1),
+            XML.replacen("task&amp;1", "task&#0;1", 1),
+            XML.replacen("task&amp;1", "task&#xD800;1", 1),
+            XML.replacen("task&amp;1", "task&#xFDD0;1", 1),
+            XML.replacen("task&amp;1", "task&#12x;1", 1),
+            XML.replacen("task&amp;1", "task&#x;1", 1),
+        ] {
+            assert_eq!(
+                parse_xml(&raw),
+                TaskCompletionV1Admission::Rejected(TaskCompletionV1Rejection::MalformedXml),
+            );
+        }
+    }
+
+    #[test]
+    fn xml_entities_decode_once_and_admit_only_valid_scalars() {
+        let raw = XML.replacen("task&amp;1", "task&amp;amp;1", 1);
+        let TaskCompletionV1Admission::Typed(typed) = parse_xml(&raw) else {
+            panic!("valid entity must admit");
+        };
+        assert_eq!(typed.task_id.as_deref(), Some("task&amp;1"));
     }
 
     #[test]

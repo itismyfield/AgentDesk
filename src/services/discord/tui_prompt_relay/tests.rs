@@ -856,6 +856,17 @@ fn classify_injected_prompt_task_notification_event() {
         InjectedPromptClass::TaskNotificationEvent,
         "wrapped task notification must classify after peeling the direct-injection wrapper",
     );
+    let typed = r#"<task-notification schema="task_completion_v1" type="system" subtype="task_notification" kind="background" status="completed"><task-id>task-1</task-id></task-notification>"#;
+    let typed_wrapped = format!("터미널에 직접 주입된 입력 (tmux : `s`):\n```text\n{typed}\n```");
+    let normalized =
+        injected_prompt_policy::normalized_start_anchored_task_notification_payload(&typed_wrapped)
+            .expect(
+                "classification must provide the same wrapper-free payload to shadow admission",
+            );
+    assert!(matches!(
+        crate::services::task_completion_v1::parse_xml(&normalized),
+        crate::services::task_completion_v1::TaskCompletionV1Admission::Typed(_)
+    ));
     let quoted = "please inspect this log line:\n\
 <task-notification><status>completed</status></task-notification>";
     assert_eq!(
