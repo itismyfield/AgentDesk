@@ -574,6 +574,9 @@ src/
 │   │   │   ├── rounds.rs
 │   │   │   ├── selection.rs
 │   │   │   └── selection_runtime.rs
+│   │   ├── model_catalog/
+│   │   │   ├── bounded_cache_file.rs
+│   │   │   └── claude.rs
 │   │   ├── outbound/
 │   │   │   ├── turn_output_controller/
 │   │   │   │   ├── fresh_send.rs

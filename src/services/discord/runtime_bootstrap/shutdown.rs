@@ -147,15 +147,33 @@ pub(super) fn run_bot_spawn_sigterm_handler(
     });
 }
 
+async fn abort_and_join_task(handle: Option<tokio::task::JoinHandle<()>>) {
+    if let Some(handle) = handle {
+        handle.abort();
+        let _ = handle.await;
+    }
+}
+
+async fn release_catalog_before_diagnostic<F>(
+    model_catalog_refresh_task: Option<tokio::task::JoinHandle<()>>,
+    diagnostic: F,
+) where
+    F: std::future::Future<Output = ()>,
+{
+    abort_and_join_task(model_catalog_refresh_task).await;
+    diagnostic.await;
+}
+
 /// Run the Discord gateway backend (`client.start()`) to completion, classify
-/// the exit, run the post-reconcile startup diagnostic on failure, then abort
-/// and join the gateway-lease keepalive task. This is the final event-loop
-/// entry of run_bot. Consumes `client`.
+/// the exit, release gateway-owned background work, then run the post-reconcile
+/// startup diagnostic on failure. This is the final event-loop entry of run_bot.
+/// Consumes `client`.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_bot_run_gateway_backend(
     mut client: serenity::Client,
     provider_for_error: &ProviderKind,
     gateway_lease_task: Option<tokio::task::JoinHandle<()>>,
+    model_catalog_refresh_task: Option<tokio::task::JoinHandle<()>>,
     startup_reconcile_remaining_for_client_start: Arc<std::sync::atomic::AtomicUsize>,
     startup_doctor_started_for_client_start: Arc<std::sync::atomic::AtomicBool>,
     health_registry_for_client_start: Arc<health::HealthRegistry>,
@@ -192,18 +210,93 @@ pub(super) async fn run_bot_run_gateway_backend(
             true
         }
     };
-    if gateway_backend_failed {
-        run_startup_diagnostic_after_reconcile_barrier(
-            startup_reconcile_remaining_for_client_start,
-            startup_doctor_started_for_client_start,
-            health_registry_for_client_start,
-            api_port,
-        )
-        .await;
-    }
+    release_catalog_before_diagnostic(model_catalog_refresh_task, async {
+        if gateway_backend_failed {
+            run_startup_diagnostic_after_reconcile_barrier(
+                startup_reconcile_remaining_for_client_start,
+                startup_doctor_started_for_client_start,
+                health_registry_for_client_start,
+                api_port,
+            )
+            .await;
+        }
+    })
+    .await;
 
-    if let Some(handle) = gateway_lease_task {
-        handle.abort();
-        let _ = handle.await;
+    abort_and_join_task(gateway_lease_task).await;
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::{abort_and_join_task, release_catalog_before_diagnostic};
+
+    #[test]
+    fn invariant_gateway_exit_releases_catalog_owner_before_diagnostics_and_takeover() {
+        crate::services::discord::model_catalog::with_test_claude_model_catalog_refresh_state(
+            || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async {
+                    let refreshes = Arc::new(AtomicUsize::new(0));
+                    let (owner_tx, owner_rx) = tokio::sync::oneshot::channel();
+                    let owner_tx = std::sync::Mutex::new(Some(owner_tx));
+                    let owner = crate::services::discord::model_catalog::spawn_test_claude_model_catalog_refresh_after_claim(
+                        Arc::clone(&refreshes),
+                        move || {
+                            if let Some(owner_tx) = owner_tx.lock().unwrap().take() {
+                                let _ = owner_tx.send(());
+                            }
+                        },
+                    );
+                    tokio::time::timeout(Duration::from_millis(100), owner_rx)
+                        .await
+                        .expect("the initial supervisor must claim refresh ownership")
+                        .expect("initial supervisor ended before claiming");
+                    assert_eq!(refreshes.load(Ordering::Acquire), 1);
+
+                    let (takeover_tx, takeover_rx) = tokio::sync::oneshot::channel();
+                    let takeover_tx = std::sync::Mutex::new(Some(takeover_tx));
+                    let survivor = crate::services::discord::model_catalog::spawn_test_claude_model_catalog_refresh_after_claim(
+                        Arc::clone(&refreshes),
+                        move || {
+                            if let Some(takeover_tx) = takeover_tx.lock().unwrap().take() {
+                                let _ = takeover_tx.send(());
+                            }
+                        },
+                    );
+                    tokio::task::yield_now().await;
+                    assert_eq!(refreshes.load(Ordering::Acquire), 1);
+
+                    release_catalog_before_diagnostic(Some(owner), async {
+                        assert_eq!(
+                            refreshes.load(Ordering::Acquire),
+                            1,
+                            "the original owner must be released before diagnostics"
+                        );
+                        tokio::time::timeout(Duration::from_millis(1_100), takeover_rx)
+                            .await
+                            .expect("a live supervisor must claim before diagnostics continue")
+                            .expect("takeover supervisor ended before claiming");
+                    })
+                    .await;
+                    assert_eq!(
+                        refreshes.load(Ordering::Acquire),
+                        2,
+                        "a live supervisor must take over within the one-second standby interval"
+                    );
+
+                    abort_and_join_task(Some(survivor)).await;
+                    assert!(
+                        !crate::services::discord::model_catalog::test_claude_model_catalog_refresh_running()
+                    );
+                });
+            },
+        );
     }
 }

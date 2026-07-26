@@ -113,6 +113,10 @@ pub(super) async fn run_bot_start_gateway_runtime(
         .await
         .expect("Failed to create Discord client");
 
+    // This path is reached only after gateway-role resolution. Standby and
+    // indeterminate runtimes return before framework construction, so the
+    // refresh task remains owned by the active gateway lifecycle.
+    let model_catalog_refresh_task = model_catalog::spawn_claude_model_catalog_refresh(&provider);
     let gateway_lease_task = gateway_lease.map(|lease| {
         run_bot_spawn_gateway_lease_keepalive(
             lease,
@@ -134,6 +138,7 @@ pub(super) async fn run_bot_start_gateway_runtime(
         client,
         &provider_for_error,
         gateway_lease_task,
+        model_catalog_refresh_task,
         startup_reconcile_remaining_for_client_start,
         startup_doctor_started_for_client_start,
         health_registry_for_client_start,
