@@ -1,4 +1,23 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DeferredIdleQueueKickoffProfile {
+    Normal,
+    ImmediateOnce,
+}
+
+impl DeferredIdleQueueKickoffProfile {
+    pub(super) fn initial_presleep(self, normal: std::time::Duration) -> std::time::Duration {
+        match self {
+            Self::Normal => normal,
+            Self::ImmediateOnce => std::time::Duration::ZERO,
+        }
+    }
+
+    pub(super) fn is_immediate(self) -> bool {
+        matches!(self, Self::ImmediateOnce)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub(super) enum DeferredIdleQueuePhase {
     InitialDelay,
@@ -81,7 +100,7 @@ impl DeferredIdleQueueEntry {
             && current.worker_epoch == self.worker_epoch
     }
 
-    pub(super) fn try_retire_exact(
+    pub(super) fn finish_retire_exact(
         &self,
         channels: &dashmap::DashMap<
             serenity::all::ChannelId,
@@ -91,9 +110,6 @@ impl DeferredIdleQueueEntry {
         expected_phase: DeferredIdleQueuePhase,
         request_checkpoint: (u64, u64),
     ) -> bool {
-        if !self.try_begin_releasing(expected_phase) {
-            return false;
-        }
         let owns_entry = channels
             .get(&channel_id)
             .is_some_and(|current| self.exactly_owned_by(current.value()));
@@ -102,6 +118,26 @@ impl DeferredIdleQueueEntry {
             return false;
         }
         true
+    }
+
+    pub(super) fn accept_schedule(&self, immediate: bool) -> bool {
+        if immediate {
+            return self.request_immediate();
+        }
+        loop {
+            let phase = self.phase();
+            if phase == DeferredIdleQueuePhase::Releasing {
+                return false;
+            }
+            saturating_increment(&self.coalesced_epoch);
+            let current = self.phase();
+            if current == phase {
+                return true;
+            }
+            if current == DeferredIdleQueuePhase::Releasing {
+                return false;
+            }
+        }
     }
 
     pub(super) fn request_immediate(&self) -> bool {

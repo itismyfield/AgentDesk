@@ -17,8 +17,8 @@ struct DeferredHookBacklogGuard {
 
 pub(in crate::services) mod deferred_worker_state;
 use self::deferred_worker_state::{
-    DeferredIdleQueueEntry, DeferredIdleQueuePhase, DeferredIdleQueueWaitOutcome,
-    wait_for_deferred_idle_queue_delay,
+    DeferredIdleQueueEntry, DeferredIdleQueueKickoffProfile, DeferredIdleQueuePhase,
+    DeferredIdleQueueWaitOutcome, wait_for_deferred_idle_queue_delay,
 };
 
 async fn retire_deferred_idle_queue_worker_if_quiescent(
@@ -28,9 +28,12 @@ async fn retire_deferred_idle_queue_worker_if_quiescent(
     expected_phase: DeferredIdleQueuePhase,
     request_checkpoint: (u64, u64),
 ) -> bool {
+    if !entry.try_begin_releasing(expected_phase) {
+        return false;
+    }
     #[cfg(test)]
     pause_before_deferred_idle_queue_empty_exit_for_tests().await;
-    entry.try_retire_exact(
+    entry.finish_retire_exact(
         &shared.restart.deferred_hook_channels,
         channel_id,
         expected_phase,
@@ -141,6 +144,9 @@ async fn pause_before_deferred_idle_queue_empty_exit_for_tests() {
         .expect("empty-exit pause lock")
         .clone();
     if let Some((reached, resume)) = pause {
+        *PAUSE_DEFERRED_IDLE_QUEUE_EMPTY_EXIT_FOR_TESTS
+            .lock()
+            .expect("empty-exit pause lock") = None;
         reached.wait().await;
         resume.wait().await;
     }
@@ -232,30 +238,14 @@ pub(super) fn schedule_race_loss_requeue_post_enqueue_idle_recheck(
     });
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DeferredIdleQueueKickoffProfile {
-    Normal,
-    ImmediateOnce,
-}
-
-impl DeferredIdleQueueKickoffProfile {
-    fn initial_presleep(self) -> std::time::Duration {
-        match self {
-            Self::Normal => DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY,
-            Self::ImmediateOnce => std::time::Duration::ZERO,
-        }
-    }
-    fn is_immediate(self) -> bool {
-        matches!(self, Self::ImmediateOnce)
-    }
-}
-
 #[cfg(test)]
 fn deferred_idle_queue_initial_presleep(immediate_once: bool) -> std::time::Duration {
     if immediate_once {
-        DeferredIdleQueueKickoffProfile::ImmediateOnce.initial_presleep()
+        DeferredIdleQueueKickoffProfile::ImmediateOnce
+            .initial_presleep(DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY)
     } else {
-        DeferredIdleQueueKickoffProfile::Normal.initial_presleep()
+        DeferredIdleQueueKickoffProfile::Normal
+            .initial_presleep(DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY)
     }
 }
 
@@ -607,7 +597,7 @@ async fn deferred_idle_queue_worker(
     entry: &DeferredIdleQueueEntry,
 ) {
     entry.set_phase(DeferredIdleQueuePhase::InitialDelay);
-    let initial_wait = profile.initial_presleep();
+    let initial_wait = profile.initial_presleep(DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY);
     if initial_wait.is_zero() {
         let _ = entry.observe_pending_request();
     } else {
@@ -756,7 +746,7 @@ fn schedule_deferred_idle_queue_worker(
             dashmap::mapref::entry::Entry::Occupied(slot) => {
                 let entry = slot.get().clone();
                 let phase = entry.phase();
-                let accepted = !profile.is_immediate() || entry.request_immediate();
+                let accepted = entry.accept_schedule(profile.is_immediate());
                 drop(slot);
                 if accepted {
                     tracing::debug!(
@@ -1484,9 +1474,9 @@ mod presleep_tests {
             .deferred_hook_channels
             .get(&channel_id)
             .expect("current worker or successor retains the slow backstop");
-        assert_eq!(
-            current.worker_epoch, old_epoch,
-            "a request accepted before retirement keeps the exact current owner alive",
+        assert!(
+            current.worker_epoch == old_epoch || current.worker_epoch > old_epoch,
+            "the request remains attached to the current owner or its successor",
         );
         assert_eq!(
             kick_calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -1498,9 +1488,158 @@ mod presleep_tests {
                 .restart
                 .deferred_hook_backlog
                 .load(std::sync::atomic::Ordering::Relaxed),
-            1,
-            "the retained guard and map owner stay balanced",
+            if current.worker_epoch == old_epoch {
+                1
+            } else {
+                2
+            },
+            "each live current/successor guard is counted exactly once",
         );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn normal_schedule_during_releasing_installs_successor_without_lost_wake() {
+        let _root = scoped_runtime_root();
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_024_288);
+        let reached = Arc::new(tokio::sync::Barrier::new(2));
+        let resume = Arc::new(tokio::sync::Barrier::new(2));
+        let _pause =
+            pause_deferred_idle_queue_empty_exit_for_tests(reached.clone(), resume.clone());
+        let kick_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_calls = kick_calls.clone();
+        let _hook = set_idle_queue_kick_hook_for_tests(Arc::new(
+            move |_shared, _provider, channel, _reason| {
+                let hook_calls = hook_calls.clone();
+                Box::pin(async move {
+                    if channel != channel_id {
+                        return None;
+                    }
+                    hook_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Some(IdleQueueKickoffChannelOutcome { started: false })
+                })
+            },
+        ));
+
+        schedule_deferred_idle_queue_kickoff_immediate(
+            shared.clone(),
+            provider.clone(),
+            channel_id,
+            "normal-empty-exit-race-test",
+        );
+        reached.wait().await;
+        let old_epoch = shared
+            .restart
+            .deferred_hook_channels
+            .get(&channel_id)
+            .expect("old worker remains published at the retirement barrier")
+            .worker_epoch;
+        shared
+            .mailbox(channel_id)
+            .replace_queue(
+                vec![user_intervention(
+                    4_024_289,
+                    "normal enqueue during release",
+                )],
+                queue_persistence_context(&shared, &provider, channel_id),
+            )
+            .await;
+        schedule_deferred_idle_queue_kickoff(
+            shared.clone(),
+            provider,
+            channel_id,
+            "normal-empty-exit-race-request",
+        );
+        let successor_epoch = shared
+            .restart
+            .deferred_hook_channels
+            .get(&channel_id)
+            .expect("normal request installs a successor")
+            .worker_epoch;
+        assert_ne!(successor_epoch, old_epoch);
+        resume.wait().await;
+        for _ in 0..16 {
+            if shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed)
+                == 1
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        for _ in 0..16 {
+            if shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed)
+                == 1
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(
+            kick_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the old attempt and exactly one successor attempt cover normal scheduling",
+        );
+        let current = shared
+            .restart
+            .deferred_hook_channels
+            .get(&channel_id)
+            .expect("successor slow backstop remains");
+        assert_eq!(current.worker_epoch, successor_epoch);
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "the paused old guard and successor guard are each counted exactly once",
+        );
+        drop(current);
+        tokio::task::yield_now().await;
+    }
+
+    #[test]
+    fn occupied_profile_phase_acceptance_table() {
+        let phases = [
+            DeferredIdleQueuePhase::InitialDelay,
+            DeferredIdleQueuePhase::Kicking,
+            DeferredIdleQueuePhase::BackstopWait,
+            DeferredIdleQueuePhase::BackstopKicking,
+            DeferredIdleQueuePhase::Releasing,
+        ];
+        for phase in phases {
+            for immediate in [false, true] {
+                let entry = DeferredIdleQueueEntry::new(false);
+                entry.set_phase(phase);
+                let before = entry.request_checkpoint();
+                let accepted = entry.accept_schedule(immediate);
+                assert_eq!(
+                    accepted,
+                    phase != DeferredIdleQueuePhase::Releasing,
+                    "phase={phase:?} immediate={immediate}",
+                );
+                if !immediate && accepted {
+                    assert_eq!(
+                        entry
+                            .requested_epoch
+                            .load(std::sync::atomic::Ordering::Acquire),
+                        before.0,
+                        "normal coalescing must not arm an immediate epoch",
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
