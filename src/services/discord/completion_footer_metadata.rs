@@ -196,6 +196,41 @@ fn looks_like_credential(value: &str) -> bool {
         ]
         .iter()
         .any(|marker| compact.contains(marker))
+        || value.split('/').any(looks_like_secret_token)
+}
+
+fn looks_like_secret_token(value: &str) -> bool {
+    let looks_like_aws_access_key = value.len() == 20
+        && [
+            "AKIA", "ASIA", "AIDA", "AROA", "AIPA", "ANPA", "ANVA", "A3T",
+        ]
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
+        && value
+            .chars()
+            .all(|character| character.is_ascii_uppercase() || character.is_ascii_digit());
+
+    let mut jwt_segments = value.split('.');
+    let header = jwt_segments.next().unwrap_or_default();
+    let payload = jwt_segments.next();
+    let signature = jwt_segments.next();
+    let looks_like_jwt = payload.is_some_and(|segment| segment.starts_with("eyJ"))
+        && signature.is_some_and(|segment| !segment.is_empty())
+        && jwt_segments.next().is_none()
+        && header.starts_with("eyJ")
+        && [
+            header,
+            payload.unwrap_or_default(),
+            signature.unwrap_or_default(),
+        ]
+        .iter()
+        .all(|segment| {
+            segment.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
+        });
+
+    looks_like_aws_access_key || looks_like_jwt
 }
 
 fn is_filesystem_path_component(value: &str) -> bool {
@@ -256,11 +291,7 @@ fn looks_like_fqdn(value: &str) -> bool {
     let Some((prefix, suffix)) = value.rsplit_once('.') else {
         return false;
     };
-    !prefix.is_empty()
-        && suffix.len() >= 2
-        && suffix
-            .chars()
-            .all(|character| character.is_ascii_alphabetic())
+    !prefix.is_empty() && suffix.len() >= 2 && suffix.chars().all(char::is_alphabetic)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -610,6 +641,7 @@ pub(in crate::services::discord) mod tests {
         }
         for malicious_model in [
             "host.example.com",
+            "例子.公司",
             "12345",
             "anthropic/12345",
             "anthropic/claude/sonnet",
@@ -633,6 +665,8 @@ pub(in crate::services::discord) mod tests {
             "anthropic/session-deadbeef",
             "anthropic/api-key-secret",
             "openai/sk-proj-secret",
+            "openai/AKIAIOSFODNN7EXAMPLE",
+            "openai/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOjF9.sig",
             "github/ghp_secret",
         ] {
             let snapshot = CompletedTurnFooterSnapshot {
