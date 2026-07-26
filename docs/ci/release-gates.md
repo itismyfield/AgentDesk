@@ -192,11 +192,11 @@ permitted: an existing normalized `deploy-gate` row must fail the migration rath
 than be silently converted, passed, or left outside enforcement.
 
 The release script stages and signs the candidate binary, proves the PostgreSQL
-tunnel, drains admissions, and receives durable restart persistence before running
-the candidate's hidden `release-migrate-postgres` command. This command is the last
-gate before launchd bootout. If migration fails, the script clears the drain marker
-and exits while the old process is still running. The old process must not be
-stopped before the migration succeeds.
+tunnel, and then runs the candidate's hidden `release-migrate-postgres` command
+before requesting `restart_pending` or any drain acknowledgement. If migration
+fails, no restart marker or self-exit trigger has been issued and the old process
+remains running. Only after migration succeeds does the script drain admissions,
+receive durable restart persistence, and proceed to launchd bootout.
 
 This boundary is forward-only. After migration 0100 commits, a binary embedding
 only migrations through 0099 cannot restart because SQLx startup validation rejects
