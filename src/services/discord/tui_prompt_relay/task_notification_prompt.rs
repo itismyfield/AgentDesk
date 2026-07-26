@@ -8,6 +8,10 @@ use super::*;
 
 pub(super) struct TaskPromptObservation {
     start_anchored: bool,
+    /// #4912: strict typed-completion admission retained only as parser-boundary
+    /// observation. Nothing reading this struct may use it for delivery policy.
+    _task_completion_v1_shadow:
+        Option<crate::services::task_completion_v1::TaskCompletionV1Admission>,
     event: Option<super::super::task_notification_delivery::TaskCardEvent>,
 }
 
@@ -33,6 +37,11 @@ pub(super) fn observe(
             .placeholder_live_events
             .bridge_task_notification_xml(channel_id, &prompt.prompt);
     }
+    // #4912: parse schema-bearing XML strictly as shadow-only diagnostics.
+    // This field cannot affect cards, marker copy, event identity, or routing.
+    let task_completion_v1_shadow =
+        matches!(injected_class, InjectedPromptClass::TaskNotificationEvent)
+            .then(|| crate::services::task_completion_v1::parse_xml(&prompt.prompt));
     let event = if matches!(injected_class, InjectedPromptClass::TaskNotificationEvent) {
         Some(
             super::super::task_notification_delivery::TaskCardEvent::from_task_prompt_with_source_event_id(
@@ -58,6 +67,7 @@ pub(super) fn observe(
     };
     TaskPromptObservation {
         start_anchored,
+        _task_completion_v1_shadow: task_completion_v1_shadow,
         event,
     }
 }

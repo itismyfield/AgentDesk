@@ -30,6 +30,10 @@ pub struct StreamLineState {
     pub stdout_error: Option<(String, String)>,
     pub tool_use_names: HashMap<String, String>,
     pub task_starts: HashMap<String, TaskStartInfo>,
+    /// #4912: closed typed-completion admission observations. These counters
+    /// are shadow telemetry only and never affect emitted stream messages.
+    pub task_completion_v1_shadow:
+        crate::services::task_completion_v1::TaskCompletionV1ShadowObservations,
     /// #3281 observability-only harvest counters (never gate delivery); see
     /// [`ReadHarvestStats`] for the counting rules.
     pub forwarded_message_count: u64,
@@ -61,6 +65,12 @@ pub fn process_stream_line(
     if line.trim().is_empty() {
         return true;
     }
+
+    // #4912: strictly admit schema-bearing completions for diagnostics only.
+    // StreamMessage remains legacy-shaped and no parsed value can influence
+    // routing, task-card identity, markers, or any user-visible output.
+    let admission = crate::services::task_completion_v1::parse_raw_json(line);
+    state.task_completion_v1_shadow.observe(&admission);
 
     let json = match serde_json::from_str::<Value>(line) {
         Ok(json) => json,
@@ -719,6 +729,31 @@ mod tests {
             !forwarded.is_empty(),
             "turn_duration must still reach the bridge as StatusUpdate telemetry"
         );
+    }
+
+    #[test]
+    fn schema_bearing_completion_is_observed_without_changing_legacy_message() {
+        let (sender, receiver) = mpsc::channel();
+        let mut state = StreamLineState::new();
+        let raw = r#"{"schema":"task_completion_v1","type":"system","subtype":"task_notification","kind":"background","status":"completed","task_id":"task-1","tool_use_id":"tool-1","summary":"untrusted"}"#;
+
+        assert!(process_stream_line(raw, &sender, &mut state));
+        assert_eq!(state.task_completion_v1_shadow.typed, 1);
+        assert_eq!(state.task_completion_v1_shadow.legacy, 0);
+        assert_eq!(state.task_completion_v1_shadow.rejected, 0);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(StreamMessage::TaskNotification {
+                task_id,
+                tool_use_id,
+                status,
+                summary,
+                ..
+            }) if task_id == "task-1"
+                && tool_use_id.as_deref() == Some("tool-1")
+                && status == "completed"
+                && summary == "untrusted"
+        ));
     }
 
     #[test]
