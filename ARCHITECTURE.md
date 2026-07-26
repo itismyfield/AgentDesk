@@ -774,6 +774,12 @@ src/
 │   │   │   ├── read.rs
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
+│   │   ├── status_panel_transition_v2/
+│   │   │   ├── journal/
+│   │   │   │   ├── codec.rs
+│   │   │   │   ├── storage.rs
+│   │   │   │   └── tests.rs
+│   │   │   └── journal.rs
 │   │   ├── task_notification_delivery/
 │   │   │   ├── store/
 │   │   │   │   ├── card_claim.rs

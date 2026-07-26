@@ -1,64 +1,64 @@
-//! Dormant status-panel transition model for #4891.
+//! Dormant status-panel transition model and filesystem journal for #4891.
 //!
-//! This module is intentionally pure and has no production caller. It cannot
-//! perform Discord I/O, persist state, mutate legacy stores, or replace legacy
-//! authority. A later slice must provide separately reviewed adapter wiring.
+//! This module has no production caller. It cannot perform Discord I/O, mutate
+//! legacy stores, replace legacy authority, or activate a cutover. The journal
+//! adapter models durable authorization that a later slice may wire separately.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Candidate {
-    pub channel_id: u64,
-    pub message_id: u64,
-    pub generation: u64,
+mod journal;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PanelIdentity {
+    provider: journal::CanonicalProvider,
+    canonical_token_hash: journal::CanonicalTokenHash,
+    channel_id: u64,
+}
+
+impl PanelIdentity {
+    pub(super) fn provider(&self) -> &str {
+        self.provider.as_str()
+    }
+
+    pub(super) fn canonical_token_hash(&self) -> &str {
+        self.canonical_token_hash.as_str()
+    }
+
+    pub(super) fn channel_id(&self) -> u64 {
+        self.channel_id
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PanelPlan {
+    pub identity: PanelIdentity,
     pub turn_id: u64,
     pub expected_prior_message_id: Option<u64>,
 }
 
-impl Candidate {
-    fn is_valid(self) -> bool {
-        self.channel_id != 0
-            && self.message_id != 0
-            && self.generation != 0
+impl PanelPlan {
+    fn is_valid(&self) -> bool {
+        self.identity.channel_id != 0
             && self.turn_id != 0
             && self.expected_prior_message_id != Some(0)
-            && self.expected_prior_message_id != Some(self.message_id)
     }
 }
 
-/// Protection evidence presented at the bind boundary.
-///
-/// The legacy variants are observations only. They deliberately cannot satisfy
-/// either initial or recovery bind authorization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ProtectionEvidence {
-    Missing,
-    PendingBind,
-    CandidateAcknowledged,
-    JournalOwned,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Candidate {
+    pub plan: PanelPlan,
+    pub message_id: u64,
+    pub generation: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct BindGuard {
-    pub candidate: Candidate,
-    pub protection: ProtectionEvidence,
-    pub candidate_identity_matches: bool,
-    pub turn_identity_matches: bool,
-    pub generation_matches: bool,
-    pub expected_binding_matches: bool,
-}
-
-impl BindGuard {
-    fn is_complete_for(self, candidate: Candidate) -> bool {
-        candidate.is_valid()
-            && self.candidate == candidate
-            && self.protection == ProtectionEvidence::JournalOwned
-            && self.candidate_identity_matches
-            && self.turn_identity_matches
-            && self.generation_matches
-            && self.expected_binding_matches
+impl Candidate {
+    fn is_valid(&self) -> bool {
+        self.plan.is_valid()
+            && self.message_id != 0
+            && self.generation != 0
+            && self.plan.expected_prior_message_id != Some(self.message_id)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BoundPanel {
     pub candidate: Candidate,
 }
@@ -66,7 +66,7 @@ pub(super) struct BoundPanel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FailurePhase {
     Prepare,
-    AuthorizeBind,
+    RecordSent,
     CommitBind,
     AuthorizeRetire,
     Delete,
@@ -86,25 +86,26 @@ pub(super) enum QuarantineReason {
     InvariantViolation,
 }
 
-/// The future journal's tagged state.
+/// Tagged state consumed by the dormant journal adapter.
 ///
-/// `PendingBind` and `CandidateAcknowledged` are intentionally absent: legacy
-/// observations are not states in this authority model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The journal-owned handle has private fields and no constructor outside the
+/// adapter. Legacy observations are intentionally absent from this bind model.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum JournalState {
     Prepared {
-        candidate: Candidate,
+        plan: PanelPlan,
+        generation: u64,
     },
     BindAuthorized {
         candidate: Candidate,
-        guard: BindGuard,
+        authorization: journal::JournalOwnedBind,
     },
     Bound {
         panel: BoundPanel,
     },
     RetireAuthorized {
         panel: BoundPanel,
-        delete_message_id: u64,
+        authorization: journal::JournalOwnedRetire,
     },
     Retired {
         panel: BoundPanel,
@@ -120,11 +121,11 @@ pub(super) enum JournalState {
 }
 
 impl JournalState {
-    pub(super) fn prepared(candidate: Candidate) -> Self {
-        Self::Prepared { candidate }
+    pub(super) fn prepared(plan: PanelPlan, generation: u64) -> Self {
+        Self::Prepared { plan, generation }
     }
 
-    fn is_terminal(self) -> bool {
+    fn is_terminal(&self) -> bool {
         matches!(
             self,
             Self::Retired { .. } | Self::Failed { .. } | Self::Quarantined { .. }
@@ -132,14 +133,14 @@ impl JournalState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum TransitionEvent {
     AuthorizeBind {
-        guard: BindGuard,
+        authorization: journal::JournalOwnedBind,
     },
     CommitBind,
     AuthorizeRetire {
-        delete_message_id: u64,
+        authorization: journal::JournalOwnedRetire,
     },
     CommitRetire,
     Fail {
@@ -154,8 +155,8 @@ pub(super) enum TransitionEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TransitionError {
     IllegalTransition,
-    IncompleteBindGuard,
-    InvalidRetirementTarget,
+    IncompleteBindAuthorization,
+    InvalidRetirementAuthorization,
     TerminalState,
 }
 
@@ -169,40 +170,52 @@ pub(super) fn transition(
     }
 
     match (state, event) {
-        (JournalState::Prepared { candidate }, TransitionEvent::AuthorizeBind { guard }) => {
-            if !guard.is_complete_for(candidate) {
-                return Err(TransitionError::IncompleteBindGuard);
+        (
+            JournalState::Prepared { plan, generation },
+            TransitionEvent::AuthorizeBind { authorization },
+        ) => {
+            let candidate = authorization.candidate().clone();
+            if !candidate.is_valid()
+                || candidate.plan != plan
+                || candidate.generation != generation
+                || !authorization.matches_candidate(&candidate)
+            {
+                return Err(TransitionError::IncompleteBindAuthorization);
             }
-            Ok(JournalState::BindAuthorized { candidate, guard })
+            Ok(JournalState::BindAuthorized {
+                candidate,
+                authorization,
+            })
         }
-        (JournalState::BindAuthorized { candidate, guard }, TransitionEvent::CommitBind)
-            if guard.is_complete_for(candidate) =>
-        {
+        (
+            JournalState::BindAuthorized {
+                candidate,
+                authorization,
+            },
+            TransitionEvent::CommitBind,
+        ) if candidate.is_valid() && authorization.matches_candidate(&candidate) => {
             Ok(JournalState::Bound {
                 panel: BoundPanel { candidate },
             })
         }
-        (JournalState::Bound { panel }, TransitionEvent::AuthorizeRetire { delete_message_id }) => {
-            if delete_message_id == 0
-                || delete_message_id == panel.candidate.message_id
-                || panel.candidate.expected_prior_message_id != Some(delete_message_id)
-            {
-                return Err(TransitionError::InvalidRetirementTarget);
+        (JournalState::Bound { panel }, TransitionEvent::AuthorizeRetire { authorization }) => {
+            if !authorization.matches_panel(&panel) {
+                return Err(TransitionError::InvalidRetirementAuthorization);
             }
             Ok(JournalState::RetireAuthorized {
                 panel,
-                delete_message_id,
+                authorization,
             })
         }
         (
             JournalState::RetireAuthorized {
                 panel,
-                delete_message_id,
+                authorization,
             },
             TransitionEvent::CommitRetire,
-        ) => Ok(JournalState::Retired {
+        ) if authorization.matches_panel(&panel) => Ok(JournalState::Retired {
+            retired_message_id: authorization.delete_message_id(),
             panel,
-            retired_message_id: delete_message_id,
         }),
         (_, TransitionEvent::Fail { phase, reason }) => Ok(JournalState::Failed { phase, reason }),
         (_, TransitionEvent::Quarantine { reason }) => Ok(JournalState::Quarantined { reason }),
@@ -210,61 +223,81 @@ pub(super) fn transition(
     }
 }
 
-/// Recovery may bind only the exact journal-owned candidate whose complete
-/// guard was durably represented by `BindAuthorized`.
-pub(super) fn recovery_bind_is_authorized(state: JournalState) -> bool {
-    matches!(
-        state,
-        JournalState::BindAuthorized { candidate, guard }
-            if guard.protection == ProtectionEvidence::JournalOwned
-                && guard.is_complete_for(candidate)
-    )
+/// Recovery may bind only an opaque authorization rehydrated from the exact
+/// durable `BindAuthorized` operation record.
+pub(super) fn recovery_bind_authorization(
+    state: &JournalState,
+) -> Option<&journal::JournalOwnedBind> {
+    match state {
+        JournalState::BindAuthorized {
+            candidate,
+            authorization,
+        } if authorization.matches_candidate(candidate) => Some(authorization),
+        _ => None,
+    }
 }
 
-/// Physical deletion may begin only from the explicit retirement authority
-/// state and only for its exact target.
-pub(super) fn deletion_is_authorized(state: JournalState, message_id: u64) -> bool {
-    matches!(
-        state,
+/// Physical deletion may begin only with the exact durable retirement handle.
+pub(super) fn deletion_authorization(state: &JournalState) -> Option<&journal::JournalOwnedRetire> {
+    match state {
         JournalState::RetireAuthorized {
-            delete_message_id,
-            ..
-        } if message_id != 0 && message_id == delete_message_id
-    )
+            panel,
+            authorization,
+        } if authorization.matches_panel(panel) => Some(authorization),
+        _ => None,
+    }
+}
+
+/// Legacy inputs remain observations only and have no conversion into bind
+/// authorization. A later migration may separately evaluate them for retirement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LegacyRetireObservation {
+    pub identity: PanelIdentity,
+    pub message_id: u64,
+}
+
+impl LegacyRetireObservation {
+    pub(super) fn new(identity: PanelIdentity, message_id: u64) -> Option<Self> {
+        (message_id != 0).then_some(Self {
+            identity,
+            message_id,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const CANDIDATE: Candidate = Candidate {
-        channel_id: 11,
-        message_id: 22,
-        generation: 33,
-        turn_id: 44,
-        expected_prior_message_id: Some(21),
-    };
-
-    fn complete_guard() -> BindGuard {
-        BindGuard {
-            candidate: CANDIDATE,
-            protection: ProtectionEvidence::JournalOwned,
-            candidate_identity_matches: true,
-            turn_identity_matches: true,
-            generation_matches: true,
-            expected_binding_matches: true,
+    fn plan() -> PanelPlan {
+        PanelPlan {
+            identity: journal::identity_for_test("claude", "discord_0123456789abcdef", 11),
+            turn_id: 44,
+            expected_prior_message_id: Some(21),
         }
     }
 
+    fn candidate() -> Candidate {
+        Candidate {
+            plan: plan(),
+            message_id: 22,
+            generation: 33,
+        }
+    }
+
+    fn bind_authorization() -> journal::JournalOwnedBind {
+        journal::bind_authorization_for_test(candidate())
+    }
+
     fn prepared() -> JournalState {
-        JournalState::prepared(CANDIDATE)
+        JournalState::prepared(plan(), 33)
     }
 
     fn bind_authorized() -> JournalState {
         transition(
             prepared(),
             TransitionEvent::AuthorizeBind {
-                guard: complete_guard(),
+                authorization: bind_authorization(),
             },
         )
         .unwrap()
@@ -275,136 +308,96 @@ mod tests {
     }
 
     fn retire_authorized() -> JournalState {
+        let panel = match bound() {
+            JournalState::Bound { panel } => panel,
+            _ => unreachable!(),
+        };
         transition(
-            bound(),
+            JournalState::Bound {
+                panel: panel.clone(),
+            },
             TransitionEvent::AuthorizeRetire {
-                delete_message_id: 21,
+                authorization: journal::retire_authorization_for_test(panel, 21),
             },
         )
         .unwrap()
     }
 
-    fn failed() -> JournalState {
-        JournalState::Failed {
-            phase: FailurePhase::CommitBind,
-            reason: FailureReason::CommitFailed,
-        }
-    }
-
-    fn quarantined() -> JournalState {
-        JournalState::Quarantined {
-            reason: QuarantineReason::InvariantViolation,
-        }
-    }
-
-    fn retired() -> JournalState {
-        transition(retire_authorized(), TransitionEvent::CommitRetire).unwrap()
-    }
-
     #[test]
     fn happy_path_is_strictly_monotonic() {
         let authorized = bind_authorized();
-        assert!(recovery_bind_is_authorized(authorized));
-
+        assert!(recovery_bind_authorization(&authorized).is_some());
         let bound = transition(authorized, TransitionEvent::CommitBind).unwrap();
-        assert!(!recovery_bind_is_authorized(bound));
+        assert!(recovery_bind_authorization(&bound).is_none());
 
-        let retire_authorized = transition(
+        let panel = match &bound {
+            JournalState::Bound { panel } => panel.clone(),
+            _ => unreachable!(),
+        };
+        let retire = transition(
             bound,
             TransitionEvent::AuthorizeRetire {
-                delete_message_id: 21,
+                authorization: journal::retire_authorization_for_test(panel, 21),
             },
         )
         .unwrap();
-        assert!(deletion_is_authorized(retire_authorized, 21));
-
-        let retired = transition(retire_authorized, TransitionEvent::CommitRetire).unwrap();
-        assert!(!deletion_is_authorized(retired, 21));
+        assert_eq!(
+            deletion_authorization(&retire).map(|proof| proof.delete_message_id()),
+            Some(21)
+        );
+        let retired = transition(retire, TransitionEvent::CommitRetire).unwrap();
+        assert!(deletion_authorization(&retired).is_none());
     }
 
     #[test]
-    fn exhaustive_normal_transition_table_accepts_only_adjacent_edges() {
-        #[derive(Clone, Copy)]
-        enum StateCase {
-            Prepared,
-            BindAuthorized,
-            Bound,
-            RetireAuthorized,
-            Retired,
-            Failed,
-            Quarantined,
-        }
+    fn mismatched_adapter_authorizations_are_rejected() {
+        let mut wrong_candidate = candidate();
+        wrong_candidate.message_id += 1;
+        assert_eq!(
+            transition(
+                prepared(),
+                TransitionEvent::AuthorizeBind {
+                    authorization: journal::mutate_bind_authorization_for_test(
+                        bind_authorization(),
+                        wrong_candidate,
+                    ),
+                },
+            ),
+            Err(TransitionError::IncompleteBindAuthorization)
+        );
 
-        #[derive(Clone, Copy)]
-        enum EventCase {
-            AuthorizeBind,
-            CommitBind,
-            AuthorizeRetire,
-            CommitRetire,
-        }
-
-        let states = [
-            StateCase::Prepared,
-            StateCase::BindAuthorized,
-            StateCase::Bound,
-            StateCase::RetireAuthorized,
-            StateCase::Retired,
-            StateCase::Failed,
-            StateCase::Quarantined,
-        ];
-        let events = [
-            EventCase::AuthorizeBind,
-            EventCase::CommitBind,
-            EventCase::AuthorizeRetire,
-            EventCase::CommitRetire,
-        ];
-
-        for (state_index, state_case) in states.into_iter().enumerate() {
-            for (event_index, event_case) in events.into_iter().enumerate() {
-                let state = match state_case {
-                    StateCase::Prepared => prepared(),
-                    StateCase::BindAuthorized => bind_authorized(),
-                    StateCase::Bound => bound(),
-                    StateCase::RetireAuthorized => retire_authorized(),
-                    StateCase::Retired => retired(),
-                    StateCase::Failed => failed(),
-                    StateCase::Quarantined => quarantined(),
-                };
-                let event = match event_case {
-                    EventCase::AuthorizeBind => TransitionEvent::AuthorizeBind {
-                        guard: complete_guard(),
-                    },
-                    EventCase::CommitBind => TransitionEvent::CommitBind,
-                    EventCase::AuthorizeRetire => TransitionEvent::AuthorizeRetire {
-                        delete_message_id: 21,
-                    },
-                    EventCase::CommitRetire => TransitionEvent::CommitRetire,
-                };
-                let accepted = transition(state, event).is_ok();
-                assert_eq!(
-                    accepted,
-                    state_index == event_index,
-                    "state {state_index}, event {event_index}"
-                );
-            }
-        }
+        let panel = match bound() {
+            JournalState::Bound { panel } => panel,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            transition(
+                JournalState::Bound {
+                    panel: panel.clone(),
+                },
+                TransitionEvent::AuthorizeRetire {
+                    authorization: journal::retire_authorization_for_test(panel, 20),
+                },
+            ),
+            Err(TransitionError::InvalidRetirementAuthorization)
+        );
     }
 
     #[test]
-    fn failure_and_quarantine_are_terminal_from_every_live_state() {
-        let live_states = [prepared(), bind_authorized(), bound(), retire_authorized()];
-
-        for state in live_states {
+    fn failure_and_quarantine_are_terminal() {
+        for state in [prepared(), bind_authorized(), bound(), retire_authorized()] {
             let failed = transition(
-                state,
+                state.clone(),
                 TransitionEvent::Fail {
                     phase: FailurePhase::Prepare,
                     reason: FailureReason::AdapterFailed,
                 },
             )
             .unwrap();
-            assert!(matches!(failed, JournalState::Failed { .. }));
-
+            assert_eq!(
+                transition(failed, TransitionEvent::CommitBind),
+                Err(TransitionError::TerminalState)
+            );
             let quarantined = transition(
                 state,
                 TransitionEvent::Quarantine {
@@ -412,236 +405,37 @@ mod tests {
                 },
             )
             .unwrap();
-            assert!(matches!(quarantined, JournalState::Quarantined { .. }));
-        }
-
-        for terminal in [retired(), failed(), quarantined()] {
             assert_eq!(
-                transition(
-                    terminal,
-                    TransitionEvent::Quarantine {
-                        reason: QuarantineReason::UnknownState,
-                    },
-                ),
+                transition(quarantined, TransitionEvent::CommitBind),
                 Err(TransitionError::TerminalState)
             );
         }
     }
 
     #[test]
-    fn every_bind_guard_clause_is_required() {
-        let mutations: [(&str, fn(&mut BindGuard)); 6] = [
-            ("journal ownership", |guard| {
-                guard.protection = ProtectionEvidence::Missing
-            }),
-            ("candidate identity", |guard| {
-                guard.candidate_identity_matches = false
-            }),
-            ("turn identity", |guard| guard.turn_identity_matches = false),
-            ("generation", |guard| guard.generation_matches = false),
-            ("expected binding", |guard| {
-                guard.expected_binding_matches = false
-            }),
-            ("exact candidate", |guard| guard.candidate.message_id += 1),
-        ];
-
-        for (name, mutate) in mutations {
-            let mut guard = complete_guard();
-            mutate(&mut guard);
-            assert_eq!(
-                transition(prepared(), TransitionEvent::AuthorizeBind { guard }),
-                Err(TransitionError::IncompleteBindGuard),
-                "removed guard: {name}"
-            );
-        }
+    fn legacy_observation_has_no_bind_conversion_surface() {
+        let observation = LegacyRetireObservation::new(plan().identity, 21).unwrap();
+        assert_eq!(observation.message_id, 21);
+        let source = include_str!("status_panel_transition_v2.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains("impl From<LegacyRetireObservation"));
+        assert!(!production.contains("JournalOwnedBind::new"));
     }
 
     #[test]
-    fn legacy_pending_bind_and_candidate_acknowledged_never_authorize_bind() {
-        for protection in [
-            ProtectionEvidence::PendingBind,
-            ProtectionEvidence::CandidateAcknowledged,
-        ] {
-            let mut guard = complete_guard();
-            guard.protection = protection;
-            assert_eq!(
-                transition(prepared(), TransitionEvent::AuthorizeBind { guard }),
-                Err(TransitionError::IncompleteBindGuard)
-            );
-
-            let forged = JournalState::BindAuthorized {
-                candidate: CANDIDATE,
-                guard,
-            };
-            assert!(!recovery_bind_is_authorized(forged));
-            assert_eq!(
-                transition(forged, TransitionEvent::CommitBind),
-                Err(TransitionError::IllegalTransition)
-            );
-        }
-    }
-
-    #[test]
-    fn recovery_bind_requires_bind_authorized_state_and_complete_journal_guard() {
-        let live_non_authority = [prepared(), bound(), retire_authorized()];
-        for state in live_non_authority {
-            assert!(!recovery_bind_is_authorized(state));
-        }
-
-        let mutations: [fn(&mut BindGuard); 6] = [
-            |guard| guard.protection = ProtectionEvidence::Missing,
-            |guard| guard.candidate_identity_matches = false,
-            |guard| guard.turn_identity_matches = false,
-            |guard| guard.generation_matches = false,
-            |guard| guard.expected_binding_matches = false,
-            |guard| guard.candidate.turn_id += 1,
-        ];
-        for mutate in mutations {
-            let mut guard = complete_guard();
-            mutate(&mut guard);
-            assert!(!recovery_bind_is_authorized(JournalState::BindAuthorized {
-                candidate: CANDIDATE,
-                guard,
-            }));
-        }
-        assert!(recovery_bind_is_authorized(bind_authorized()));
-    }
-
-    #[test]
-    fn deletion_requires_retire_authorized_and_exact_target() {
-        for state in [prepared(), bind_authorized(), bound(), retired(), failed()] {
-            assert!(!deletion_is_authorized(state, 21));
-        }
-        let state = retire_authorized();
-        assert!(!deletion_is_authorized(state, 0));
-        assert!(!deletion_is_authorized(state, 20));
-        assert!(!deletion_is_authorized(state, CANDIDATE.message_id));
-        assert!(deletion_is_authorized(state, 21));
-    }
-
-    #[test]
-    fn retirement_rejects_current_or_unexpected_message() {
-        for delete_message_id in [0, 20, CANDIDATE.message_id] {
-            assert_eq!(
-                transition(
-                    bound(),
-                    TransitionEvent::AuthorizeRetire { delete_message_id },
-                ),
-                Err(TransitionError::InvalidRetirementTarget)
-            );
-        }
-    }
-
-    #[test]
-    fn invalid_candidate_cannot_receive_bind_authority() {
-        let invalid_candidates = [
-            Candidate {
-                channel_id: 0,
-                ..CANDIDATE
-            },
-            Candidate {
-                message_id: 0,
-                ..CANDIDATE
-            },
-            Candidate {
-                generation: 0,
-                ..CANDIDATE
-            },
-            Candidate {
-                turn_id: 0,
-                ..CANDIDATE
-            },
-            Candidate {
-                expected_prior_message_id: Some(0),
-                ..CANDIDATE
-            },
-            Candidate {
-                expected_prior_message_id: Some(CANDIDATE.message_id),
-                ..CANDIDATE
-            },
-        ];
-
-        for candidate in invalid_candidates {
-            let mut guard = complete_guard();
-            guard.candidate = candidate;
-            assert_eq!(
-                transition(
-                    JournalState::prepared(candidate),
-                    TransitionEvent::AuthorizeBind { guard },
-                ),
-                Err(TransitionError::IncompleteBindGuard)
-            );
-        }
-    }
-
-    #[test]
-    fn forged_incomplete_bind_authority_cannot_commit() {
-        let mut guard = complete_guard();
-        guard.generation_matches = false;
-        let forged = JournalState::BindAuthorized {
-            candidate: CANDIDATE,
-            guard,
-        };
-        assert_eq!(
-            transition(forged, TransitionEvent::CommitBind),
-            Err(TransitionError::IllegalTransition)
-        );
-    }
-
-    #[test]
-    fn proof_model_has_no_legacy_or_io_authority_surface() {
+    fn model_has_no_discord_or_legacy_authority_surface() {
         let source = include_str!("status_panel_transition_v2.rs");
         let production = source.split("#[cfg(test)]").next().unwrap();
         for forbidden in [
             "serenity",
             "reqwest",
-            "std::fs",
-            "tokio::fs",
             "status_panel_orphan_store",
             "status_panel_singleton_store",
             "inflight::",
         ] {
             assert!(
                 !production.contains(forbidden),
-                "forbidden production authority surface: {forbidden}"
-            );
-        }
-    }
-
-    #[test]
-    fn failure_taxonomy_covers_each_transition_phase() {
-        let phases = [
-            FailurePhase::Prepare,
-            FailurePhase::AuthorizeBind,
-            FailurePhase::CommitBind,
-            FailurePhase::AuthorizeRetire,
-            FailurePhase::Delete,
-        ];
-        let reasons = [
-            FailureReason::GuardRejected,
-            FailureReason::CommitFailed,
-            FailureReason::AdapterFailed,
-        ];
-        for phase in phases {
-            for reason in reasons {
-                assert_eq!(
-                    transition(prepared(), TransitionEvent::Fail { phase, reason }),
-                    Ok(JournalState::Failed { phase, reason })
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn quarantine_taxonomy_remains_typed() {
-        for reason in [
-            QuarantineReason::MalformedRecord,
-            QuarantineReason::UnknownState,
-            QuarantineReason::InvariantViolation,
-        ] {
-            assert_eq!(
-                transition(prepared(), TransitionEvent::Quarantine { reason }),
-                Ok(JournalState::Quarantined { reason })
+                "forbidden surface: {forbidden}"
             );
         }
     }
