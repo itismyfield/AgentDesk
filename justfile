@@ -69,6 +69,7 @@ test-non-pg:
     # #4875: keep the Claude catalog and picker test modules fully selected.
     cargo test --lib services::discord::model_catalog -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::commands::model_ui::tests -- --skip _pg --skip pg_ --skip postgres
+    cargo test --lib services::discord::runtime_bootstrap::shutdown::lifecycle_tests -- --skip _pg --skip pg_ --skip postgres
     cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
     # `ClaudeBinary` capability invariants are compile-fail doctests in src/lib.rs.
     # Filter the real rustdoc harness to this public capability contract.

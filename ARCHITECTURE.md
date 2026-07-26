@@ -575,6 +575,7 @@ src/
 │   │   │   ├── selection.rs
 │   │   │   └── selection_runtime.rs
 │   │   ├── model_catalog/
+│   │   │   ├── bounded_cache_file.rs
 │   │   │   └── claude.rs
 │   │   ├── outbound/
 │   │   │   ├── turn_output_controller/

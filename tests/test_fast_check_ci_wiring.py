@@ -55,6 +55,7 @@ EXPECTED_TEST_NON_PG_COMMANDS = (
     "env -u AGENTDESK_ROOT_DIR cargo test --lib relay_recovery -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::discord::model_catalog -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::discord::commands::model_ui::tests -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib services::discord::runtime_bootstrap::shutdown::lifecycle_tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --doc ClaudeBinary",
 )

@@ -29,12 +29,6 @@ const API_CACHE_VERSION: u8 = 1;
 static REFRESH_TASK_RUNNING: AtomicBool = AtomicBool::new(false);
 static CATALOG_CACHE: OnceLock<RwLock<CatalogCache>> = OnceLock::new();
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct FileCacheKey {
-    modified_ms: u128,
-    len: u64,
-}
-
 #[derive(Clone, Debug, Default)]
 struct CatalogCache {
     gateway_entries: Vec<ModelCatalogEntry>,
@@ -239,26 +233,8 @@ fn truncate_catalog_text(raw: &str, fallback: &str) -> String {
     text
 }
 
-fn file_cache_key(path: &Path) -> Option<FileCacheKey> {
-    let metadata = std::fs::metadata(path).ok()?;
-    if !metadata.file_type().is_file() || metadata.len() > MAX_CACHE_BODY_BYTES as u64 {
-        return None;
-    }
-    let modified_ms = metadata
-        .modified()
-        .ok()?
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_millis();
-    Some(FileCacheKey {
-        modified_ms,
-        len: metadata.len(),
-    })
-}
-
-fn bounded_read(path: &Path, expected: &FileCacheKey) -> Option<Vec<u8>> {
-    let body = std::fs::read(path).ok()?;
-    (body.len() <= MAX_CACHE_BODY_BYTES && body.len() as u64 == expected.len).then_some(body)
+fn read_cache_file(path: &Path) -> Option<Vec<u8>> {
+    super::bounded_cache_file::read_regular_file_bounded(path, MAX_CACHE_BODY_BYTES)
 }
 
 fn gateway_cache_path() -> Option<PathBuf> {
@@ -394,14 +370,8 @@ fn catalog_candidate_from_disk_paths(
     api_path: Option<&Path>,
     current_ms: u64,
 ) -> DiskCatalogCandidate {
-    let gateway_key = gateway_path.and_then(file_cache_key);
-    let api_key = api_path.and_then(file_cache_key);
-    let gateway_raw = gateway_path
-        .zip(gateway_key.as_ref())
-        .and_then(|(path, expected)| bounded_read(path, expected));
-    let api_raw = api_path
-        .zip(api_key.as_ref())
-        .and_then(|(path, expected)| bounded_read(path, expected));
+    let gateway_raw = gateway_path.and_then(read_cache_file);
+    let api_raw = api_path.and_then(read_cache_file);
     let api_entries = api_raw
         .as_deref()
         .map(|raw| api_entries_from_raw(raw, current_ms))
@@ -601,8 +571,7 @@ fn usable_api_models(models: Vec<ApiModel>) -> Vec<ApiModel> {
 }
 
 fn cache_is_fresh(path: &Path, current_ms: u64) -> bool {
-    file_cache_key(path)
-        .and_then(|key| bounded_read(path, &key))
+    read_cache_file(path)
         .and_then(|raw| serde_json::from_slice::<ApiCache>(&raw).ok())
         .is_some_and(|cache| {
             cache.version == API_CACHE_VERSION
@@ -743,6 +712,44 @@ pub(super) fn spawn_background_refresh(
 }
 
 #[cfg(test)]
+pub(super) fn spawn_test_background_refresh(
+    refreshes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) -> tokio::task::JoinHandle<()> {
+    spawn_test_background_refresh_after_claim(refreshes, || {})
+}
+
+#[cfg(test)]
+pub(super) fn spawn_test_background_refresh_after_claim(
+    refreshes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    after_claim: impl Fn() + Send + Sync + 'static,
+) -> tokio::task::JoinHandle<()> {
+    let after_claim = std::sync::Arc::new(after_claim);
+    tokio::spawn(async move {
+        let mut attempts = tokio::time::interval(REFRESH_STANDBY_INTERVAL);
+        loop {
+            attempts.tick().await;
+            if let Some(_guard) = RefreshTaskGuard::claim() {
+                after_claim();
+                refreshes.fetch_add(1, Ordering::AcqRel);
+                std::future::pending::<()>().await;
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+pub(super) fn with_test_refresh_task_state<T>(operation: impl FnOnce() -> T) -> T {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    REFRESH_TASK_RUNNING.store(false, Ordering::Release);
+    operation()
+}
+
+#[cfg(test)]
+pub(super) fn test_refresh_task_running() -> bool {
+    REFRESH_TASK_RUNNING.load(Ordering::Acquire)
+}
+
+#[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
@@ -762,74 +769,105 @@ mod tests {
     }
 
     #[test]
+    fn invariant_claude_model_catalog_global_test_state_uses_canonical_lock_scope() {
+        const REFRESH_STATE_STORE: &str = concat!("REFRESH_TASK_RUNNING", ".store");
+
+        let source = include_str!("claude.rs");
+        let scope = source
+            .split("pub(super) fn with_test_refresh_task_state")
+            .nth(1)
+            .and_then(|suffix| suffix.split("\n}\n").next())
+            .expect("test refresh state scope");
+        let lock = scope
+            .find("acquire_shared_test_env_lock")
+            .expect("canonical shared test lock");
+        let reset = scope
+            .find(REFRESH_STATE_STORE)
+            .expect("scoped refresh state reset");
+        assert!(lock < reset, "the canonical lock must precede the reset");
+
+        let test_module = source
+            .split("#[cfg(test)]\nmod tests")
+            .nth(1)
+            .expect("Claude catalog test module");
+        assert!(
+            !test_module.contains(REFRESH_STATE_STORE),
+            "tests must mutate refresh state only through the locked scope"
+        );
+    }
+
+    #[test]
     fn invariant_claude_model_catalog_refresh_claim_is_singleflight() {
-        REFRESH_TASK_RUNNING.store(false, Ordering::Release);
-        let guard = RefreshTaskGuard::claim().expect("first Claude task claim");
-        assert!(RefreshTaskGuard::claim().is_none());
-        drop(guard);
-        let reclaimed = RefreshTaskGuard::claim().expect("claim reset after drop");
-        drop(reclaimed);
-        assert!(!REFRESH_TASK_RUNNING.load(Ordering::Acquire));
+        with_test_refresh_task_state(|| {
+            let guard = RefreshTaskGuard::claim().expect("first Claude task claim");
+            assert!(RefreshTaskGuard::claim().is_none());
+            drop(guard);
+            let reclaimed = RefreshTaskGuard::claim().expect("claim reset after drop");
+            drop(reclaimed);
+            assert!(!REFRESH_TASK_RUNNING.load(Ordering::Acquire));
+        });
     }
 
     #[test]
     fn invariant_claude_model_catalog_non_claude_provider_has_no_supervisor() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            assert!(spawn_background_refresh(&ProviderKind::Codex).is_none());
-            let handle = spawn_background_refresh(&ProviderKind::Claude)
-                .expect("Claude gateway must keep a refresh supervisor");
-            handle.abort();
-            let _ = handle.await;
+        with_test_refresh_task_state(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                assert!(spawn_background_refresh(&ProviderKind::Codex).is_none());
+                let handle = spawn_background_refresh(&ProviderKind::Claude)
+                    .expect("Claude gateway must keep a refresh supervisor");
+                handle.abort();
+                let _ = handle.await;
+            });
         });
     }
 
     #[test]
     fn invariant_claude_model_catalog_owner_exit_hands_off_to_live_supervisor() {
-        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-        REFRESH_TASK_RUNNING.store(false, Ordering::Release);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            tokio::time::pause();
-            let refreshes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let spawn_supervisor = |refreshes: Arc<std::sync::atomic::AtomicUsize>| {
-                tokio::spawn(supervise_background_refresh(
-                    Duration::from_secs(1),
-                    Duration::from_secs(60),
-                    move || {
-                        let refreshes = Arc::clone(&refreshes);
-                        async move {
-                            refreshes.fetch_add(1, Ordering::AcqRel);
-                            std::future::pending::<()>().await;
-                        }
-                    },
-                ))
-            };
+        with_test_refresh_task_state(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                tokio::time::pause();
+                let refreshes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let spawn_supervisor = |refreshes: Arc<std::sync::atomic::AtomicUsize>| {
+                    tokio::spawn(supervise_background_refresh(
+                        Duration::from_secs(1),
+                        Duration::from_secs(60),
+                        move || {
+                            let refreshes = Arc::clone(&refreshes);
+                            async move {
+                                refreshes.fetch_add(1, Ordering::AcqRel);
+                                std::future::pending::<()>().await;
+                            }
+                        },
+                    ))
+                };
 
-            let first = spawn_supervisor(Arc::clone(&refreshes));
-            let second = spawn_supervisor(Arc::clone(&refreshes));
-            tokio::task::yield_now().await;
-            assert_eq!(refreshes.load(Ordering::Acquire), 1);
-            tokio::time::advance(Duration::from_millis(500)).await;
-            tokio::task::yield_now().await;
+                let first = spawn_supervisor(Arc::clone(&refreshes));
+                let second = spawn_supervisor(Arc::clone(&refreshes));
+                tokio::task::yield_now().await;
+                assert_eq!(refreshes.load(Ordering::Acquire), 1);
+                tokio::time::advance(Duration::from_millis(500)).await;
+                tokio::task::yield_now().await;
 
-            first.abort();
-            let _ = first.await;
-            assert!(!REFRESH_TASK_RUNNING.load(Ordering::Acquire));
-            tokio::time::advance(Duration::from_secs(1)).await;
-            tokio::task::yield_now().await;
-            assert_eq!(refreshes.load(Ordering::Acquire), 2);
-            assert!(REFRESH_TASK_RUNNING.load(Ordering::Acquire));
+                first.abort();
+                let _ = first.await;
+                assert!(!REFRESH_TASK_RUNNING.load(Ordering::Acquire));
+                tokio::time::advance(Duration::from_secs(1)).await;
+                tokio::task::yield_now().await;
+                assert_eq!(refreshes.load(Ordering::Acquire), 2);
+                assert!(REFRESH_TASK_RUNNING.load(Ordering::Acquire));
 
-            second.abort();
-            let _ = second.await;
-            assert!(!REFRESH_TASK_RUNNING.load(Ordering::Acquire));
+                second.abort();
+                let _ = second.await;
+                assert!(!REFRESH_TASK_RUNNING.load(Ordering::Acquire));
+            });
         });
     }
 
@@ -856,20 +894,6 @@ mod tests {
             assert_eq!(entry.secondary_summary, alias.metadata_fallback_id);
             assert_ne!(entry.value, alias.metadata_fallback_id);
         }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn invariant_claude_model_catalog_rejects_fifo_before_bounded_read() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("cache.fifo");
-        let status = std::process::Command::new("mkfifo")
-            .arg(&path)
-            .status()
-            .expect("spawn mkfifo");
-        assert!(status.success(), "mkfifo should succeed");
-
-        assert!(file_cache_key(&path).is_none());
     }
 
     #[test]
