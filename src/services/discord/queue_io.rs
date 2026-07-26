@@ -509,13 +509,27 @@ async fn idle_queue_backstop_backlog_units_all(
         .sum()
 }
 
+/// Wait for either the normal delay or a coalesced immediate queue signal.
+/// The signal belongs to the per-channel task guard, so waking it cannot create
+/// a second concurrent dequeue or bypass the normal kickoff admission gates.
+async fn wait_for_deferred_idle_queue_delay(
+    delay: std::time::Duration,
+    immediate_signal: &tokio::sync::Notify,
+) {
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => {}
+        _ = immediate_signal.notified() => {}
+    }
+}
+
 async fn run_single_slow_idle_queue_backstop(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     reason: &'static str,
+    immediate_signal: &tokio::sync::Notify,
 ) -> Option<IdleQueueBackstopRearm> {
-    tokio::time::sleep(DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY).await;
+    wait_for_deferred_idle_queue_delay(DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY, immediate_signal).await;
     let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
     let backlog_units =
         idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot);
@@ -577,6 +591,12 @@ fn schedule_single_slow_idle_queue_backstop(
             entry.insert(Arc::new(tokio::sync::Notify::new()));
         }
     };
+    let immediate_signal = shared
+        .restart
+        .deferred_hook_channels
+        .get(&channel_id)
+        .expect("new slow backstop must retain its per-channel signal")
+        .clone();
     shared
         .restart
         .deferred_hook_backlog
@@ -587,8 +607,14 @@ fn schedule_single_slow_idle_queue_backstop(
             channel_id,
             active: true,
         };
-        let rearm =
-            run_single_slow_idle_queue_backstop(&shared, &provider, channel_id, reason).await;
+        let rearm = run_single_slow_idle_queue_backstop(
+            &shared,
+            &provider,
+            channel_id,
+            reason,
+            immediate_signal.as_ref(),
+        )
+        .await;
         backlog_guard.release();
         if let Some(rearm) = rearm {
             schedule_single_slow_idle_queue_backstop(
@@ -758,6 +784,12 @@ fn schedule_deferred_idle_queue_kickoff_inner(
             entry.insert(Arc::new(tokio::sync::Notify::new()));
         }
     };
+    let immediate_signal = shared
+        .restart
+        .deferred_hook_channels
+        .get(&channel_id)
+        .expect("new deferred kickoff must retain its per-channel signal")
+        .clone();
     shared
         .restart
         .deferred_hook_backlog
@@ -773,15 +805,21 @@ fn schedule_deferred_idle_queue_kickoff_inner(
 
         let initial_presleep = profile.initial_presleep();
         if !initial_presleep.is_zero() {
-            tokio::time::sleep(initial_presleep).await;
+            wait_for_deferred_idle_queue_delay(initial_presleep, immediate_signal.as_ref()).await;
         }
 
         let _ =
             kick_idle_queue_channel_if_context_available(&shared, &provider, channel_id, reason)
                 .await;
 
-        let rearm =
-            run_single_slow_idle_queue_backstop(&shared, &provider, channel_id, reason).await;
+        let rearm = run_single_slow_idle_queue_backstop(
+            &shared,
+            &provider,
+            channel_id,
+            reason,
+            immediate_signal.as_ref(),
+        )
+        .await;
         backlog_guard.release();
         if let Some(rearm) = rearm {
             schedule_single_slow_idle_queue_backstop(
@@ -1026,26 +1064,126 @@ mod presleep_tests {
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn coalesced_immediate_kick_notifies_existing_slow_task() {
+    async fn coalesced_immediate_kick_interrupts_existing_initial_delay_once() {
         let shared = make_shared_data_for_tests();
         let provider = ProviderKind::Claude;
         let channel_id = ChannelId::new(4_024_281);
-        let notify = Arc::new(tokio::sync::Notify::new());
-        shared
-            .restart
-            .deferred_hook_channels
-            .insert(channel_id, notify.clone());
+        let kicks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_kicks = kicks.clone();
+        let _hook = set_idle_queue_kick_hook_for_tests(Arc::new(
+            move |_shared, _provider, channel, reason| {
+                let hook_kicks = hook_kicks.clone();
+                Box::pin(async move {
+                    if channel != channel_id {
+                        return None;
+                    }
+                    assert_eq!(reason, "slow-initial-delay");
+                    hook_kicks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Some(IdleQueueKickoffChannelOutcome::default())
+                })
+            },
+        ));
 
-        schedule_deferred_idle_queue_kickoff_immediate(
-            shared,
-            provider,
+        let before_immediate_signal = tokio::time::Instant::now();
+        schedule_deferred_idle_queue_kickoff(
+            shared.clone(),
+            provider.clone(),
             channel_id,
-            "coalesced-immediate-test",
+            "slow-initial-delay",
         );
+        tokio::task::yield_now().await;
+        schedule_local_only_slash_idle_queue_kickoff(shared, provider, channel_id);
+        tokio::task::yield_now().await;
 
-        tokio::time::timeout(std::time::Duration::from_millis(1), notify.notified())
-            .await
-            .expect("immediate coalesce should wake the existing task");
+        assert_eq!(
+            tokio::time::Instant::now(),
+            before_immediate_signal,
+            "the existing 2s timer must not elapse before the coalesced immediate signal kicks"
+        );
+        assert_eq!(
+            kicks.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "immediate coalescing must interrupt the existing 2s initial sleep and perform one kickoff"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn coalesced_immediate_kick_interrupts_existing_backstop_once() {
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_024_282);
+        let queued_message_id = MessageId::new(4_024_283);
+        shared
+            .mailbox(channel_id)
+            .replace_queue(
+                vec![user_intervention(
+                    queued_message_id.get(),
+                    "backstop wakeup",
+                )],
+                queue_persistence_context(&shared, &provider, channel_id),
+            )
+            .await;
+
+        let kicks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_kicks = kicks.clone();
+        let _hook = set_idle_queue_kick_hook_for_tests(Arc::new(
+            move |shared, provider, channel, reason| {
+                let hook_kicks = hook_kicks.clone();
+                Box::pin(async move {
+                    if channel != channel_id {
+                        return None;
+                    }
+                    assert_eq!(reason, "slow-backstop");
+                    hook_kicks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let taken = super::super::mailbox_take_next_automatic_intervention(
+                        &shared, &provider, channel,
+                    )
+                    .await;
+                    let intervention = taken
+                        .intervention
+                        .expect("backstop wakeup promotes queued work");
+                    let started = mailbox_try_start_turn(
+                        &shared,
+                        channel,
+                        Arc::new(CancelToken::new()),
+                        intervention.author_id,
+                        intervention.message_id,
+                    )
+                    .await;
+                    Some(IdleQueueKickoffChannelOutcome { started })
+                })
+            },
+        ));
+
+        let before_immediate_signal = tokio::time::Instant::now();
+        assert!(schedule_single_slow_idle_queue_backstop(
+            shared.clone(),
+            provider.clone(),
+            channel_id,
+            "slow-backstop",
+            1,
+        ));
+        tokio::task::yield_now().await;
+        schedule_local_only_slash_idle_queue_kickoff(shared.clone(), provider, channel_id);
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            tokio::time::Instant::now(),
+            before_immediate_signal,
+            "the existing 60s timer must not elapse before the coalesced immediate signal kicks"
+        );
+        assert_eq!(
+            kicks.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "immediate coalescing must interrupt the existing 60s backstop and perform one kickoff"
+        );
+        assert_eq!(
+            mailbox_snapshot(&shared, channel_id)
+                .await
+                .active_user_message_id,
+            Some(queued_message_id),
+            "the existing queue authority, not the local-only branch, promotes the queued message"
+        );
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
