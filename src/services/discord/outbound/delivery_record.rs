@@ -59,7 +59,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 
 use poise::serenity_prelude::ChannelId;
@@ -534,39 +533,27 @@ pub(in crate::services::discord) fn delete_record(
 }
 
 // ---------------------------------------------------------------------------
-// #3089 B1 — shadow-write the delivered frontier (observe-only, default OFF).
+// #3089 B1 — shadow-write the delivered frontier (production default ON).
 //
 // B1 mirrors the in-memory `confirmed_end_offset` authority into the durable
 // sidecar AFTER a confirmed `Delivered` commit, and asserts the durable END
-// tracks it (design §5 / M4 — END is the risky datum). Read-authority STAYS the
-// legacy markers; this is a parallel "shadow" so B2 can later flip to it with
-// confidence. OFF (default) → zero extraction, zero write → behavioral no-op.
+// tracks it (design §5 / M4 — END is the risky datum). The test seam below
+// retains a deterministic OFF path without a production environment gate.
 // ---------------------------------------------------------------------------
 
-/// #3089 B1 shadow-write flag (`AGENTDESK_DELIVERY_RECORD_SHADOW`, OnceLock,
-/// default OFF). Telemetry ONLY when enabled (the default-OFF first eval has no
-/// observable side effect — deploy no-op), mirroring the A-phase flag idiom.
+/// #4890: production always records the durable frontier shadow. Tests may
+/// force the legacy OFF path through `shadow_test_seam`.
 pub(in crate::services::discord) fn delivery_record_shadow_enabled() -> bool {
     #[cfg(test)]
     if let Some(forced) = shadow_test_seam::current_override() {
         return forced;
     }
-    static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        let on = std::env::var("AGENTDESK_DELIVERY_RECORD_SHADOW")
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase())
-            .is_some_and(|v| v == "1" || v == "true");
-        if on {
-            tracing::info!("  ✓ delivery_record_shadow: enabled");
-        }
-        on
-    })
+    true
 }
 
-/// #4130 test seam: a per-thread override of
-/// `delivery_record_shadow_enabled()` so default-OFF tests stay deterministic
-/// even when the developer shell exports `AGENTDESK_DELIVERY_RECORD_SHADOW=1`.
+/// #4130/#4890 test seam: a per-thread override of
+/// `delivery_record_shadow_enabled()` so tests can exercise the legacy OFF path
+/// without changing production behavior.
 #[cfg(test)]
 pub(in crate::services::discord) mod shadow_test_seam {
     use std::cell::Cell;
@@ -597,32 +584,14 @@ pub(in crate::services::discord) mod shadow_test_seam {
     }
 }
 
-/// #3089 B2b read-authority flag (`AGENTDESK_DELIVERY_RECORD_AUTHORITY`, OnceLock,
-/// default OFF). When OFF (default) the dedup gates read the legacy in-memory
-/// `committed_relay_offset` verbatim → byte-identical, deploy no-op. When ON the
-/// gates consult the durable `delivered_frontier` (fused with in-memory) so the
-/// "already-relayed → skip" decision survives a restart / cross-actor boundary.
+/// #4890: production always reads the durable frontier authority. Tests may
+/// force the legacy in-memory OFF path through `authority_test_seam`.
 pub(in crate::services::discord) fn delivery_record_authority_enabled() -> bool {
-    // #3933: a per-thread test override (see `authority_test_seam`) lets a unit
-    // test drive the authority-ON enforce path (the release config) through the
-    // real save path WITHOUT poisoning the env-global `OnceLock` cache for
-    // sibling tests that assume the compiled-default OFF. Production strips this
-    // branch entirely (`cfg(test)`), so the flag stays byte-identical at runtime.
     #[cfg(test)]
     if let Some(forced) = authority_test_seam::current_override() {
         return forced;
     }
-    static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        let on = std::env::var("AGENTDESK_DELIVERY_RECORD_AUTHORITY")
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase())
-            .is_some_and(|v| v == "1" || v == "true");
-        if on {
-            tracing::info!("  ✓ delivery_record_authority: enabled");
-        }
-        on
-    })
+    true
 }
 
 /// #3933 test seam: a per-thread override of `delivery_record_authority_enabled()`
@@ -635,7 +604,7 @@ pub(in crate::services::discord) mod authority_test_seam {
 
     thread_local! {
         /// When `Some`, forces the flag on THIS thread only; `None` (default)
-        /// falls through to the env-cached `OnceLock`.
+        /// uses the production default-on behavior.
         static OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
     }
 
@@ -721,19 +690,19 @@ fn delivery_record_rollout_health_json_for_flags(
 /// enforce decision. Returns `true` (block the backward inflight write) ONLY when
 /// the durable delivered-frontier authority is ON, a same-turn offset moved
 /// backward (`response_sent_offset` or `last_offset`), **and** the backward move
-/// is NOT a legitimate full reset. Authority OFF (default) → always `false` → the
-/// guard stays observe-only and the write proceeds byte-identically (deploy
-/// no-op). Gated by the SAME flag as the read-authority flip so the single offset
-/// authority + its enforcement cut over atomically.
+/// is NOT a legitimate full reset. The test-only OFF seam keeps the legacy
+/// observe-only path available for regression coverage. Gated by the SAME flag as
+/// the read-authority flip so the single offset authority + its enforcement cut
+/// over atomically.
 ///
 /// #3933: `is_legitimate_full_reset` carves the legitimate Gemini/Qwen
 /// `RetryBoundary` rewind (turn_bridge/retry_state.rs clears `full_response` and
 /// rewinds `response_sent_offset`→0 for the SAME turn identity to re-stream) out
-/// of the coarse backward-write skip. The release runs
-/// `AGENTDESK_DELIVERY_RECORD_AUTHORITY=1`, so before this carve-out the enforce
-/// branch dropped the re-streamed body (live data loss). A genuine stale-snapshot
+/// of the coarse backward-write skip. Before this carve-out the enforce branch
+/// dropped the re-streamed body (live data loss). A genuine stale-snapshot
 /// backward regression carries a NON-EMPTY body, so it never matches the reset
-/// signature and stays blocked.
+/// signature and stays blocked. Production uses this enforcement by default; the
+/// cfg(test) OFF seam retains the observe-only legacy behavior.
 pub(in crate::services::discord) fn authority_blocks_backward_inflight_write(
     authority_enabled: bool,
     response_sent_offset_monotonic: bool,
@@ -850,16 +819,13 @@ pub(in crate::services::discord) fn current_generation_mtime_ns(tmux_session_nam
     }
 }
 
-/// #3593 (flag-INDEPENDENT): the CURRENT-generation durable `delivered_frontier`
-/// END, or `0` when there is none to trust (absent/malformed record, a stale
-/// prior-generation frontier per the #1270 guard, missing transcript EOF, or a
-/// frontier END beyond the current EOF). UNLIKE
-/// [`effective_committed_offset`], this NEVER consults
-/// `AGENTDESK_DELIVERY_RECORD_AUTHORITY` — it is the durable frontier the legacy
-/// #3520 new-message floor read, surfaced so the synthetic-resume dedup gate can
-/// fuse it (`max`) with the in-memory committed offset and remain a TRUE superset
-/// of #3520 under BOTH authority states. Returning `0` (not `None`) keeps the
-/// caller's `committed.max(this)` fusion a plain `u64` op; `0` is the safe floor
+/// #3593: the CURRENT-generation durable `delivered_frontier` END, or `0` when
+/// there is none to trust (absent/malformed record, a stale prior-generation
+/// frontier per the #1270 guard, missing transcript EOF, or a frontier END beyond
+/// the current EOF). This flag-independent reader is also used by the
+/// synthetic-resume dedup gate so its `max` fusion remains a TRUE superset of the
+/// in-memory committed offset. Returning `0` (not `None`) keeps the caller's
+/// `committed.max(this)` fusion a plain `u64` op; `0` is the safe floor
 /// (`range_already_committed` suppresses NOTHING at `committed == 0`).
 pub(in crate::services::discord) fn delivered_frontier_end_current_generation(
     provider: &ProviderKind,
@@ -959,16 +925,16 @@ pub(in crate::services::discord) fn reanchor_current_generation_frontier(
 }
 
 /// #3089 B2b: the effective "already-committed" offset the dedup/skip gates read.
-/// Flag OFF (default) → the legacy in-memory `committed_relay_offset` verbatim
-/// (no record read → deploy no-op). Flag ON → `max(delivered_frontier.end,
-/// in_memory)` (I3: missing/malformed record → in-memory only, never assume
-/// delivered), but ONLY when the durable frontier is from the CURRENT wrapper
-/// generation (#1270 guard — a stale prior-generation frontier is treated as
-/// `None`) and physically within the current transcript EOF (#4188 guard). The
-/// in-memory authority is the relay coord's `confirmed_end_offset` for
-/// `channel`; the durable record is keyed by `(provider, channel)`;
-/// `tmux_session_name` resolves the current generation watermark, while
-/// `current_transcript_eof` bounds the durable offset space.
+/// Production default-on uses `max(delivered_frontier.end, in_memory)` (I3:
+/// missing/malformed record → in-memory only, never assume delivered), but ONLY
+/// when the durable frontier is from the CURRENT wrapper generation (#1270 guard
+/// — a stale prior-generation frontier is treated as `None`) and physically
+/// within the current transcript EOF (#4188 guard). The test-only OFF seam
+/// returns the legacy in-memory `committed_relay_offset` verbatim. The in-memory
+/// authority is the relay coord's `confirmed_end_offset` for `channel`; the
+/// durable record is keyed by `(provider, channel)`; `tmux_session_name` resolves
+/// the current generation watermark, while `current_transcript_eof` bounds the
+/// durable offset space.
 pub(in crate::services::discord) fn effective_committed_offset(
     shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,
@@ -995,15 +961,11 @@ pub(in crate::services::discord) fn effective_committed_offset(
 /// reads — the `max` of [`effective_committed_offset`] and the FLAG-INDEPENDENT
 /// current-generation durable frontier ([`delivered_frontier_end_current_generation`]).
 ///
-/// Why fuse here and not rely on `effective_committed_offset` alone: under
-/// `AGENTDESK_DELIVERY_RECORD_AUTHORITY=OFF` (the default), `effective_committed_offset`
-/// returns ONLY the in-memory `committed_relay_offset`. On a restart / synthetic
-/// resume that in-memory value is reset to `0`, while the durable frontier still
-/// holds the current-generation high watermark (e.g. 443154). With the in-memory
-/// floor alone the gate would compute `range_already_committed(422855, 0) == false`
-/// and RE-POST the already-delivered body — the legacy #3520 new-message guard read
-/// the durable frontier flag-independently, so the new placeholder-path gate must
-/// too to be a TRUE superset of #3520 under BOTH authority states.
+/// Why fuse here and not rely on `effective_committed_offset` alone: the
+/// flag-independent current-generation reader also covers the synthetic-resume
+/// path when its in-memory value resets to `0`, while the durable frontier still
+/// holds the current-generation high watermark (e.g. 443154). The fused floor
+/// remains a TRUE superset of the legacy #3520 new-message guard.
 ///
 /// Safety (no over-suppression): `max` only RAISES the floor, and the durable reader
 /// is current-generation-only (#1270 guard → stale prior-generation frontier yields
@@ -2161,6 +2123,35 @@ mod tests {
     }
 
     #[test]
+    fn delivery_record_production_defaults_are_shadow_and_authority_on_4890() {
+        assert!(delivery_record_shadow_enabled());
+        assert!(delivery_record_authority_enabled());
+
+        let json = delivery_record_rollout_health_json();
+        assert_eq!(json["mode"], "shadow_and_authority");
+        assert_eq!(json["shadow_enabled"], true);
+        assert_eq!(json["authority_enabled"], true);
+        assert_eq!(json["dedup_authority"], "durable_delivery_record_frontier");
+        assert_eq!(json["same_turn_backward_write_enforcement"], "enforcing");
+        assert_eq!(json["warning_count"], 0);
+    }
+
+    #[test]
+    fn delivery_record_test_only_off_seams_preserve_legacy_path_4890() {
+        let _shadow = shadow_test_seam::force(false);
+        let _authority = authority_test_seam::force(false);
+
+        assert!(!delivery_record_shadow_enabled());
+        assert!(!delivery_record_authority_enabled());
+        assert!(!authority_blocks_backward_inflight_write(
+            false, false, true, false
+        ));
+        let json = delivery_record_rollout_health_json();
+        assert_eq!(json["dedup_authority"], "in_memory_committed_offset");
+        assert_eq!(json["same_turn_backward_write_enforcement"], "observe_only");
+    }
+
+    #[test]
     fn delivery_record_rollout_health_reports_off_as_observable_warning() {
         let json = delivery_record_rollout_health_json_for_flags(false, false);
         assert_eq!(json["mode"], "off");
@@ -2393,9 +2384,9 @@ mod tests {
     }
 
     // ---- #3593 flag-independent current-generation durable frontier reader ----
-    // (codex HIGH: the synthetic-resume dedup gate must fuse the durable frontier
-    // EVEN when AGENTDESK_DELIVERY_RECORD_AUTHORITY is OFF — `effective_committed_offset`
-    // hides it under the flag, so the gate reads this flag-INDEPENDENT path instead.)
+    // (codex HIGH: the synthetic-resume dedup gate fuses this durable frontier
+    // independently, so its restart behavior remains safe even when the test-only
+    // authority OFF seam hides the frontier from `effective_committed_offset`.)
 
     /// The exact #3593 AUTHORITY-OFF regression codex flagged: a restart / synthetic
     /// resume reset the in-memory `committed_relay_offset` to 0, but the durable
@@ -3259,8 +3250,8 @@ mod tests {
     // The pure helpers above (fuse / #1270 generation gate / range_already_committed)
     // are covered, but no test drove the ENV-RESOLVED public gates
     // (`effective_committed_offset` / `committed_floor_for_resend_dedup`) with the
-    // flag FORCED ON — the release config (AGENTDESK_DELIVERY_RECORD_AUTHORITY=1)
-    // the compiled default (OFF) never exercises. These tests force it ON via the
+    // flag FORCED ON — the production default is now ON, while the cfg(test)
+    // OFF seam remains available. These tests force it ON explicitly via the
     // #3993 per-thread seam and verify the whole wiring end-to-end (not by
     // hand-computing the fusion): the dedup floor is `max(durable, in_memory)` so it
     // never over-suppresses, the #1270 gate distrusts a stale generation, and the

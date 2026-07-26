@@ -96,8 +96,8 @@
     prior-generation frontier whose end exceeds the compacted transcript EOF is
     distrusted (fixes the delivered_frontier message-loss after `/compact`); +8
     from #4130 cfg(test) shadow_test_seam — per-thread override so default-OFF
-    tests ignore developer-shell AGENTDESK_DELIVERY_RECORD_SHADOW; production
-    paths untouched; durable delivery lease/frontier/owner-context sidecar, plus
+    tests retain a cfg(test)-only OFF seam for the production-default-ON shadow
+    path; production env parsing is removed; durable delivery lease/frontier/owner-context sidecar, plus
     the #4081 bounded recent-content fingerprint guard; +133 from #4508 adding the
     edit-failure stable pre-edit path/generation identity plus locked,
     double-validated EOF/frontier snapshot seam and fail-open rotate regression
