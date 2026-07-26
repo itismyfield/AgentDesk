@@ -24,6 +24,22 @@ pub(super) fn register_pipeline_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
         })?,
     )?;
 
+    // __resolvePhaseGateDeclarationRaw(kind): returns the canonical immutable declaration.
+    pipeline_obj.set(
+        "__resolvePhaseGateDeclarationRaw",
+        Function::new(ctx.clone(), move |kind: String| -> String {
+            let kind = kind.trim();
+            let kind = if kind.is_empty() {
+                crate::phase_gate::DEFAULT_PHASE_GATE_KIND
+            } else {
+                kind
+            };
+            crate::phase_gate::resolve_declaration_value(kind)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_string())
+        })?,
+    )?;
+
     // __resolveForCardRaw(cardId): returns the effective pipeline for a card
     let pg_resolve = pg_pool;
     pipeline_obj.set(
@@ -54,22 +70,24 @@ pub(super) fn register_pipeline_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
                 return JSON.parse(agentdesk.pipeline.__resolveForCardRaw(cardId));
             };
 
-            agentdesk.pipeline.resolvePhaseGate = function(config) {
+            agentdesk.pipeline.resolvePhaseGateDeclaration = function(kind) {
+                return JSON.parse(agentdesk.pipeline.__resolvePhaseGateDeclarationRaw(kind || ""));
+            };
+
+            agentdesk.pipeline.resolvePhaseGate = function(config, kind) {
                 var cfg = config || agentdesk.pipeline.getConfig();
                 var gate = (cfg && cfg.phase_gate) ? cfg.phase_gate : {};
-                var checks = Array.isArray(gate.checks) && gate.checks.length > 0
-                    ? gate.checks.slice()
-                    : ["merge_verified", "issue_closed", "build_passed"];
+                var declaration = agentdesk.pipeline.resolvePhaseGateDeclaration(kind);
+                if (!declaration) return null;
                 return {
                     dispatch_to: gate.dispatch_to || "self",
                     dispatch_type: gate.dispatch_type || "phase-gate",
-                    pass_verdict: gate.pass_verdict || "phase_gate_passed",
-                    checks: checks
+                    declaration: declaration
                 };
             };
 
-            agentdesk.pipeline.resolvePhaseGateForCard = function(cardId) {
-                return agentdesk.pipeline.resolvePhaseGate(agentdesk.pipeline.resolveForCard(cardId));
+            agentdesk.pipeline.resolvePhaseGateForCard = function(cardId, kind) {
+                return agentdesk.pipeline.resolvePhaseGate(agentdesk.pipeline.resolveForCard(cardId), kind);
             };
 
             agentdesk.pipeline.isTerminal = function(state, config) {
@@ -179,6 +197,73 @@ pub(super) fn register_pipeline_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>
     "#)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod auto_queue_phase_gate_js_contract_tests {
+    use super::register_pipeline_ops;
+    use crate::phase_gate::PHASE_GATE_DECLARATIONS;
+    use rquickjs::{Context, Runtime};
+
+    #[test]
+    fn quickjs_phase_gate_declarations_match_rust_registry_serialization() {
+        let runtime = Runtime::new().expect("create QuickJS runtime"); // agentdesk-audit: allow-unwrap — test-only QuickJS fixture
+        let context = Context::full(&runtime).expect("create QuickJS context"); // agentdesk-audit: allow-unwrap — test-only QuickJS fixture
+        context.with(|ctx| {
+            let agentdesk = rquickjs::Object::new(ctx.clone()).expect("agentdesk object"); // agentdesk-audit: allow-unwrap — test-only QuickJS fixture
+            ctx.globals()
+                .set("agentdesk", agentdesk)
+                .expect("install agentdesk"); // agentdesk-audit: allow-unwrap — test-only QuickJS fixture
+            register_pipeline_ops(&ctx, None).expect("register pipeline ops"); // agentdesk-audit: allow-unwrap — test-only host contract setup
+
+            let catalog = crate::phase_gate::catalog_value();
+            let catalog_ids = catalog["kinds"]
+                .as_array()
+                .expect("catalog kinds") // agentdesk-audit: allow-unwrap — immutable registry catalog fixture
+                .iter()
+                .map(|kind| kind["id"].as_str().expect("catalog kind id")) // agentdesk-audit: allow-unwrap — catalog entries always include string ids
+                .collect::<Vec<_>>();
+            let registry_ids = PHASE_GATE_DECLARATIONS
+                .iter()
+                .map(|declaration| declaration.kind.id())
+                .collect::<Vec<_>>();
+            assert_eq!(catalog_ids, registry_ids, "catalog/registry kind-set drift");
+
+            for declaration in PHASE_GATE_DECLARATIONS {
+                let kind = declaration.kind.id();
+                let script = format!(
+                    "JSON.stringify(agentdesk.pipeline.resolvePhaseGateDeclaration({kind:?}))"
+                );
+                let serialized: String = ctx.eval(script).expect("evaluate declaration"); // agentdesk-audit: allow-unwrap — test-only QuickJS assertion
+                let from_js: serde_json::Value =
+                    serde_json::from_str(&serialized).expect("decode declaration"); // agentdesk-audit: allow-unwrap — host operation must emit valid JSON
+                let from_rust =
+                    crate::phase_gate::resolve_declaration_value(kind).expect("Rust declaration"); // agentdesk-audit: allow-unwrap — immutable built-in declaration fixture
+                assert_eq!(from_js, from_rust, "serialization drift for {kind}");
+                for field in [
+                    "kind",
+                    "declaration_version",
+                    "pass_verdict",
+                    "evidence_requirement",
+                    "required_checks",
+                    "available",
+                    "unavailable_reason",
+                ] {
+                    assert_eq!(
+                        from_js.get(field),
+                        from_rust.get(field),
+                        "field drift for {kind}.{field}"
+                    );
+                }
+            }
+
+            let unknown: String = ctx
+                .eval("JSON.stringify(agentdesk.pipeline.resolvePhaseGateDeclaration('unknown-gate'))")
+                .expect("evaluate unknown declaration"); // agentdesk-audit: allow-unwrap — test-only QuickJS assertion
+            assert_eq!(unknown, "null");
+            assert!(crate::phase_gate::resolve_declaration_value("unknown-gate").is_none());
+        });
+    }
 }
 
 fn resolve_for_card_raw_pg(pool: &PgPool, card_id: &str) -> String {

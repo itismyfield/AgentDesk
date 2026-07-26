@@ -162,7 +162,10 @@
 
 - canonical_modules: `src/engine/mod.rs` (driver) plus `src/engine/ops/*.rs`
   (per-domain op handlers). `src/pipeline.rs` (frozen giant surface, giant-file)
-  composes the policy pipeline.
+  composes the policy pipeline. `src/phase_gate.rs` owns immutable typed
+  phase-gate declarations shared by the HTTP catalog, policy host operation,
+  and Rust verdict reducers; pipeline configuration may select routing metadata
+  but cannot override declaration checks, authority, or pass verdict.
 - legacy_modules: none — there is no parallel engine. The whole surface is
   pre-migration giant-file territory.
 - do_not_edit_without_migration_plan:

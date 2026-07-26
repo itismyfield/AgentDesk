@@ -100,9 +100,15 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.pg_db == 'true'",
     "runs_on" => "ubuntu-latest",
-    # #4747 (opt.3) re-pins after making PR cache access restore-only.
-    "job_sha256" => "038d897af037869047a114d10640751c62f0a7350d3748320bbabb171fadeeff",
+    # #4913 re-pins after adding the trusted session-forwarding test to the
+    # existing toolchain-provisioned targeted lane.
+    "job_sha256" => "86804b84bc35aacdf93d9f12607ec2fdf43d5c0bf1c67bb136b9b373365c16a4",
     "cargo_steps" => {
+      "Trusted session forwarding tests" => {
+        "commands" => ["env -u AGENTDESK_ROOT_DIR cargo test --lib services::session_forwarding -- --skip _pg --skip pg_ --skip postgres"],
+        "continue_on_error" => nil,
+        "timeout_minutes" => 10,
+      },
       "just test-postgres" => {
         "commands" => ["just test-postgres"],
         "continue_on_error" => nil,

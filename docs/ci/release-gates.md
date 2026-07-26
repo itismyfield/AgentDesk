@@ -180,3 +180,34 @@ python3 scripts/e2e/post_deploy_relay_continuity.py --fixture pass
 
 Full runbook:
 [`docs/runbooks/post-deploy-relay-continuity-smoke.md`](../runbooks/post-deploy-relay-continuity-smoke.md).
+
+## 9. Untrusted `deploy-gate` rollout boundary (#4898)
+
+Migration `0100_block_untrusted_deploy_gate.sql` is the authoritative rollout
+containment while trusted typed deployment evidence is unavailable. Its validated
+PostgreSQL `CHECK` constraint rejects `deploy-gate` case-insensitively after
+trimming ASCII space, tab, newline, carriage return, form feed, and vertical tab.
+`NULL`, blank legacy provenance, and `pr-confirm` remain valid. `NOT VALID` is not
+permitted: an existing normalized `deploy-gate` row must fail the migration rather
+than be silently converted, passed, or left outside enforcement.
+
+The release script stages and signs the candidate binary, proves the PostgreSQL
+tunnel, and then runs the candidate's hidden `release-migrate-postgres` command
+before requesting `restart_pending` or any drain acknowledgement. If migration
+fails, no restart marker or self-exit trigger has been issued and the old process
+remains running. Only after migration succeeds does the script drain admissions,
+receive durable restart persistence, and proceed to launchd bootout.
+
+This boundary is forward-only. After migration 0100 commits, a binary embedding
+only migrations through 0099 cannot restart because SQLx startup validation rejects
+the newer database migration. A post-migration activation failure must therefore
+fail forward with a 0100-aware binary; it must not auto-restart a pre-0100 rollback
+binary. Preflight counts are diagnostic only and are never authority because an old
+or concurrent node could insert after a count. PostgreSQL DDL locking plus the
+validated constraint serialize legacy writers and enforce the boundary for every
+node after commit.
+
+A future trusted deployment-evidence capability must ship a coordinated migration
+that explicitly replaces or removes this constraint in the same rollout that
+introduces the typed evidence authority. Configuration, policy payloads, or agent
+results alone cannot enable `deploy-gate`.
