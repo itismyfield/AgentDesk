@@ -1,5 +1,14 @@
 use super::*;
 
+pub(crate) struct TakeNextSoftResult {
+    pub(crate) intervention: Option<Intervention>,
+    pub(crate) dispatch_lease: Option<Arc<DispatchLease>>,
+    pub(crate) has_more: bool,
+    pub(crate) queue_len_after: usize,
+    pub(crate) queue_exit_events: Vec<QueueExitEvent>,
+    pub(crate) persistence_error: Option<String>,
+}
+
 pub(crate) fn has_soft_intervention_at(
     queue: &mut Vec<Intervention>,
     now: Instant,
@@ -24,11 +33,17 @@ pub(crate) fn has_soft_intervention(queue: &mut Vec<Intervention>) -> HasPending
     }
 }
 
-pub(crate) fn dequeue_next_soft_intervention(queue: &mut Vec<Intervention>) -> TakeNextSoftResult {
+pub(crate) fn dequeue_next_soft_intervention(
+    queue: &mut Vec<Intervention>,
+    primary_message_id: Option<MessageId>,
+) -> TakeNextSoftResult {
     let queue_exit_events = super::prune_interventions(queue);
     let intervention = queue
         .iter()
-        .position(|item| item.mode == InterventionMode::Soft)
+        .position(|item| {
+            item.mode == InterventionMode::Soft
+                && primary_message_id.is_none_or(|message_id| item.message_id == message_id)
+        })
         .map(|index| queue.remove(index));
     let has_more = queue.iter().any(|item| item.mode == InterventionMode::Soft);
     TakeNextSoftResult {
@@ -105,6 +120,24 @@ mod tests {
             pending_uploads: Vec::new(),
             voice_announcement: None,
         }
+    }
+
+    #[test]
+    fn matching_dequeue_preserves_blocked_head_and_fifo_of_remaining_items() {
+        let mut queue = vec![intervention(10), intervention(11), intervention(12)];
+
+        let result = dequeue_next_soft_intervention(&mut queue, Some(MessageId::new(11)));
+
+        assert_eq!(
+            result.intervention.as_ref().map(|item| item.message_id),
+            Some(MessageId::new(11))
+        );
+        assert!(result.has_more);
+        assert_eq!(
+            queue.iter().map(|item| item.message_id).collect::<Vec<_>>(),
+            vec![MessageId::new(10), MessageId::new(12)],
+            "selective automatic progress must park the blocked head without reordering survivors"
+        );
     }
 
     #[test]

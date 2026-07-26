@@ -14,6 +14,9 @@ PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
 NIGHTLY_WORKFLOW = REPO_ROOT / ".github/workflows/ci-nightly.yml"
 MACOS_TRUSTED_WORKFLOW = REPO_ROOT / ".github/workflows/ci-macos-trusted.yml"
+BUSY_RETRY_4888_TEST_COMMAND = (
+    "env -u AGENTDESK_ROOT_DIR cargo test --lib _4888 -- --test-threads=1"
+)
 
 # This manifest is intentionally exact: changing the retained test recipe must also
 # update this test deliberately. The duplication is a drift-prevention gate, not an
@@ -40,6 +43,21 @@ EXPECTED_TEST_NON_PG_COMMANDS = (
     "cargo test --lib queue_marker::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib queue_status_presentation::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib status_panel_singleton_store -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib busy_followup_retry_store -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib services::claude_tui::input::tests -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib services::tmux_common::sentinel_tests -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib services::discord::turn_bridge::followup_requeue::tests -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib services::discord::turn_bridge::terminal_outcome_delivery::busy_followup_retry::tests -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib services::discord::gateway::tests -- --skip _pg --skip pg_ --skip postgres",
+    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::gateway::outbound_messages::classified_edit_tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
+    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_dispatch::queued::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
+    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::intake_turn::placeholder_handoff::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
+    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::completion_admission::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
+    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::completion_admission_actor::tests -- --skip _pg --skip pg_ --skip postgres --test-threads=1",
+    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::cleanup::tests::late_already_finalized_cleanup_releases_mailbox_and_rearms_once_4906 -- --exact --test-threads=1",
+    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_finalizer::cleanup::tests::mailbox_release_backstop_coalesces_duplicate_arms_and_eventually_fires_4906 -- --exact --test-threads=1",
+    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::recovery_engine::runtime::reregister_ledger_reseed_tests -- --test-threads=1",
+    "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::placeholder_sweeper::abandon_guard::tests -- --test-threads=1",
     "env -u AGENTDESK_ROOT_DIR cargo test --lib placeholder_live_events -- --skip _pg --skip pg_ --skip postgres",
     "env -u AGENTDESK_ROOT_DIR cargo test --lib single_message_panel::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::discord::outbound::serenity_reference::tests::lifecycle_notice_nonce_is_stable_and_semantic_event_scoped -- --exact",
@@ -213,6 +231,16 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertIn(
             "cargo test --lib discord_thread_create -- --test-threads=1",
             job_block(nightly, "full_windows"),
+        )
+
+    def test_trusted_macos_runs_busy_retry_regressions_on_both_runner_paths(self) -> None:
+        workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
+        hosted = job_block(workflow, "macos_hosted")
+        self_hosted = job_block(workflow, "macos_self_hosted")
+
+        self.assertEqual(hosted.count(BUSY_RETRY_4888_TEST_COMMAND), 1)
+        self.assertEqual(
+            self_hosted.count(f"nice -n 10 {BUSY_RETRY_4888_TEST_COMMAND}"), 1
         )
 
     def test_test_lane_baseline_uses_candidate_snapshot_refs(self) -> None:

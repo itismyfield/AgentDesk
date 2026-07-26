@@ -461,6 +461,7 @@ fn intake_request_from_row(row: &IntakeOutboxRow) -> Result<IntakeRequest, Strin
     Ok(IntakeRequest {
         channel_id: ChannelId::new(channel_id),
         user_msg_id: MessageId::new(user_msg_id),
+        busy_followup_retry_user_msg_id: MessageId::new(user_msg_id),
         request_owner: UserId::new(request_owner),
         request_owner_name: owner_name,
         user_text: row.user_text.clone(),

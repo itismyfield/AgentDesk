@@ -2273,6 +2273,14 @@ async fn release_restored_watcher_active_turn_before_panel_edit(
     let Some(token) = finish.removed_token.as_ref() else {
         return false;
     };
+    shared.turn_finalizer.note_mailbox_released(
+        super::turn_finalizer::TurnKey::new(
+            channel_id,
+            finalizer_turn_id,
+            shared.restart.current_generation,
+        ),
+        shared.clone(),
+    );
 
     // #4106 review-fix: cancel the removed token, decrement the counter, AND run
     // the finalizer's D-side channel cleanup here. Hoisting the release ahead of
@@ -2290,6 +2298,14 @@ async fn release_restored_watcher_active_turn_before_panel_edit(
 
     super::turn_finalizer::cleanup::clear_watchdog_and_kick_thread_parents_after_turn_release(
         shared, provider, channel_id,
+    )
+    .await;
+    super::turn_finalizer::cleanup::rearm_queue_backstop_after_mailbox_release(
+        shared,
+        provider,
+        channel_id,
+        finish.has_pending,
+        "watcher_pre_panel_mailbox_release",
     )
     .await;
     if !finish.has_pending {

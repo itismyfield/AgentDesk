@@ -29,9 +29,9 @@ mod outbound_messages;
 #[cfg(test)]
 use self::outbound_messages::await_answer_flush_if_queued_notice;
 pub(super) use self::outbound_messages::{
-    ClassifiedOutboundEditError, ClassifiedOutboundPostError, edit_outbound_message,
-    edit_outbound_message_classified, send_intake_placeholder, send_outbound_message,
-    send_outbound_message_with_nonce_classified,
+    ClassifiedOutboundEditError, ClassifiedOutboundPostError, edit_intake_placeholder,
+    edit_outbound_message, edit_outbound_message_classified, send_intake_placeholder,
+    send_outbound_message, send_outbound_message_with_nonce_classified,
 };
 
 pub(super) type GatewayFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -1324,6 +1324,88 @@ mod tests {
                 "cycle {cycle}: the slow (60s) fail-open backstop stays coalesced to one — no fast kick"
             );
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dispatch_promote_gate_capped_busy_retry_skips_backstop_4888() {
+        let _root = scoped_runtime_root();
+        let _busy = crate::services::discord::router::set_hosted_tui_promote_busy_for_tests(true);
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let http = Arc::new(serenity::Http::new("Bot test-token"));
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(100_000_004_888_600);
+        let user_msg = MessageId::new(100_000_004_888_601);
+        crate::services::discord::busy_followup_retry_store::bind_notice_if_absent(
+            &provider,
+            channel_id.get(),
+            user_msg.get(),
+            user_msg.get() + 1,
+        )
+        .expect("bind busy notice");
+        for _ in 0..crate::services::discord::busy_followup_retry_store::MAX_BUSY_RETRY_COUNT {
+            crate::services::discord::busy_followup_retry_store::record_busy_retry(
+                &provider,
+                channel_id.get(),
+                user_msg.get(),
+                user_msg.get() + 1,
+            )
+            .expect("record busy retry");
+        }
+        assert!(
+            crate::services::discord::busy_followup_retry_store::is_capped(
+                &provider,
+                channel_id.get(),
+                user_msg.get(),
+            )
+        );
+
+        let persistence =
+            crate::services::discord::queue_persistence_context(&shared, &provider, channel_id);
+        shared
+            .mailbox(channel_id)
+            .replace_queue(
+                vec![promoted_intervention(
+                    user_msg.get(),
+                    "capped busy promote head",
+                )],
+                persistence.clone(),
+            )
+            .await;
+        let taken = shared.mailbox(channel_id).take_next_soft(persistence).await;
+        let intervention = taken.intervention.expect("soft-take promotes the head");
+        let gateway = DiscordGateway::new(http, shared.clone(), provider, None);
+
+        assert!(
+            gateway
+                .dispatch_queued_turn(
+                    channel_id,
+                    &intervention,
+                    "tester",
+                    false,
+                    taken.dispatch_lease,
+                )
+                .await
+                .is_ok()
+        );
+        let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
+        assert_eq!(snapshot.intervention_queue.len(), 1);
+        assert_eq!(snapshot.intervention_queue[0].message_id, user_msg);
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a capped busy retry must preserve the queue entry without arming the slow backstop"
+        );
+        assert!(
+            !shared
+                .restart
+                .deferred_hook_channels
+                .contains_key(&channel_id),
+            "a capped busy retry must not register a deferred backstop task"
+        );
     }
 
     /// #4270 pin (entrypoint, ready) — with the hosted TUI ready the promote

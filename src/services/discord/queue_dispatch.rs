@@ -41,6 +41,69 @@ pub(in crate::services::discord) struct MailboxEnqueueOutcome {
     pub(super) persistence_error: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AutomaticQueueProgression {
+    Empty,
+    BlockedByCappedRetries,
+    Eligible(MessageId),
+}
+
+fn busy_retry_is_capped(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    intervention: &Intervention,
+) -> bool {
+    super::busy_followup_retry_store::state_is_capped(
+        super::busy_followup_retry_store::resolve_identity(
+            provider,
+            channel_id.get(),
+            intervention.message_id.get(),
+            &intervention.source_message_ids,
+        )
+        .state,
+    )
+}
+
+pub(super) fn automatic_progression(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    snapshot: &ChannelMailboxSnapshot,
+) -> AutomaticQueueProgression {
+    if let Some(intervention) = snapshot.intervention_queue.iter().find(|intervention| {
+        intervention.mode == InterventionMode::Soft
+            && !busy_retry_is_capped(provider, channel_id, intervention)
+    }) {
+        return AutomaticQueueProgression::Eligible(intervention.message_id);
+    }
+    if let Some((marker, _)) =
+        crate::services::turn_orchestrator::load_channel_pending_dispatch_marker(
+            provider,
+            &shared.token_hash,
+            channel_id,
+        )
+    {
+        return if busy_retry_is_capped(provider, channel_id, &marker) {
+            AutomaticQueueProgression::BlockedByCappedRetries
+        } else {
+            AutomaticQueueProgression::Eligible(marker.message_id)
+        };
+    }
+    if snapshot.intervention_queue.is_empty() {
+        AutomaticQueueProgression::Empty
+    } else {
+        AutomaticQueueProgression::BlockedByCappedRetries
+    }
+}
+
+pub(super) fn intervention_became_capped(
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    intervention: &Intervention,
+) -> bool {
+    busy_retry_is_capped(provider, channel_id, intervention)
+}
+
 #[derive(Debug, Default)]
 pub(super) struct MailboxTakeNextSoftOutcome {
     pub(super) intervention: Option<Intervention>,
@@ -55,6 +118,175 @@ impl MailboxTakeNextSoftOutcome {
     ) -> Option<(Intervention, bool, Option<DispatchLeaseHandle>)> {
         self.intervention
             .map(|intervention| (intervention, self.has_more, self.dispatch_lease))
+    }
+}
+
+pub(super) async fn mailbox_take_next_soft_intervention(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> MailboxTakeNextSoftOutcome {
+    mailbox_take_soft_intervention(shared, provider, channel_id, None).await
+}
+
+pub(super) async fn mailbox_take_next_automatic_intervention(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> MailboxTakeNextSoftOutcome {
+    let mut excluded_stale_primary_message_ids = std::collections::HashSet::new();
+    loop {
+        let mut snapshot = super::mailbox_snapshot(shared, channel_id).await;
+        snapshot.intervention_queue.retain(|intervention| {
+            !excluded_stale_primary_message_ids.contains(&intervention.message_id)
+        });
+        let (selected_message_id, result) =
+            match automatic_progression(shared, provider, channel_id, &snapshot) {
+                AutomaticQueueProgression::Eligible(message_id) => (
+                    Some(message_id),
+                    mailbox_take_soft_intervention(shared, provider, channel_id, Some(message_id))
+                        .await,
+                ),
+                AutomaticQueueProgression::Empty => (
+                    None,
+                    mailbox_take_soft_intervention(shared, provider, channel_id, None).await,
+                ),
+                AutomaticQueueProgression::BlockedByCappedRetries => {
+                    tracing::info!(
+                        provider = provider.as_str(),
+                        channel_id = channel_id.get(),
+                        "AUTOMATIC-QUEUE-GUARD: preserving capped busy-retry entries"
+                    );
+                    return MailboxTakeNextSoftOutcome::default();
+                }
+            };
+        let Some(intervention) = result.intervention.as_ref() else {
+            if result.persistence_error.is_none()
+                && result.has_more
+                && let Some(message_id) = selected_message_id
+            {
+                excluded_stale_primary_message_ids.insert(message_id);
+                continue;
+            }
+            return result;
+        };
+        if !intervention_became_capped(provider, channel_id, intervention) {
+            return result;
+        }
+
+        let dispatch_lease = result
+            .dispatch_lease
+            .as_ref()
+            .expect("dequeued automatic intervention must carry its dispatch lease")
+            .clone();
+        let restored = mailbox_restore_dequeued_head(
+            shared,
+            provider,
+            channel_id,
+            intervention.clone(),
+            dispatch_lease,
+        )
+        .await;
+        if !restored.enqueued {
+            tracing::error!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                message_id = intervention.message_id.get(),
+                "AUTOMATIC-QUEUE-GUARD: capped-after-selection intervention restore failed"
+            );
+            return MailboxTakeNextSoftOutcome::default();
+        }
+    }
+}
+
+async fn mailbox_take_soft_intervention(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    primary_message_id: Option<MessageId>,
+) -> MailboxTakeNextSoftOutcome {
+    loop {
+        let result: TakeNextSoftResult = shared
+            .mailbox(channel_id)
+            .take_soft_matching(
+                super::queue_persistence_context(shared, provider, channel_id),
+                primary_message_id,
+            )
+            .await;
+        let queue_len_after = result.queue_len_after;
+        super::apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
+        if let Some(error) = result.persistence_error {
+            tracing::error!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                error = %error,
+                "mailbox dequeue failed durable pending-queue persistence"
+            );
+            return MailboxTakeNextSoftOutcome {
+                intervention: None,
+                dispatch_lease: None,
+                has_more: result.has_more,
+                persistence_error: Some(error),
+            };
+        }
+        super::maybe_schedule_catch_up_retry_after_queue_drain(
+            shared,
+            provider,
+            channel_id,
+            queue_len_after,
+        );
+        let Some(intervention) = result.intervention else {
+            return MailboxTakeNextSoftOutcome {
+                intervention: None,
+                dispatch_lease: None,
+                has_more: result.has_more,
+                persistence_error: None,
+            };
+        };
+
+        if let Some(stale) = super::stale_dispatch_turn_for_queued_intervention(
+            shared.pg_pool.as_ref(),
+            &intervention,
+        )
+        .await
+        {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] ⏭ DISPATCH-GUARD: dropped queued terminal dispatch {} in channel {} (status={})",
+                stale.dispatch_id,
+                channel_id,
+                stale.status
+            );
+            let queue_exit_events = [QueueExitEvent {
+                intervention: intervention.clone(),
+                kind: stale.queue_exit_kind,
+            }];
+            super::apply_queue_exit_feedback(shared, channel_id, &queue_exit_events).await;
+            super::mailbox_abandon_pending_dispatch(
+                shared,
+                provider,
+                channel_id,
+                intervention.message_id,
+            )
+            .await;
+            drop(result.dispatch_lease);
+            if primary_message_id.is_some() {
+                return MailboxTakeNextSoftOutcome {
+                    intervention: None,
+                    dispatch_lease: None,
+                    has_more: result.has_more,
+                    persistence_error: None,
+                };
+            }
+            continue;
+        }
+
+        return MailboxTakeNextSoftOutcome {
+            intervention: Some(intervention),
+            dispatch_lease: result.dispatch_lease,
+            has_more: result.has_more,
+            persistence_error: None,
+        };
     }
 }
 

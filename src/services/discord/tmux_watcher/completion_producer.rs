@@ -1,5 +1,24 @@
 use super::*;
 
+pub(super) fn note_watcher_terminal_projection_settled(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    finalizer_turn_id: Option<u64>,
+) {
+    let Some(finalizer_turn_id) = finalizer_turn_id else {
+        return;
+    };
+    shared.turn_finalizer.note_terminal_projection_settled(
+        crate::services::discord::turn_finalizer::TurnKey::new(
+            channel_id,
+            finalizer_turn_id,
+            shared.restart.current_generation,
+        ),
+        true,
+        shared.clone(),
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn complete_watcher_terminal_footer_or_status_panel_with_sniffer<S, SniffFuture>(
     http: &Arc<serenity::Http>,

@@ -478,9 +478,13 @@ def cargo_test_filter(command: str) -> LaneFilter | None:
 def discover_lane_filters(repo_root: Path) -> tuple[LaneFilter, ...]:
     """Parse selection contracts from positive main-push and PR test lanes."""
     just_text = (repo_root / "justfile").read_text(encoding="utf-8")
-    workflows = (
-        (repo_root / ".github/workflows/ci-main.yml").read_text(encoding="utf-8"),
-        (repo_root / ".github/workflows/ci-pr.yml").read_text(encoding="utf-8"),
+    workflow_paths = (
+        repo_root / ".github/workflows/ci-main.yml",
+        repo_root / ".github/workflows/ci-pr.yml",
+        repo_root / ".github/workflows/ci-macos-trusted.yml",
+    )
+    workflows = tuple(
+        path.read_text(encoding="utf-8") for path in workflow_paths if path.is_file()
     )
 
     commands = list(just_recipe_commands(just_text, "test-non-pg"))

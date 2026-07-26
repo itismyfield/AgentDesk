@@ -145,6 +145,7 @@ jobs:
           python3 scripts/ci-timeout.py 900 env -u AGENTDESK_ROOT_DIR cargo test --lib health -- --skip _pg --skip pg_ --skip postgres
           env -u AGENTDESK_ROOT_DIR cargo test --lib relay_recovery -- --skip _pg --skip pg_ --skip postgres
           cargo test --all-targets routines -- --skip _pg --skip pg_ --skip postgres
+          env -u AGENTDESK_ROOT_DIR cargo test --lib _4888 -- --test-threads=1
           cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
 
       - name: Fresh user portable smoke
@@ -266,6 +267,7 @@ jobs:
           nice -n 10 python3 scripts/ci-timeout.py 900 env -u AGENTDESK_ROOT_DIR cargo test --lib health -- --skip _pg --skip pg_ --skip postgres
           nice -n 10 env -u AGENTDESK_ROOT_DIR cargo test --lib relay_recovery -- --skip _pg --skip pg_ --skip postgres
           nice -n 10 cargo test --all-targets routines -- --skip _pg --skip pg_ --skip postgres
+          nice -n 10 env -u AGENTDESK_ROOT_DIR cargo test --lib _4888 -- --test-threads=1
           nice -n 10 cargo test invariant --all-targets -- --skip _pg --skip pg_ --skip postgres
 
       - name: Fresh user portable smoke
