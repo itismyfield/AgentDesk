@@ -455,7 +455,8 @@ mod last_message_checkpoint_tests {
 
 pub(in crate::services::discord) use queue_io::{
     arm_slow_idle_queue_backstop_if_queue_nonempty, schedule_deferred_idle_queue_kickoff,
-    schedule_deferred_idle_queue_kickoff_immediate, spawn_turn_completion_idle_queue_listener,
+    schedule_deferred_idle_queue_kickoff_immediate, schedule_local_only_slash_idle_queue_kickoff,
+    spawn_turn_completion_idle_queue_listener,
 };
 pub(super) fn single_message_panel_enabled() -> bool {
     single_message_panel::enabled()

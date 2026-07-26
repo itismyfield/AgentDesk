@@ -288,6 +288,21 @@ pub(super) fn schedule_deferred_idle_queue_kickoff_immediate(
     );
 }
 
+/// Local-only slash observations have no completion event, so they independently
+/// re-arm the same channel-coalesced idle queue authority.
+pub(super) fn schedule_local_only_slash_idle_queue_kickoff(
+    shared: Arc<SharedData>,
+    provider: ProviderKind,
+    channel_id: ChannelId,
+) {
+    schedule_deferred_idle_queue_kickoff_immediate(
+        shared,
+        provider,
+        channel_id,
+        "local-only slash observation",
+    );
+}
+
 pub(super) fn schedule_post_enqueue_idle_queue_kick(
     shared: Arc<SharedData>,
     provider: ProviderKind,
@@ -1031,6 +1046,138 @@ mod presleep_tests {
         tokio::time::timeout(std::time::Duration::from_millis(1), notify.notified())
             .await
             .expect("immediate coalesce should wake the existing task");
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn local_only_slash_two_halves_coalesce_without_lifecycle_artifacts() {
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_874_100);
+        let tmux_session_name = "local-model-two-halves";
+
+        // `/model` is observed as a command-name half followed by a local stdout half.
+        schedule_local_only_slash_idle_queue_kickoff(shared.clone(), provider.clone(), channel_id);
+        schedule_local_only_slash_idle_queue_kickoff(shared.clone(), provider.clone(), channel_id);
+
+        assert_eq!(
+            shared
+                .restart
+                .deferred_hook_backlog
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "both local-only transcript halves must share one channel kickoff task"
+        );
+        let snapshot = mailbox_snapshot(&shared, channel_id).await;
+        assert!(snapshot.cancel_token.is_none());
+        assert!(snapshot.active_user_message_id.is_none());
+        assert!(
+            !crate::services::tui_prompt_dedupe::external_input_relay_lease_present(
+                provider.as_str(),
+                tmux_session_name,
+                channel_id.get(),
+            ),
+            "local-only wakeup must not mint an external relay lease"
+        );
+        assert!(
+            !super::super::tui_direct_pending_start::pending_synthetic_start_blocks_idle_kickoff(
+                provider.as_str(),
+                channel_id.get(),
+            ),
+            "local-only wakeup must not mint a synthetic pending start"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn local_only_slash_kick_promotes_pending_user_work() {
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_874_110);
+        let queued_message_id = MessageId::new(4_874_111);
+        shared
+            .mailbox(channel_id)
+            .replace_queue(
+                vec![user_intervention(
+                    queued_message_id.get(),
+                    "queued after /model",
+                )],
+                queue_persistence_context(&shared, &provider, channel_id),
+            )
+            .await;
+
+        let kicks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_kicks = kicks.clone();
+        let _hook = set_idle_queue_kick_hook_for_tests(Arc::new(
+            move |shared, provider, channel, reason| {
+                let hook_kicks = hook_kicks.clone();
+                Box::pin(async move {
+                    if channel != channel_id {
+                        return None;
+                    }
+                    assert_eq!(reason, "local-only slash observation");
+                    hook_kicks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let taken = super::super::mailbox_take_next_automatic_intervention(
+                        &shared, &provider, channel,
+                    )
+                    .await;
+                    let intervention = taken.intervention.expect("pending work is promoted");
+                    let started = mailbox_try_start_turn(
+                        &shared,
+                        channel,
+                        Arc::new(CancelToken::new()),
+                        intervention.author_id,
+                        intervention.message_id,
+                    )
+                    .await;
+                    Some(IdleQueueKickoffChannelOutcome { started })
+                })
+            },
+        ));
+
+        schedule_local_only_slash_idle_queue_kickoff(shared.clone(), provider, channel_id);
+        yield_backstop_tasks().await;
+
+        assert_eq!(kicks.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let snapshot = mailbox_snapshot(&shared, channel_id).await;
+        assert_eq!(snapshot.active_user_message_id, Some(queued_message_id));
+        assert!(snapshot.intervention_queue.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn local_only_slash_kick_preserves_real_active_turn() {
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_874_120);
+        let active_message_id = MessageId::new(4_874_121);
+        let queued_message_id = MessageId::new(4_874_122);
+        assert!(
+            mailbox_try_start_turn(
+                &shared,
+                channel_id,
+                Arc::new(CancelToken::new()),
+                UserId::new(4_874_123),
+                active_message_id,
+            )
+            .await
+        );
+        shared
+            .mailbox(channel_id)
+            .replace_queue(
+                vec![user_intervention(
+                    queued_message_id.get(),
+                    "must remain queued",
+                )],
+                queue_persistence_context(&shared, &provider, channel_id),
+            )
+            .await;
+
+        schedule_local_only_slash_idle_queue_kickoff(shared.clone(), provider, channel_id);
+        yield_backstop_tasks().await;
+
+        let snapshot = mailbox_snapshot(&shared, channel_id).await;
+        assert_eq!(snapshot.active_user_message_id, Some(active_message_id));
+        assert!(snapshot.cancel_token.is_some());
+        assert_eq!(snapshot.intervention_queue.len(), 1);
+        assert_eq!(snapshot.intervention_queue[0].message_id, queued_message_id);
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -1773,13 +1773,24 @@ fn local_control_prompt(tmux: &str, body: &str, entry_id: &str) -> ObservedTuiPr
 }
 
 #[test]
-fn local_slash_control_note_emission_is_wired_through_prepare_gate() {
+fn local_slash_control_note_and_queue_wakeup_are_independently_wired() {
     let relay_source = include_str!("../tui_prompt_relay.rs");
+    let note_prepare = relay_source
+        .find("let note = prepare_local_only_slash_control_note(&prompt, kind);")
+        .expect("local-only branch must prepare its note before delivery");
+    let queue_wakeup = relay_source
+        .find("super::schedule_local_only_slash_idle_queue_kickoff(")
+        .expect("local-only branch must re-arm the channel queue");
+    let note_gate = relay_source
+        .find("let Some(note) = note else {")
+        .expect("local-only branch must retain its note dedupe gate");
+    let notify_http = relay_source
+        .find("let Some(notify_http) = shared.serenity_http_or_token_fallback() else {")
+        .expect("local-only branch must retain the Discord delivery gate");
+
     assert!(
-        relay_source.contains(
-            "let Some(note) = prepare_local_only_slash_control_note(&prompt, kind) else {"
-        ),
-        "relay_observed_prompt must consume the gated note outcome before channel delivery"
+        note_prepare < queue_wakeup && queue_wakeup < note_gate && queue_wakeup < notify_http,
+        "queue wakeup must run after local-only classification but before either note-dedupe or Discord-delivery return"
     );
 }
 
