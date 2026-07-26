@@ -84,8 +84,10 @@ pub mod runtime_store;
 // relay flight recorder's two-signal owner separation and the three terminal
 // lifecycle events. No relay/cleanup behaviour lives here.
 mod relay_owner_observability;
+pub(crate) mod session_canonical_identity;
 pub(crate) mod session_identity;
 mod session_runtime;
+mod session_status_hook;
 pub(crate) mod settings;
 pub(crate) mod shared_memory;
 // #3038 S1/S2: extracted SharedData field clusters (named sub-structs + their
@@ -201,7 +203,7 @@ use crate::services::turn_orchestrator::ChannelMailboxHandle;
 use crate::services::turn_orchestrator::HasPendingSoftQueueResult;
 use adk_session::{
     build_adk_session_key, build_session_key_candidates, derive_adk_session_info,
-    lookup_pending_dispatch_for_thread, parse_dispatch_id, post_adk_session_status,
+    lookup_pending_dispatch_for_thread, parse_dispatch_id,
 };
 pub(in crate::services) use compact_turn_authority::{
     ManagedCompactTurnIdentity, compact_eligible_turn_source, live_managed_turn_matches,
@@ -225,6 +227,11 @@ use queue_dispatch::{
 use recovery_engine::restore_inflight_turns;
 use restart_report::flush_restart_reports;
 use router::handle_event;
+use session_status_hook::{
+    post_canonical as post_adk_session_status_with_canonical_identity,
+    post_channel_turn as post_adk_session_status_for_channel,
+    post_legacy as post_adk_session_status,
+};
 use settings::{
     RoleBinding, channel_upload_dir, cleanup_old_uploads, load_bot_settings,
     load_last_session_path, resolve_role_binding, save_bot_settings,

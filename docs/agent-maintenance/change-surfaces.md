@@ -1762,7 +1762,10 @@
     durable-truth accessor the idle-relay drift self-heal reads; #3693: +2 to
     include `cwd` in provider resume selector lookup; #3718 makes runtime
     activity heartbeat refresh monotonic via `GREATEST`; -1 from #3795 using
-    the central `SessionIdentity` tmux-tail helper).
+    the central `SessionIdentity` tmux-tail helper). #4913 GO-A1 keeps canonical
+    Discord identity transaction logic and PostgreSQL tests in
+    `src/db/dispatched_sessions/canonical_identity{,_pg_tests}.rs`; the giant root
+    receives only the existing parameter type and narrow alias-aware read seam.
   - `src/db/session_transcripts.rs` is a retained PG-cleanup surface (now below
     the giant-file threshold; bugfix only).
   - `src/db/prompt_manifests/` (directory, refactored).
@@ -1794,7 +1797,11 @@ these contextual numbers to match ordinary LoC churn.
 - `src/services/onboarding/mod.rs` (frozen giant surface),
   `src/services/dispatched_sessions.rs` (frozen giant surface; #4091 r2 adds the two-sample
   growth-evidence selector cross-check wiring, claude_tui transcript-mtime
-  runtime-activity anchors, and the flip-back window guard), and
+  runtime-activity anchors, and the flip-back window guard; #4913 GO-A1 keeps
+  hook identity validation in `src/services/dispatched_sessions/canonical_identity.rs`
+  and limits the giant root to optional wire fields plus thin typed routing; the
+  follow-up adds only conflict-category observation and resolved-primary selector
+  propagation, while PostgreSQL identity authority stays under `src/db/`), and
   `src/services/settings.rs` (frozen giant surface) — service-layer route support surfaces
   split out of the large dashboard route modules. (`src/services/onboarding.rs`
   and `src/services/api_friction.rs` have been removed/decomposed.)

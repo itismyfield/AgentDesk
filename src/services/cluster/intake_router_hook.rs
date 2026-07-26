@@ -2106,7 +2106,7 @@ mod pg_tests {
     async fn enforce_owner_lookup_error_blocks_local_execution_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
-        sqlx::query("DROP TABLE sessions")
+        sqlx::query("DROP TABLE sessions CASCADE")
             .execute(&pool)
             .await
             .expect("drop sessions for lookup error");

@@ -1817,22 +1817,18 @@ pub(super) async fn handle_text_message(
     )
     .await
     .or_else(|| super::super::super::adk_session::parse_dispatch_id(user_text));
-    post_adk_session_status(
+    post_adk_session_status_for_channel(
+        shared,
+        channel_id,
         adk_session_key.as_deref(),
         adk_session_name.as_deref(),
         model_for_turn.as_deref(),
-        "working",
         &provider,
-        Some(&adk_session_info),
-        None,
-        Some(&current_path),
+        &adk_session_info,
+        &current_path,
         dispatch_id.as_deref(),
         adk_thread_channel_id,
-        Some(channel_id),
-        role_binding
-            .as_ref()
-            .map(|binding| binding.role_id.as_str()),
-        shared.api_port,
+        role_binding.as_ref(),
     )
     .await;
 

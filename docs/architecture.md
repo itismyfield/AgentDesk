@@ -402,9 +402,30 @@ CREATE TABLE sessions (
   session_info        TEXT,
   tokens              INTEGER DEFAULT 0,
   cwd                 TEXT,
+  channel_id          TEXT,                  -- exact Discord channel/thread snowflake
+  identity_kind       TEXT,                  -- discord_channel/scheduled_snapshot (nullable compatibility)
+  discord_token_hash  TEXT,                  -- existing discord_<16hex> namespace, never raw token
   last_heartbeat      DATETIME,
   created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+-- PostgreSQL locator compatibility: prior host/tmux keys map to durable sessions.id.
+CREATE TABLE session_key_aliases (
+  session_key         TEXT PRIMARY KEY,
+  session_id          BIGINT REFERENCES sessions(id) ON DELETE CASCADE,
+  created_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- One locator cannot exist in both primary and alias tables. Trigger-maintained
+-- claims make this invariant race-safe for current and old direct SQL writers.
+CREATE TABLE session_locator_namespace (
+  session_key         TEXT PRIMARY KEY,
+  owner_kind          TEXT CHECK (owner_kind IN ('primary', 'alias'))
+);
+
+-- Only identity_kind='discord_channel' rows are unique by
+-- (provider, discord_token_hash, channel_id). Scheduled snapshots and nullable
+-- legacy rows are excluded; ambiguous legacy rows are never auto-merged.
 
 -- 회의 (기존 PCD meetings 확장)
 CREATE TABLE meetings (

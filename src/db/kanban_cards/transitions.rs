@@ -40,21 +40,45 @@ pub async fn load_active_turn_targets_for_card_pg(
         .collect()
 }
 
+pub(crate) async fn clear_session_for_turn_target_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session_key: &str,
+) -> anyhow::Result<()> {
+    let session_id =
+        crate::db::dispatched_session_canonical_identity::resolve_session_id_for_mutation_pg(
+            tx,
+            session_key,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("resolve turn-target session locator: {error:?}"))?;
+    if let Some(session_id) = session_id {
+        sqlx::query(
+            "UPDATE sessions
+             SET status = 'disconnected',
+                 active_dispatch_id = NULL,
+                 claude_session_id = NULL
+             WHERE id = $1",
+        )
+        .bind(session_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| anyhow::anyhow!("clear turn-target session row: {error}"))?;
+    }
+    Ok(())
+}
+
 pub async fn clear_session_for_turn_target_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> anyhow::Result<()> {
-    sqlx::query(
-        "UPDATE sessions
-         SET status = 'disconnected',
-             active_dispatch_id = NULL,
-             claude_session_id = NULL
-         WHERE session_key = $1",
-    )
-    .bind(session_key)
-    .execute(pool)
-    .await
-    .map_err(|error| anyhow::anyhow!("clear session for {session_key}: {error}"))?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| anyhow::anyhow!("begin turn-target clear transaction: {error}"))?;
+    clear_session_for_turn_target_on_pg_tx(&mut tx, session_key).await?;
+    tx.commit()
+        .await
+        .map_err(|error| anyhow::anyhow!("commit turn-target clear transaction: {error}"))?;
     Ok(())
 }
 

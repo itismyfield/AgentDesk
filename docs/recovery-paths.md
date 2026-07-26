@@ -133,6 +133,32 @@ Production session-key call sites that need host/tmux identity route through
 raw colon splitting uses are non-session string parsing, the parser
 implementation itself, or explicitly out-of-scope compatibility surfaces.
 
+The namespaced key is a **locator**, not the durable Discord channel identity.
+GO-A1 (#4913) adds an optional semantic identity tuple on PostgreSQL session
+rows: `(provider, discord_token_hash, channel_id, identity_kind)`. Ordinary
+channels and threads use their exact Discord snowflake (a thread never reuses
+its parent id); `scheduled_snapshot` is explicit and excluded from the unique
+`discord_channel` authority. Raw bot tokens are never persisted.
+
+`session_key_aliases` maps prior locators to the durable `sessions.id` row.
+Resolution is ordered exact primary locator, exact alias, then unique canonical
+identity when that tuple is supplied. Provider-selector reads, `/resume` context,
+idle cleanup, force-kill ownership lookup, and heartbeat guards resolve an old
+locator to that same primary row before reading or mutating it. `/resume` pins the
+resolved durable `sessions.id` across its guard-to-update seam, so a concurrent
+alias remap cannot redirect the update to another row.
+
+If two evidence sources point to different rows, or multiple legacy rows claim a
+tuple, write/destructive paths return a typed conflict instead of selecting,
+merging, deleting, renaming, or killing a session. The primary and alias tables
+also share one trigger-maintained `session_locator_namespace` claim, making a
+concurrent legacy primary insert versus alias insert serialize to exactly one
+owner. New hooks dual-write identity fields; omitted fields permit safe same-owner
+legacy convergence but never provider/channel reassignment or last-writer-wins.
+Conflicts emit only a closed category, normalized provider, and numeric channel
+identifier; neither raw Discord tokens nor full token namespaces/locators enter
+the diagnostic.
+
 ## Inflight Cleanup SSoT
 
 **Canonical owner**: `src/services/discord/inflight.rs`
