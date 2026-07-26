@@ -214,7 +214,7 @@ fn channel_lock_child_process() {
     let root = std::env::var_os("AGENTDESK_PANEL_JOURNAL_TEST_ROOT").unwrap();
     let journal = journal(Path::new(&root), 40);
     assert!(matches!(
-        storage::try_lock_for_test(&journal.channel_dir),
+        journal.storage.try_lock(),
         Err(StoreError::LockFailed)
     ));
 }
@@ -223,8 +223,8 @@ fn channel_lock_child_process() {
 fn operation_and_quarantine_gc_are_bounded() {
     let root = tempfile::tempdir().unwrap();
     let journal = journal(root.path(), 37);
-    let operations = journal.channel_dir.join("operations");
-    let quarantine = journal.channel_dir.join("quarantine");
+    let operations = journal.storage.initial_channel_path().join("operations");
+    let quarantine = journal.storage.initial_channel_path().join("quarantine");
     for index in 0..(MAX_OPERATION_RECORDS + 5) {
         fs::write(operations.join(format!("{index:020}.json")), b"{}").unwrap();
     }
@@ -251,9 +251,112 @@ fn symlinked_channel_file_is_rejected() {
     let journal = journal(root.path(), 38);
     let target = root.path().join("outside.json");
     fs::write(&target, b"{}").unwrap();
-    symlink(target, journal.channel_dir.join(CHANNEL_FILE)).unwrap();
+    symlink(
+        target,
+        journal.storage.initial_channel_path().join(CHANNEL_FILE),
+    )
+    .unwrap();
     assert_eq!(
         journal.load(),
         ReadOutcome::DurabilityFailure(StoreError::SymlinkRejected)
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn parent_swap_cannot_redirect_descriptor_relative_writes() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let journal = journal(root.path(), 41);
+    let original_provider = root.path().join("claude");
+    let detached_provider = root.path().join("claude-detached");
+    let outside = tempfile::tempdir().unwrap();
+    fs::rename(&original_provider, &detached_provider).unwrap();
+    symlink(outside.path(), &original_provider).unwrap();
+
+    let prepared = applied(journal.prepare(plan(&journal, 1, None), 0));
+    assert_eq!(prepared.generation, 1);
+    assert!(
+        detached_provider
+            .join("discord_0123456789abcdef/41/channel.json")
+            .is_file()
+    );
+    assert!(!outside.path().join("discord_0123456789abcdef").exists());
+}
+
+#[test]
+fn malformed_channel_creates_durable_quarantine_barrier() {
+    let root = tempfile::tempdir().unwrap();
+    let channel_journal = journal(root.path(), 42);
+    let first = applied(channel_journal.prepare(plan(&channel_journal, 1, None), 0));
+    assert_eq!(first.generation, 1);
+    fs::write(
+        channel_journal
+            .storage
+            .initial_channel_path()
+            .join(CHANNEL_FILE),
+        b"{malformed",
+    )
+    .unwrap();
+
+    assert_eq!(
+        channel_journal.load(),
+        ReadOutcome::DurabilityFailure(StoreError::Quarantined)
+    );
+    assert!(channel_journal.storage.quarantine_marker_present().unwrap());
+    let marker = channel_journal
+        .storage
+        .read_quarantine_marker()
+        .unwrap()
+        .unwrap();
+    let marker = String::from_utf8(marker).unwrap();
+    assert!(marker.contains("revision=1\n"), "marker: {marker:?}");
+    assert!(marker.contains("generation=1\n"), "marker: {marker:?}");
+
+    let reopened = journal(root.path(), 42);
+    assert_eq!(
+        reopened.prepare(plan(&reopened, 2, None), 0),
+        Mutation::DurabilityFailure(StoreError::Quarantined)
+    );
+    assert_eq!(
+        reopened.prepare(plan(&reopened, 2, None), 1),
+        Mutation::DurabilityFailure(StoreError::Quarantined)
+    );
+}
+
+#[test]
+fn operation_mismatch_creates_durable_quarantine_barrier() {
+    let root = tempfile::tempdir().unwrap();
+    let channel_journal = journal(root.path(), 43);
+    let first = applied(channel_journal.prepare(plan(&channel_journal, 1, None), 0));
+    assert_eq!(first.generation, 1);
+    let channel = fs::read(
+        channel_journal
+            .storage
+            .initial_channel_path()
+            .join(CHANNEL_FILE),
+    )
+    .unwrap();
+    let wire: ChannelWire = serde_json::from_slice(&channel).unwrap();
+    fs::write(
+        channel_journal
+            .storage
+            .initial_channel_path()
+            .join("operations")
+            .join(ChannelJournal::operation_name(&wire.last_operation)),
+        b"{}",
+    )
+    .unwrap();
+
+    assert_eq!(
+        channel_journal.load(),
+        ReadOutcome::DurabilityFailure(StoreError::Quarantined)
+    );
+    let reopened = journal(root.path(), 43);
+    assert_eq!(
+        reopened.prepare(plan(&reopened, 2, None), 0),
+        Mutation::DurabilityFailure(StoreError::Quarantined)
+    );
+    assert_eq!(reopened.storage.read_quarantine_records().unwrap().len(), 1);
 }

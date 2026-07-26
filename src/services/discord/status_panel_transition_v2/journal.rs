@@ -10,14 +10,16 @@
 mod codec;
 mod storage;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use codec::{
     ChannelWire, OperationStamp, ReplayMetadata, bind_digest, commit_bind_digest, delete_digest,
     prepare_digest, retire_digest,
 };
 use serde::{Deserialize, Serialize};
-use storage::{ChannelLock, Failpoint, WriteTarget};
+#[cfg(test)]
+use storage::WriteTarget;
+use storage::{ChannelLock, ChannelStorage, Directory, Failpoint};
 use uuid::Uuid;
 
 use super::{BoundPanel, Candidate, JournalState, PanelIdentity, PanelPlan};
@@ -73,6 +75,7 @@ pub(super) enum StoreError {
     LockFailed,
     ReadFailed,
     MalformedRecord,
+    Quarantined,
     InvariantViolation,
     WriteFailed(WriteStage),
 }
@@ -193,7 +196,7 @@ pub(super) struct ChannelSnapshot {
 }
 
 pub(super) struct ChannelJournal {
-    channel_dir: PathBuf,
+    storage: ChannelStorage,
     identity: PanelIdentity,
     #[cfg(test)]
     failpoint: Option<Failpoint>,
@@ -211,17 +214,14 @@ impl ChannelJournal {
         if channel_id == 0 {
             return Err(StoreError::InvalidPathComponent("channel_id"));
         }
-        storage::ensure_directory(root)?;
-        let provider_dir = root.join(provider.as_str());
-        storage::ensure_child_directory(root, &provider_dir)?;
-        let token_dir = provider_dir.join(canonical_token_hash.as_str());
-        storage::ensure_child_directory(root, &token_dir)?;
-        let channel_dir = token_dir.join(channel_id.to_string());
-        storage::ensure_child_directory(root, &channel_dir)?;
-        storage::ensure_child_directory(root, &channel_dir.join("operations"))?;
-        storage::ensure_child_directory(root, &channel_dir.join("quarantine"))?;
+        let storage = ChannelStorage::open(
+            root,
+            provider.as_str(),
+            canonical_token_hash.as_str(),
+            channel_id,
+        )?;
         Ok(Self {
-            channel_dir,
+            storage,
             identity: PanelIdentity {
                 provider,
                 canonical_token_hash,
@@ -606,7 +606,7 @@ impl ChannelJournal {
     }
 
     fn lock(&self) -> Result<ChannelLock, StoreError> {
-        storage::lock_channel(&self.channel_dir)
+        self.storage.lock()
     }
 
     fn require_locked(&self) -> Result<ChannelSnapshot, StoreError> {
@@ -615,66 +615,87 @@ impl ChannelJournal {
     }
 
     fn load_optional_locked(&self) -> Result<Option<ChannelSnapshot>, StoreError> {
-        let path = self.channel_dir.join(CHANNEL_FILE);
-        let bytes = match storage::read_nofollow(&path)? {
+        if self.storage.quarantine_marker_present()? {
+            return Err(StoreError::Quarantined);
+        }
+        let bytes = match self.storage.read_channel()? {
             Some(bytes) => bytes,
             None => return Ok(None),
         };
         let wire: ChannelWire = match serde_json::from_slice(&bytes) {
             Ok(wire) => wire,
-            Err(_) => {
-                let _ = storage::quarantine(&self.channel_dir, &path);
-                return Err(StoreError::MalformedRecord);
-            }
+            Err(_) => return Err(self.quarantine_locked(&bytes, StoreError::MalformedRecord)),
         };
-        let operation_path = self.operation_path(&wire.last_operation);
-        let operation_bytes = match storage::read_nofollow(&operation_path)? {
+        let operation_name = Self::operation_name(&wire.last_operation);
+        let operation_bytes = match self.storage.read_operation(&operation_name)? {
             Some(bytes) => bytes,
             None => {
-                let _ = storage::quarantine(&self.channel_dir, &path);
-                return Err(StoreError::InvariantViolation);
+                return Err(self.quarantine_locked(&bytes, StoreError::InvariantViolation));
             }
         };
         if operation_bytes != bytes {
-            let _ = storage::quarantine(&self.channel_dir, &path);
-            return Err(StoreError::InvariantViolation);
+            return Err(self.quarantine_locked(&bytes, StoreError::InvariantViolation));
         }
         wire.into_snapshot(&self.identity)
             .map(Some)
-            .map_err(|error| {
-                let _ = storage::quarantine(&self.channel_dir, &path);
-                error
-            })
+            .map_err(|error| self.quarantine_locked(&bytes, error))
+    }
+
+    fn quarantine_locked(&self, bytes: &[u8], source: StoreError) -> StoreError {
+        let high_watermark = self.operation_high_watermark_locked();
+        match self.storage.quarantine_channel(bytes, high_watermark) {
+            Ok(()) => StoreError::Quarantined,
+            Err(_) => source,
+        }
+    }
+
+    fn operation_high_watermark_locked(&self) -> Option<(u64, u64)> {
+        let records = self.storage.read_operation_records().ok()?;
+        let mut high_watermark: Option<(u64, u64)> = None;
+        for (_, bytes) in records {
+            let Ok(wire) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                continue;
+            };
+            let Some(revision) = wire.get("revision").and_then(serde_json::Value::as_u64) else {
+                continue;
+            };
+            let Some(generation) = wire
+                .get("channel_generation")
+                .and_then(serde_json::Value::as_u64)
+            else {
+                continue;
+            };
+            high_watermark = Some(high_watermark.map_or((revision, generation), |current| {
+                current.max((revision, generation))
+            }));
+        }
+        high_watermark
     }
 
     fn persist_locked(&self, snapshot: &ChannelSnapshot) -> Result<(), StoreError> {
+        if self.storage.quarantine_marker_present()? {
+            return Err(StoreError::Quarantined);
+        }
         let wire = ChannelWire::from_snapshot(&self.identity, snapshot);
         let body = serde_json::to_vec(&wire).map_err(|_| StoreError::InvariantViolation)?;
-        storage::atomic_write(
-            &self.operation_path(&snapshot.last_operation),
+        self.storage.write_operation(
+            &Self::operation_name(&snapshot.last_operation),
             &body,
-            WriteTarget::Operation,
             self.failpoint(),
         )?;
-        storage::atomic_write(
-            &self.channel_dir.join(CHANNEL_FILE),
-            &body,
-            WriteTarget::Channel,
-            self.failpoint(),
-        )?;
+        self.storage.write_channel(&body, self.failpoint())?;
         self.gc_locked()
     }
 
-    fn operation_path(&self, stamp: &OperationStamp) -> PathBuf {
-        self.channel_dir.join("operations").join(format!(
-            "{:020}-{}.json",
-            stamp.revision, stamp.operation_id
-        ))
+    fn operation_name(stamp: &OperationStamp) -> String {
+        format!("{:020}-{}.json", stamp.revision, stamp.operation_id)
     }
 
     fn gc_locked(&self) -> Result<(), StoreError> {
-        storage::prune_directory(&self.channel_dir.join("operations"), MAX_OPERATION_RECORDS)?;
-        storage::prune_directory(&self.channel_dir.join("quarantine"), MAX_QUARANTINE_RECORDS)
+        self.storage
+            .prune(Directory::Operations, MAX_OPERATION_RECORDS)?;
+        self.storage
+            .prune(Directory::Quarantine, MAX_QUARANTINE_RECORDS)
     }
 
     #[cfg(test)]
