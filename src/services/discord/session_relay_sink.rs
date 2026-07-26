@@ -568,6 +568,7 @@ impl SessionBoundDiscordRelaySink {
             dr::commit_ordered_jsonl_range(
                 provider,
                 ChannelId::new(channel_id),
+                session_name,
                 (start, end),
                 frame_generation,
             ),
@@ -3137,61 +3138,108 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn idle_range_commit_requires_current_generation_and_persists_frontier() {
+    #[tokio::test]
+    async fn idle_range_custom_session_commit_is_durable_and_retry_suppresses_transport() {
         let temp = tempfile::tempdir().expect("tempdir");
         let _root = crate::config::set_agentdesk_root_for_test(temp.path());
         let channel = ChannelId::new(45_360);
-        let session = ProviderKind::Claude.build_tmux_session_name(&channel.get().to_string());
+        let session = "AgentDesk-claude-yaml-custom-segment";
+        let numeric_session =
+            ProviderKind::Claude.build_tmux_session_name(&channel.get().to_string());
+        assert_ne!(session, numeric_session);
         let output_path =
-            crate::services::cluster::session_matcher::expected_rollout_path_for(&session);
+            crate::services::cluster::session_matcher::expected_rollout_path_for(session);
         let generation_path =
-            crate::services::tmux_common::session_temp_path(&session, "generation");
+            crate::services::tmux_common::session_temp_path(session, "generation");
         std::fs::create_dir_all(std::path::Path::new(&output_path).parent().unwrap())
             .expect("output dir");
+        std::fs::create_dir_all(std::path::Path::new(&generation_path).parent().unwrap())
+            .expect("generation dir");
         std::fs::write(&output_path, vec![b'x'; 256]).expect("output file");
         std::fs::write(&generation_path, b"1").expect("generation marker");
-        let generation = dr::current_generation_mtime_ns(&session);
+        let generation = dr::current_generation_mtime_ns(session);
         assert_ne!(generation, 0);
+        assert_eq!(
+            dr::current_generation_mtime_ns(&numeric_session),
+            0,
+            "the numeric channel-derived session must not accidentally provide generation authority"
+        );
+        assert!(
+            !dr::commit_ordered_jsonl_range(
+                &ProviderKind::Claude,
+                channel,
+                &numeric_session,
+                (128, 256),
+                generation,
+            )
+            .expect("numeric identity mutation is a clean refusal"),
+            "reconstructing the runtime identity from the numeric channel must fail"
+        );
 
         let shared = super::super::make_shared_data_for_tests();
         let sink = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
-        let mut delivery = delivery_with_fence_offset(&session, None, 0, "", None);
+        let mut delivery = delivery_with_fence_offset(session, None, 0, "", None);
         delivery.channel_id = channel.get();
         delivery.relay_range = Some((128, 256));
         delivery.relay_generation_mtime_ns = Some(generation);
+        let mut transport_posts = 0;
 
-        assert!(!sink.idle_range_already_committed_before_transport(
-            &shared,
-            &ProviderKind::Claude,
-            channel.get(),
-            &session,
-            &delivery,
-        ));
-        assert!(sink.advance_idle_range_after_confirmed_post(
-            &shared,
-            &ProviderKind::Claude,
-            channel.get(),
-            &session,
-            &delivery,
-        ));
+        for _attempt in 0..2 {
+            if sink.idle_range_already_committed_before_transport(
+                &shared,
+                &ProviderKind::Claude,
+                channel.get(),
+                session,
+                &delivery,
+            ) {
+                continue;
+            }
+            transport_posts += 1;
+            let cell = shared.delivery_lease(channel);
+            let key = delivery_lease_key_for_frame(
+                channel,
+                shared.restart.current_generation,
+                &delivery,
+                Some(128),
+            );
+            let guard = SinkDeliveryLeaseGuard::acquire(&cell, key, 128, 256)
+                .expect("first transport owns the sink lease");
+            sink.advance_after_confirmed_post(
+                &shared,
+                &ProviderKind::Claude,
+                channel.get(),
+                session,
+                &delivery,
+                Some(&guard),
+            );
+            match cell.read() {
+                super::super::LeaseSnapshot::Committed { outcome, .. } => assert_eq!(
+                    outcome,
+                    super::super::LeaseOutcome::Delivered,
+                    "the confirmed custom-session POST must not commit NotDelivered"
+                ),
+                other => panic!("expected committed sink lease, got {other:?}"),
+            }
+        }
+
+        assert_eq!(transport_posts, 1, "retry must not issue a duplicate POST");
         assert_eq!(shared.committed_relay_offset(channel), 256);
         assert!(sink.idle_range_already_committed_before_transport(
             &shared,
             &ProviderKind::Claude,
             channel.get(),
-            &session,
+            session,
             &delivery,
         ));
         assert_eq!(
             dr::delivered_frontier_end_current_generation(
                 &ProviderKind::Claude,
                 channel,
-                &session,
+                session,
                 Some(256),
             ),
             256,
-            "confirmed ranged delivery is durable even when rollout shadow mode is off"
+            "confirmed ranged delivery is durable for the authoritative custom session"
         );
 
         delivery.relay_range = Some((256, 300));
@@ -3200,7 +3248,7 @@ mod tests {
             &shared,
             &ProviderKind::Claude,
             channel.get(),
-            &session,
+            session,
             &delivery,
         ));
         assert_eq!(shared.committed_relay_offset(channel), 256);

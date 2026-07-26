@@ -560,15 +560,15 @@ fn commit_ordered_jsonl_range_at(
 pub(in crate::services::discord) fn commit_ordered_jsonl_range(
     provider: &ProviderKind,
     channel: ChannelId,
+    tmux_session_name: &str,
     range: (u64, u64),
     generation_mtime_ns: i64,
 ) -> Result<bool, String> {
-    let tmux_session_name = provider.build_tmux_session_name(&channel.get().to_string());
     commit_ordered_jsonl_range_at(
         &record_path_or_err(provider, channel.get())?,
         range,
         generation_mtime_ns,
-        || current_generation_mtime_ns(&tmux_session_name),
+        || current_generation_mtime_ns(tmux_session_name),
     )
 }
 
