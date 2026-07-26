@@ -176,15 +176,56 @@ pub async fn query_invariants_pg(
 }
 
 pub fn observability_response(recent_limit: usize) -> ObservabilityResponse {
+    observability_response_from_log(
+        recent_limit,
+        &crate::services::observability::events::global(),
+    )
+}
+
+fn observability_response_from_log(
+    recent_limit: usize,
+    event_log: &crate::services::observability::events::EventLog,
+) -> ObservabilityResponse {
     let limit = recent_limit.min(1000);
     let counters = crate::services::observability::metrics::snapshot();
-    let recent_events = crate::services::observability::events::recent(limit);
+    let event_ring = event_log.accounting();
+    let recent_events = event_log.recent(limit);
     let watcher_first_relay = crate::services::observability::watcher_latency::snapshot();
     ObservabilityResponse {
         counters: serde_json::to_value(counters).unwrap_or(Value::Null),
+        event_ring: serde_json::to_value(event_ring).unwrap_or(Value::Null),
         recent_events: serde_json::to_value(recent_events).unwrap_or(Value::Null),
         watcher_first_relay: serde_json::to_value(watcher_first_relay).unwrap_or(Value::Null),
         generated_at_ms: chrono::Utc::now().timestamp_millis(),
+    }
+}
+
+#[cfg(test)]
+mod observability_response_tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::services::observability::events::{EventLog, StructuredEvent};
+
+    fn event(name: &str) -> StructuredEvent {
+        StructuredEvent::new(name, None, None, json!({}))
+    }
+
+    #[test]
+    fn event_ring_accounting_is_externally_serialized() {
+        let log = EventLog::new(1);
+        log.push(event("lost"));
+        log.push(event("replacement"));
+        let batch = log.snapshot_unflushed().unwrap();
+        log.acknowledge_flushed(&batch);
+        log.push(event("retained"));
+
+        let response = observability_response_from_log(10, &log);
+        assert_eq!(response.event_ring["dropped_total"], 1);
+        assert_eq!(response.event_ring["retention_evicted_total"], 1);
+        let serialized = serde_json::to_value(response).unwrap();
+        assert_eq!(serialized["event_ring"]["dropped_total"], 1);
+        assert_eq!(serialized["event_ring"]["retention_evicted_total"], 1);
     }
 }
 

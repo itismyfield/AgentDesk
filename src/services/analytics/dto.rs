@@ -25,6 +25,7 @@ pub struct InvariantsResponse {
 #[derive(Debug, Serialize)]
 pub struct ObservabilityResponse {
     pub counters: Value,
+    pub event_ring: Value,
     pub recent_events: Value,
     pub watcher_first_relay: Value,
     pub generated_at_ms: i64,
