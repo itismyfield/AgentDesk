@@ -6707,51 +6707,52 @@ mod persistence_tests {
         );
     }
 
-    #[allow(clippy::await_holding_lock)]
-    #[tokio::test]
-    async fn clear_persistence_failure_preserves_active_authority_and_queue() {
+    #[test]
+    fn clear_persistence_failure_preserves_active_authority_and_queue() {
         let _lock = lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
         let _env_guard = EnvGuard::set_root(tmp.path());
 
-        let provider = ProviderKind::Codex;
-        let token_hash = "unwritable-clear-queue";
-        let channel_id = ChannelId::new(4_916_402);
-        let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
-        let registry = ChannelMailboxRegistry::default();
-        let handle = registry.handle(channel_id);
-        let token = Arc::new(CancelToken::new());
-        let owner = UserId::new(17);
-        let message = MessageId::new(4_916_412);
-        assert!(handle.try_start_turn(token.clone(), owner, message).await);
-        assert!(
-            handle
-                .enqueue(
-                    make_intervention(4_916_413, "must survive failed clear", None),
-                    persistence.clone(),
-                )
-                .await
-                .enqueued
-        );
-        std::fs::write(tmp.path().join("runtime-blocker"), "not-a-directory").unwrap();
-        let _failing_root = EnvGuard::set_root(&tmp.path().join("runtime-blocker"));
+        run_async(async {
+            let provider = ProviderKind::Codex;
+            let token_hash = "unwritable-clear-queue";
+            let channel_id = ChannelId::new(4_916_402);
+            let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            let registry = ChannelMailboxRegistry::default();
+            let handle = registry.handle(channel_id);
+            let token = Arc::new(CancelToken::new());
+            let owner = UserId::new(17);
+            let message = MessageId::new(4_916_412);
+            assert!(handle.try_start_turn(token.clone(), owner, message).await);
+            assert!(
+                handle
+                    .enqueue(
+                        make_intervention(4_916_413, "must survive failed clear", None),
+                        persistence.clone(),
+                    )
+                    .await
+                    .enqueued
+            );
+            std::fs::write(tmp.path().join("runtime-blocker"), "not-a-directory").unwrap();
+            let _failing_root = EnvGuard::set_root(&tmp.path().join("runtime-blocker"));
 
-        let result = handle.clear(persistence).await;
+            let result = handle.clear(persistence).await;
 
-        assert!(result.persistence_error.is_some());
-        assert!(result.removed_token.is_none());
-        assert!(result.queue_exit_events.is_empty());
-        let after = handle.snapshot().await;
-        assert!(
-            after
-                .cancel_token
-                .as_ref()
-                .is_some_and(|active| Arc::ptr_eq(active, &token)),
-            "failed durable clear must preserve the active runtime token"
-        );
-        assert_eq!(after.active_request_owner, Some(owner));
-        assert_eq!(after.active_user_message_id, Some(message));
-        assert_eq!(after.intervention_queue.len(), 1);
+            assert!(result.persistence_error.is_some());
+            assert!(result.removed_token.is_none());
+            assert!(result.queue_exit_events.is_empty());
+            let after = handle.snapshot().await;
+            assert!(
+                after
+                    .cancel_token
+                    .as_ref()
+                    .is_some_and(|active| Arc::ptr_eq(active, &token)),
+                "failed durable clear must preserve the active runtime token"
+            );
+            assert_eq!(after.active_request_owner, Some(owner));
+            assert_eq!(after.active_user_message_id, Some(message));
+            assert_eq!(after.intervention_queue.len(), 1);
+        });
     }
 
     #[test]

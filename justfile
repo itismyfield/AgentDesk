@@ -57,6 +57,9 @@ test-non-pg:
     cargo test --lib services::discord::outbound::serenity_reference::tests::lifecycle_notice_nonce_is_stable_and_semantic_event_scoped -- --exact
     cargo test --lib services::discord::outbound::delivery::tests::v3_referenced_send_preserves_reference_and_dedupes -- --exact
     cargo test --lib cli::args::tests::legacy_queue_help_directs_users_to_query_without_changing_compatibility_contract
+    # #4916: deferred lifecycle cleanup must preserve authority and retry safely.
+    cargo test --lib services::auto_queue::runtime::tests
+    cargo test --lib services::discord::clear_recovery_latch_tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1
     cargo test --all-targets auto_queue -- --skip _pg --skip pg_ --skip postgres
     cargo test --all-targets cancel -- --skip _pg --skip pg_ --skip postgres
