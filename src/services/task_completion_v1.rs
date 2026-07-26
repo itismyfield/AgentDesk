@@ -548,45 +548,86 @@ mod tests {
         }
     }
 
+    // Unicode 16.0 / ICU4X 2.1.2 golden fingerprints. Each SHA-256 hashes the
+    // sorted member scalars as four-byte big-endian integers. Regenerate these
+    // literals only during an intentional Unicode profile upgrade.
+    const FORMAT_GOLDEN: (usize, &str) = (
+        170,
+        "9b8328757c21f609db32f87ac55fb30060408c243041aa9ff602d8d79db0f471",
+    );
+    const DEFAULT_IGNORABLE_GOLDEN: (usize, &str) = (
+        4_174,
+        "af2bc3d9df7efe853444acbdac7278d97dea892bc187b24b50cca7e452f3077a",
+    );
+    const BIDI_CONTROL_GOLDEN: (usize, &str) = (
+        12,
+        "66619508d89567de1a781280be43dcf7522f806066355a6f9b80811d195c13d2",
+    );
+    const REJECTED_UNION_GOLDEN: (usize, &str) = (
+        4_206,
+        "35739b1ac598a2cc0e26a7ed6b92e96d24a65e63746f02fda41503060a0a4991",
+    );
+
+    fn property_scalars(predicate: impl Fn(char) -> bool) -> Vec<char> {
+        (0..=char::MAX as u32)
+            .filter_map(char::from_u32)
+            .filter(|character| predicate(*character))
+            .collect()
+    }
+
+    fn scalar_fingerprint(scalars: &[char]) -> String {
+        use sha2::{Digest, Sha256};
+
+        let mut digest = Sha256::new();
+        for character in scalars {
+            digest.update((*character as u32).to_be_bytes());
+        }
+        hex::encode(digest.finalize())
+    }
+
+    fn assert_golden_set(label: &str, scalars: &[char], golden: (usize, &str)) {
+        assert_eq!(
+            (scalars.len(), scalar_fingerprint(scalars)),
+            (golden.0, golden.1.to_string()),
+            "{label} Unicode 16.0 fingerprint drifted"
+        );
+    }
+
     #[test]
-    fn unicode_format_default_ignorable_and_bidi_controls_are_rejected_exhaustively() {
+    fn unicode_property_sets_match_pinned_unicode_16_golden_and_raw_admission_rejects_union() {
         let general_category = CodePointMapData::<GeneralCategory>::new();
         let default_ignorable = CodePointSetData::new::<DefaultIgnorableCodePoint>();
         let bidi_control = CodePointSetData::new::<BidiControl>();
-        let mut covered = 0usize;
-        let mut format_only = 0usize;
-        let mut default_ignorable_only = 0usize;
 
-        for scalar in 0..=char::MAX as u32 {
-            let Some(character) = char::from_u32(scalar) else {
-                continue;
-            };
-            let is_format = general_category.get(character) == GeneralCategory::Format;
-            let is_default_ignorable = default_ignorable.contains(character);
-            let is_bidi_control = bidi_control.contains(character);
-            if is_format || is_default_ignorable || is_bidi_control {
-                covered += 1;
-                format_only += usize::from(is_format && !character.is_control());
-                default_ignorable_only += usize::from(
-                    is_default_ignorable && !character.is_control() && !character.is_whitespace(),
-                );
-                let id = format!("visible{character}suffix");
-                assert!(
-                    !valid_id(&id),
-                    "U+{scalar:04X} must be rejected by the opaque ID profile"
-                );
+        let format = property_scalars(|character| {
+            general_category.get(character) == GeneralCategory::Format
+        });
+        let default_ignorable = property_scalars(|character| default_ignorable.contains(character));
+        let bidi_control = property_scalars(|character| bidi_control.contains(character));
+        let rejected_union = property_scalars(|character| {
+            general_category.get(character) == GeneralCategory::Format
+                || CodePointSetData::new::<DefaultIgnorableCodePoint>().contains(character)
+                || CodePointSetData::new::<BidiControl>().contains(character)
+        });
+
+        assert_golden_set("General_Category=Format", &format, FORMAT_GOLDEN);
+        assert_golden_set(
+            "Default_Ignorable_Code_Point",
+            &default_ignorable,
+            DEFAULT_IGNORABLE_GOLDEN,
+        );
+        assert_golden_set("Bidi_Control", &bidi_control, BIDI_CONTROL_GOLDEN);
+        assert_golden_set("rejected union", &rejected_union, REJECTED_UNION_GOLDEN);
+
+        for character in rejected_union {
+            for key in ["task_id", "tool_use_id"] {
+                assert_rejected(&with_id(key, &format!("visible{character}suffix")));
             }
         }
+    }
 
-        assert!(
-            covered > 4_000,
-            "expected the full default-ignorable profile"
-        );
-        assert!(format_only > 100, "format predicate must be exercised");
-        assert!(
-            default_ignorable_only > 4_000,
-            "default-ignorable predicate must be exercised beyond controls and whitespace"
-        );
+    #[test]
+    fn explicit_invisible_unicode_witnesses_hit_the_production_predicate() {
         for character in ['\u{202e}', '\u{200b}', '\u{feff}', '\u{2066}'] {
             assert!(forbidden_id_character(character));
         }
