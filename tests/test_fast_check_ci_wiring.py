@@ -22,6 +22,7 @@ BUSY_RETRY_4888_TEST_COMMAND = (
 # update this test deliberately. The duplication is a drift-prevention gate, not an
 # attempt to derive the expected coverage from the justfile under test.
 EXPECTED_TEST_NON_PG_COMMANDS = (
+    "cargo test --lib services::task_completion_v1::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib source_registry -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib task_notification -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib delivery_lease_key -- --skip _pg --skip pg_ --skip postgres",
@@ -64,6 +65,7 @@ EXPECTED_TEST_NON_PG_COMMANDS = (
     "cargo test --lib services::discord::outbound::delivery::tests::v3_referenced_send_preserves_reference_and_dedupes -- --exact",
     "cargo test --lib canonical_identity::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib session_canonical_identity::tests -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib services::terminal_abort_authority::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::observability::metrics::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib cli::args::tests::legacy_queue_help_directs_users_to_query_without_changing_compatibility_contract",
     "cargo test --all-targets transition -- --skip _pg --skip pg_ --skip postgres --test-threads=1",

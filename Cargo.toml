@@ -93,6 +93,7 @@ textwrap = "0.16"
 regex = "1"
 pulldown-cmark = "0.9.6"
 unicode-normalization = "0.1"
+icu_properties = "=2.1.2"
 
 # From RCC — crypto/encoding
 base64 = "0.22"
