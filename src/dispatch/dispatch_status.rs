@@ -282,7 +282,7 @@ async fn phase_gate_dispatch_uses_legacy_default_on_pg_tx(
              WHERE td.id = $1
              GROUP BY pg.run_id, pg.phase
              HAVING COUNT(*) > 0
-                AND BOOL_AND(NULLIF(BTRIM(e.phase_gate_kind), '') IS NULL)
+                AND BOOL_AND(NULLIF(BTRIM(e.phase_gate_kind, E' \t\n\r\\f\\v'), '') IS NULL)
          )",
     )
     .bind(dispatch_id)
@@ -1734,6 +1734,15 @@ mod auto_queue_phase_gate_finalize_wrapper_tests {
         dispatch_id: &str,
         phase_gate_kind: Option<&str>,
     ) {
+        seed_legacy_gate_dispatch_with_kinds(pool, run_id, dispatch_id, &[phase_gate_kind]).await;
+    }
+
+    async fn seed_legacy_gate_dispatch_with_kinds(
+        pool: &PgPool,
+        run_id: &str,
+        dispatch_id: &str,
+        phase_gate_kinds: &[Option<&str>],
+    ) {
         sqlx::query(
             "INSERT INTO agents (id, name, provider)
              VALUES ('agent-finalize-pg', 'Agent', 'claude')",
@@ -1760,17 +1769,19 @@ mod auto_queue_phase_gate_finalize_wrapper_tests {
         .execute(pool)
         .await
         .expect("seed finalize test dispatch"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
-        sqlx::query(
-            "INSERT INTO auto_queue_entries
-                (id, run_id, status, batch_phase, phase_gate_kind)
-             VALUES ($1, $2, 'pending', 0, $3)",
-        )
-        .bind(format!("entry-{dispatch_id}"))
-        .bind(run_id)
-        .bind(phase_gate_kind)
-        .execute(pool)
-        .await
-        .expect("seed finalize test entry"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        for (index, phase_gate_kind) in phase_gate_kinds.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO auto_queue_entries
+                    (id, run_id, status, batch_phase, phase_gate_kind)
+                 VALUES ($1, $2, 'pending', 0, $3)",
+            )
+            .bind(format!("entry-{dispatch_id}-{index}"))
+            .bind(run_id)
+            .bind(*phase_gate_kind)
+            .execute(pool)
+            .await
+            .expect("seed finalize test entry"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        }
         sqlx::query(
             "INSERT INTO auto_queue_phase_gates
                 (run_id, phase, status, dispatch_id, pass_verdict, next_phase)
@@ -1961,9 +1972,117 @@ mod auto_queue_phase_gate_finalize_wrapper_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn finalize_and_patch_accept_ascii_control_whitespace_legacy_provenance() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_legacy_gate_dispatch(
+            &pool,
+            "run-whitespace-legacy",
+            "dsp-whitespace-legacy",
+            Some(" \t\n\r"),
+        )
+        .await;
+
+        let injected = maybe_inject_phase_gate_verdict_pg(
+            &pool,
+            "dsp-whitespace-legacy",
+            &json!({"checks": passing_checks()}),
+        )
+        .await;
+        assert_eq!(
+            injected
+                .as_ref()
+                .and_then(|value| value.get("verdict"))
+                .and_then(Value::as_str),
+            Some("phase_gate_passed")
+        );
+        let changed = set_dispatch_status_on_pg_async(
+            &pool,
+            "dsp-whitespace-legacy",
+            "completed",
+            Some(&json!({"checks": passing_checks()})),
+            "test_patch",
+            Some(&["dispatched"]),
+            true,
+        )
+        .await
+        .expect("complete whitespace PATCH dispatch"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
+        assert_eq!(changed, 1);
+        let gate_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM auto_queue_phase_gates
+             WHERE run_id = 'run-whitespace-legacy' AND phase = 0",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count cleared whitespace gate"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
+        assert_eq!(gate_count, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn finalize_and_patch_reject_mixed_null_and_nonblank_legacy_provenance() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        TestPostgresDb::emulate_pre_0100_deploy_gate_rows(&pool).await;
+        seed_legacy_gate_dispatch_with_kinds(
+            &pool,
+            "run-mixed-legacy",
+            "dsp-mixed-legacy",
+            &[None, Some("deploy-gate")],
+        )
+        .await;
+
+        assert!(
+            maybe_inject_phase_gate_verdict_pg(
+                &pool,
+                "dsp-mixed-legacy",
+                &json!({"checks": passing_checks()}),
+            )
+            .await
+            .is_none()
+        );
+        set_dispatch_status_on_pg_async(
+            &pool,
+            "dsp-mixed-legacy",
+            "completed",
+            Some(&json!({"checks": passing_checks()})),
+            "test_patch",
+            Some(&["dispatched"]),
+            true,
+        )
+        .await
+        .expect("complete mixed-provenance PATCH dispatch"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
+        let result = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT result::TEXT FROM task_dispatches WHERE id = $1",
+        )
+        .bind("dsp-mixed-legacy")
+        .fetch_one(&pool)
+        .await
+        .expect("load mixed-provenance PATCH result") // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
+        .expect("mixed-provenance PATCH result exists"); // agentdesk-audit: allow-unwrap — completion writes the supplied result
+        let result: Value =
+            serde_json::from_str(&result).expect("decode mixed-provenance PATCH result"); // agentdesk-audit: allow-unwrap — persisted result must remain valid JSON
+        assert!(result.get("verdict").is_none());
+        let gate_status = sqlx::query_scalar::<_, String>(
+            "SELECT status FROM auto_queue_phase_gates
+             WHERE run_id = 'run-mixed-legacy' AND phase = 0",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load failed mixed-provenance gate"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
+        assert_eq!(gate_status, "failed");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn finalize_and_patch_reject_nonblank_legacy_provenance() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
+        TestPostgresDb::emulate_pre_0100_deploy_gate_rows(&pool).await;
         seed_legacy_gate_dispatch(
             &pool,
             "run-nonblank-legacy",

@@ -120,7 +120,7 @@ function authoritativePhaseGateContext(runId, phase, context) {
 
   var rows = agentdesk.db.query(
     "SELECT COUNT(*) as entry_count, " +
-    "SUM(CASE WHEN phase_gate_kind IS NULL OR BTRIM(phase_gate_kind) = '' THEN 1 ELSE 0 END) as legacy_default_count " +
+    "SUM(CASE WHEN phase_gate_kind IS NULL OR BTRIM(phase_gate_kind, E' \\t\\n\\r\\f\\v') = '' THEN 1 ELSE 0 END) as legacy_default_count " +
     "FROM auto_queue_entries WHERE run_id = ? AND COALESCE(batch_phase, 0) = ?",
     [runId, phase]
   );

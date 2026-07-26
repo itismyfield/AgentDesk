@@ -293,6 +293,60 @@ test("auto-queue legacy context remains fail-closed for nonblank persisted kind"
   assert.equal(state.autoQueueClearedPhaseGates.length, 0);
 });
 
+test("auto-queue legacy context remains fail-closed for mixed NULL and nonblank persisted kinds", () => {
+  const context = {
+    phase_gate: {
+      run_id: "run-mixed-provenance",
+      batch_phase: 0
+    }
+  };
+  const result = {
+    verdict: "phase_gate_passed",
+    checks: passingPrChecks()
+  };
+  const dispatch = {
+    id: "dsp-mixed-provenance",
+    kanban_card_id: "card-mixed-provenance",
+    dispatch_type: "phase-gate",
+    context: JSON.stringify(context),
+    result: JSON.stringify(result),
+    status: "completed"
+  };
+  let provenanceSql = "";
+  const { policy, state } = loadPolicy("policies/auto-queue.js", {
+    phaseGateDeclaration,
+    dbQuery(sql) {
+      if (sql.includes("SELECT id, kanban_card_id, dispatch_type, result, context FROM task_dispatches")) {
+        return [dispatch];
+      }
+      if (sql.includes("FROM auto_queue_phase_gates")) {
+        return [{
+          dispatch_id: dispatch.id,
+          status: "pending",
+          pass_verdict: "phase_gate_passed",
+          next_phase: 1,
+          final_phase: false,
+          anchor_card_id: dispatch.kanban_card_id,
+          created_at: "2026-07-25T00:00:00Z"
+        }];
+      }
+      if (sql.includes("legacy_default_count")) {
+        provenanceSql = sql;
+        return [{ entry_count: 2, legacy_default_count: 1 }];
+      }
+      return [];
+    },
+    globals: { notifyCardOwner() {} }
+  });
+
+  policy.onDispatchCompleted({ dispatch_id: dispatch.id });
+
+  assert.equal(state.autoQueueSavedPhaseGates.length, 1);
+  assert.equal(state.autoQueueSavedPhaseGates[0].state.status, "failed");
+  assert.equal(state.autoQueueClearedPhaseGates.length, 0);
+  assert.match(provenanceSql, /BTRIM\(phase_gate_kind, E' \\t\\n\\r\\f\\v'\)/);
+});
+
 test("auto-queue group keys split distinct kind and declaration snapshots", () => {
   const { module } = loadPolicy("policies/auto-queue.js", { phaseGateDeclaration });
   const pr = prConfirmDeclaration();

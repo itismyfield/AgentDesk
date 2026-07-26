@@ -1295,7 +1295,7 @@ async fn phase_gate_run_phase_uses_legacy_default_on_pg_tx(
 ) -> Result<bool, String> {
     sqlx::query_scalar::<_, bool>(
         "SELECT COALESCE(
-             BOOL_AND(NULLIF(BTRIM(phase_gate_kind), '') IS NULL),
+             BOOL_AND(NULLIF(BTRIM(phase_gate_kind, E' \t\n\r\\f\\v'), '') IS NULL),
              FALSE
          )
          FROM auto_queue_entries
@@ -2658,6 +2658,7 @@ mod reconcile_phase_gate_pg_tests {
     async fn legacy_context_with_nonblank_persisted_kind_remains_failed_closed() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
+        TestPostgresDb::emulate_pre_0100_deploy_gate_rows(&pool).await;
         fixture(&pool).await;
         seed_pending_entry(&pool, "run-pg-test", "entry-explicit-kind", 0).await;
         sqlx::query(
@@ -2711,6 +2712,141 @@ mod reconcile_phase_gate_pg_tests {
             outcome,
             PhaseGateReconciliation::MarkedFailed { .. }
         ));
+        assert_eq!(gate_status(&pool, "run-pg-test", 0).await, "failed");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_ascii_control_whitespace_context_repairs_from_registry() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        fixture(&pool).await;
+        seed_pending_entry(&pool, "run-pg-test", "entry-whitespace-gate", 0).await;
+        sqlx::query(
+            "UPDATE auto_queue_entries SET phase_gate_kind = E' \\t\\n\\r'
+             WHERE id = 'entry-whitespace-gate'",
+        )
+        .execute(&pool)
+        .await
+        .expect("set ASCII control whitespace kind"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        seed_pending_entry(&pool, "run-pg-test", "entry-next-whitespace", 1).await;
+
+        let legacy_context = json!({
+            "phase_gate": {"run_id": "run-pg-test", "batch_phase": 0, "next_phase": 1}
+        });
+        let passing = json!({
+            "checks": {
+                "merge_verified": "pass",
+                "issue_closed": "pass",
+                "build_passed": "pass"
+            }
+        });
+        insert_dispatch(
+            &pool,
+            "dsp-whitespace-repair",
+            "completed",
+            legacy_context,
+            Some(passing),
+        )
+        .await;
+        save_phase_gate_state_on_pg(
+            &pool,
+            "run-pg-test",
+            0,
+            &PhaseGateStateWrite {
+                status: "failed".into(),
+                dispatch_ids: vec!["dsp-whitespace-repair".into()],
+                next_phase: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed whitespace failed gate"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        sqlx::query("UPDATE auto_queue_runs SET status='paused' WHERE id='run-pg-test'")
+            .execute(&pool)
+            .await
+            .expect("pause whitespace run"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+
+        let summary = repair_phase_gates_for_run_on_pg(
+            &pool,
+            "run-pg-test",
+            PhaseGateRepairOptions::default(),
+        )
+        .await
+        .expect("repair whitespace gate"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
+        assert_eq!(summary.cleared_gates, 1);
+        assert_eq!(summary.blocking_gates_remaining, 0);
+        assert_eq!(summary.run_status.as_deref(), Some("active"));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mixed_null_and_nonblank_legacy_context_remains_failed_closed_on_repair() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        TestPostgresDb::emulate_pre_0100_deploy_gate_rows(&pool).await;
+        fixture(&pool).await;
+        seed_pending_entry(&pool, "run-pg-test", "entry-mixed-null", 0).await;
+        seed_pending_entry(&pool, "run-pg-test", "entry-mixed-deploy", 0).await;
+        sqlx::query(
+            "UPDATE auto_queue_entries SET phase_gate_kind = 'deploy-gate'
+             WHERE id = 'entry-mixed-deploy'",
+        )
+        .execute(&pool)
+        .await
+        .expect("set mixed explicit deploy kind"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+
+        let legacy_context = json!({
+            "phase_gate": {"run_id": "run-pg-test", "batch_phase": 0}
+        });
+        let passing = json!({
+            "verdict": "phase_gate_passed",
+            "checks": {
+                "merge_verified": "pass",
+                "issue_closed": "pass",
+                "build_passed": "pass"
+            }
+        });
+        insert_dispatch(
+            &pool,
+            "dsp-mixed-repair",
+            "completed",
+            legacy_context,
+            Some(passing),
+        )
+        .await;
+        save_phase_gate_state_on_pg(
+            &pool,
+            "run-pg-test",
+            0,
+            &PhaseGateStateWrite {
+                status: "failed".into(),
+                dispatch_ids: vec!["dsp-mixed-repair".into()],
+                failure_reason: Some("mixed provenance".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed mixed failed gate"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+        sqlx::query("UPDATE auto_queue_runs SET status='paused' WHERE id='run-pg-test'")
+            .execute(&pool)
+            .await
+            .expect("pause mixed run"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+
+        let summary = repair_phase_gates_for_run_on_pg(
+            &pool,
+            "run-pg-test",
+            PhaseGateRepairOptions::default(),
+        )
+        .await
+        .expect("repair mixed gate"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL assertion
+        assert_eq!(summary.cleared_gates, 0);
+        assert_eq!(summary.blocking_gates_remaining, 1);
+        assert_eq!(summary.run_status.as_deref(), Some("paused"));
         assert_eq!(gate_status(&pool, "run-pg-test", 0).await, "failed");
 
         pool.close().await;

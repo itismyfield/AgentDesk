@@ -2106,7 +2106,20 @@ fi
 rm -f "$ADK_REL/logs/relay-watchdog.deploy-marker" 2>/dev/null || true
 rm -f "$ADK_REL/runtime/restart_persisted" 2>/dev/null || true
 
-# Stop release only after the durable persistence acknowledgement.
+# This is the final fail-closed gate before bootout. Migration 0100 is a
+# forward-only binary floor: once it commits, a pre-0100 binary cannot be
+# restarted because SQLx rejects a database migration newer than its embedded
+# manifest. Therefore every staging/signing/tunnel/drain/persistence check above
+# must succeed first. On migration failure the currently running process has not
+# been stopped; clear the drain marker so it remains usable and abort activation.
+echo "▸ Applying release PostgreSQL migrations before binary activation..."
+if ! "$STAGED_BINARY" release-migrate-postgres; then
+    echo "✗ Release PostgreSQL migration failed; the existing runtime remains active."
+    clear_restart_drain_mode "$ADK_REL/runtime" || true
+    exit 1
+fi
+
+# Stop release only after the durable persistence acknowledgement and migration.
 echo "▸ Stopping release..."
 LAUNCHD_DOMAIN="$(_launchd_domain)"
 launchctl bootout "$LAUNCHD_DOMAIN/$PLIST_REL" 2>/dev/null || true

@@ -446,6 +446,17 @@
   before merging.
 
 ### Audited touches
+- 2026-07-26 — #4898 untrusted deploy-gate containment: PostgreSQL migration
+  0100 adds a validated cluster-wide `CHECK` constraint that rejects normalized
+  `deploy-gate` provenance. The `ALTER TABLE` lock serializes concurrent legacy
+  writers, so preflight row counts are diagnostic only and every old node is
+  fenced after commit. The release candidate applies migration 0100 only after
+  staging, signing, tunnel readiness, admission drain, and restart persistence,
+  immediately before stopping the old process. This creates a forward-only
+  binary floor: pre-0100 binaries must not restart after commit. Existing
+  deploy-gate rows block rollout; no node converts or passes them. Enabling a
+  future trusted typed evidence capability requires a coordinated constraint
+  migration and capability rollout across the fleet.
 - 2026-07-25 — #4913 GO-C1 trusted session-forwarding prerequisite:
   `session_forwarding` treats per-node `cluster.nodes.<instance>.trusted_forward_origin`
   as operator-owned authority, requires exact agreement with fresh worker capability

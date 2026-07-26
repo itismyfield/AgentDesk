@@ -251,6 +251,25 @@ class DeploymentWiringTests(unittest.TestCase):
         self.assertLess(migrate_at, stop_at)
         self.assertLess(stop_at, deploy.index("DEPLOY_OK=1", stop_at))
 
+    def test_database_migration_is_last_gate_before_release_stop(self):
+        deploy = DEPLOY.read_text(encoding="utf-8")
+        stage_at = deploy.index('echo "▸ Staging signed binary from $SOURCE_BINARY..."')
+        tunnel_at = deploy.index("_migrate_pg_tunnel_before_release_stop", stage_at)
+        persistence_at = deploy.index("wait_for_restart_persistence_or_fail", tunnel_at)
+        migration_at = deploy.index(
+            'if ! "$STAGED_BINARY" release-migrate-postgres; then', persistence_at
+        )
+        stop_at = deploy.index('echo "▸ Stopping release..."', migration_at)
+        self.assertLess(stage_at, tunnel_at)
+        self.assertLess(tunnel_at, persistence_at)
+        self.assertLess(persistence_at, migration_at)
+        self.assertLess(migration_at, stop_at)
+        migration_failure = deploy[migration_at:stop_at]
+        self.assertIn(
+            'clear_restart_drain_mode "$ADK_REL/runtime" || true', migration_failure
+        )
+        self.assertIn("the existing runtime remains active", migration_failure)
+
     def _run_block(
         self,
         adk_rel: Path,
