@@ -690,7 +690,7 @@ pub(super) fn suppressed_task_notification_marker(
         TaskNotificationKind::Background => (
             footer_background_marker_session_key(channel_id, footer_only_event_key?),
             "lifecycle.background_task_complete",
-            super::tui_task_card::format_background_completion_marker(background_summary, None),
+            super::tui_task_card::format_background_completion_marker(background_summary),
         ),
         // Subagent completions are durable-card owned, so a suppressed watcher
         // terminal must not add a duplicate discrete marker.

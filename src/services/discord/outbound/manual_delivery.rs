@@ -196,6 +196,18 @@ pub(super) enum ManualDeliveryOutcome {
 #[derive(Clone)]
 pub(super) struct SerenityManualOutboundClient {
     pub(super) http: Arc<serenity::Http>,
+    pub(super) suppress_all_mentions: bool,
+}
+
+impl SerenityManualOutboundClient {
+    fn message(&self, content: impl Into<String>) -> CreateMessage {
+        let message = CreateMessage::new().content(content);
+        if self.suppress_all_mentions {
+            message.allowed_mentions(crate::services::discord::http::lifecycle_allowed_mentions())
+        } else {
+            message.allowed_mentions(crate::services::discord::http::relay_allowed_mentions())
+        }
+    }
 }
 
 impl DiscordOutboundClient for SerenityManualOutboundClient {
@@ -214,7 +226,7 @@ impl DiscordOutboundClient for SerenityManualOutboundClient {
                 )
             })?;
         channel_id
-            .send_message(&*self.http, CreateMessage::new().content(content))
+            .send_message(&*self.http, self.message(content))
             .await
             .map(|message| message.id.get().to_string())
             .map_err(|error| {
@@ -282,10 +294,7 @@ impl ManualOutboundClient for SerenityManualOutboundClient {
             })?;
         let (inline, attachment) = build_long_message_attachment(content, summary);
         channel_id
-            .send_message(
-                &*self.http,
-                CreateMessage::new().content(inline).add_file(attachment),
-            )
+            .send_message(&*self.http, self.message(inline).add_file(attachment))
             .await
             .map(|message| message.id.get().to_string())
             .map_err(|error| {
@@ -668,6 +677,43 @@ mod manual_v3_delivery_tests {
     use std::sync::{Arc, Mutex};
 
     use crate::services::discord::health::{HealthRegistry, handle_send};
+
+    #[test]
+    fn lifecycle_manual_message_suppresses_all_mentions_structurally() {
+        let client = SerenityManualOutboundClient {
+            http: Arc::new(serenity::Http::new("test-token")),
+            suppress_all_mentions: true,
+        };
+        let value = serde_json::to_value(client.message("@everyone <@123> <@&456>"))
+            .expect("serialize message");
+        assert_eq!(
+            value.get("content").and_then(serde_json::Value::as_str),
+            Some("@everyone <@123> <@&456>")
+        );
+        assert_eq!(
+            value
+                .get("allowed_mentions")
+                .and_then(|mentions| mentions.get("parse"))
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn ordinary_manual_message_retains_directed_user_mentions_only() {
+        let client = SerenityManualOutboundClient {
+            http: Arc::new(serenity::Http::new("test-token")),
+            suppress_all_mentions: false,
+        };
+        let value = serde_json::to_value(client.message("<@123>")).expect("serialize message");
+        let parse = value
+            .get("allowed_mentions")
+            .and_then(|mentions| mentions.get("parse"))
+            .and_then(serde_json::Value::as_array)
+            .expect("parse array");
+        assert_eq!(parse, &[serde_json::Value::String("users".to_string())]);
+    }
 
     #[test]
     fn synthetic_routine_pair_is_complete_and_message_id_deterministic() {

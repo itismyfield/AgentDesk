@@ -94,6 +94,15 @@ pub(in crate::services::discord) fn relay_allowed_mentions() -> CreateAllowedMen
         .all_roles(false)
 }
 
+/// Lifecycle content is never an intentional directed ping, so suppress every
+/// Discord mention class at the transport boundary.
+pub(in crate::services::discord) fn lifecycle_allowed_mentions() -> CreateAllowedMentions {
+    CreateAllowedMentions::new()
+        .all_users(false)
+        .everyone(false)
+        .all_roles(false)
+}
+
 pub(in crate::services::discord) async fn send_channel_message(
     http: &serenity::Http,
     channel_id: ChannelId,
@@ -268,7 +277,7 @@ pub(in crate::services::discord) async fn delete_channel_message(
 mod tests {
     use super::{
         DISCORD_EMPTY_MESSAGE_SENTINEL, channel_message_builder, discord_content_or_zwsp,
-        is_unknown_required_reference_response, relay_allowed_mentions,
+        is_unknown_required_reference_response, lifecycle_allowed_mentions, relay_allowed_mentions,
     };
     use poise::serenity_prelude::{ChannelId, MessageId};
 
@@ -305,6 +314,30 @@ mod tests {
         assert!(
             !parse.iter().any(|p| p == "roles"),
             "roles suppressed: {parse:?}"
+        );
+    }
+
+    #[test]
+    fn lifecycle_allowed_mentions_suppresses_every_mention_class() {
+        let value = serde_json::to_value(lifecycle_allowed_mentions()).expect("serialize");
+        let parse = value
+            .get("parse")
+            .and_then(|value| value.as_array())
+            .expect("parse array");
+        assert!(parse.is_empty(), "lifecycle parse must be empty: {value}");
+        assert!(
+            value
+                .get("users")
+                .and_then(|users| users.as_array())
+                .is_none_or(Vec::is_empty),
+            "lifecycle user allowlist must be empty: {value}"
+        );
+        assert!(
+            value
+                .get("roles")
+                .and_then(|roles| roles.as_array())
+                .is_none_or(Vec::is_empty),
+            "lifecycle role allowlist must be empty: {value}"
         );
     }
 

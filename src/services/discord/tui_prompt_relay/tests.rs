@@ -8,7 +8,7 @@ fn compact_command_name_first_stub() -> &'static str {
 }
 
 #[test]
-fn footer_only_background_delivery_uses_event_identity_and_preview() {
+fn footer_only_background_delivery_uses_event_identity_and_summary_only() {
     let channel_id = ChannelId::new(49_120);
     let event = super::super::task_notification_delivery::TaskCardEvent::from_task_prompt(
         channel_id.get(),
@@ -17,7 +17,7 @@ fn footer_only_background_delivery_uses_event_identity_and_preview() {
         "<task-notification><task-id>background-4912</task-id>\
          <tool-use-id>toolu-background-4912</tool-use-id>\
          <summary>Background command &quot;focused tests&quot; completed</summary>\
-         <result>4 passed\n0 failed</result></task-notification>",
+         <result>token=secret /private/result.log</result></task-notification>",
     );
 
     let (session_key, content) =
@@ -32,8 +32,23 @@ fn footer_only_background_delivery_uses_event_identity_and_preview() {
     );
     assert_eq!(
         content,
-        "⚙️ Background complete · Background command \"focused tests\" completed\n> 4 passed 0 failed"
+        "⚙️ Background complete · Background command \"focused tests\" completed"
     );
+    assert!(!content.contains("token=secret"));
+    assert!(!content.contains("/private/result.log"));
+    let watcher = super::super::tmux::suppressed_task_notification_marker(
+        channel_id,
+        "AgentDesk-claude-4912",
+        99,
+        crate::services::agent_protocol::TaskNotificationKind::Background,
+        Some(event.event_key()),
+        Some("Background command \"focused tests\" completed"),
+        1,
+        &[],
+    )
+    .expect("watcher marker");
+    assert_eq!(watcher.0, session_key);
+    assert_eq!(watcher.2, content);
 }
 
 // ====================================================================

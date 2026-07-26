@@ -14,11 +14,10 @@ impl TaskCardEvent {
             TaskCardPayload::Task(note) => {
                 super::super::tui_task_card::format_background_completion_marker(
                     note.summary.as_deref(),
-                    note.result.as_deref(),
                 )
             }
             TaskCardPayload::Subagent(_) => {
-                super::super::tui_task_card::format_background_completion_marker(None, None)
+                super::super::tui_task_card::format_background_completion_marker(None)
             }
         }
     }

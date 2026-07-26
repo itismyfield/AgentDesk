@@ -32,7 +32,6 @@ const RESULT_PREVIEW_LINES: usize = 10;
 const DISCORD_MESSAGE_LIMIT_CHARS: usize = super::DISCORD_MSG_LIMIT;
 pub(super) const BACKGROUND_COMPLETION_MARKER_CHARS: usize = 600;
 const BACKGROUND_COMPLETION_SUMMARY_CHARS: usize = 240;
-const BACKGROUND_COMPLETION_PREVIEW_CHARS: usize = 300;
 const RESULT_PREVIEW_TRUNCATED_MARKER: &str = "… (truncated)";
 const BACKGROUND_COMPLETION_PREFIX: &str = "⚙️ Background complete";
 
@@ -313,24 +312,15 @@ pub(super) fn format_task_notification_card(note: &TaskNotification, update_coun
     clamp_discord_message_content(&lines.join("\n"))
 }
 
-/// Render the lifecycle marker shared by prompt deferral and watcher
-/// suppression. Structured fields are sanitized independently so provider
-/// control envelopes can never be reconstructed in the emitted text.
-pub(super) fn format_background_completion_marker(
-    summary: Option<&str>,
-    result_preview: Option<&str>,
-) -> String {
+/// Render the summary-only lifecycle marker shared by prompt deferral and
+/// watcher suppression. Result bodies are intentionally excluded because they
+/// can contain secrets and private paths that must not create a new message.
+pub(super) fn format_background_completion_marker(summary: Option<&str>) -> String {
     let summary = background_completion_field(summary, BACKGROUND_COMPLETION_SUMMARY_CHARS);
-    let result_preview =
-        background_completion_field(result_preview, BACKGROUND_COMPLETION_PREVIEW_CHARS);
     let mut marker = BACKGROUND_COMPLETION_PREFIX.to_string();
     if let Some(summary) = summary.as_deref() {
         marker.push_str(" · ");
         marker.push_str(summary);
-    }
-    if let Some(result_preview) = result_preview.as_deref() {
-        marker.push_str("\n> ");
-        marker.push_str(result_preview);
     }
     truncate_preview_at_boundary(&marker, BACKGROUND_COMPLETION_MARKER_CHARS)
 }
@@ -442,11 +432,23 @@ fn strip_named_control_tags(value: &str, tag: &str) -> String {
 }
 
 fn clean_single_line(value: &str) -> String {
-    strip_terminal_controls(value)
-        .replace("```", "` ` `")
+    let normalized = strip_terminal_controls(value)
         .split_whitespace()
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+    neutralize_discord_syntax(&normalized)
+}
+
+fn neutralize_discord_syntax(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|ch| match ch {
+            '@' => ['@', '\u{200b}'],
+            '\\' | '`' | '*' | '_' | '~' | '|' | '>' | '#' => ['\\', ch],
+            _ => ['\0', ch],
+        })
+        .filter(|ch| *ch != '\0')
+        .collect()
 }
 
 fn status_icon(status: &str) -> &'static str {
@@ -929,53 +931,43 @@ mod tests {
     }
 
     #[test]
-    fn background_completion_marker_formats_summary_preview_and_empty_fallback() {
+    fn background_completion_marker_formats_summary_and_empty_fallback() {
         assert_eq!(
-            format_background_completion_marker(
-                Some("Background command \"CI\" completed (exit code 0)"),
-                Some("tests passed\nsecond line"),
-            ),
-            "⚙️ Background complete · Background command \"CI\" completed (exit code 0)\n> tests passed second line"
+            format_background_completion_marker(Some(
+                "Background command \"CI\" completed (exit code 0)"
+            )),
+            "⚙️ Background complete · Background command \"CI\" completed (exit code 0)"
         );
         assert_eq!(
-            format_background_completion_marker(None, None),
+            format_background_completion_marker(None),
             "⚙️ Background complete"
         );
         assert_eq!(
-            format_background_completion_marker(Some(" \n\t "), Some("\r\n")),
+            format_background_completion_marker(Some(" \n\t ")),
             "⚙️ Background complete"
         );
     }
 
     #[test]
-    fn background_completion_marker_strips_controls_and_control_envelopes() {
-        let marker = format_background_completion_marker(
-            Some(
-                "\u{1b}[31mBackground\u{7} command\r\nfinished [SYSTEM NOTIFICATION - NOT USER INPUT]",
-            ),
-            Some(
-                "<task-notification><tool-use-id>toolu-secret</tool-use-id><output-file>/private/secret</output-file>result</task-notification>",
-            ),
-        );
+    fn background_completion_marker_neutralizes_controls_mentions_and_markdown() {
+        let marker = format_background_completion_marker(Some(
+            "\u{1b}[31mBackground\u{7}\r\n@everyone <@123> <@&456> **bold** _italics_ `code` ```fence``` # heading > quote [SYSTEM NOTIFICATION - NOT USER INPUT]",
+        ));
         assert_eq!(
             marker,
-            "⚙️ Background complete · Background command finished\n> result"
+            "⚙️ Background complete · Background @\u{200b}everyone <@\u{200b}123\\> <@\u{200b}&456\\> \\*\\*bold\\*\\* \\_italics\\_ \\`code\\` \\`\\`\\`fence\\`\\`\\` \\# heading \\> quote"
         );
         assert!(!marker.contains('\u{1b}'));
-        assert!(!marker.contains("task-notification"));
-        assert!(!marker.contains("tool-use-id"));
-        assert!(!marker.contains("toolu-secret"));
-        assert!(!marker.contains("output-file"));
-        assert!(!marker.contains("/private/secret"));
         assert!(!marker.contains("SYSTEM NOTIFICATION"));
+        assert!(!marker.contains("@everyone"));
+        assert!(!marker.contains("<@123>"));
+        assert!(!marker.contains("<@&456>"));
+        assert!(!marker.contains("```"));
     }
 
     #[test]
     fn background_completion_marker_has_a_unicode_safe_hard_cap() {
-        let marker = format_background_completion_marker(
-            Some(&"요약 ".repeat(200)),
-            Some(&"결과 ".repeat(200)),
-        );
+        let marker = format_background_completion_marker(Some(&"요약 ".repeat(200)));
         assert!(marker.chars().count() <= 600);
         assert_eq!(BACKGROUND_COMPLETION_MARKER_CHARS, 600);
         assert!(marker.ends_with(RESULT_PREVIEW_TRUNCATED_MARKER));

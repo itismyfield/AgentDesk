@@ -325,7 +325,10 @@ async fn send_message_with_backends_and_delivery_options_for_caller(
         Err(resp) => return resp,
     };
 
-    let outbound_client = SerenityManualOutboundClient { http };
+    let outbound_client = SerenityManualOutboundClient {
+        http,
+        suppress_all_mentions: source == crate::services::message_outbox::LIFECYCLE_NOTIFIER_SOURCE,
+    };
     send_resolved_manual_message_with_client(
         &outbound_client,
         shared_outbound_deduper(),
