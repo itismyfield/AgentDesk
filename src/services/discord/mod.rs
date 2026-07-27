@@ -789,6 +789,11 @@ fn increment_counter(counter: &AtomicUsize, reason: &str) -> usize {
 }
 
 #[cfg(test)]
+pub(crate) use router::intake_runtime_transition_after_redirect;
+#[cfg(test)]
+pub(crate) use session_runtime::resume_launch_state_for_tests;
+
+#[cfg(test)]
 mod global_active_counter_tests {
     use super::{increment_counter, saturating_decrement_counter};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -839,8 +844,6 @@ mod global_active_counter_tests {
     }
 }
 
-#[cfg(test)]
-pub(crate) use session_runtime::resume_launch_state_for_tests;
 use session_runtime::{
     DiscordSession, RuntimeChannelBindingStatus, WorktreeInfo, auto_restore_session,
     auto_restore_session_force, auto_restore_session_with_dm_hint, bootstrap_thread_session,

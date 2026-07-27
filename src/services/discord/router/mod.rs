@@ -26,13 +26,13 @@ pub(super) use message_handler::{
 };
 pub(crate) use message_handler::{IntakeRequest, execute_intake_turn_core};
 pub(in crate::services::discord) use queue_status_presentation::queue_status_card_enabled;
-#[cfg(test)]
-pub(super) use turn_start::load_session_runtime_state;
 pub(super) use turn_start::reserve_headless_turn;
 pub(crate) use turn_start::{
     HeadlessTurnReservation, HeadlessTurnStartError, HeadlessTurnStartOutcome,
     HeadlessTurnStartStatus,
 };
+#[cfg(test)]
+pub(crate) use turn_start::{intake_runtime_transition_after_redirect, load_session_runtime_state};
 
 // Re-export items used across submodules
 use thread_binding::{link_dispatch_thread, lookup_dispatch_info, verify_thread_accessible};

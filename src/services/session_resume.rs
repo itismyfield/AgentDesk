@@ -819,7 +819,6 @@ mod tests {
             "claude",
             old_session_id,
             tmux,
-            false,
         );
         crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
             tmux,
@@ -866,14 +865,10 @@ mod tests {
                 .is_some(),
             "resume must retain unrelated runtime bindings"
         );
-        let (selected_session_id, _, selected_cwd) = {
-            let mut data = shared.core.lock().await;
-            crate::services::discord::router::load_session_runtime_state(
-                &mut data.sessions,
-                channel_id,
-            )
-            .expect("target launch state")
-        };
+        let (selected_session_id, selected_cwd) =
+            crate::services::discord::resume_launch_state_for_tests(&shared, channel_id)
+                .await
+                .expect("target launch state");
         assert_eq!(selected_session_id.as_deref(), Some(target_session_id));
         assert_eq!(selected_cwd, target_cwd);
 
@@ -922,6 +917,7 @@ mod tests {
             .to_string();
         let old_session_id = "44444444-4444-4444-4444-444444444444";
         let target_session_id = "55555555-5555-5555-5555-555555555555";
+        let tmux = "AgentDesk-claude-resume-intake-lock";
         rebind_channel_provider_session(
             &shared,
             &ProviderKind::Claude,
@@ -938,13 +934,12 @@ mod tests {
         let intake_shared = Arc::clone(&shared);
         let (snapshot_started_tx, mut snapshot_started_rx) = tokio::sync::mpsc::channel(1);
         let intake = tokio::spawn(async move {
-            let transition =
-                crate::services::discord::router::intake_runtime_transition_after_redirect(
-                    &intake_shared,
-                    channel_id,
-                    (None, false, old_cwd),
-                )
-                .await;
+            let transition = crate::services::discord::intake_runtime_transition_after_redirect(
+                &intake_shared,
+                channel_id,
+                (None, false, old_cwd),
+            )
+            .await;
             snapshot_started_tx.send(()).await.unwrap();
             (transition.state.0, transition.state.2)
         });
