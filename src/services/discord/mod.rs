@@ -839,6 +839,8 @@ mod global_active_counter_tests {
     }
 }
 
+#[cfg(test)]
+pub(crate) use session_runtime::resume_launch_state_for_tests;
 use session_runtime::{
     DiscordSession, RuntimeChannelBindingStatus, WorktreeInfo, auto_restore_session,
     auto_restore_session_force, auto_restore_session_with_dm_hint, bootstrap_thread_session,
@@ -848,8 +850,6 @@ use session_runtime::{
     select_restored_session_path, synthetic_thread_channel_name, validate_live_channel_routing,
     validate_live_channel_routing_with_dm_hint,
 };
-#[cfg(test)]
-pub(crate) use session_runtime::{rebind_channel_session_for_tests, resume_launch_state_for_tests};
 
 /// Bot-level settings persisted to disk
 #[derive(Clone)]
@@ -2166,6 +2166,8 @@ pub(crate) struct SharedData {
     pub(super) core: Mutex<CoreState>,
     /// Per-channel request lifecycle actor registry.
     mailboxes: ChannelMailboxRegistry,
+    /// Serializes `/resume` rebinds with intake session selection for each channel.
+    session_transition_locks: dashmap::DashMap<ChannelId, Arc<tokio::sync::Mutex<()>>>,
     /// Bot settings — mostly reads, rare writes
     pub(super) settings: tokio::sync::RwLock<DiscordBotSettings>,
     /// Per-channel timestamps of the last Discord API call (for rate limiting)
@@ -2301,6 +2303,16 @@ impl SharedData {
 
     fn mailbox(&self, channel_id: ChannelId) -> ChannelMailboxHandle {
         self.mailboxes.handle(channel_id)
+    }
+
+    pub(crate) fn session_transition_lock(
+        &self,
+        channel_id: ChannelId,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        self.session_transition_locks
+            .entry(channel_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     /// #3293: non-creating mailbox lookup for probes — `mailbox()` mints a
@@ -2493,6 +2505,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
             active_meetings: std::collections::HashMap::new(),
         }),
         mailboxes: ChannelMailboxRegistry::default(),
+        session_transition_locks: dashmap::DashMap::new(),
         settings: tokio::sync::RwLock::new(DiscordBotSettings::default()),
         api_timestamps: dashmap::DashMap::new(),
         skills_cache: tokio::sync::RwLock::new(Vec::new()),

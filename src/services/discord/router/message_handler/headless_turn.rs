@@ -302,6 +302,8 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             status: HeadlessTurnStartStatus::Consumed,
         });
     }
+    let session_transition_lock = shared.session_transition_lock(channel_id);
+    let session_transition_guard = session_transition_lock.lock().await;
     let cancel_token = Arc::new(CancelToken::new());
     let started = super::super::super::mailbox_try_start_turn(
         shared,
@@ -832,6 +834,8 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         recovery_message_count,
     )
     .await;
+
+    drop(session_transition_guard);
 
     let (memory_settings, memory_backend) = build_memory_backend(role_binding.as_ref());
     let memento_recall_gate = memento_recall_gate_decision(

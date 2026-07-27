@@ -1312,6 +1312,7 @@ mod tests {
                 active_meetings: std::collections::HashMap::new(),
             }),
             mailboxes: crate::services::turn_orchestrator::ChannelMailboxRegistry::default(),
+            session_transition_locks: dashmap::DashMap::new(),
             settings: tokio::sync::RwLock::new(super::super::DiscordBotSettings::default()),
             api_timestamps: dashmap::DashMap::new(),
             skills_cache: tokio::sync::RwLock::new(Vec::new()),
