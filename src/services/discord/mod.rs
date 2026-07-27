@@ -848,6 +848,8 @@ use session_runtime::{
     select_restored_session_path, synthetic_thread_channel_name, validate_live_channel_routing,
     validate_live_channel_routing_with_dm_hint,
 };
+#[cfg(test)]
+pub(crate) use session_runtime::{rebind_channel_session_for_tests, resume_launch_state_for_tests};
 
 /// Bot-level settings persisted to disk
 #[derive(Clone)]

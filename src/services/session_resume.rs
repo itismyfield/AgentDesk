@@ -61,6 +61,38 @@ pub struct ResumePreviousOptions {
 
 /// Successful rebind result — returned to the HTTP caller and rendered into the
 /// slash-command reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResumeRuntimeBindingClearOutcome {
+    Cleared { tmux_session: String },
+    AlreadyAbsent { tmux_session: String },
+    Failed { tmux_session: String, error: String },
+}
+
+impl ResumeRuntimeBindingClearOutcome {
+    fn status(&self) -> &'static str {
+        match self {
+            Self::Cleared { .. } => "cleared",
+            Self::AlreadyAbsent { .. } => "already_absent",
+            Self::Failed { .. } => "failed",
+        }
+    }
+
+    fn tmux_session(&self) -> &str {
+        match self {
+            Self::Cleared { tmux_session }
+            | Self::AlreadyAbsent { tmux_session }
+            | Self::Failed { tmux_session, .. } => tmux_session,
+        }
+    }
+
+    fn error(&self) -> Option<&str> {
+        match self {
+            Self::Failed { error, .. } => Some(error),
+            Self::Cleared { .. } | Self::AlreadyAbsent { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ResumeRebindOutcome {
     pub(crate) target_session_id: String,
@@ -69,6 +101,7 @@ pub(crate) struct ResumeRebindOutcome {
     pub(crate) previous_cwd: Option<String>,
     pub(crate) tmux_killed: bool,
     pub(crate) lifecycle_path: &'static str,
+    pub(crate) runtime_binding_clear: ResumeRuntimeBindingClearOutcome,
     pub(crate) in_memory_rebound: bool,
     /// `true` when the target was auto-selected (no explicit `session_id`).
     pub(crate) auto_selected: bool,
@@ -153,6 +186,11 @@ impl ResumeRebindOutcome {
                 "previous_cwd": self.previous_cwd,
                 "tmux_killed": self.tmux_killed,
                 "lifecycle_path": self.lifecycle_path,
+                "runtime_binding_clear": {
+                    "status": self.runtime_binding_clear.status(),
+                    "tmux_session": self.runtime_binding_clear.tmux_session(),
+                    "error": self.runtime_binding_clear.error(),
+                },
                 "in_memory_rebound": self.in_memory_rebound,
                 "auto_selected": self.auto_selected,
             })),
@@ -315,6 +353,34 @@ pub(crate) async fn perform_resume_rebind(
     tmux_name: &str,
     opts: &ResumePreviousOptions,
 ) -> Result<ResumeRebindOutcome, ResumeRebindError> {
+    perform_resume_rebind_with_runtime_clear(
+        pool,
+        registry,
+        session_key,
+        provider,
+        channel_id,
+        tmux_name,
+        opts,
+        |tmux_session_name| {
+            Ok(crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(tmux_session_name))
+        },
+    )
+    .await
+}
+
+async fn perform_resume_rebind_with_runtime_clear<F>(
+    pool: &PgPool,
+    registry: Option<&HealthRegistry>,
+    session_key: &str,
+    provider: Option<ProviderKind>,
+    channel_id: Option<ChannelId>,
+    tmux_name: &str,
+    opts: &ResumePreviousOptions,
+    clear_runtime_binding: F,
+) -> Result<ResumeRebindOutcome, ResumeRebindError>
+where
+    F: FnOnce(&str) -> Result<bool, String>,
+{
     let Some(SessionRebindContext {
         resolved_session_key: _,
         session_id,
@@ -404,6 +470,7 @@ pub(crate) async fn perform_resume_rebind(
     // Teardown the channel's current tmux/turn via the shared lifecycle path.
     let mut tmux_killed = false;
     let mut lifecycle_path = "skipped-no-runtime";
+    let mut observed_tmux_name = None;
     if let (Some(registry), Some(provider), Some(channel_id)) =
         (registry, provider.as_ref(), channel_id)
     {
@@ -420,6 +487,29 @@ pub(crate) async fn perform_resume_rebind(
         .await;
         tmux_killed = lifecycle.tmux_killed;
         lifecycle_path = lifecycle.lifecycle_path;
+        observed_tmux_name = lifecycle.tmux_session_observed;
+    }
+
+    // `/resume` is the only lifecycle path that must forget the retired runtime's
+    // provider UUID before installing a different durable target. Prefer the
+    // session actually observed during teardown because a watcher alias can differ
+    // from the canonical name parsed from the request.
+    let runtime_binding_clear = clear_resume_runtime_binding_after_teardown_with(
+        observed_tmux_name.as_deref(),
+        tmux_name,
+        clear_runtime_binding,
+    );
+    if let ResumeRuntimeBindingClearOutcome::Failed {
+        tmux_session,
+        error,
+    } = &runtime_binding_clear
+    {
+        tracing::warn!(
+            tmux_session,
+            %error,
+            target_session_id,
+            "resume durable target retained after runtime binding clear failure"
+        );
     }
 
     // In-memory mirror so the next turn resumes without a restart.
@@ -444,9 +534,47 @@ pub(crate) async fn perform_resume_rebind(
         previous_cwd: current_cwd,
         tmux_killed,
         lifecycle_path,
+        runtime_binding_clear,
         in_memory_rebound,
         auto_selected,
     })
+}
+
+fn clear_resume_runtime_binding_after_teardown(
+    observed_tmux_session: Option<&str>,
+    canonical_tmux_session: &str,
+) -> ResumeRuntimeBindingClearOutcome {
+    clear_resume_runtime_binding_after_teardown_with(
+        observed_tmux_session,
+        canonical_tmux_session,
+        |tmux_session_name| {
+            Ok(crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(tmux_session_name))
+        },
+    )
+}
+
+fn clear_resume_runtime_binding_after_teardown_with<F>(
+    observed_tmux_session: Option<&str>,
+    canonical_tmux_session: &str,
+    clear: F,
+) -> ResumeRuntimeBindingClearOutcome
+where
+    F: FnOnce(&str) -> Result<bool, String>,
+{
+    let tmux_session = observed_tmux_session
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(canonical_tmux_session)
+        .trim()
+        .to_string();
+    match clear(&tmux_session) {
+        Ok(true) => ResumeRuntimeBindingClearOutcome::Cleared { tmux_session },
+        Ok(false) => ResumeRuntimeBindingClearOutcome::AlreadyAbsent { tmux_session },
+        Err(error) => ResumeRuntimeBindingClearOutcome::Failed {
+            tmux_session,
+            error,
+        },
+    }
 }
 
 /// An auto-selected previous-session candidate: the worktree and provider
@@ -677,6 +805,242 @@ mod tests {
 
     fn no_live_bound() -> std::collections::HashSet<String> {
         std::collections::HashSet::new()
+    }
+
+    fn runtime_binding(session_id: &str) -> crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            output_path: format!("/runtime/{session_id}.jsonl"),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some(session_id.to_string()),
+            last_offset: 0,
+            relay_last_offset: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_clears_stale_binding_before_target_launch_selection() {
+        let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_794_101);
+        let tmux = "AgentDesk-claude-resume-production-path";
+        let session_key = "claude/test/host:AgentDesk-claude-resume-production-path";
+        let old_session_id = "11111111-1111-1111-1111-111111111111";
+        let target_session_id = "22222222-2222-2222-2222-222222222222";
+        let old_cwd = tempfile::tempdir().expect("old cwd");
+        let target_cwd = tempfile::tempdir().expect("target cwd");
+        let old_cwd = old_cwd.path().to_str().expect("utf8 old cwd");
+        let target_cwd = target_cwd.path().to_str().expect("utf8 target cwd");
+
+        sqlx::query(
+            "INSERT INTO sessions
+             (session_key, provider, status, cwd, claude_session_id,
+              raw_provider_session_id, last_heartbeat)
+             VALUES ($1, 'claude', 'idle', $2, $3, $3, NOW())",
+        )
+        .bind(session_key)
+        .bind(old_cwd)
+        .bind(old_session_id)
+        .execute(&pool)
+        .await
+        .expect("seed resume session");
+        crate::services::tui_prompt_dedupe::register_provider_session(
+            "claude",
+            old_session_id,
+            tmux,
+        );
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            tmux,
+            runtime_binding(old_session_id),
+        );
+
+        let outcome = perform_resume_rebind(
+            &pool,
+            None,
+            session_key,
+            Some(ProviderKind::Claude),
+            None,
+            tmux,
+            &ResumePreviousOptions {
+                session_id: Some(target_session_id.to_string()),
+                cwd: Some(target_cwd.to_string()),
+            },
+        )
+        .await
+        .expect("resume target");
+        assert_eq!(
+            outcome.runtime_binding_clear,
+            ResumeRuntimeBindingClearOutcome::Cleared {
+                tmux_session: tmux.to_string(),
+            }
+        );
+        crate::services::discord::rebind_channel_session_for_tests(
+            &shared,
+            &ProviderKind::Claude,
+            channel_id,
+            target_cwd,
+            target_session_id,
+        )
+        .await;
+
+        assert!(
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux).is_none(),
+            "the retired runtime must not restore its provider session id"
+        );
+        assert_eq!(
+            crate::services::tui_prompt_dedupe::provider_session_for_tmux("claude", tmux),
+            None
+        );
+        let (selected_session_id, selected_cwd) =
+            crate::services::discord::resume_launch_state_for_tests(&shared, channel_id)
+                .await
+                .expect("target launch state");
+        assert_eq!(selected_session_id.as_deref(), Some(target_session_id));
+        assert_eq!(selected_cwd, target_cwd);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[test]
+    fn resume_prefers_observed_tmux_alias_and_retains_unrelated_bindings() {
+        let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+        let canonical = "AgentDesk-claude-canonical";
+        let observed_alias = "AgentDesk-claude-observed-alias";
+        let unrelated = "AgentDesk-claude-unrelated";
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            canonical,
+            runtime_binding("canonical-old-sid"),
+        );
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            observed_alias,
+            runtime_binding("observed-old-sid"),
+        );
+        crate::services::tui_prompt_dedupe::register_tmux_channel(unrelated, 4_794_199);
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            unrelated,
+            runtime_binding("unrelated-sid"),
+        );
+
+        assert!(matches!(
+            clear_resume_runtime_binding_after_teardown(Some(observed_alias), canonical),
+            ResumeRuntimeBindingClearOutcome::Cleared { .. }
+        ));
+
+        assert!(
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(observed_alias)
+                .is_none()
+        );
+        assert!(
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(canonical)
+                .is_some(),
+            "canonical fallback must not be cleared when teardown observed an alias"
+        );
+        assert!(
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(unrelated)
+                .is_some()
+        );
+        assert_eq!(
+            crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(unrelated),
+            Some(4_794_199)
+        );
+    }
+
+    #[test]
+    fn resume_runtime_binding_clear_absence_is_success() {
+        let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+
+        assert_eq!(
+            clear_resume_runtime_binding_after_teardown(None, "AgentDesk-claude-already-dead",),
+            ResumeRuntimeBindingClearOutcome::AlreadyAbsent {
+                tmux_session: "AgentDesk-claude-already-dead".to_string(),
+            }
+        );
+        assert_eq!(
+            clear_resume_runtime_binding_after_teardown(
+                Some("   "),
+                "AgentDesk-claude-canonical-fallback",
+            ),
+            ResumeRuntimeBindingClearOutcome::AlreadyAbsent {
+                tmux_session: "AgentDesk-claude-canonical-fallback".to_string(),
+            },
+            "a missing observed name must fall back to the canonical parsed tmux name"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_runtime_binding_clear_failure_keeps_durable_target() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let session_key = "claude/test/host:AgentDesk-claude-clear-failure";
+        let tmux = "AgentDesk-claude-clear-failure";
+        let old_session_id = "11111111-1111-1111-1111-111111111111";
+        let target_session_id = "33333333-3333-3333-3333-333333333333";
+        let old_cwd = tempfile::tempdir().expect("old cwd");
+        let target_cwd = tempfile::tempdir().expect("target cwd");
+        let old_cwd = old_cwd.path().to_str().expect("utf8 old cwd");
+        let target_cwd = target_cwd.path().to_str().expect("utf8 target cwd");
+
+        sqlx::query(
+            "INSERT INTO sessions
+             (session_key, provider, status, cwd, claude_session_id,
+              raw_provider_session_id, last_heartbeat)
+             VALUES ($1, 'claude', 'idle', $2, $3, $3, NOW())",
+        )
+        .bind(session_key)
+        .bind(old_cwd)
+        .bind(old_session_id)
+        .execute(&pool)
+        .await
+        .expect("seed resume session");
+
+        let outcome = perform_resume_rebind_with_runtime_clear(
+            &pool,
+            None,
+            session_key,
+            Some(ProviderKind::Claude),
+            None,
+            tmux,
+            &ResumePreviousOptions {
+                session_id: Some(target_session_id.to_string()),
+                cwd: Some(target_cwd.to_string()),
+            },
+            |_| Err("injected runtime binding clear failure".to_string()),
+        )
+        .await
+        .expect("runtime clear failure is best effort");
+        assert!(matches!(
+            outcome.runtime_binding_clear,
+            ResumeRuntimeBindingClearOutcome::Failed { ref error, .. }
+                if error == "injected runtime binding clear failure"
+        ));
+
+        let durable: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT cwd, claude_session_id, raw_provider_session_id
+             FROM sessions WHERE session_key = $1",
+        )
+        .bind(session_key)
+        .fetch_one(&pool)
+        .await
+        .expect("load durable resume target");
+        assert_eq!(durable.0.as_deref(), Some(target_cwd));
+        assert_eq!(durable.1.as_deref(), Some(target_session_id));
+        assert_eq!(durable.2.as_deref(), Some(target_session_id));
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[test]
