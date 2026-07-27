@@ -15,6 +15,14 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "check_test_lane_coverage.py"
+AUTO_QUEUE_POSTGRES_TESTS = {
+    "dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests::finalize_and_patch_accept_ascii_control_whitespace_legacy_provenance",
+    "dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests::finalize_and_patch_reject_mixed_null_and_nonblank_legacy_provenance",
+    "dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests::finalize_and_patch_reject_nonblank_legacy_provenance",
+    "dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests::normal_finalize_infers_legacy_default_only_from_persisted_null_kind",
+    "dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests::patch_completion_reconstructs_legacy_default_and_clears_gate",
+    "services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests::unavailable_deploy_gate_creates_no_database_rows",
+}
 _spec = importlib.util.spec_from_file_location("check_test_lane_coverage", SCRIPT)
 assert _spec and _spec.loader
 coverage = importlib.util.module_from_spec(_spec)
@@ -212,6 +220,40 @@ class LaneFilterTests(unittest.TestCase):
                 inventory["services::auto_queue::tests"],
             )
         )
+
+    def test_auto_queue_postgres_authority_lane_owns_all_six_regressions(self) -> None:
+        inventory = coverage.discover_test_inventory(REPO_ROOT)
+        discovered = set().union(*inventory.values())
+        self.assertEqual(AUTO_QUEUE_POSTGRES_TESTS & discovered, AUTO_QUEUE_POSTGRES_TESTS)
+
+        non_pg = coverage.LaneFilter(
+            ("auto_queue",), ("_pg", "pg_", "postgres")
+        )
+        postgres = coverage.LaneFilter(("_pg", "pg_", "postgres"), ())
+        for test_name in AUTO_QUEUE_POSTGRES_TESTS:
+            with self.subTest(test=test_name):
+                self.assertFalse(non_pg.selects_test(test_name))
+                self.assertTrue(postgres.selects_test(test_name))
+
+    def test_auto_queue_postgres_authority_lane_inventory_match_is_fail_closed(self) -> None:
+        def assert_expected_tests_exist(
+            expected: set[str], discovered: set[str]
+        ) -> None:
+            missing = expected - discovered
+            if missing:
+                raise AssertionError(f"missing expected tests: {sorted(missing)}")
+
+        inventory = coverage.discover_test_inventory(REPO_ROOT)
+        discovered = set().union(*inventory.values())
+        assert_expected_tests_exist(AUTO_QUEUE_POSTGRES_TESTS, discovered)
+        with self.assertRaisesRegex(AssertionError, "missing_regression"):
+            assert_expected_tests_exist(
+                AUTO_QUEUE_POSTGRES_TESTS
+                | {
+                    "dispatch::dispatch_status::auto_queue_phase_gate_finalize_wrapper_tests::postgres_tests::missing_regression"
+                },
+                discovered,
+            )
 
 
 class RatchetTests(unittest.TestCase):
