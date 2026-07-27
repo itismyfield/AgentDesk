@@ -232,7 +232,7 @@
     output policy, recovery marker, and test clusters moved verbatim into
     sub-1000-LoC `watchers/lifecycle/*.rs` modules. The root remains the
     canonical facade and preserves all prior call paths through re-exports.
-  - `src/services/discord/tmux.rs` (frozen giant surface; test-only #4277 re-exports
+  - `src/services/discord/tmux.rs` (frozen giant surface; #4895 removes untyped auth/overload terminal variants and authority-bearing outcome fields; parser diagnostics now use a fixed redacted category while generic error results remain `HardResult`; test-only #4277 re-exports
     the watcher delivery-lease key helper so session-sink production-entry tests
     prove bidirectional contention on the same idle JSONL range; -9 from the #4804
     Windows-compile hotfix moving `footer_background_marker_session_key` into
@@ -334,7 +334,7 @@
     late-frame fresh row B is rejected; -576 from #3841 extracting placeholder
     suppression helpers to `tmux_placeholder_suppression/`;
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (frozen giant surface; #4799 adds thin suppressed-terminal wiring only: footer-owned background completions enqueue one semantic-event-keyed lifecycle marker, while card-owned subagents are deliberately excluded to prevent a duplicate card+marker surface; #4229 S4
+  - `src/services/discord/tmux_watcher.rs` (frozen giant surface; #4895 removes the obsolete auth/overload prose-authority fields from the thin collector→exit wiring; untyped prose now remains a bounded diagnostic and cannot reach provider-clear/tmux-kill/retry execution; #4799 adds thin suppressed-terminal wiring only: footer-owned background completions enqueue one semantic-event-keyed lifecycle marker, while card-owned subagents are deliberately excluded to prevent a duplicate card+marker surface; #4229 S4
     moved the turn stream collector (seed restore/first parse-forward/monitor
     auto-turn claim/active read-parse loop) verbatim to
     `src/services/discord/tmux_watcher/turn_stream_collector.rs` (frozen giant surface), ratcheting

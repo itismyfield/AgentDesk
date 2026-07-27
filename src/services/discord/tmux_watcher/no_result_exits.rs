@@ -36,8 +36,6 @@ pub(super) struct NoResultExitLocals<'a> {
     pub(super) finish_mailbox_on_completion: bool,
     pub(super) startup_inflight_snapshot: Option<InflightTurnState>,
     pub(super) is_prompt_too_long: bool,
-    pub(super) is_auth_error: bool,
-    pub(super) is_provider_overloaded: bool,
     pub(super) prompt_too_long_killed: bool,
     pub(super) terminal_delivery_observed: bool,
     pub(super) active_read_state: Option<ActiveReadState>,
@@ -87,8 +85,6 @@ pub(super) async fn handle_no_result_exits(
         finish_mailbox_on_completion,
         startup_inflight_snapshot,
         is_prompt_too_long,
-        is_auth_error,
-        is_provider_overloaded,
         prompt_too_long_killed,
         terminal_delivery_observed,
         active_read_state,
@@ -738,8 +734,6 @@ pub(super) async fn handle_no_result_exits(
             && !was_paused
             && pause_epoch.load(Ordering::Relaxed) == epoch_snapshot
             && !is_prompt_too_long
-            && !is_auth_error
-            && !is_provider_overloaded
         {
             let ts = chrono::Local::now().format("%H:%M:%S");
             // Wedge is the mailbox token; decide on its CURRENT active-turn id (different/absent = B took over / released).

@@ -7,7 +7,58 @@ pub(super) fn is_prompt_too_long_message(text: &str) -> bool {
         || lower.contains("context window")
 }
 
-pub(super) fn is_auth_error_message(text: &str) -> bool {
+/// A bounded diagnosis category for untyped provider prose.
+///
+/// This type intentionally carries no source text and no terminal authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderProseDiagnostic {
+    Authentication,
+    Overload,
+}
+
+impl ProviderProseDiagnostic {
+    pub(crate) const COUNT: usize = 2;
+
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::Authentication => 0,
+            Self::Overload => 1,
+        }
+    }
+
+    pub(crate) const fn summary(self) -> &'static str {
+        match self {
+            Self::Authentication => "authentication-like provider diagnostic",
+            Self::Overload => "overload-like provider diagnostic",
+        }
+    }
+
+    pub(crate) const fn redacted_content(self) -> &'static str {
+        match self {
+            Self::Authentication => {
+                "Provider emitted authentication-like untyped prose; details redacted."
+            }
+            Self::Overload => "Provider emitted overload-like untyped prose; details redacted.",
+        }
+    }
+}
+
+pub(crate) fn classify_provider_prose_diagnostic(text: &str) -> Option<ProviderProseDiagnostic> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if is_auth_like_prose(trimmed) {
+        Some(ProviderProseDiagnostic::Authentication)
+    } else if is_overload_like_prose(trimmed) {
+        Some(ProviderProseDiagnostic::Overload)
+    } else {
+        None
+    }
+}
+
+fn is_auth_like_prose(text: &str) -> bool {
     let lower = text.to_lowercase();
     lower.contains("not logged in")
         || lower.contains("authentication error")
@@ -29,14 +80,9 @@ pub(super) fn is_auth_error_message(text: &str) -> bool {
                 || lower.contains("expired")))
 }
 
-pub(super) fn detect_provider_overload_message(text: &str) -> Option<String> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let lower = trimmed.to_lowercase();
-    let looks_overloaded = lower.contains("selected model is at capacity")
+fn is_overload_like_prose(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("selected model is at capacity")
         || lower.contains("model is at capacity")
         || (lower.contains("at capacity") && lower.contains("model"))
         || lower.contains("try a different model")
@@ -49,22 +95,26 @@ pub(super) fn detect_provider_overload_message(text: &str) -> Option<String> {
         || lower.contains("server overloaded")
         || lower.contains("service overloaded")
         || lower.contains("overloaded")
-        || lower.contains("please try again later");
-
-    if looks_overloaded {
-        Some(trimmed.to_string())
-    } else {
-        None
-    }
+        || lower.contains("please try again later")
 }
 
 #[cfg(test)]
 mod pure_tests {
-    use super::is_auth_error_message;
+    use super::{ProviderProseDiagnostic, classify_provider_prose_diagnostic};
 
     #[test]
-    fn auth_error_detects_expired_refresh_token_variants() {
-        assert!(is_auth_error_message("refresh token was already used"));
-        assert!(is_auth_error_message("Please log out and sign in again"));
+    fn classifies_auth_and_overload_prose_without_retaining_source_text() {
+        assert_eq!(
+            classify_provider_prose_diagnostic("refresh token was already used"),
+            Some(ProviderProseDiagnostic::Authentication)
+        );
+        assert_eq!(
+            classify_provider_prose_diagnostic("Please log out and sign in again"),
+            Some(ProviderProseDiagnostic::Authentication)
+        );
+        assert_eq!(
+            classify_provider_prose_diagnostic("529 server overloaded"),
+            Some(ProviderProseDiagnostic::Overload)
+        );
     }
 }

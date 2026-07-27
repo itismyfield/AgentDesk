@@ -14,6 +14,8 @@ pub(in crate::services::discord) struct WatcherToolState {
     pub has_post_tool_text: bool,
     /// Structured transcript events collected during watcher replay
     pub transcript_events: Vec<SessionTranscriptEvent>,
+    /// One fixed, redacted event per untyped provider-prose category.
+    prose_diagnostics_recorded: [bool; ProviderProseDiagnostic::COUNT],
     /// Recent user-visible tool/system events for Active placeholder cards.
     placeholder_events: Vec<RecentPlaceholderEvent>,
     /// Provider-normalized status events for the status-panel-v2 message.
@@ -29,6 +31,7 @@ impl WatcherToolState {
             any_tool_used: false,
             has_post_tool_text: false,
             transcript_events: Vec::new(),
+            prose_diagnostics_recorded: [false; ProviderProseDiagnostic::COUNT],
             placeholder_events: Vec::new(),
             status_events: Vec::new(),
         }
@@ -65,6 +68,25 @@ impl WatcherToolState {
             None,
         );
         self.current_tool_line = None;
+    }
+
+    fn record_provider_prose_diagnostic(&mut self, diagnostic: ProviderProseDiagnostic) {
+        let recorded = &mut self.prose_diagnostics_recorded[diagnostic.index()];
+        if *recorded {
+            return;
+        }
+        *recorded = true;
+        push_transcript_event(
+            &mut self.transcript_events,
+            SessionTranscriptEvent {
+                kind: SessionTranscriptEventKind::Error,
+                tool_name: None,
+                summary: Some(diagnostic.summary().to_string()),
+                content: diagnostic.redacted_content().to_string(),
+                status: Some("error".to_string()),
+                is_error: true,
+            },
+        );
     }
 
     fn mark_thinking(&mut self) {
@@ -441,29 +463,15 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
                         },
                     );
 
-                    if is_error {
-                        if is_prompt_too_long_message(&result_str) {
-                            outcome.is_prompt_too_long = true;
-                        }
-                        if is_auth_error_message(&result_str) {
-                            outcome.is_auth_error = true;
-                            outcome.auth_error_message.get_or_insert(result_str.clone());
-                        }
-                        if let Some(message) = detect_provider_overload_message(&result_str) {
-                            outcome.is_provider_overloaded = true;
-                            outcome.provider_overload_message.get_or_insert(message);
-                        }
+                    if is_error && is_prompt_too_long_message(&result_str) {
+                        outcome.is_prompt_too_long = true;
                     }
 
                     // Use result text when streaming didn't capture the final response:
                     // 1. full_response is empty — no text was streamed at all
                     // 2. tools were used but no text was streamed after the last tool
                     //    — append result_str so earlier narration is preserved (#2749)
-                    if !outcome.is_prompt_too_long
-                        && !outcome.is_auth_error
-                        && !outcome.is_provider_overloaded
-                        && !result_str.is_empty()
-                    {
+                    if !outcome.is_prompt_too_long && !result_str.is_empty() {
                         if full_response.trim().is_empty() {
                             full_response.clear();
                             full_response.push_str(&result_str);
@@ -577,91 +585,11 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
                 }
                 _ => {}
             }
-        } else if is_auth_error_message(trimmed) {
-            if let Some(skip) = pre_turn_line_skip(
-                turn_start_offset,
-                line_start_offset,
-                Some(WatcherTerminalKind::AuthError),
-            ) {
-                tracing::info!(
-                    terminal_kind = skip.terminal_kind.as_str(),
-                    evidence_offset = skip.evidence_offset,
-                    turn_start_offset = skip.turn_start_offset,
-                    "tmux watcher skipped terminal evidence before this turn's start offset"
-                );
-                outcome.pre_turn_bytes_skipped =
-                    outcome.pre_turn_bytes_skipped.saturating_add(line_len);
-                continue;
-            }
-            if pre_turn_line {
-                outcome.pre_turn_bytes_skipped =
-                    outcome.pre_turn_bytes_skipped.saturating_add(line_len);
-                continue;
-            }
-            outcome.found_result = true;
-            outcome.terminal_kind = Some(WatcherTerminalKind::AuthError);
-            outcome.terminal_evidence_offset = line_start_offset;
-            outcome.is_auth_error = true;
-            outcome
-                .auth_error_message
-                .get_or_insert(trimmed.to_string());
-            push_transcript_event(
-                &mut tool_state.transcript_events,
-                SessionTranscriptEvent {
-                    kind: SessionTranscriptEventKind::Error,
-                    tool_name: None,
-                    summary: Some("authentication error".to_string()),
-                    content: trimmed.to_string(),
-                    status: Some("error".to_string()),
-                    is_error: true,
-                },
-            );
-            state.final_result = Some(String::new());
-            // #1216: see `result` arm — stop after a turn-terminating event.
-            break;
-        } else if let Some(message) = detect_provider_overload_message(trimmed) {
-            if let Some(skip) = pre_turn_line_skip(
-                turn_start_offset,
-                line_start_offset,
-                Some(WatcherTerminalKind::ProviderOverload),
-            ) {
-                tracing::info!(
-                    terminal_kind = skip.terminal_kind.as_str(),
-                    evidence_offset = skip.evidence_offset,
-                    turn_start_offset = skip.turn_start_offset,
-                    "tmux watcher skipped terminal evidence before this turn's start offset"
-                );
-                outcome.pre_turn_bytes_skipped =
-                    outcome.pre_turn_bytes_skipped.saturating_add(line_len);
-                continue;
-            }
-            if pre_turn_line {
-                outcome.pre_turn_bytes_skipped =
-                    outcome.pre_turn_bytes_skipped.saturating_add(line_len);
-                continue;
-            }
-            outcome.found_result = true;
-            outcome.terminal_kind = Some(WatcherTerminalKind::ProviderOverload);
-            outcome.terminal_evidence_offset = line_start_offset;
-            outcome.is_provider_overloaded = true;
-            outcome.provider_overload_message.get_or_insert(message);
-            push_transcript_event(
-                &mut tool_state.transcript_events,
-                SessionTranscriptEvent {
-                    kind: SessionTranscriptEventKind::Error,
-                    tool_name: None,
-                    summary: Some("provider overload".to_string()),
-                    content: trimmed.to_string(),
-                    status: Some("error".to_string()),
-                    is_error: true,
-                },
-            );
-            state.final_result = Some(String::new());
-            // #1216: see `result` arm — stop after a turn-terminating event.
-            break;
         } else if pre_turn_line {
             outcome.pre_turn_bytes_skipped =
                 outcome.pre_turn_bytes_skipped.saturating_add(line_len);
+        } else if let Some(diagnostic) = classify_provider_prose_diagnostic(trimmed) {
+            tool_state.record_provider_prose_diagnostic(diagnostic);
         }
     }
 
@@ -769,6 +697,134 @@ mod tests {
 
     mod provider_output_guard_tests {
         include!("tmux_output_stream/provider_output_guard_tests.rs");
+    }
+
+    fn parse_lines(
+        input: &str,
+    ) -> (
+        WatcherLineOutcome,
+        String,
+        WatcherToolState,
+        StreamLineState,
+    ) {
+        let mut buffer = input.to_string();
+        let mut state = StreamLineState::new();
+        let mut full_response = String::new();
+        let mut tool_state = WatcherToolState::new();
+        let outcome =
+            process_watcher_lines(&mut buffer, &mut state, &mut full_response, &mut tool_state);
+        assert!(buffer.is_empty());
+        (outcome, full_response, tool_state, state)
+    }
+
+    #[test]
+    fn generic_auth_and_overload_error_results_remain_hard_results() {
+        for diagnostic in [
+            "oauth token expired while explaining an error code",
+            "529 server overloaded; please try again later",
+            "Error: Unknown Codex error: unauthorized",
+            "Error: Unknown Qwen error: rate limit",
+        ] {
+            let input = serde_json::json!({
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": true,
+                "result": diagnostic,
+                "session_id": "sess-generic-error",
+            })
+            .to_string()
+                + "\n";
+            let (outcome, full_response, tool_state, _) = parse_lines(&input);
+
+            assert!(outcome.found_result, "diagnostic={diagnostic}");
+            assert_eq!(
+                outcome.terminal_kind,
+                Some(WatcherTerminalKind::HardResult),
+                "diagnostic={diagnostic}"
+            );
+            assert_eq!(full_response, diagnostic);
+            assert_eq!(tool_state.transcript_events.len(), 1);
+            assert_eq!(tool_state.transcript_events[0].content, diagnostic);
+        }
+    }
+
+    #[test]
+    fn bare_provider_prose_is_non_terminal_and_redacted() {
+        for (prose, expected) in [
+            (
+                "oauth credential=raw-auth-secret",
+                ProviderProseDiagnostic::Authentication,
+            ),
+            (
+                "unauthorized token=raw-unauthorized-secret",
+                ProviderProseDiagnostic::Authentication,
+            ),
+            (
+                "token expired raw-token-secret",
+                ProviderProseDiagnostic::Authentication,
+            ),
+            (
+                "529 server overloaded raw-overload-detail",
+                ProviderProseDiagnostic::Overload,
+            ),
+        ] {
+            let (outcome, full_response, tool_state, state) = parse_lines(&format!("{prose}\n"));
+
+            assert!(!outcome.found_result, "prose={prose}");
+            assert_eq!(outcome.terminal_kind, None, "prose={prose}");
+            assert_eq!(outcome.terminal_evidence_offset, None, "prose={prose}");
+            assert!(full_response.is_empty());
+            assert!(state.final_result.is_none());
+            assert_eq!(tool_state.transcript_events.len(), 1);
+            let event = &tool_state.transcript_events[0];
+            assert_eq!(event.summary.as_deref(), Some(expected.summary()));
+            assert_eq!(event.content, expected.redacted_content());
+            assert!(!event.content.contains("raw-"));
+        }
+    }
+
+    #[test]
+    fn unique_provider_prose_flood_uses_fixed_category_slots() {
+        let mut input = String::new();
+        for index in 0..500 {
+            input.push_str(&format!("oauth unique-auth-secret-{index}\n"));
+            input.push_str(&format!("529 server overloaded unique-overload-{index}\n"));
+        }
+
+        let (outcome, full_response, tool_state, state) = parse_lines(&input);
+
+        assert!(!outcome.found_result);
+        assert_eq!(outcome.terminal_kind, None);
+        assert_eq!(outcome.terminal_evidence_offset, None);
+        assert!(full_response.is_empty());
+        assert!(state.final_result.is_none());
+        assert_eq!(
+            tool_state.transcript_events.len(),
+            ProviderProseDiagnostic::COUNT
+        );
+        assert!(
+            tool_state
+                .transcript_events
+                .iter()
+                .all(|event| !event.content.contains("unique-"))
+        );
+    }
+
+    #[test]
+    fn string_api_error_envelope_has_no_terminal_authority() {
+        let envelope = "[API Error: unauthorized oauth token expired]";
+        let (outcome, full_response, tool_state, state) = parse_lines(&format!("{envelope}\n"));
+
+        assert!(!outcome.found_result);
+        assert_eq!(outcome.terminal_kind, None);
+        assert_eq!(outcome.terminal_evidence_offset, None);
+        assert!(full_response.is_empty());
+        assert!(state.final_result.is_none());
+        assert_eq!(tool_state.transcript_events.len(), 1);
+        assert_eq!(
+            tool_state.transcript_events[0].content,
+            ProviderProseDiagnostic::Authentication.redacted_content()
+        );
     }
 
     #[test]
