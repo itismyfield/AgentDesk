@@ -499,8 +499,12 @@ async fn run_single_slow_idle_queue_backstop(
     provider: &ProviderKind,
     channel_id: ChannelId,
     reason: &'static str,
+    wake: &tokio::sync::Notify,
 ) -> Option<IdleQueueBackstopRearm> {
-    tokio::time::sleep(DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY).await;
+    let timed_out = tokio::select! {
+        _ = tokio::time::sleep(DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY) => true,
+        _ = wake.notified() => false,
+    };
     let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
     let backlog_units =
         idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot);
@@ -508,13 +512,15 @@ async fn run_single_slow_idle_queue_backstop(
         return None;
     }
 
-    emit_idle_queue_backstop_warn(
-        provider,
-        Some(channel_id),
-        reason,
-        backlog_units,
-        "channel_backstop",
-    );
+    if timed_out {
+        emit_idle_queue_backstop_warn(
+            provider,
+            Some(channel_id),
+            reason,
+            backlog_units,
+            "channel_backstop",
+        );
+    }
     let _outcome =
         kick_idle_queue_channel_if_context_available(shared, provider, channel_id, reason).await;
 
@@ -547,7 +553,7 @@ fn schedule_single_slow_idle_queue_backstop(
     reason: &'static str,
     backlog_units: usize,
 ) -> bool {
-    match shared.restart.deferred_hook_channels.entry(channel_id) {
+    let wake = match shared.restart.deferred_hook_channels.entry(channel_id) {
         dashmap::mapref::entry::Entry::Occupied(_) => {
             tracing::debug!(
                 provider = provider.as_str(),
@@ -559,7 +565,9 @@ fn schedule_single_slow_idle_queue_backstop(
             return false;
         }
         dashmap::mapref::entry::Entry::Vacant(entry) => {
-            entry.insert(Arc::new(tokio::sync::Notify::new()));
+            let wake = Arc::new(tokio::sync::Notify::new());
+            entry.insert(wake.clone());
+            wake
         }
     };
     shared
@@ -573,7 +581,8 @@ fn schedule_single_slow_idle_queue_backstop(
             active: true,
         };
         let rearm =
-            run_single_slow_idle_queue_backstop(&shared, &provider, channel_id, reason).await;
+            run_single_slow_idle_queue_backstop(&shared, &provider, channel_id, reason, &wake)
+                .await;
         backlog_guard.release();
         if let Some(rearm) = rearm {
             schedule_single_slow_idle_queue_backstop(
@@ -724,7 +733,7 @@ fn schedule_deferred_idle_queue_kickoff_inner(
     reason: &'static str,
     profile: DeferredIdleQueueKickoffProfile,
 ) {
-    match shared.restart.deferred_hook_channels.entry(channel_id) {
+    let wake = match shared.restart.deferred_hook_channels.entry(channel_id) {
         dashmap::mapref::entry::Entry::Occupied(entry) => {
             if profile.wakes_existing_task() {
                 entry.get().notify_one();
@@ -740,7 +749,9 @@ fn schedule_deferred_idle_queue_kickoff_inner(
             return;
         }
         dashmap::mapref::entry::Entry::Vacant(entry) => {
-            entry.insert(Arc::new(tokio::sync::Notify::new()));
+            let wake = Arc::new(tokio::sync::Notify::new());
+            entry.insert(wake.clone());
+            wake
         }
     };
     shared
@@ -758,7 +769,10 @@ fn schedule_deferred_idle_queue_kickoff_inner(
 
         let initial_presleep = profile.initial_presleep();
         if !initial_presleep.is_zero() {
-            tokio::time::sleep(initial_presleep).await;
+            tokio::select! {
+                _ = tokio::time::sleep(initial_presleep) => {}
+                _ = wake.notified() => {}
+            }
         }
 
         let _ =
@@ -766,7 +780,8 @@ fn schedule_deferred_idle_queue_kickoff_inner(
                 .await;
 
         let rearm =
-            run_single_slow_idle_queue_backstop(&shared, &provider, channel_id, reason).await;
+            run_single_slow_idle_queue_backstop(&shared, &provider, channel_id, reason, &wake)
+                .await;
         backlog_guard.release();
         if let Some(rearm) = rearm {
             schedule_single_slow_idle_queue_backstop(
