@@ -133,6 +133,11 @@ LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY = (
 GAP_TRANSCRIPT_KEY = "gap_transcript"
 GAP_OWNER_TRANSCRIPTS_KEY = "gap_owner_transcripts"
 RECOVERED_GAP_GUARDS_KEY = "recovered_gap_replay_guards"
+ISSUE_FILING_SUPPRESSION_REASON_KEY = "issue_filing_suppression_reason"
+ISSUE_FILING_SUPPRESSION_SINCE_KEY = "issue_filing_suppression_since"
+ISSUE_FILING_REACHABLE_TICKS_KEY = "issue_filing_reachable_ticks"
+ISSUE_FILING_REACHABLE_TICKS_REQUIRED = 2
+ISSUE_FILING_DC_UNREACHABLE_REASON = "dcserver_transport_unreachable"
 MAX_TRANSCRIPT_HISTORY = 64
 MAX_KNOWN_TRANSCRIPTS = 256
 MAX_PENDING_TRANSCRIPTS = 32
@@ -1470,6 +1475,7 @@ class WatcherStateProbe:
     # Local-time bridge heartbeat copied from the watcher-state snapshot. Missing
     # or malformed values remain None so coverage corroboration fails closed.
     inflight_updated_at: float | None = None
+    response_malformed: bool = False
 
 
 def canonical_session_uuid(value: object) -> str | None:
@@ -1490,7 +1496,7 @@ def parse_watcher_state_probe(
     if status != 200:
         return WatcherStateProbe(status)
     if not isinstance(payload, Mapping):
-        return WatcherStateProbe(200)
+        return WatcherStateProbe(200, response_malformed=True)
 
     attached_raw = payload.get("attached")
     desynced_raw = payload.get("desynced")
@@ -1498,6 +1504,9 @@ def parse_watcher_state_probe(
     bound_session_id_raw = payload.get("bound_session_id")
     attached = attached_raw if isinstance(attached_raw, bool) else None
     desynced = desynced_raw if isinstance(desynced_raw, bool) else None
+    response_malformed = not isinstance(attached_raw, bool) or not isinstance(
+        desynced_raw, bool
+    )
     bound = bound_output_path if isinstance(bound_output_path, str) else None
     bound_session_id = canonical_session_uuid(bound_session_id_raw)
     inflight_updated_at = parse_local_timestamp(payload.get("inflight_updated_at"))
@@ -1513,6 +1522,7 @@ def parse_watcher_state_probe(
             bound,
             bound_session_id=bound_session_id,
             inflight_updated_at=inflight_updated_at,
+            response_malformed=response_malformed,
         )
 
     malformed = False
@@ -1538,6 +1548,7 @@ def parse_watcher_state_probe(
             ),
             bound_session_id,
             inflight_updated_at,
+            True,
         )
 
     def string_field(key: str) -> tuple[str | None, bool]:
@@ -1622,6 +1633,7 @@ def parse_watcher_state_probe(
         ),
         bound_session_id,
         inflight_updated_at,
+        response_malformed or malformed,
     )
 
 
@@ -2257,7 +2269,7 @@ class Runtime:
         try:
             payload = json.loads(body)
         except json.JSONDecodeError:
-            return WatcherStateProbe(200)
+            return WatcherStateProbe(200, response_malformed=True)
         return parse_watcher_state_probe(200, payload)
 
     def discord_haystack(self, channel_id: str) -> str | None:
@@ -3037,6 +3049,58 @@ def _alert_pending_retirement(
     return True
 
 
+def _reset_issue_filing_suppression(channel_state: dict[str, Any]) -> None:
+    channel_state.pop(ISSUE_FILING_SUPPRESSION_REASON_KEY, None)
+    channel_state.pop(ISSUE_FILING_SUPPRESSION_SINCE_KEY, None)
+    channel_state.pop(ISSUE_FILING_REACHABLE_TICKS_KEY, None)
+
+
+def _issue_filing_stable(
+    channel_state: dict[str, Any], probe: WatcherStateProbe, now: float
+) -> bool:
+    """Defer filing only for transport-level dcserver unreachability."""
+    suppression_active = (
+        channel_state.get(ISSUE_FILING_SUPPRESSION_REASON_KEY)
+        == ISSUE_FILING_DC_UNREACHABLE_REASON
+        and _is_finite_nonnegative_number(
+            channel_state.get(ISSUE_FILING_SUPPRESSION_SINCE_KEY)
+        )
+    )
+    if not suppression_active:
+        _reset_issue_filing_suppression(channel_state)
+
+    if probe.status is None:
+        if not suppression_active:
+            channel_state[ISSUE_FILING_SUPPRESSION_REASON_KEY] = (
+                ISSUE_FILING_DC_UNREACHABLE_REASON
+            )
+            channel_state[ISSUE_FILING_SUPPRESSION_SINCE_KEY] = now
+        channel_state[ISSUE_FILING_REACHABLE_TICKS_KEY] = 0
+        return False
+
+    if probe.status in (200, 404) and not probe.response_malformed:
+        if not suppression_active:
+            return True
+        raw_ticks = channel_state.get(ISSUE_FILING_REACHABLE_TICKS_KEY, 0)
+        ticks = (
+            raw_ticks
+            if isinstance(raw_ticks, int)
+            and not isinstance(raw_ticks, bool)
+            and raw_ticks >= 0
+            else 0
+        )
+        ticks += 1
+        channel_state[ISSUE_FILING_REACHABLE_TICKS_KEY] = ticks
+        if ticks < ISSUE_FILING_REACHABLE_TICKS_REQUIRED:
+            return False
+        _reset_issue_filing_suppression(channel_state)
+        return True
+
+    if suppression_active:
+        channel_state[ISSUE_FILING_REACHABLE_TICKS_KEY] = 0
+    return True
+
+
 def _clear_gap_alert_without_recovery(
     rt: Runtime,
     channel_state: dict[str, Any],
@@ -3084,6 +3148,7 @@ def _clear_gap_alert_without_recovery(
     channel_state.pop("alerting", None)
     channel_state.pop("gap_since", None)
     channel_state.pop("issue_url", None)
+    _reset_issue_filing_suppression(channel_state)
     channel_state.pop(GAP_TRANSCRIPT_KEY, None)
     channel_state.pop(GAP_OWNER_TRANSCRIPTS_KEY, None)
     return True
@@ -3924,6 +3989,7 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             chs.pop("alerting", None)
             chs.pop("gap_since", None)
             chs.pop("issue_url", None)
+            _reset_issue_filing_suppression(chs)
             chs.pop(GAP_TRANSCRIPT_KEY, None)
             chs.pop(GAP_OWNER_TRANSCRIPTS_KEY, None)
         rt.log(
@@ -3946,17 +4012,25 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
                 f"(marker < {cfg.deploy_quiet_secs}s old)"
             )
             return
+        issue_filing_stable = _issue_filing_stable(chs, selected_probe, now)
         gap_min = int(v.gap_secs // 60) if v.delivered_ts else 999
         if not chs.get("gap_since"):
             chs["gap_since"] = now
-        if (
-            cfg.github_repo
+        issue_due = (
+            bool(cfg.github_repo)
             and not chs.get("issue_url")
             and now - float(chs["gap_since"]) >= cfg.issue_after_secs
-        ):
+        )
+        if issue_due and issue_filing_stable:
             url = rt.file_github_issue(ch, gap_min, v.lost)
             if url:
                 chs["issue_url"] = url
+        elif issue_due:
+            rt.log(
+                f"[{cid}] issue filing deferred "
+                f"reason={chs.get(ISSUE_FILING_SUPPRESSION_REASON_KEY)} "
+                f"reachable_ticks={chs.get(ISSUE_FILING_REACHABLE_TICKS_KEY, 0)}"
+            )
         if now - float(chs.get("last_alert", 0)) >= cfg.realert_secs:
             issue_line = (
                 f"\n자동 등록 이슈: {chs['issue_url']}" if chs.get("issue_url") else ""
@@ -4006,6 +4080,7 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         chs.pop("alerting", None)
         chs.pop("gap_since", None)
         chs.pop("issue_url", None)
+        _reset_issue_filing_suppression(chs)
         chs.pop(GAP_TRANSCRIPT_KEY, None)
         chs.pop(GAP_OWNER_TRANSCRIPTS_KEY, None)
         rt.log(

@@ -1360,7 +1360,10 @@ class WatcherStateParserTests(unittest.TestCase):
         self.assertTrue(verdict.confirmed)
 
     def test_non_mapping_and_non_200_never_invent_activity(self):
-        self.assertEqual(parse_watcher_state_probe(200, []), WatcherStateProbe(200))
+        self.assertEqual(
+            parse_watcher_state_probe(200, []),
+            WatcherStateProbe(200, response_malformed=True),
+        )
         self.assertEqual(
             parse_watcher_state_probe(404, self.payload()), WatcherStateProbe(404)
         )
@@ -2151,7 +2154,9 @@ class RuntimeCoverageProbeTests(unittest.TestCase):
         )
         with mock.patch.object(relay_watchdog.subprocess, "run", return_value=completed):
             probe = self.make_rt().watcher_state("999")
-        self.assertEqual(probe, WatcherStateProbe(200, None, None))
+        self.assertEqual(
+            probe, WatcherStateProbe(200, None, None, response_malformed=True)
+        )
 
     def test_direct_node_snapshot_does_not_report_tunnel_closed(self):
         calls: list[list[str]] = []
@@ -6098,6 +6103,7 @@ class TickChannelTests(unittest.TestCase):
     # (d) persistent-gap issue auto-filing is deduplicated
     def test_persistent_gap_files_issue_exactly_once(self):
         rt = self.gap_rt(github_repo="owner/repo")
+        rt.watcher_probe = WatcherStateProbe(200, True, False)
         state = {"999": {"gap_since": self.now - rt.cfg.issue_after_secs - 1}}
         tick_channel(rt, TICK_CHANNEL, state, self.now)
         self.assertEqual(rt.issue_calls, 1)
@@ -6113,6 +6119,218 @@ class TickChannelTests(unittest.TestCase):
         state = {"999": {"gap_since": self.now - rt.cfg.issue_after_secs - 1}}
         tick_channel(rt, TICK_CHANNEL, state, self.now)
         self.assertEqual(rt.issue_calls, 0)
+
+    def test_unreachable_gap_defers_issue_but_preserves_alert_and_evidence(self):
+        rt = self.gap_rt(github_repo="owner/repo")
+        rt.watcher_probe = WatcherStateProbe(None)
+        incident_age = rt.cfg.issue_after_secs + 60
+        transcript = self.proj_dir / "s.jsonl"
+        recovered_guard = {
+            "size": transcript.stat().st_size,
+            "confirmed_at": self.now - 120,
+            "last_seen_at": self.now - 60,
+            "absent_since": None,
+        }
+        state = {
+            "999": {
+                "gap_since": self.now - incident_age,
+                relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY: [str(transcript)],
+                relay_watchdog.RECOVERED_GAP_GUARDS_KEY: {
+                    str(transcript): recovered_guard
+                },
+            }
+        }
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        chs = state["999"]
+        self.assertEqual(rt.issue_calls, 0)
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertIn("릴레이 갭 감지", rt.alerts[0][0])
+        self.assertEqual(chs["gap_since"], self.now - incident_age)
+        self.assertEqual(
+            chs[relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY],
+            [str(self.proj_dir / "s.jsonl")],
+        )
+        self.assertEqual(
+            chs[relay_watchdog.RECOVERED_GAP_GUARDS_KEY][str(transcript)][
+                "confirmed_at"
+            ],
+            recovered_guard["confirmed_at"],
+        )
+        self.assertTrue(chs.get("alerting"))
+        self.assertEqual(
+            chs[relay_watchdog.ISSUE_FILING_SUPPRESSION_REASON_KEY],
+            relay_watchdog.ISSUE_FILING_DC_UNREACHABLE_REASON,
+        )
+        self.assertEqual(
+            chs[relay_watchdog.ISSUE_FILING_SUPPRESSION_SINCE_KEY], self.now
+        )
+        self.assertEqual(chs[relay_watchdog.ISSUE_FILING_REACHABLE_TICKS_KEY], 0)
+
+    def test_repeated_unreachable_ticks_preserve_incident_clock(self):
+        rt = self.gap_rt(github_repo="owner/repo", realert_secs=1)
+        rt.watcher_probe = WatcherStateProbe(None)
+        original_gap_since = self.now - rt.cfg.issue_after_secs - 600
+        state = {"999": {"gap_since": original_gap_since}}
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+
+        chs = state["999"]
+        self.assertEqual(rt.issue_calls, 0)
+        self.assertEqual(len(rt.alerts), 2)
+        self.assertEqual(chs["gap_since"], original_gap_since)
+        self.assertEqual(
+            chs[relay_watchdog.ISSUE_FILING_SUPPRESSION_SINCE_KEY], self.now
+        )
+        self.assertEqual(chs[relay_watchdog.ISSUE_FILING_REACHABLE_TICKS_KEY], 0)
+
+    def test_two_reachable_ticks_resume_old_incident_exactly_once(self):
+        rt = self.gap_rt(github_repo="owner/repo")
+        rt.watcher_probe = WatcherStateProbe(None)
+        original_gap_since = self.now - rt.cfg.issue_after_secs - 300
+        state = {"999": {"gap_since": original_gap_since}}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        rt.watcher_probe = WatcherStateProbe(200, True, False)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        self.assertEqual(rt.issue_calls, 0)
+        self.assertEqual(
+            state["999"][relay_watchdog.ISSUE_FILING_REACHABLE_TICKS_KEY], 1
+        )
+        self.assertEqual(state["999"]["gap_since"], original_gap_since)
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        self.assertEqual(rt.issue_calls, 1)
+        self.assertEqual(
+            state["999"]["issue_url"], "https://example.test/issues/1"
+        )
+        self.assertEqual(state["999"]["gap_since"], original_gap_since)
+        self.assertNotIn(
+            relay_watchdog.ISSUE_FILING_SUPPRESSION_REASON_KEY, state["999"]
+        )
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+        self.assertEqual(rt.issue_calls, 1)
+
+    def test_reachable_flap_resets_two_tick_counter(self):
+        rt = self.gap_rt(github_repo="owner/repo")
+        state = {
+            "999": {
+                "gap_since": self.now - rt.cfg.issue_after_secs - 1,
+                relay_watchdog.ISSUE_FILING_SUPPRESSION_REASON_KEY: (
+                    relay_watchdog.ISSUE_FILING_DC_UNREACHABLE_REASON
+                ),
+                relay_watchdog.ISSUE_FILING_SUPPRESSION_SINCE_KEY: self.now - 10,
+                relay_watchdog.ISSUE_FILING_REACHABLE_TICKS_KEY: 0,
+            }
+        }
+
+        rt.watcher_probe = WatcherStateProbe(200, True, False)
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        rt.watcher_probe = WatcherStateProbe(None)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        rt.watcher_probe = WatcherStateProbe(404)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        self.assertEqual(rt.issue_calls, 0)
+        self.assertEqual(
+            state["999"][relay_watchdog.ISSUE_FILING_REACHABLE_TICKS_KEY], 1
+        )
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+        self.assertEqual(rt.issue_calls, 1)
+
+    def test_404_counts_as_reachable_for_issue_resume(self):
+        rt = self.gap_rt(github_repo="owner/repo")
+        state = {
+            "999": {
+                "gap_since": self.now - rt.cfg.issue_after_secs - 1,
+                relay_watchdog.ISSUE_FILING_SUPPRESSION_REASON_KEY: (
+                    relay_watchdog.ISSUE_FILING_DC_UNREACHABLE_REASON
+                ),
+                relay_watchdog.ISSUE_FILING_SUPPRESSION_SINCE_KEY: self.now - 10,
+                relay_watchdog.ISSUE_FILING_REACHABLE_TICKS_KEY: 0,
+            }
+        }
+        rt.watcher_probe = WatcherStateProbe(404)
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+
+        self.assertEqual(rt.issue_calls, 1)
+
+    def test_5xx_and_malformed_200_are_not_unreachable_suppression_authority(self):
+        probes = (
+            WatcherStateProbe(503),
+            parse_watcher_state_probe(200, {"attached": "malformed"}),
+        )
+        for probe in probes:
+            with self.subTest(probe=probe):
+                rt = self.gap_rt(github_repo="owner/repo")
+                rt.watcher_probe = probe
+                state = {
+                    "999": {
+                        "gap_since": self.now - rt.cfg.issue_after_secs - 1
+                    }
+                }
+
+                tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+                self.assertEqual(rt.issue_calls, 1)
+                self.assertNotIn(
+                    relay_watchdog.ISSUE_FILING_SUPPRESSION_REASON_KEY,
+                    state["999"],
+                )
+
+    def test_bad_responses_reset_reachable_counter(self):
+        probes = (
+            WatcherStateProbe(503),
+            parse_watcher_state_probe(200, {"attached": "malformed"}),
+        )
+        for probe in probes:
+            with self.subTest(probe=probe):
+                rt = self.gap_rt(github_repo="owner/repo")
+                rt.watcher_probe = probe
+                original_since = self.now - 10
+                state = {
+                    "999": {
+                        "gap_since": self.now - rt.cfg.issue_after_secs + 100,
+                        relay_watchdog.ISSUE_FILING_SUPPRESSION_REASON_KEY: (
+                            relay_watchdog.ISSUE_FILING_DC_UNREACHABLE_REASON
+                        ),
+                        relay_watchdog.ISSUE_FILING_SUPPRESSION_SINCE_KEY: original_since,
+                        relay_watchdog.ISSUE_FILING_REACHABLE_TICKS_KEY: 1,
+                    }
+                }
+
+                tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+                self.assertEqual(rt.issue_calls, 0)
+                self.assertEqual(
+                    state["999"][relay_watchdog.ISSUE_FILING_REACHABLE_TICKS_KEY],
+                    0,
+                )
+                self.assertEqual(
+                    state["999"][relay_watchdog.ISSUE_FILING_SUPPRESSION_SINCE_KEY],
+                    original_since,
+                )
+
+    def test_planned_deploy_still_returns_before_gap_incident_state(self):
+        rt = self.gap_rt(github_repo="owner/repo")
+        rt.watcher_probe = WatcherStateProbe(None)
+        rt.deploy_marker.touch()
+        state: dict = {}
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        chs = state["999"]
+        self.assertEqual(rt.alerts, [])
+        self.assertEqual(rt.issue_calls, 0)
+        self.assertNotIn("gap_since", chs)
+        self.assertNotIn(
+            relay_watchdog.ISSUE_FILING_SUPPRESSION_REASON_KEY, chs
+        )
 
     # (e) consecutive discord-read failures escalate to an alert
     def test_read_failure_threshold_escalates(self):
