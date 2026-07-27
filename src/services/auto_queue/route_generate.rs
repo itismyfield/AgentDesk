@@ -774,44 +774,49 @@ mod deploy_gate_request_rejection_tests {
         );
     }
 
-    #[tokio::test]
-    async fn unavailable_deploy_gate_creates_no_database_rows() {
-        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-        let pool = pg_db.connect_and_migrate().await;
-        let runs_before =
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM auto_queue_runs")
-                .fetch_one(&pool)
-                .await
-                .expect("count auto-queue runs before request"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
-        let entries_before =
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM auto_queue_entries")
-                .fetch_one(&pool)
-                .await
-                .expect("count auto-queue entries before request"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+    #[cfg(test)]
+    mod postgres_tests {
+        use super::*;
 
-        let error = generate(
-            State(state_with_postgres(Some(pool.clone()))),
-            Json(body("deploy-gate")),
-        )
-        .await
-        .expect_err("unavailable deploy-gate must be rejected");
-        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM auto_queue_runs")
-                .fetch_one(&pool)
-                .await
-                .expect("count auto-queue runs after request"), // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
-            runs_before
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM auto_queue_entries")
-                .fetch_one(&pool)
-                .await
-                .expect("count auto-queue entries after request"), // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
-            entries_before
-        );
+        #[tokio::test]
+        async fn unavailable_deploy_gate_creates_no_database_rows() {
+            let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+            let pool = pg_db.connect_and_migrate().await;
+            let runs_before =
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM auto_queue_runs")
+                    .fetch_one(&pool)
+                    .await
+                    .expect("count auto-queue runs before request"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+            let entries_before =
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM auto_queue_entries")
+                    .fetch_one(&pool)
+                    .await
+                    .expect("count auto-queue entries before request"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
 
-        pool.close().await;
-        pg_db.drop().await;
+            let error = generate(
+                State(state_with_postgres(Some(pool.clone()))),
+                Json(body("deploy-gate")),
+            )
+            .await
+            .expect_err("unavailable deploy-gate must be rejected");
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM auto_queue_runs")
+                    .fetch_one(&pool)
+                    .await
+                    .expect("count auto-queue runs after request"), // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+                runs_before
+            );
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM auto_queue_entries")
+                    .fetch_one(&pool)
+                    .await
+                    .expect("count auto-queue entries after request"), // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
+                entries_before
+            );
+
+            pool.close().await;
+            pg_db.drop().await;
+        }
     }
 }

@@ -90,6 +90,14 @@ class LaneFilter:
     skips: tuple[str, ...]
     exact: bool = False
 
+    def selects_test(self, test_name: str) -> bool:
+        """Whether libtest selects one fully qualified test name."""
+        def matches(pattern: str) -> bool:
+            return pattern == test_name if self.exact else pattern in test_name
+
+        positive_match = not self.positives or any(map(matches, self.positives))
+        return positive_match and not any(map(matches, self.skips))
+
     def fully_selects(self, module: str, test_names: Iterable[str]) -> bool:
         """Whether this command selects every discovered test in the module.
 
@@ -102,15 +110,9 @@ class LaneFilter:
         positive_match = not self.positives or any(
             positive in module for positive in self.positives
         )
-        if not positive_match:
+        if not positive_match or any(skip in module for skip in self.skips):
             return False
-        if any(skip in module for skip in self.skips):
-            return False
-        return not any(
-            skip in test_name
-            for test_name in test_names
-            for skip in self.skips
-        )
+        return all(self.selects_test(test_name) for test_name in test_names)
 
 
 class StripState:
