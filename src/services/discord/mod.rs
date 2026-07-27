@@ -1255,8 +1255,13 @@ impl TmuxWatcherRegistry {
         tmux_session_name: &str,
         channel_id: ChannelId,
     ) -> bool {
-        self.restore_owner_channel_for_tmux_session(tmux_session_name, channel_id);
-        self.owner_channel_for_tmux_session(tmux_session_name) == Some(channel_id)
+        let _guard = lock_tmux_watcher_registry();
+        if self.owner_channel_for_tmux_session(tmux_session_name) == Some(channel_id) {
+            self.restored_owner_by_tmux_session
+                .insert(tmux_session_name.to_string(), channel_id);
+            return true;
+        }
+        false
     }
 
     /// #3105 (codex P1 sub-case B): true when a LIVE watcher handle currently
@@ -1341,6 +1346,26 @@ mod tmux_watcher_registry_restore_tests {
         assert!(
             !registry.restore_owner_channel_for_tmux_session(tmux, channel),
             "unchanged restore must not re-report a change"
+        );
+    }
+
+    #[test]
+    fn session_rebind_retains_owner_after_watcher_teardown() {
+        let registry = TmuxWatcherRegistry::new();
+        let tmux = "AgentDesk-claude-adk-cc";
+        let channel = ChannelId::new(4794);
+
+        let handle = live_watcher_handle(tmux);
+        let cancel = handle.cancel.clone();
+        registry.insert(channel, handle);
+        assert!(registry.retain_owner_during_session_rebind(tmux, channel));
+        assert_eq!(registry.owner_channel_for_tmux_session(tmux), Some(channel));
+
+        registry.remove_tmux_session_if_current(tmux, &cancel);
+        assert_eq!(
+            registry.owner_channel_for_tmux_session(tmux),
+            Some(channel),
+            "the owner-only binding must bridge watcher teardown until pane death"
         );
     }
 

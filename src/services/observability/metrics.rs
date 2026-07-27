@@ -482,6 +482,19 @@ mod tests {
     use crate::db::dispatched_session_canonical_identity::SessionIdentityConflictKind;
 
     #[test]
+    fn permanent_relay_loss_is_additive_and_exposed() {
+        let counters = ObservabilityCounters::new();
+        counters.record_relay_permanent_loss(4794, "Claude", 9);
+        counters.record_relay_permanent_loss(4794, "claude", 2);
+
+        let rows = counters.snapshot();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].channel_id, 4794);
+        assert_eq!(rows[0].provider, "claude");
+        assert_eq!(rows[0].relay_permanent_loss, 11);
+    }
+
+    #[test]
     fn identity_conflict_snapshot_preserves_closed_categories() {
         let counters = ObservabilityCounters::new();
         counters.record_session_identity_conflict(
