@@ -484,6 +484,15 @@ pub(crate) struct HydratePendingQueueResult {
     pub(crate) persistence_error: Option<String>,
 }
 
+#[cfg(test)]
+pub(crate) fn load_channel_pending_queue_for_tests(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: ChannelId,
+) -> (Vec<Intervention>, Option<ChannelId>) {
+    load_channel_pending_queue(provider, token_hash, channel_id)
+}
+
 #[derive(Debug)]
 pub(crate) struct DispatchLease;
 
