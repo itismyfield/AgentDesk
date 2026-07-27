@@ -403,6 +403,55 @@ mod confirmed_fresh_delivery {
     }
 }
 
+mod soft_terminal_authority {
+    use super::super::watcher_direct_fallback_has_turn_authority;
+    use crate::services::discord::tmux::WatcherTerminalKind;
+
+    #[test]
+    fn ownerless_soft_stop_without_external_boundary_cannot_post() {
+        assert!(!watcher_direct_fallback_has_turn_authority(
+            Some(WatcherTerminalKind::SoftStopHookSummary),
+            false,
+        ));
+        assert!(!watcher_direct_fallback_has_turn_authority(
+            Some(WatcherTerminalKind::SoftUserBoundary),
+            false,
+        ));
+    }
+
+    #[test]
+    fn soft_stop_requires_pre_frame_turn_authority() {
+        assert!(watcher_direct_fallback_has_turn_authority(
+            Some(WatcherTerminalKind::SoftStopHookSummary),
+            true,
+        ));
+    }
+
+    #[test]
+    fn ownerless_hard_result_keeps_recovery_fallback() {
+        assert!(watcher_direct_fallback_has_turn_authority(
+            Some(WatcherTerminalKind::HardResult),
+            false,
+        ));
+        assert!(watcher_direct_fallback_has_turn_authority(None, false));
+    }
+
+    #[test]
+    fn unauthorized_soft_terminal_drains_before_terminal_tail() {
+        let source = include_str!("../tmux_watcher.rs");
+        let branch_start = source
+            .rfind("if watcher_direct_fallback_requested && !watcher_direct_fallback_authorized")
+            .expect("unauthorized soft-terminal drain branch");
+        let tail_start = source[branch_start..]
+            .find("let relay_suppressed")
+            .map(|offset| branch_start + offset)
+            .expect("terminal finalization tail");
+        let branch = &source[branch_start..tail_start];
+        assert!(branch.contains("slot_guard.release()"));
+        assert!(branch.contains("continue 'watcher_loop"));
+    }
+}
+
 /// #3151: the deterministic decision seam for the in-flight sink-delivery
 /// marker gate (`watcher_terminal_resend_action_gated`). Table-drives the gate
 /// over every lease-snapshot variant and asserts the reclaim side-effect flag.

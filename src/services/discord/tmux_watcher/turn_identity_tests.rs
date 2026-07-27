@@ -290,6 +290,63 @@ fn no_inflight_offset_key_still_refuses_append_edit_tail_duplicate_4277() {
 }
 
 #[test]
+fn soft_terminal_authority_requires_owner_exact_resume_floor_and_nonce() {
+    let session = "AgentDesk-claude-adk-cc";
+    let mut state = state_with_offsets(42, session, Some(63_621_206), 63_621_206);
+    state.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+    let nonce = state.turn_nonce.clone().unwrap();
+
+    assert!(watcher_soft_terminal_has_turn_authority(
+        Some(&state),
+        session,
+        63_621_206,
+        Some(&nonce),
+    ));
+    assert!(!watcher_soft_terminal_has_turn_authority(
+        Some(&state),
+        session,
+        130_740_943,
+        Some(&nonce),
+    ));
+    assert!(!watcher_soft_terminal_has_turn_authority(
+        Some(&state),
+        session,
+        63_621_206,
+        Some("newer-turn-nonce"),
+    ));
+
+    state.tmux_session_name = Some("AgentDesk-claude-other".to_string());
+    assert!(!watcher_soft_terminal_has_turn_authority(
+        Some(&state),
+        session,
+        63_621_206,
+        Some(&nonce),
+    ));
+}
+
+#[test]
+fn ownerless_or_nonce_less_inflight_cannot_authorize_soft_terminal() {
+    let session = "AgentDesk-claude-adk-cc";
+    let mut state = state_with_offsets(42, session, Some(63_621_206), 63_621_206);
+    let nonce = state.turn_nonce.clone().unwrap();
+
+    assert!(!watcher_soft_terminal_has_turn_authority(
+        Some(&state),
+        session,
+        63_621_206,
+        Some(&nonce),
+    ));
+    state.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+    state.turn_nonce = None;
+    assert!(!watcher_soft_terminal_has_turn_authority(
+        Some(&state),
+        session,
+        63_621_206,
+        None,
+    ));
+}
+
+#[test]
 fn degenerate_key_content_guard_requires_no_fresh_output_4081() {
     let temp = tempfile::TempDir::new().expect("temp runtime root");
     let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());

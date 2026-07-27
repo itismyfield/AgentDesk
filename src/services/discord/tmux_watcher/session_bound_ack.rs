@@ -13,6 +13,7 @@
 //! to `shared`/`http`/`InflightTurnState`. Items are `pub(super)` so the parent
 //! watcher loop keeps calling them by their original names.
 
+use super::super::WatcherTerminalKind;
 use super::supervisor_relay::SessionBoundRelayAckTarget;
 
 /// #3041 P1-5: the watcher's view of the session-bound terminal ACK. The
@@ -239,6 +240,30 @@ pub(super) fn watcher_should_direct_send_after_session_bound_ack(
     // reconciliation), so neither gets a blind skip (NotDelivered) nor a blind
     // re-send (Unknown). §3.2 SAFETY INVARIANT.
     should_direct_send && !session_bound_ack_confirms_transport(ack_outcome)
+}
+
+/// A soft transcript boundary is not a self-authenticating Discord turn.
+///
+/// Claude `/compact` rewrites can expose historical assistant entries followed by
+/// `stop_hook_summary` records to a recovering watcher.  When the durable inflight
+/// row has already disappeared (or survived only as an ownerless recovery row),
+/// the soft marker alone must not authorize a fresh Discord POST. A real soft
+/// turn must be authenticated against the pre-frame inflight identity by the
+/// caller; anchors and leases are intentionally insufficient because a newer
+/// turn can create them while historical backlog is being parsed.
+///
+/// Hard provider results retain the existing recovery fallback: unlike soft
+/// boundaries they are explicit terminal events, and suppressing an ownerless hard
+/// result would recreate the recovery black-hole this fallback closes.
+pub(super) fn watcher_direct_fallback_has_turn_authority(
+    terminal_kind: Option<WatcherTerminalKind>,
+    soft_turn_authority: bool,
+) -> bool {
+    let soft_terminal = matches!(
+        terminal_kind,
+        Some(WatcherTerminalKind::SoftStopHookSummary | WatcherTerminalKind::SoftUserBoundary)
+    );
+    !soft_terminal || soft_turn_authority
 }
 
 /// #3041 P1-3 (Part b, §3.2): the watcher's terminal re-send DECISION after a

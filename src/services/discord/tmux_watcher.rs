@@ -569,7 +569,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             was_paused,
             active_read_state,
         } = collected_turn_stream;
-
+        let startup_soft_terminal_authority = watcher_soft_terminal_has_turn_authority(
+            startup_inflight_snapshot.as_ref(),
+            &tmux_session_name,
+            data_start_offset,
+            watcher_turn_nonce.as_deref(),
+        );
         let no_result_outcome = {
             let no_result_context = NoResultExitContext {
                 http: &http,
@@ -1570,25 +1575,24 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let recent_stop_reason =
             recent_turn_stop_for_watcher_range(channel_id, &tmux_session_name, data_start_offset)
                 .map(|stop| stop.reason);
-        // #3042: an ownerless turn (`inflight_present=false` or
-        // `relay_owner_kind=none`, the post-restart restore_inflight gap) has no
-        // reliable terminal-commit ACK path, so a `TimedOut` there must not drive
-        // the watcher-direct re-send. Mirror the relay_flight_recorder fields used
-        // below so the gate sees exactly what is logged.
         let relay_owner_present = inflight_before_relay.as_ref().is_some_and(|state| {
             !matches!(
                 state.effective_relay_owner_kind(),
                 crate::services::discord::inflight::RelayOwnerKind::None
             )
         });
-        let watcher_direct_fallback_intended = watcher_should_direct_send_after_session_bound_ack(
+        let watcher_direct_fallback_requested = watcher_should_direct_send_after_session_bound_ack(
             relay_decision.should_direct_send,
             session_bound_ack_outcome,
             relay_owner_present,
         );
-        // #3041 P1-3 (Part b, §3.2): REPLACE the blind re-send. Before re-sending the
-        // terminal body after a non-`Delivered` session-bound ACK (the
-        // `relay_terminal_ack_timeout` duplicate vector), reconcile against the offset
+        let watcher_direct_fallback_authorized = watcher_direct_fallback_has_turn_authority(
+            terminal_kind,
+            startup_soft_terminal_authority,
+        );
+        let watcher_direct_fallback_intended =
+            watcher_direct_fallback_requested && watcher_direct_fallback_authorized;
+        // #3041 P1-3 (Part b, §3.2): reconcile a non-`Delivered` ACK before re-send against the offset
         // authority FIRST, over the SAME consumed range `[data_start_offset, terminal_event_consumed_offset(current_offset, all_data))`.
         // Part (a) advances `committed_relay_offset` to the watcher's own `end` on a
         // confirmed sink delivery, so the consult is exact: committed >= end → SKIP (sink
@@ -1800,6 +1804,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 "session_bound"
             } else if direct_terminal_response_refused_duplicate {
                 "duplicate_guard_refused"
+            } else if watcher_direct_fallback_requested && !watcher_direct_fallback_authorized {
+                "soft_terminal_no_authority"
             } else if watcher_direct_fallback_after_session_bound_ack {
                 "watcher_direct"
             } else if relay_decision.suppressed {
@@ -2144,6 +2150,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 },
             )
             .await
+        } else if watcher_direct_fallback_requested {
+            false
         } else if relay_decision.suppressed {
             discrete_trigger_marker::enqueue_suppressed_machine_trigger_marker(
                 &shared,
@@ -2300,6 +2308,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 .await;
                 continue 'watcher_loop;
             }
+        }
+        if watcher_direct_fallback_requested && !watcher_direct_fallback_authorized {
+            slot_guard.release();
+            continue 'watcher_loop;
         }
         let relay_suppressed = relay_decision.suppressed;
         let terminal_output_committed = relay_ok || relay_suppressed;
