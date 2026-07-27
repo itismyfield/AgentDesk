@@ -302,57 +302,14 @@ pub fn run(
         exited_t1.store(true, Ordering::Relaxed);
     });
 
-    // === Thread 1b: Stderr monitor — detect auth errors and write synthetic result ===
+    // === Thread 1b: Stderr monitor — diagnostics only ===
     let stderr = child.stderr.take();
-    let output_file_for_stderr = output_file.to_string();
     let exited_stderr = claude_exited.clone();
     let _stderr_thread = std::thread::spawn(move || {
         let Some(stderr) = stderr else { return };
-        let reader = BufReader::new(stderr);
-        let mut collected = String::new();
-        for line in reader.lines() {
-            if exited_stderr.load(Ordering::Relaxed) {
-                break;
-            }
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => break,
-            };
+        monitor_stderr_diagnostics(BufReader::new(stderr), &exited_stderr, |line| {
             redacted_eprintln!("\x1b[90m[stderr] {}\x1b[0m", line);
-            collected.push_str(&line);
-            collected.push('\n');
-
-            let lower = line.to_lowercase();
-            if lower.contains("not logged in")
-                || lower.contains("please run /login")
-                || lower.contains("unauthorized")
-                || lower.contains("authentication")
-                || lower.contains("oauth")
-                || lower.contains("access token could not be refreshed")
-                || (lower.contains("refresh token")
-                    && (lower.contains("expired")
-                        || lower.contains("invalid")
-                        || lower.contains("revoked")))
-                || lower.contains("token expired")
-                || lower.contains("invalid api key")
-                || lower.contains("api key")
-                    && (lower.contains("missing")
-                        || lower.contains("invalid")
-                        || lower.contains("expired"))
-            {
-                // Write a synthetic error result to the output file so the watcher
-                // can detect it and stop the spinner.
-                let err_event = serde_json::json!({
-                    "type": "result",
-                    "is_error": true,
-                    "result": format!("Authentication error: {}", line.trim()),
-                    "total_cost_usd": 0.0,
-                });
-                let _ = append_jsonl_line_and_sync(&output_file_for_stderr, &err_event.to_string());
-                eprintln!("\x1b[31m[auth error detected — wrote synthetic result]\x1b[0m");
-                break;
-            }
-        }
+        });
     });
 
     // === Thread 2: Terminal input — read user typing → Claude stdin ===
@@ -777,15 +734,41 @@ fn append_output_line(
     output.write_line(line)
 }
 
-fn append_jsonl_line_and_sync(path: &str, line: &str) -> std::io::Result<()> {
-    let mut output = crate::services::tmux_common::RotatingJsonlWriter::open(path)?;
-    output.write_line(line)?;
-    output.sync_all()
+fn monitor_stderr_diagnostics<R: BufRead>(
+    reader: R,
+    exited: &AtomicBool,
+    mut observe_line: impl FnMut(&str),
+) -> [bool; crate::services::discord::ProviderProseDiagnostic::COUNT] {
+    let mut diagnostic_categories =
+        [false; crate::services::discord::ProviderProseDiagnostic::COUNT];
+    for line in reader.lines() {
+        if exited.load(Ordering::Relaxed) {
+            break;
+        }
+        let Ok(line) = line else { break };
+        observe_line(&line);
+        if let Some(diagnostic) =
+            crate::services::discord::classify_provider_prose_diagnostic(&line)
+        {
+            let recorded = &mut diagnostic_categories[diagnostic.index()];
+            if !*recorded {
+                *recorded = true;
+                eprintln!(
+                    "\x1b[90m[provider stderr diagnostic: {}]\x1b[0m",
+                    diagnostic.summary()
+                );
+            }
+        }
+    }
+    diagnostic_categories
 }
 
 #[cfg(test)]
 mod stderr_redaction_tests {
-    use super::redacted_stderr_line;
+    use super::{monitor_stderr_diagnostics, redacted_stderr_line};
+    use crate::services::discord::ProviderProseDiagnostic;
+    use std::io::Cursor;
+    use std::sync::atomic::AtomicBool;
 
     #[test]
     fn redacted_stderr_line_masks_assignment_secret() {
@@ -798,6 +781,41 @@ mod stderr_redaction_tests {
             "rendered={rendered}"
         );
         assert!(!rendered.contains("sk-live-secret"), "rendered={rendered}");
+    }
+
+    #[test]
+    fn stderr_auth_prose_is_observed_without_synthetic_output() {
+        let input = concat!(
+            "oauth raw-secret-one\n",
+            "unauthorized raw-secret-two\n",
+            "token expired raw-secret-three\n",
+        );
+        let exited = AtomicBool::new(false);
+        let mut observed = Vec::new();
+
+        let categories = monitor_stderr_diagnostics(Cursor::new(input), &exited, |line| {
+            observed.push(line.to_string());
+        });
+
+        assert_eq!(observed.len(), 3);
+        assert!(categories[ProviderProseDiagnostic::Authentication.index()]);
+        assert!(!categories[ProviderProseDiagnostic::Overload.index()]);
+    }
+
+    #[test]
+    fn stderr_unique_flood_uses_fixed_category_slots() {
+        let mut input = String::new();
+        for index in 0..500 {
+            input.push_str(&format!("oauth unique-auth-{index}\n"));
+            input.push_str(&format!("529 server overloaded unique-overload-{index}\n"));
+        }
+        let exited = AtomicBool::new(false);
+        let categories = monitor_stderr_diagnostics(Cursor::new(input), &exited, |_| {});
+
+        assert_eq!(
+            categories.into_iter().filter(|recorded| *recorded).count(),
+            ProviderProseDiagnostic::COUNT
+        );
     }
 }
 
@@ -821,13 +839,13 @@ mod turn_abort_classification_tests {
     }
 
     #[test]
-    fn fatal_startup_error_is_not_a_turn_abort() {
-        // Synthetic auth-failure result (no abort markers) must still tear the
-        // session down — unchanged behavior.
+    fn generic_zero_cost_error_is_not_a_turn_abort() {
+        // Provider-emitted error results remain generic hard results. Stderr
+        // prose no longer synthesizes this shape or gains child-exit authority.
         let json = serde_json::json!({
             "type": "result",
             "is_error": true,
-            "result": "Authentication error: not logged in",
+            "result": "generic startup failure",
             "total_cost_usd": 0.0
         });
         assert!(!result_event_is_turn_abort(&json));

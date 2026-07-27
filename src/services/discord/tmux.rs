@@ -37,12 +37,9 @@ use super::settings::{
 };
 use super::task_notification_delivery::footer_background_marker_session_key;
 use super::tmux_error_detect::{
-    detect_provider_overload_message, is_auth_error_message, is_prompt_too_long_message,
+    ProviderProseDiagnostic, classify_provider_prose_diagnostic, is_prompt_too_long_message,
 };
-use super::tmux_overload_retry::{
-    PROVIDER_OVERLOAD_MAX_RETRIES, ProviderOverloadDecision, clear_provider_overload_retry_state,
-    record_provider_overload_retry, schedule_provider_overload_retry,
-};
+use super::tmux_overload_retry::clear_provider_overload_retry_state;
 use super::tmux_restart_handoff::{
     resolve_dispatched_thread_dispatch_from_db, resume_aborted_restart_turn,
 };
@@ -124,10 +121,6 @@ pub(super) struct WatcherLineOutcome {
     pub pre_turn_bytes_skipped: usize,
     pub soft_terminal_candidate: bool,
     pub is_prompt_too_long: bool,
-    pub is_auth_error: bool,
-    pub auth_error_message: Option<String>,
-    pub is_provider_overloaded: bool,
-    pub provider_overload_message: Option<String>,
     pub stale_resume_detected: bool,
     pub auto_compacted: bool,
     pub task_notification_kind: Option<TaskNotificationKind>,
@@ -141,8 +134,6 @@ pub(super) enum WatcherTerminalKind {
     HardResult,
     SoftStopHookSummary,
     SoftUserBoundary,
-    AuthError,
-    ProviderOverload,
 }
 
 impl WatcherTerminalKind {
@@ -151,8 +142,6 @@ impl WatcherTerminalKind {
             Self::HardResult => "hard_result",
             Self::SoftStopHookSummary => "soft_stop_hook_summary",
             Self::SoftUserBoundary => "soft_user_boundary",
-            Self::AuthError => "auth_error",
-            Self::ProviderOverload => "provider_overload",
         }
     }
 }
