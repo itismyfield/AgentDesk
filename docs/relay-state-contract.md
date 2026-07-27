@@ -22,6 +22,133 @@ The persistence and node-ownership status of these values is classified in
 a durable sidecar is host-local unless a PostgreSQL-backed ownership contract
 explicitly says otherwise.
 
+## Canonical owner, dependency, and acceptance contract (Task #32)
+
+This section is the one-page release contract for the current relay campaign.
+It is normative where older issue or PR text conflicts with it. An accepted
+Discord source message ID has exactly one terminal disposition:
+
+- `Steered`: the exact live turn accepted the source and durably recorded that
+  ownership before any success acknowledgement; or
+- `DurablyQueued`: the canonical durable queue accepted it. This is not a
+  terminal discard: completion, worker replacement, shutdown, and process or
+  node restart must preserve the same obligation through eventual drain without
+  adding or rewriting the intake disposition.
+
+No accepted source ID may have zero or two dispositions. A reaction, panel,
+in-memory mailbox entry, attempted send, or agent verdict is not a disposition.
+
+### Canonical authority table
+
+| Surface | Canonical owner and store | Required identity | Linearization point | Forbidden fallback | Acceptance test |
+|---|---|---|---|---|---|
+| Discord intake | Channel mailbox actor plus the PostgreSQL-backed queue/admission record | Source message ID plus full delivery identity below | One transaction/CAS writes exactly one `Steered` or `DurablyQueued` disposition | Process-local queue, reaction, panel state, or “busy” inference as acceptance | Replaying one source ID concurrently yields one row and one disposition; crash/restart drains every `DurablyQueued` row |
+| Terminal body delivery | The single relay owner plus shared delivery lease; durable delivery record/frontier is dedup authority | Full delivery identity and exact transcript range | Confirmed Discord transport followed by identity-gated durable range commit; an ambiguous gap remains typed `Unknown` | Markerless POST, fresh POST after edit failure, restored-body/fingerprint guess, or legacy in-memory dedup | Bridge, watcher, replacement worker, and restart race on one range: one Discord body, one monotonic committed frontier |
+| Terminal ACK | Exact relay-ring sequence owned by the terminal frame; outcome record is the ACK store | Sequence plus pinned turn/range identity | Exact sequence records its typed terminal outcome | `>=` high-water ACK, another turn's ACK, timeout-as-success, or blind resend/skip | Co-chunked turns, dropped frame, timeout, and replacement resolve independently and all non-confirmed outcomes reconcile the durable frontier |
+| Status panel | Channel-scoped durable transition journal/singleton owner | Provider, channel, turn, candidate message, generation, and spawn nonce | Journal-authorized bind/retire CAS, not a transport boolean | Legacy singleton/inflight inference, delete-on-commit-failure, or fresh panel without journal authority | Faults on every transition preserve at most one current panel; a completed Discord panel is not deleted because its journal commit was interrupted |
+| Terminal abort | Watcher decision owner with immutable typed audit record; platform kill is only the executor | Full delivery identity plus exact pane/PID target and decision provenance | Audit commit, immediate target revalidation, kill request, then observed process/session exit | Plaintext substring classification, session-name-only kill, fabricated finalizer pin, or unconfirmed kill treated as success | Incident-shaped tests prove wrong generation/pane/PID and main-session targets fail closed; only the exact disposable target can reach confirmed exit |
+
+The delivery identity is the indivisible tuple `(provider, channel_id, turn_id,
+dispatch_id, exact tmux session, generation, spawn nonce, transcript
+range/frontier)`. “Exact tmux session” includes the resolved pane and pane PID
+at destructive boundaries. Missing or legacy fields are explicit typed states,
+never wildcards. Identity may be extended, but no component above may be dropped
+when ownership, deduplication, panel retirement, ACK correlation, or abort is
+decided.
+
+### Terminal ACK and crash-window rules
+
+The terminal sequence is exact:
+
+1. The producer pins the delivery identity and terminal transcript range, obtains
+   the shared delivery lease, and enqueues terminal frame sequence `N`.
+2. The sink consumes `N`, performs the authorized Discord edit/POST, and attempts
+   the identity-gated durable range/frontier commit while retaining the lease.
+3. The sink records exactly one typed outcome for `N`: `Delivered`,
+   `FreshDelivered { committed_to, persistence_recorded }`, `NotDelivered`, or
+   `Unknown`. Only confirmed `Delivered`/`FreshDelivered` transport is success;
+   commit metadata must not erase confirmed transport provenance.
+4. The watcher reads outcome `N`, never a `>= N` watermark. Every
+   `NotDelivered`/`Unknown`-class result (including drop, sink error, timeout, or
+   missing target) enters committed-frontier reconciliation: covered range means
+   skip, uncovered range means the one authorized retry. There is no blind skip
+   or blind resend.
+
+Status-panel transitions are
+`Prepared → BindAuthorized → Bound → RetireAuthorized → Retired`, with typed
+failure/quarantine terminals. Discord success and durable commit are separate
+facts. A crash after Discord success but before durable commit must recover by
+stable nonce/message identity and journal reconciliation; it must not infer
+failure, delete the successful panel, or create an unjournaled replacement.
+Likewise, a body POST accepted by Discord in that window remains `Unknown` until
+probe/reconciliation establishes confirmed transport or authorizes one retry.
+
+A terminal abort requires closed typed provenance (structured provider failure,
+authorized cancellation, or another enumerated terminal reason), the exact
+identity and transcript boundary that produced it, and an immutable audit entry.
+Immediately before acting, re-resolve and compare tmux session, pane ID, pane PID,
+generation, and spawn nonce. After the kill request, bounded observation must
+confirm that exact target exited; timeout, probe failure, or identity change is a
+typed unconfirmed result and cannot clear ownership or claim successful abort.
+The canonical main orchestration session is never an automatic kill target.
+
+### Verified dependency DAG and evidence boundary
+
+The implementation order is:
+
+```text
+#4890 → #4911 → #4891 → #4860 → #4889
+             ↑
+           #4909
+
+#4895 → #4896
+#4874 (independent)
+```
+
+`#4934` (dormant panel reducer), `#4933` (dormant typed completion codec), and
+`#4918` (deploy-gate containment) are substrate or containment only. They do not
+close any arrow above without production callers and the acceptance evidence
+below. `#4898` is closed-but-incomplete: trusted typed deployment evidence is
+still absent. The discarded research commits `7a733441`, `53705ac3`, and
+`5cf5e7b` are explicitly forbidden as completion evidence; code ancestry,
+passing unit tests, or a closed issue cannot substitute for production proof.
+No new abstraction without a production caller counts toward this contract.
+
+### Measurable completion gates
+
+The campaign is complete only when one release evidence bundle proves all of the
+following against the production call paths:
+
+1. **Disposition accounting:** every accepted source message ID in the test
+   ledger has exactly one disposition; after worker replacement, shutdown, and
+   restart, unresolved durable obligations reach zero and each queued ID is
+   eventually steered once.
+2. **Real Discord fault injection:** in a dedicated Discord test channel, run
+   at least 20 accepted messages per fault and inject 429/5xx, delayed sink
+   consumption past the ACK deadline, edit 404, connection loss after Discord
+   accepts POST, and process death in the Discord-success↔durable-commit window.
+   Record source/response message IDs, timestamps, typed outcomes, and durable
+   rows. Across repeated runs: 100% of accepted IDs remain accounted for, every
+   durable obligation drains within five minutes after recovery, and there are
+   zero duplicate terminal bodies or unjournaled panels.
+3. **Ownership/restart matrix:** run bridge, watcher, replacement worker,
+   shutdown, and restart at each pre/post linearization point. The committed
+   transcript frontier is monotonic, exactly one owner may emit each range, and
+   every `Unknown` resolves through probe/frontier reconciliation rather than a
+   timer-only decision.
+4. **Panel convergence:** after faulting every panel transition and restarting,
+   each channel has at most one journal-owned current panel; a successful
+   completed panel survives the commit crash window, and every superseded panel
+   has an exact retire authorization.
+5. **Abort safety:** replay the #4895 incident text and wrong-target races. There
+   are zero plaintext-triggered kills and zero session-name-only kills; audit
+   precedes action, target identity matches in full, and claimed success has an
+   observed exact-target exit.
+6. **Dependency closure:** every DAG predecessor has its own production caller,
+   focused regression test, and linked release evidence. Dormant/substrate PRs,
+   `#4898`, and the three discarded research commits are excluded from the
+   completion count.
+
 ### Reference format
 
 Code anchors below are **symbol-path references**, not `file:line` (which
