@@ -92,11 +92,11 @@ class LaneFilter:
 
     def selects_test(self, test_name: str) -> bool:
         """Whether libtest selects one fully qualified test name."""
-        positive_match = not self.positives or any(
-            positive == test_name if self.exact else positive in test_name
-            for positive in self.positives
-        )
-        return positive_match and not any(skip in test_name for skip in self.skips)
+        def matches(pattern: str) -> bool:
+            return pattern == test_name if self.exact else pattern in test_name
+
+        positive_match = not self.positives or any(map(matches, self.positives))
+        return positive_match and not any(map(matches, self.skips))
 
     def fully_selects(self, module: str, test_names: Iterable[str]) -> bool:
         """Whether this command selects every discovered test in the module.

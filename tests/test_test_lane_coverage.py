@@ -153,6 +153,39 @@ class LaneFilterTests(unittest.TestCase):
             )
         )
 
+    def test_exact_skip_matching_agrees_with_libtest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "exact_skip.rs"
+            binary = root / "exact_skip"
+            source.write_text("#[test] fn deploy_gate_case() {}\n", encoding="utf-8")
+            subprocess.run(
+                ["rustc", "--test", source, "-o", binary],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            cases = (
+                ("deploy_gate", True, "1 passed"),
+                ("deploy_gate_case", False, "0 passed"),
+            )
+            for skip, expected_selected, libtest_summary in cases:
+                with self.subTest(skip=skip):
+                    lane = coverage.LaneFilter(
+                        ("deploy_gate_case",), (skip,), exact=True
+                    )
+                    result = subprocess.run(
+                        [binary, "deploy_gate_case", "--exact", "--skip", skip],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(
+                        lane.selects_test("deploy_gate_case"), expected_selected
+                    )
+                    self.assertIn(libtest_summary, result.stdout)
+
     def test_single_test_filter_does_not_cover_parent_module(self) -> None:
         modules = {"service::tests", "other::tests"}
         lanes = (coverage.LaneFilter(("service::tests::one_case",), ()),)
