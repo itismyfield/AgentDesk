@@ -6260,6 +6260,40 @@ class TickChannelTests(unittest.TestCase):
 
         self.assertEqual(rt.issue_calls, 1)
 
+    def test_gap_owner_without_selected_transcript_still_probes_recovery(self):
+        rt = self.gap_rt(github_repo="owner/repo")
+        transcript = self.proj_dir / "s.jsonl"
+        original_gap_since = self.now - rt.cfg.issue_after_secs - 60
+        state = {
+            "999": {
+                "gap_since": original_gap_since,
+                relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY: [str(transcript)],
+                relay_watchdog.ISSUE_FILING_SUPPRESSION_REASON_KEY: (
+                    relay_watchdog.ISSUE_FILING_DC_UNREACHABLE_REASON
+                ),
+                relay_watchdog.ISSUE_FILING_SUPPRESSION_SINCE_KEY: self.now - 10,
+                relay_watchdog.ISSUE_FILING_REACHABLE_TICKS_KEY: 0,
+            }
+        }
+        rt.watcher_probe = WatcherStateProbe(200, True, False)
+
+        with mock.patch.object(
+            relay_watchdog,
+            "select_watch_transcript_with_reason",
+            return_value=(None, "no_candidates"),
+        ):
+            tick_channel(rt, TICK_CHANNEL, state, self.now)
+            self.assertEqual(rt.issue_calls, 0)
+            self.assertEqual(
+                state["999"][relay_watchdog.ISSUE_FILING_REACHABLE_TICKS_KEY], 1
+            )
+            tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+            tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+
+        self.assertGreaterEqual(rt.watcher_calls, 2)
+        self.assertEqual(rt.issue_calls, 1)
+        self.assertEqual(state["999"]["gap_since"], original_gap_since)
+
     def test_5xx_and_malformed_200_are_not_unreachable_suppression_authority(self):
         probes = (
             WatcherStateProbe(503),
@@ -6283,7 +6317,7 @@ class TickChannelTests(unittest.TestCase):
                     state["999"],
                 )
 
-    def test_bad_responses_reset_reachable_counter(self):
+    def test_bad_responses_keep_aged_incident_suppressed_until_two_healthy_ticks(self):
         probes = (
             WatcherStateProbe(503),
             parse_watcher_state_probe(200, {"attached": "malformed"}),
@@ -6291,30 +6325,30 @@ class TickChannelTests(unittest.TestCase):
         for probe in probes:
             with self.subTest(probe=probe):
                 rt = self.gap_rt(github_repo="owner/repo")
-                rt.watcher_probe = probe
-                original_since = self.now - 10
-                state = {
-                    "999": {
-                        "gap_since": self.now - rt.cfg.issue_after_secs + 100,
-                        relay_watchdog.ISSUE_FILING_SUPPRESSION_REASON_KEY: (
-                            relay_watchdog.ISSUE_FILING_DC_UNREACHABLE_REASON
-                        ),
-                        relay_watchdog.ISSUE_FILING_SUPPRESSION_SINCE_KEY: original_since,
-                        relay_watchdog.ISSUE_FILING_REACHABLE_TICKS_KEY: 1,
-                    }
-                }
+                original_gap_since = self.now - rt.cfg.issue_after_secs - 100
+                state = {"999": {"gap_since": original_gap_since}}
 
+                rt.watcher_probe = WatcherStateProbe(None)
                 tick_channel(rt, TICK_CHANNEL, state, self.now)
+                rt.watcher_probe = WatcherStateProbe(200, True, False)
+                tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+                rt.watcher_probe = probe
+                tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
 
                 self.assertEqual(rt.issue_calls, 0)
                 self.assertEqual(
                     state["999"][relay_watchdog.ISSUE_FILING_REACHABLE_TICKS_KEY],
                     0,
                 )
-                self.assertEqual(
-                    state["999"][relay_watchdog.ISSUE_FILING_SUPPRESSION_SINCE_KEY],
-                    original_since,
-                )
+                self.assertEqual(state["999"]["gap_since"], original_gap_since)
+
+                rt.watcher_probe = WatcherStateProbe(200, True, False)
+                tick_channel(rt, TICK_CHANNEL, state, self.now + 3)
+                self.assertEqual(rt.issue_calls, 0)
+                tick_channel(rt, TICK_CHANNEL, state, self.now + 4)
+                self.assertEqual(rt.issue_calls, 1)
+                tick_channel(rt, TICK_CHANNEL, state, self.now + 5)
+                self.assertEqual(rt.issue_calls, 1)
 
     def test_planned_deploy_still_returns_before_gap_incident_state(self):
         rt = self.gap_rt(github_repo="owner/repo")

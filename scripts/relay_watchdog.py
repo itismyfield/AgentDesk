@@ -3098,6 +3098,7 @@ def _issue_filing_stable(
 
     if suppression_active:
         channel_state[ISSUE_FILING_REACHABLE_TICKS_KEY] = 0
+        return False
     return True
 
 
@@ -3820,7 +3821,7 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         ),
         None,
     )
-    selected_probe = rt.watcher_state(cid) if selected_path else WatcherStateProbe(None)
+    selected_probe = rt.watcher_state(cid)
     selected_session_id = (
         canonical_session_uuid(selected.path.stem) if selected is not None else None
     )
