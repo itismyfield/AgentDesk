@@ -1244,6 +1244,18 @@ impl TmuxWatcherRegistry {
             .remove(tmux_session_name);
     }
 
+    /// Preserve authoritative routing for a live tmux pane after the channel's
+    /// provider session is rebound. Existing watcher ownership already wins; an
+    /// owner-only entry covers watcher teardown until pane death is confirmed.
+    pub(super) fn retain_owner_during_session_rebind(
+        &self,
+        tmux_session_name: &str,
+        channel_id: ChannelId,
+    ) -> bool {
+        self.restore_owner_channel_for_tmux_session(tmux_session_name, channel_id);
+        self.owner_channel_for_tmux_session(tmux_session_name) == Some(channel_id)
+    }
+
     /// #3105 (codex P1 sub-case B): true when a LIVE watcher handle currently
     /// owns this tmux session. Used to distinguish a genuinely dead/orphaned
     /// session (no live watcher) from a live session whose authoritative owner

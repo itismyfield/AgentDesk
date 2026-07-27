@@ -90,6 +90,7 @@ struct DriftState {
     last_touched_at: Instant,
     last_warn_at: Option<Instant>,
     suppressed_count: u64,
+    pending_emission_count: u64,
     #[cfg_attr(not(unix), allow(dead_code))]
     last_repair_attempt_at: Option<Instant>,
     repair_inflight: bool,
@@ -102,6 +103,7 @@ impl DriftState {
             last_touched_at: now,
             last_warn_at: None,
             suppressed_count: 0,
+            pending_emission_count: 0,
             last_repair_attempt_at: None,
             repair_inflight: false,
         }
@@ -171,7 +173,18 @@ pub(super) fn should_emit_drift_warn(tmux_session_name: &str) -> WarnDecision {
     let state = map
         .entry(tmux_session_name.to_string())
         .or_insert_with(|| DriftState::new(now));
+    state.pending_emission_count = state.pending_emission_count.saturating_add(1);
     decide_drift_warn(state, now)
+}
+
+fn take_pending_emission_count(tmux_session_name: &str) -> u64 {
+    let mut map = DRIFT_STATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let Some(state) = map.get_mut(tmux_session_name) else {
+        return 0;
+    };
+    std::mem::take(&mut state.pending_emission_count)
 }
 
 /// Source a repair value was promoted from (for the success log) or the reason a
@@ -427,31 +440,45 @@ async fn attempt_drift_repair(
                 .tmux_watchers
                 .restore_owner_channel_for_tmux_session(tmux_session_name, ChannelId::new(channel));
             if repaired {
+                let delayed_emission_count = take_pending_emission_count(tmux_session_name);
                 tracing::warn!(
                     tmux_session_name = %tmux_session_name,
                     channel_id = channel,
                     repair_source = source.label(),
                     provider = "claude",
+                    delayed_emission_count,
                     "repaired authoritative tmux-session→channel registry (drift-triggered); \
                      idle relay can route again"
                 );
             }
         }
         RepairDecision::Blocked(reason) => {
+            let permanent_loss_count = if reason == BlockReason::DeadPane {
+                take_pending_emission_count(tmux_session_name)
+            } else {
+                0
+            };
+            let metric_channel = mirror_channel.or(db_channel).unwrap_or(0);
+            crate::services::observability::metrics::record_relay_permanent_loss(
+                metric_channel,
+                ProviderKind::Claude.as_str(),
+                permanent_loss_count,
+            );
             tracing::warn!(
                 tmux_session_name = %tmux_session_name,
                 block_reason = reason.label(),
                 db_channel_id = db_channel,
                 mirror_channel_id = mirror_channel,
                 provider = "claude",
-                "idle relay drift repair blocked; keeping the drop (no mis-delivery)"
+                permanent_loss_count,
+                "idle relay drift repair blocked; preserving fail-closed routing"
             );
         }
         RepairDecision::NoSource => {
             tracing::debug!(
                 tmux_session_name = %tmux_session_name,
                 provider = "claude",
-                "idle relay drift repair found no durable source; keeping the drop"
+                "idle relay drift repair found no durable source; preserving fail-closed routing"
             );
         }
     }

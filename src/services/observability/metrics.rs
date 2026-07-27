@@ -69,6 +69,9 @@ pub struct AtomicCounters {
     /// cleanly assigned across the three relay-launch paths, root cause #3). A
     /// phantom/unknown owner can make the bridge skip its own delivery.
     pub relay_owner_unknown: AtomicU64,
+    /// #4794: relay emissions that became permanently unrecoverable after an
+    /// authoritative tmux-owner registry miss and confirmed pane death.
+    pub relay_permanent_loss: AtomicU64,
     /// #4913: canonical Discord identity writes rejected with a typed conflict.
     pub session_identity_conflicts: AtomicU64,
     pub session_identity_conflict_ambiguous_canonical: AtomicU64,
@@ -96,6 +99,7 @@ impl AtomicCounters {
                 .relay_uncommitted_inflight_cleared
                 .load(Ordering::Relaxed),
             relay_owner_unknown: self.relay_owner_unknown.load(Ordering::Relaxed),
+            relay_permanent_loss: self.relay_permanent_loss.load(Ordering::Relaxed),
             session_identity_conflicts: self.session_identity_conflicts.load(Ordering::Relaxed),
             session_identity_conflict_ambiguous_canonical: self
                 .session_identity_conflict_ambiguous_canonical
@@ -133,6 +137,8 @@ pub struct AtomicCountersSnapshot {
     pub relay_uncommitted_inflight_cleared: u64,
     /// #2838: see [`AtomicCounters::relay_owner_unknown`].
     pub relay_owner_unknown: u64,
+    /// #4794: see [`AtomicCounters::relay_permanent_loss`].
+    pub relay_permanent_loss: u64,
     /// #4913: see [`AtomicCounters::session_identity_conflicts`].
     pub session_identity_conflicts: u64,
     pub session_identity_conflict_ambiguous_canonical: u64,
@@ -171,6 +177,8 @@ pub struct CounterSnapshotRow {
     /// #2838: turns that began relay with an Unknown owner kind. See
     /// [`AtomicCounters::relay_owner_unknown`].
     pub relay_owner_unknown: u64,
+    /// #4794: see [`AtomicCounters::relay_permanent_loss`].
+    pub relay_permanent_loss: u64,
     /// #4913: canonical identity writes rejected with a typed conflict.
     pub session_identity_conflicts: u64,
     pub session_identity_conflict_ambiguous_canonical: u64,
@@ -269,6 +277,13 @@ impl ObservabilityCounters {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// #4794: add a confirmed count of permanently unrecoverable relay emissions.
+    pub fn record_relay_permanent_loss(&self, channel_id: u64, provider: &str, count: u64) {
+        self.slot(channel_id, provider)
+            .relay_permanent_loss
+            .fetch_add(count, Ordering::Relaxed);
+    }
+
     pub fn record_session_identity_conflict(
         &self,
         channel_id: u64,
@@ -345,6 +360,7 @@ impl ObservabilityCounters {
                     relay_terminal_ack_timeout: snap.relay_terminal_ack_timeout,
                     relay_uncommitted_inflight_cleared: snap.relay_uncommitted_inflight_cleared,
                     relay_owner_unknown: snap.relay_owner_unknown,
+                    relay_permanent_loss: snap.relay_permanent_loss,
                     session_identity_conflicts: snap.session_identity_conflicts,
                     session_identity_conflict_ambiguous_canonical: snap
                         .session_identity_conflict_ambiguous_canonical,
@@ -436,6 +452,20 @@ pub fn record_relay_uncommitted_inflight_cleared(channel_id: u64, provider: &str
 pub fn record_relay_owner_unknown(channel_id: u64, provider: &str) {
     global().record_relay_owner_unknown(channel_id, provider);
     super::emit::emit_relay_root_cause_counter(provider, channel_id, "relay_owner_unknown");
+}
+
+/// #4794: record confirmed permanent relay loss as an additive emission count.
+pub fn record_relay_permanent_loss(channel_id: u64, provider: &str, count: u64) {
+    if count == 0 {
+        return;
+    }
+    global().record_relay_permanent_loss(channel_id, provider, count);
+    tracing::error!(
+        channel_id,
+        provider,
+        permanent_loss_count = count,
+        "relay emissions became permanently unrecoverable"
+    );
 }
 
 pub fn record_relay_circuit_activate_unknown() {

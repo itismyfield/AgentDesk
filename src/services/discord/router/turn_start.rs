@@ -552,6 +552,29 @@ pub(super) fn session_runtime_state_after_redirect(
     load_session_runtime_state(sessions, effective_channel_id).unwrap_or(original_state)
 }
 
+pub(crate) struct IntakeRuntimeTransition {
+    pub(crate) state: (Option<String>, bool, String),
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+pub(crate) async fn intake_runtime_transition_after_redirect(
+    shared: &Arc<SharedData>,
+    effective_channel_id: ChannelId,
+    fallback_state: (Option<String>, bool, String),
+) -> IntakeRuntimeTransition {
+    let guard = shared
+        .session_transition_lock(effective_channel_id)
+        .lock_owned()
+        .await;
+    let mut data = shared.core.lock().await;
+    let state = load_session_runtime_state(&mut data.sessions, effective_channel_id)
+        .unwrap_or(fallback_state);
+    IntakeRuntimeTransition {
+        state,
+        _guard: guard,
+    }
+}
+
 pub(in crate::services::discord) async fn release_mailbox_after_placeholder_post_failure(
     shared: &Arc<SharedData>,
     provider: &super::super::ProviderKind,

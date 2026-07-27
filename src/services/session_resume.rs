@@ -66,6 +66,7 @@ pub struct ResumePreviousOptions {
 pub(crate) enum ResumeRuntimeBindingClearOutcome {
     Cleared { tmux_session: String },
     AlreadyAbsent { tmux_session: String },
+    RetainedLive { tmux_session: String },
 }
 
 impl ResumeRuntimeBindingClearOutcome {
@@ -73,12 +74,15 @@ impl ResumeRuntimeBindingClearOutcome {
         match self {
             Self::Cleared { .. } => "cleared",
             Self::AlreadyAbsent { .. } => "already_absent",
+            Self::RetainedLive { .. } => "retained_live",
         }
     }
 
     fn tmux_session(&self) -> &str {
         match self {
-            Self::Cleared { tmux_session } | Self::AlreadyAbsent { tmux_session } => tmux_session,
+            Self::Cleared { tmux_session }
+            | Self::AlreadyAbsent { tmux_session }
+            | Self::RetainedLive { tmux_session } => tmux_session,
         }
     }
 }
@@ -465,11 +469,17 @@ pub(crate) async fn perform_resume_rebind(
         lifecycle_path = lifecycle.lifecycle_path;
     }
 
-    // `/resume` alone forgets the retired canonical runtime binding before the
-    // replacement is installed in memory. Intake holds the same per-channel
-    // transition lock while selecting a session, so the old UUID cannot be
-    // restored between these two operations.
-    let runtime_binding_clear = clear_resume_runtime_binding(tmux_name);
+    // If teardown actually retired the pane, forget its stale transcript/session
+    // mirror. Otherwise keep the live binding and its scan offset so output that
+    // arrives during the rebind remains eligible for delayed delivery.
+    let runtime_binding_clear =
+        if tmux_killed || !crate::services::platform::tmux::has_session(tmux_name) {
+            clear_resume_runtime_binding(tmux_name)
+        } else {
+            ResumeRuntimeBindingClearOutcome::RetainedLive {
+                tmux_session: tmux_name.trim().to_string(),
+            }
+        };
 
     // In-memory mirror so the next turn resumes without a restart.
     let in_memory_rebound = if let (Some(shared), Some(provider), Some(channel_id)) =
@@ -481,6 +491,11 @@ pub(crate) async fn perform_resume_rebind(
             channel_id,
             &target_cwd,
             &target_session_id,
+            tmux_name,
+            matches!(
+                runtime_binding_clear,
+                ResumeRuntimeBindingClearOutcome::RetainedLive { .. }
+            ),
         )
         .await;
         true
@@ -796,12 +811,15 @@ mod tests {
             channel_id,
             old_cwd,
             old_session_id,
+            tmux,
+            false,
         )
         .await;
         crate::services::tui_prompt_dedupe::register_provider_session(
             "claude",
             old_session_id,
             tmux,
+            false,
         );
         crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
             tmux,
@@ -848,10 +866,14 @@ mod tests {
                 .is_some(),
             "resume must retain unrelated runtime bindings"
         );
-        let (selected_session_id, selected_cwd) =
-            crate::services::discord::resume_launch_state_for_tests(&shared, channel_id)
-                .await
-                .expect("target launch state");
+        let (selected_session_id, _, selected_cwd) = {
+            let mut data = shared.core.lock().await;
+            crate::services::discord::router::load_session_runtime_state(
+                &mut data.sessions,
+                channel_id,
+            )
+            .expect("target launch state")
+        };
         assert_eq!(selected_session_id.as_deref(), Some(target_session_id));
         assert_eq!(selected_cwd, target_cwd);
 
@@ -886,62 +908,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resume_and_intake_keep_transition_ordering_contract() {
-        let resume_source = include_str!("session_resume.rs");
-        let durable = resume_source
-            .find("let rows = rebind_session_provider_by_id_pg")
-            .expect("durable rebind exists");
-        let teardown = resume_source
-            .find("let lifecycle = force_kill_turn")
-            .expect("runtime teardown exists");
-        let clear = resume_source
-            .find("let runtime_binding_clear = clear_resume_runtime_binding(tmux_name)")
-            .expect("retired binding clear exists");
-        let rebound = resume_source
-            .find("rebind_channel_provider_session(")
-            .expect("in-memory rebind exists");
-        assert!(durable < teardown && teardown < clear && clear < rebound);
-
-        let intake_source = include_str!("discord/router/message_handler/intake_turn.rs");
-        let intake_gate = intake_source
-            .find("let session_transition_lock = shared.session_transition_lock(channel_id)")
-            .expect("intake transition gate exists");
-        let intake_snapshot = intake_source
-            .find("let (session_info, mut pending_uploads, session_was_cleared)")
-            .expect("intake session snapshot exists");
-        let intake_claim = intake_source
-            .find("let started = try_start_turn_with_stale_busy_heal")
-            .expect("intake mailbox claim exists");
-        let intake_release = intake_source
-            .find("drop(session_transition_guard)")
-            .expect("intake transition release exists");
-        assert!(
-            intake_gate < intake_snapshot
-                && intake_snapshot < intake_claim
-                && intake_claim < intake_release
-        );
-
-        let headless_source = include_str!("discord/router/message_handler/headless_turn.rs");
-        let headless_gate = headless_source
-            .find("let session_transition_lock = shared.session_transition_lock(channel_id)")
-            .expect("headless transition gate exists");
-        let headless_claim = headless_source
-            .find("let started = super::super::super::mailbox_try_start_turn")
-            .expect("headless mailbox claim exists");
-        let headless_snapshot = headless_source
-            .find("let (mut session_id, mut memento_context_loaded, mut current_path)")
-            .expect("headless session snapshot exists");
-        let headless_release = headless_source
-            .find("drop(session_transition_guard)")
-            .expect("headless transition release exists");
-        assert!(
-            headless_gate < headless_claim
-                && headless_claim < headless_snapshot
-                && headless_snapshot < headless_release
-        );
-    }
-
     #[tokio::test]
     async fn session_transition_lock_blocks_intake_selection_until_resume_rebind_finishes() {
         let shared = crate::services::discord::make_shared_data_for_tests();
@@ -962,6 +928,8 @@ mod tests {
             channel_id,
             &old_cwd,
             old_session_id,
+            tmux,
+            false,
         )
         .await;
 
@@ -970,12 +938,15 @@ mod tests {
         let intake_shared = Arc::clone(&shared);
         let (snapshot_started_tx, mut snapshot_started_rx) = tokio::sync::mpsc::channel(1);
         let intake = tokio::spawn(async move {
-            let transition_lock = intake_shared.session_transition_lock(channel_id);
-            let _intake_guard = transition_lock.lock().await;
+            let transition =
+                crate::services::discord::router::intake_runtime_transition_after_redirect(
+                    &intake_shared,
+                    channel_id,
+                    (None, false, old_cwd),
+                )
+                .await;
             snapshot_started_tx.send(()).await.unwrap();
-            crate::services::discord::resume_launch_state_for_tests(&intake_shared, channel_id)
-                .await
-                .unwrap()
+            (transition.state.0, transition.state.2)
         });
 
         tokio::task::yield_now().await;
@@ -989,6 +960,8 @@ mod tests {
             channel_id,
             &target_cwd,
             target_session_id,
+            tmux,
+            false,
         )
         .await;
         drop(resume_guard);

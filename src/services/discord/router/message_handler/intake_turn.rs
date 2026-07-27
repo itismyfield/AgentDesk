@@ -263,9 +263,6 @@ pub(super) async fn handle_text_message(
         .await;
         return Ok(());
     }
-    // Exclude `/resume` from session snapshot/recovery through mailbox claim.
-    let session_transition_lock = shared.session_transition_lock(channel_id);
-    let session_transition_guard = session_transition_lock.lock().await;
     // Get session info, allowed tools, and pending uploads
     let (session_info, mut pending_uploads, session_was_cleared) = {
         let mut data = shared.core.lock().await;
@@ -834,15 +831,16 @@ pub(super) async fn handle_text_message(
         dispatch_type_str = Some(active_dispatch_type);
     }
 
-    let (mut session_id, mut memento_context_loaded, current_path) = {
-        let mut data = shared.core.lock().await;
-        session_runtime_state_after_redirect(
-            &mut data.sessions,
-            original_channel_id,
-            channel_id,
-            (session_id, memento_context_loaded, current_path),
-        )
-    };
+    // Redirect resolution is complete: serialize the effective channel's runtime
+    // snapshot and mailbox claim with `/resume` for this same channel.
+    let intake_runtime_transition = intake_runtime_transition_after_redirect(
+        shared,
+        channel_id,
+        (session_id, memento_context_loaded, current_path),
+    )
+    .await;
+    let (mut session_id, mut memento_context_loaded, current_path) =
+        intake_runtime_transition.state.clone();
     let mut session_strategy_reason = if session_id.is_some() {
         "runtime_cached_provider_session"
     } else if bootstrapped_fresh_thread_session {
@@ -1229,7 +1227,7 @@ pub(super) async fn handle_text_message(
     )
     .await;
 
-    drop(session_transition_guard);
+    drop(intake_runtime_transition);
 
     // #3813 Phase 1a: intake latency span anchor (turn claimed; observation-only
     // — see latency_spans.rs). Never `.log()`'d on the early returns below.

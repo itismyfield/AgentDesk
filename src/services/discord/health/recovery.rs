@@ -98,13 +98,21 @@ pub(crate) async fn rebind_channel_provider_session(
     channel_id: ChannelId,
     cwd: &str,
     session_id: &str,
+    tmux_session_name: &str,
+    retain_runtime_owner: bool,
 ) {
+    let retained_runtime_owner = retain_runtime_owner
+        && shared
+            .tmux_watchers
+            .retain_owner_during_session_rebind(tmux_session_name, channel_id);
     let (previous_path, previous_session_id) =
         discord::rebind_channel_session(shared, provider, channel_id, cwd, session_id).await;
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
         provider = provider.as_str(),
         channel_id = channel_id.get(),
+        tmux_session_name,
+        retained_runtime_owner,
         previous_path = previous_path.as_deref().unwrap_or("<none>"),
         previous_session_id = previous_session_id.as_deref().unwrap_or("<none>"),
         target_cwd = cwd,
