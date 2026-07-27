@@ -30,6 +30,13 @@ use crate::services::cluster::watcher_supervisor::{SupervisorConfig, run_watcher
 use crate::services::provider::ProviderKind;
 use tracing::Instrument;
 
+#[cfg(test)]
+pub(in crate::services::discord) const PURE_SUBAGENT_ZERO_DELIVERY_PAYLOAD: &str = concat!(
+    "{\"type\":\"system\",\"subtype\":\"task_started\",\"task_id\":\"sub-1\",\"task_type\":\"local_agent\"}\n",
+    "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"sub-1\",\"status\":\"completed\",\"summary\":\"Subagent finished\"}\n",
+    "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}\n"
+);
+
 mod delivery_outcome_classify;
 mod idle_jsonl;
 // #3960: orphaned `SessionBoundRelay` TUI-direct reclaim (producer-liveness TOCTOU).
@@ -1343,6 +1350,11 @@ impl RelaySink for SessionBoundDiscordRelaySink {
         // handled by the per-sequence ACK. The fence still ONLY gates the OFFSET ADVANCE
         // (inline in `deliver_response`) — outcome and advance are decoupled.
         let deliveries = self.ingest_frame(frame);
+        let fenced_terminal_without_delivery = deliveries.is_empty()
+            && matches!(
+                (frame.turn_start_offset, frame.terminal_consumed_end),
+                (Some(start), Some(end)) if end > start
+            );
         let mut terminal_delivered = false;
         let mut terminal_fresh_delivered = None;
         let mut terminal_not_delivered = false;
@@ -1370,7 +1382,10 @@ impl RelaySink for SessionBoundDiscordRelaySink {
         }
         // #3041 P1-3 R5: surface the outcome on THIS frame's sequence (the watcher
         // resolves its own terminal ACK on its exact seq, so a co-chunked tail can't
-        // satisfy another turn's ACK); no result-bearing delivery → `FrameAccepted`.
+        // satisfy another turn's ACK). A valid terminal commit fence proves this exact
+        // sequence needs a terminal resolution even when parser visibility policy emits
+        // no delivery; resolve it as NotDelivered so the watcher reconciles immediately.
+        // An unfenced frame with no result-bearing delivery remains `FrameAccepted`.
         // #3041 P1-5: NO `TerminalUnknown` (the sink always KNOWS its result).
         if terminal_delivered {
             Ok(RelaySinkOutcome::TerminalDelivered)
@@ -1379,7 +1394,7 @@ impl RelaySink for SessionBoundDiscordRelaySink {
                 committed_to,
                 persistence_recorded,
             })
-        } else if terminal_not_delivered {
+        } else if terminal_not_delivered || fenced_terminal_without_delivery {
             Ok(RelaySinkOutcome::TerminalNotDelivered)
         } else {
             Ok(RelaySinkOutcome::FrameAccepted)
@@ -4529,14 +4544,9 @@ mod tests {
         let binding = matched("42");
         let mut parser = SessionRelayParser::default();
 
-        let pure_subagent = concat!(
-            "{\"type\":\"system\",\"subtype\":\"task_started\",\"task_id\":\"sub-1\",\"task_type\":\"local_agent\"}\n",
-            "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"sub-1\",\"status\":\"completed\",\"summary\":\"Subagent finished\"}\n",
-            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}\n"
-        );
         assert!(
             parser
-                .ingest_frame(&frame(&binding, pure_subagent, 1))
+                .ingest_frame(&frame(&binding, PURE_SUBAGENT_ZERO_DELIVERY_PAYLOAD, 1,))
                 .is_empty()
         );
 
