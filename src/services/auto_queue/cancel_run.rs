@@ -1179,8 +1179,13 @@ pub(crate) async fn cancel_with_pg(
     cancel_selected_runs_with_pg(health_registry, pool, &target_run_ids, "auto_queue_cancel").await
 }
 
+// #4953: every test here needs a live PostgreSQL server, so the module name
+// must carry the `pg_` marker that `just test-postgres` and the test-lane
+// coverage gate select on. Naming it `tests` put it outside the PG lane's
+// module-level match while the non-PG lane still ran it, so the PG-less
+// `full_non_pg` CI job executed it and failed with a 15s pool timeout.
 #[cfg(test)]
-mod tests {
+mod pg_tests {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
 
