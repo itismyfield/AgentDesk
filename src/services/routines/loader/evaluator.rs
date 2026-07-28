@@ -8,6 +8,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
+mod tests;
+
+#[cfg(test)]
 pub(super) fn load_single_routine_script(root: &Path, path: &Path) -> Result<LoadedRoutineScript> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| anyhow!("read routine script {}: {e}", path.display()))?;

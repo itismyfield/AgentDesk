@@ -16,6 +16,8 @@ use std::os::unix::fs::OpenOptionsExt as _;
 use std::os::windows::fs::OpenOptionsExt as _;
 
 mod authority;
+#[cfg(test)]
+mod tests;
 use authority::AuthorityFileKind;
 #[cfg(unix)]
 use authority::{FileIdentity, require_available_identity};

@@ -2,6 +2,9 @@ use std::fmt;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+#[cfg(test)]
+mod tests;
+
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
 
