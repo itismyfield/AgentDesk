@@ -815,6 +815,9 @@ adk_rsync_peer_asset_surface() {
     local remote_root="$3"
     local surface="$4"
     local timeout_seconds="$5"
+    local remote_target
+    local remote_command
+    local pipeline_status
 
     adk_validate_peer_destination "$peer" || return 1
     adk_validate_peer_runtime_root "$remote_root" || return 1
@@ -824,7 +827,37 @@ adk_rsync_peer_asset_surface() {
         *) return 1 ;;
     esac
     _adk_assert_no_symlink_tree "$source_root" || return 1
-    rsync -a --protect-args \
-        -e "ssh -o ConnectTimeout=$timeout_seconds" \
-        -- "$source_root/" "$peer:$remote_root/$surface/"
+
+    # Apple still ships rsync/openrsync variants that reject --protect-args.
+    # Probe the exact option instead of parsing vendor-specific version text.
+    # Modern rsync keeps its argument-safe fast path; legacy hosts use a tar
+    # stream whose remote command is quoted as one bash -lc argument.
+    if rsync --protect-args --version >/dev/null 2>&1; then
+        rsync -a --protect-args \
+            -e "ssh -o ConnectTimeout=$timeout_seconds" \
+            -- "$source_root/" "$peer:$remote_root/$surface/"
+        return
+    fi
+
+    remote_target="$remote_root/$surface"
+    remote_command="set -e
+target=$(printf '%q' "$remote_target")
+target_parent=\$(dirname \"\$target\")
+for path in \"\$target_parent\" \"\$target\"; do
+    [ ! -L \"\$path\" ] || exit 51
+done
+if [ -e \"\$target\" ] && [ ! -d \"\$target\" ]; then
+    exit 52
+fi
+mkdir -p \"\$target\"
+first_link=\$(find \"\$target\" -type l -print -quit) || exit 53
+[ -z \"\$first_link\" ] || exit 54
+tar -xf - -C \"\$target\""
+
+    tar -C "$source_root" -cf - . \
+        | ssh -o "ConnectTimeout=$timeout_seconds" "$peer" \
+            "bash -lc $(printf '%q' "$remote_command")"
+    pipeline_status=("${PIPESTATUS[@]}")
+    [ "${pipeline_status[0]:-1}" -eq 0 ] \
+        && [ "${pipeline_status[1]:-1}" -eq 0 ]
 }

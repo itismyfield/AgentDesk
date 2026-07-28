@@ -523,6 +523,30 @@ printf '%s\n' "${PEER_RSYNC_ARGS[@]}" | grep -Fxq -- '--protect-args' \
     "operator@peer.local:$PEER_ROOT/routines/" ] \
     || fail_test 'peer rsync split or rewrote the remote metacharacter path'
 
+# Legacy macOS rsync rejects --protect-args. Its fallback must transfer the
+# same metacharacter path through a quoted tar-over-SSH command, never retry an
+# unprotected rsync invocation.
+LEGACY_ROOT="$TMP_ROOT/legacy peer/ADK Root;[\$HOME]"
+mkdir -p "$(dirname "$LEGACY_ROOT")"
+LEGACY_RSYNC_PROBES=0
+rsync() {
+    if [ "${1:-}" = '--protect-args' ] && [ "${2:-}" = '--version' ]; then
+        LEGACY_RSYNC_PROBES=$((LEGACY_RSYNC_PROBES + 1))
+        return 1
+    fi
+    return 91
+}
+ssh() {
+    command bash -c "${4:?missing legacy fake-ssh remote command}"
+}
+adk_rsync_peer_asset_surface "$VALID_ROOT/routines" 'operator@peer.local' \
+    "$LEGACY_ROOT" 'routines' 7
+unset -f ssh rsync
+[ "$LEGACY_RSYNC_PROBES" -eq 1 ] \
+    && cmp "$VALID_ROOT/routines/valid.js" \
+        "$LEGACY_ROOT/routines/valid.js" >/dev/null \
+    || fail_test 'legacy rsync fallback lost quoted tar-stream assets'
+
 # Exercise installer preflight and promotion functions. An incomplete old
 # artifact must fail before a binary marker or live assets change.
 extract_function() {
