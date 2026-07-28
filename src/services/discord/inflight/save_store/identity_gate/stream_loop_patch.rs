@@ -266,9 +266,14 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
             baseline_bytes = persisted_baseline.full_response.len(),
             local_bytes = state.full_response.len(),
             durable_bytes = on_disk.full_response.len(),
-            "stream-tick response merge deferred: concurrent bodies are not prefix-compatible"
+            "stream-tick response merge rejected: concurrent bodies are not prefix-compatible"
         );
-        return GuardedSaveOutcome::IoError;
+        // This is a deterministic authority conflict, not transient storage
+        // failure. Adopt the lock-held winner so callers terminate exact-frame
+        // replay instead of retrying the same divergent merge forever.
+        state.clone_from(&on_disk);
+        persisted_baseline.clone_from(&on_disk);
+        return GuardedSaveOutcome::IdentityMismatch;
     };
     updated.full_response = merged_response;
     updated.response_sent_offset = merged_response_offset;
@@ -940,9 +945,6 @@ mod tests {
         save_inflight_state_in_root(root.path(), &durable).expect("persist divergent row");
         let path = inflight_state_path(root.path(), &ProviderKind::Codex, channel_id);
         let durable_bytes_before = std::fs::read(&path).expect("read durable bytes");
-        let local_before = serde_json::to_value(&local).unwrap();
-        let baseline_before = serde_json::to_value(&baseline).unwrap();
-
         assert_eq!(
             save_stream_tick_state_preserving_current_message_races_in_root(
                 root.path(),
@@ -953,14 +955,21 @@ mod tests {
                 0,
                 "test::non_prefix_divergence",
             ),
-            GuardedSaveOutcome::IoError,
+            GuardedSaveOutcome::IdentityMismatch,
         );
         assert_eq!(
             std::fs::read(path).expect("durable survives"),
             durable_bytes_before
         );
-        assert_eq!(serde_json::to_value(&local).unwrap(), local_before);
-        assert_eq!(serde_json::to_value(&baseline).unwrap(), baseline_before);
+        let durable_winner = load(root.path(), &ProviderKind::Codex, channel_id);
+        assert_eq!(
+            serde_json::to_value(&local).unwrap(),
+            serde_json::to_value(&durable_winner).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&baseline).unwrap(),
+            serde_json::to_value(&durable_winner).unwrap()
+        );
     }
 
     #[test]

@@ -40,7 +40,7 @@ pub(super) struct PostLoopFinalizeContext {
     pub(super) standby_relay_owns_output: bool,
     pub(super) watcher_owns_assistant_relay: bool,
     pub(super) watcher_relay_available_for_turn: bool,
-    pub(super) bridge_entry_relay_owner_kind: super::super::inflight::RelayOwnerKind,
+    pub(super) bridge_entry_watcher_owner_epoch_current: bool,
     pub(super) response_sent_offset: usize,
     pub(super) tmux_last_offset: Option<u64>,
     pub(super) watcher_owner_channel_id: ChannelId,
@@ -112,7 +112,7 @@ pub(super) async fn run_post_loop_finalize(
     let standby_relay_owns_output = ctx.standby_relay_owns_output;
     let watcher_owns_assistant_relay = ctx.watcher_owns_assistant_relay;
     let watcher_relay_available_for_turn = ctx.watcher_relay_available_for_turn;
-    let bridge_entry_relay_owner_kind = ctx.bridge_entry_relay_owner_kind;
+    let bridge_entry_watcher_owner_epoch_current = ctx.bridge_entry_watcher_owner_epoch_current;
     let response_sent_offset = ctx.response_sent_offset;
     let tmux_last_offset = ctx.tmux_last_offset;
     let watcher_owner_channel_id = ctx.watcher_owner_channel_id;
@@ -328,12 +328,12 @@ pub(super) async fn run_post_loop_finalize(
         );
     }
     let terminal_error_path = cancelled || is_prompt_too_long || transport_error || recovery_retry;
-    // A bridge rebuilt from durable state must honor the row's existing
-    // relay owner. The pending-response guard below only applies to
-    // in-process handoffs where the bridge may already own unsent bytes.
+    // A bridge rebuilt from durable state must honor the row's existing relay
+    // owner while that exact entry epoch remains current. A later handoff
+    // invalidates it before owner kind can cycle back through Watcher (ABA).
     let recovered_watcher_owns_output =
         watcher_handoff::recovered_watcher_owns_output_at_bridge_entry(
-            bridge_entry_relay_owner_kind,
+            bridge_entry_watcher_owner_epoch_current,
             watcher_owns_assistant_relay,
             watcher_relay_available_for_turn,
             terminal_error_path,

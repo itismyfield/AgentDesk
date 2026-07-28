@@ -31,17 +31,11 @@ pub(super) const RETAINED_STREAM_RETRY_BACKOFF: std::time::Duration =
     std::time::Duration::from_millis(100);
 
 pub(super) fn retained_stream_retry_backoff(
-    done: bool,
-    terminal_control_drain_until: Option<std::time::Instant>,
     runtime_handoff_retry_pending: bool,
     guarded_tool_frame_retry_pending: bool,
-    now: std::time::Instant,
-) -> Option<std::time::Duration> {
-    (guarded_tool_frame_retry_pending
-        || (runtime_handoff_retry_pending
-            && done
-            && terminal_control_drain_until.is_none_or(|deadline| now >= deadline)))
-    .then_some(RETAINED_STREAM_RETRY_BACKOFF)
+) -> std::time::Duration {
+    debug_assert!(guarded_tool_frame_retry_pending || runtime_handoff_retry_pending);
+    RETAINED_STREAM_RETRY_BACKOFF
 }
 
 /// A successful exit-candidate flush replaces `inflight_state` with the exact

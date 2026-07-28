@@ -463,7 +463,7 @@ mod tests {
             .map(|offset| authority + offset)
             .expect("production caller constructs guards");
         let entry_owner = caller[authority..guards]
-            .find("let bridge_entry_relay_owner_kind = inflight_state.effective_relay_owner_kind()")
+            .find("let mut bridge_entry_watcher_owner_epoch_current = inflight_state .effective_relay_owner_kind()")
             .map(|offset| authority + offset)
             .expect("post-authority relay owner snapshot remains explicit");
         let guard_call = &caller[guards
@@ -541,8 +541,8 @@ mod tests {
             "finalizer and cleanup guards must use the exact post-authority merge"
         );
         assert!(
-            finalize_context.contains("bridge_entry_relay_owner_kind,"),
-            "post-loop recovery classification must receive the post-authority owner snapshot"
+            finalize_context.contains("bridge_entry_watcher_owner_epoch_current,"),
+            "post-loop recovery classification must receive the entry owner epoch verdict"
         );
     }
 

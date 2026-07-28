@@ -126,6 +126,7 @@ pub(super) struct StreamLoopState<'a> {
     pub(super) last_status_panel_edit: &'a mut tokio::time::Instant,
     pub(super) bridge_spans: &'a mut BridgeLatencySpans,
     pub(super) status_panel_generation: &'a mut u64,
+    pub(super) entry_watcher_epoch_current: &'a mut bool,
 }
 
 pub(super) struct StreamLoopOutput {
@@ -706,6 +707,7 @@ pub(super) async fn run_stream_loop(
                             tmux_session_name,
                             last_offset,
                         } => {
+                            *state.entry_watcher_epoch_current = false;
                             let outcome = handle_runtime_handoff_loop_message(
                                 RuntimeHandoffLoopMessage::TmuxReady {
                                     output_path,
@@ -748,6 +750,7 @@ pub(super) async fn run_stream_loop(
                             }
                         }
                         StreamMessage::RuntimeReady { handoff } => {
+                            *state.entry_watcher_epoch_current = false;
                             let outcome = handle_runtime_handoff_loop_message(
                                 RuntimeHandoffLoopMessage::RuntimeReady { handoff },
                                 RuntimeHandoffLoopContext {
@@ -789,6 +792,7 @@ pub(super) async fn run_stream_loop(
                             session_name,
                             last_offset,
                         } => {
+                            *state.entry_watcher_epoch_current = false;
                             let outcome = handle_runtime_handoff_loop_message(
                                 RuntimeHandoffLoopMessage::ProcessReady {
                                     output_path,
@@ -903,15 +907,11 @@ pub(super) async fn run_stream_loop(
             // Once a completed turn's residual drain expires there is no next
             // receiver wake, so keep the loop alive with a bounded retry
             // backoff rather than dropping the exact frame or busy-spinning.
-            if let Some(backoff) = retained_stream_retry_backoff(
-                done,
-                terminal_control_drain_until,
+            tokio::time::sleep(retained_stream_retry_backoff(
                 runtime_handoff_retry_pending,
                 guarded_tool_frame_retry_pending,
-                std::time::Instant::now(),
-            ) {
-                tokio::time::sleep(backoff).await;
-            }
+            ))
+            .await;
             continue 'outer;
         }
 

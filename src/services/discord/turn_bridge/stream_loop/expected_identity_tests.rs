@@ -130,9 +130,7 @@ fn done_cancel_waits_for_retained_terminal_tool_result_replay() {
 
 #[test]
 fn disconnected_receiver_with_done_behind_retained_retry_is_backed_off() {
-    let now = std::time::Instant::now();
     let receiver_disconnected = true;
-    let done = false;
     let mut pending = std::collections::VecDeque::from([StreamMessage::Done {
         result: "done behind retry".to_string(),
         session_id: Some("session-4259-r11".to_string()),
@@ -157,9 +155,72 @@ fn disconnected_receiver_with_done_behind_retained_retry_is_backed_off() {
     ));
     assert!(matches!(pending.get(1), Some(StreamMessage::Done { .. })));
     assert_eq!(
-        retained_stream_retry_backoff(done, None, false, retry_retained, now),
-        Some(RETAINED_STREAM_RETRY_BACKOFF),
+        retained_stream_retry_backoff(false, retry_retained),
+        RETAINED_STREAM_RETRY_BACKOFF,
         "every retained guarded retry must yield even before queued Done is reached",
+    );
+}
+
+#[test]
+fn deterministic_tool_divergence_releases_done_and_cancel_without_requeue() {
+    let mut pending = std::collections::VecDeque::from([StreamMessage::Done {
+        result: "done after authority conflict".to_string(),
+        session_id: Some("session-4259-r12-conflict".to_string()),
+    }]);
+    let exact_frame = StreamMessage::ToolResult {
+        content: "already rejected divergent result".to_string(),
+        is_error: false,
+        tool_use_id: Some("tool-4259-r12-conflict".to_string()),
+    };
+    let mut retry_retained = true;
+
+    assert!(!reconcile_exact_stream_frame_after_tool_outcome(
+        &mut pending,
+        exact_frame,
+        StreamToolArmOutcome::AuthorityLost,
+        &mut retry_retained,
+    ));
+    assert!(!retry_retained);
+    assert_eq!(
+        pending.len(),
+        1,
+        "the exact frame is neither duplicated nor requeued"
+    );
+    assert!(matches!(pending.front(), Some(StreamMessage::Done { .. })));
+    assert!(should_exit_completed_turn_on_cancel(
+        true,
+        true,
+        retry_retained
+    ));
+}
+
+#[test]
+fn disconnected_runtime_ready_retry_ahead_of_done_is_backed_off_before_done() {
+    let receiver_disconnected = true;
+    let pending = std::collections::VecDeque::from([
+        StreamMessage::RuntimeReady {
+            handoff: crate::services::agent_protocol::RuntimeHandoff::ProcessBackend {
+                output_path: "/runtime/retained.jsonl".to_string(),
+                session_name: "runtime-retained-r12".to_string(),
+                last_offset: 4259,
+            },
+        },
+        StreamMessage::Done {
+            result: "done behind runtime retry".to_string(),
+            session_id: Some("session-4259-r12".to_string()),
+        },
+    ]);
+
+    assert!(receiver_disconnected);
+    assert!(matches!(
+        pending.front(),
+        Some(StreamMessage::RuntimeReady { .. })
+    ));
+    assert!(matches!(pending.get(1), Some(StreamMessage::Done { .. })));
+    assert_eq!(
+        retained_stream_retry_backoff(true, false),
+        RETAINED_STREAM_RETRY_BACKOFF,
+        "runtime retry must yield even before Done/disconnect changes loop state",
     );
 }
 
@@ -180,18 +241,40 @@ fn retained_retry_policies_are_wired_to_both_cancel_boundaries_and_backoff() {
         .find("if runtime_handoff_retry_pending || guarded_tool_frame_retry_pending")
         .map(|start| &source[start..])
         .expect("retained retry block");
-    let backoff = retry_block
-        .find("if let Some(backoff) = retained_stream_retry_backoff(")
+    let sleep = retry_block
+        .find("tokio::time::sleep(retained_stream_retry_backoff(")
         .expect("retained retry block applies bounded backoff");
-    let sleep = backoff
-        + retry_block[backoff..]
-            .find("tokio::time::sleep(backoff).await")
-            .expect("retained retry backoff is awaited before replay");
     let replay = sleep
         + retry_block[sleep..]
             .find("continue 'outer")
             .expect("exact retained frame is replayed on the next outer iteration");
     assert!(sleep < replay);
+}
+
+#[test]
+fn every_later_authority_handoff_invalidates_the_bridge_entry_watcher_epoch() {
+    let source = include_str!("../stream_loop.rs")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let invalidation = "*state.entry_watcher_epoch_current = false;";
+    assert_eq!(source.matches(invalidation).count(), 3);
+
+    for arm in [
+        "StreamMessage::TmuxReady {",
+        "StreamMessage::RuntimeReady { handoff } => {",
+        "StreamMessage::ProcessReady {",
+    ] {
+        let arm_start = source.find(arm).expect("authority handoff arm");
+        let handler = source[arm_start..]
+            .find("let outcome = handle_runtime_handoff_loop_message(")
+            .map(|offset| arm_start + offset)
+            .expect("handoff handler");
+        assert!(
+            source[arm_start..handler].contains(invalidation),
+            "{arm} must invalidate the bridge-entry owner epoch before mutation/retry",
+        );
+    }
 }
 
 #[test]

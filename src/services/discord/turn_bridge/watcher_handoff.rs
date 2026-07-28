@@ -25,19 +25,17 @@ pub(super) fn should_delegate_bridge_relay_to_watcher(
         && !recovery_retry
 }
 
-/// A watcher owner adopted by the durable bridge-entry merge predates this
-/// process's stream handling, so it owns the whole turn even when detached
-/// bridge locals still contain bytes that appear unsent.
+/// A watcher owner adopted by the durable bridge-entry merge owns the whole
+/// turn, including detached bytes, only while that exact owner epoch remains
+/// current. Later handoff claims invalidate the epoch before owner-kind ABA.
 pub(super) fn recovered_watcher_owns_output_at_bridge_entry(
-    bridge_entry_relay_owner_kind: super::super::inflight::RelayOwnerKind,
+    bridge_entry_watcher_owner_epoch_current: bool,
     watcher_owns_assistant_relay: bool,
     watcher_relay_available_for_turn: bool,
     terminal_error_path: bool,
 ) -> bool {
-    matches!(
-        bridge_entry_relay_owner_kind,
-        super::super::inflight::RelayOwnerKind::Watcher
-    ) && watcher_owns_assistant_relay
+    bridge_entry_watcher_owner_epoch_current
+        && watcher_owns_assistant_relay
         && watcher_relay_available_for_turn
         && !terminal_error_path
 }
@@ -220,10 +218,28 @@ mod tests {
         let terminal_error_path = false;
         let bridge_response_pending = true;
         assert!(recovered_watcher_owns_output_at_bridge_entry(
-            super::super::super::inflight::RelayOwnerKind::Watcher,
+            true,
             true,
             true,
             terminal_error_path,
+        ));
+        assert!(!should_delegate_bridge_relay_to_watcher(
+            true,
+            true,
+            bridge_response_pending,
+            false,
+            false,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn later_watcher_reclaim_cannot_aba_bridge_entry_owner_with_pending_bytes() {
+        let bridge_response_pending = true;
+        assert!(!recovered_watcher_owns_output_at_bridge_entry(
+            false, // invalidated by Watcher -> None -> new Watcher handoff
+            true, true, false,
         ));
         assert!(!should_delegate_bridge_relay_to_watcher(
             true,
