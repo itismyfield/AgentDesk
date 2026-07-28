@@ -36,6 +36,22 @@ impl CounterKey {
     }
 }
 
+/// Closed reason categories for permanently unrecoverable relay emissions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayPermanentLossReason {
+    DriftStateTtlExpired,
+    DeadPane,
+}
+
+impl RelayPermanentLossReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DriftStateTtlExpired => "drift_state_ttl_expired",
+            Self::DeadPane => "dead_pane",
+        }
+    }
+}
+
 /// Atomic counters per `(channel_id, provider)`. All fields use `AtomicU64`.
 #[derive(Debug, Default)]
 pub struct AtomicCounters {
@@ -76,6 +92,10 @@ pub struct AtomicCounters {
     /// promotion drains it as delayed rather than lost. This is process-local and
     /// cumulative per `(channel_id, provider)`.
     pub relay_permanent_loss: AtomicU64,
+    /// #4794: subset of permanent loss caused by unresolved drift state TTL expiry.
+    pub relay_permanent_loss_drift_state_ttl_expired: AtomicU64,
+    /// #4794: subset of permanent loss confirmed by a dead/absent pane probe.
+    pub relay_permanent_loss_dead_pane: AtomicU64,
     /// #4913: canonical Discord identity writes rejected with a typed conflict.
     pub session_identity_conflicts: AtomicU64,
     pub session_identity_conflict_ambiguous_canonical: AtomicU64,
@@ -104,6 +124,12 @@ impl AtomicCounters {
                 .load(Ordering::Relaxed),
             relay_owner_unknown: self.relay_owner_unknown.load(Ordering::Relaxed),
             relay_permanent_loss: self.relay_permanent_loss.load(Ordering::Relaxed),
+            relay_permanent_loss_drift_state_ttl_expired: self
+                .relay_permanent_loss_drift_state_ttl_expired
+                .load(Ordering::Relaxed),
+            relay_permanent_loss_dead_pane: self
+                .relay_permanent_loss_dead_pane
+                .load(Ordering::Relaxed),
             session_identity_conflicts: self.session_identity_conflicts.load(Ordering::Relaxed),
             session_identity_conflict_ambiguous_canonical: self
                 .session_identity_conflict_ambiguous_canonical
@@ -144,6 +170,8 @@ pub struct AtomicCountersSnapshot {
     /// #4794: confirmed lost observed-prompt emissions; see
     /// [`AtomicCounters::relay_permanent_loss`] for exact inclusion rules.
     pub relay_permanent_loss: u64,
+    pub relay_permanent_loss_drift_state_ttl_expired: u64,
+    pub relay_permanent_loss_dead_pane: u64,
     /// #4913: see [`AtomicCounters::session_identity_conflicts`].
     pub session_identity_conflicts: u64,
     pub session_identity_conflict_ambiguous_canonical: u64,
@@ -284,10 +312,23 @@ impl ObservabilityCounters {
     }
 
     /// #4794: add a confirmed count of permanently unrecoverable relay emissions.
-    pub fn record_relay_permanent_loss(&self, channel_id: u64, provider: &str, count: u64) {
-        self.slot(channel_id, provider)
-            .relay_permanent_loss
+    pub fn record_relay_permanent_loss(
+        &self,
+        channel_id: u64,
+        provider: &str,
+        reason: RelayPermanentLossReason,
+        count: u64,
+    ) {
+        let slot = self.slot(channel_id, provider);
+        slot.relay_permanent_loss
             .fetch_add(count, Ordering::Relaxed);
+        match reason {
+            RelayPermanentLossReason::DriftStateTtlExpired => {
+                &slot.relay_permanent_loss_drift_state_ttl_expired
+            }
+            RelayPermanentLossReason::DeadPane => &slot.relay_permanent_loss_dead_pane,
+        }
+        .fetch_add(count, Ordering::Relaxed);
     }
 
     pub fn record_session_identity_conflict(
@@ -367,6 +408,9 @@ impl ObservabilityCounters {
                     relay_uncommitted_inflight_cleared: snap.relay_uncommitted_inflight_cleared,
                     relay_owner_unknown: snap.relay_owner_unknown,
                     relay_permanent_loss: snap.relay_permanent_loss,
+                    relay_permanent_loss_drift_state_ttl_expired: snap
+                        .relay_permanent_loss_drift_state_ttl_expired,
+                    relay_permanent_loss_dead_pane: snap.relay_permanent_loss_dead_pane,
                     session_identity_conflicts: snap.session_identity_conflicts,
                     session_identity_conflict_ambiguous_canonical: snap
                         .session_identity_conflict_ambiguous_canonical,
@@ -461,15 +505,21 @@ pub fn record_relay_owner_unknown(channel_id: u64, provider: &str) {
 }
 
 /// #4794: record confirmed permanent relay loss as an additive emission count.
-pub fn record_relay_permanent_loss(channel_id: u64, provider: &str, count: u64) {
+pub fn record_relay_permanent_loss(
+    channel_id: u64,
+    provider: &str,
+    reason: RelayPermanentLossReason,
+    count: u64,
+) {
     if count == 0 {
         return;
     }
-    global().record_relay_permanent_loss(channel_id, provider, count);
+    global().record_relay_permanent_loss(channel_id, provider, reason, count);
     tracing::error!(
         channel_id,
         provider,
         permanent_loss_count = count,
+        permanent_loss_reason = reason.as_str(),
         "relay emissions became permanently unrecoverable"
     );
 }
@@ -490,14 +540,26 @@ mod tests {
     #[test]
     fn permanent_relay_loss_is_additive_and_exposed() {
         let counters = ObservabilityCounters::new();
-        counters.record_relay_permanent_loss(4794, "Claude", 9);
-        counters.record_relay_permanent_loss(4794, "claude", 2);
+        counters.record_relay_permanent_loss(
+            4794,
+            "Claude",
+            RelayPermanentLossReason::DriftStateTtlExpired,
+            9,
+        );
+        counters.record_relay_permanent_loss(
+            4794,
+            "claude",
+            RelayPermanentLossReason::DeadPane,
+            2,
+        );
 
         let rows = counters.snapshot();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].channel_id, 4794);
         assert_eq!(rows[0].provider, "claude");
         assert_eq!(rows[0].relay_permanent_loss, 11);
+        assert_eq!(rows[0].relay_permanent_loss_drift_state_ttl_expired, 9);
+        assert_eq!(rows[0].relay_permanent_loss_dead_pane, 2);
     }
 
     #[test]

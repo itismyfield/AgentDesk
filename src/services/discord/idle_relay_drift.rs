@@ -183,6 +183,7 @@ fn purge_expired_locked(map: &mut HashMap<String, DriftState>, now: Instant) {
             crate::services::observability::metrics::record_relay_permanent_loss(
                 channel_id,
                 &provider,
+                crate::services::observability::metrics::RelayPermanentLossReason::DriftStateTtlExpired,
                 pending_count,
             );
             tracing::error!(
@@ -257,6 +258,7 @@ pub(super) fn record_confirmed_dead_orphan_loss(
     crate::services::observability::metrics::record_relay_permanent_loss(
         channel_id,
         provider.as_str(),
+        crate::services::observability::metrics::RelayPermanentLossReason::DeadPane,
         permanent_loss_count,
     );
     permanent_loss_count
@@ -559,6 +561,7 @@ async fn attempt_drift_repair(
                 crate::services::observability::metrics::record_relay_permanent_loss(
                     metric_channel,
                     provider.as_str(),
+                    crate::services::observability::metrics::RelayPermanentLossReason::DeadPane,
                     permanent_loss_count,
                 );
             }
@@ -894,7 +897,7 @@ mod tests {
         let before = crate::services::observability::metrics::snapshot()
             .into_iter()
             .find(|row| row.channel_id == channel_id && row.provider == "claude")
-            .map(|row| row.relay_permanent_loss)
+            .map(|row| row.relay_permanent_loss_drift_state_ttl_expired)
             .unwrap_or(0);
         let now = Instant::now();
         let mut map = DRIFT_STATE
@@ -915,7 +918,7 @@ mod tests {
         let after = crate::services::observability::metrics::snapshot()
             .into_iter()
             .find(|row| row.channel_id == channel_id && row.provider == "claude")
-            .map(|row| row.relay_permanent_loss)
+            .map(|row| row.relay_permanent_loss_drift_state_ttl_expired)
             .unwrap_or(0);
         assert_eq!(after - before, 4, "TTL loss must be counted exactly once");
         reset_drift_state_for_tests();
