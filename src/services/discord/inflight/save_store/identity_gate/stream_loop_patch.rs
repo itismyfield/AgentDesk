@@ -76,8 +76,7 @@ pub(in crate::services::discord) fn save_stream_tick_state_preserving_current_me
         persisted_baseline,
         state,
         expected,
-        expected_current_msg_id,
-        expected_current_msg_len,
+        (expected_current_msg_id, expected_current_msg_len),
         caller,
         StreamTickSaveMode::MergeConcurrentOwner,
     )
@@ -103,8 +102,7 @@ pub(in crate::services::discord) fn save_stream_tick_state_if_bridge_authority(
         persisted_baseline,
         state,
         expected,
-        expected_current_msg_id,
-        expected_current_msg_len,
+        (expected_current_msg_id, expected_current_msg_len),
         caller,
         StreamTickSaveMode::StrictBridgeMutation,
     )
@@ -130,14 +128,12 @@ pub(in crate::services::discord::inflight) fn save_stream_tick_state_preserving_
         persisted_baseline,
         state,
         expected,
-        expected_current_msg_id,
-        expected_current_msg_len,
+        (expected_current_msg_id, expected_current_msg_len),
         caller,
         StreamTickSaveMode::MergeConcurrentOwner,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord::inflight) fn save_stream_tick_state_if_bridge_authority_in_root(
     root: &Path,
     persisted_baseline: &mut InflightTurnState,
@@ -152,21 +148,18 @@ pub(in crate::services::discord::inflight) fn save_stream_tick_state_if_bridge_a
         persisted_baseline,
         state,
         expected,
-        expected_current_msg_id,
-        expected_current_msg_len,
+        (expected_current_msg_id, expected_current_msg_len),
         caller,
         StreamTickSaveMode::StrictBridgeMutation,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
     root: &Path,
     persisted_baseline: &mut InflightTurnState,
     state: &mut InflightTurnState,
     expected: &InflightTurnIdentity,
-    expected_current_msg_id: u64,
-    expected_current_msg_len: usize,
+    expected_current_message: (u64, usize),
     caller: &'static str,
     mode: StreamTickSaveMode,
 ) -> GuardedSaveOutcome {
@@ -206,7 +199,7 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
     let baseline_authority = StreamRelayAuthority::from_state(persisted_baseline);
     let local_authority = StreamRelayAuthority::from_state(state);
     let durable_authority = StreamRelayAuthority::from_state(&on_disk);
-    let baseline_current_message = (expected_current_msg_id, expected_current_msg_len);
+    let baseline_current_message = expected_current_message;
     let durable_current_message = (on_disk.current_msg_id, on_disk.current_msg_len);
     if mode == StreamTickSaveMode::StrictBridgeMutation {
         let authority_changed =
@@ -221,8 +214,8 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
                 baseline_relay_owner = baseline_authority.relay_owner_kind.as_str(),
                 local_relay_owner = local_authority.relay_owner_kind.as_str(),
                 durable_relay_owner = durable_authority.relay_owner_kind.as_str(),
-                expected_current_msg_id,
-                expected_current_msg_len,
+                expected_current_msg_id = expected_current_message.0,
+                expected_current_msg_len = expected_current_message.1,
                 durable_current_msg_id = on_disk.current_msg_id,
                 durable_current_msg_len = on_disk.current_msg_len,
                 "strict stream mutation fence rejected changed durable authority"

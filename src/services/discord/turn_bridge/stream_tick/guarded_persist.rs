@@ -4,6 +4,26 @@ use super::super::*;
 
 pub(super) type GuardedSaveOutcome = crate::services::discord::inflight::GuardedSaveOutcome;
 
+pub(in crate::services::discord::turn_bridge) struct StreamTickCandidateSaveContext<
+    'a,
+    G: TurnGateway + ?Sized,
+> {
+    pub(in crate::services::discord::turn_bridge) gateway: &'a G,
+    pub(in crate::services::discord::turn_bridge) provider: &'a ProviderKind,
+    pub(in crate::services::discord::turn_bridge) token_hash: &'a str,
+    pub(in crate::services::discord::turn_bridge) channel_id: ChannelId,
+    pub(in crate::services::discord::turn_bridge) persisted_baseline: &'a mut InflightTurnState,
+    pub(in crate::services::discord::turn_bridge) inflight_state: &'a mut InflightTurnState,
+    pub(in crate::services::discord::turn_bridge) expected_identity:
+        &'a crate::services::discord::inflight::InflightTurnIdentity,
+    pub(in crate::services::discord::turn_bridge) expected_current_message: &'a mut (u64, usize),
+    pub(in crate::services::discord::turn_bridge) current_msg_id: &'a mut MessageId,
+    pub(in crate::services::discord::turn_bridge) pending_current_message_candidate:
+        &'a mut Option<MessageId>,
+    pub(in crate::services::discord::turn_bridge) bridge_created_response_placeholder_msg_id:
+        &'a mut Option<MessageId>,
+}
+
 /// Durable precondition for a Discord-visible stream mutation.
 ///
 /// A successful identity guard is not sufficient by itself: the same turn may
@@ -90,13 +110,14 @@ pub(in crate::services::discord::turn_bridge) fn persist_stream_tick_state(
         expected,
         expected_current_message,
         detached_current_msg_id,
-        channel_id,
-        caller,
-        false,
+        StreamTickSaveOperation {
+            channel_id,
+            caller,
+            mode: StreamTickSaveMode::MergeConcurrentOwner,
+        },
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn persist_stream_tick_visible_mutation_fence(
     persisted_baseline: &mut InflightTurnState,
     inflight_state: &mut InflightTurnState,
@@ -112,36 +133,35 @@ fn persist_stream_tick_visible_mutation_fence(
         expected,
         expected_current_message,
         detached_current_msg_id,
-        channel_id,
-        caller,
-        true,
+        StreamTickSaveOperation {
+            channel_id,
+            caller,
+            mode: StreamTickSaveMode::StrictVisibleMutationFence,
+        },
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn persist_stream_tick_state_with_authority_mode(
     persisted_baseline: &mut InflightTurnState,
     inflight_state: &mut InflightTurnState,
     expected: &crate::services::discord::inflight::InflightTurnIdentity,
     expected_current_message: &mut (u64, usize),
     detached_current_msg_id: &mut MessageId,
-    channel_id: ChannelId,
-    caller: &'static str,
-    strict_visible_mutation_fence: bool,
+    operation: StreamTickSaveOperation,
 ) -> GuardedSaveOutcome {
     use crate::services::discord::inflight::{
         GuardedSaveOutcome, save_stream_tick_state_if_bridge_authority,
         save_stream_tick_state_preserving_current_message_races,
     };
     let expected_current_before_save = *expected_current_message;
-    let outcome = if strict_visible_mutation_fence {
+    let outcome = if operation.mode == StreamTickSaveMode::StrictVisibleMutationFence {
         save_stream_tick_state_if_bridge_authority(
             persisted_baseline,
             inflight_state,
             expected,
             expected_current_message.0,
             expected_current_message.1,
-            caller,
+            operation.caller,
         )
     } else {
         save_stream_tick_state_preserving_current_message_races(
@@ -150,7 +170,7 @@ fn persist_stream_tick_state_with_authority_mode(
             expected,
             expected_current_message.0,
             expected_current_message.1,
-            caller,
+            operation.caller,
         )
     };
     if outcome == GuardedSaveOutcome::Saved {
@@ -160,7 +180,7 @@ fn persist_stream_tick_state_with_authority_mode(
         );
         *detached_current_msg_id =
             detached_current_msg_id_from_durable(inflight_state.current_msg_id);
-    } else if strict_visible_mutation_fence
+    } else if operation.mode == StreamTickSaveMode::StrictVisibleMutationFence
         && outcome == GuardedSaveOutcome::IdentityMismatch
         && expected.matches_state(inflight_state)
         && ((
@@ -185,8 +205,8 @@ fn persist_stream_tick_state_with_authority_mode(
         GuardedSaveOutcome::Missing | GuardedSaveOutcome::IdentityMismatch
     ) {
         tracing::warn!(
-            channel_id = channel_id.get(),
-            caller,
+            channel_id = operation.channel_id.get(),
+            caller = operation.caller,
             ?outcome,
             "stream tick guarded save skipped because durable row is no longer owned by this turn"
         );
@@ -194,218 +214,137 @@ fn persist_stream_tick_state_with_authority_mode(
     outcome
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamTickSaveMode {
+    MergeConcurrentOwner,
+    StrictVisibleMutationFence,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StreamTickSaveOperation {
+    channel_id: ChannelId,
+    caller: &'static str,
+    mode: StreamTickSaveMode,
+}
+
 pub(in crate::services::discord::turn_bridge) async fn persist_stream_tick_state_with_candidate_cleanup<
     G: TurnGateway + ?Sized,
 >(
-    gateway: &G,
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: ChannelId,
-    persisted_baseline: &mut InflightTurnState,
-    inflight_state: &mut InflightTurnState,
-    expected_identity: &crate::services::discord::inflight::InflightTurnIdentity,
-    expected_current_message: &mut (u64, usize),
-    current_msg_id: &mut MessageId,
-    pending_current_message_candidate: &mut Option<MessageId>,
-    bridge_created_response_placeholder_msg_id: &mut Option<MessageId>,
+    mut context: StreamTickCandidateSaveContext<'_, G>,
     caller: &'static str,
 ) -> GuardedSaveOutcome {
     persist_stream_tick_state_with_candidate_cleanup_mode(
-        gateway,
-        provider,
-        token_hash,
-        channel_id,
-        persisted_baseline,
-        inflight_state,
-        expected_identity,
-        expected_current_message,
-        current_msg_id,
-        pending_current_message_candidate,
-        bridge_created_response_placeholder_msg_id,
+        &mut context,
         caller,
-        false,
+        StreamTickSaveMode::MergeConcurrentOwner,
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn fence_stream_tick_visible_mutation_with_candidate_cleanup<
     G: TurnGateway + ?Sized,
 >(
-    gateway: &G,
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: ChannelId,
-    persisted_baseline: &mut InflightTurnState,
-    inflight_state: &mut InflightTurnState,
-    expected_identity: &crate::services::discord::inflight::InflightTurnIdentity,
-    expected_current_message: &mut (u64, usize),
-    current_msg_id: &mut MessageId,
-    pending_current_message_candidate: &mut Option<MessageId>,
-    bridge_created_response_placeholder_msg_id: &mut Option<MessageId>,
+    mut context: StreamTickCandidateSaveContext<'_, G>,
     caller: &'static str,
 ) -> GuardedSaveOutcome {
     persist_stream_tick_state_with_candidate_cleanup_mode(
-        gateway,
-        provider,
-        token_hash,
-        channel_id,
-        persisted_baseline,
-        inflight_state,
-        expected_identity,
-        expected_current_message,
-        current_msg_id,
-        pending_current_message_candidate,
-        bridge_created_response_placeholder_msg_id,
+        &mut context,
         caller,
-        true,
+        StreamTickSaveMode::StrictVisibleMutationFence,
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn persist_stream_tick_state_with_candidate_cleanup_mode<G: TurnGateway + ?Sized>(
-    gateway: &G,
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: ChannelId,
-    persisted_baseline: &mut InflightTurnState,
-    inflight_state: &mut InflightTurnState,
-    expected_identity: &crate::services::discord::inflight::InflightTurnIdentity,
-    expected_current_message: &mut (u64, usize),
-    current_msg_id: &mut MessageId,
-    pending_current_message_candidate: &mut Option<MessageId>,
-    bridge_created_response_placeholder_msg_id: &mut Option<MessageId>,
+    context: &mut StreamTickCandidateSaveContext<'_, G>,
     caller: &'static str,
-    strict_visible_mutation_fence: bool,
+    mode: StreamTickSaveMode,
 ) -> GuardedSaveOutcome {
-    let outcome = if strict_visible_mutation_fence {
+    let outcome = if mode == StreamTickSaveMode::StrictVisibleMutationFence {
         persist_stream_tick_visible_mutation_fence(
-            persisted_baseline,
-            inflight_state,
-            expected_identity,
-            expected_current_message,
-            current_msg_id,
-            channel_id,
+            context.persisted_baseline,
+            context.inflight_state,
+            context.expected_identity,
+            context.expected_current_message,
+            context.current_msg_id,
+            context.channel_id,
             caller,
         )
     } else {
         persist_stream_tick_state(
-            persisted_baseline,
-            inflight_state,
-            expected_identity,
-            expected_current_message,
-            current_msg_id,
-            channel_id,
+            context.persisted_baseline,
+            context.inflight_state,
+            context.expected_identity,
+            context.expected_current_message,
+            context.current_msg_id,
+            context.channel_id,
             caller,
         )
     };
     if outcome == GuardedSaveOutcome::IoError {
         return outcome;
     }
-    let Some(candidate) = *pending_current_message_candidate else {
+    let Some(candidate) = *context.pending_current_message_candidate else {
         return outcome;
     };
-    if outcome == GuardedSaveOutcome::Saved && inflight_state.current_msg_id == candidate.get() {
-        pending_current_message_candidate.take();
+    if outcome == GuardedSaveOutcome::Saved
+        && context.inflight_state.current_msg_id == candidate.get()
+    {
+        context.pending_current_message_candidate.take();
         return outcome;
     }
-    discard_pending_current_message_candidate(
-        gateway,
-        provider,
-        token_hash,
-        channel_id,
-        inflight_state,
-        expected_current_message,
-        current_msg_id,
-        pending_current_message_candidate,
-        bridge_created_response_placeholder_msg_id,
-    )
-    .await;
+    discard_pending_current_message_candidate(context).await;
     outcome
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn discard_pending_current_message_candidate<G: TurnGateway + ?Sized>(
-    gateway: &G,
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: ChannelId,
-    inflight_state: &mut InflightTurnState,
-    expected_current_message: &(u64, usize),
-    current_msg_id: &mut MessageId,
-    pending_current_message_candidate: &mut Option<MessageId>,
-    bridge_created_response_placeholder_msg_id: &mut Option<MessageId>,
+    context: &mut StreamTickCandidateSaveContext<'_, G>,
 ) {
-    let Some(candidate) = pending_current_message_candidate.take() else {
+    let Some(candidate) = context.pending_current_message_candidate.take() else {
         return;
     };
-    if *bridge_created_response_placeholder_msg_id == Some(candidate) {
-        *bridge_created_response_placeholder_msg_id = None;
+    if *context.bridge_created_response_placeholder_msg_id == Some(candidate) {
+        *context.bridge_created_response_placeholder_msg_id = None;
     }
-    inflight_state.current_msg_id = expected_current_message.0;
-    inflight_state.current_msg_len = expected_current_message.1;
-    *current_msg_id = detached_current_msg_id_from_durable(expected_current_message.0);
-    cleanup_unbound_bridge_anchor(gateway, provider, token_hash, channel_id, candidate).await;
+    context.inflight_state.current_msg_id = context.expected_current_message.0;
+    context.inflight_state.current_msg_len = context.expected_current_message.1;
+    *context.current_msg_id =
+        detached_current_msg_id_from_durable(context.expected_current_message.0);
+    cleanup_unbound_bridge_anchor(
+        context.gateway,
+        context.provider,
+        context.token_hash,
+        context.channel_id,
+        candidate,
+    )
+    .await;
 }
 
 /// A stream-loop break may happen before the next periodic tick. Give a pending
 /// response candidate one final guarded bind; if the store is unavailable,
 /// discard the unbound Discord message instead of returning an orphan.
-#[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord::turn_bridge) async fn settle_pending_current_message_candidate_on_loop_exit<
     G: TurnGateway + ?Sized,
 >(
-    gateway: &G,
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: ChannelId,
-    persisted_baseline: &mut InflightTurnState,
-    inflight_state: &mut InflightTurnState,
-    expected_identity: &crate::services::discord::inflight::InflightTurnIdentity,
-    expected_current_message: &mut (u64, usize),
-    current_msg_id: &mut MessageId,
-    pending_current_message_candidate: &mut Option<MessageId>,
-    bridge_created_response_placeholder_msg_id: &mut Option<MessageId>,
+    mut context: StreamTickCandidateSaveContext<'_, G>,
 ) -> bool {
-    if pending_current_message_candidate.is_none() {
+    if context.pending_current_message_candidate.is_none() {
         return false;
     }
-    let outcome = persist_stream_tick_state_with_candidate_cleanup(
-        gateway,
-        provider,
-        token_hash,
-        channel_id,
-        persisted_baseline,
-        inflight_state,
-        expected_identity,
-        expected_current_message,
-        current_msg_id,
-        pending_current_message_candidate,
-        bridge_created_response_placeholder_msg_id,
+    let outcome = persist_stream_tick_state_with_candidate_cleanup_mode(
+        &mut context,
         "turn_bridge::stream_loop::exit_candidate_flush",
+        StreamTickSaveMode::MergeConcurrentOwner,
     )
     .await;
     if outcome == GuardedSaveOutcome::IoError {
         tracing::warn!(
-            channel_id = channel_id.get(),
+            channel_id = context.channel_id.get(),
             "stream-loop exit could not bind response candidate; discarding unbound message"
         );
-        discard_pending_current_message_candidate(
-            gateway,
-            provider,
-            token_hash,
-            channel_id,
-            inflight_state,
-            expected_current_message,
-            current_msg_id,
-            pending_current_message_candidate,
-            bridge_created_response_placeholder_msg_id,
-        )
-        .await;
+        discard_pending_current_message_candidate(&mut context).await;
     }
-    debug_assert!(pending_current_message_candidate.is_none());
+    debug_assert!(context.pending_current_message_candidate.is_none());
     outcome == GuardedSaveOutcome::Saved
 }
 
@@ -714,17 +653,19 @@ mod tests {
         let gateway = super::super::provider_output_guard_tests::CapturingGateway::default();
 
         let outcome = persist_stream_tick_state_with_candidate_cleanup(
-            &gateway,
-            &ProviderKind::Codex,
-            "candidate-retry-test",
-            channel,
-            &mut persisted_baseline,
-            &mut state,
-            &expected,
-            &mut expected_current_message,
-            &mut current_msg_id,
-            &mut pending_candidate,
-            &mut bridge_created_candidate,
+            StreamTickCandidateSaveContext {
+                gateway: &gateway,
+                provider: &ProviderKind::Codex,
+                token_hash: "candidate-retry-test",
+                channel_id: channel,
+                persisted_baseline: &mut persisted_baseline,
+                inflight_state: &mut state,
+                expected_identity: &expected,
+                expected_current_message: &mut expected_current_message,
+                current_msg_id: &mut current_msg_id,
+                pending_current_message_candidate: &mut pending_candidate,
+                bridge_created_response_placeholder_msg_id: &mut bridge_created_candidate,
+            },
             "turn_bridge::stream_tick::io_error_candidate_test",
         )
         .await;
@@ -734,17 +675,19 @@ mod tests {
 
         assert!(
             !settle_pending_current_message_candidate_on_loop_exit(
-                &gateway,
-                &ProviderKind::Codex,
-                "candidate-retry-test",
-                channel,
-                &mut persisted_baseline,
-                &mut state,
-                &expected,
-                &mut expected_current_message,
-                &mut current_msg_id,
-                &mut pending_candidate,
-                &mut bridge_created_candidate,
+                StreamTickCandidateSaveContext {
+                    gateway: &gateway,
+                    provider: &ProviderKind::Codex,
+                    token_hash: "candidate-retry-test",
+                    channel_id: channel,
+                    persisted_baseline: &mut persisted_baseline,
+                    inflight_state: &mut state,
+                    expected_identity: &expected,
+                    expected_current_message: &mut expected_current_message,
+                    current_msg_id: &mut current_msg_id,
+                    pending_current_message_candidate: &mut pending_candidate,
+                    bridge_created_response_placeholder_msg_id: &mut bridge_created_candidate,
+                },
             )
             .await
         );
@@ -779,19 +722,19 @@ mod tests {
         let mut bound_pending = Some(bound_current);
         let mut bound_created = Some(bound_current);
         assert!(
-            settle_pending_current_message_candidate_on_loop_exit(
-                &gateway,
-                &ProviderKind::Codex,
-                "candidate-matrix-test",
-                bound_channel,
-                &mut bound_baseline,
-                &mut bound,
-                &bound_identity,
-                &mut bound_expected,
-                &mut bound_current,
-                &mut bound_pending,
-                &mut bound_created,
-            )
+            settle_pending_current_message_candidate_on_loop_exit(StreamTickCandidateSaveContext {
+                gateway: &gateway,
+                provider: &ProviderKind::Codex,
+                token_hash: "candidate-matrix-test",
+                channel_id: bound_channel,
+                persisted_baseline: &mut bound_baseline,
+                inflight_state: &mut bound,
+                expected_identity: &bound_identity,
+                expected_current_message: &mut bound_expected,
+                current_msg_id: &mut bound_current,
+                pending_current_message_candidate: &mut bound_pending,
+                bridge_created_response_placeholder_msg_id: &mut bound_created,
+            },)
             .await
         );
         assert_eq!(bound_pending, None);
@@ -820,19 +763,19 @@ mod tests {
         let mut competing_pending = Some(competing_current);
         let mut competing_created = Some(competing_current);
         assert!(
-            settle_pending_current_message_candidate_on_loop_exit(
-                &gateway,
-                &ProviderKind::Codex,
-                "candidate-matrix-test",
-                competing_channel,
-                &mut competing_baseline,
-                &mut competing_local,
-                &competing_identity,
-                &mut competing_expected,
-                &mut competing_current,
-                &mut competing_pending,
-                &mut competing_created,
-            )
+            settle_pending_current_message_candidate_on_loop_exit(StreamTickCandidateSaveContext {
+                gateway: &gateway,
+                provider: &ProviderKind::Codex,
+                token_hash: "candidate-matrix-test",
+                channel_id: competing_channel,
+                persisted_baseline: &mut competing_baseline,
+                inflight_state: &mut competing_local,
+                expected_identity: &competing_identity,
+                expected_current_message: &mut competing_expected,
+                current_msg_id: &mut competing_current,
+                pending_current_message_candidate: &mut competing_pending,
+                bridge_created_response_placeholder_msg_id: &mut competing_created,
+            },)
             .await
         );
         assert_eq!(competing_pending, None);
@@ -855,17 +798,19 @@ mod tests {
         let mut stale_created = Some(stale_current);
         assert_eq!(
             persist_stream_tick_state_with_candidate_cleanup(
-                &gateway,
-                &ProviderKind::Codex,
-                "candidate-matrix-test",
-                reowned_channel,
-                &mut stale_baseline,
-                &mut stale,
-                &stale_identity,
-                &mut stale_expected,
-                &mut stale_current,
-                &mut stale_pending,
-                &mut stale_created,
+                StreamTickCandidateSaveContext {
+                    gateway: &gateway,
+                    provider: &ProviderKind::Codex,
+                    token_hash: "candidate-matrix-test",
+                    channel_id: reowned_channel,
+                    persisted_baseline: &mut stale_baseline,
+                    inflight_state: &mut stale,
+                    expected_identity: &stale_identity,
+                    expected_current_message: &mut stale_expected,
+                    current_msg_id: &mut stale_current,
+                    pending_current_message_candidate: &mut stale_pending,
+                    bridge_created_response_placeholder_msg_id: &mut stale_created,
+                },
                 "turn_bridge::stream_tick::candidate_reowned_test",
             )
             .await,
@@ -894,17 +839,19 @@ mod tests {
         let mut missing_created = Some(missing_current);
         assert_eq!(
             persist_stream_tick_state_with_candidate_cleanup(
-                &gateway,
-                &ProviderKind::Codex,
-                "candidate-matrix-test",
-                missing_channel,
-                &mut missing_baseline,
-                &mut missing,
-                &missing_identity,
-                &mut missing_expected,
-                &mut missing_current,
-                &mut missing_pending,
-                &mut missing_created,
+                StreamTickCandidateSaveContext {
+                    gateway: &gateway,
+                    provider: &ProviderKind::Codex,
+                    token_hash: "candidate-matrix-test",
+                    channel_id: missing_channel,
+                    persisted_baseline: &mut missing_baseline,
+                    inflight_state: &mut missing,
+                    expected_identity: &missing_identity,
+                    expected_current_message: &mut missing_expected,
+                    current_msg_id: &mut missing_current,
+                    pending_current_message_candidate: &mut missing_pending,
+                    bridge_created_response_placeholder_msg_id: &mut missing_created,
+                },
                 "turn_bridge::stream_tick::candidate_missing_test",
             )
             .await,
@@ -949,17 +896,19 @@ mod tests {
         let intended_authority =
             crate::services::discord::inflight::StreamRelayAuthority::from_state(&stale);
         let outcome = fence_stream_tick_visible_mutation_with_candidate_cleanup(
-            &gateway,
-            &ProviderKind::Codex,
-            "strict-fence-test",
-            channel,
-            &mut persisted_baseline,
-            &mut stale,
-            &expected,
-            &mut expected_current_message,
-            &mut current_msg_id,
-            &mut pending_candidate,
-            &mut bridge_created_candidate,
+            StreamTickCandidateSaveContext {
+                gateway: &gateway,
+                provider: &ProviderKind::Codex,
+                token_hash: "strict-fence-test",
+                channel_id: channel,
+                persisted_baseline: &mut persisted_baseline,
+                inflight_state: &mut stale,
+                expected_identity: &expected,
+                expected_current_message: &mut expected_current_message,
+                current_msg_id: &mut current_msg_id,
+                pending_current_message_candidate: &mut pending_candidate,
+                bridge_created_response_placeholder_msg_id: &mut bridge_created_candidate,
+            },
             "turn_bridge::stream_tick::strict_authority_interleaving_test",
         )
         .await;
@@ -1031,17 +980,19 @@ mod tests {
             crate::services::discord::inflight::StreamRelayAuthority::from_state(&state);
 
         let outcome = fence_stream_tick_visible_mutation_with_candidate_cleanup(
-            &gateway,
-            &ProviderKind::Codex,
-            "multi-rollover-test",
-            channel,
-            &mut persisted_baseline,
-            &mut state,
-            &expected,
-            &mut expected_current_message,
-            &mut current_msg_id,
-            &mut pending_candidate,
-            &mut bridge_created_candidate,
+            StreamTickCandidateSaveContext {
+                gateway: &gateway,
+                provider: &ProviderKind::Codex,
+                token_hash: "multi-rollover-test",
+                channel_id: channel,
+                persisted_baseline: &mut persisted_baseline,
+                inflight_state: &mut state,
+                expected_identity: &expected,
+                expected_current_message: &mut expected_current_message,
+                current_msg_id: &mut current_msg_id,
+                pending_current_message_candidate: &mut pending_candidate,
+                bridge_created_response_placeholder_msg_id: &mut bridge_created_candidate,
+            },
             "turn_bridge::stream_tick::second_rollover_bind_test",
         )
         .await;
@@ -1055,17 +1006,19 @@ mod tests {
 
         assert!(
             !settle_pending_current_message_candidate_on_loop_exit(
-                &gateway,
-                &ProviderKind::Codex,
-                "multi-rollover-test",
-                channel,
-                &mut persisted_baseline,
-                &mut state,
-                &expected,
-                &mut expected_current_message,
-                &mut current_msg_id,
-                &mut pending_candidate,
-                &mut bridge_created_candidate,
+                StreamTickCandidateSaveContext {
+                    gateway: &gateway,
+                    provider: &ProviderKind::Codex,
+                    token_hash: "multi-rollover-test",
+                    channel_id: channel,
+                    persisted_baseline: &mut persisted_baseline,
+                    inflight_state: &mut state,
+                    expected_identity: &expected,
+                    expected_current_message: &mut expected_current_message,
+                    current_msg_id: &mut current_msg_id,
+                    pending_current_message_candidate: &mut pending_candidate,
+                    bridge_created_response_placeholder_msg_id: &mut bridge_created_candidate,
+                },
             )
             .await
         );

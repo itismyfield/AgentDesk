@@ -8,7 +8,9 @@ use super::runtime_handoff_loop::{
     RuntimeHandoffLoopContext, RuntimeHandoffLoopMessage, RuntimeHandoffLoopState,
     handle_runtime_handoff_loop_message,
 };
-use super::stream_tick::guarded_persist::settle_pending_current_message_candidate_on_loop_exit;
+use super::stream_tick::guarded_persist::{
+    StreamTickCandidateSaveContext, settle_pending_current_message_candidate_on_loop_exit,
+};
 use super::stream_tick::{
     BridgeStreamTickContext, BridgeStreamTickState, LongRunningPlaceholderActive,
     PendingLongRunningOpenAfterStateSave, PendingLongRunningRetargetAfterStateSave,
@@ -1054,19 +1056,20 @@ pub(super) async fn run_stream_loop(
     *state.status_panel_generation = status_panel_generation;
 
     let current_msg_id_before_exit_settle = *state.current_msg_id;
-    if settle_pending_current_message_candidate_on_loop_exit(
-        gateway.as_ref(),
-        &provider,
-        &shared_owned.token_hash,
+    if settle_pending_current_message_candidate_on_loop_exit(StreamTickCandidateSaveContext {
+        gateway: gateway.as_ref(),
+        provider: &provider,
+        token_hash: &shared_owned.token_hash,
         channel_id,
-        &mut persisted_inflight_baseline,
-        state.inflight_state,
-        &stream_tick_expected_identity,
-        state.expected_current_message,
-        state.current_msg_id,
-        &mut pending_current_message_candidate,
-        state.bridge_created_response_placeholder_msg_id,
-    )
+        persisted_baseline: &mut persisted_inflight_baseline,
+        inflight_state: state.inflight_state,
+        expected_identity: &stream_tick_expected_identity,
+        expected_current_message: state.expected_current_message,
+        current_msg_id: state.current_msg_id,
+        pending_current_message_candidate: &mut pending_current_message_candidate,
+        bridge_created_response_placeholder_msg_id: state
+            .bridge_created_response_placeholder_msg_id,
+    })
     .await
     {
         reconcile_saved_exit_candidate(

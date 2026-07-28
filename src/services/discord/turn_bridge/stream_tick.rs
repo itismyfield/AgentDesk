@@ -8,10 +8,10 @@ use super::*;
 #[path = "stream_tick/guarded_persist.rs"]
 pub(super) mod guarded_persist;
 use guarded_persist::{
-    GuardedSaveOutcome, VisibleMutationAuthority, dirty_after_guarded_save,
-    fence_stream_tick_visible_mutation_with_candidate_cleanup, persist_stream_tick_heartbeat,
-    persist_stream_tick_state_with_candidate_cleanup, sync_stream_tick_tool_fields,
-    visible_mutation_authority_after_guarded_save,
+    GuardedSaveOutcome, StreamTickCandidateSaveContext, VisibleMutationAuthority,
+    dirty_after_guarded_save, fence_stream_tick_visible_mutation_with_candidate_cleanup,
+    persist_stream_tick_heartbeat, persist_stream_tick_state_with_candidate_cleanup,
+    sync_stream_tick_tool_fields, visible_mutation_authority_after_guarded_save,
 };
 
 pub(super) type LongRunningPlaceholderActive = Option<(
@@ -361,17 +361,19 @@ pub(super) async fn run_bridge_stream_tick(
                 );
             let current_msg_id_before_fence = current_msg_id;
             let guarded_outcome = fence_stream_tick_visible_mutation_with_candidate_cleanup(
-                gateway.as_ref(),
-                &provider,
-                &shared_owned.token_hash,
-                channel_id,
-                persisted_inflight_baseline,
-                &mut *inflight_state,
-                stream_tick_expected,
-                expected_current_message,
-                &mut current_msg_id,
-                pending_current_message_candidate,
-                bridge_created_response_placeholder_msg_id,
+                StreamTickCandidateSaveContext {
+                    gateway: gateway.as_ref(),
+                    provider: &provider,
+                    token_hash: &shared_owned.token_hash,
+                    channel_id,
+                    persisted_baseline: persisted_inflight_baseline,
+                    inflight_state: &mut *inflight_state,
+                    expected_identity: stream_tick_expected,
+                    expected_current_message,
+                    current_msg_id: &mut current_msg_id,
+                    pending_current_message_candidate,
+                    bridge_created_response_placeholder_msg_id,
+                },
                 $caller,
             )
             .await;
@@ -934,17 +936,19 @@ pub(super) async fn run_bridge_stream_tick(
             crate::services::discord::inflight::StreamRelayAuthority::from_state(inflight_state);
         let current_msg_id_before_flush = current_msg_id;
         let flush_outcome = persist_stream_tick_state_with_candidate_cleanup(
-            gateway.as_ref(),
-            &provider,
-            &shared_owned.token_hash,
-            channel_id,
-            persisted_inflight_baseline,
-            &mut *inflight_state,
-            stream_tick_expected,
-            expected_current_message,
-            &mut current_msg_id,
-            pending_current_message_candidate,
-            bridge_created_response_placeholder_msg_id,
+            StreamTickCandidateSaveContext {
+                gateway: gateway.as_ref(),
+                provider: &provider,
+                token_hash: &shared_owned.token_hash,
+                channel_id,
+                persisted_baseline: persisted_inflight_baseline,
+                inflight_state: &mut *inflight_state,
+                expected_identity: stream_tick_expected,
+                expected_current_message,
+                current_msg_id: &mut current_msg_id,
+                pending_current_message_candidate,
+                bridge_created_response_placeholder_msg_id,
+            },
             "turn_bridge::stream_tick::dirty_flush",
         )
         .await;
