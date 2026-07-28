@@ -639,10 +639,8 @@ pub(crate) async fn activate_with_deps_pg(
                     &card_id,
                     &agent_id,
                     *group,
-                    slot_index,
                     "activate_dispatch_create_failed_pg",
                     &error.to_string(),
-                    &entry_log_ctx,
                 );
                 crate::auto_queue_log!(
                     warn,

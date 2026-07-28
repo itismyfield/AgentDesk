@@ -114,10 +114,8 @@ pub(super) fn record_entry_dispatch_failure(
     card_id: &str,
     agent_id: &str,
     thread_group: i64,
-    slot_index: Option<i64>,
     trigger_source: &str,
     cause: &str,
-    log_ctx: &AutoQueueLogContext<'_>,
 ) -> Result<crate::db::auto_queue::EntryDispatchFailureResult, String> {
     let Some(pool) = deps.pg_pool.as_ref() else {
         return Err(format!(
@@ -169,45 +167,6 @@ pub(super) fn record_entry_dispatch_failure(
         |error| error,
     )
     .map_err(|error| format!("{entry_id}: dispatch failure state update failed: {error}"))?;
-
-    if result.changed {
-        if let Some(assigned_slot) = slot_index {
-            let run_id_text = run_id.to_string();
-            let agent_id_text = agent_id.to_string();
-            let entry_id_text = entry_id.to_string();
-            let release_result = crate::utils::async_bridge::block_on_pg_result(
-                pool,
-                move |bridge_pool| async move {
-                    crate::db::auto_queue::release_slot_for_group_agent_pg(
-                        &bridge_pool,
-                        &run_id_text,
-                        thread_group,
-                        &agent_id_text,
-                        assigned_slot,
-                    )
-                    .await
-                    .map_err(|error| {
-                        format!(
-                            "release postgres slot {} for failed entry {}: {}",
-                            assigned_slot, entry_id_text, error
-                        )
-                    })
-                },
-                |error| error,
-            );
-            if let Err(error) = release_result {
-                crate::auto_queue_log!(
-                    warn,
-                    "entry_dispatch_failure_release_slot_failed",
-                    log_ctx.clone().slot_index(assigned_slot),
-                    "[auto-queue] failed to release slot {} for entry {} after dispatch failure: {}",
-                    assigned_slot,
-                    entry_id,
-                    error
-                );
-            }
-        }
-    }
 
     Ok(result)
 }
@@ -397,6 +356,97 @@ mod failed_entry_alert_tests {
         );
 
         assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn production_failure_wrapper_preserves_restoring_slot_binding_pg() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        must_ok(
+            sqlx::query(
+                "INSERT INTO auto_queue_runs (id, status, max_concurrent_threads)
+                 VALUES ('run-restore-wrapper', 'restoring', 1)",
+            )
+            .execute(&pool)
+            .await,
+            "seed restoring run",
+        );
+        must_ok(
+            sqlx::query(
+                "INSERT INTO auto_queue_entries (
+                     id, run_id, agent_id, status, retry_count, slot_index, thread_group
+                 ) VALUES (
+                     'entry-restore-wrapper', 'run-restore-wrapper', 'agent-1',
+                     'dispatched', 0, 0, 0
+                 )",
+            )
+            .execute(&pool)
+            .await,
+            "seed restoring dispatched entry",
+        );
+        must_ok(
+            sqlx::query(
+                "INSERT INTO auto_queue_slots (
+                     agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map
+                 ) VALUES ('agent-1', 0, 'run-restore-wrapper', 0, '{}'::jsonb)",
+            )
+            .execute(&pool)
+            .await,
+            "seed restoring slot",
+        );
+        let config = crate::config::Config::default();
+        let engine = must_ok(
+            crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone())),
+            "create test policy engine",
+        );
+        let deps = AutoQueueActivateDeps {
+            pg_pool: Some(pool.clone()),
+            engine,
+            config: Arc::new(config),
+            health_registry: None,
+            guild_id: None,
+        };
+
+        let result = must_ok(
+            record_entry_dispatch_failure(
+                &deps,
+                "run-restore-wrapper",
+                "entry-restore-wrapper",
+                "card-restore-wrapper",
+                "agent-1",
+                0,
+                "restore_run_create_dispatch_failed",
+                "forced create failure",
+            ),
+            "production failure wrapper",
+        );
+        assert_eq!(
+            result.to_status,
+            crate::db::auto_queue::ENTRY_STATUS_PENDING
+        );
+        let state = must_ok(
+            sqlx::query_as::<_, (String, String, Option<String>)>(
+                "SELECT e.status, r.status, s.assigned_run_id
+                 FROM auto_queue_entries e
+                 JOIN auto_queue_runs r ON r.id = e.run_id
+                 JOIN auto_queue_slots s ON s.agent_id = e.agent_id AND s.slot_index = 0
+                 WHERE e.id = 'entry-restore-wrapper'",
+            )
+            .fetch_one(&pool)
+            .await,
+            "load production-wrapper state",
+        );
+        assert_eq!(
+            state,
+            (
+                "pending".to_string(),
+                "restoring".to_string(),
+                Some("run-restore-wrapper".to_string()),
+            )
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]

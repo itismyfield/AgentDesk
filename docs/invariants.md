@@ -20,7 +20,7 @@ path, and exposed at `GET /api/analytics/invariants`.
 | `tmux_confirmed_end_monotonic` | The tmux relay `confirmed_end_offset` watermark only advances and must reach the committed tmux output end after a direct delivery or bridge handoff. This is the tmux-output counterpart to `response_sent_offset`; the two are different units and must not be compared directly. | `src/services/discord/turn_bridge/mod.rs:299`, `src/services/discord/tmux.rs:3870` | `debug_assert!` and invariant counter at `src/services/discord/turn_bridge/mod.rs:337`, `src/services/discord/tmux.rs:3870`. |
 | `mailbox_active_turn_matches_dispatch` | While a foreground Discord turn is active, the channel mailbox owns exactly one active turn token. Turn finalization must remove that token before queue follow-up dispatch starts. | `src/services/turn_orchestrator.rs:675`, `src/services/turn_orchestrator.rs:1102`, `src/services/discord/mod.rs:1025`, `src/services/discord/turn_bridge/mod.rs:1541` | Soft invariant counter at `src/services/discord/turn_bridge/mod.rs:1549`. |
 | `turn_id_unique_within_session` | A persisted turn id is `discord:{channel_id}:{user_msg_id}`. Discord message ids are unique within the channel/session scope, and zero ids are reserved for synthetic rebind state that must not create real turn rows. | `src/services/discord/turn_bridge/mod.rs:213`, `src/services/discord/recovery_engine.rs:409` | `debug_assert!` and invariant counter at `src/services/discord/turn_bridge/mod.rs:228`. |
-| `auto_queue_slot_single_active_entry` | Within a single auto_queue_run, each `(agent_id, slot_index)` pair owns at most one entry in the `dispatched` state at any moment. A second dispatched entry on the same slot indicates either a stuck prior dispatch or a tick that failed to release the slot before dispatching the next card. | `src/services/auto_queue.rs:assemble_status_response`, `src/db/auto_queue/claim.rs:allocate_slot_for_group_agent_pg`, `src/db/auto_queue/slots.rs:release_slot_for_group_agent_pg` | Soft invariant counter at `src/services/auto_queue.rs:assemble_status_response` (no panic — this tripping means an auto_queue tick bug, not corruption). |
+| `auto_queue_slot_single_active_entry` | Within a single auto_queue_run, each `(agent_id, slot_index)` pair owns at most one entry in the `dispatched` state at any moment. A second dispatched entry on the same slot indicates either a stuck prior dispatch or a slot allocation that admitted a new card while an active dispatch still owned the slot. | `src/services/auto_queue.rs:assemble_status_response`, `src/db/auto_queue/claim.rs:allocate_slot_for_group_agent_pg`, `src/db/auto_queue/claim.rs:active_dispatch_slot_guard_sql`, `src/db/auto_queue/slots.rs:slot_has_active_dispatch_pg` | Soft invariant counter at `src/services/auto_queue.rs:assemble_status_response`; allocation SQL and post-claim checks reject slots with active entries or dispatches (no panic — this tripping means an auto_queue tick bug, not corruption). |
 | `dispatch_outbox_retry_count_in_bounds` | `dispatch_outbox.retry_count` is a `bigint` on Postgres and is read as `i64` in Rust (`MAX_RETRY_COUNT = 4`). It must be non-negative and must not exceed `MAX_RETRY_COUNT + 1` (a transient +1 can exist right before the row flips to `failed`). Overflowing into i32 territory was the original bug that motivated widening the column; the assertion guards against either a schema regression or an accounting bug that advances retry_count past the failure threshold without flipping status. | `src/server/routes/dispatches/outbox.rs:150` (`MAX_RETRY_COUNT`), `src/server/routes/dispatches/outbox.rs:383` (tick loop) | Soft invariant counter at `src/server/routes/dispatches/outbox.rs:383`. |
 
 ## Lifecycle Invariants
@@ -38,14 +38,13 @@ path, and exposed at `GET /api/analytics/invariants`.
 
 Each auto_queue_run assigns cards to agents through a `(thread_group, slot_index)`
 pool. The tick-based runtime allocates a slot via
-`allocate_slot_for_group_agent`, flips the picked entry to `dispatched`, then
-releases the slot in `release_slot_for_group_agent` once the entry reaches a
-terminal status. If two entries under the same `(agent_id, slot_index)` appear
-as `dispatched` concurrently, a tick has either failed to release the prior
-slot, or it has picked a second entry before the prior dispatched entry
-reached a terminal status. Both cases produce confused operator UI (the status
-view shows two "active" entries in one slot) and desync the agent-side tmux
-session binding. The check runs inside `assemble_status_response` — the same
+`allocate_slot_for_group_agent`; allocator guards reject slots with an active
+dispatch, a post-claim probe closes allocation races, and terminal transitions
+release slot ownership in the same transaction. If two entries under the same
+`(agent_id, slot_index)` appear as `dispatched` concurrently, those guards or
+the transactional release have failed. That produces confused operator UI (the
+status view shows two "active" entries in one slot) and desyncs the agent-side
+tmux session binding. The check runs inside `assemble_status_response` — the same
 path the HTTP status endpoint renders — so any operator query triggers the
 observation without extra DB round trips.
 

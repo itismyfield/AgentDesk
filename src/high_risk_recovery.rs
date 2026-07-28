@@ -402,6 +402,68 @@ async fn boot_reconcile_pg_resets_stale_runtime_rows() {
 }
 
 #[tokio::test]
+async fn boot_reconcile_terminalizes_cancelled_run_entry_after_partial_legacy_cancel_pg() {
+    let Some(pg_db) = PgRecoveryTestDatabase::create().await else {
+        return;
+    };
+    let Some(pool) = pg_db.migrate().await else {
+        pg_db.drop().await;
+        return;
+    };
+    seed_agent_pg(&pool).await;
+    seed_card_pg(&pool, "card-cancelled-reconcile", "in_progress").await;
+    sqlx::query(
+        "INSERT INTO auto_queue_runs (id, agent_id, status, completed_at)
+         VALUES ('run-cancelled-reconcile', 'agent-1', 'cancelled', NOW())",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed cancelled run");
+    sqlx::query(
+        "INSERT INTO task_dispatches
+            (id, kanban_card_id, to_agent_id, dispatch_type, status, title)
+         VALUES (
+            'dispatch-cancelled-reconcile', 'card-cancelled-reconcile', 'agent-1',
+            'implementation', 'cancelled', 'Cancelled dispatch'
+         )",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed cancelled dispatch");
+    sqlx::query(
+        "INSERT INTO auto_queue_entries
+            (id, run_id, kanban_card_id, agent_id, status, dispatch_id, slot_index, dispatched_at)
+         VALUES (
+            'entry-cancelled-reconcile', 'run-cancelled-reconcile',
+            'card-cancelled-reconcile', 'agent-1', 'dispatched',
+            'dispatch-cancelled-reconcile', 0, NOW()
+         )",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed stranded cancelled entry");
+
+    let stats = crate::reconcile::reconcile_boot_db_pg(&pool, "cancel-reconcile-test")
+        .await
+        .expect("boot reconcile cancelled run entry");
+    assert_eq!(stats.broken_auto_queue_entries_reset, 1);
+    let entry = sqlx::query_as::<_, (String, Option<String>, Option<i64>)>(
+        "SELECT status, dispatch_id, slot_index
+         FROM auto_queue_entries
+         WHERE id = 'entry-cancelled-reconcile'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("load reconciled cancelled entry");
+    assert_eq!(entry, ("skipped".to_string(), None, None));
+
+    crate::db::postgres::close_test_pool(pool, "cancelled run reconcile")
+        .await
+        .expect("close cancelled run reconcile pool");
+    pg_db.drop().await;
+}
+
+#[tokio::test]
 async fn restart_recovery_does_not_repost_prior_typed_dispatch_delivery() {
     let Some(pg_db) = PgRecoveryTestDatabase::create().await else {
         return;

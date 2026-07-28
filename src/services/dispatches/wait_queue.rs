@@ -81,6 +81,13 @@ pub(crate) fn spawn_cached_constraint_release_wake(
     );
 }
 
+pub(crate) async fn wake_cached_constraint_release_pg(
+    pool: &PgPool,
+    trigger: &str,
+) -> Result<DispatchOutboxWakeSummary, String> {
+    wake_waiting_dispatch_outbox_pg(pool, &runtime_cluster_config_snapshot(), trigger).await
+}
+
 pub(crate) fn spawn_wait_queue_wake_pg(
     pool: PgPool,
     cluster_config: ClusterConfig,

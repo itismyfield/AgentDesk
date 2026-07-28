@@ -76,8 +76,8 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg(
 /// Observability metadata captured while cancelling a dispatch so the
 /// commit-owning caller can fire the canonical writer's emits after the
 /// transaction durably lands (#3039).
-struct CancelTransitionMeta {
-    dispatch_id: String,
+pub(crate) struct CancelTransitionMeta {
+    pub(crate) dispatch_id: String,
     kanban_card_id: Option<String>,
     to_agent_id: Option<String>,
     dispatch_type: Option<String>,
@@ -86,7 +86,7 @@ struct CancelTransitionMeta {
 }
 
 impl CancelTransitionMeta {
-    fn emit(&self) {
+    pub(crate) fn emit(&self) {
         crate::services::observability::emit_dispatch_result(
             &self.dispatch_id,
             self.kanban_card_id.as_deref(),
@@ -139,6 +139,18 @@ pub async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx(
             .await?
             .changed,
     )
+}
+
+pub(crate) async fn cancel_dispatch_on_pg_tx_with_meta(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    dispatch_id: &str,
+    reason: Option<&str>,
+) -> Result<Option<CancelTransitionMeta>, String> {
+    let outcome =
+        cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(tx, dispatch_id, reason).await?;
+    Ok((outcome.changed > 0)
+        .then_some(outcome.transition)
+        .flatten())
 }
 
 async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(

@@ -4,6 +4,7 @@ pub mod entries;
 pub mod phase_gate_verdict;
 pub mod phase_gates;
 pub mod queries;
+pub mod run_status;
 pub mod runs;
 pub mod slot_predicate;
 pub mod slots;

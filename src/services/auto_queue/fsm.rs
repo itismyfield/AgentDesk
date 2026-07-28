@@ -150,10 +150,8 @@ pub(super) fn attempt_restore_dispatch(
                     &entry.card_id,
                     &entry.agent_id,
                     entry.thread_group,
-                    slot_index,
                     "restore_run_create_dispatch_failed",
                     &error_text,
-                    &entry_log_ctx,
                 )?;
                 crate::auto_queue_log!(
                     warn,

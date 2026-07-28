@@ -387,11 +387,6 @@ pub async fn update_dispatch(
             Ok(_) => {}
             Err(error) => return internal_error(error),
         }
-    } else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(DispatchRouteResponse::error("no fields to update")),
-        );
     }
 
     match crate::dispatch::query_dispatch_row_pg(pool, &id).await {
@@ -800,7 +795,10 @@ async fn update_dispatch_result_pg(
 
 #[cfg(test)]
 mod tests {
-    use super::{get_dispatch_delivery_events, get_dispatch_delivery_reconcile_stats};
+    use super::{
+        UpdateDispatchBody, get_dispatch_delivery_events, get_dispatch_delivery_reconcile_stats,
+        update_dispatch,
+    };
     use axum::extract::{Path, State};
     use axum::http::StatusCode;
 
@@ -946,6 +944,95 @@ mod tests {
             health_registry: None,
             cluster_instance_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn publish_only_dispatch_patch_broadcasts_without_mutating_result_or_phase_gate_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let state = test_state_with_pg(pool.clone());
+        let mut receiver = state.broadcast_tx.subscribe();
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, status) VALUES ('run-publish-only', 'active')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed publish-only run");
+        let context = serde_json::json!({
+            "phase_gate": {
+                "run_id": "run-publish-only",
+                "phase": 1,
+                "pass_verdict": "pass",
+                "final_phase": false
+            }
+        });
+        let detailed_result = serde_json::json!({
+            "error": "transport failure",
+            "diagnostics": {"attempts": 3, "provider": "test"}
+        });
+        sqlx::query(
+            "INSERT INTO task_dispatches (
+                 id, status, dispatch_type, context, result
+             ) VALUES ($1, 'failed', 'phase-gate', $2, $3)",
+        )
+        .bind("dispatch-publish-only")
+        .bind(context.to_string())
+        .bind(detailed_result.to_string())
+        .execute(&pool)
+        .await
+        .expect("seed publish-only dispatch");
+        sqlx::query(
+            "INSERT INTO auto_queue_phase_gates (
+                 run_id, phase, dispatch_id, status, pass_verdict, final_phase
+             ) VALUES ('run-publish-only', 1, 'dispatch-publish-only', 'failed', 'pass', FALSE)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed failed phase gate");
+
+        let (status, _) = update_dispatch(
+            State(state),
+            Path("dispatch-publish-only".to_string()),
+            axum::Json(UpdateDispatchBody {
+                status: None,
+                result: None,
+                allowed_from: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let event = receiver
+            .recv()
+            .await
+            .expect("receive dispatch update event");
+        assert_eq!(event.event, "task_dispatch_updated");
+        assert_eq!(event.data["id"], "dispatch-publish-only");
+
+        let state_row = sqlx::query_as::<_, (String, String, String, i64)>(
+            "SELECT d.result::TEXT, pg.status, r.status,
+                    (SELECT COUNT(*) FROM dispatch_events WHERE dispatch_id = d.id)
+             FROM task_dispatches d
+             JOIN auto_queue_phase_gates pg ON pg.dispatch_id = d.id
+             JOIN auto_queue_runs r ON r.id = pg.run_id
+             WHERE d.id = 'dispatch-publish-only'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load publish-only state");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&state_row.0)
+                .expect("decode persisted result"),
+            detailed_result
+        );
+        assert_eq!(state_row.1, "failed");
+        assert_eq!(state_row.2, "active");
+        assert_eq!(
+            state_row.3, 0,
+            "publish-only route must not add audit writes"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[tokio::test]

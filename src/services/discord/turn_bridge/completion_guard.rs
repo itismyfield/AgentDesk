@@ -439,13 +439,13 @@ pub(in crate::services::discord) async fn guard_review_dispatch_completion(
 
 /// Review and review-decision dispatches stay pending until their explicit
 /// API submissions arrive. Work dispatches use explicit PATCH/finalize flows.
-/// Fail a dispatch with retry on PATCH failure.
+/// Fail a dispatch and apply its AutoQueue retry policy atomically in Postgres.
 pub(in crate::services::discord) async fn fail_dispatch_with_retry(
     _api_port: u16,
     dispatch_id: Option<&str>,
     error_msg: &str,
 ) {
-    fail_dispatch_with_policy(dispatch_id, error_msg, None, true, None).await;
+    fail_dispatch_with_policy(dispatch_id, error_msg, None, true).await;
 }
 
 pub(in crate::services::discord) async fn fail_dispatch_tmux_session_died(
@@ -453,14 +453,7 @@ pub(in crate::services::discord) async fn fail_dispatch_tmux_session_died(
     dispatch_id: Option<&str>,
     error_msg: &str,
 ) {
-    fail_dispatch_with_policy(
-        dispatch_id,
-        error_msg,
-        Some("tmux_session_died"),
-        true,
-        Some(&["pending", "dispatched"]),
-    )
-    .await;
+    fail_dispatch_with_policy(dispatch_id, error_msg, Some("tmux_session_died"), true).await;
 }
 
 pub(in crate::services::discord) async fn fail_dispatch_auth_expired(
@@ -468,14 +461,7 @@ pub(in crate::services::discord) async fn fail_dispatch_auth_expired(
     dispatch_id: Option<&str>,
     error_msg: &str,
 ) {
-    fail_dispatch_with_policy(
-        dispatch_id,
-        error_msg,
-        Some("auth_token_expired"),
-        false,
-        None,
-    )
-    .await;
+    fail_dispatch_with_policy(dispatch_id, error_msg, Some("auth_token_expired"), false).await;
 }
 
 async fn fail_dispatch_with_policy(
@@ -483,8 +469,9 @@ async fn fail_dispatch_with_policy(
     error_msg: &str,
     error_code: Option<&str>,
     reset_auto_queue_entries: bool,
-    allowed_from: Option<&[&str]>,
 ) {
+    use tracing::Instrument as _;
+
     let Some(dispatch_id) = dispatch_id else {
         return;
     };
@@ -494,67 +481,68 @@ async fn fail_dispatch_with_policy(
         "fail_dispatch_terminal"
     };
     let dispatch_span = crate::logging::dispatch_span(span_name, Some(dispatch_id), None, None);
-    let _guard = dispatch_span.enter();
-    let payload = crate::services::dispatches::UpdateDispatchBody {
-        status: Some("failed".to_string()),
-        result: Some(dispatch_failure_result(error_msg, error_code)),
-        allowed_from: allowed_from.map(|statuses| {
-            statuses
-                .iter()
-                .map(|status| (*status).to_string())
-                .collect()
-        }),
-    };
-    use crate::services::discord::internal_api::DispatchUpdateOutcome;
-    for attempt in 1..=3 {
-        match crate::services::discord::internal_api::update_dispatch(dispatch_id, payload.clone())
-            .await
-        {
-            Ok(DispatchUpdateOutcome::Updated(_)) => {
-                tracing::warn!("marked dispatch as failed");
-                if reset_auto_queue_entries {
-                    if !runtime_pg_reset_linked_auto_queue_entries(dispatch_id) {
-                        tracing::warn!(
-                            "failed dispatch auto-queue retry reset skipped or affected no rows"
-                        );
-                    }
-                } else if !runtime_pg_fail_linked_auto_queue_entries(dispatch_id) {
-                    tracing::warn!(
-                        "failed dispatch auto-queue terminal update skipped or affected no rows"
-                    );
+    async {
+        // A generic loopback PATCH terminalizes the linked entry before this retry
+        // policy can run. Make the specialized Postgres reducer the sole writer so
+        // dispatch, entry retry/terminal state, audit, and run finalization commit
+        // atomically instead of compensating after a PATCH-created split brain.
+        match runtime_pg_fail_dispatch_with_result(
+            dispatch_id,
+            error_msg,
+            error_code,
+            reset_auto_queue_entries,
+        ) {
+            DispatchFailureWriteOutcome::Updated => {
+                tracing::warn!(dispatch_id = %dispatch_id, "marked dispatch as failed");
+                // Publish-only PATCH deliberately carries no mutable fields. The
+                // route reads the canonical row and emits task_dispatch_updated,
+                // so a concurrent richer result cannot be clobbered and phase-gate
+                // reconciliation cannot run twice.
+                match crate::services::discord::internal_api::publish_dispatch_update(dispatch_id)
+                    .await
+                {
+                    Ok(crate::services::discord::internal_api::DispatchUpdateOutcome::Updated(
+                        _,
+                    )) => {}
+                    Ok(
+                        crate::services::discord::internal_api::DispatchUpdateOutcome::Conflict {
+                            body,
+                        },
+                    ) => tracing::warn!(
+                        dispatch_id = %dispatch_id,
+                        response = %body,
+                        "post-commit dispatch failure publish returned conflict"
+                    ),
+                    Err(error) => tracing::warn!(
+                        dispatch_id = %dispatch_id,
+                        error = %error,
+                        "failed to publish post-commit dispatch failure update"
+                    ),
                 }
-                return;
             }
-            Ok(DispatchUpdateOutcome::Conflict { body }) => {
-                // #2194 follow-up: dispatch is already in a terminal status
-                // (completed/cancelled/failed). Do NOT overwrite via DB fallback.
-                // Trust the existing terminal state — reconciliation hooks own
-                // the auto-queue transition.
+            DispatchFailureWriteOutcome::AlreadyTerminal => {
                 tracing::info!(
                     dispatch_id = %dispatch_id,
-                    response = %body,
-                    "fail_dispatch: dispatch already terminal (409 conflict); skipping DB fallback"
+                    "dispatch failure writer preserved existing terminal dispatch"
                 );
-                return;
             }
-            _ => {
-                if attempt < 3 {
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                }
+            DispatchFailureWriteOutcome::Missing => {
+                tracing::warn!(
+                    dispatch_id = %dispatch_id,
+                    "dispatch failure writer found no dispatch row"
+                );
+            }
+            DispatchFailureWriteOutcome::HardError(error) => {
+                tracing::error!(
+                    dispatch_id = %dispatch_id,
+                    error = %error,
+                    "dispatch failure writer failed; dispatch may remain open"
+                );
             }
         }
     }
-    // Fallback: direct DB update to prevent orphan dispatch.
-    // Also leave a reconciliation marker so onTick can run the hook chain later.
-    tracing::error!("dispatch PATCH failed after retries; falling back to direct DB");
-    if !runtime_pg_fail_dispatch_with_result(
-        dispatch_id,
-        error_msg,
-        error_code,
-        reset_auto_queue_entries,
-    ) {
-        tracing::warn!("postgres failure fallback skipped or affected no rows");
-    }
+    .instrument(dispatch_span)
+    .await;
 }
 
 /// Complete an implementation/rework dispatch via finalize_dispatch (#143).

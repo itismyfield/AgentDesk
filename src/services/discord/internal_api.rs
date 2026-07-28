@@ -272,13 +272,29 @@ pub(super) async fn update_dispatch(
     dispatch_id: &str,
     body: crate::services::dispatches::UpdateDispatchBody,
 ) -> Result<DispatchUpdateOutcome, String> {
+    update_dispatch_request(dispatch_id, Some(&body)).await
+}
+
+pub(super) async fn publish_dispatch_update(
+    dispatch_id: &str,
+) -> Result<DispatchUpdateOutcome, String> {
+    update_dispatch_request(dispatch_id, None).await
+}
+
+async fn update_dispatch_request(
+    dispatch_id: &str,
+    body: Option<&crate::services::dispatches::UpdateDispatchBody>,
+) -> Result<DispatchUpdateOutcome, String> {
     let ctx = load_context()?;
     let path = format!("/api/dispatches/{dispatch_id}");
-    let response = client()
+    let mut request = client()
         .request(Method::PATCH, api_url(&ctx, &path))
-        .json(&body)
         .header(reqwest::header::ORIGIN, api_origin(&ctx))
-        .header(reqwest::header::REFERER, api_origin(&ctx))
+        .header(reqwest::header::REFERER, api_origin(&ctx));
+    if let Some(body) = body {
+        request = request.json(body);
+    }
+    let response = request
         .send()
         .await
         .map_err(|error| format!("direct runtime API {path}: {error}"))?;

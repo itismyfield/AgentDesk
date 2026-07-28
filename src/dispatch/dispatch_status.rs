@@ -48,6 +48,10 @@ pub(crate) fn emit_dispatch_quality_event(
     let Some(event_type) = (match to_status {
         "dispatched" => Some("dispatch_dispatched"),
         "completed" => Some("dispatch_completed"),
+        // Dispatch settlement is distinct from provider turn health. Keeping it
+        // out of `turn_error` prevents one transport failure from counting twice
+        // and prevents attribution failures from lowering turn success rates.
+        "failed" => Some("dispatch_failed"),
         _ => None,
     }) else {
         return;
@@ -1437,7 +1441,7 @@ fn infer_phase_gate_verdict(
         .and_then(serde_json::Value::as_object)
         .map_or(0, serde_json::Map::len);
     tracing::info!(
-        dispatch_id,
+        dispatch_id = %dispatch_id,
         pass_verdict = %pass_verdict,
         declared_check_count,
         reported_check_count,
@@ -2194,7 +2198,7 @@ mod auto_queue_phase_gate_finalize_wrapper_tests {
 
         assert!(
             logs.as_ref()
-                .is_ok_and(|logs| logs.contains("dispatch_id=\"dsp-log-fields\"")),
+                .is_ok_and(|logs| logs.contains("dispatch_id=dsp-log-fields")),
             "{logs:?}"
         );
         assert!(
