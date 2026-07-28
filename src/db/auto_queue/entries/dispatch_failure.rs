@@ -544,9 +544,10 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("load non-live terminal state");
-            let expected_run_status = if matches!(run_status, "generated" | "unknown-status") {
-                // Non-terminal but non-live runs can be finalized once their last
-                // entry becomes terminal. Already-terminal runs remain unchanged.
+            let expected_run_status = if run_status == "generated" {
+                // An eligible non-live generated run can be finalized once its
+                // last entry becomes terminal. Unknown or terminal states are
+                // intentionally preserved by the run-status CAS.
                 "completed"
             } else {
                 run_status
