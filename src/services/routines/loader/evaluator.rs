@@ -17,6 +17,7 @@ const ROUTINE_QUICKJS_MEMORY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ROUTINE_JSON_DEPTH: usize = 128;
 const MAX_ROUTINE_JSON_ARRAY_LENGTH: usize = 16_384;
 const MAX_ROUTINE_JSON_NODES: usize = 32_768;
+const MAX_ROUTINE_JSON_CONVERTED_BYTES: usize = ROUTINE_QUICKJS_MEMORY_LIMIT_BYTES;
 
 #[cfg(test)]
 mod tests;
@@ -467,8 +468,69 @@ fn js_value_to_json<'js>(
     label: &'static str,
     json_container_policy: &JsonContainerPolicy<'js>,
 ) -> Result<Value> {
+    js_value_to_json_with_byte_budget(
+        value,
+        label,
+        json_container_policy,
+        MAX_ROUTINE_JSON_CONVERTED_BYTES,
+    )
+}
+
+struct JsonConversionByteBudget {
+    maximum: usize,
+    remaining: usize,
+}
+
+impl JsonConversionByteBudget {
+    fn new(maximum: usize) -> Self {
+        Self {
+            maximum,
+            remaining: maximum,
+        }
+    }
+
+    fn charge(&mut self, label: &'static str, bytes: usize) -> Result<()> {
+        let Some(remaining) = self.remaining.checked_sub(bytes) else {
+            return Err(anyhow!(
+                "{label} exceeds maximum converted JSON size {} bytes",
+                self.maximum
+            ));
+        };
+        self.remaining = remaining;
+        Ok(())
+    }
+}
+
+fn copy_json_string_with_budget<'js>(
+    value: rquickjs::String<'js>,
+    label: &'static str,
+    kind: &'static str,
+    byte_budget: &mut JsonConversionByteBudget,
+) -> Result<String> {
+    let ctx = value.ctx().clone();
+    let value = value.to_cstring().map_err(|e| {
+        conversion_js_error(&ctx, format_args!("{label} {kind} conversion failed"), &e)
+    })?;
+    // SAFETY: `value` owns a non-null QuickJS buffer of exactly `value.len()`
+    // bytes for this scope. Treat it as bytes first because QuickJS preserves
+    // unmatched UTF-16 surrogates using byte sequences that are not Rust UTF-8.
+    let bytes = unsafe { std::slice::from_raw_parts(value.as_ptr().cast::<u8>(), value.len()) };
+    let value = std::str::from_utf8(bytes)
+        .map_err(|error| anyhow!("{label} {kind} conversion failed: invalid UTF-8: {error}"))?;
+    // Debit the aggregate budget before creating the retained Rust String.
+    byte_budget.charge(label, value.len())?;
+    Ok(value.to_owned())
+}
+
+fn js_value_to_json_with_byte_budget<'js>(
+    value: rquickjs::Value<'js>,
+    label: &'static str,
+    json_container_policy: &JsonContainerPolicy<'js>,
+    maximum_converted_bytes: usize,
+) -> Result<Value> {
     let mut active = HashSet::new();
     let mut remaining_nodes = MAX_ROUTINE_JSON_NODES;
+    let mut byte_budget = JsonConversionByteBudget::new(maximum_converted_bytes);
     js_value_to_json_inner(
         value,
         label,
@@ -476,6 +538,7 @@ fn js_value_to_json<'js>(
         0,
         &mut active,
         &mut remaining_nodes,
+        &mut byte_budget,
     )
 }
 
@@ -486,6 +549,7 @@ fn js_value_to_json_inner<'js>(
     depth: usize,
     active: &mut HashSet<rquickjs::Value<'js>>,
     remaining_nodes: &mut usize,
+    byte_budget: &mut JsonConversionByteBudget,
 ) -> Result<Value> {
     if *remaining_nodes == 0 {
         return Err(anyhow!(
@@ -509,13 +573,12 @@ fn js_value_to_json_inner<'js>(
         return Ok(Value::Number(number));
     }
     if let Some(value) = value.as_string() {
-        return Ok(Value::String(value.to_string().map_err(|e| {
-            conversion_js_error(
-                value.ctx(),
-                format_args!("{label} string conversion failed"),
-                &e,
-            )
-        })?));
+        return Ok(Value::String(copy_json_string_with_budget(
+            value.clone(),
+            label,
+            "string",
+            byte_budget,
+        )?));
     }
     if value.is_promise() {
         return Err(anyhow!("{label} contains unsupported Promise"));
@@ -576,6 +639,7 @@ fn js_value_to_json_inner<'js>(
                     depth + 1,
                     active,
                     remaining_nodes,
+                    byte_budget,
                 )?);
             }
             Ok(Value::Array(out))
@@ -605,7 +669,7 @@ fn js_value_to_json_inner<'js>(
             .ok_or_else(|| anyhow!("{label} object conversion failed"));
         let result = object.and_then(|object| {
             let mut out = Map::new();
-            for key in object.keys::<String>() {
+            for key in object.keys::<rquickjs::String>() {
                 let key = key.map_err(|e| {
                     conversion_js_error(
                         object.ctx(),
@@ -618,6 +682,7 @@ fn js_value_to_json_inner<'js>(
                         "{label} exceeds maximum value count {MAX_ROUTINE_JSON_NODES}"
                     ));
                 }
+                let key = copy_json_string_with_budget(key, label, "object key", byte_budget)?;
                 let item: rquickjs::Value = object.get(key.as_str()).map_err(|e| {
                     conversion_js_error(
                         object.ctx(),
@@ -634,6 +699,7 @@ fn js_value_to_json_inner<'js>(
                         depth + 1,
                         active,
                         remaining_nodes,
+                        byte_budget,
                     )?,
                 );
             }

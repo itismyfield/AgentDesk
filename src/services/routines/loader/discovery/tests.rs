@@ -32,13 +32,24 @@ fn collect_with_limits(
     routines: &Path,
     limits: super::RoutineTreeLimits,
 ) -> std::io::Result<Vec<super::DiscoveredRoutineScript>> {
-    let (_, roots, _) =
-        bind_routine_root_authority(&[routines.to_path_buf()], runtime_root).unwrap();
-    super::collect_routine_script_paths_with_limits(
-        &roots[0],
+    collect_with_limits_and_hooks(
+        runtime_root,
+        routines,
         super::RoutineDiscoveryHooks::default(),
         limits,
     )
+}
+
+#[cfg(unix)]
+fn collect_with_limits_and_hooks(
+    runtime_root: &Path,
+    routines: &Path,
+    hooks: super::RoutineDiscoveryHooks<'_>,
+    limits: super::RoutineTreeLimits,
+) -> std::io::Result<Vec<super::DiscoveredRoutineScript>> {
+    let (_, roots, _) =
+        bind_routine_root_authority(&[routines.to_path_buf()], runtime_root).unwrap();
+    super::collect_routine_script_paths_with_limits(&roots[0], hooks, limits)
 }
 
 #[cfg(unix)]
@@ -136,6 +147,56 @@ fn routine_tree_total_source_limit_rejects_overflow() {
 
     assert!(error.to_string().contains("source bytes"));
     assert!(error.to_string().contains("maximum 3"));
+}
+
+#[cfg(unix)]
+#[test]
+fn routine_tree_source_budget_charges_growth_before_read() {
+    let release = tempfile::tempdir().unwrap();
+    let routines = release.path().join("routines");
+    std::fs::create_dir_all(&routines).unwrap();
+    std::fs::create_dir_all(release.path().join("routine-helpers")).unwrap();
+    std::fs::write(routines.join("grow.js"), "a").unwrap();
+    let grow = |path: &Path| std::fs::write(path, "four").unwrap();
+
+    let error = collect_with_limits_and_hooks(
+        release.path(),
+        &routines,
+        super::RoutineDiscoveryHooks {
+            before_read: Some(&grow),
+            ..Default::default()
+        },
+        test_limits(1, 1, 1, 3),
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("source bytes"));
+    assert!(error.to_string().contains("maximum 3"));
+}
+
+#[cfg(unix)]
+#[test]
+fn routine_tree_source_budget_accepts_shrink_to_exact_boundary_before_read() {
+    let release = tempfile::tempdir().unwrap();
+    let routines = release.path().join("routines");
+    std::fs::create_dir_all(&routines).unwrap();
+    std::fs::create_dir_all(release.path().join("routine-helpers")).unwrap();
+    std::fs::write(routines.join("shrink.js"), "four").unwrap();
+    let shrink = |path: &Path| std::fs::write(path, "ok").unwrap();
+
+    let snapshots = collect_with_limits_and_hooks(
+        release.path(),
+        &routines,
+        super::RoutineDiscoveryHooks {
+            before_read: Some(&shrink),
+            ..Default::default()
+        },
+        test_limits(1, 1, 1, 2),
+    )
+    .unwrap();
+
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].read_source().unwrap(), "ok");
 }
 
 #[test]

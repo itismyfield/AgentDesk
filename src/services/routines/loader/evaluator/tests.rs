@@ -1,7 +1,11 @@
 use super::super::{
     ObservationLimits, RoutineScriptLoader, RoutineTickContext, RoutineTickRoutine, RoutineTickRun,
 };
-use super::{load_single_routine_script, validate_routine_script_source};
+use super::{
+    JsonContainerPolicy, capture_json_container_class_ids, create_plain_object_classifier,
+    js_value_to_json_with_byte_budget, load_single_routine_script, validate_routine_script_source,
+    with_bounded_quickjs_context,
+};
 use std::path::Path;
 
 fn validate_test_source(source: &str) -> anyhow::Result<super::ValidatedRoutineSource> {
@@ -17,6 +21,27 @@ fn assert_source_rejected(source: &str, expected: &str) {
     let error = validate_test_source(source).unwrap_err();
     let message = error.to_string();
     assert!(message.contains(expected), "{message}");
+}
+
+fn convert_test_json_with_byte_budget(
+    source: &str,
+    maximum_converted_bytes: usize,
+) -> anyhow::Result<serde_json::Value> {
+    with_bounded_quickjs_context(|ctx| {
+        let json_container_policy = JsonContainerPolicy {
+            class_ids: capture_json_container_class_ids(ctx.clone())?,
+            plain_object_classifier: create_plain_object_classifier(ctx.clone())?,
+        };
+        let value: rquickjs::Value = ctx
+            .eval(source.as_bytes().to_vec())
+            .map_err(|e| anyhow::anyhow!("test JSON eval failed: {e}"))?;
+        js_value_to_json_with_byte_budget(
+            value,
+            "test JSON",
+            &json_container_policy,
+            maximum_converted_bytes,
+        )
+    })
 }
 
 fn tick_context(script_ref: &str, name: &str) -> RoutineTickContext {
@@ -568,6 +593,57 @@ fn rejects_metadata_exceeding_total_value_budget() {
         });
         "#,
         "exceeds maximum value count 32768",
+    );
+}
+
+#[test]
+fn rejects_repeated_string_references_exceeding_converted_byte_budget() {
+    let error = convert_test_json_with_byte_budget(
+        "(() => { const shared = '12345678'; return Array(8).fill(shared); })()",
+        63,
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("exceeds maximum converted JSON size 63 bytes"),
+        "{error}"
+    );
+}
+
+#[test]
+fn converted_byte_budget_accepts_exact_utf8_key_and_value_boundary() {
+    let value = convert_test_json_with_byte_budget("({ 'é': '💣' })", 6).unwrap();
+    assert_eq!(value, serde_json::json!({ "é": "💣" }));
+
+    let error = convert_test_json_with_byte_budget("({ 'é': '💣' })", 5).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("exceeds maximum converted JSON size 5 bytes"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_lone_surrogates_in_json_values_and_keys_before_rust_copy() {
+    for (source, expected) in [
+        (r#"({ value: "\ud800" })"#, "string conversion failed"),
+        (
+            r#"({ ["\ud800"]: "value" })"#,
+            "object key conversion failed",
+        ),
+    ] {
+        let error = convert_test_json_with_byte_budget(source, 64).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains(expected), "{message}");
+        assert!(message.contains("invalid UTF-8"), "{message}");
+    }
+
+    assert_eq!(
+        convert_test_json_with_byte_budget(r#"({ key: "still alive" })"#, 14).unwrap(),
+        serde_json::json!({ "key": "still alive" })
     );
 }
 

@@ -904,10 +904,6 @@ fn collect_routine_scripts_inner(
                         ),
                     ));
                 }
-                let source_length = file.metadata()?.len();
-                if source_length <= MAX_ROUTINE_SOURCE_BYTES {
-                    budget.reserve_source(source_length, &path)?;
-                }
                 if let Some(hook) = hooks.before_read {
                     hook(&path);
                 }
@@ -919,6 +915,9 @@ fn collect_routine_scripts_inner(
                 let source =
                     read_opened_routine_source(&file, &path).map_err(RoutineSourceReadError::from);
                 verify_discovery_authority(hooks)?;
+                if let Ok(source) = &source {
+                    budget.reserve_source(source.as_bytes().len() as u64, &path)?;
+                }
                 out.push(DiscoveredRoutineScript { path, source });
             }
             PinnedEntryKind::RegularFile | PinnedEntryKind::Other => {}
@@ -972,10 +971,6 @@ fn collect_routine_scripts_inner(
                 path.display()
             )));
         }
-        let source_length = file.metadata()?.len();
-        if source_length <= MAX_ROUTINE_SOURCE_BYTES {
-            budget.reserve_source(source_length, &path)?;
-        }
         if let Some(hook) = hooks.before_read {
             hook(&path);
         }
@@ -986,6 +981,9 @@ fn collect_routine_scripts_inner(
         verify_discovery_authority(hooks)?;
         let source = read_opened_routine_source(&file, &path).map_err(RoutineSourceReadError::from);
         verify_discovery_authority(hooks)?;
+        if let Ok(source) = &source {
+            budget.reserve_source(source.as_bytes().len() as u64, &path)?;
+        }
         out.push(DiscoveredRoutineScript { path, source });
     }
     Ok(())
