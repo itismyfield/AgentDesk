@@ -6381,6 +6381,35 @@ class TickChannelTests(unittest.TestCase):
         self.assertEqual(len(tombstones), 1)
         self.assertEqual(permanent_loss_total(state["999"]), 1)
 
+    def test_offset_fallback_warning_is_edge_triggered(self):
+        transcript = self.proj_dir / "s.jsonl"
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.now - 2000))
+        transcript.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": ts,
+                    "message": {
+                        "content": [{"type": "text", "text": "uuid-less fallback"}]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        rt = self.make_rt()
+        state: dict = {}
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+
+        warnings = [
+            line
+            for line in rt.log_lines
+            if "permanent-loss-identity-offset-fallback" in line
+        ]
+        self.assertEqual(len(warnings), 1)
+
     def test_record_uuid_identity_survives_actual_head_truncation(self):
         prefix = (self.now - 5000, "truncated delivered prefix")
         missing = (self.now - 4000, "late block retained after truncation")
@@ -6486,8 +6515,12 @@ class TickChannelTests(unittest.TestCase):
             ],
             corrupt,
         )
-        self.assertTrue(
-            any("permanent-loss-state-corrupt" in line for line in rt.log_lines)
+        self.assertEqual(
+            sum("permanent-loss-state-corrupt" in line for line in rt.log_lines), 1
+        )
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        self.assertEqual(
+            sum("permanent-loss-state-corrupt" in line for line in rt.log_lines), 1
         )
         self.assertFalse(any("PERMANENT LOSS ALERT" in line for line in rt.log_lines))
         self.assertFalse(any("영구 릴레이 유실" in body for body, _ in rt.alerts))

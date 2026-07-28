@@ -4222,16 +4222,38 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         )
         suspected_permanent_losses += tombstone_update.suspected
         new_permanent_losses += len(tombstone_update.newly_tombstoned)
+        raw_identity_warnings = chs.get(PERMANENT_LOSS_IDENTITY_WARNING_KEY, {})
+        identity_warnings = (
+            {
+                warning_path: int(count)
+                for warning_path, count in raw_identity_warnings.items()
+                if isinstance(warning_path, str)
+                and isinstance(count, int)
+                and not isinstance(count, bool)
+                and count > 0
+            }
+            if isinstance(raw_identity_warnings, dict)
+            else {}
+        )
+        prior_fallbacks = identity_warnings.get(path)
         if read_result.identity_fallbacks:
-            rt.log(
-                f"[{cid}] permanent-loss-identity-offset-fallback path={path} "
-                f"blocks={read_result.identity_fallbacks}; identity may change "
-                "after head truncation"
-            )
+            identity_warnings[path] = read_result.identity_fallbacks
+            if prior_fallbacks != read_result.identity_fallbacks:
+                rt.log(
+                    f"[{cid}] permanent-loss-identity-offset-fallback path={path} "
+                    f"blocks={read_result.identity_fallbacks}; identity may change "
+                    "after head truncation"
+                )
+        else:
+            identity_warnings.pop(path, None)
+        if identity_warnings:
+            chs[PERMANENT_LOSS_IDENTITY_WARNING_KEY] = identity_warnings
+        else:
+            chs.pop(PERMANENT_LOSS_IDENTITY_WARNING_KEY, None)
         if tombstone_update.corrupted:
             rt.log(
                 f"[{cid}] permanent-loss-state-corrupt path={path}; "
-                "preserving raw state"
+                f"quarantined={tombstone_update.quarantined}"
             )
         if tombstone_update.overflowed:
             rt.log(
