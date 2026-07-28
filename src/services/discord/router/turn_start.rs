@@ -539,19 +539,6 @@ pub(crate) fn load_session_runtime_state(
     })
 }
 
-pub(super) fn session_runtime_state_after_redirect(
-    sessions: &mut std::collections::HashMap<ChannelId, DiscordSession>,
-    original_channel_id: ChannelId,
-    effective_channel_id: ChannelId,
-    original_state: (Option<String>, bool, String),
-) -> (Option<String>, bool, String) {
-    if effective_channel_id == original_channel_id {
-        return original_state;
-    }
-
-    load_session_runtime_state(sessions, effective_channel_id).unwrap_or(original_state)
-}
-
 pub(crate) struct IntakeRuntimeTransition {
     pub(crate) state: (Option<String>, bool, String),
     _guard: tokio::sync::OwnedMutexGuard<()>,

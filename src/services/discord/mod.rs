@@ -1256,12 +1256,18 @@ impl TmuxWatcherRegistry {
         channel_id: ChannelId,
     ) -> bool {
         let _guard = lock_tmux_watcher_registry();
-        if self.owner_channel_for_tmux_session(tmux_session_name) == Some(channel_id) {
-            self.restored_owner_by_tmux_session
-                .insert(tmux_session_name.to_string(), channel_id);
-            return true;
+        let tmux_session_name = tmux_session_name.trim();
+        if tmux_session_name.is_empty() {
+            return false;
         }
-        false
+        if let Some(current_owner) = self.owner_channel_by_tmux_session.get(tmux_session_name)
+            && *current_owner.value() != channel_id
+        {
+            return false;
+        }
+        self.restored_owner_by_tmux_session
+            .insert(tmux_session_name.to_string(), channel_id);
+        true
     }
 
     /// #3105 (codex P1 sub-case B): true when a LIVE watcher handle currently
@@ -2207,7 +2213,10 @@ pub(crate) struct SharedData {
     /// Per-channel request lifecycle actor registry.
     mailboxes: ChannelMailboxRegistry,
     /// Serializes `/resume` rebinds with intake session selection for each channel.
-    session_transition_locks: dashmap::DashMap<ChannelId, Arc<tokio::sync::Mutex<()>>>,
+    /// Weak entries let inactive channels disappear once the final intake/resume
+    /// guard drops; the map is opportunistically pruned on each lookup, so channel
+    /// churn cannot retain one mutex per historical channel for process lifetime.
+    session_transition_locks: dashmap::DashMap<ChannelId, std::sync::Weak<tokio::sync::Mutex<()>>>,
     /// Bot settings — mostly reads, rare writes
     pub(super) settings: tokio::sync::RwLock<DiscordBotSettings>,
     /// Per-channel timestamps of the last Discord API call (for rate limiting)
@@ -2350,9 +2359,29 @@ impl SharedData {
         channel_id: ChannelId,
     ) -> Arc<tokio::sync::Mutex<()>> {
         self.session_transition_locks
-            .entry(channel_id)
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
+            .retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = self
+            .session_transition_locks
+            .get(&channel_id)
+            .and_then(|lock| lock.upgrade())
+        {
+            return lock;
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        match self.session_transition_locks.entry(channel_id) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                if let Some(existing) = entry.get().upgrade() {
+                    existing
+                } else {
+                    entry.insert(Arc::downgrade(&lock));
+                    lock
+                }
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(Arc::downgrade(&lock));
+                lock
+            }
+        }
     }
 
     /// #3293: non-creating mailbox lookup for probes — `mailbox()` mints a

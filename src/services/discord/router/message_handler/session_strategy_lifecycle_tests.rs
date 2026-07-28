@@ -102,49 +102,6 @@ async fn launch_runtime_refresh_rejects_rebound_session_when_target_path_is_stal
     assert_ne!(runtime.1.as_deref(), Some(rebound_session_id));
 }
 
-#[test]
-fn invalid_redirect_path_falls_back_without_pairing_redirect_session_id() {
-    let original_channel = serenity::ChannelId::new(4_794_005);
-    let redirect_channel = serenity::ChannelId::new(4_794_006);
-    let original_session_id = "33333333-3333-3333-3333-333333333333";
-    let redirect_session_id = "44444444-4444-4444-4444-444444444444";
-    let mut sessions = std::collections::HashMap::new();
-    sessions.insert(
-        redirect_channel,
-        DiscordSession {
-            session_id: Some(redirect_session_id.to_string()),
-            memento_context_loaded: false,
-            memento_reflected: false,
-            current_path: Some("/removed/redirect-worktree".to_string()),
-            history: Vec::new(),
-            pending_uploads: Vec::new(),
-            cleared: false,
-            remote_profile_name: None,
-            channel_id: Some(redirect_channel.get()),
-            channel_name: None,
-            category_name: None,
-            last_active: tokio::time::Instant::now(),
-            worktree: None,
-            born_generation: 0,
-        },
-    );
-    let original = (
-        Some(original_session_id.to_string()),
-        true,
-        "/prior/redirect-path".to_string(),
-    );
-
-    let resolved = session_runtime_state_after_redirect(
-        &mut sessions,
-        original_channel,
-        redirect_channel,
-        original.clone(),
-    );
-
-    assert_eq!(resolved, original);
-    assert_ne!(resolved.0.as_deref(), Some(redirect_session_id));
-}
-
 #[tokio::test]
 async fn claimed_runtime_refresh_adopts_late_resume_binding() {
     let shared = crate::services::discord::make_shared_data_for_tests();

@@ -92,6 +92,12 @@ pub(crate) async fn resume_runtime_for_channel(
     shared_for_provider(registry, provider, channel_id).await
 }
 
+/// Mirror a successful durable `/resume` target into the owning Discord runtime.
+///
+/// `retain_runtime_owner` means teardown left the tmux pane alive. In that case
+/// the authoritative owner-only registry entry is re-established before the
+/// channel session is changed, so direct-pane output remains delayed/routable
+/// without promoting the diagnostic dedupe mirror to routing authority.
 pub(crate) async fn rebind_channel_provider_session(
     shared: &SharedData,
     provider: &ProviderKind,
