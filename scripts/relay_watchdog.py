@@ -48,6 +48,7 @@ if sys.version_info < MIN_PYTHON:  # pragma: no cover - trivial guard
     raise SystemExit(1)
 
 import calendar
+import hashlib
 import json
 import math
 import os
@@ -138,6 +139,16 @@ ISSUE_FILING_SUPPRESSION_SINCE_KEY = "issue_filing_suppression_since"
 ISSUE_FILING_REACHABLE_TICKS_KEY = "issue_filing_reachable_ticks"
 ISSUE_FILING_REACHABLE_TICKS_REQUIRED = 2
 ISSUE_FILING_DC_UNREACHABLE_REASON = "dcserver_transport_unreachable"
+LOSS_OBSERVATIONS_KEY = "permanent_loss_observations"
+LOSS_SCAN_SEQUENCE_KEY = "permanent_loss_scan_sequence"
+PERMANENT_LOSS_TOMBSTONES_KEY = "permanent_loss_tombstones"
+PERMANENT_LOSS_TOTAL_KEY = "permanent_loss_total"
+# A source block becomes unrecoverable only after two independent ordering
+# observations: it stays unmatched in consecutive successful Discord reads while
+# a later source block is actually matched on both reads. A wall-clock threshold
+# cannot prove a skip; repeated overtaking can, and two observations reject one
+# bounded-read/transient-edit snapshot without coupling the rule to poll_secs.
+PERMANENT_LOSS_CONFIRM_TICKS = 2
 MAX_TRANSCRIPT_HISTORY = 64
 MAX_KNOWN_TRANSCRIPTS = 256
 MAX_PENDING_TRANSCRIPTS = 32
@@ -1398,6 +1409,203 @@ class Verdict:
 
 
 @dataclass(frozen=True)
+class PermanentLossUpdate:
+    active_blocks: list[tuple[float, str]]
+    newly_tombstoned: tuple[str, ...]
+    tombstoned_in_scan: int
+
+
+def _assistant_block_id(
+    transcript: str | Path, epoch: float, text: str, occurrence: int
+) -> str:
+    """Stable identity for one source block across append-only transcript scans."""
+    digest = hashlib.sha256(norm(text).encode("utf-8")).hexdigest()
+    identity = f"{transcript}\0{epoch:.6f}\0{digest}\0{occurrence}"
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _validated_loss_observations(
+    channel_state: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    raw = channel_state.get(LOSS_OBSERVATIONS_KEY, {})
+    if not isinstance(raw, dict):
+        return {}
+    valid: dict[str, dict[str, Any]] = {}
+    for block_id, entry in raw.items():
+        if not (
+            isinstance(block_id, str)
+            and len(block_id) == 64
+            and isinstance(entry, dict)
+            and isinstance(entry.get("path"), str)
+            and entry.get("path")
+            and isinstance(entry.get("count"), int)
+            and not isinstance(entry.get("count"), bool)
+            and 0 < entry["count"] < PERMANENT_LOSS_CONFIRM_TICKS
+            and _is_finite_nonnegative_number(entry.get("epoch"))
+            and _is_finite_nonnegative_number(entry.get("last_observed_at"))
+            and isinstance(entry.get("last_scan"), int)
+            and not isinstance(entry.get("last_scan"), bool)
+            and entry["last_scan"] >= 0
+        ):
+            continue
+        valid[block_id] = {
+            "path": entry["path"],
+            "epoch": float(entry["epoch"]),
+            "count": entry["count"],
+            "last_observed_at": float(entry["last_observed_at"]),
+            "last_scan": entry["last_scan"],
+        }
+    return valid
+
+
+def permanent_loss_tombstones(
+    channel_state: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Return durable confirmed-loss identities; malformed state fails open."""
+    raw = channel_state.get(PERMANENT_LOSS_TOMBSTONES_KEY, {})
+    if not isinstance(raw, dict):
+        return {}
+    valid: dict[str, dict[str, Any]] = {}
+    for block_id, entry in raw.items():
+        if not (
+            isinstance(block_id, str)
+            and len(block_id) == 64
+            and isinstance(entry, dict)
+            and isinstance(entry.get("path"), str)
+            and entry.get("path")
+            and _is_finite_nonnegative_number(entry.get("epoch"))
+            and _is_finite_nonnegative_number(entry.get("confirmed_at"))
+        ):
+            continue
+        valid[block_id] = {
+            "path": entry["path"],
+            "epoch": float(entry["epoch"]),
+            "confirmed_at": float(entry["confirmed_at"]),
+        }
+    return valid
+
+
+def permanent_loss_total(channel_state: Mapping[str, Any]) -> int:
+    raw = channel_state.get(PERMANENT_LOSS_TOTAL_KEY, 0)
+    persisted = (
+        raw
+        if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0
+        else 0
+    )
+    return max(persisted, len(permanent_loss_tombstones(channel_state)))
+
+
+def next_permanent_loss_scan(channel_state: dict[str, Any]) -> int:
+    raw = channel_state.get(LOSS_SCAN_SEQUENCE_KEY, 0)
+    prior = (
+        raw
+        if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0
+        else 0
+    )
+    current = prior + 1
+    channel_state[LOSS_SCAN_SEQUENCE_KEY] = current
+    return current
+
+
+def update_permanent_loss_tombstones(
+    channel_state: dict[str, Any],
+    transcript: str | Path,
+    blocks: list[tuple[float, str]],
+    hay: str,
+    now: float,
+    grace_secs: int,
+    scan_sequence: int,
+) -> PermanentLossUpdate:
+    """Confirm source-order skips and remove confirmed losses from active gaps.
+
+    Confirmation is ordering-based rather than age-based: the same stale source
+    block must remain unmatched on two consecutive successful Discord reads, and
+    each read must match a later block from the same transcript. Relay delivery is
+    ordered and frame_ack=false drops have no replay path, so repeated overtaking
+    proves that the earlier block was skipped. One observation remains retryable.
+    """
+    path = str(transcript)
+    tombstones = permanent_loss_tombstones(channel_state)
+    total_before = permanent_loss_total(channel_state)
+    observations = _validated_loss_observations(channel_state)
+    identities: list[str] = []
+    duplicate_occurrences: dict[tuple[float, str], int] = {}
+    matched: list[bool] = []
+    for epoch, text in blocks:
+        digest = hashlib.sha256(norm(text).encode("utf-8")).hexdigest()
+        duplicate_key = (epoch, digest)
+        occurrence = duplicate_occurrences.get(duplicate_key, 0)
+        duplicate_occurrences[duplicate_key] = occurrence + 1
+        identities.append(_assistant_block_id(path, epoch, text, occurrence))
+        matched.append(delivered(text, hay))
+
+    later_match: list[bool] = [False] * len(blocks)
+    seen_match = False
+    for index in range(len(blocks) - 1, -1, -1):
+        later_match[index] = seen_match
+        seen_match = seen_match or matched[index]
+
+    observed_ids: set[str] = set()
+    newly_tombstoned: list[str] = []
+    active_blocks: list[tuple[float, str]] = []
+    tombstoned_in_scan = 0
+    for index, ((epoch, text), block_id) in enumerate(zip(blocks, identities)):
+        if block_id in tombstones:
+            tombstoned_in_scan += 1
+            continue
+        overtaken = now - epoch > grace_secs and not matched[index] and later_match[index]
+        if overtaken:
+            observed_ids.add(block_id)
+            prior = observations.get(block_id)
+            consecutive = bool(
+                prior
+                and prior["path"] == path
+                and prior["last_scan"] == scan_sequence - 1
+            )
+            count = prior["count"] + 1 if consecutive else 1
+            if count >= PERMANENT_LOSS_CONFIRM_TICKS:
+                tombstones[block_id] = {
+                    "path": path,
+                    "epoch": epoch,
+                    "confirmed_at": now,
+                }
+                observations.pop(block_id, None)
+                newly_tombstoned.append(block_id)
+                tombstoned_in_scan += 1
+                continue
+            observations[block_id] = {
+                "path": path,
+                "epoch": epoch,
+                "count": count,
+                "last_observed_at": now,
+                "last_scan": scan_sequence,
+            }
+        active_blocks.append((epoch, text))
+
+    observations = {
+        block_id: entry
+        for block_id, entry in observations.items()
+        if entry["path"] != path or block_id in observed_ids
+    }
+    if observations:
+        channel_state[LOSS_OBSERVATIONS_KEY] = observations
+    else:
+        channel_state.pop(LOSS_OBSERVATIONS_KEY, None)
+    if tombstones:
+        channel_state[PERMANENT_LOSS_TOMBSTONES_KEY] = tombstones
+    else:
+        channel_state.pop(PERMANENT_LOSS_TOMBSTONES_KEY, None)
+    channel_state[PERMANENT_LOSS_TOTAL_KEY] = total_before + len(
+        newly_tombstoned
+    )
+    return PermanentLossUpdate(
+        active_blocks=active_blocks,
+        newly_tombstoned=tuple(newly_tombstoned),
+        tombstoned_in_scan=tombstoned_in_scan,
+    )
+
+
+@dataclass(frozen=True)
 class PgHealthVerdict:
     """End-to-end PG health plus the listener-only cause discriminator."""
 
@@ -1921,6 +2129,7 @@ def evaluate(
     grace_secs: int,
     gap_alert_secs: int,
     prior_delivered_ts: float = 0.0,
+    last_actual_delivery_ts: float | None = None,
 ) -> Verdict:
     """Core relay-gap judgment descended from the 07-09 logic and subsequently
     extended through the #4140→#4178→#4181 lineage. The health watermark is the
@@ -1938,12 +2147,21 @@ def evaluate(
     current_delivered_ts = max(
         (e for e, t in blocks if delivered(t, hay)), default=0.0
     )
-    # Discord reads are bounded.  Absence from today's haystack cannot erase a
-    # delivery confirmed by an earlier tick or process lifetime.
+    # Discord reads are bounded. Absence from today's haystack cannot erase the
+    # health watermark, but source classification remains independent: an older
+    # unmatched block is ignored only after durable skip/tombstone confirmation.
     delivered_ts = max(prior, current_delivered_ts)
     stale = [(e, t) for e, t in blocks if now - e > grace_secs]
     lost = [(e, t) for e, t in stale if e > delivered_ts and not delivered(t, hay)]
-    gap_secs = (now - delivered_ts) if delivered_ts else float("inf")
+    if last_actual_delivery_ts is None:
+        actual_delivery_ts = delivered_ts
+    else:
+        actual_delivery_ts = (
+            float(last_actual_delivery_ts)
+            if _is_finite_nonnegative_number(last_actual_delivery_ts)
+            else 0.0
+        )
+    gap_secs = (now - actual_delivery_ts) if actual_delivery_ts else float("inf")
     if lost and gap_secs > gap_alert_secs:
         state = STATE_GAP
     elif lost:
@@ -2041,6 +2259,13 @@ def delivered_watermark_for_path(
 ) -> float:
     entry = delivered_watermarks(channel_state).get(str(transcript))
     return entry[0] if entry is not None else 0.0
+
+
+def last_delivery_observed_at_for_path(
+    channel_state: Mapping[str, Any], transcript: str | Path
+) -> float:
+    entry = delivered_watermarks(channel_state).get(str(transcript))
+    return entry[1] if entry is not None else 0.0
 
 
 def advance_delivered_watermark(
@@ -3673,6 +3898,8 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
 
     evaluated: list[tuple[TranscriptCandidate, Verdict]] = []
     fresh_undelivered_by_path: dict[str, int] = {}
+    new_permanent_losses = 0
+    loss_scan_sequence = next_permanent_loss_scan(chs)
     unreadable_paths: list[str] = []
     escalated_pending_paths: list[str] = []
     remaining_pending = list(pending_paths)
@@ -3714,7 +3941,13 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             continue
         pending_failures.pop(path, None)
         prior_delivered_ts = delivered_watermark_for_path(chs, candidate.path)
-        verdict = evaluate(
+        prior_delivery_observed_at = last_delivery_observed_at_for_path(
+            chs, candidate.path
+        )
+        # Advance the health watermark from the unfiltered source before removing
+        # permanent-loss tombstones. Elapsed time must describe real transport
+        # progress, never the age of an unmatched block.
+        observed_verdict = evaluate(
             read_result.blocks,
             hay,
             now,
@@ -3722,18 +3955,45 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             cfg.gap_alert_secs,
             prior_delivered_ts,
         )
-        if verdict.delivered_ts > prior_delivered_ts:
+        if observed_verdict.delivered_ts > prior_delivered_ts:
             advance_delivered_watermark(
-                chs, candidate.path, verdict.delivered_ts, now
+                chs, candidate.path, observed_verdict.delivered_ts, now
             )
+        tombstone_update = update_permanent_loss_tombstones(
+            chs,
+            candidate.path,
+            read_result.blocks,
+            hay,
+            now,
+            cfg.grace_secs,
+            loss_scan_sequence,
+        )
+        new_permanent_losses += len(tombstone_update.newly_tombstoned)
+        verdict = evaluate(
+            tombstone_update.active_blocks,
+            hay,
+            now,
+            cfg.grace_secs,
+            cfg.gap_alert_secs,
+            prior_delivered_ts,
+            now
+            if observed_verdict.delivered_ts > prior_delivered_ts
+            else prior_delivery_observed_at,
+        )
         fresh_undelivered = sum(
             1
-            for epoch, text in read_result.blocks
+            for epoch, text in tombstone_update.active_blocks
             if now - epoch <= cfg.grace_secs
             and epoch > verdict.delivered_ts
             and not delivered(text, hay)
         )
         fresh_undelivered_by_path[path] = fresh_undelivered
+        if tombstone_update.newly_tombstoned:
+            rt.log(
+                f"[{cid}] permanent-loss-confirmed path={path} "
+                f"new={len(tombstone_update.newly_tombstoned)} "
+                f"total={permanent_loss_total(chs)}"
+            )
         if path in pending_set:
             rt.log(
                 f"[{cid}] transcript-debut-eval path={path} "
@@ -3915,6 +4175,22 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         else None
     )
     observe_coverage(coverage_transcript_probe)
+    if new_permanent_losses:
+        cumulative_losses = permanent_loss_total(chs)
+        rt.alert(
+            ch,
+            "🚨 **새 영구 릴레이 유실 확정 (out-of-band 워치독)**\n\n"
+            f"후속 assistant 블록의 실제 Discord 도착이 반복 확인된 뒤에도 "
+            f"미매칭으로 남은 블록 **{new_permanent_losses}건**을 재전송 불가 "
+            "tombstone으로 전환했습니다.\n"
+            f"현재 미도달 **{sum(verdict.lost for _, verdict in evaluated)}건**, "
+            f"영구 유실 **{cumulative_losses}건 누적**.\n\n"
+            f"런타임: {rt.dcserver_snapshot()}",
+        )
+        rt.log(
+            f"[{cid}] PERMANENT LOSS ALERT new={new_permanent_losses} "
+            f"cumulative={cumulative_losses}"
+        )
     previous_gap_owners = _validated_gap_owner_transcripts(chs)
     evaluated_paths = {str(candidate.path) for candidate, _ in evaluated}
     incident_open = bool(
@@ -4063,7 +4339,15 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             f"(< {cfg.gap_alert_secs}s alert threshold — relay batching, not down)"
         )
     else:
-        if chs.get("alerting"):
+        if chs.get("alerting") and new_permanent_losses:
+            # Tombstoning closes the retryable incident but does not prove that
+            # the skipped blocks arrived; the dedicated permanent-loss alert is
+            # the only transition notice.
+            rt.log(
+                f"[{cid}] gap transitioned to permanent loss — "
+                "alert state cleared without recovery claim"
+            )
+        elif chs.get("alerting"):
             # Auto-clear: tell the same audience the gap resolved, then reset.
             rt.alert(
                 ch,

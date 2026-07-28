@@ -5669,7 +5669,7 @@ class TickChannelTests(unittest.TestCase):
         self.assertNotIn(relay_watchdog.GAP_OWNER_TRANSCRIPTS_KEY, chs)
         self.assertFalse(chs.get("alerting", False))
 
-        stale_tick = self.now + rt.cfg.grace_secs + 2
+        stale_tick = self.now + rt.cfg.gap_alert_secs + 2
         rt.haystack = ""
         tick_channel(rt, TICK_CHANNEL, state, stale_tick)
         save_state(state_path, state)
@@ -6099,6 +6099,150 @@ class TickChannelTests(unittest.TestCase):
         rt.haystack = norm("landed fine in discord")
         tick_channel(rt, TICK_CHANNEL, {}, self.now)
         self.assertEqual(rt.alerts, [])
+
+    def test_permanent_loss_tombstone_stops_repeat_gap_alarm(self):
+        missing = (self.now - 2000, "permanently skipped response")
+        delivered_later = (self.now - 1200, "later response reached discord")
+        self.write_transcript([missing, delivered_later])
+        rt = self.make_rt(realert_secs=1)
+        rt.haystack = norm(delivered_later[1])
+        state: dict = {}
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(rt.alerts, [])
+        self.assertEqual(
+            state["999"][relay_watchdog.PERMANENT_LOSS_TOTAL_KEY], 0
+        )
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertIn("새 영구 릴레이 유실 확정", rt.alerts[0][0])
+        self.assertIn("현재 미도달 **0건**", rt.alerts[0][0])
+        self.assertIn("영구 유실 **1건 누적**", rt.alerts[0][0])
+        self.assertNotIn("alerting", state["999"])
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 4)
+        self.assertEqual(
+            len(rt.alerts),
+            1,
+            "an existing tombstone must not re-alert while delivery continues",
+        )
+        self.assertEqual(
+            state["999"][relay_watchdog.PERMANENT_LOSS_TOTAL_KEY], 1
+        )
+
+    def test_gap_elapsed_uses_last_actual_delivery_not_missing_block_age(self):
+        prior_delivery = (self.now - 2400, "prior delivered response")
+        missing = (self.now - 1200, "new skipped response")
+        later_missing = (self.now - 800, "still retryable response")
+        self.write_transcript([prior_delivery, missing, later_missing])
+        rt = self.make_rt(gap_alert_secs=900)
+        rt.haystack = norm(prior_delivery[1])
+        state: dict = {}
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.assertEqual(rt.alerts, [])
+
+        last_actual_delivery = self.now + 60
+        new_delivery = (self.now + 30, "newly observed real delivery")
+        final_missing = (self.now + 40, "newly retryable response")
+        self.write_transcript(
+            [prior_delivery, missing, later_missing, new_delivery, final_missing]
+        )
+        rt.haystack = norm(f"{prior_delivery[1]} {new_delivery[1]}")
+        tick_channel(rt, TICK_CHANNEL, state, last_actual_delivery)
+
+        rt.haystack = norm(prior_delivery[1])
+        tick_channel(
+            rt,
+            TICK_CHANNEL,
+            state,
+            last_actual_delivery + rt.cfg.gap_alert_secs + 60,
+        )
+
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertIn("마지막 정상 도달 이후 **16분**", rt.alerts[0][0])
+        self.assertNotIn("40분", rt.alerts[0][0])
+
+    def test_new_permanent_loss_after_prior_tombstone_alerts_again(self):
+        first_missing = (self.now - 4000, "first skipped response")
+        first_success = (self.now - 3000, "first delivered successor")
+        self.write_transcript([first_missing, first_success])
+        rt = self.make_rt(realert_secs=1)
+        rt.haystack = norm(first_success[1])
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        self.assertEqual(len(rt.alerts), 1)
+
+        second_missing = (self.now - 2000, "second skipped response")
+        second_success = (self.now - 1000, "second delivered successor")
+        self.write_transcript(
+            [first_missing, first_success, second_missing, second_success]
+        )
+        rt.haystack = norm(f"{first_success[1]} {second_success[1]}")
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 4)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 6)
+
+        permanent_alerts = [
+            body for body, _ in rt.alerts if "새 영구 릴레이 유실 확정" in body
+        ]
+        self.assertEqual(len(permanent_alerts), 2)
+        self.assertIn("영구 유실 **2건 누적**", permanent_alerts[-1])
+        self.assertEqual(
+            state["999"][relay_watchdog.PERMANENT_LOSS_TOTAL_KEY], 2
+        )
+
+    def test_tombstone_survives_state_round_trip_and_restart(self):
+        missing = (self.now - 2000, "restart-persistent skipped response")
+        delivered_later = (self.now - 1200, "restart-persistent successor")
+        self.write_transcript([missing, delivered_later])
+        rt = self.make_rt(realert_secs=1)
+        rt.haystack = norm(delivered_later[1])
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        self.assertEqual(len(rt.alerts), 1)
+        save_state(rt.state_path, state)
+
+        restarted_state = load_state(rt.state_path)
+        restarted = self.make_rt(realert_secs=1)
+        restarted.haystack = norm(delivered_later[1])
+        tick_channel(restarted, TICK_CHANNEL, restarted_state, self.now + 4)
+
+        self.assertEqual(restarted.alerts, [])
+        self.assertEqual(
+            restarted_state["999"][relay_watchdog.PERMANENT_LOSS_TOTAL_KEY], 1
+        )
+        self.assertEqual(
+            len(
+                restarted_state["999"][
+                    relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY
+                ]
+            ),
+            1,
+        )
+
+    def test_nonconsecutive_overtaking_observation_does_not_tombstone(self):
+        missing = (self.now - 2000, "intermittently observed missing response")
+        delivered_later = (self.now - 1200, "intermittent delivered successor")
+        self.write_transcript([missing, delivered_later])
+        rt = self.make_rt()
+        rt.haystack = norm(delivered_later[1])
+        state: dict = {}
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        rt.haystack = norm(f"{missing[1]} {delivered_later[1]}")
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        rt.haystack = norm(delivered_later[1])
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+
+        self.assertEqual(
+            state["999"][relay_watchdog.PERMANENT_LOSS_TOTAL_KEY], 0
+        )
+        self.assertNotIn(
+            relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY, state["999"]
+        )
 
     # (d) persistent-gap issue auto-filing is deduplicated
     def test_persistent_gap_files_issue_exactly_once(self):
