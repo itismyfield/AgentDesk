@@ -722,13 +722,13 @@ mod tests {
     use filetime::{FileTime, set_file_mtime};
 
     #[test]
-    fn transition_busy_response_exposes_retryable_two_second_contract() {
+    fn transition_busy_response_exposes_retryable_three_second_contract() {
         let (status, Json(body)) = ResumeRebindError::TransitionBusy.into_response();
         assert_eq!(status, StatusCode::CONFLICT);
         let error = body["error"]
             .as_str()
             .expect("busy response has error text");
-        assert!(error.contains("2 seconds"));
+        assert!(error.contains("3 seconds"));
         assert!(error.contains("retry /resume"));
     }
 

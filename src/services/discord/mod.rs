@@ -2379,7 +2379,7 @@ pub(crate) struct SharedData {
 }
 
 pub(crate) const SESSION_TRANSITION_LOCK_WAIT_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(2);
+    std::time::Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SessionTransitionBusy;
@@ -2637,7 +2637,7 @@ mod session_transition_lock_tests {
         tokio::task::yield_now().await;
         assert!(
             waiter.is_finished(),
-            "transition wait must end at the configured two-second boundary"
+            "transition wait must end at the configured three-second boundary"
         );
         assert!(matches!(waiter.await.unwrap(), Err(SessionTransitionBusy)));
         drop(held);
