@@ -4,6 +4,39 @@ use super::super::*;
 
 pub(super) type GuardedSaveOutcome = crate::services::discord::inflight::GuardedSaveOutcome;
 
+/// Durable precondition for a Discord-visible stream mutation.
+///
+/// A successful identity guard is not sufficient by itself: the same turn may
+/// have handed live delivery to a watcher/standby relay.  Only the historical
+/// `None` owner is bridge authority.  Store failures fail closed for this tick
+/// but remain retryable; a missing/reowned row or a durable non-bridge relay
+/// owner permanently ends bridge authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum VisibleMutationAuthority {
+    Authorized,
+    Retry,
+    AuthorityLost,
+}
+
+pub(super) fn visible_mutation_authority_after_guarded_save(
+    outcome: GuardedSaveOutcome,
+    inflight_state: &InflightTurnState,
+) -> VisibleMutationAuthority {
+    use crate::services::discord::inflight::RelayOwnerKind;
+
+    match outcome {
+        GuardedSaveOutcome::Saved
+            if inflight_state.effective_relay_owner_kind() == RelayOwnerKind::None =>
+        {
+            VisibleMutationAuthority::Authorized
+        }
+        GuardedSaveOutcome::Saved
+        | GuardedSaveOutcome::Missing
+        | GuardedSaveOutcome::IdentityMismatch => VisibleMutationAuthority::AuthorityLost,
+        GuardedSaveOutcome::IoError => VisibleMutationAuthority::Retry,
+    }
+}
+
 pub(super) fn sync_stream_tick_tool_fields(
     inflight_state: &mut InflightTurnState,
     current_tool_line: &Option<String>,
@@ -30,18 +63,95 @@ pub(in crate::services::discord::turn_bridge) fn persist_stream_tick_state(
     channel_id: ChannelId,
     caller: &'static str,
 ) -> GuardedSaveOutcome {
-    use crate::services::discord::inflight::{
-        GuardedSaveOutcome, save_stream_tick_state_preserving_current_message_races,
-    };
-    let outcome = save_stream_tick_state_preserving_current_message_races(
+    persist_stream_tick_state_with_authority_mode(
         persisted_baseline,
         inflight_state,
         expected,
-        expected_current_message.0,
-        expected_current_message.1,
+        expected_current_message,
+        detached_current_msg_id,
+        channel_id,
         caller,
-    );
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_stream_tick_visible_mutation_fence(
+    persisted_baseline: &mut InflightTurnState,
+    inflight_state: &mut InflightTurnState,
+    expected: &crate::services::discord::inflight::InflightTurnIdentity,
+    expected_current_message: &mut (u64, usize),
+    detached_current_msg_id: &mut MessageId,
+    channel_id: ChannelId,
+    caller: &'static str,
+) -> GuardedSaveOutcome {
+    persist_stream_tick_state_with_authority_mode(
+        persisted_baseline,
+        inflight_state,
+        expected,
+        expected_current_message,
+        detached_current_msg_id,
+        channel_id,
+        caller,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_stream_tick_state_with_authority_mode(
+    persisted_baseline: &mut InflightTurnState,
+    inflight_state: &mut InflightTurnState,
+    expected: &crate::services::discord::inflight::InflightTurnIdentity,
+    expected_current_message: &mut (u64, usize),
+    detached_current_msg_id: &mut MessageId,
+    channel_id: ChannelId,
+    caller: &'static str,
+    strict_visible_mutation_fence: bool,
+) -> GuardedSaveOutcome {
+    use crate::services::discord::inflight::{
+        GuardedSaveOutcome, save_stream_tick_state_if_bridge_authority,
+        save_stream_tick_state_preserving_current_message_races,
+    };
+    let expected_current_before_save = *expected_current_message;
+    let outcome = if strict_visible_mutation_fence {
+        save_stream_tick_state_if_bridge_authority(
+            persisted_baseline,
+            inflight_state,
+            expected,
+            expected_current_message.0,
+            expected_current_message.1,
+            caller,
+        )
+    } else {
+        save_stream_tick_state_preserving_current_message_races(
+            persisted_baseline,
+            inflight_state,
+            expected,
+            expected_current_message.0,
+            expected_current_message.1,
+            caller,
+        )
+    };
     if outcome == GuardedSaveOutcome::Saved {
+        *expected_current_message = (
+            inflight_state.current_msg_id,
+            inflight_state.current_msg_len,
+        );
+        *detached_current_msg_id =
+            detached_current_msg_id_from_durable(inflight_state.current_msg_id);
+    } else if strict_visible_mutation_fence
+        && outcome == GuardedSaveOutcome::IdentityMismatch
+        && expected.matches_state(inflight_state)
+        && ((
+            inflight_state.current_msg_id,
+            inflight_state.current_msg_len,
+        ) != expected_current_before_save
+            || inflight_state.effective_relay_owner_kind()
+                != crate::services::discord::inflight::RelayOwnerKind::None)
+    {
+        // The strict lock-held fence adopted the exact same-turn durable row.
+        // Make candidate cleanup fall back to that authoritative message, not
+        // the stale pre-fence epoch.
         *expected_current_message = (
             inflight_state.current_msg_id,
             inflight_state.current_msg_len,
@@ -80,15 +190,96 @@ pub(in crate::services::discord::turn_bridge) async fn persist_stream_tick_state
     bridge_created_response_placeholder_msg_id: &mut Option<MessageId>,
     caller: &'static str,
 ) -> GuardedSaveOutcome {
-    let outcome = persist_stream_tick_state(
+    persist_stream_tick_state_with_candidate_cleanup_mode(
+        gateway,
+        provider,
+        token_hash,
+        channel_id,
         persisted_baseline,
         inflight_state,
         expected_identity,
         expected_current_message,
         current_msg_id,
-        channel_id,
+        pending_current_message_candidate,
+        bridge_created_response_placeholder_msg_id,
         caller,
-    );
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn fence_stream_tick_visible_mutation_with_candidate_cleanup<
+    G: TurnGateway + ?Sized,
+>(
+    gateway: &G,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: ChannelId,
+    persisted_baseline: &mut InflightTurnState,
+    inflight_state: &mut InflightTurnState,
+    expected_identity: &crate::services::discord::inflight::InflightTurnIdentity,
+    expected_current_message: &mut (u64, usize),
+    current_msg_id: &mut MessageId,
+    pending_current_message_candidate: &mut Option<MessageId>,
+    bridge_created_response_placeholder_msg_id: &mut Option<MessageId>,
+    caller: &'static str,
+) -> GuardedSaveOutcome {
+    persist_stream_tick_state_with_candidate_cleanup_mode(
+        gateway,
+        provider,
+        token_hash,
+        channel_id,
+        persisted_baseline,
+        inflight_state,
+        expected_identity,
+        expected_current_message,
+        current_msg_id,
+        pending_current_message_candidate,
+        bridge_created_response_placeholder_msg_id,
+        caller,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_stream_tick_state_with_candidate_cleanup_mode<G: TurnGateway + ?Sized>(
+    gateway: &G,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: ChannelId,
+    persisted_baseline: &mut InflightTurnState,
+    inflight_state: &mut InflightTurnState,
+    expected_identity: &crate::services::discord::inflight::InflightTurnIdentity,
+    expected_current_message: &mut (u64, usize),
+    current_msg_id: &mut MessageId,
+    pending_current_message_candidate: &mut Option<MessageId>,
+    bridge_created_response_placeholder_msg_id: &mut Option<MessageId>,
+    caller: &'static str,
+    strict_visible_mutation_fence: bool,
+) -> GuardedSaveOutcome {
+    let outcome = if strict_visible_mutation_fence {
+        persist_stream_tick_visible_mutation_fence(
+            persisted_baseline,
+            inflight_state,
+            expected_identity,
+            expected_current_message,
+            current_msg_id,
+            channel_id,
+            caller,
+        )
+    } else {
+        persist_stream_tick_state(
+            persisted_baseline,
+            inflight_state,
+            expected_identity,
+            expected_current_message,
+            current_msg_id,
+            channel_id,
+            caller,
+        )
+    };
     if outcome == GuardedSaveOutcome::IoError {
         return outcome;
     }
@@ -650,6 +841,165 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn strict_fence_loses_authority_before_visible_mutation() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env_reset =
+            crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let channel = ChannelId::new(4_259_110);
+        let mut stale = owner_state(channel.get(), 77_010);
+        stale.current_msg_id = 1;
+        stale.current_msg_len = 9;
+        save_inflight_state(&stale).expect("seed bridge owner row");
+        let expected = crate::services::discord::inflight::InflightTurnIdentity::from_state(&stale);
+        let mut persisted_baseline = stale.clone();
+
+        stale.full_response = "stale bridge response".to_string();
+        stale.current_msg_id = 2;
+        stale.current_msg_len = 10;
+        let mut expected_current_message = (1, 9);
+        let mut current_msg_id = MessageId::new(2);
+        let mut pending_candidate = Some(current_msg_id);
+        let mut bridge_created_candidate = Some(current_msg_id);
+
+        let mut watcher = persisted_baseline.clone();
+        watcher.full_response = "watcher-owned response".to_string();
+        watcher.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+        save_inflight_state(&watcher).expect("watcher takes relay authority");
+
+        let gateway = super::super::provider_output_guard_tests::CapturingGateway::default();
+        let outcome = fence_stream_tick_visible_mutation_with_candidate_cleanup(
+            &gateway,
+            &ProviderKind::Codex,
+            "strict-fence-test",
+            channel,
+            &mut persisted_baseline,
+            &mut stale,
+            &expected,
+            &mut expected_current_message,
+            &mut current_msg_id,
+            &mut pending_candidate,
+            &mut bridge_created_candidate,
+            "turn_bridge::stream_tick::strict_authority_interleaving_test",
+        )
+        .await;
+        let authority = visible_mutation_authority_after_guarded_save(outcome, &stale);
+        if authority == VisibleMutationAuthority::Authorized {
+            TurnGateway::edit_message(
+                &gateway,
+                channel,
+                current_msg_id,
+                "forbidden stale mutation",
+            )
+            .await
+            .expect("test mutation");
+        }
+
+        assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+        assert_eq!(authority, VisibleMutationAuthority::AuthorityLost);
+        assert!(gateway.edits.lock().expect("edits lock").is_empty());
+        assert_eq!(
+            gateway.deletes.lock().expect("deletes lock").as_slice(),
+            &[2]
+        );
+        assert_eq!(pending_candidate, None);
+        assert_eq!(bridge_created_candidate, None);
+        assert_eq!(expected_current_message, (1, 9));
+        assert_eq!(current_msg_id, MessageId::new(1));
+        assert_eq!(stale.full_response, "watcher-owned response");
+        let durable =
+            load_inflight_state(&ProviderKind::Codex, channel.get()).expect("watcher row survives");
+        assert_eq!(
+            durable.effective_relay_owner_kind(),
+            crate::services::discord::inflight::RelayOwnerKind::Watcher
+        );
+        assert_eq!(
+            serde_json::to_value(&stale).unwrap(),
+            serde_json::to_value(&durable).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&persisted_baseline).unwrap(),
+            serde_json::to_value(&durable).unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn second_rollover_failure_keeps_bound_m2_and_deletes_only_unbound_m3() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let blocked_root = temp.path().join("blocked-root");
+        std::fs::write(&blocked_root, b"not a directory").expect("blocked runtime root");
+        let _env_reset =
+            crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", &blocked_root);
+
+        let channel = ChannelId::new(4_259_111);
+        let mut state = owner_state(channel.get(), 77_010);
+        // M2 is the already-guarded first rollover. M3 is the only unbound
+        // candidate when the second rollover's immediate bind hits I/O error.
+        state.current_msg_id = 2;
+        state.current_msg_len = 11;
+        let expected = crate::services::discord::inflight::InflightTurnIdentity::from_state(&state);
+        let mut persisted_baseline = state.clone();
+        let mut expected_current_message = (2, 11);
+        state.current_msg_id = 3;
+        state.current_msg_len = 12;
+        let mut current_msg_id = MessageId::new(3);
+        let mut pending_candidate = Some(current_msg_id);
+        let mut bridge_created_candidate = Some(current_msg_id);
+        let gateway = super::super::provider_output_guard_tests::CapturingGateway::default();
+
+        let outcome = fence_stream_tick_visible_mutation_with_candidate_cleanup(
+            &gateway,
+            &ProviderKind::Codex,
+            "multi-rollover-test",
+            channel,
+            &mut persisted_baseline,
+            &mut state,
+            &expected,
+            &mut expected_current_message,
+            &mut current_msg_id,
+            &mut pending_candidate,
+            &mut bridge_created_candidate,
+            "turn_bridge::stream_tick::second_rollover_bind_test",
+        )
+        .await;
+        assert_eq!(outcome, GuardedSaveOutcome::IoError);
+        assert_eq!(
+            visible_mutation_authority_after_guarded_save(outcome, &state),
+            VisibleMutationAuthority::Retry
+        );
+        assert_eq!(pending_candidate, Some(MessageId::new(3)));
+        assert!(gateway.deletes.lock().expect("deletes lock").is_empty());
+
+        assert!(
+            !settle_pending_current_message_candidate_on_loop_exit(
+                &gateway,
+                &ProviderKind::Codex,
+                "multi-rollover-test",
+                channel,
+                &mut persisted_baseline,
+                &mut state,
+                &expected,
+                &mut expected_current_message,
+                &mut current_msg_id,
+                &mut pending_candidate,
+                &mut bridge_created_candidate,
+            )
+            .await
+        );
+        assert_eq!(pending_candidate, None);
+        assert_eq!(bridge_created_candidate, None);
+        assert_eq!((state.current_msg_id, state.current_msg_len), (2, 11));
+        assert_eq!(current_msg_id, MessageId::new(2));
+        assert_eq!(
+            gateway.deletes.lock().expect("deletes lock").as_slice(),
+            &[3]
+        );
+        assert!(
+            !gateway.deletes.lock().expect("deletes lock").contains(&2),
+            "already-bound M2 must never be treated as an orphan"
+        );
+    }
+
     #[test]
     fn production_tick_reconciles_anchor_dirty_flush_and_exit_candidate_merges() {
         let tick = include_str!("../stream_tick.rs");
@@ -697,7 +1047,7 @@ mod tests {
             .map(|offset| dirty_flush + offset)
             .expect("ordinary Saved flush refreshes detached tick state");
         let tick_writeback = production_tick[saved_reconcile..]
-            .find("*state.full_response = full_response;")
+            .find("writeback_tick_state!();")
             .map(|offset| saved_reconcile + offset)
             .expect("reconciled tick state is written back");
         assert!(
@@ -706,6 +1056,20 @@ mod tests {
                 && saved_reconcile < tick_writeback
         );
 
+        let rollover_send = production_tick
+            .find("TurnGateway::send_message(gateway.as_ref(), channel_id, &status_block)")
+            .expect("rollover creates a fresh tail candidate");
+        let immediate_rollover_bind = production_tick[rollover_send..]
+            .find("turn_bridge::stream_tick::rollover_candidate_bind")
+            .map(|offset| rollover_send + offset)
+            .expect("every rollover candidate is guarded before another loop iteration");
+        let post_rollover_panel = production_tick[immediate_rollover_bind..]
+            .find("turn_bridge::stream_tick::panel_reanchor")
+            .map(|offset| immediate_rollover_bind + offset)
+            .expect("post-rollover work starts only after the candidate bind");
+        assert!(rollover_send < immediate_rollover_bind);
+        assert!(immediate_rollover_bind < post_rollover_panel);
+
         let stream_loop = include_str!("../stream_loop.rs");
         let persistent_dirty = stream_loop
             .find("let mut state_dirty = false;")
@@ -713,6 +1077,18 @@ mod tests {
         let outer = stream_loop
             .find("'outer: while")
             .expect("production stream loop remains present");
+        let tick_call = stream_loop[outer..]
+            .find("let tick_outcome = run_bridge_stream_tick(")
+            .map(|offset| outer + offset)
+            .expect("stream loop observes the explicit tick outcome");
+        let authority_loss = stream_loop[tick_call..]
+            .find("if tick_outcome == StreamTickOutcome::AuthorityLost")
+            .map(|offset| tick_call + offset)
+            .expect("tick authority loss reaches the stream loop");
+        let authority_break = stream_loop[authority_loss..]
+            .find("break 'outer;")
+            .map(|offset| authority_loss + offset)
+            .expect("authority loss immediately stops stream draining");
         let writeback = stream_loop[outer..]
             .find("*state.inflight_state = inflight_state;")
             .map(|offset| outer + offset)
@@ -731,7 +1107,10 @@ mod tests {
             .expect("successful exit merge refreshes caller-owned state");
         assert!(
             persistent_dirty < outer
-                && outer < writeback
+                && outer < tick_call
+                && tick_call < authority_loss
+                && authority_loss < authority_break
+                && authority_break < writeback
                 && writeback < pre_settle_anchor
                 && pre_settle_anchor < settle
                 && settle < exit_reconcile

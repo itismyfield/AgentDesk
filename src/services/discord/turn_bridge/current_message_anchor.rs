@@ -144,6 +144,119 @@ pub(super) async fn edit_bound_current_message<G: TurnGateway + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::discord::formatting::ReplaceLongMessageOutcome;
+    use crate::services::discord::gateway::GatewayFuture;
+    use std::sync::Mutex;
+
+    #[derive(Clone, Copy)]
+    enum AuthorityMarker {
+        Restart,
+        Rebind,
+    }
+
+    struct MarkerDuringSendGateway {
+        provider: ProviderKind,
+        channel_id: u64,
+        marker: AuthorityMarker,
+        candidate: MessageId,
+        deleted: Mutex<Vec<u64>>,
+    }
+
+    impl TurnGateway for MarkerDuringSendGateway {
+        fn send_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _content: &'a str,
+        ) -> GatewayFuture<'a, Result<MessageId, String>> {
+            Box::pin(async move {
+                let mut durable = crate::services::discord::inflight::load_inflight_state(
+                    &self.provider,
+                    self.channel_id,
+                )
+                .expect("durable row during send");
+                match self.marker {
+                    AuthorityMarker::Restart => durable.set_restart_mode(
+                        crate::services::discord::InflightRestartMode::DrainRestart,
+                    ),
+                    AuthorityMarker::Rebind => durable.rebind_origin = true,
+                }
+                crate::services::discord::inflight::save_inflight_state(&durable)
+                    .expect("install authority marker during send");
+                Ok(self.candidate)
+            })
+        }
+
+        fn edit_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _content: &'a str,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn delete_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            message_id: MessageId,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            self.deleted
+                .lock()
+                .expect("deleted lock")
+                .push(message_id.get());
+            Box::pin(async { Ok(()) })
+        }
+
+        fn replace_message_with_outcome<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _content: &'a str,
+        ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
+            Box::pin(async { Ok(ReplaceLongMessageOutcome::EditedOriginal) })
+        }
+
+        fn schedule_retry_with_history<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _user_message_id: MessageId,
+            _user_text: &'a str,
+        ) -> GatewayFuture<'a, ()> {
+            Box::pin(async {})
+        }
+
+        fn dispatch_queued_turn<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _intervention: &'a Intervention,
+            _request_owner_name: &'a str,
+            _has_more_queued_turns: bool,
+            _dispatch_lease: Option<
+                std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>,
+            >,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn validate_live_routing<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn requester_mention(&self) -> Option<String> {
+            None
+        }
+
+        fn can_chain_locally(&self) -> bool {
+            false
+        }
+
+        fn bot_owner_provider(&self) -> Option<ProviderKind> {
+            Some(self.provider.clone())
+        }
+    }
 
     #[test]
     fn cleared_durable_current_message_stays_absent_until_real_anchor_exists() {
@@ -167,5 +280,84 @@ mod tests {
         assert_eq!(unbound_current_message_candidate(detached, 0), None);
         assert_eq!(unbound_current_message_candidate(real, real.get()), None);
         assert_eq!(unbound_current_message_candidate(real, 900_001), Some(real));
+    }
+
+    #[tokio::test]
+    async fn authority_marker_installed_during_anchor_send_aborts_bind_and_deletes_candidate() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+
+        for (index, marker) in [AuthorityMarker::Restart, AuthorityMarker::Rebind]
+            .into_iter()
+            .enumerate()
+        {
+            let provider = ProviderKind::Codex;
+            let channel_id = 42_592_710 + index as u64;
+            let mut local = InflightTurnState::new(
+                provider.clone(),
+                channel_id,
+                Some("adk-anchor-r7".to_string()),
+                343_742_347_365_974_026,
+                77_010 + index as u64,
+                18,
+                "anchor race".to_string(),
+                Some("session".to_string()),
+                Some(format!("AgentDesk-codex-anchor-{index}")),
+                Some(format!("/runtime/anchor-{index}.jsonl")),
+                None,
+                512,
+            );
+            local.current_msg_id = 0;
+            local.current_msg_len = 0;
+            crate::services::discord::inflight::save_inflight_state(&local)
+                .expect("seed absent anchor");
+            let expected =
+                crate::services::discord::inflight::InflightTurnIdentity::from_state(&local);
+            let candidate = MessageId::new(990_000 + index as u64);
+            let gateway = MarkerDuringSendGateway {
+                provider: provider.clone(),
+                channel_id,
+                marker,
+                candidate,
+                deleted: Mutex::new(Vec::new()),
+            };
+            let mut detached = detached_current_msg_id_from_durable(0);
+            let mut bridge_candidate = None;
+
+            assert!(
+                !ensure_bridge_current_message_anchor(
+                    &gateway,
+                    &provider,
+                    "anchor-r7",
+                    ChannelId::new(channel_id),
+                    &expected,
+                    &mut detached,
+                    &mut bridge_candidate,
+                    &mut local,
+                    "⏳",
+                )
+                .await
+            );
+            assert_eq!(
+                gateway.deleted.lock().expect("deleted lock").as_slice(),
+                &[candidate.get()]
+            );
+            assert_eq!(durable_current_msg_id_from_detached(detached), 0);
+            assert_eq!(bridge_candidate, None);
+            let durable =
+                crate::services::discord::inflight::load_inflight_state(&provider, channel_id)
+                    .expect("preserved marked row");
+            assert_eq!(durable.current_msg_id, 0);
+            match marker {
+                AuthorityMarker::Restart => assert!(durable.restart_mode.is_some()),
+                AuthorityMarker::Rebind => assert!(durable.rebind_origin),
+            }
+        }
     }
 }

@@ -12,6 +12,10 @@ pub(super) fn refresh_stream_tick_expected_identity_after_handoff(
     ) {
         *expected =
             crate::services::discord::inflight::InflightTurnIdentity::from_state(inflight_state);
+        if inflight_state.save_generation > persisted_baseline.save_generation {
+            persisted_baseline.clone_from(inflight_state);
+            return;
+        }
         persisted_baseline.runtime_kind = inflight_state.runtime_kind;
         persisted_baseline
             .tmux_session_name

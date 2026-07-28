@@ -24,20 +24,10 @@ fn merge_stream_response_progress(
     if durable == before {
         return Some((local_body.to_string(), local_offset));
     }
-    if local_body == durable_body {
-        let offset = normalize_response_sent_offset(local_body, local_offset.max(durable_offset));
-        return Some((local_body.to_string(), offset));
-    }
-    let merged_body = if local_body.starts_with(durable_body) {
-        local_body
-    } else if durable_body.starts_with(local_body) {
-        durable_body
-    } else {
-        return None;
-    };
-    let merged_offset =
-        normalize_response_sent_offset(merged_body, local_offset.max(durable_offset));
-    Some((merged_body.to_string(), merged_offset))
+    super::merge_forward_response_progress(
+        (durable_body, durable_offset),
+        (local_body, local_offset),
+    )
 }
 
 /// Three-way merges the stream loop's owned fields onto a lock-held durable
@@ -56,7 +46,7 @@ pub(in crate::services::discord) fn save_stream_tick_state_preserving_current_me
     let Some(root) = inflight_runtime_root() else {
         return GuardedSaveOutcome::IoError;
     };
-    save_stream_tick_state_preserving_current_message_races_in_root(
+    save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
         &root,
         persisted_baseline,
         state,
@@ -64,7 +54,41 @@ pub(in crate::services::discord) fn save_stream_tick_state_preserving_current_me
         expected_current_msg_id,
         expected_current_msg_len,
         caller,
+        StreamTickSaveMode::MergeConcurrentOwner,
     )
+}
+
+/// Strict precondition for a Discord-visible stream mutation.  Unlike the
+/// ordinary stream merge, this refuses to apply any local delta after a
+/// durable relay handoff or current-message epoch change.  The check and write
+/// happen under the same inflight-row lock.
+pub(in crate::services::discord) fn save_stream_tick_state_if_bridge_authority(
+    persisted_baseline: &mut InflightTurnState,
+    state: &mut InflightTurnState,
+    expected: &InflightTurnIdentity,
+    expected_current_msg_id: u64,
+    expected_current_msg_len: usize,
+    caller: &'static str,
+) -> GuardedSaveOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedSaveOutcome::IoError;
+    };
+    save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
+        &root,
+        persisted_baseline,
+        state,
+        expected,
+        expected_current_msg_id,
+        expected_current_msg_len,
+        caller,
+        StreamTickSaveMode::StrictBridgeMutation,
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamTickSaveMode {
+    MergeConcurrentOwner,
+    StrictBridgeMutation,
 }
 
 pub(in crate::services::discord::inflight) fn save_stream_tick_state_preserving_current_message_races_in_root(
@@ -75,6 +99,51 @@ pub(in crate::services::discord::inflight) fn save_stream_tick_state_preserving_
     expected_current_msg_id: u64,
     expected_current_msg_len: usize,
     caller: &'static str,
+) -> GuardedSaveOutcome {
+    save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
+        root,
+        persisted_baseline,
+        state,
+        expected,
+        expected_current_msg_id,
+        expected_current_msg_len,
+        caller,
+        StreamTickSaveMode::MergeConcurrentOwner,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::services::discord::inflight) fn save_stream_tick_state_if_bridge_authority_in_root(
+    root: &Path,
+    persisted_baseline: &mut InflightTurnState,
+    state: &mut InflightTurnState,
+    expected: &InflightTurnIdentity,
+    expected_current_msg_id: u64,
+    expected_current_msg_len: usize,
+    caller: &'static str,
+) -> GuardedSaveOutcome {
+    save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
+        root,
+        persisted_baseline,
+        state,
+        expected,
+        expected_current_msg_id,
+        expected_current_msg_len,
+        caller,
+        StreamTickSaveMode::StrictBridgeMutation,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
+    root: &Path,
+    persisted_baseline: &mut InflightTurnState,
+    state: &mut InflightTurnState,
+    expected: &InflightTurnIdentity,
+    expected_current_msg_id: u64,
+    expected_current_msg_len: usize,
+    caller: &'static str,
+    mode: StreamTickSaveMode,
 ) -> GuardedSaveOutcome {
     let Some(provider) = state.provider_kind() else {
         return GuardedSaveOutcome::IoError;
@@ -109,10 +178,30 @@ pub(in crate::services::discord::inflight) fn save_stream_tick_state_preserving_
         return GuardedSaveOutcome::IdentityMismatch;
     }
 
-    let mut updated = on_disk.clone();
     let baseline_current_message = (expected_current_msg_id, expected_current_msg_len);
-    let local_current_message = (state.current_msg_id, state.current_msg_len);
     let durable_current_message = (on_disk.current_msg_id, on_disk.current_msg_len);
+    if mode == StreamTickSaveMode::StrictBridgeMutation
+        && (on_disk.effective_relay_owner_kind() != RelayOwnerKind::None
+            || durable_current_message != baseline_current_message)
+    {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = state.channel_id,
+            caller,
+            relay_owner = on_disk.effective_relay_owner_kind().as_str(),
+            expected_current_msg_id,
+            expected_current_msg_len,
+            durable_current_msg_id = on_disk.current_msg_id,
+            durable_current_msg_len = on_disk.current_msg_len,
+            "strict stream mutation fence rejected changed durable authority"
+        );
+        state.clone_from(&on_disk);
+        persisted_baseline.clone_from(&on_disk);
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+
+    let mut updated = on_disk.clone();
+    let local_current_message = (state.current_msg_id, state.current_msg_len);
     if local_current_message != baseline_current_message
         && (durable_current_message == baseline_current_message
             || durable_current_message == local_current_message)
@@ -556,6 +645,103 @@ mod tests {
             serde_json::to_value(&local).unwrap(),
             serde_json::to_value(&persisted).unwrap()
         );
+        assert_eq!(
+            serde_json::to_value(&baseline).unwrap(),
+            serde_json::to_value(&persisted).unwrap()
+        );
+    }
+
+    #[test]
+    fn strict_visible_fence_rejects_watcher_before_local_delta_and_adopts_durable() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let channel_id = 42_593_114;
+        let mut baseline = owner_state(channel_id, 77_010);
+        baseline.full_response = "base".to_string();
+        (baseline.current_msg_id, baseline.current_msg_len) = (901, 12);
+        save_inflight_state_in_root(root.path(), &baseline).expect("seed bridge row");
+        let expected = InflightTurnIdentity::from_state(&baseline);
+
+        let mut local = baseline.clone();
+        local.full_response = "base plus stale bridge delta".to_string();
+        (local.current_msg_id, local.current_msg_len) = (902, 18);
+
+        let mut watcher = baseline.clone();
+        watcher.full_response = "base plus watcher delta".to_string();
+        watcher.response_sent_offset = watcher.full_response.len();
+        watcher.set_relay_owner_kind(RelayOwnerKind::Watcher);
+        save_inflight_state_in_root(root.path(), &watcher).expect("watcher takes authority");
+
+        assert_eq!(
+            save_stream_tick_state_if_bridge_authority_in_root(
+                root.path(),
+                &mut baseline,
+                &mut local,
+                &expected,
+                901,
+                12,
+                "test::strict_watcher_authority_fence",
+            ),
+            GuardedSaveOutcome::IdentityMismatch,
+        );
+        let persisted = load(root.path(), &ProviderKind::Codex, channel_id);
+        assert_eq!(persisted.full_response, "base plus watcher delta");
+        assert_eq!(
+            (persisted.current_msg_id, persisted.current_msg_len),
+            (901, 12)
+        );
+        assert_eq!(
+            persisted.effective_relay_owner_kind(),
+            RelayOwnerKind::Watcher
+        );
+        assert_eq!(
+            serde_json::to_value(&local).unwrap(),
+            serde_json::to_value(&persisted).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&baseline).unwrap(),
+            serde_json::to_value(&persisted).unwrap()
+        );
+    }
+
+    #[test]
+    fn strict_visible_fence_rejects_changed_current_message_epoch() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let channel_id = 42_593_115;
+        let mut baseline = owner_state(channel_id, 77_010);
+        baseline.full_response = "base".to_string();
+        (baseline.current_msg_id, baseline.current_msg_len) = (911, 12);
+        save_inflight_state_in_root(root.path(), &baseline).expect("seed bridge row");
+        let expected = InflightTurnIdentity::from_state(&baseline);
+
+        let mut local = baseline.clone();
+        local.full_response = "base plus stale rollover".to_string();
+        (local.current_msg_id, local.current_msg_len) = (912, 18);
+
+        let mut competing = baseline.clone();
+        competing.full_response = "base plus durable competitor".to_string();
+        (competing.current_msg_id, competing.current_msg_len) = (913, 21);
+        save_inflight_state_in_root(root.path(), &competing).expect("advance durable epoch");
+
+        assert_eq!(
+            save_stream_tick_state_if_bridge_authority_in_root(
+                root.path(),
+                &mut baseline,
+                &mut local,
+                &expected,
+                911,
+                12,
+                "test::strict_current_message_epoch_fence",
+            ),
+            GuardedSaveOutcome::IdentityMismatch,
+        );
+        let persisted = load(root.path(), &ProviderKind::Codex, channel_id);
+        assert_eq!(persisted.full_response, competing.full_response);
+        assert_eq!(
+            (persisted.current_msg_id, persisted.current_msg_len),
+            (913, 21)
+        );
+        let persisted_json = serde_json::to_value(&persisted).unwrap();
+        assert_eq!(serde_json::to_value(&local).unwrap(), persisted_json);
         assert_eq!(
             serde_json::to_value(&baseline).unwrap(),
             serde_json::to_value(&persisted).unwrap()

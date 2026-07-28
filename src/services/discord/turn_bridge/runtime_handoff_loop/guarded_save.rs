@@ -22,16 +22,17 @@ use super::super::super::*;
 /// consistent with row ownership (see
 /// [`tmux_ready_state_dirty_after_guarded_save`]).
 pub(super) fn guarded_runtime_handoff_save(
-    inflight_state: &InflightTurnState,
+    persisted_baseline: &InflightTurnState,
+    inflight_state: &mut InflightTurnState,
     expected: &crate::services::discord::inflight::InflightTurnIdentity,
     channel_id: ChannelId,
     caller: &'static str,
 ) -> crate::services::discord::inflight::GuardedSaveOutcome {
     use crate::services::discord::inflight::{
-        GuardedSaveOutcome, save_inflight_state_if_identity_matches_allow_output_restamp,
+        GuardedSaveOutcome, stamp_runtime_handoff_if_matches_identity,
     };
-    let outcome = save_inflight_state_if_identity_matches_allow_output_restamp(
-        inflight_state,
+    let outcome = stamp_runtime_handoff_if_matches_identity(
+        (persisted_baseline, inflight_state),
         expected,
         caller,
     );
@@ -55,7 +56,8 @@ pub(super) fn guarded_runtime_handoff_save(
 /// output/owner evidence. `Missing` never creates a row: every bridge entry
 /// path seeds or adopts the durable row before a runtime handoff can arrive.
 pub(super) fn guarded_runtime_atomic_stamp(
-    inflight_state: &InflightTurnState,
+    persisted_baseline: &InflightTurnState,
+    inflight_state: &mut InflightTurnState,
     expected: &crate::services::discord::inflight::InflightTurnIdentity,
     channel_id: ChannelId,
     caller: &'static str,
@@ -63,7 +65,11 @@ pub(super) fn guarded_runtime_atomic_stamp(
     use crate::services::discord::inflight::{
         GuardedSaveOutcome, stamp_runtime_handoff_if_matches_identity,
     };
-    let outcome = stamp_runtime_handoff_if_matches_identity(inflight_state, expected, caller);
+    let outcome = stamp_runtime_handoff_if_matches_identity(
+        (persisted_baseline, inflight_state),
+        expected,
+        caller,
+    );
     if matches!(
         outcome,
         GuardedSaveOutcome::Missing | GuardedSaveOutcome::IdentityMismatch
@@ -152,12 +158,15 @@ mod tests {
         let channel = ChannelId::new(4_259_001);
         let mut state = tmux_ready_owner_state(channel.get(), 77_010);
         save_inflight_state(&state).expect("seed owner row");
-        let expected = crate::services::discord::inflight::InflightTurnIdentity::from_state(&state);
+        let baseline = state.clone();
+        let expected =
+            crate::services::discord::inflight::InflightTurnIdentity::from_state(&baseline);
 
         state.output_path = Some("/tmp/AgentDesk-codex-adk-4259.jsonl".to_string());
         state.last_offset = 4096;
         let outcome = guarded_runtime_handoff_save(
-            &state,
+            &baseline,
+            &mut state,
             &expected,
             channel,
             "turn_bridge::runtime_handoff_loop::tmux_ready_watcher_handoff",
@@ -190,12 +199,15 @@ mod tests {
         let channel = ChannelId::new(4_755_001);
         let mut state = tmux_ready_owner_state(channel.get(), 77_010);
         save_inflight_state(&state).expect("seed owner row");
-        let expected = crate::services::discord::inflight::InflightTurnIdentity::from_state(&state);
+        let baseline = state.clone();
+        let expected =
+            crate::services::discord::inflight::InflightTurnIdentity::from_state(&baseline);
 
         state.turn_start_offset = Some(4_096);
         state.last_offset = 4_096;
         let outcome = guarded_runtime_handoff_save(
-            &state,
+            &baseline,
+            &mut state,
             &expected,
             channel,
             "turn_bridge::runtime_handoff_loop::tmux_ready_pre_mutation_identity",
@@ -204,7 +216,7 @@ mod tests {
 
         let persisted =
             load_inflight_state(&ProviderKind::Codex, channel.get()).expect("persisted row");
-        assert_eq!(persisted.turn_start_offset, Some(4_096));
+        assert_eq!(persisted.turn_start_offset, baseline.turn_start_offset);
         assert_eq!(persisted.last_offset, 4_096);
     }
 
@@ -224,9 +236,10 @@ mod tests {
             temp.path(),
         );
         let channel = ChannelId::new(4_259_002);
-        let snapshot = tmux_ready_owner_state(channel.get(), 77_010);
+        let mut snapshot = tmux_ready_owner_state(channel.get(), 77_010);
+        let baseline = snapshot.clone();
         let expected =
-            crate::services::discord::inflight::InflightTurnIdentity::from_state(&snapshot);
+            crate::services::discord::inflight::InflightTurnIdentity::from_state(&baseline);
 
         // A concurrent turn (different `user_msg_id`) re-owned the channel; its
         // row is on disk when this turn's stale handoff snapshot tries to write.
@@ -235,7 +248,8 @@ mod tests {
         save_inflight_state(&concurrent).expect("seed re-owned row");
 
         let outcome = guarded_runtime_handoff_save(
-            &snapshot,
+            &baseline,
+            &mut snapshot,
             &expected,
             channel,
             "turn_bridge::runtime_handoff_loop::tmux_ready_watcher_handoff",

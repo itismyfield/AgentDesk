@@ -45,21 +45,30 @@ fn saved_tmux_ready_first_fill_recaptures_and_allows_next_stream_tick_flush() {
         let channel = ChannelId::new(4_836_001);
         let mut state = owner_state(channel.get(), 77_010, None);
         save_inflight_state(&state).expect("seed pre-handoff row");
-        let mut expected = InflightTurnIdentity::from_state(&state);
-        let mut persisted_baseline = state.clone();
+        let mut persisted_baseline =
+            load_inflight_state(&ProviderKind::Codex, channel.get()).expect("persisted baseline");
+        state.clone_from(&persisted_baseline);
+        let mut expected = InflightTurnIdentity::from_state(&persisted_baseline);
 
         state.full_response = "answer already buffered before handoff".to_string();
         state.tmux_session_name = Some("AgentDesk-codex-handoff-ready".to_string());
         state.last_offset = 1_024;
         let handoff_outcome = stamp_runtime_handoff_if_matches_identity(
-            &state,
+            (&persisted_baseline, &mut state),
             &expected,
             "turn_bridge::stream_loop::saved_handoff_test",
         );
         assert_eq!(handoff_outcome, GuardedSaveOutcome::Saved);
         let handoff_row =
             load_inflight_state(&ProviderKind::Codex, channel.get()).expect("handoff row");
-        assert!(handoff_row.full_response.is_empty());
+        assert_eq!(
+            handoff_row.full_response,
+            "answer already buffered before handoff"
+        );
+        assert_eq!(
+            serde_json::to_value(&state).expect("serialize adopted handoff row"),
+            serde_json::to_value(&handoff_row).expect("serialize durable handoff row"),
+        );
         assert_eq!(handoff_row.tmux_session_name, state.tmux_session_name);
         refresh_stream_tick_expected_identity_after_handoff(
             &mut expected,
@@ -67,10 +76,9 @@ fn saved_tmux_ready_first_fill_recaptures_and_allows_next_stream_tick_flush() {
             &state,
             Some(handoff_outcome),
         );
-        assert!(persisted_baseline.full_response.is_empty());
         assert_eq!(
-            persisted_baseline.tmux_session_name,
-            state.tmux_session_name
+            serde_json::to_value(&persisted_baseline).expect("serialize refreshed baseline"),
+            serde_json::to_value(&handoff_row).expect("serialize durable handoff row"),
         );
 
         let mut expected_current_message = (state.current_msg_id, state.current_msg_len);

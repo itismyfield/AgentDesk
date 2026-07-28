@@ -1,5 +1,11 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord::turn_bridge) enum StreamLoopOutcome {
+    Completed,
+    AuthorityLost,
+}
+
 /// A successful exit-candidate flush replaces `inflight_state` with the exact
 /// lock-held merge. Mirror every merged stream field back into the caller-owned
 /// loop state before terminal handling can observe the detached pre-await view.

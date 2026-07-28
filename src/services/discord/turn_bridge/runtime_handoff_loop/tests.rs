@@ -20,13 +20,21 @@ fn runtime_seed(provider: ProviderKind, channel_id: u64) -> InflightTurnState {
     )
 }
 
+struct HandoffObservation {
+    outcome: RuntimeHandoffLoopOutcome,
+    claim_outcome: WatcherHandoffClaimOutcome,
+    tmux_handed_off: bool,
+    watcher_relay_available: bool,
+    watcher_slots: usize,
+}
+
 async fn dispatch_process_handoff(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     state: &mut InflightTurnState,
     message: RuntimeHandoffLoopMessage,
     state_dirty: &mut bool,
-) -> RuntimeHandoffLoopOutcome {
+) -> HandoffObservation {
     let channel_id = ChannelId::new(state.channel_id);
     let mut terminal_control_ready_observed = false;
     let mut tmux_last_offset = None;
@@ -39,7 +47,7 @@ async fn dispatch_process_handoff(
     let mut terminal_control_drain_until = None;
     let mut last_activity_heartbeat_at = None;
 
-    handle_runtime_handoff_loop_message(
+    let outcome = handle_runtime_handoff_loop_message(
         message,
         RuntimeHandoffLoopContext {
             shared_owned: shared,
@@ -63,7 +71,14 @@ async fn dispatch_process_handoff(
             last_activity_heartbeat_at: &mut last_activity_heartbeat_at,
         },
     )
-    .await
+    .await;
+    HandoffObservation {
+        outcome,
+        claim_outcome: watcher_handoff_claim_outcome,
+        tmux_handed_off,
+        watcher_relay_available: watcher_relay_available_for_turn,
+        watcher_slots: shared.tmux_watchers.len(),
+    }
 }
 
 #[tokio::test]
@@ -97,7 +112,7 @@ async fn process_runtime_ready_first_population_is_saved() {
     )
     .await;
 
-    assert_eq!(outcome, Some(GuardedSaveOutcome::Saved));
+    assert_eq!(outcome.outcome, Some(GuardedSaveOutcome::Saved));
     assert!(
         state_dirty,
         "the existing dirty flag from watcher-owner normalization remains queued"
@@ -146,7 +161,7 @@ async fn process_ready_skips_reowned_row_and_does_not_queue_stale_flush() {
     )
     .await;
 
-    assert_eq!(outcome, Some(GuardedSaveOutcome::IdentityMismatch));
+    assert_eq!(outcome.outcome, Some(GuardedSaveOutcome::IdentityMismatch));
     assert!(
         !state_dirty,
         "a stale handoff must not queue a later whole-row flush"
@@ -157,4 +172,66 @@ async fn process_ready_skips_reowned_row_and_does_not_queue_stale_flush() {
         persisted.output_path.as_deref(),
         Some("/runtime/newer-turn.jsonl")
     );
+}
+
+async fn assert_reowned_watcher_handoff_has_no_side_effects(
+    message: RuntimeHandoffLoopMessage,
+    channel_id: u64,
+) {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let root = tempfile::tempdir().expect("runtime root");
+    let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        root.path(),
+    );
+    let provider = ProviderKind::Codex;
+    let mut stale = runtime_seed(provider.clone(), channel_id);
+    let mut successor = stale.clone();
+    successor.user_msg_id = 99_999;
+    successor.output_path = Some("/runtime/successor.jsonl".to_string());
+    save_inflight_state(&successor).expect("seed successor row");
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let mut state_dirty = false;
+
+    let observed =
+        dispatch_process_handoff(&shared, &provider, &mut stale, message, &mut state_dirty).await;
+
+    assert_eq!(observed.outcome, Some(GuardedSaveOutcome::IdentityMismatch));
+    assert_eq!(observed.claim_outcome, WatcherHandoffClaimOutcome::None);
+    assert!(!observed.tmux_handed_off);
+    assert!(!observed.watcher_relay_available);
+    assert_eq!(observed.watcher_slots, 0);
+    assert!(!state_dirty);
+}
+
+#[tokio::test]
+async fn legacy_tmux_ready_reowned_row_never_claims_or_starts_watcher() {
+    assert_reowned_watcher_handoff_has_no_side_effects(
+        RuntimeHandoffLoopMessage::TmuxReady {
+            output_path: "/runtime/stale-legacy.jsonl".to_string(),
+            input_fifo_path: "/runtime/stale-legacy.input".to_string(),
+            tmux_session_name: "AgentDesk-codex-stale-legacy".to_string(),
+            last_offset: 4_096,
+        },
+        42_592_603,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn runtime_ready_reowned_row_never_claims_or_starts_watcher() {
+    assert_reowned_watcher_handoff_has_no_side_effects(
+        RuntimeHandoffLoopMessage::RuntimeReady {
+            handoff: RuntimeHandoff::CodexTui {
+                rollout_path: "/runtime/stale-codex.jsonl".to_string(),
+                thread_id: None,
+                tmux_session_name: "AgentDesk-codex-stale-runtime".to_string(),
+                last_offset: 8_192,
+            },
+        },
+        42_592_604,
+    )
+    .await;
 }

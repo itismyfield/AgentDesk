@@ -458,9 +458,14 @@ mod tests {
             .map(|offset| spawn + offset)
             .expect("production caller establishes authority");
         let guards = caller[authority..]
-            .find("make_bridge_guards(&mut bridge")
+            .find("let (mut completion_guard, mut inflight_guard) = make_bridge_guards(")
             .map(|offset| authority + offset)
             .expect("production caller constructs guards");
+        let guard_call = &caller[guards
+            ..caller[guards..]
+                .find(");")
+                .map(|offset| guards + offset + 2)
+                .expect("guard call remains bounded")];
         let notice_decision = caller[guards..]
             .find("resumed_long_running_placeholder_notice_message_id(")
             .map(|offset| guards + offset)
@@ -517,12 +522,51 @@ mod tests {
             "failed persistence must signal only the waiter and abort"
         );
         assert!(
-            !caller[spawn..authority].contains("make_bridge_guards(&mut bridge"),
+            !caller[spawn..authority].contains("make_bridge_guards("),
             "pre-authority path must not register a finalizer or broadcast guard"
         );
         assert!(
             !caller[spawn..authority].contains("send_message"),
             "pre-authority path must not create a Discord placeholder"
+        );
+        assert!(
+            guard_call.contains("&inflight_state"),
+            "finalizer and cleanup guards must use the exact post-authority merge"
+        );
+    }
+
+    #[test]
+    fn stream_authority_loss_relinquishes_guards_before_visible_finalization() {
+        let caller = include_str!("mod.rs");
+        let outcome_match = caller
+            .find("match stream_loop_output.outcome")
+            .expect("stream-loop outcome remains handled");
+        let authority_lost = caller[outcome_match..]
+            .find("StreamLoopOutcome::AuthorityLost")
+            .map(|offset| outcome_match + offset)
+            .expect("authority loss remains explicit");
+        let relinquish = caller[authority_lost..]
+            .find("completion_guard.relinquish_bridge_authority()")
+            .map(|offset| authority_lost + offset)
+            .expect("authority loss suppresses the stale completion broadcast");
+        let defuse = caller[relinquish..]
+            .find("inflight_guard.defuse()")
+            .map(|offset| relinquish + offset)
+            .expect("authority loss suppresses stale durable cleanup");
+        let early_return = caller[defuse..]
+            .find("return;")
+            .map(|offset| defuse + offset)
+            .expect("authority loss exits the bridge immediately");
+        let finalize = caller[outcome_match..]
+            .find("post_loop_finalize::run_post_loop_finalize")
+            .map(|offset| outcome_match + offset)
+            .expect("normal bridge still has visible finalization");
+
+        assert!(
+            authority_lost < relinquish
+                && relinquish < defuse
+                && defuse < early_return
+                && early_return < finalize
         );
     }
 

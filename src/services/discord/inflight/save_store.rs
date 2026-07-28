@@ -33,6 +33,7 @@ pub(in crate::services::discord) use self::identity_gate::{
     recovery_anchor_message_if_matches_identity, recovery_anchor_msg_id_if_matches_identity,
     save_inflight_state_if_identity_matches_allow_output_restamp,
     save_inflight_state_if_identity_unchanged, save_inflight_state_if_matches_identity,
+    save_stream_tick_state_if_bridge_authority,
     save_stream_tick_state_preserving_current_message_races,
     stamp_claude_e_process_if_matches_identity, stamp_runtime_handoff_if_matches_identity,
     touch_inflight_state_if_matches_identity,
@@ -470,6 +471,11 @@ mod tests {
         assert_eq!(state.user_msg_id, 0);
         assert_eq!(state.turn_start_offset, Some(256));
         save_inflight_state_in_root(temp.path(), &state).expect("seed matching id-0 row");
+        let persisted_path = inflight_state_path(temp.path(), &provider, state.channel_id);
+        state = serde_json::from_str(
+            &std::fs::read_to_string(&persisted_path).expect("reload exact seeded id-0 row"),
+        )
+        .expect("parse exact seeded id-0 row");
 
         state.full_response = "id-0 durable owner refresh".to_string();
         state.response_sent_offset = state.full_response.len();
@@ -482,7 +488,6 @@ mod tests {
             GuardedSaveOutcome::Saved
         );
 
-        let persisted_path = inflight_state_path(temp.path(), &provider, state.channel_id);
         let persisted: InflightTurnState = serde_json::from_str(
             &std::fs::read_to_string(persisted_path).expect("read persisted inflight"),
         )
@@ -504,6 +509,11 @@ mod tests {
         let provider = ProviderKind::Codex;
         let mut state = state_with_full_response(44_090, "seeded", "AgentDesk-codex-restamp-4259");
         save_inflight_state_in_root(temp.path(), &state).expect("seed intake-path row");
+        let persisted_path = inflight_state_path(temp.path(), &provider, state.channel_id);
+        state = serde_json::from_str(
+            &std::fs::read_to_string(&persisted_path).expect("reload exact seeded row"),
+        )
+        .expect("parse exact seeded row");
 
         let expected = InflightTurnIdentity::from_state(&state);
         let seeded_output_path = state.output_path.clone();
@@ -532,7 +542,6 @@ mod tests {
             GuardedSaveOutcome::Saved
         );
 
-        let persisted_path = inflight_state_path(temp.path(), &provider, state.channel_id);
         let persisted: InflightTurnState = serde_json::from_str(
             &std::fs::read_to_string(persisted_path).expect("read persisted inflight"),
         )

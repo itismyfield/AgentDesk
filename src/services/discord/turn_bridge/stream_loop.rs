@@ -12,7 +12,7 @@ use super::stream_tick::guarded_persist::settle_pending_current_message_candidat
 use super::stream_tick::{
     BridgeStreamTickContext, BridgeStreamTickState, LongRunningPlaceholderActive,
     PendingLongRunningOpenAfterStateSave, PendingLongRunningRetargetAfterStateSave,
-    run_bridge_stream_tick,
+    StreamTickOutcome, run_bridge_stream_tick,
 };
 use super::{streaming_edit_text::TuiErrorClassification, *};
 use content_arms::{
@@ -32,6 +32,7 @@ mod expected_identity;
 mod expected_identity_tests;
 mod message_conversion;
 mod tool_arms;
+pub(super) use exit_reconcile::StreamLoopOutcome;
 use exit_reconcile::reconcile_saved_exit_candidate;
 use expected_identity::refresh_stream_tick_expected_identity_after_handoff;
 
@@ -122,11 +123,6 @@ pub(super) struct StreamLoopState<'a> {
     pub(super) last_status_panel_edit: &'a mut tokio::time::Instant,
     pub(super) bridge_spans: &'a mut BridgeLatencySpans,
     pub(super) status_panel_generation: &'a mut u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum StreamLoopOutcome {
-    Completed,
 }
 
 pub(super) struct StreamLoopOutput {
@@ -276,6 +272,7 @@ pub(super) async fn run_stream_loop(
     let mut pending_long_running_open_after_state_save = None;
     let mut pending_long_running_retarget_after_state_save = None;
     let mut state_dirty = false;
+    let mut loop_outcome = StreamLoopOutcome::Completed;
 
     'outer: while !done
         || terminal_control_drain_until.is_some_and(|deadline| std::time::Instant::now() < deadline)
@@ -812,7 +809,7 @@ pub(super) async fn run_stream_loop(
             }
         }
 
-        run_bridge_stream_tick(
+        let tick_outcome = run_bridge_stream_tick(
             BridgeStreamTickContext {
                 shared_owned: shared_owned.clone(),
                 gateway: gateway.clone(),
@@ -879,6 +876,10 @@ pub(super) async fn run_stream_loop(
             },
         )
         .await;
+        if tick_outcome == StreamTickOutcome::AuthorityLost {
+            loop_outcome = StreamLoopOutcome::AuthorityLost;
+            break 'outer;
+        }
     }
     // #3813 AC#1 tail: emit bridge-side latency spans once at loop exit
     // (observation-only; self-suppresses when no bridge relay happened).
@@ -970,7 +971,7 @@ pub(super) async fn run_stream_loop(
     }
 
     StreamLoopOutput {
-        outcome: StreamLoopOutcome::Completed,
+        outcome: loop_outcome,
         tui_error_classification,
         pending_long_running_open_after_state_save,
         pending_long_running_retarget_after_state_save,

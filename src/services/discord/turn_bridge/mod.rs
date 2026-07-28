@@ -527,8 +527,12 @@ pub(super) fn spawn_turn_bridge(
 
         // Register finalizer/broadcast/cleanup side effects only after both the
         // bridge-entry store gate and any absent-anchor bind proved authority.
-        let (completion_guard, mut inflight_guard) =
-            make_bridge_guards(&mut bridge, &shared_owned, &provider);
+        let (mut completion_guard, mut inflight_guard) = make_bridge_guards(
+            &mut bridge,
+            &inflight_state,
+            &shared_owned,
+            &provider,
+        );
 
         let resumed_long_running_placeholder_notice_msg_id =
             bridge_entry_persist::resumed_long_running_placeholder_notice_message_id(
@@ -717,6 +721,15 @@ pub(super) fn spawn_turn_bridge(
         .await;
         match stream_loop_output.outcome {
             stream_loop::StreamLoopOutcome::Completed => {}
+            stream_loop::StreamLoopOutcome::AuthorityLost => {
+                // The same-turn watcher/successor now owns both visible relay
+                // and durable cleanup. Wake only this bridge's waiter: a
+                // Completed broadcast or abandon-on-drop would kill/clear the
+                // relay that just became authoritative.
+                completion_guard.relinquish_bridge_authority();
+                inflight_guard.defuse();
+                return;
+            }
         }
         let pending_long_running_open_after_state_save =
             stream_loop_output.pending_long_running_open_after_state_save;
