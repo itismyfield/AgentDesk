@@ -11,6 +11,7 @@ mod claim_bootstrap;
 pub(crate) mod inflight_create_log;
 mod placeholder_handoff;
 pub(super) mod race_loss;
+mod runtime_transition;
 mod stale_dispatch_guard;
 mod steering_hook;
 mod turn_watchdog;
@@ -831,47 +832,31 @@ pub(super) async fn handle_text_message(
         dispatch_type_str = Some(active_dispatch_type);
     }
 
-    // Redirect resolution is complete. Never wait outside durable storage for a
-    // concurrent `/resume`: if the channel transition is already held, enqueue
-    // immediately and let the normal queued consumer retry after the transition.
-    // This removes the process-crash loss window that existed while intake waited
-    // up to three seconds with the event only on this task's stack.
-    let intake_runtime_transition = match try_intake_runtime_transition_after_redirect(
+    let Some(intake_runtime_transition) = runtime_transition::acquire_after_redirect_or_requeue(
+        http,
         shared,
+        token,
+        &provider,
         channel_id,
+        original_channel_id,
+        turn_kind,
+        original_request_owner,
+        user_msg_id,
+        user_text,
+        &reply_context,
+        has_reply_boundary,
+        merge_consecutive,
+        &pending_uploads,
+        &voice_announcement,
+        reply_to_user_message,
+        &dispatch_id_for_thread,
+        turn_start_attempt,
+        preserve_on_cancel,
         (session_id, memento_context_loaded, current_path),
     )
-    .await
-    {
-        Ok(transition) => transition,
-        Err(_) => {
-            tracing::warn!(
-                channel_id = channel_id.get(),
-                "session transition is busy; preserving intake immediately as a durable queued intervention"
-            );
-            return race_loss::handle_race_loss_enqueue(
-                http,
-                shared,
-                token,
-                &provider,
-                channel_id,
-                original_channel_id,
-                turn_kind,
-                original_request_owner,
-                user_msg_id,
-                user_text,
-                &reply_context,
-                has_reply_boundary,
-                merge_consecutive,
-                &pending_uploads,
-                &voice_announcement,
-                reply_to_user_message,
-                &dispatch_id_for_thread,
-                turn_start_attempt,
-                preserve_on_cancel,
-            )
-            .await;
-        }
+    .await?
+    else {
+        return Ok(());
     };
     let (mut session_id, mut memento_context_loaded, current_path) =
         intake_runtime_transition.state.clone();
