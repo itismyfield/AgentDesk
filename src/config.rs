@@ -2402,9 +2402,11 @@ pub struct RoutinesConfig {
     #[serde(default = "default_routines_dir")]
     pub dir: PathBuf,
     /// Additional operator-managed QuickJS routine entry roots. Node/Python
-    /// helpers must live outside these roots. Entries load after `dir`, so a
-    /// script with the same relative path overrides the bundled script without
-    /// being copied into the release directory.
+    /// helpers must live outside these roots. All configured roots must be
+    /// canonically disjoint from each other and from the sibling
+    /// `routine-helpers` surface. Entries load after `dir`, so a script with the
+    /// same relative path overrides the bundled script without being copied
+    /// into the release directory.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_dirs: Vec<PathBuf>,
     /// How often the due-scan tick runs, in seconds. Defaults to 30.

@@ -12,7 +12,7 @@ use crate::engine::loader::compute_policy_version;
 mod discovery;
 use discovery::{
     add_cached_candidates_for_root, candidate_failure_key, collect_routine_script_paths,
-    routine_roots_identity, script_ref,
+    routine_roots_identity, script_ref, validate_routine_roots,
 };
 
 fn full_source_version(source: &str) -> String {
@@ -246,6 +246,7 @@ impl RoutineScriptLoader {
             .load_gate
             .lock()
             .unwrap_or_else(recover_poisoned_lock);
+        validate_routine_roots(roots)?;
         let mut seen_refs = HashSet::new();
         let mut candidates_by_ref: BTreeMap<String, Vec<RoutineScriptCandidate>> = BTreeMap::new();
         let existing_scripts: HashMap<String, LoadedRoutineScript> = self
@@ -921,7 +922,7 @@ fn ensure_acyclic_js_value<'js>(
 
 #[cfg(test)]
 mod tests {
-    use super::discovery::stable_absolute_path;
+    use super::discovery::{RoutineRootValidationError, stable_absolute_path};
     use super::*;
     use std::io::{self, Write};
     use std::sync::Barrier;
@@ -974,6 +975,71 @@ mod tests {
             .join("tests")
             .join("fixtures")
             .join("routines")
+    }
+
+    fn isolated_release_surfaces() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let release = tempfile::tempdir().unwrap();
+        let routines = release.path().join("routines");
+        let helpers = release.path().join("routine-helpers");
+        std::fs::create_dir_all(&routines).unwrap();
+        std::fs::create_dir_all(&helpers).unwrap();
+        std::fs::write(
+            routines.join("tracked.js"),
+            "agentdesk.routines.register({ name: 'Tracked', tick() { return { action: 'skip' }; } });",
+        )
+        .unwrap();
+        std::fs::write(helpers.join("helper.js"), "module.exports = {};").unwrap();
+        (release, routines, helpers)
+    }
+
+    const PREFLIGHT_EVALUATION_SENTINEL: usize = 7;
+
+    fn preflight_observed_loader(
+    ) -> (RoutineScriptLoader, Arc<std::sync::atomic::AtomicUsize>, PathBuf) {
+        let loader = RoutineScriptLoader::new().unwrap();
+        loader.state.evaluation_attempts.store(
+            PREFLIGHT_EVALUATION_SENTINEL,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let failure_sentinel = PathBuf::from("preflight-existing-failure.js");
+        loader.state.failed_scripts.lock().unwrap().insert(
+            failure_sentinel.clone(),
+            RoutineScriptFailure {
+                source_version: Some("preflight-sentinel".to_string()),
+                consecutive_failures: 1,
+                retry_at: Instant::now(),
+                warning_emitted: true,
+            },
+        );
+        let source_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_source_reads = Arc::clone(&source_reads);
+        *loader.source_reader.lock().unwrap() = Some(Arc::new(move |path| {
+            observed_source_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            std::fs::read_to_string(path)
+        }));
+        (loader, source_reads, failure_sentinel)
+    }
+
+    fn assert_preflight_rejection_has_no_load_side_effects(
+        loader: &RoutineScriptLoader,
+        source_reads: &std::sync::atomic::AtomicUsize,
+        failure_sentinel: &Path,
+    ) {
+        assert_eq!(
+            loader
+                .state
+                .evaluation_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            PREFLIGHT_EVALUATION_SENTINEL
+        );
+        assert_eq!(
+            source_reads.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        let failed_scripts = loader.state.failed_scripts.lock().unwrap();
+        assert_eq!(failed_scripts.len(), 1);
+        assert!(failed_scripts.contains_key(failure_sentinel));
+        assert!(loader.script_refs().unwrap().is_empty());
     }
 
     #[test]
@@ -1137,7 +1203,7 @@ mod tests {
 
         let nested_routine = nested.join("inventory.js");
         let root_routine = routines.join("tracked.js");
-        let node_helper = helpers.join("local_worktree_inventory.js");
+        let node_helper = helpers.join("inventory.js");
         std::fs::write(
             &node_helper,
             "throw new Error('sibling Node helper must never be evaluated by QuickJS');",
@@ -1191,6 +1257,132 @@ mod tests {
     }
 
     #[test]
+    fn preflight_rejects_sibling_helper_as_additional_root_without_side_effects() {
+        let (_release, routines, helpers) = isolated_release_surfaces();
+
+        let (loader, source_reads, failure_sentinel) = preflight_observed_loader();
+        let error = loader.load_dirs(&[routines, helpers]).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<RoutineRootValidationError>(),
+            Some(RoutineRootValidationError::HelperSurfaceOverlap { root_index: 1, .. })
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("overlaps reserved sibling helper surface")
+        );
+        assert_preflight_rejection_has_no_load_side_effects(
+            &loader,
+            source_reads.as_ref(),
+            &failure_sentinel,
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_release_parent_as_additional_root_without_side_effects() {
+        let (release, routines, _helpers) = isolated_release_surfaces();
+
+        let (loader, source_reads, failure_sentinel) = preflight_observed_loader();
+        let error = loader
+            .load_dirs(&[routines, release.path().to_path_buf()])
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<RoutineRootValidationError>(),
+            Some(RoutineRootValidationError::HelperSurfaceOverlap { root_index: 1, .. })
+        ));
+        assert_preflight_rejection_has_no_load_side_effects(
+            &loader,
+            source_reads.as_ref(),
+            &failure_sentinel,
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_root_below_sibling_helper_without_side_effects() {
+        let (_release, routines, helpers) = isolated_release_surfaces();
+        let nested_helper_root = helpers.join("nested");
+        std::fs::create_dir_all(&nested_helper_root).unwrap();
+
+        let (loader, source_reads, failure_sentinel) = preflight_observed_loader();
+        let error = loader
+            .load_dirs(&[routines, nested_helper_root])
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<RoutineRootValidationError>(),
+            Some(RoutineRootValidationError::HelperSurfaceOverlap { root_index: 1, .. })
+        ));
+        assert_preflight_rejection_has_no_load_side_effects(
+            &loader,
+            source_reads.as_ref(),
+            &failure_sentinel,
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_primary_and_child_roots_without_side_effects() {
+        let release = tempfile::tempdir().unwrap();
+        let routines = release.path().join("routines");
+        let nested = routines.join("monitoring");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join("tracked.js"),
+            "agentdesk.routines.register({ name: 'Tracked', tick() { return { action: 'skip' }; } });",
+        )
+        .unwrap();
+
+        let (loader, source_reads, failure_sentinel) = preflight_observed_loader();
+        let error = loader.load_dirs(&[routines, nested]).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<RoutineRootValidationError>(),
+            Some(RoutineRootValidationError::CanonicalRootOverlap {
+                first_index: 0,
+                second_index: 1,
+                ..
+            })
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("overlap after canonicalization")
+        );
+        assert_preflight_rejection_has_no_load_side_effects(
+            &loader,
+            source_reads.as_ref(),
+            &failure_sentinel,
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_same_canonical_root_without_side_effects() {
+        let release = tempfile::tempdir().unwrap();
+        let routines = release.path().join("routines");
+        let nested = routines.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let lexical_alias = nested.join("..");
+
+        let (loader, source_reads, failure_sentinel) = preflight_observed_loader();
+        let error = loader.load_dirs(&[routines, lexical_alias]).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<RoutineRootValidationError>(),
+            Some(RoutineRootValidationError::DuplicateCanonicalRoot {
+                first_index: 0,
+                second_index: 1,
+                ..
+            })
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("same canonical directory")
+        );
+        assert_preflight_rejection_has_no_load_side_effects(
+            &loader,
+            source_reads.as_ref(),
+            &failure_sentinel,
+        );
+    }
+
+    #[test]
     fn load_dir_hashes_and_evaluates_the_same_source_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("atomic-source.js");
@@ -1224,7 +1416,7 @@ mod tests {
     }
 
     #[test]
-    fn operator_root_can_override_a_bundled_nested_routine() {
+    fn valid_disjoint_operator_root_loads_and_overrides_nested_routine() {
         let bundled = tempfile::tempdir().unwrap();
         let operator = tempfile::tempdir().unwrap();
         let bundled_monitoring = bundled.path().join("monitoring");
@@ -1419,27 +1611,25 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn real_and_symlink_alias_candidate_records_one_failure() {
+    fn preflight_rejects_symlink_alias_to_sibling_helper_without_side_effects() {
         use std::os::unix::fs::symlink;
 
-        let root = tempfile::tempdir().unwrap();
+        let (_release, routines, helpers) = isolated_release_surfaces();
         let alias_parent = tempfile::tempdir().unwrap();
-        let path = root.path().join("broken.js");
-        std::fs::write(&path, "throw new Error('alias failure');").unwrap();
-        let alias = alias_parent.path().join("root-alias");
-        symlink(root.path(), &alias).unwrap();
-        let roots = vec![root.path().to_path_buf(), alias];
+        let helper_alias = alias_parent.path().join("helper-alias");
+        symlink(&helpers, &helper_alias).unwrap();
 
-        let loader = RoutineScriptLoader::new().unwrap();
-        assert_eq!(loader.load_dirs(&roots).unwrap(), 0);
-        assert_eq!(
-            loader
-                .state
-                .evaluation_attempts
-                .load(std::sync::atomic::Ordering::Relaxed),
-            1
+        let (loader, source_reads, failure_sentinel) = preflight_observed_loader();
+        let error = loader.load_dirs(&[routines, helper_alias]).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<RoutineRootValidationError>(),
+            Some(RoutineRootValidationError::HelperSurfaceOverlap { root_index: 1, .. })
+        ));
+        assert_preflight_rejection_has_no_load_side_effects(
+            &loader,
+            source_reads.as_ref(),
+            &failure_sentinel,
         );
-        assert_eq!(loader.state.failed_scripts.lock().unwrap().len(), 1);
     }
 
     #[test]
