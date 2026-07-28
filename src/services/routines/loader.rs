@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use rquickjs::{Context, Function, Runtime};
 use serde::Serialize;
 use serde_json::{Map, Number, Value};

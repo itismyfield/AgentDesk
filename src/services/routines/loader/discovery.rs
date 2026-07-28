@@ -1,4 +1,4 @@
-use super::{full_source_version, LoadedRoutineScript, RoutineScriptCandidate};
+use super::{LoadedRoutineScript, RoutineScriptCandidate, full_source_version};
 use anyhow::Result;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};

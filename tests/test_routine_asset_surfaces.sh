@@ -7,6 +7,27 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=../scripts/routine-asset-surface.sh
 . "$REPO_ROOT/scripts/routine-asset-surface.sh"
 
+# The checked-in loader root itself is part of the contract: every tracked JS
+# file under routines/ must be a QuickJS registration entrypoint, and each
+# migrated helper must exist only on the sibling helper surface. This catches a
+# future helper accidentally being moved back under the recursive loader root.
+for helper_ref in "${ADK_LEGACY_ROUTINE_HELPER_REFS[@]}"; do
+    if [ -e "$REPO_ROOT/routines/$helper_ref" ]; then
+        echo "FAIL: legacy helper returned to QuickJS loader root: $helper_ref" >&2
+        exit 1
+    fi
+    if [ ! -f "$REPO_ROOT/routine-helpers/$helper_ref" ]; then
+        echo "FAIL: migrated helper missing from sibling surface: $helper_ref" >&2
+        exit 1
+    fi
+done
+while IFS= read -r routine_ref; do
+    if ! grep -Fq 'agentdesk.routines.register' "$REPO_ROOT/$routine_ref"; then
+        echo "FAIL: tracked routines/ JS is not a QuickJS entrypoint: $routine_ref" >&2
+        exit 1
+    fi
+done < <(git -C "$REPO_ROOT" ls-files 'routines/*.js' 'routines/**/*.js')
+
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-routine-assets.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
