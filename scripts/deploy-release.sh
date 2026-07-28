@@ -139,6 +139,8 @@ DASHBOARD_SOURCE=""
 STAGED_BINARY=""
 POLICIES_STAGED=""
 ROUTINE_ASSET_TXN=""
+REL_ROLLBACK_MATERIAL_MODE=""
+LEGACY_ROUTINE_HELPERS_SENTINEL_NAME=".agentdesk-legacy-empty-v1"
 ROUTINE_ASSET_INCOMING="${AGENTDESK_ROUTINE_ASSET_INCOMING:-}"
 ROUTINE_ASSET_INCOMING_CLAIMED=0
 LAUNCHD_MIGRATED_STAGED=""
@@ -901,6 +903,139 @@ print(value.lower())
 PY
 }
 
+_manifest_routine_helpers_binding_state() {
+    # A missing field identifies releases created before routine helpers became
+    # a generation-bound surface. Once the field exists, an absent live helper
+    # tree is corruption and must never be normalized as a legacy release.
+    local manifest="$ADK_REL/runtime/release-source.json"
+    [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
+    python3 - "$manifest" <<'PY' 2>/dev/null
+import json
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception:
+    raise SystemExit(2)
+if "routine_helpers_sha256" not in data:
+    print("legacy-unbound")
+    raise SystemExit(0)
+value = data.get("routine_helpers_sha256")
+if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]+", value):
+    raise SystemExit(2)
+print("bound")
+PY
+}
+
+_release_migration_name_is_valid() {
+    python3 - "$1" <<'PY' >/dev/null 2>&1
+import re
+import sys
+
+raise SystemExit(
+    0 if re.fullmatch(r"[0-9]{4}_[A-Za-z0-9._-]+\.sql", sys.argv[1]) else 1
+)
+PY
+}
+
+_validate_legacy_routine_helpers_sentinel() {
+    local helper_root="$1"
+    local source_git_sha="$2"
+    local latest_migration="$3"
+    local sentinel="$helper_root/$LEGACY_ROUTINE_HELPERS_SENTINEL_NAME"
+
+    [ -d "$helper_root" ] && [ ! -L "$helper_root" ] \
+        && [ -f "$sentinel" ] && [ ! -L "$sentinel" ] \
+        || return 1
+    _adk_assert_no_symlink_tree "$helper_root" || return 1
+    if find "$helper_root" -mindepth 1 -maxdepth 1 \
+        ! -name "$LEGACY_ROUTINE_HELPERS_SENTINEL_NAME" -print -quit \
+        | grep -q .; then
+        return 1
+    fi
+    python3 - "$sentinel" "$source_git_sha" "$latest_migration" <<'PY' \
+        >/dev/null 2>&1
+import sys
+
+path, source_git_sha, latest_migration = sys.argv[1:]
+expected = (
+    "format=agentdesk-legacy-empty-routine-helpers-v1\n"
+    f"source_git_sha={source_git_sha}\n"
+    f"latest_postgres_migration={latest_migration}\n"
+)
+with open(path, encoding="utf-8") as handle:
+    actual = handle.read()
+raise SystemExit(0 if actual == expected else 1)
+PY
+}
+
+_normalize_legacy_release_routine_helpers() {
+    local helper_root="$ADK_REL/routine-helpers"
+    local source_git_sha="$1"
+    local latest_migration="$2"
+    local binding_state="$3"
+    local sentinel="$helper_root/$LEGACY_ROUTINE_HELPERS_SENTINEL_NAME"
+    local staged_legacy_root root_mode
+
+    if [ -d "$helper_root" ] && [ ! -L "$helper_root" ]; then
+        if [ -e "$sentinel" ] || [ -L "$sentinel" ]; then
+            [ "$binding_state" = legacy-unbound ] \
+                && _validate_legacy_routine_helpers_sentinel \
+                    "$helper_root" "$source_git_sha" "$latest_migration" \
+                || {
+                    echo "✗ Legacy routine-helper sentinel does not match release-source.json" >&2
+                    return 1
+                }
+        else
+            _adk_assert_no_symlink_tree "$helper_root" || return 1
+        fi
+        return 0
+    fi
+    if [ -e "$helper_root" ] || [ -L "$helper_root" ]; then
+        echo "✗ Refusing unsafe live routine-helper surface: $helper_root" >&2
+        return 1
+    fi
+    if [ "$binding_state" != legacy-unbound ]; then
+        echo "✗ release-source.json binds routine helpers, but the live surface is missing" >&2
+        return 1
+    fi
+    [ -n "${ROUTINE_ASSET_TXN:-}" ] && [ -d "$ROUTINE_ASSET_TXN" ] \
+        && [ ! -L "$ROUTINE_ASSET_TXN" ] || return 1
+    staged_legacy_root="$ROUTINE_ASSET_TXN/legacy-empty-routine-helpers"
+    [ ! -e "$staged_legacy_root" ] || return 1
+    root_mode="$(_adk_path_mode "$ADK_REL/routines")" || return 1
+    mkdir "$staged_legacy_root" || return 1
+    if ! printf '%s\n' \
+        'format=agentdesk-legacy-empty-routine-helpers-v1' \
+        "source_git_sha=$source_git_sha" \
+        "latest_postgres_migration=$latest_migration" \
+        > "$staged_legacy_root/$LEGACY_ROUTINE_HELPERS_SENTINEL_NAME" \
+      || ! chmod "$root_mode" "$staged_legacy_root" \
+      || ! chmod 600 "$staged_legacy_root/$LEGACY_ROUTINE_HELPERS_SENTINEL_NAME" \
+      || ! mv "$staged_legacy_root" "$helper_root"; then
+        rm -rf "$staged_legacy_root" 2>/dev/null || true
+        return 1
+    fi
+    _validate_legacy_routine_helpers_sentinel \
+        "$helper_root" "$source_git_sha" "$latest_migration" || return 1
+    echo "▸ Normalized legacy release with explicit empty routine-helper sentinel"
+}
+
+_strip_legacy_helper_sentinel_from_staged_generation() {
+    local staged_root="$1"
+    local sentinel="$staged_root/$LEGACY_ROUTINE_HELPERS_SENTINEL_NAME"
+
+    [ -d "$staged_root" ] && [ ! -L "$staged_root" ] || return 1
+    if [ -L "$sentinel" ] || { [ -e "$sentinel" ] && [ ! -f "$sentinel" ]; }; then
+        echo "✗ Refusing unsafe reserved helper sentinel in staged generation" >&2
+        return 1
+    fi
+    rm -f "$sentinel" || return 1
+    adk_validate_routine_helper_surface "$staged_root"
+}
+
 _write_rollback_backup_metadata() {
     local backup_binary="$1"
     local metadata_path="$2"
@@ -1030,6 +1165,122 @@ if not re.fullmatch(r"[0-9]{4}_[A-Za-z0-9._-]+\.sql", migration):
     sys.exit(1)
 print(migration)
 PY
+}
+
+_prepare_release_rollback_generation() {
+    # Decide every rollback-artifact branch while the old service is still
+    # running. In particular, a pre-helper release gets one explicit empty
+    # sentinel surface so backup metadata can bind and later restore that exact
+    # legacy generation instead of failing only after launchd has been stopped.
+    local source_git_sha latest_migration binding_state routines_sha helpers_sha
+    local rollback_path preflight_binary preflight_metadata
+
+    REL_ROLLBACK_MATERIAL_MODE=""
+    [ -n "${REL_BINARY:-}" ] \
+        && [ -n "${REL_BINARY_BACKUP:-}" ] \
+        && [ -n "${REL_BINARY_BACKUP_META:-}" ] || return 1
+
+    for rollback_path in \
+        "$REL_BINARY_BACKUP" \
+        "$REL_BINARY_BACKUP_META" \
+        "$REL_BINARY_BACKUP.tmp" \
+        "$REL_BINARY_BACKUP_META.tmp"; do
+        if [ -L "$rollback_path" ]; then
+            echo "✗ Refusing symlinked rollback artifact before release stop: $rollback_path" >&2
+            return 1
+        fi
+        if [ -e "$rollback_path" ] && [ ! -f "$rollback_path" ]; then
+            echo "✗ Refusing non-regular rollback artifact before release stop: $rollback_path" >&2
+            return 1
+        fi
+    done
+    if [ -L "$REL_BINARY" ] \
+      || { [ -e "$REL_BINARY" ] && [ ! -f "$REL_BINARY" ]; }; then
+        echo "✗ Refusing unsafe live release binary before release stop: $REL_BINARY" >&2
+        return 1
+    fi
+    if [ -f "$REL_BINARY_BACKUP" ] && [ ! -f "$REL_BINARY_BACKUP_META" ]; then
+        echo "✗ Existing rollback binary has no generation metadata" >&2
+        return 1
+    fi
+
+    # Atomic-copy leftovers and metadata without its binary are never rollback
+    # authority. Normalize them while the old release is still healthy.
+    chflags nouchg "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP_META.tmp" \
+        "$REL_BINARY_BACKUP_META" 2>/dev/null || true
+    rm -f "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP_META.tmp" || return 1
+    if [ ! -f "$REL_BINARY_BACKUP" ] && [ -f "$REL_BINARY_BACKUP_META" ]; then
+        rm -f "$REL_BINARY_BACKUP_META" || return 1
+    fi
+
+    if [ -f "$REL_BINARY_BACKUP" ]; then
+        REL_ROLLBACK_MATERIAL_MODE="preserve"
+    elif [ -f "$REL_BINARY" ]; then
+        REL_ROLLBACK_MATERIAL_MODE="capture"
+    else
+        REL_ROLLBACK_MATERIAL_MODE="none"
+        return 0
+    fi
+
+    source_git_sha="$(_manifest_source_git_sha 2>/dev/null || true)"
+    latest_migration="$(_manifest_latest_migration_name 2>/dev/null || true)"
+    if [ -z "$source_git_sha" ] \
+      || [ -z "$latest_migration" ] \
+      || ! _release_migration_name_is_valid "$latest_migration"; then
+        echo "✗ Current release-source.json cannot bind rollback metadata" >&2
+        REL_ROLLBACK_MATERIAL_MODE=""
+        return 1
+    fi
+    if ! binding_state="$(_manifest_routine_helpers_binding_state)"; then
+        echo "✗ Current release-source.json has an invalid routine-helper binding" >&2
+        REL_ROLLBACK_MATERIAL_MODE=""
+        return 1
+    fi
+    if [ ! -d "$ADK_REL/routines" ] || [ -L "$ADK_REL/routines" ]; then
+        echo "✗ Current release has no safe routine surface to bind for rollback" >&2
+        REL_ROLLBACK_MATERIAL_MODE=""
+        return 1
+    fi
+    _adk_assert_no_symlink_tree "$ADK_REL/routines" || return 1
+    if ! _normalize_legacy_release_routine_helpers \
+        "$source_git_sha" "$latest_migration" "$binding_state"; then
+        REL_ROLLBACK_MATERIAL_MODE=""
+        return 1
+    fi
+    routines_sha="$(_sha256_tree "$ADK_REL/routines")" || return 1
+    helpers_sha="$(_sha256_tree "$ADK_REL/routine-helpers")" || return 1
+    if [ -z "$routines_sha" ] || [ -z "$helpers_sha" ]; then
+        REL_ROLLBACK_MATERIAL_MODE=""
+        return 1
+    fi
+
+    if [ "$REL_ROLLBACK_MATERIAL_MODE" = preserve ]; then
+        if ! _rollback_backup_latest_migration_name allow-prior >/dev/null; then
+            echo "✗ Existing rollback backup is not bound to the current release generation" >&2
+            REL_ROLLBACK_MATERIAL_MODE=""
+            return 1
+        fi
+        preflight_binary="$REL_BINARY_BACKUP"
+    else
+        preflight_binary="$REL_BINARY"
+    fi
+    # Exercise the exact metadata writer while the old service is still live.
+    # The post-stop write remains a JIT snapshot, but schema/path/legacy-surface
+    # failures are forced into this no-downtime boundary.
+    preflight_metadata="$ROUTINE_ASSET_TXN/rollback-backup.meta.preflight"
+    if [ -L "$preflight_metadata" ] \
+      || { [ -e "$preflight_metadata" ] && [ ! -f "$preflight_metadata" ]; }; then
+        REL_ROLLBACK_MATERIAL_MODE=""
+        return 1
+    fi
+    rm -f "$preflight_metadata" || return 1
+    if ! _write_rollback_backup_metadata \
+        "$preflight_binary" "$preflight_metadata" "$ROUTINE_ASSET_TXN"; then
+        echo "✗ Rollback metadata preflight failed before release stop" >&2
+        REL_ROLLBACK_MATERIAL_MODE=""
+        return 1
+    fi
+    return 0
 }
 
 _rollback_would_brick_on_migration() {
@@ -2158,6 +2409,11 @@ if ! adk_stage_routine_helpers "$REPO" "$ADK_REL" "$ROUTINE_ASSET_TXN" \
     echo "✗ Routine helper staging failed; refusing to swap an incomplete asset tree"
     exit 1
 fi
+if ! _strip_legacy_helper_sentinel_from_staged_generation \
+    "$ROUTINE_ASSET_TXN/staged/release-root/routine-helpers"; then
+    echo "✗ Reserved legacy helper sentinel contaminated the staged generation"
+    exit 1
+fi
 
 if [ "$ROUTINE_ASSET_INCOMING_CLAIMED" = 1 ]; then
     if ! adk_remove_claimed_routine_asset_incoming \
@@ -2328,6 +2584,14 @@ echo "▸ Exact-validating staged routine generation with candidate runtime..."
 if ! adk_validate_staged_routine_asset_transaction \
     "$ADK_REL" "$ROUTINE_ASSET_TXN" "$STAGED_BINARY"; then
     echo "✗ Candidate runtime rejected staged routines before migration/service stop"
+    exit 1
+fi
+REL_BINARY="$ADK_REL/bin/agentdesk"
+REL_BINARY_BACKUP="$ADK_REL/bin/agentdesk.prev"
+REL_BINARY_BACKUP_META="$REL_BINARY_BACKUP.meta"
+echo "▸ Preflighting current release rollback generation..."
+if ! _prepare_release_rollback_generation; then
+    echo "✗ Current release rollback generation is unsafe; service was not stopped"
     exit 1
 fi
 
@@ -2836,29 +3100,19 @@ unset POST_DEPLOY_SMOKE_LOG_FINGERPRINT_BYTES POST_DEPLOY_SMOKE_LOG_FINGERPRINT_
 # #3858: back up the current good binary BEFORE overwriting it so a runtime-only
 # crash (passes compile/doctor/sign but crash-loops on boot) can be rolled back
 # instead of leaving the release down with the last-good binary already gone.
-REL_BINARY="$ADK_REL/bin/agentdesk"
-REL_BINARY_BACKUP="$ADK_REL/bin/agentdesk.prev"
-REL_BINARY_BACKUP_META="$REL_BINARY_BACKUP.meta"
 chflags nouchg "$REL_BINARY" 2>/dev/null || true
-for rollback_path in \
-    "$REL_BINARY_BACKUP" \
-    "$REL_BINARY_BACKUP_META" \
-    "$REL_BINARY_BACKUP.tmp" \
-    "$REL_BINARY_BACKUP_META.tmp"; do
-    if [ -L "$rollback_path" ]; then
-        echo "✗ Refusing symlinked rollback artifact: $rollback_path"
-        exit 1
-    fi
-done
-if [ -f "$REL_BINARY_BACKUP" ]; then
+case "$REL_ROLLBACK_MATERIAL_MODE" in
+preserve)
     # #3858 (re-entrancy / finding 2): treat .prev as last-KNOWN-GOOD. A leftover
     # .prev means a PRIOR deploy failed before its success-path cleanup, so it
     # holds that deploy's last good binary (captured when the then-live binary was
     # still healthy). The CURRENT live binary may be the unverified/bad binary the
     # prior deploy promoted — do NOT overwrite a good .prev with it. Preserve the
     # existing last-known-good as the rollback target so a re-run can still recover.
+    # The branch was selected and validated before release stop; repeat the exact
+    # digest check here only as a JIT tamper guard.
     if ! _rollback_backup_latest_migration_name allow-prior >/dev/null; then
-        echo "✗ Existing rollback backup metadata is absent, corrupt, or not bound to current assets"
+        echo "✗ Existing rollback generation changed after preflight"
         echo "  refusing to trust stale $REL_BINARY_BACKUP"
         exit 1
     fi
@@ -2876,7 +3130,8 @@ if [ -f "$REL_BINARY_BACKUP" ]; then
     echo "▸ Preserving generation-verified last-known-good rollback bundle..."
     # Ensure it is mutable so the rollback's `mv -f` can consume it.
     chflags nouchg "$REL_BINARY_BACKUP" 2>/dev/null || true
-elif [ -f "$REL_BINARY" ]; then
+    ;;
+capture)
     # No prior backup: the current live binary is the last successful deploy's
     # health-confirmed binary (the success path drops .prev once health passes).
     # Capture it as the rollback target. cp (not mv) so the last-good binary is
@@ -2904,11 +3159,15 @@ elif [ -f "$REL_BINARY" ]; then
         echo "✗ Could not atomically bind rollback metadata to the backup"
         exit 1
     fi
-elif [ -e "$REL_BINARY_BACKUP_META" ]; then
-    # Metadata without its binary cannot be a rollback target. Remove this
-    # harmless half of an interrupted cleanup before creating any future pair.
-    rm -f "$REL_BINARY_BACKUP_META"
-fi
+    ;;
+none)
+    # Fresh install: preflight proved that no live or rollback binary exists.
+    ;;
+*)
+    echo "✗ Rollback generation mode was not decided before release stop" >&2
+    exit 1
+    ;;
+esac
 
 # Promote the fully validated asset pair before the binary. The durable marker
 # was armed inside the shared state machine before its first rename, while the

@@ -6,6 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_RELEASE="$SCRIPT_DIR/../scripts/deploy-release.sh"
+ASSET_SURFACE="$SCRIPT_DIR/../scripts/routine-asset-surface.sh"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -19,6 +20,25 @@ extract_function() {
         $0 ~ start { printing = 1 }
         printing { print }
     ' "$DEPLOY_RELEASE"
+}
+
+load_release_generation_functions() {
+    local name
+    for name in \
+        _sha256_file \
+        _sha256_tree \
+        _manifest_latest_migration_name \
+        _manifest_source_git_sha \
+        _manifest_routine_helpers_binding_state \
+        _release_migration_name_is_valid \
+        _validate_legacy_routine_helpers_sentinel \
+        _normalize_legacy_release_routine_helpers \
+        _strip_legacy_helper_sentinel_from_staged_generation \
+        _write_rollback_backup_metadata \
+        _rollback_backup_latest_migration_name \
+        _prepare_release_rollback_generation; do
+        eval "$(extract_function "$name")"
+    done
 }
 
 # The stop helper must arm recovery before invoking bootout and refuse a live
@@ -109,6 +129,202 @@ extract_function() {
         && [ "$DRAIN_WAITS" = 1 ] \
         && [ "$BOOTSTRAPS" = 1 ] || exit 97
 ) || fail 'pre-promotion recovery did not reconcile the stop-confirmation signal gap'
+
+# A release from before the helper split has bin+routines+release-source but no
+# helper tree. Normalize that absence explicitly before stop, bind it into the
+# rollback metadata, promote the new pair, and prove the metadata still verifies
+# against the sentinel tree after it moves to routine-helpers.old.
+(
+    # shellcheck source=../scripts/routine-asset-surface.sh
+    . "$ASSET_SURFACE"
+    load_release_generation_functions
+
+    TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/adk-release-legacy-helpers.XXXXXX")"
+    cleanup_legacy_test() {
+        adk_release_routine_asset_lock 2>/dev/null || true
+        rm -rf "$TEST_ROOT"
+    }
+    trap cleanup_legacy_test EXIT
+    chflags() { :; }
+
+    ADK_REL="$TEST_ROOT/release"
+    REPO="$TEST_ROOT/repo"
+    DEPLOY_LOCK_FILE="$ADK_REL/runtime/deploy-release.lock"
+    LEGACY_ROUTINE_HELPERS_SENTINEL_NAME='.agentdesk-legacy-empty-v1'
+    LEGACY_SHA='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    LEGACY_MIGRATION='0100_legacy_release.sql'
+    mkdir -p "$ADK_REL/bin" "$ADK_REL/routines" "$ADK_REL/runtime" \
+        "$REPO/routines" "$REPO/routine-helpers"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$ADK_REL/bin/agentdesk"
+    chmod +x "$ADK_REL/bin/agentdesk"
+    printf 'agentdesk.routines.register({ tick() { return { action: "complete" }; } });\n' \
+        > "$ADK_REL/routines/legacy.js"
+    printf 'agentdesk.routines.register({ tick() { return { action: "complete" }; } });\n' \
+        > "$REPO/routines/current.js"
+    for helper_ref in "${ADK_REQUIRED_ROUTINE_HELPER_REFS[@]}"; do
+        mkdir -p "$REPO/routine-helpers/$(dirname "$helper_ref")"
+        printf 'helper:%s\n' "$helper_ref" > "$REPO/routine-helpers/$helper_ref"
+    done
+    printf '{"source_git_sha":"%s","latest_postgres_migration":"%s"}\n' \
+        "$LEGACY_SHA" "$LEGACY_MIGRATION" \
+        > "$ADK_REL/runtime/release-source.json"
+    CANDIDATE="$TEST_ROOT/candidate-agentdesk"
+    printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        '[ "${1:-}" = validate-routines ]' \
+        '[ "${2:-}" = --root ]' \
+        '[ -d "${3:-}" ]' \
+        '[ "${4:-}" = --runtime-root ]' \
+        '[ "${3:-}" = "${5:-}/routines" ]' \
+        '[ -d "${5:-}/routine-helpers" ]' \
+        > "$CANDIDATE"
+    chmod +x "$CANDIDATE"
+
+    adk_acquire_routine_asset_lock "$DEPLOY_LOCK_FILE" 0
+    ROUTINE_ASSET_TXN="$(
+        adk_begin_routine_asset_transaction "$ADK_REL" "$DEPLOY_LOCK_FILE"
+    )"
+    adk_stage_routines "$REPO" "$ADK_REL" "$ROUTINE_ASSET_TXN" >/dev/null
+    adk_stage_routine_helpers "$REPO" "$ADK_REL" "$ROUTINE_ASSET_TXN" >/dev/null
+    _strip_legacy_helper_sentinel_from_staged_generation \
+        "$ROUTINE_ASSET_TXN/staged/release-root/routine-helpers"
+    adk_validate_staged_routine_asset_transaction \
+        "$ADK_REL" "$ROUTINE_ASSET_TXN" "$CANDIDATE"
+
+    REL_BINARY="$ADK_REL/bin/agentdesk"
+    REL_BINARY_BACKUP="$ADK_REL/bin/agentdesk.prev"
+    REL_BINARY_BACKUP_META="$REL_BINARY_BACKUP.meta"
+    _prepare_release_rollback_generation
+    [ "$REL_ROLLBACK_MATERIAL_MODE" = capture ] \
+        || exit 101
+    [ -f "$ADK_REL/routine-helpers/$LEGACY_ROUTINE_HELPERS_SENTINEL_NAME" ] \
+        && [ -f "$ROUTINE_ASSET_TXN/rollback-backup.meta.preflight" ] \
+        || exit 102
+
+    cp -p "$REL_BINARY" "$REL_BINARY_BACKUP.tmp"
+    _write_rollback_backup_metadata \
+        "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP_META.tmp" \
+        "$ROUTINE_ASSET_TXN"
+    mv "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP"
+    mv "$REL_BINARY_BACKUP_META.tmp" "$REL_BINARY_BACKUP_META"
+    adk_promote_routine_asset_transaction \
+        "$ADK_REL" "$ROUTINE_ASSET_TXN" "$CANDIDATE"
+
+    [ -f "$ADK_REL/routine-helpers.old/$LEGACY_ROUTINE_HELPERS_SENTINEL_NAME" ] \
+        && [ ! -e "$ADK_REL/routine-helpers/$LEGACY_ROUTINE_HELPERS_SENTINEL_NAME" ] \
+        || exit 103
+    [ "$(_rollback_backup_latest_migration_name)" = "$LEGACY_MIGRATION" ] \
+        || exit 104
+    EXPECTED_HELPERS_SHA="$(adk_sha256_tree "$ADK_REL/routine-helpers.old")"
+    python3 - "$REL_BINARY_BACKUP_META" "$EXPECTED_HELPERS_SHA" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+raise SystemExit(0 if data.get("routine_helpers_sha256") == sys.argv[2] else 1)
+PY
+    adk_rollback_routine_asset_transaction "$ADK_REL" "$ROUTINE_ASSET_TXN"
+    [ -f "$ADK_REL/routine-helpers/$LEGACY_ROUTINE_HELPERS_SENTINEL_NAME" ] \
+        || exit 105
+
+    # A retry stages the preserved sentinel as operator data; the reserved-file
+    # scrub must remove it before exact candidate validation/promotion.
+    ROUTINE_ASSET_TXN="$(
+        adk_begin_routine_asset_transaction "$ADK_REL" "$DEPLOY_LOCK_FILE"
+    )"
+    adk_stage_routines "$REPO" "$ADK_REL" "$ROUTINE_ASSET_TXN" >/dev/null
+    adk_stage_routine_helpers "$REPO" "$ADK_REL" "$ROUTINE_ASSET_TXN" >/dev/null
+    _strip_legacy_helper_sentinel_from_staged_generation \
+        "$ROUTINE_ASSET_TXN/staged/release-root/routine-helpers"
+    [ ! -e "$ROUTINE_ASSET_TXN/staged/release-root/routine-helpers/$LEGACY_ROUTINE_HELPERS_SENTINEL_NAME" ] \
+        || exit 106
+    adk_validate_staged_routine_asset_transaction \
+        "$ADK_REL" "$ROUTINE_ASSET_TXN" "$CANDIDATE"
+    adk_rollback_routine_asset_transaction "$ADK_REL" "$ROUTINE_ASSET_TXN"
+) || fail 'legacy helper absence was not normalized into an exact rollback generation'
+
+# Invalid rollback material must fail while the old service is untouched. This
+# models the main-flow guard: stop is reachable only after preflight succeeds.
+(
+    # shellcheck source=../scripts/routine-asset-surface.sh
+    . "$ASSET_SURFACE"
+    load_release_generation_functions
+    TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/adk-release-prev-preflight.XXXXXX")"
+    trap 'rm -rf "$TEST_ROOT"' EXIT
+    chflags() { :; }
+    ADK_REL="$TEST_ROOT/release"
+    ROUTINE_ASSET_TXN="$ADK_REL/runtime/routine-assets.txn.ABC123"
+    LEGACY_ROUTINE_HELPERS_SENTINEL_NAME='.agentdesk-legacy-empty-v1'
+    mkdir -p "$ADK_REL/bin" "$ADK_REL/routines" "$ROUTINE_ASSET_TXN"
+    printf 'old\n' > "$ADK_REL/bin/agentdesk"
+    printf 'stale backup\n' > "$ADK_REL/bin/agentdesk.prev"
+    printf 'legacy\n' > "$ADK_REL/routines/legacy.js"
+    printf '%s\n' \
+        '{"source_git_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","latest_postgres_migration":"0100_legacy_release.sql"}' \
+        > "$ADK_REL/runtime/release-source.json"
+    REL_BINARY="$ADK_REL/bin/agentdesk"
+    REL_BINARY_BACKUP="$ADK_REL/bin/agentdesk.prev"
+    REL_BINARY_BACKUP_META="$REL_BINARY_BACKUP.meta"
+    STOP_CALLS=0
+    stop_release() { STOP_CALLS=$((STOP_CALLS + 1)); }
+    if _prepare_release_rollback_generation >/dev/null 2>&1; then
+        stop_release
+    fi
+    [ "$STOP_CALLS" = 0 ] && [ ! -e "$ADK_REL/routine-helpers" ] \
+        || exit 107
+
+    # Once release-source explicitly binds a helper generation, absence is
+    # corruption rather than legacy compatibility and must never get a sentinel.
+    rm -f "$REL_BINARY_BACKUP"
+    printf '%s\n' \
+        '{"source_git_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","latest_postgres_migration":"0100_legacy_release.sql","routine_helpers_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}' \
+        > "$ADK_REL/runtime/release-source.json"
+    if _prepare_release_rollback_generation >/dev/null 2>&1; then
+        stop_release
+    fi
+    [ "$STOP_CALLS" = 0 ] && [ ! -e "$ADK_REL/routine-helpers" ] \
+        || exit 109
+) || fail 'invalid .prev state reached release stop or fabricated a helper generation'
+
+# Metadata serialization itself is part of preflight. Inject its failure on the
+# same no-helper/no-prev legacy shape and prove the stop edge is unreachable.
+(
+    # shellcheck source=../scripts/routine-asset-surface.sh
+    . "$ASSET_SURFACE"
+    load_release_generation_functions
+    TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/adk-release-meta-preflight.XXXXXX")"
+    trap 'rm -rf "$TEST_ROOT"' EXIT
+    chflags() { :; }
+    ADK_REL="$TEST_ROOT/release"
+    ROUTINE_ASSET_TXN="$ADK_REL/runtime/routine-assets.txn.ABC123"
+    LEGACY_ROUTINE_HELPERS_SENTINEL_NAME='.agentdesk-legacy-empty-v1'
+    mkdir -p "$ADK_REL/bin" "$ADK_REL/routines" "$ROUTINE_ASSET_TXN"
+    printf 'old\n' > "$ADK_REL/bin/agentdesk"
+    printf 'legacy\n' > "$ADK_REL/routines/legacy.js"
+    printf '%s\n' \
+        '{"source_git_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","latest_postgres_migration":"0100_legacy_release.sql"}' \
+        > "$ADK_REL/runtime/release-source.json"
+    REL_BINARY="$ADK_REL/bin/agentdesk"
+    REL_BINARY_BACKUP="$ADK_REL/bin/agentdesk.prev"
+    REL_BINARY_BACKUP_META="$REL_BINARY_BACKUP.meta"
+    STOP_CALLS=0
+    _write_rollback_backup_metadata() { return 88; }
+    stop_release() { STOP_CALLS=$((STOP_CALLS + 1)); }
+    if _prepare_release_rollback_generation >/dev/null 2>&1; then
+        stop_release
+    fi
+    [ "$STOP_CALLS" = 0 ] \
+        && [ "$REL_ROLLBACK_MATERIAL_MODE" = '' ] \
+        && [ -f "$ADK_REL/routine-helpers/$LEGACY_ROUTINE_HELPERS_SENTINEL_NAME" ] \
+        || exit 108
+) || fail 'rollback metadata preflight failure reached release stop'
+
+PREPARE_LINE="$(rg -n '^if ! _prepare_release_rollback_generation; then$' "$DEPLOY_RELEASE" | cut -d: -f1)"
+STOP_LINE="$(rg -n '^if ! _stop_release_for_promotion; then$' "$DEPLOY_RELEASE" | cut -d: -f1)"
+[ -n "$PREPARE_LINE" ] && [ -n "$STOP_LINE" ] \
+    && [ "$PREPARE_LINE" -lt "$STOP_LINE" ] \
+    || fail 'rollback generation preflight is not wired before release stop'
 
 # Cleanup must use strict on-disk token ownership, never merely a non-empty
 # inherited lock-directory variable. This guards an SSH sender/receiver race.
