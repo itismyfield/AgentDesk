@@ -356,7 +356,7 @@ cleanup_backup() {
 validate_local_build_generation_manifest() {
   local binary="$PROJECT_DIR/target/release/agentdesk"
   local manifest="$PROJECT_DIR/target/release/agentdesk-generation.json"
-  local source_sha binary_sha routines_sha helpers_sha
+  local source_sha binary_sha routines_sha helpers_sha inputs_sha
 
   [ -f "$manifest" ] && [ ! -L "$manifest" ] \
     && [ -f "$binary" ] && [ ! -L "$binary" ] || {
@@ -368,10 +368,12 @@ validate_local_build_generation_manifest() {
     return 1
   }
   source_sha="$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null)" || return 1
+  inputs_sha="$(adk_executable_input_digest "$PROJECT_DIR")" || return 1
   binary_sha="$(adk_sha256_file "$binary")" || return 1
   routines_sha="$(adk_sha256_tree "$PROJECT_DIR/routines")" || return 1
   helpers_sha="$(adk_sha256_tree "$PROJECT_DIR/routine-helpers")" || return 1
   AGENTDESK_BUILD_SOURCE_SHA="$source_sha" \
+  AGENTDESK_BUILD_INPUTS_SHA="$inputs_sha" \
   AGENTDESK_BUILD_BINARY_SHA="$binary_sha" \
   AGENTDESK_BUILD_ROUTINES_SHA="$routines_sha" \
   AGENTDESK_BUILD_HELPERS_SHA="$helpers_sha" \
@@ -389,11 +391,12 @@ except Exception as exc:
     raise SystemExit(1)
 expected = {
     "source_git_sha": os.environ["AGENTDESK_BUILD_SOURCE_SHA"],
+    "executable_inputs_sha256": os.environ["AGENTDESK_BUILD_INPUTS_SHA"],
     "binary_sha256": os.environ["AGENTDESK_BUILD_BINARY_SHA"],
     "routines_sha256": os.environ["AGENTDESK_BUILD_ROUTINES_SHA"],
     "routine_helpers_sha256": os.environ["AGENTDESK_BUILD_HELPERS_SHA"],
 }
-if data.get("format") != "agentdesk-local-build-v2":
+if data.get("format") != "agentdesk-local-build-v3":
     raise SystemExit(1)
 if data.get("worktree_state") != "clean":
     raise SystemExit(1)

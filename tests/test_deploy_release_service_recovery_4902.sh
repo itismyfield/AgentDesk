@@ -41,7 +41,12 @@ load_release_generation_functions() {
         _snapshot_release_binary_immutable_flag \
         _set_release_binary_immutable_state \
         _restore_release_binary_immutable_flag \
-        _prepare_release_rollback_generation; do
+        _rollback_material_mode_path \
+        _durable_rollback_material_mode \
+        _persist_rollback_material_mode \
+        _restore_rollback_material_mode \
+        _prepare_release_rollback_generation \
+        _verified_preflight_rollback_migration; do
         eval "$(extract_function "$name")"
     done
 }
@@ -169,6 +174,7 @@ load_release_generation_functions() {
     chflags() { :; }
     _release_service_is_stopped() { return 0; }
     _resume_release_candidate_drain_authority() { return 0; }
+    _forward_migration_recovery_state() { printf 'unknown/interrupted\n'; }
     _stop_release_for_promotion() { return 90; }
     _restart_pre_promotion_release() { OLD_RESTARTS=$((OLD_RESTARTS + 1)); return 91; }
     _rollback_release_binary() { OLD_RESTARTS=$((OLD_RESTARTS + 1)); return 92; }
@@ -331,26 +337,278 @@ PY
         > "$STAGED_BINARY"
     chmod +x "$STAGED_BINARY"
     _sha256_file() { printf '%064d\n' 0; }
+    _release_executable_inputs_match_built_candidate() { return 0; }
+    _classify_forward_migration_relation() {
+        FORWARD_ROLLBACK_MIGRATION=0099_old.sql
+        FORWARD_TARGET_MIGRATION=0100_forward.sql
+        FORWARD_MIGRATION_CLASSIFIED_STATE=advanced
+    }
     _fsync_forward_recovery_generation() {
-        : > "$TEST_ROOT/generation-fsynced"
+        printf 'generation-fsync\n' >> "$TEST_ROOT/order"
     }
     _persist_forward_migration_applied() {
-        [ -f "$TEST_ROOT/generation-fsynced" ] || return 92
         [ "$1" = "$ROUTINE_ASSET_TXN" ] \
             && [ "$2" = "$(printf '%064d' 0)" ] || return 91
+        [ "$3" = unknown/interrupted ] || return 92
+        printf 'forward-marker\n' >> "$TEST_ROOT/order"
         printf 'durable-barrier\n' > "$BARRIER_MARKER"
     }
+    FORWARD_MIGRATION_RECOVERY_STATE=none
+    FORWARD_MIGRATION_APPLIED=0
+    FORWARD_MIGRATION_CANDIDATE_SHA=''
 
     set +e
     (
-        trap '[ -f "$BARRIER_MARKER" ] && [ -f "$STAGED_BINARY" ] || exit 99; exit 143' TERM
+        trap '[ -f "$BARRIER_MARKER" ] && [ -f "$STAGED_BINARY" ] || exit 99; printf "migration-child\n" >> "$TEST_ROOT/order"; exit 143' TERM
         _apply_release_postgres_migration_with_forward_barrier
     )
     migration_status=$?
     set -e
     [ "$migration_status" = 143 ] && [ -f "$BARRIER_MARKER" ] \
+        && [ "$(tr '\n' ' ' < "$TEST_ROOT/order")" = \
+            'generation-fsync forward-marker migration-child ' ] \
         || exit 123
 ) || fail 'TERM at migration-command return preceded the durable forward barrier'
+
+# The target filename used for `not-advanced` classification must remain bound
+# to the exact executable inputs that produced the staged binary. Drift after
+# the unknown marker is durable must stop before the child and leave only the
+# conservative fail-forward state.
+(
+    # shellcheck source=../scripts/routine-asset-surface.sh
+    . "$ASSET_SURFACE"
+    eval "$(extract_function _release_executable_inputs_match_built_candidate)"
+    eval "$(extract_function _apply_release_postgres_migration_with_forward_barrier)"
+    TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/adk-migration-input-fence.XXXXXX")"
+    trap 'rm -rf "$TEST_ROOT"' EXIT
+    REPO="$TEST_ROOT/repo"
+    mkdir -p "$REPO/src" "$REPO/migrations/postgres"
+    printf '[package]\nname="fence"\nversion="0.1.0"\n' > "$REPO/Cargo.toml"
+    printf '# lock\n' > "$REPO/Cargo.lock"
+    printf 'fn main() {}\n' > "$REPO/build.rs"
+    printf 'pub fn fence() {}\n' > "$REPO/src/lib.rs"
+    printf '%s\n' '-- initial target' > "$REPO/migrations/postgres/0100_target.sql"
+    STAGED_BINARY="$TEST_ROOT/agentdesk.deploy.InputFence1"
+    EVENT_LOG="$TEST_ROOT/events"
+    printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        'printf "child\n" >> "$EVENT_LOG"' \
+        'exit 0' > "$STAGED_BINARY"
+    chmod +x "$STAGED_BINARY"
+    export EVENT_LOG
+    ROUTINE_ASSET_TXN="$TEST_ROOT/routine-assets.txn.InputFence1"
+    mkdir -p "$ROUTINE_ASSET_TXN"
+    DEPLOY_EXECUTABLE_INPUT_SHA="$(adk_executable_input_digest "$REPO")"
+    _sha256_file() { adk_sha256_file "$1"; }
+    _fsync_forward_recovery_generation() { :; }
+    _classify_forward_migration_relation() {
+        FORWARD_ROLLBACK_MIGRATION=0100_target.sql
+        FORWARD_TARGET_MIGRATION=0100_target.sql
+        FORWARD_MIGRATION_CLASSIFIED_STATE=not-advanced
+    }
+    _persist_forward_migration_applied() {
+        printf 'marker:%s\n' "$3" >> "$EVENT_LOG"
+        if [ "$3" = unknown/interrupted ]; then
+            printf '%s\n' '-- drift after marker' \
+                >> "$REPO/migrations/postgres/0100_target.sql"
+        fi
+    }
+    FORWARD_MIGRATION_RECOVERY_STATE=none
+    FORWARD_MIGRATION_APPLIED=0
+
+    set +e
+    _apply_release_postgres_migration_with_forward_barrier \
+        >"$TEST_ROOT/stdout" 2>"$TEST_ROOT/stderr"
+    migration_status=$?
+    set -e
+    [ "$migration_status" -ne 0 ] \
+        && [ "$FORWARD_MIGRATION_RECOVERY_STATE" = unknown/interrupted ] \
+        && [ "$(<"$EVENT_LOG")" = 'marker:unknown/interrupted' ] \
+        && ! grep -q '^child$' "$EVENT_LOG" \
+        || exit 163
+) || fail 'migration target drift escaped the staged-candidate input fence'
+
+# Fresh install has no rollback material by construction. Exercise the real
+# transaction/mode/fsync/marker path and pin the conservative contract:
+# successful migration still records `advanced`, so every later failure can
+# only fail forward with the sole compatible candidate.
+(
+    # shellcheck source=../scripts/routine-asset-surface.sh
+    . "$ASSET_SURFACE"
+    load_release_generation_functions
+    for function_name in \
+        _latest_postgres_migration_path \
+        _forward_migration_marker_path \
+        _classify_forward_migration_relation \
+        _persist_forward_migration_applied \
+        _fsync_forward_recovery_generation \
+        _release_executable_inputs_match_built_candidate \
+        _apply_release_postgres_migration_with_forward_barrier \
+        _forward_migration_marker_value; do
+        eval "$(extract_function "$function_name")"
+    done
+    TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/adk-fresh-none-forward.XXXXXX")"
+    trap 'rm -rf "$TEST_ROOT"' EXIT
+    ADK_REL="$TEST_ROOT/release"
+    REPO="$TEST_ROOT/repo"
+    DEPLOY_LOCK_FILE="$ADK_REL/runtime/deploy-release.lock"
+    mkdir -p "$ADK_REL/bin" "$REPO/src" "$REPO/migrations/postgres"
+    printf '[package]\nname="fresh-none"\nversion="0.1.0"\n' > "$REPO/Cargo.toml"
+    printf '# lock\n' > "$REPO/Cargo.lock"
+    printf 'fn main() {}\n' > "$REPO/build.rs"
+    printf 'pub fn fresh() {}\n' > "$REPO/src/lib.rs"
+    printf '%s\n' '-- fresh migration' \
+        > "$REPO/migrations/postgres/0100_fresh.sql"
+    git -C "$REPO" init -q
+    git -C "$REPO" -c user.name=AgentDesk \
+        -c user.email=agentdesk@example.invalid add .
+    git -C "$REPO" -c user.name=AgentDesk \
+        -c user.email=agentdesk@example.invalid commit -qm fresh
+    adk_acquire_routine_asset_lock "$DEPLOY_LOCK_FILE" 0
+    ROUTINE_ASSET_TXN="$(
+        adk_begin_routine_asset_transaction "$ADK_REL" "$DEPLOY_LOCK_FILE"
+    )"
+    mkdir -p "$ROUTINE_ASSET_TXN/staged/release-root/routines" \
+        "$ROUTINE_ASSET_TXN/staged/release-root/routine-helpers"
+    printf 'routine\n' \
+        > "$ROUTINE_ASSET_TXN/staged/release-root/routines/fresh.js"
+    printf 'helper\n' \
+        > "$ROUTINE_ASSET_TXN/staged/release-root/routine-helpers/fresh.py"
+    REL_BINARY="$ADK_REL/bin/agentdesk"
+    REL_BINARY_BACKUP="$ADK_REL/bin/agentdesk.prev"
+    REL_BINARY_BACKUP_META="$REL_BINARY_BACKUP.meta"
+    LEGACY_ROUTINE_HELPERS_SENTINEL_NAME=.agentdesk-legacy-empty-v1
+    chflags() { :; }
+    _prepare_release_rollback_generation
+    [ "$REL_ROLLBACK_MATERIAL_MODE" = none ] \
+        && [ ! -e "$ROUTINE_ASSET_TXN/rollback-backup.meta.preflight" ] \
+        || exit 164
+    STAGED_BINARY="$ADK_REL/bin/agentdesk.deploy.FreshNone1"
+    FRESH_EVENT_LOG="$TEST_ROOT/events"
+    printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        '[ "${1:-}" = release-migrate-postgres ] || exit 90' \
+        'printf "child\n" >> "$FRESH_EVENT_LOG"' \
+        > "$STAGED_BINARY"
+    chmod +x "$STAGED_BINARY"
+    export FRESH_EVENT_LOG
+    DEPLOY_EXECUTABLE_INPUT_SHA="$(adk_executable_input_digest "$REPO")"
+    FORWARD_MIGRATION_RECOVERY_STATE=none
+    FORWARD_MIGRATION_APPLIED=0
+    _apply_release_postgres_migration_with_forward_barrier
+    [ "$FORWARD_MIGRATION_RECOVERY_STATE" = advanced ] \
+        && [ "$(_forward_migration_marker_value \
+            "$ROUTINE_ASSET_TXN" migration_state)" = advanced ] \
+        && [ "$(<"$FRESH_EVENT_LOG")" = child ] \
+        || exit 165
+    rm -f "$ROUTINE_ASSET_TXN/forward-migration-applied.json"
+    adk_abort_routine_asset_transaction "$ADK_REL" "$ROUTINE_ASSET_TXN"
+    adk_release_routine_asset_lock
+) || fail 'fresh-install none mode did not enforce conservative advanced recovery'
+
+# Exercise the real marker parser. Legacy v1 can never prove whether the child
+# advanced and therefore maps to unknown; a v2 `not-advanced` claim whose
+# rollback evidence disagrees also degrades to unknown instead of old rollback.
+(
+    eval "$(extract_function _forward_migration_marker_path)"
+    eval "$(extract_function _forward_migration_marker_value)"
+    eval "$(extract_function _forward_migration_recovery_state)"
+    TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/adk-forward-marker-parser.XXXXXX")"
+    trap 'rm -rf "$TEST_ROOT"' EXIT
+    TXN="$TEST_ROOT/routine-assets.txn.Marker1"
+    mkdir -p "$TXN"
+    printf '%s\n' \
+        '{"format":"agentdesk-forward-migration-v1","asset_transaction":"routine-assets.txn.Marker1","candidate_binary_sha256":"0000000000000000000000000000000000000000000000000000000000000000","candidate_binary_name":"agentdesk.deploy.Marker1","latest_postgres_migration":"0100_target.sql","source_git_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' \
+        > "$TXN/forward-migration-applied.json"
+    [ "$(_forward_migration_recovery_state "$TXN")" = unknown/interrupted ] \
+        || exit 166
+
+    printf '%s\n' \
+        '{"format":"agentdesk-forward-migration-v2","asset_transaction":"routine-assets.txn.Marker1","candidate_binary_sha256":"0000000000000000000000000000000000000000000000000000000000000000","candidate_binary_name":"agentdesk.deploy.Marker1","migration_state":"not-advanced","rollback_latest_postgres_migration":"0100_target.sql","target_latest_postgres_migration":"0100_target.sql","source_git_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' \
+        > "$TXN/forward-migration-applied.json"
+    REL_ROLLBACK_MATERIAL_MODE=capture
+    _verified_preflight_rollback_migration() { printf '0099_other.sql\n'; }
+    [ "$(_forward_migration_recovery_state "$TXN")" = unknown/interrupted ] \
+        || exit 167
+) || fail 'forward marker parser trusted legacy or mismatched no-advance authority'
+
+# The durable three-state relation drives the real EXIT crash-binary path. Only
+# an advanced or interrupted migration may bypass the validated old rollback;
+# an explicitly verified no-advance result must still take that rollback.
+for TEST_MIGRATION_STATE in not-advanced advanced unknown/interrupted; do
+(
+    eval "$(extract_function _forward_migration_recovery_state)"
+    eval "$(extract_function _cleanup_on_exit)"
+    TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/adk-forward-state.XXXXXX")"
+    trap 'rm -rf "$TEST_ROOT"' EXIT
+    ADK_REL="$TEST_ROOT/release"
+    ACTIVE_TXN="$ADK_REL/runtime/routine-assets.txn.State1"
+    mkdir -p "$ACTIVE_TXN"
+    : > "$ACTIVE_TXN/forward-migration-applied.json"
+    DEPLOY_LOCK_FILE="$ADK_REL/runtime/deploy.lock"
+    DEPLOY_OK=0
+    ROLLBACK_ARMED=1
+    STAGED_BINARY=''
+    FORWARD_MIGRATION_APPLIED=0
+    FORWARD_MIGRATION_RECOVERY_STATE=none
+    POLICIES_STAGED=''
+    LAUNCHD_MIGRATED_STAGED=''
+    RELEASE_ROOT_SCRIPTS_STAGED=''
+    ROUTINE_ASSET_INCOMING_CLAIMED=0
+    ROUTINE_ASSET_INCOMING=''
+    OLD_ROLLBACKS=0
+    FORWARD_RECOVERIES=0
+    _adk_active_txn() { printf '%s\n' "$ACTIVE_TXN"; }
+    adk_routine_asset_transaction_phase() { printf 'promoted\n'; }
+    adk_routine_asset_lock_owned() { return 0; }
+    adk_routine_asset_candidate_drain_authority_exists() { return 1; }
+    _forward_migration_marker_path() {
+        printf '%s/forward-migration-applied.json\n' "$1"
+    }
+    _forward_migration_marker_value() {
+        case "$2" in
+            migration_state) printf '%s\n' "$TEST_MIGRATION_STATE" ;;
+            rollback_latest_postgres_migration) printf '0100_equal.sql\n' ;;
+            target_latest_postgres_migration)
+                if [ "$TEST_MIGRATION_STATE" = advanced ]; then
+                    printf '0101_new.sql\n'
+                else
+                    printf '0100_equal.sql\n'
+                fi
+                ;;
+            *) return 1 ;;
+        esac
+    }
+    _verified_preflight_rollback_migration() { printf '0100_equal.sql\n'; }
+    _migration_advanced() {
+        [ "${1%%_*}" -gt "${2%%_*}" ]
+    }
+    _forward_migration_candidate_sha() { printf '%064d\n' 0; }
+    _recover_forward_migrated_release() {
+        FORWARD_RECOVERIES=$((FORWARD_RECOVERIES + 1))
+    }
+    _rollback_release_binary() {
+        OLD_ROLLBACKS=$((OLD_ROLLBACKS + 1))
+    }
+    _cleanup_owned_pg_tunnel_preflight() { :; }
+    _rollback_pg_tunnel_migration() { :; }
+    _finalize_detached_helper() { :; }
+    adk_release_routine_asset_lock() { :; }
+
+    set +e
+    _cleanup_on_exit 70 >/dev/null 2>&1
+    cleanup_status=$?
+    set -e
+    [ "$cleanup_status" = 70 ] || exit 140
+    if [ "$TEST_MIGRATION_STATE" = not-advanced ]; then
+        [ "$OLD_ROLLBACKS" = 1 ] && [ "$FORWARD_RECOVERIES" = 0 ] \
+            || exit 141
+    else
+        [ "$OLD_ROLLBACKS" = 0 ] && [ "$FORWARD_RECOVERIES" = 1 ] \
+            || exit 142
+    fi
+) || fail "cleanup violated ${TEST_MIGRATION_STATE} migration recovery state"
+done
 
 rg -q '_recover_forward_migrated_release "\$active_txn"' "$DEPLOY_RELEASE" \
     || fail 'cleanup does not route durable forward-migration phase to compatible recovery'
@@ -455,6 +713,7 @@ BEGIN_TXN_LINE="$(rg -n '^[[:space:]]+adk_begin_routine_asset_transaction "\$ADK
         printf '%s/forward-migration-applied.json\n' "$1"
     }
     _forward_migration_candidate_sha() { return 1; }
+    _forward_migration_recovery_state() { return 1; }
     _rollback_release_binary() { DESTRUCTIVE_CALLS=$((DESTRUCTIVE_CALLS + 1)); }
     adk_rollback_routine_asset_transaction() {
         DESTRUCTIVE_CALLS=$((DESTRUCTIVE_CALLS + 1))
@@ -543,10 +802,9 @@ BEGIN_TXN_LINE="$(rg -n '^[[:space:]]+adk_begin_routine_asset_transaction "\$ADK
         count=$((count + 1))
         printf '%s\n' "$count" > "$TEST_ROOT/ssh-count"
         case "$count" in
-            1) return 0 ;;
-            2) printf '%s\n' "$TEST_ROOT/remote" ;;
-            3) printf '%s\n' "$TEST_ROOT/remote/runtime/deploy-release.lock" ;;
-            4)
+            1) printf '%s\n' "$TEST_ROOT/remote" ;;
+            2) printf '%s\n' "$TEST_ROOT/remote/runtime/deploy-release.lock" ;;
+            3)
                 : > "$TEST_ROOT/remote-claim-started"
                 while [ ! -f "$TEST_ROOT/release-remote" ]; do
                     sleep 0.05
@@ -575,6 +833,185 @@ BEGIN_TXN_LINE="$(rg -n '^[[:space:]]+adk_begin_routine_asset_transaction "\$ADK
         && [ -f "$TEST_ROOT/inbox-cleaned" ] \
         || exit 128
 ) || fail 'peer SSH returned or cleaned its inbox before remote deploy completion'
+
+# A peer may still have a checkout from before the lock-sync protocol existed.
+# Execute the real caller against a real stale clone: it must fetch and run the
+# same-SHA deploy/common bootstrap from origin, never the stale worktree script.
+(
+    # shellcheck source=../scripts/routine-asset-surface.sh
+    . "$ASSET_SURFACE"
+    eval "$(extract_function _deploy_peer_env_prelude)"
+    eval "$(extract_function _deploy_to_one_peer)"
+    TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/adk-peer-stale-bootstrap.XXXXXX")"
+    trap 'rm -rf "$TEST_ROOT"' EXIT
+    ORIGIN="$TEST_ROOT/origin.git"
+    SEED="$TEST_ROOT/seed"
+    PEER_REPO="$TEST_ROOT/peer"
+    git init -q --bare "$ORIGIN"
+    git init -q "$SEED"
+    git -C "$SEED" checkout -qb main
+    mkdir -p "$SEED/scripts"
+    printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        ': > "${AGENTDESK_REPO_DIR:?}/stale-ran"' \
+        > "$SEED/scripts/deploy-release.sh"
+    printf '# stale common\n' > "$SEED/scripts/routine-asset-surface.sh"
+    git -C "$SEED" -c user.name=AgentDesk \
+        -c user.email=agentdesk@example.invalid add scripts
+    git -C "$SEED" -c user.name=AgentDesk \
+        -c user.email=agentdesk@example.invalid commit -qm stale
+    git -C "$SEED" remote add origin "$ORIGIN"
+    git -C "$SEED" push -q -u origin main
+    git --git-dir="$ORIGIN" symbolic-ref HEAD refs/heads/main
+    git clone -q "$ORIGIN" "$PEER_REPO"
+
+    printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        'set -euo pipefail' \
+        '[ -f "$(dirname "$0")/routine-asset-surface.sh" ]' \
+        ': > "${AGENTDESK_REPO_DIR:?}/fresh-bootstrap-ran"' \
+        > "$SEED/scripts/deploy-release.sh"
+    printf '# fresh common\n' > "$SEED/scripts/routine-asset-surface.sh"
+    git -C "$SEED" -c user.name=AgentDesk \
+        -c user.email=agentdesk@example.invalid add scripts
+    git -C "$SEED" -c user.name=AgentDesk \
+        -c user.email=agentdesk@example.invalid commit -qm fresh-bootstrap
+    git -C "$SEED" push -q origin main
+
+    ADK_REL="$TEST_ROOT/no-local-assets"
+    mkdir -p "$ADK_REL"
+    DEPLOY_SSH_CONNECT_TIMEOUT=2
+    AGENTDESK_PEER_REPO_DIR="$PEER_REPO"
+    DEPLOY_PEER_INVOCATION=0
+    DEPLOY_PEERS_FILE="$TEST_ROOT/peers"
+    ssh() {
+        local remote_command="${!#}"
+        bash -c "$remote_command"
+    }
+    _deploy_to_one_peer fake-peer --skip-build \
+        >"$TEST_ROOT/bootstrap.log" 2>&1
+    [ -f "$PEER_REPO/fresh-bootstrap-ran" ] \
+        && [ ! -e "$PEER_REPO/stale-ran" ] \
+        || exit 168
+) || fail 'stale peer executed its pre-protocol deploy script instead of fetched bootstrap'
+
+# Two peer deploys targeting successive generations serialize the fast-forward
+# itself, not merely later staging. B may not mutate the checkout to H+1 while
+# A still owns the lock and is staging H; each re-exec also revalidates the
+# exact HEAD/input digest captured under that same lock.
+(
+    TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/adk-peer-lock-sync.XXXXXX")"
+    trap 'rm -rf "$TEST_ROOT"' EXIT
+    REPO="$TEST_ROOT/repo"
+    BIN_DIR="$TEST_ROOT/bin"
+    LOCK_FILE="$TEST_ROOT/runtime/deploy-release.lock"
+    EVENTS_FILE="$TEST_ROOT/events"
+    mkdir -p "$REPO/scripts" "$REPO/src" "$REPO/migrations/postgres" \
+        "$REPO/.cargo" "$BIN_DIR" "$(dirname "$LOCK_FILE")"
+    printf '[package]\nname="peer-fixture"\nversion="0.1.0"\n' > "$REPO/Cargo.toml"
+    printf '# lock\n' > "$REPO/Cargo.lock"
+    printf 'fn main() {}\n' > "$REPO/build.rs"
+    printf 'base\n' > "$REPO/src/generation.rs"
+    printf '%s\n' '-- migration' > "$REPO/migrations/postgres/0100_peer.sql"
+    printf 'base\n' > "$REPO/head"
+    cat > "$BIN_DIR/git" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = -C ]; then
+    repo="$2"
+    shift 2
+else
+    repo="$REPO"
+fi
+case "${1:-}" in
+    fetch|checkout) exit 0 ;;
+    merge)
+        printf '%s\n' "$GENERATION" > "$repo/head"
+        printf '%s\n' "$GENERATION" > "$repo/src/generation.rs"
+        printf '%s:sync\n' "$GENERATION" >> "$EVENTS_FILE"
+        ;;
+    rev-parse)
+        [ "${2:-}" = HEAD ] || exit 2
+        cat "$repo/head"
+        ;;
+    *) exit 3 ;;
+esac
+SH
+    chmod +x "$BIN_DIR/git"
+    cp "$ASSET_SURFACE" "$REPO/scripts/routine-asset-surface.sh"
+    cat > "$REPO/scripts/deploy-release.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+. "$ASSET_SURFACE"
+eval "$PEER_VALIDATE_BODY"
+_sha256_file() { adk_sha256_file "$1"; }
+adk_acquire_routine_asset_lock "$DEPLOY_LOCK_FILE" 0
+adk_routine_asset_lock_owned "$DEPLOY_LOCK_FILE"
+AGENTDESK_PEER_SYNC_REEXEC=1
+_validate_peer_locked_generation
+printf '%s:stage:%s\n' "$GENERATION" "$(git -C "$REPO" rev-parse HEAD)" \
+    >> "$EVENTS_FILE"
+if [ "$GENERATION" = H ]; then
+    : > "$READY_FILE"
+    while [ ! -e "$RELEASE_FILE" ]; do sleep 0.01; done
+fi
+adk_release_routine_asset_lock
+SH
+    chmod +x "$REPO/scripts/deploy-release.sh"
+    PEER_SYNC_BODY="$(extract_function _peer_sync_main_and_reexec_under_lock)"
+    PEER_DIGEST_BODY="$(extract_function _peer_post_merge_executable_input_digest)"
+    PEER_VALIDATE_BODY="$(extract_function _validate_peer_locked_generation)"
+    export PEER_SYNC_BODY PEER_DIGEST_BODY PEER_VALIDATE_BODY \
+        ASSET_SURFACE REPO LOCK_FILE EVENTS_FILE
+    export PATH="$BIN_DIR:$PATH"
+
+    run_peer_lane() {
+        local generation="$1"
+        GENERATION="$generation" \
+        DEPLOY_LOCK_FILE="$LOCK_FILE" \
+        READY_FILE="$TEST_ROOT/a-ready" \
+        RELEASE_FILE="$TEST_ROOT/a-release" \
+        bash -c '
+            set -euo pipefail
+            . "$ASSET_SURFACE"
+            eval "$PEER_DIGEST_BODY"
+            eval "$PEER_SYNC_BODY"
+            _sha256_file() { adk_sha256_file "$1"; }
+            # Model a bootstrap whose in-memory digest protocol predates the
+            # just-merged common script. The sync function must not use this.
+            adk_executable_input_digest() { printf "old-protocol\n"; }
+            export GENERATION REPO DEPLOY_LOCK_FILE EVENTS_FILE READY_FILE RELEASE_FILE
+            DEPLOY_PEER_INVOCATION=1
+            AGENTDESK_PEER_SYNC_MAIN_UNDER_LOCK=1
+            AGENTDESK_PEER_SYNC_REEXEC=0
+            adk_acquire_routine_asset_lock "$DEPLOY_LOCK_FILE" 5
+            printf "%s:recovery\n" "$GENERATION" >> "$EVENTS_FILE"
+            _peer_sync_main_and_reexec_under_lock
+        ' &
+        LAST_PEER_LANE_PID=$!
+    }
+
+    run_peer_lane H
+    lane_a_pid=$LAST_PEER_LANE_PID
+    attempts=0
+    while [ ! -e "$TEST_ROOT/a-ready" ] && [ "$attempts" -lt 500 ]; do
+        sleep 0.01
+        attempts=$((attempts + 1))
+    done
+    [ -e "$TEST_ROOT/a-ready" ] || exit 160
+    run_peer_lane H1
+    lane_b_pid=$LAST_PEER_LANE_PID
+    sleep 0.2
+    [ "$(<"$REPO/head")" = H ] \
+        && ! grep -q '^H1:' "$EVENTS_FILE" \
+        && kill -0 "$lane_b_pid" 2>/dev/null || exit 161
+    : > "$TEST_ROOT/a-release"
+    wait "$lane_a_pid"
+    wait "$lane_b_pid"
+    [ "$(tr '\n' ' ' < "$EVENTS_FILE")" = \
+        'H:recovery H:sync H:stage:H H1:recovery H1:sync H1:stage:H1 ' ] \
+        || { cat "$EVENTS_FILE" >&2; exit 162; }
+) || fail 'peer fast-forward escaped the remote deploy lock generation boundary'
 
 # Capture the exact process instance started by the candidate generation, then
 # prove rollback drain waits for launchd, that PID/identity, and the HTTP port.
@@ -680,6 +1117,10 @@ BEGIN_TXN_LINE="$(rg -n '^[[:space:]]+adk_begin_routine_asset_transaction "\$ADK
     eval "$(extract_function _resume_release_candidate_drain_authority)"
 
     ADK_REL='/tmp/adk-release-resume-drain-test'
+    mkdir -p "$ADK_REL/bin"
+    REL_BINARY="$ADK_REL/bin/agentdesk"
+    printf 'resume-candidate\n' > "$REL_BINARY"
+    CANDIDATE_SHA="$(adk_sha256_file "$REL_BINARY")"
     PLIST_REL='com.agentdesk.release'
     LAUNCHD_DOMAIN='gui/test'
     REL_PORT=8791
@@ -691,10 +1132,12 @@ BEGIN_TXN_LINE="$(rg -n '^[[:space:]]+adk_begin_routine_asset_transaction "\$ADK
     }
     adk_routine_asset_candidate_drain_authority_value() {
         case "$3" in
+            capture_state) printf 'exact\n' ;;
             pid) printf '7878\n' ;;
             identity) printf 'persisted-candidate-instance\n' ;;
             port) printf '8791\n' ;;
             supervisor) printf 'gui/test/com.agentdesk.release\n' ;;
+            candidate_binary_sha256) printf '%s\n' "$CANDIDATE_SHA" ;;
             *) return 91 ;;
         esac
     }
@@ -702,6 +1145,7 @@ BEGIN_TXN_LINE="$(rg -n '^[[:space:]]+adk_begin_routine_asset_transaction "\$ADK
     _resolve_release_server_port() { printf '8791\n'; }
     _release_launchd_job_is_loaded() { return 1; }
     _release_candidate_port_refuses_connections() { return 0; }
+    _sha256_file() { adk_sha256_file "$1"; }
     adk_process_identity() {
         [ "$1" = 7878 ] || return 1
         printf 'persisted-candidate-instance\n'
@@ -720,12 +1164,128 @@ BEGIN_TXN_LINE="$(rg -n '^[[:space:]]+adk_begin_routine_asset_transaction "\$ADK
         DRAIN_MARKER=0
     }
 
-    _resume_release_candidate_drain_authority txn
+    _resume_release_candidate_drain_authority txn "$CANDIDATE_SHA"
     [ "$DRAIN_WAITS" = 1 ] \
         && [ "$DRAIN_MARKER" = 0 ] \
         && [ "$RELEASE_CANDIDATE_CAPTURED" = 0 ] \
         || exit 130
 ) || fail 'forward recovery bypassed the persisted exact candidate identity'
+
+# A fresh invocation must not reject a provisional authority forever. Whether
+# bootstrap already happened or not, recovery remains on the SHA-bound forward
+# candidate, publishes an exact PID/identity before completion, and never calls
+# an old-generation rollback seam.
+for PROVISIONAL_MODE in loaded unloaded; do
+(
+    # shellcheck source=../scripts/routine-asset-surface.sh
+    . "$ASSET_SURFACE"
+    eval "$(extract_function _resume_release_candidate_drain_authority)"
+    eval "$(extract_function _start_forward_migrated_release)"
+    eval "$(extract_function _recover_forward_migrated_release)"
+    eval "$(extract_function _recover_durable_forward_migration_before_new_deploy)"
+
+    TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/adk-provisional-recovery.XXXXXX")"
+    trap 'rm -rf "$TEST_ROOT"' EXIT
+    ADK_REL="$TEST_ROOT/release"
+    ACTIVE_TXN="$ADK_REL/runtime/routine-assets.txn.Provisional1"
+    REL_BINARY="$ADK_REL/bin/agentdesk"
+    mkdir -p "$ACTIVE_TXN" "$ADK_REL/bin"
+    printf 'forward-candidate\n' > "$REL_BINARY"
+    : > "$ACTIVE_TXN/forward-migration-applied.json"
+    CANDIDATE_SHA="$(adk_sha256_file "$REL_BINARY")"
+    PLIST_REL=com.agentdesk.release
+    LAUNCHD_DOMAIN=gui/test
+    REL_PORT=8791
+    LOCK_FILE="$ADK_REL/runtime/dcserver.lock"
+    DEPLOY_HEALTH_RETRIES=1
+    DEPLOY_HEALTH_DELAY_SECS=0
+    FORWARD_MIGRATION_APPLIED=1
+    FORWARD_MIGRATION_CANDIDATE_SHA="$CANDIDATE_SHA"
+    RELEASE_CANDIDATE_CAPTURED=0
+    RELEASE_CANDIDATE_PID=''
+    RELEASE_CANDIDATE_IDENTITY=''
+    ACTIVE=1
+    JOB_LOADED=0
+    [ "$PROVISIONAL_MODE" = unloaded ] || JOB_LOADED=1
+    EVENTS=''
+    OLD_ROLLBACKS=0
+
+    _adk_active_txn() {
+        [ "$ACTIVE" = 1 ] || return 1
+        printf '%s\n' "$ACTIVE_TXN"
+    }
+    _forward_migration_marker_path() {
+        printf '%s/forward-migration-applied.json\n' "$1"
+    }
+    _forward_migration_candidate_sha() { printf '%s\n' "$CANDIDATE_SHA"; }
+    _forward_migration_recovery_state() { printf 'unknown/interrupted\n'; }
+    _forward_migration_staged_binary() { return 1; }
+    adk_routine_asset_transaction_phase() { printf 'promoted\n'; }
+    adk_routine_asset_candidate_drain_authority_exists() { return 0; }
+    adk_routine_asset_candidate_drain_authority_value() {
+        case "$3" in
+            capture_state) printf 'provisional\n' ;;
+            port) printf '8791\n' ;;
+            supervisor) printf 'gui/test/com.agentdesk.release\n' ;;
+            candidate_binary_sha256) printf '%s\n' "$CANDIDATE_SHA" ;;
+            *) return 1 ;;
+        esac
+    }
+    _launchd_domain() { printf 'gui/test\n'; }
+    _resolve_release_server_port() { printf '8791\n'; }
+    _sha256_file() { adk_sha256_file "$1"; }
+    _release_launchd_job_is_loaded() { [ "$JOB_LOADED" = 1 ]; }
+    _release_candidate_port_refuses_connections() { [ "$JOB_LOADED" = 0 ]; }
+    _release_service_is_stopped() { [ "$JOB_LOADED" = 0 ]; }
+    _capture_release_candidate_process() {
+        RELEASE_CANDIDATE_PID=9090
+        RELEASE_CANDIDATE_IDENTITY=provisional-instance
+        RELEASE_CANDIDATE_CAPTURED=1
+        EVENTS="${EVENTS}capture "
+    }
+    _release_candidate_command_matches_live_binary() { return 0; }
+    _persist_release_candidate_drain_authority() {
+        if [ -n "${2:-}" ]; then
+            EVENTS="${EVENTS}persist-exact "
+        else
+            EVENTS="${EVENTS}persist-provisional "
+        fi
+    }
+    _stop_and_drain_release_candidate() {
+        [ "$RELEASE_CANDIDATE_CAPTURED" = 1 ] || return 1
+        EVENTS="${EVENTS}drain "
+        JOB_LOADED=0
+        RELEASE_CANDIDATE_CAPTURED=0
+    }
+    launchctl() {
+        [ "$1" = bootstrap ] || return 1
+        JOB_LOADED=1
+        EVENTS="${EVENTS}bootstrap "
+    }
+    xattr() { :; }
+    start_release_tmux_fallback() { return 1; }
+    wait_for_http_service_health() { EVENTS="${EVENTS}healthy "; }
+    _set_release_binary_immutable_state() { :; }
+    _retire_release_rollback_material() { :; }
+    adk_commit_routine_asset_transaction_forward() {
+        EVENTS="${EVENTS}commit "
+        ACTIVE=0
+    }
+    _rollback_release_binary() { OLD_ROLLBACKS=$((OLD_ROLLBACKS + 1)); }
+
+    _recover_durable_forward_migration_before_new_deploy
+    [ "$ACTIVE" = 0 ] && [ "$OLD_ROLLBACKS" = 0 ] \
+        && [[ "$EVENTS" == *'persist-exact '* ]] \
+        && [[ "$EVENTS" == *'healthy commit '* ]] \
+        || exit 150
+    if [ "$PROVISIONAL_MODE" = loaded ]; then
+        [[ "$EVENTS" == 'capture persist-exact drain '* ]] || exit 151
+    else
+        [[ "$EVENTS" == 'persist-provisional bootstrap capture persist-exact '* ]] \
+            || exit 152
+    fi
+) || fail "fresh ${PROVISIONAL_MODE} provisional marker did not recover forward"
+done
 
 (
     eval "$(extract_function _release_candidate_port_refuses_connections)"
@@ -887,6 +1447,16 @@ DEPLOY_OK_LINE="$(rg -n '^DEPLOY_OK=1$' "$DEPLOY_RELEASE" | tail -1 | cut -d: -f
         || exit 103
     [ "$(_rollback_backup_latest_migration_name)" = "$LEGACY_MIGRATION" ] \
         || exit 104
+    # Simulate binary promotion, then a fresh shell with no transient mode.
+    # The durable mode must restore `capture`, and the preflight verifier must
+    # follow the old bytes to .prev instead of hashing the promoted candidate.
+    cp "$CANDIDATE" "$REL_BINARY"
+    REL_ROLLBACK_MATERIAL_MODE=''
+    _restore_rollback_material_mode "$ROUTINE_ASSET_TXN"
+    [ "$REL_ROLLBACK_MATERIAL_MODE" = capture ] \
+        && [ "$(_verified_preflight_rollback_migration "$ROUTINE_ASSET_TXN")" \
+            = "$LEGACY_MIGRATION" ] \
+        || exit 110
     EXPECTED_HELPERS_SHA="$(adk_sha256_tree "$ADK_REL/routine-helpers.old")"
     python3 - "$REL_BINARY_BACKUP_META" "$EXPECTED_HELPERS_SHA" <<'PY'
 import json
@@ -922,6 +1492,7 @@ PY
     # shellcheck source=../scripts/routine-asset-surface.sh
     . "$ASSET_SURFACE"
     load_release_generation_functions
+    _persist_rollback_material_mode() { return 0; }
     TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/adk-release-prev-preflight.XXXXXX")"
     trap 'rm -rf "$TEST_ROOT"' EXIT
     chflags() { :; }
@@ -965,6 +1536,7 @@ PY
     # shellcheck source=../scripts/routine-asset-surface.sh
     . "$ASSET_SURFACE"
     load_release_generation_functions
+    _persist_rollback_material_mode() { return 0; }
     TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/adk-release-meta-preflight.XXXXXX")"
     trap 'rm -rf "$TEST_ROOT"' EXIT
     chflags() { :; }

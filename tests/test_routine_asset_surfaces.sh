@@ -230,11 +230,67 @@ release_runtime_lock() {
 CURRENT_LOCK=""
 CURRENT_TXN=""
 
+# Transaction authority is published only after its phase, lock binding, and
+# directory graph are individually durable. The forward marker may rely on this
+# order after a power loss, so execute the real writer and inspect its seam.
+DURABILITY_RUNTIME="$TMP_ROOT/durability-runtime"
+DURABILITY_TRACE="$TMP_ROOT/durability-events.log"
+ADK_ROUTINE_ASSET_DURABILITY_TRACE_FILE="$DURABILITY_TRACE"
+acquire_runtime_lock "$DURABILITY_RUNTIME"
+DURABILITY_TXN="$(
+    adk_begin_routine_asset_transaction "$DURABILITY_RUNTIME" "$CURRENT_LOCK"
+)"
+[ "$(sed -n '1p' "$DURABILITY_TRACE")" = 'atomic:phase:file+parent' ] \
+    && [ "$(sed -n '2p' "$DURABILITY_TRACE")" = \
+        'atomic:lock-path:file+parent' ] \
+    && [ "$(sed -n '3p' "$DURABILITY_TRACE")" = \
+        'transaction-metadata-tree:directories' ] \
+    && [ "$(sed -n '4p' "$DURABILITY_TRACE")" = \
+        'atomic:active-marker:file+parent' ] \
+    || fail_test 'active transaction marker preceded durable recovery metadata'
+adk_abort_routine_asset_transaction "$DURABILITY_RUNTIME" "$DURABILITY_TXN"
+release_runtime_lock
+unset ADK_ROUTINE_ASSET_DURABILITY_TRACE_FILE
+
+# replace(2) can publish the active marker even when the following parent fsync
+# fails. The begin caller must preserve marker+transaction as one recoverable
+# pair, and the next owner must converge it instead of seeing a dangling marker.
+FAULT_RUNTIME="$TMP_ROOT/active-marker-fsync-fault"
+acquire_runtime_lock "$FAULT_RUNTIME"
+export ADK_ROUTINE_ASSET_TEST_FAIL_AFTER_REPLACE_LABEL=active-marker
+set +e
+adk_begin_routine_asset_transaction "$FAULT_RUNTIME" "$CURRENT_LOCK" \
+    >/dev/null 2>"$TMP_ROOT/active-marker-fsync-fault.err"
+FAULT_STATUS=$?
+set -e
+unset ADK_ROUTINE_ASSET_TEST_FAIL_AFTER_REPLACE_LABEL
+[ "$FAULT_STATUS" -ne 0 ] \
+    || fail_test 'post-replace active-marker fsync fault was accepted'
+FAULT_MARKER="$FAULT_RUNTIME/runtime/routine-assets.active"
+FAULT_TXN_NAME="$(sed -n '1p' "$FAULT_MARKER")"
+FAULT_TXN="$FAULT_RUNTIME/runtime/$FAULT_TXN_NAME"
+[ -d "$FAULT_TXN" ] && [ -f "$FAULT_TXN/phase" ] \
+    || fail_test 'post-replace failure left a dangling active transaction marker'
+adk_recover_active_routine_asset_transaction "$FAULT_RUNTIME"
+[ ! -e "$FAULT_MARKER" ] && [ ! -e "$FAULT_TXN" ] \
+    || fail_test 'preserved active-marker failure pair did not recover cleanly'
+release_runtime_lock
+
 # Unique stages preserve operator assets, exact tombstones, and root mode.
 SOURCE_ROOT="$TMP_ROOT/repo-v1"
 RUNTIME_ROOT="$TMP_ROOT/release-v0"
 seed_source "$SOURCE_ROOT" 'v1'
 seed_live "$RUNTIME_ROOT" 'v0'
+HELPER_DIGEST_WITHOUT_BYTECODE="$(adk_sha256_tree "$SOURCE_ROOT/routine-helpers")"
+mkdir -p "$SOURCE_ROOT/routine-helpers/__pycache__" \
+    "$RUNTIME_ROOT/routine-helpers/__pycache__"
+printf 'source bytecode\n' \
+    > "$SOURCE_ROOT/routine-helpers/__pycache__/bundled.cpython-313.pyc"
+printf 'live bytecode\n' \
+    > "$RUNTIME_ROOT/routine-helpers/__pycache__/operator.cpython-313.pyc"
+[ "$(adk_sha256_tree "$SOURCE_ROOT/routine-helpers")" \
+    = "$HELPER_DIGEST_WITHOUT_BYTECODE" ] \
+    || fail_test 'helper generation digest included machine-local bytecode'
 write_quickjs_routine \
     "$SOURCE_ROOT/routines/monitoring/bundled-v1-only.js" 'v1-only'
 printf 'v1-only helper\n' \
@@ -266,6 +322,10 @@ LEGACY_ROUTINE_STAGE="$RUNTIME_ROOT/routines.new"
     || fail_test 'helper staging erased an operator-private asset'
 [ -f "$CURRENT_TXN/staged/release-root/routines/monitoring/operator.js" ] \
     || fail_test 'routine staging erased an operator-private entrypoint'
+[ ! -e "$CURRENT_TXN/staged/release-root/routine-helpers/__pycache__" ] \
+    && ! find "$CURRENT_TXN/staged/release-root/routine-helpers" \
+        -type f -name '*.pyc' -print -quit | grep -q . \
+    || fail_test 'helper staging published machine-local Python bytecode'
 cmp "$SOURCE_ROOT/routines/generation-marker" \
     "$CURRENT_TXN/staged/release-root/routines/generation-marker" >/dev/null \
     && cmp "$SOURCE_ROOT/routines/monitoring/bundled.js" \
@@ -2060,25 +2120,33 @@ eval "$(extract_function validate_local_build_generation_manifest \
     seed_source "$PROJECT_DIR" 'build-v0'
     write_fake_install_candidate "$PROJECT_DIR/target/release/agentdesk"
     printf 'target/\ndist/\n' > "$PROJECT_DIR/.gitignore"
+    printf '__pycache__/\n*.pyc\n' >> "$PROJECT_DIR/.gitignore"
+    printf '[package]\nname="fixture"\nversion="0.1.0"\n' \
+        > "$PROJECT_DIR/Cargo.toml"
+    printf '# fixture lock\n' > "$PROJECT_DIR/Cargo.lock"
+    printf 'fn main() {}\n' > "$PROJECT_DIR/build.rs"
     printf 'pub fn fixture() {}\n' > "$PROJECT_DIR/src/lib.rs"
     printf '%s\n' '-- fixture migration' \
         > "$PROJECT_DIR/migrations/postgres/0100_fixture.sql"
     git -C "$PROJECT_DIR" init -q
     git -C "$PROJECT_DIR" -c user.name=AgentDesk -c user.email=agentdesk@example.invalid \
-        add .gitignore src migrations routines routine-helpers
+        add .gitignore Cargo.toml Cargo.lock build.rs src migrations routines routine-helpers
     git -C "$PROJECT_DIR" -c user.name=AgentDesk -c user.email=agentdesk@example.invalid \
         commit -qm 'fixture generation'
     BUILD_SOURCE_SHA="$(git -C "$PROJECT_DIR" rev-parse HEAD)"
+    BUILD_INPUT_SHA="$(adk_executable_input_digest "$PROJECT_DIR")"
     (
         cd "$PROJECT_DIR/dist"
         write_local_build_generation_manifest \
-            "$PROJECT_DIR/target/release/agentdesk" "$BUILD_SOURCE_SHA"
+            "$PROJECT_DIR/target/release/agentdesk" "$BUILD_SOURCE_SHA" \
+            "$BUILD_INPUT_SHA"
     )
     error() { :; }
     validate_local_build_generation_manifest
     printf 'pub fn fixture() { panic!("dirty"); }\n' > "$PROJECT_DIR/src/lib.rs"
     if write_local_build_generation_manifest \
         "$PROJECT_DIR/target/release/agentdesk" "$BUILD_SOURCE_SHA" \
+        "$BUILD_INPUT_SHA" \
         >/dev/null 2>&1; then
         exit 95
     fi
@@ -2091,6 +2159,22 @@ eval "$(extract_function validate_local_build_generation_manifest \
     printf '%s\n' '-- fixture migration' \
         > "$PROJECT_DIR/migrations/postgres/0100_fixture.sql"
     validate_local_build_generation_manifest
+    printf 'migrations/postgres/9999_ignored.sql\n' \
+        >> "$PROJECT_DIR/.git/info/exclude"
+    printf '%s\n' '-- ignored but executable migration input' \
+        > "$PROJECT_DIR/migrations/postgres/9999_ignored.sql"
+    if validate_local_build_generation_manifest >/dev/null 2>&1; then
+        exit 98
+    fi
+    rm "$PROJECT_DIR/migrations/postgres/9999_ignored.sql"
+    validate_local_build_generation_manifest
+    mkdir -p "$PROJECT_DIR/routine-helpers/__pycache__"
+    printf 'machine-local-bytecode-v1\n' \
+        > "$PROJECT_DIR/routine-helpers/__pycache__/probe.pyc"
+    validate_local_build_generation_manifest
+    printf 'machine-local-bytecode-v2\n' \
+        > "$PROJECT_DIR/routine-helpers/__pycache__/probe.pyc"
+    validate_local_build_generation_manifest
     printf '%s\n' '// evaluator-compatible v1 asset edit' \
         >> "$PROJECT_DIR/routines/monitoring/bundled.js"
     if validate_local_build_generation_manifest >/dev/null 2>&1; then
@@ -2102,6 +2186,7 @@ eval "$(extract_function validate_local_build_generation_manifest \
         commit -qm 'clean head drift'
     if write_local_build_generation_manifest \
         "$PROJECT_DIR/target/release/agentdesk" "$BUILD_SOURCE_SHA" \
+        "$BUILD_INPUT_SHA" \
         >/dev/null 2>&1; then
         exit 97
     fi

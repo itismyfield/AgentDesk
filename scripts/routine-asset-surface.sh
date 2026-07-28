@@ -62,10 +62,10 @@ import stat
 import sys
 
 root = os.path.abspath(sys.argv[1])
-digest = hashlib.sha256(b"agentdesk-tree-v1\0")
+digest = hashlib.sha256(b"agentdesk-tree-v2-python-bytecode-excluded\0")
 for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
-    dirs.sort()
-    files.sort()
+    dirs[:] = sorted(name for name in dirs if name != "__pycache__")
+    files = sorted(name for name in files if not name.endswith(".pyc"))
     for name in dirs:
         path = os.path.join(current, name)
         entry = os.lstat(path)
@@ -97,6 +97,108 @@ for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
 print(digest.hexdigest())
+PY
+}
+
+adk_executable_input_digest() {
+    local repo_root="$1"
+
+    [ -d "$repo_root" ] && [ ! -L "$repo_root" ] || return 1
+    python3 - "$repo_root" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+root = os.path.abspath(sys.argv[1])
+required_files = ["Cargo.toml", "Cargo.lock"]
+optional_files = ["build.rs", "rust-toolchain", "rust-toolchain.toml"]
+input_roots = ["src", "migrations/postgres", ".cargo"]
+paths = []
+
+for relative in required_files:
+    path = os.path.join(root, relative)
+    try:
+        entry = os.lstat(path)
+    except FileNotFoundError:
+        raise SystemExit(1)
+    if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode):
+        raise SystemExit(1)
+    paths.append(relative)
+
+for relative in optional_files:
+    path = os.path.join(root, relative)
+    try:
+        entry = os.lstat(path)
+    except FileNotFoundError:
+        continue
+    if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode):
+        raise SystemExit(1)
+    paths.append(relative)
+
+for relative_root in input_roots:
+    absolute_root = os.path.join(root, relative_root)
+    if not os.path.exists(absolute_root):
+        if relative_root in ("src", "migrations/postgres"):
+            raise SystemExit(1)
+        continue
+    if os.path.islink(absolute_root) or not os.path.isdir(absolute_root):
+        raise SystemExit(1)
+    for current, directories, files in os.walk(
+        absolute_root, topdown=True, followlinks=False
+    ):
+        directories.sort()
+        files.sort()
+        for name in directories:
+            entry = os.lstat(os.path.join(current, name))
+            if stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode):
+                raise SystemExit(1)
+        for name in files:
+            path = os.path.join(current, name)
+            entry = os.lstat(path)
+            if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode):
+                raise SystemExit(1)
+            paths.append(os.path.relpath(path, root).replace(os.sep, "/"))
+
+digest = hashlib.sha256(b"agentdesk-executable-inputs-v1\0")
+for relative in sorted(paths):
+    encoded = relative.encode("utf-8")
+    digest.update(encoded + b"\0")
+    path = os.path.join(root, *relative.split("/"))
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    digest.update(b"\0")
+print(digest.hexdigest())
+PY
+}
+
+adk_prune_python_bytecode_tree() {
+    local root="$1"
+
+    [ -d "$root" ] && [ ! -L "$root" ] || return 1
+    python3 - "$root" <<'PY'
+import os
+import shutil
+import sys
+
+root = os.path.abspath(sys.argv[1])
+for current, directories, files in os.walk(root, topdown=True, followlinks=False):
+    for name in list(directories):
+        if name != "__pycache__":
+            continue
+        path = os.path.join(current, name)
+        if os.path.islink(path):
+            raise SystemExit(1)
+        shutil.rmtree(path)
+        directories.remove(name)
+    for name in files:
+        if not name.endswith(".pyc"):
+            continue
+        path = os.path.join(current, name)
+        if os.path.islink(path) or not os.path.isfile(path):
+            raise SystemExit(1)
+        os.unlink(path)
 PY
 }
 
@@ -246,8 +348,10 @@ def validate_relpath(value):
 def source_paths():
     paths = []
     for current, directories, files in os.walk(source_root, followlinks=False):
-        directories.sort()
-        files.sort()
+        directories[:] = sorted(
+            name for name in directories if name != "__pycache__"
+        )
+        files = sorted(name for name in files if not name.endswith(".pyc"))
         for name in directories + files:
             path = os.path.join(current, name)
             entry = os.lstat(path)
@@ -578,17 +682,95 @@ _adk_active_marker() {
     printf '%s/routine-assets.active\n' "$(_adk_state_dir "$1")"
 }
 
+_adk_trace_durability_event() {
+    local event="$1"
+    local trace_file="${ADK_ROUTINE_ASSET_DURABILITY_TRACE_FILE:-}"
+
+    [ -n "$trace_file" ] || return 0
+    printf '%s\n' "$event" >> "$trace_file"
+}
+
 _adk_write_atomic_file() {
     local path="$1"
     local value="$2"
-    local tmp="${path}.tmp.$$.$RANDOM"
+    local label="${3:-$(basename "$path")}"
 
-    printf '%s\n' "$value" > "$tmp" || return 1
-    mv "$tmp" "$path"
+    ADK_ATOMIC_PATH="$path" ADK_ATOMIC_VALUE="$value" \
+    ADK_ATOMIC_LABEL="$label" python3 <<'PY' \
+        || return 1
+import os
+import tempfile
+
+path = os.environ["ADK_ATOMIC_PATH"]
+parent = os.path.dirname(path)
+fd, temporary = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".", dir=parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(os.environ["ADK_ATOMIC_VALUE"])
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+    if os.environ.get("ADK_ROUTINE_ASSET_TEST_FAIL_AFTER_REPLACE_LABEL") == os.environ[
+        "ADK_ATOMIC_LABEL"
+    ]:
+        raise OSError("injected failure after atomic replace")
+    directory = os.open(parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+    _adk_trace_durability_event "atomic:${label}:file+parent"
+}
+
+_adk_active_marker_references_transaction() {
+    local marker="$1"
+    local txn_name="$2"
+    local recorded
+
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    recorded="$(sed -n '1p' "$marker")" || return 1
+    [ "$recorded" = "$txn_name" ]
 }
 
 _adk_write_phase() {
-    _adk_write_atomic_file "$1/phase" "$2"
+    _adk_write_atomic_file "$1/phase" "$2" phase
+}
+
+_adk_fsync_transaction_metadata_tree() {
+    local state_dir="$1"
+    local txn_root="$2"
+
+    python3 - "$state_dir" "$txn_root" <<'PY' || return 1
+import os
+import sys
+
+state_dir, txn_root = sys.argv[1:]
+directories = [
+    os.path.join(txn_root, "staged", "release-root"),
+    os.path.join(txn_root, "staged"),
+    os.path.join(txn_root, "surfaces", "routines"),
+    os.path.join(txn_root, "surfaces", "routine-helpers"),
+    os.path.join(txn_root, "surfaces"),
+    txn_root,
+    state_dir,
+]
+for path in directories:
+    if not os.path.isdir(path) or os.path.islink(path):
+        raise SystemExit(1)
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+PY
+    _adk_trace_durability_event "transaction-metadata-tree:directories"
 }
 
 _adk_read_txn_phase() {
@@ -679,6 +861,45 @@ _adk_assert_active_txn() {
     }
 }
 
+adk_fsync_active_routine_asset_transaction_metadata() {
+    local runtime_root="$1"
+    local txn_root="$2"
+    local marker phase_file lock_path_file state_dir
+
+    _adk_assert_active_txn "$runtime_root" "$txn_root" || return 1
+    _adk_read_txn_phase "$txn_root" >/dev/null || return 1
+    marker="$(_adk_active_marker "$runtime_root")" || return 1
+    phase_file="$txn_root/phase"
+    lock_path_file="$txn_root/lock-path"
+    state_dir="$(_adk_state_dir "$runtime_root")" || return 1
+    python3 - "$phase_file" "$lock_path_file" "$marker" \
+        "$txn_root" "$state_dir" "$runtime_root" <<'PY' || return 1
+import os
+import stat
+import sys
+
+phase_file, lock_path_file, marker, txn_root, state_dir, runtime_root = sys.argv[1:]
+for path in (phase_file, lock_path_file, marker):
+    entry = os.lstat(path)
+    if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode):
+        raise SystemExit(1)
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+for path in (txn_root, state_dir, runtime_root):
+    if not os.path.isdir(path) or os.path.islink(path):
+        raise SystemExit(1)
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+PY
+    _adk_trace_durability_event "active-transaction-metadata:file+directories"
+}
+
 adk_routine_asset_transaction_phase() {
     local runtime_root="$1"
     local txn_root="$2"
@@ -706,6 +927,7 @@ adk_persist_routine_asset_candidate_drain_authority() {
     local identity="$5"
     local port="$6"
     local supervisor="$7"
+    local candidate_sha="${8:-}"
     local capture_state marker
 
     _adk_assert_active_txn "$runtime_root" "$txn_root" || return 1
@@ -721,6 +943,13 @@ adk_persist_routine_asset_candidate_drain_authority() {
     fi
     case "$identity$supervisor" in *$'\n'*|*$'\r'*) return 1 ;; esac
     [ "${#identity}" -le 4096 ] && [ "${#supervisor}" -le 1024 ] || return 1
+    case "$candidate_sha" in
+        '') ;;
+        *[!0-9a-f]*) return 1 ;;
+    esac
+    if [ -n "$candidate_sha" ] && [ "${#candidate_sha}" -ne 64 ]; then
+        return 1
+    fi
     marker="$(_adk_candidate_drain_authority_path "$txn_root")" || return 1
     [ ! -L "$marker" ] || return 1
     ADK_DRAIN_ENTRYPOINT="$entrypoint" \
@@ -729,6 +958,7 @@ adk_persist_routine_asset_candidate_drain_authority() {
     ADK_DRAIN_PORT="$port" \
     ADK_DRAIN_SUPERVISOR="$supervisor" \
     ADK_DRAIN_CAPTURE_STATE="$capture_state" \
+    ADK_DRAIN_CANDIDATE_SHA="$candidate_sha" \
     python3 - "$marker" <<'PY'
 import json
 import os
@@ -737,13 +967,14 @@ import sys
 
 marker = sys.argv[1]
 payload = {
-    "format": "agentdesk-candidate-drain-v1",
+    "format": "agentdesk-candidate-drain-v2",
     "entrypoint": os.environ["ADK_DRAIN_ENTRYPOINT"],
     "capture_state": os.environ["ADK_DRAIN_CAPTURE_STATE"],
     "pid": os.environ["ADK_DRAIN_PID"],
     "identity": os.environ["ADK_DRAIN_IDENTITY"],
     "port": int(os.environ["ADK_DRAIN_PORT"]),
     "supervisor": os.environ["ADK_DRAIN_SUPERVISOR"],
+    "candidate_binary_sha256": os.environ["ADK_DRAIN_CANDIDATE_SHA"],
 }
 fd, temporary = tempfile.mkstemp(prefix=".candidate-drain.", dir=os.path.dirname(marker))
 try:
@@ -772,7 +1003,10 @@ adk_routine_asset_candidate_drain_authority_value() {
     local field="$3"
     local marker
 
-    case "$field" in pid|identity|port|supervisor) ;; *) return 1 ;; esac
+    case "$field" in
+        capture_state|pid|identity|port|supervisor|candidate_binary_sha256) ;;
+        *) return 1 ;;
+    esac
     marker="$(_adk_candidate_drain_authority_path "$txn_root")" || return 1
     [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
     ADK_DRAIN_EXPECTED_ENTRYPOINT="$expected_entrypoint" \
@@ -788,25 +1022,39 @@ try:
         data = json.load(handle)
 except Exception:
     raise SystemExit(1)
-if data.get("format") != "agentdesk-candidate-drain-v1":
+format_name = data.get("format")
+if format_name not in ("agentdesk-candidate-drain-v1", "agentdesk-candidate-drain-v2"):
     raise SystemExit(1)
 if data.get("entrypoint") != os.environ["ADK_DRAIN_EXPECTED_ENTRYPOINT"]:
     raise SystemExit(1)
-if data.get("capture_state") != "exact":
+capture_state = data.get("capture_state")
+if capture_state not in ("exact", "provisional"):
     raise SystemExit(1)
 pid = data.get("pid") or ""
 identity = data.get("identity") or ""
 port = data.get("port")
 supervisor = data.get("supervisor") or ""
-if not re.fullmatch(r"[1-9][0-9]*", pid):
-    raise SystemExit(1)
-if not identity or len(identity) > 4096 or "\n" in identity or "\r" in identity:
+candidate_sha = data.get("candidate_binary_sha256") or ""
+if capture_state == "exact":
+    if not re.fullmatch(r"[1-9][0-9]*", pid):
+        raise SystemExit(1)
+    if not identity or len(identity) > 4096 or "\n" in identity or "\r" in identity:
+        raise SystemExit(1)
+elif pid or identity:
     raise SystemExit(1)
 if not isinstance(port, int) or not 1 <= port <= 65535:
     raise SystemExit(1)
 if not supervisor or len(supervisor) > 1024 or "\n" in supervisor or "\r" in supervisor:
     raise SystemExit(1)
-value = data.get(os.environ["ADK_DRAIN_FIELD"])
+if candidate_sha and not re.fullmatch(r"[0-9a-f]{64}", candidate_sha):
+    raise SystemExit(1)
+field = os.environ["ADK_DRAIN_FIELD"]
+if field in ("pid", "identity") and capture_state != "exact":
+    raise SystemExit(1)
+values = dict(data)
+values["capture_state"] = capture_state
+values["candidate_binary_sha256"] = candidate_sha
+value = values.get(field)
 print(value)
 PY
 }
@@ -903,7 +1151,6 @@ adk_begin_routine_asset_transaction() {
     local lock_file="${2:-$runtime_root/runtime/deploy-release.lock}"
     local state_dir
     local marker
-    local marker_tmp
     local txn_root
     local txn_name
 
@@ -931,14 +1178,24 @@ adk_begin_routine_asset_transaction() {
         rm -rf "$txn_root" 2>/dev/null || true
         return 1
     }
-    _adk_write_atomic_file "$txn_root/lock-path" "${lock_file}.d" || {
+    _adk_write_atomic_file "$txn_root/lock-path" "${lock_file}.d" lock-path || {
         rm -rf "$txn_root" 2>/dev/null || true
         return 1
     }
-    marker_tmp="${marker}.tmp.$$.$RANDOM"
-    if ! printf '%s\n' "$txn_name" > "$marker_tmp" || ! mv "$marker_tmp" "$marker"; then
-        rm -f "$marker_tmp" 2>/dev/null || true
+    if ! _adk_fsync_transaction_metadata_tree "$state_dir" "$txn_root"; then
         rm -rf "$txn_root" 2>/dev/null || true
+        return 1
+    fi
+    if ! _adk_write_atomic_file "$marker" "$txn_name" active-marker; then
+        if _adk_active_marker_references_transaction "$marker" "$txn_name"; then
+            # replace(2) may have published the marker before its parent fsync
+            # failed. Keep the referenced transaction intact so the pair is
+            # recoverable; deleting it here would create a permanent dangling
+            # marker that blocks every later deploy.
+            echo "Active routine asset marker publish is incomplete; retaining transaction for recovery" >&2
+        elif [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+            rm -rf "$txn_root" 2>/dev/null || true
+        fi
         return 1
     fi
     printf '%s\n' "$txn_root"
@@ -971,7 +1228,8 @@ _adk_stage_preserved_asset_surface() {
     mkdir -p "$staged_root" || return 1
     chmod "$root_mode" "$staged_root" || return 1
     if [ -d "$live_root" ]; then
-        if ! rsync -a "$live_root/" "$staged_root/"; then
+        if ! rsync -a --exclude='__pycache__/' --exclude='*.pyc' \
+            "$live_root/" "$staged_root/"; then
             rm -rf "$staged_root" 2>/dev/null || true
             return 1
         fi
@@ -979,7 +1237,8 @@ _adk_stage_preserved_asset_surface() {
     # A peer inbox is operator data delivered out-of-band. It overlays the
     # peer's old live tree but never wins over repository-owned paths below.
     if [ -n "$incoming_root" ]; then
-        if ! rsync -a "$incoming_root/" "$staged_root/"; then
+        if ! rsync -a --exclude='__pycache__/' --exclude='*.pyc' \
+            "$incoming_root/" "$staged_root/"; then
             rm -rf "$staged_root" 2>/dev/null || true
             return 1
         fi
@@ -988,7 +1247,8 @@ _adk_stage_preserved_asset_surface() {
     # --checksum defeats rsync's size+mtime quick-check: successive v0/v1 test
     # payloads (and real generated assets) can legitimately share both while
     # containing different bytes.
-    if ! rsync -a --checksum "$source_root/" "$staged_root/"; then
+    if ! rsync -a --checksum --exclude='__pycache__/' --exclude='*.pyc' \
+        "$source_root/" "$staged_root/"; then
         rm -rf "$staged_root" 2>/dev/null || true
         return 1
     fi
@@ -1629,6 +1889,7 @@ adk_rsync_peer_asset_surface() {
         if ssh -o "ConnectTimeout=$timeout_seconds" "$peer" \
             "bash -lc $(printf '%q' "$remote_probe")"; then
             rsync -a --protect-args \
+                --exclude='__pycache__/' --exclude='*.pyc' \
                 -e "ssh -o ConnectTimeout=$timeout_seconds" \
                 -- "$source_root/" "$peer:$remote_root/$surface/"
             return
@@ -1650,7 +1911,7 @@ first_link=\$(find \"\$target\" -type l -print -quit) || exit 53
 [ -z \"\$first_link\" ] || exit 54
 tar -xf - -C \"\$target\""
 
-    tar -C "$source_root" -cf - . \
+    tar -C "$source_root" --exclude='__pycache__' --exclude='*.pyc' -cf - . \
         | ssh -o "ConnectTimeout=$timeout_seconds" "$peer" \
             "bash -lc $(printf '%q' "$remote_command")"
     pipeline_status=("${PIPESTATUS[@]}")

@@ -156,7 +156,11 @@ PG_TUNNEL_ROLLBACK_MANUAL_KIND="none"
 PG_TUNNEL_ROLLBACK_MANUAL_CONFIG=""
 PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE=""
 FORWARD_MIGRATION_APPLIED=0
+FORWARD_MIGRATION_RECOVERY_STATE=none
 FORWARD_MIGRATION_CANDIDATE_SHA=""
+FORWARD_MIGRATION_CLASSIFIED_STATE=""
+FORWARD_ROLLBACK_MIGRATION=""
+FORWARD_TARGET_MIGRATION=""
 RELEASE_BINARY_FLAG_SNAPSHOT=0
 RELEASE_BINARY_OLD_IMMUTABLE=0
 RELEASE_CANDIDATE_PID=""
@@ -547,7 +551,7 @@ _validate_external_deploy_bundle() {
     [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ] || return 0
 
     local manifest="${AGENTDESK_DEPLOY_BUNDLE_MANIFEST:-}"
-    local source_sha binary_sha routines_sha helpers_sha
+    local source_sha binary_sha routines_sha helpers_sha inputs_sha
     if [ -z "$manifest" ]; then
         echo "✗ AGENTDESK_DEPLOY_BINARY requires AGENTDESK_DEPLOY_BUNDLE_MANIFEST" >&2
         echo "  binary-only overrides cannot prove binary/routine asset generation identity" >&2
@@ -562,15 +566,17 @@ _validate_external_deploy_bundle() {
         return 1
     fi
     source_sha="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
+    inputs_sha="$(adk_executable_input_digest "$REPO")"
     binary_sha="$(_sha256_file "$SOURCE_BINARY")"
     routines_sha="$(_sha256_tree "$REPO/routines")"
     helpers_sha="$(_sha256_tree "$REPO/routine-helpers")"
-    if [ -z "$source_sha" ] || [ -z "$binary_sha" ] \
+    if [ -z "$source_sha" ] || [ -z "$inputs_sha" ] || [ -z "$binary_sha" ] \
       || [ -z "$routines_sha" ] || [ -z "$helpers_sha" ]; then
         echo "✗ Could not resolve external deploy generation identity" >&2
         return 1
     fi
     AGENTDESK_BUNDLE_SOURCE_SHA="$source_sha" \
+    AGENTDESK_BUNDLE_INPUTS_SHA="$inputs_sha" \
     AGENTDESK_BUNDLE_BINARY_SHA="$binary_sha" \
     AGENTDESK_BUNDLE_ROUTINES_SHA="$routines_sha" \
     AGENTDESK_BUNDLE_HELPERS_SHA="$helpers_sha" \
@@ -588,11 +594,12 @@ except Exception as exc:
     raise SystemExit(1)
 expected = {
     "source_git_sha": os.environ["AGENTDESK_BUNDLE_SOURCE_SHA"],
+    "executable_inputs_sha256": os.environ["AGENTDESK_BUNDLE_INPUTS_SHA"],
     "binary_sha256": os.environ["AGENTDESK_BUNDLE_BINARY_SHA"],
     "routines_sha256": os.environ["AGENTDESK_BUNDLE_ROUTINES_SHA"],
     "routine_helpers_sha256": os.environ["AGENTDESK_BUNDLE_HELPERS_SHA"],
 }
-if data.get("format") != "agentdesk-release-bundle-v1":
+if data.get("format") != "agentdesk-release-bundle-v2":
     print("unsupported bundle manifest format", file=sys.stderr)
     raise SystemExit(1)
 for key, value in expected.items():
@@ -607,6 +614,7 @@ PY
         echo "✗ External deploy bundle manifest did not match binary/current assets" >&2
         return 1
     }
+    DEPLOY_EXECUTABLE_INPUT_SHA="$inputs_sha"
     echo "▸ External deploy bundle generation verified: ${source_sha:0:12}"
 }
 
@@ -616,7 +624,7 @@ _write_release_source_manifest() {
     local manifest_tmp="$ADK_REL/runtime/release-source.json.new"
     local manifest_path="$ADK_REL/runtime/release-source.json"
     local generated_at repo_head repo_branch repo_upstream repo_upstream_sha repo_dirty latest_migration latest_migration_name latest_migration_sha
-    local manifest_binary binary_sha routines_sha helpers_sha
+    local manifest_binary binary_sha routines_sha helpers_sha inputs_sha
 
     generated_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     repo_head="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
@@ -644,6 +652,7 @@ _write_release_source_manifest() {
     fi
     manifest_binary="${REL_BINARY:-${SOURCE_BINARY:-}}"
     binary_sha="$(_sha256_file "$manifest_binary")"
+    inputs_sha="$(adk_executable_input_digest "$REPO")"
     # These are bundle-generation digests, so bind the repository payload that
     # travels with the binary. Operator-preserved runtime files intentionally do
     # not alter the reusable source bundle manifest.
@@ -654,6 +663,7 @@ _write_release_source_manifest() {
     AGENTDESK_MANIFEST_REPO="$REPO" \
     AGENTDESK_MANIFEST_REPO_BRANCH="$repo_branch" \
     AGENTDESK_MANIFEST_REPO_HEAD="$repo_head" \
+    AGENTDESK_MANIFEST_INPUTS_SHA="$inputs_sha" \
     AGENTDESK_MANIFEST_REPO_UPSTREAM="$repo_upstream" \
     AGENTDESK_MANIFEST_REPO_UPSTREAM_SHA="$repo_upstream_sha" \
     AGENTDESK_MANIFEST_REPO_DIRTY="$repo_dirty" \
@@ -677,12 +687,13 @@ import sys
 
 path = sys.argv[1]
 payload = {
-    "format": "agentdesk-release-bundle-v1",
+    "format": "agentdesk-release-bundle-v2",
     "generated_at": os.environ.get("AGENTDESK_MANIFEST_GENERATED_AT", ""),
     "repo_path": os.environ.get("AGENTDESK_MANIFEST_REPO", ""),
     "repo_branch": os.environ.get("AGENTDESK_MANIFEST_REPO_BRANCH", ""),
     "repo_head": os.environ.get("AGENTDESK_MANIFEST_REPO_HEAD", ""),
     "source_git_sha": os.environ.get("AGENTDESK_MANIFEST_REPO_HEAD", ""),
+    "executable_inputs_sha256": os.environ.get("AGENTDESK_MANIFEST_INPUTS_SHA", ""),
     "repo_upstream": os.environ.get("AGENTDESK_MANIFEST_REPO_UPSTREAM", ""),
     "repo_upstream_sha": os.environ.get("AGENTDESK_MANIFEST_REPO_UPSTREAM_SHA", ""),
     "repo_dirty": os.environ.get("AGENTDESK_MANIFEST_REPO_DIRTY", "unknown"),
@@ -1236,6 +1247,39 @@ _restore_release_binary_immutable_flag() {
         "$REL_BINARY" "${RELEASE_BINARY_OLD_IMMUTABLE:-0}"
 }
 
+_rollback_material_mode_path() {
+    printf '%s/rollback-material-mode\n' "$1"
+}
+
+_durable_rollback_material_mode() {
+    local txn_root="$1"
+    local path mode
+
+    path="$(_rollback_material_mode_path "$txn_root")" || return 1
+    [ -f "$path" ] && [ ! -L "$path" ] || return 1
+    mode="$(sed -n '1p' "$path")" || return 1
+    case "$mode" in preserve|capture|none) ;; *) return 1 ;; esac
+    printf '%s\n' "$mode"
+}
+
+_persist_rollback_material_mode() {
+    local txn_root="$1"
+    local mode="$2"
+
+    _adk_assert_active_txn "$ADK_REL" "$txn_root" || return 1
+    case "$mode" in preserve|capture|none) ;; *) return 1 ;; esac
+    _adk_write_atomic_file \
+        "$(_rollback_material_mode_path "$txn_root")" "$mode" \
+        rollback-material-mode
+}
+
+_restore_rollback_material_mode() {
+    local mode
+
+    mode="$(_durable_rollback_material_mode "$1")" || return 1
+    REL_ROLLBACK_MATERIAL_MODE="$mode"
+}
+
 _prepare_release_rollback_generation() {
     # Decide every rollback-artifact branch while the old service is still
     # running. In particular, a pre-helper release gets one explicit empty
@@ -1292,8 +1336,13 @@ _prepare_release_rollback_generation() {
         REL_ROLLBACK_MATERIAL_MODE="capture"
     else
         REL_ROLLBACK_MATERIAL_MODE="none"
-        return 0
     fi
+    if ! _persist_rollback_material_mode \
+        "$ROUTINE_ASSET_TXN" "$REL_ROLLBACK_MATERIAL_MODE"; then
+        REL_ROLLBACK_MATERIAL_MODE=""
+        return 1
+    fi
+    [ "$REL_ROLLBACK_MATERIAL_MODE" != none ] || return 0
 
     source_git_sha="$(_manifest_source_git_sha 2>/dev/null || true)"
     latest_migration="$(_manifest_latest_migration_name 2>/dev/null || true)"
@@ -1360,15 +1409,101 @@ _forward_migration_marker_path() {
     printf '%s/forward-migration-applied.json\n' "$1"
 }
 
+_verified_preflight_rollback_migration() {
+    local txn_root="${1:-${ROUTINE_ASSET_TXN:-}}"
+    local metadata_path
+    local backup_binary mode migration
+
+    [ -n "$txn_root" ] || return 1
+    metadata_path="$txn_root/rollback-backup.meta.preflight"
+    mode="${REL_ROLLBACK_MATERIAL_MODE:-}"
+    case "$mode" in
+        preserve|capture|none) ;;
+        *) mode="$(_durable_rollback_material_mode "$txn_root")" || return 1 ;;
+    esac
+    case "$mode" in
+        preserve)
+            backup_binary="$REL_BINARY_BACKUP"
+            ;;
+        capture)
+            # Before promotion the preflight metadata binds the live binary.
+            # After promotion those exact old bytes live at .prev, so try the
+            # durable backup first and then the still-live pre-promotion path.
+            for backup_binary in "$REL_BINARY_BACKUP" "$REL_BINARY"; do
+                if migration="$(
+                    ROUTINE_ASSET_TXN="$txn_root" \
+                    REL_BINARY_BACKUP="$backup_binary" \
+                    REL_BINARY_BACKUP_META="$metadata_path" \
+                        _rollback_backup_latest_migration_name
+                )"; then
+                    printf '%s\n' "$migration"
+                    return 0
+                fi
+            done
+            return 1
+            ;;
+        none)
+            return 1
+            ;;
+        *) return 1 ;;
+    esac
+    ROUTINE_ASSET_TXN="$txn_root" \
+    REL_BINARY_BACKUP="$backup_binary" \
+    REL_BINARY_BACKUP_META="$metadata_path" \
+        _rollback_backup_latest_migration_name
+}
+
+_classify_forward_migration_relation() {
+    local rollback_migration target_path target_migration mode
+
+    target_path="$(_latest_postgres_migration_path 2>/dev/null || true)"
+    [ -n "$target_path" ] || return 1
+    target_migration="$(basename "$target_path")"
+    _release_migration_name_is_valid "$target_migration" || return 1
+    mode="${REL_ROLLBACK_MATERIAL_MODE:-}"
+    case "$mode" in
+        preserve|capture|none) ;;
+        *) mode="$(_durable_rollback_material_mode "$ROUTINE_ASSET_TXN")" \
+            || return 1 ;;
+    esac
+    if [ "$mode" = none ]; then
+        # A fresh install has no rollback binary. Even when the database was
+        # already current, every post-child failure must retain the only
+        # compatible candidate generation rather than invent an old rollback.
+        FORWARD_ROLLBACK_MIGRATION="$target_migration"
+        FORWARD_TARGET_MIGRATION="$target_migration"
+        FORWARD_MIGRATION_CLASSIFIED_STATE=advanced
+        return 0
+    fi
+    rollback_migration="$(_verified_preflight_rollback_migration)" || return 1
+    _release_migration_name_is_valid "$rollback_migration" || return 1
+    FORWARD_ROLLBACK_MIGRATION="$rollback_migration"
+    FORWARD_TARGET_MIGRATION="$target_migration"
+    if _migration_advanced "$target_migration" "$rollback_migration"; then
+        FORWARD_MIGRATION_CLASSIFIED_STATE=advanced
+    else
+        FORWARD_MIGRATION_CLASSIFIED_STATE=not-advanced
+    fi
+}
+
 _persist_forward_migration_applied() {
     local txn_root="$1"
     local candidate_sha="$2"
-    local marker txn_id migration_path migration_name source_sha candidate_name candidate_suffix
+    local migration_state="$3"
+    local rollback_migration="$4"
+    local target_migration="$5"
+    local marker txn_id source_sha candidate_name candidate_suffix
 
     _adk_assert_active_txn "$ADK_REL" "$txn_root" || return 1
     case "$candidate_sha" in
         ''|*[!0-9a-f]*) return 1 ;;
     esac
+    case "$migration_state" in
+        advanced|not-advanced|unknown/interrupted) ;;
+        *) return 1 ;;
+    esac
+    _release_migration_name_is_valid "$rollback_migration" || return 1
+    _release_migration_name_is_valid "$target_migration" || return 1
     candidate_name="$(basename "${STAGED_BINARY:-}")" || return 1
     case "$candidate_name" in
         agentdesk.deploy.*) candidate_suffix="${candidate_name#agentdesk.deploy.}" ;;
@@ -1378,10 +1513,6 @@ _persist_forward_migration_applied() {
         ''|*[!A-Za-z0-9]*) return 1 ;;
     esac
     txn_id="$(basename "$txn_root")" || return 1
-    migration_path="$(_latest_postgres_migration_path 2>/dev/null || true)"
-    [ -n "$migration_path" ] || return 1
-    migration_name="$(basename "$migration_path")"
-    _release_migration_name_is_valid "$migration_name" || return 1
     source_sha="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
     case "$source_sha" in
         ''|*[!0-9a-f]*) return 1 ;;
@@ -1391,7 +1522,9 @@ _persist_forward_migration_applied() {
     AGENTDESK_FORWARD_TXN_ID="$txn_id" \
     AGENTDESK_FORWARD_CANDIDATE_SHA="$candidate_sha" \
     AGENTDESK_FORWARD_CANDIDATE_NAME="$candidate_name" \
-    AGENTDESK_FORWARD_MIGRATION="$migration_name" \
+    AGENTDESK_FORWARD_MIGRATION_STATE="$migration_state" \
+    AGENTDESK_FORWARD_ROLLBACK_MIGRATION="$rollback_migration" \
+    AGENTDESK_FORWARD_TARGET_MIGRATION="$target_migration" \
     AGENTDESK_FORWARD_SOURCE_SHA="$source_sha" \
     python3 - "$marker" <<'PY'
 import json
@@ -1401,11 +1534,17 @@ import sys
 
 marker = sys.argv[1]
 payload = {
-    "format": "agentdesk-forward-migration-v1",
+    "format": "agentdesk-forward-migration-v2",
     "asset_transaction": os.environ["AGENTDESK_FORWARD_TXN_ID"],
     "candidate_binary_sha256": os.environ["AGENTDESK_FORWARD_CANDIDATE_SHA"],
     "candidate_binary_name": os.environ["AGENTDESK_FORWARD_CANDIDATE_NAME"],
-    "latest_postgres_migration": os.environ["AGENTDESK_FORWARD_MIGRATION"],
+    "migration_state": os.environ["AGENTDESK_FORWARD_MIGRATION_STATE"],
+    "rollback_latest_postgres_migration": os.environ[
+        "AGENTDESK_FORWARD_ROLLBACK_MIGRATION"
+    ],
+    "target_latest_postgres_migration": os.environ[
+        "AGENTDESK_FORWARD_TARGET_MIGRATION"
+    ],
     "source_git_sha": os.environ["AGENTDESK_FORWARD_SOURCE_SHA"],
 }
 fd, temporary = tempfile.mkstemp(
@@ -1435,18 +1574,20 @@ _fsync_forward_recovery_generation() {
     local txn_root="$1"
     local candidate_binary="$2"
     local staged_root="$txn_root/staged/release-root"
+    local rollback_mode
 
     [ -f "$candidate_binary" ] && [ ! -L "$candidate_binary" ] || return 1
     [ -d "$staged_root/routines" ] && [ ! -L "$staged_root/routines" ] \
         || return 1
     [ -d "$staged_root/routine-helpers" ] \
         && [ ! -L "$staged_root/routine-helpers" ] || return 1
-    python3 - "$candidate_binary" "$txn_root" <<'PY'
+    rollback_mode="$(_durable_rollback_material_mode "$txn_root")" || return 1
+    python3 - "$candidate_binary" "$txn_root" "$rollback_mode" <<'PY'
 import os
 import stat
 import sys
 
-candidate, txn_root = sys.argv[1:]
+candidate, txn_root, rollback_mode = sys.argv[1:]
 staged_root = os.path.join(txn_root, "staged", "release-root")
 roots = [
     os.path.join(staged_root, "routines"),
@@ -1456,7 +1597,7 @@ roots = [
 def fsync_regular(path):
     mode = os.lstat(path).st_mode
     if stat.S_ISLNK(mode):
-        return
+        raise OSError(f"symlinked recovery file: {path}")
     if not stat.S_ISREG(mode):
         raise OSError(f"non-regular recovery file: {path}")
     fd = os.open(path, os.O_RDONLY)
@@ -1466,6 +1607,9 @@ def fsync_regular(path):
         os.close(fd)
 
 fsync_regular(candidate)
+fsync_regular(os.path.join(txn_root, "rollback-material-mode"))
+if rollback_mode != "none":
+    fsync_regular(os.path.join(txn_root, "rollback-backup.meta.preflight"))
 for root in roots:
     for current, directories, files in os.walk(root, topdown=False, followlinks=False):
         for name in files:
@@ -1498,34 +1642,68 @@ for directory in [
     finally:
         os.close(fd)
 PY
+    adk_fsync_active_routine_asset_transaction_metadata \
+        "$ADK_REL" "$txn_root"
+}
+
+_release_executable_inputs_match_built_candidate() {
+    local current_inputs
+
+    [ -n "${DEPLOY_EXECUTABLE_INPUT_SHA:-}" ] || return 1
+    current_inputs="$(adk_executable_input_digest "$REPO")" || return 1
+    [ "$current_inputs" = "$DEPLOY_EXECUTABLE_INPUT_SHA" ]
 }
 
 _apply_release_postgres_migration_with_forward_barrier() {
-    local candidate_sha
+    local candidate_sha final_state
 
     candidate_sha="$(_sha256_file "$STAGED_BINARY")" || {
         echo "✗ Could not bind the staged candidate before forward migration" >&2
         return 1
     }
+    if ! _release_executable_inputs_match_built_candidate; then
+        echo "✗ Executable inputs changed before migration classification" >&2
+        return 1
+    fi
     _fsync_forward_recovery_generation "$ROUTINE_ASSET_TXN" "$STAGED_BINARY" \
         || { echo "✗ Could not durably flush the forward recovery generation" >&2; return 1; }
-    # Arm conservatively before publishing the marker. If marker persistence or
-    # migration itself fails, retaining/starting this newer candidate is still
-    # compatible with the previous schema and avoids an unguarded TERM window.
+    if ! _classify_forward_migration_relation; then
+        echo "✗ Could not verify rollback/current migration relation" >&2
+        return 1
+    fi
+    final_state="$FORWARD_MIGRATION_CLASSIFIED_STATE"
     FORWARD_MIGRATION_CANDIDATE_SHA="$candidate_sha"
+    FORWARD_MIGRATION_RECOVERY_STATE=unknown/interrupted
     FORWARD_MIGRATION_APPLIED=1
     # Persist the compatible candidate before entering the foreground migration
     # command. Bash may deliver TERM immediately after that child returns, before
     # any following assignment can run; the marker is the fail-forward authority
     # across that otherwise unguarded process boundary.
     if ! _persist_forward_migration_applied \
-        "$ROUTINE_ASSET_TXN" "$candidate_sha"; then
+        "$ROUTINE_ASSET_TXN" "$candidate_sha" unknown/interrupted \
+        "$FORWARD_ROLLBACK_MIGRATION" "$FORWARD_TARGET_MIGRATION"; then
         echo "✗ Could not persist the forward-migration recovery barrier" >&2
+        return 1
+    fi
+    if ! _release_executable_inputs_match_built_candidate; then
+        echo "✗ Executable inputs changed at the migration child boundary" >&2
         return 1
     fi
     if ! "$STAGED_BINARY" release-migrate-postgres; then
         echo "✗ Release PostgreSQL migration failed; retaining the compatible candidate for fail-forward recovery." >&2
         return 1
+    fi
+    if ! _persist_forward_migration_applied \
+        "$ROUTINE_ASSET_TXN" "$candidate_sha" "$final_state" \
+        "$FORWARD_ROLLBACK_MIGRATION" "$FORWARD_TARGET_MIGRATION"; then
+        echo "✗ Migration completed but its durable relation state could not be published" >&2
+        return 1
+    fi
+    FORWARD_MIGRATION_RECOVERY_STATE="$final_state"
+    if [ "$final_state" = advanced ]; then
+        FORWARD_MIGRATION_APPLIED=1
+    else
+        FORWARD_MIGRATION_APPLIED=0
     fi
 }
 
@@ -1535,7 +1713,7 @@ _forward_migration_marker_value() {
     local marker
 
     case "$field" in
-        candidate_binary_sha256|candidate_binary_name) ;;
+        candidate_binary_sha256|candidate_binary_name|migration_state|rollback_latest_postgres_migration|target_latest_postgres_migration) ;;
         *) return 1 ;;
     esac
     marker="$(_forward_migration_marker_path "$txn_root")" || return 1
@@ -1553,24 +1731,81 @@ try:
         data = json.load(handle)
 except Exception:
     raise SystemExit(1)
-if data.get("format") != "agentdesk-forward-migration-v1":
+format_name = data.get("format")
+if format_name not in ("agentdesk-forward-migration-v1", "agentdesk-forward-migration-v2"):
     raise SystemExit(1)
 if data.get("asset_transaction") != os.environ["AGENTDESK_FORWARD_EXPECTED_TXN"]:
     raise SystemExit(1)
 candidate_sha = data.get("candidate_binary_sha256") or ""
 candidate_name = data.get("candidate_binary_name") or ""
 source_sha = data.get("source_git_sha") or ""
-migration = data.get("latest_postgres_migration") or ""
+if format_name == "agentdesk-forward-migration-v1":
+    state = "unknown/interrupted"
+    rollback_migration = data.get("latest_postgres_migration") or ""
+    target_migration = rollback_migration
+else:
+    state = data.get("migration_state") or ""
+    rollback_migration = data.get("rollback_latest_postgres_migration") or ""
+    target_migration = data.get("target_latest_postgres_migration") or ""
 if not re.fullmatch(r"[0-9a-f]{64}", candidate_sha):
     raise SystemExit(1)
 if not re.fullmatch(r"agentdesk\.deploy\.[A-Za-z0-9]+", candidate_name):
     raise SystemExit(1)
 if not re.fullmatch(r"[0-9a-f]{40,64}", source_sha):
     raise SystemExit(1)
-if not re.fullmatch(r"[0-9]{4}_[A-Za-z0-9._-]+\.sql", migration):
+if state not in ("advanced", "not-advanced", "unknown/interrupted"):
     raise SystemExit(1)
-print(data[os.environ["AGENTDESK_FORWARD_MARKER_FIELD"]])
+for migration in (rollback_migration, target_migration):
+    if not re.fullmatch(r"[0-9]{4}_[A-Za-z0-9._-]+\.sql", migration):
+        raise SystemExit(1)
+values = dict(data)
+values["migration_state"] = state
+values["rollback_latest_postgres_migration"] = rollback_migration
+values["target_latest_postgres_migration"] = target_migration
+print(values[os.environ["AGENTDESK_FORWARD_MARKER_FIELD"]])
 PY
+}
+
+_forward_migration_recovery_state() {
+    local txn_root="$1"
+    local state rollback_migration target_migration verified_rollback mode
+
+    state="$(_forward_migration_marker_value "$txn_root" migration_state)" \
+        || return 1
+    case "$state" in
+        unknown/interrupted) printf '%s\n' "$state"; return 0 ;;
+        advanced|not-advanced) ;;
+        *) return 1 ;;
+    esac
+    rollback_migration="$(_forward_migration_marker_value \
+        "$txn_root" rollback_latest_postgres_migration)" || return 1
+    target_migration="$(_forward_migration_marker_value \
+        "$txn_root" target_latest_postgres_migration)" || return 1
+    mode="${REL_ROLLBACK_MATERIAL_MODE:-}"
+    case "$mode" in
+        preserve|capture|none) ;;
+        *) mode="$(_durable_rollback_material_mode "$txn_root" 2>/dev/null || true)" ;;
+    esac
+    if [ "$mode" = none ]; then
+        # Durable `none` proves there never was rollback material. Only the
+        # conservative fail-forward state is valid for that fresh generation.
+        [ "$state" = advanced ] || state=unknown/interrupted
+        printf '%s\n' "$state"
+        return 0
+    fi
+    verified_rollback="$(_verified_preflight_rollback_migration \
+        "$txn_root" 2>/dev/null || true)"
+    if [ -z "$verified_rollback" ] \
+      || [ "$verified_rollback" != "$rollback_migration" ]; then
+        printf 'unknown/interrupted\n'
+        return 0
+    fi
+    if _migration_advanced "$target_migration" "$verified_rollback"; then
+        [ "$state" = advanced ] || state=unknown/interrupted
+    else
+        [ "$state" = not-advanced ] || state=unknown/interrupted
+    fi
+    printf '%s\n' "$state"
 }
 
 _forward_migration_candidate_sha() {
@@ -1670,36 +1905,88 @@ _persist_release_candidate_drain_authority() {
     local txn_root="$1"
     local pid="${2:-}"
     local identity="${3:-}"
-    local domain
+    local domain candidate_sha candidate_path
 
     domain="${LAUNCHD_DOMAIN:-$(_launchd_domain)}"
+    candidate_sha="${FORWARD_MIGRATION_CANDIDATE_SHA:-}"
+    if [ -z "$candidate_sha" ]; then
+        if [ -n "${STAGED_BINARY:-}" ] && [ -f "$STAGED_BINARY" ]; then
+            candidate_path="$STAGED_BINARY"
+        else
+            candidate_path="${REL_BINARY:-}"
+        fi
+        candidate_sha="$(_sha256_file "$candidate_path")" || return 1
+    fi
     adk_persist_routine_asset_candidate_drain_authority \
         "$ADK_REL" "$txn_root" deploy-release "$pid" "$identity" \
-        "${REL_PORT:-$(_resolve_release_server_port)}" "$domain/$PLIST_REL"
+        "${REL_PORT:-$(_resolve_release_server_port)}" "$domain/$PLIST_REL" \
+        "$candidate_sha"
+}
+
+_release_candidate_command_matches_live_binary() {
+    local pid="$1"
+    local command_line
+
+    command_line="$(ps -o command= -p "$pid" 2>/dev/null || true)"
+    [ -n "$command_line" ] || return 1
+    case "$command_line" in
+        "${REL_BINARY}"|"${REL_BINARY} "*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 _resume_release_candidate_drain_authority() {
     local txn_root="$1"
-    local pid identity marker_port supervisor expected_supervisor current_port
+    local expected_candidate_sha="$2"
+    local capture_state pid identity marker_port supervisor marker_candidate_sha
+    local expected_supervisor current_port live_sha
 
     adk_routine_asset_candidate_drain_authority_exists "$txn_root" || return 0
-    pid="$(adk_routine_asset_candidate_drain_authority_value \
-        "$txn_root" deploy-release pid)" || return 1
-    identity="$(adk_routine_asset_candidate_drain_authority_value \
-        "$txn_root" deploy-release identity)" || return 1
+    capture_state="$(adk_routine_asset_candidate_drain_authority_value \
+        "$txn_root" deploy-release capture_state)" || return 1
     marker_port="$(adk_routine_asset_candidate_drain_authority_value \
         "$txn_root" deploy-release port)" || return 1
     supervisor="$(adk_routine_asset_candidate_drain_authority_value \
         "$txn_root" deploy-release supervisor)" || return 1
+    marker_candidate_sha="$(adk_routine_asset_candidate_drain_authority_value \
+        "$txn_root" deploy-release candidate_binary_sha256)" || return 1
     LAUNCHD_DOMAIN="${LAUNCHD_DOMAIN:-$(_launchd_domain)}"
     expected_supervisor="$LAUNCHD_DOMAIN/$PLIST_REL"
     current_port="${REL_PORT:-$(_resolve_release_server_port)}"
     [ "$supervisor" = "$expected_supervisor" ] \
         && [ "$marker_port" = "$current_port" ] || return 1
+    case "$expected_candidate_sha" in
+        ''|*[!0-9a-f]*) return 1 ;;
+    esac
+    [ -z "$marker_candidate_sha" ] \
+        || [ "$marker_candidate_sha" = "$expected_candidate_sha" ] || return 1
+    live_sha="$(_sha256_file "$REL_BINARY" 2>/dev/null || true)"
+    [ "$live_sha" = "$expected_candidate_sha" ] || return 1
     REL_PORT="$current_port"
-    RELEASE_CANDIDATE_PID="$pid"
-    RELEASE_CANDIDATE_IDENTITY="$identity"
-    RELEASE_CANDIDATE_CAPTURED=1
+    if [ "$capture_state" = provisional ]; then
+        if _release_launchd_job_is_loaded; then
+            _capture_release_candidate_process || return 1
+            _release_candidate_command_matches_live_binary \
+                "$RELEASE_CANDIDATE_PID" || return 1
+            _persist_release_candidate_drain_authority "$txn_root" \
+                "$RELEASE_CANDIDATE_PID" "$RELEASE_CANDIDATE_IDENTITY" \
+                || return 1
+        elif _release_candidate_port_refuses_connections; then
+            return 0
+        else
+            return 1
+        fi
+    elif [ "$capture_state" = exact ]; then
+        pid="$(adk_routine_asset_candidate_drain_authority_value \
+            "$txn_root" deploy-release pid)" || return 1
+        identity="$(adk_routine_asset_candidate_drain_authority_value \
+            "$txn_root" deploy-release identity)" || return 1
+        RELEASE_CANDIDATE_PID="$pid"
+        RELEASE_CANDIDATE_IDENTITY="$identity"
+        RELEASE_CANDIDATE_CAPTURED=1
+    else
+        return 1
+    fi
     _stop_and_drain_release_candidate "$txn_root" || return 1
     RELEASE_CANDIDATE_PID=""
     RELEASE_CANDIDATE_IDENTITY=""
@@ -1880,7 +2167,8 @@ _recover_forward_migrated_release() {
     actual_sha="$(_sha256_file "$candidate_binary")" || return 1
     [ "$actual_sha" = "$candidate_sha" ] || return 1
 
-    _resume_release_candidate_drain_authority "$txn_root" || return 1
+    _resume_release_candidate_drain_authority "$txn_root" "$candidate_sha" \
+        || return 1
 
     if [ "$candidate_binary" = "${REL_BINARY:-}" ] \
       && ! _release_service_is_stopped \
@@ -1926,7 +2214,7 @@ _recover_forward_migrated_release() {
 }
 
 _recover_durable_forward_migration_before_new_deploy() {
-    local active_txn active_status marker phase
+    local active_txn active_status marker phase recovery_state staged_candidate
 
     if active_txn="$(_adk_active_txn "$ADK_REL")"; then
         :
@@ -1942,12 +2230,39 @@ _recover_durable_forward_migration_before_new_deploy() {
         echo "🛑 Existing forward-migration recovery marker is invalid: $marker" >&2
         return 1
     fi
+    # R8 transactions persist this before the forward marker. Legacy v1
+    # markers have no mode file and already map to unknown/interrupted, so a
+    # missing file may safely degrade to fail-forward instead of blocking them.
+    _restore_rollback_material_mode "$active_txn" 2>/dev/null || true
+    recovery_state="$(_forward_migration_recovery_state "$active_txn")" || {
+        echo "🛑 Existing forward-migration recovery state is invalid: $marker" >&2
+        return 1
+    }
 
     echo "↪ Recovering durable forward-migrated generation before new deploy work" >&2
     REL_PORT="${REL_PORT:-$(_resolve_release_server_port)}"
     LOCK_FILE="${LOCK_FILE:-$ADK_REL/runtime/dcserver.lock}"
     phase="$(adk_routine_asset_transaction_phase "$ADK_REL" "$active_txn")" \
         || return 1
+    if [ "$recovery_state" = not-advanced ] \
+      && ! adk_routine_asset_candidate_drain_authority_exists "$active_txn" \
+      && [ "$phase" = staging ]; then
+        staged_candidate="$(_forward_migration_staged_binary \
+            "$active_txn" 2>/dev/null || true)"
+        [ -n "$staged_candidate" ] || return 1
+        if ! adk_abort_routine_asset_transaction "$ADK_REL" "$active_txn"; then
+            echo "🛑 Safe no-advance transaction abort remains incomplete" >&2
+            return 1
+        fi
+        rm -f "$staged_candidate" || return 1
+        FORWARD_MIGRATION_APPLIED=0
+        FORWARD_MIGRATION_RECOVERY_STATE=none
+        return 0
+    fi
+    if [ "$recovery_state" = not-advanced ]; then
+        echo "⚠ No-advance marker has post-staging runtime state; treating recovery as interrupted" >&2
+        recovery_state=unknown/interrupted
+    fi
     if [ "$phase" = staging ] && ! _capture_release_old_process; then
         echo "🛑 Could not capture the exact pre-recovery release process" >&2
         return 1
@@ -2396,6 +2711,8 @@ _cleanup_on_exit() {
     local forward_recovery_required=0
     local forward_marker=""
     local forward_marker_present=0
+    local forward_marker_valid=1
+    local forward_migration_state="${FORWARD_MIGRATION_RECOVERY_STATE:-none}"
     local candidate_drain_guard=0
 
     # Cleanup traps are installed before this invocation acquires the shared
@@ -2441,6 +2758,12 @@ _cleanup_on_exit() {
             if [ -n "$forward_marker" ] \
               && { [ -e "$forward_marker" ] || [ -L "$forward_marker" ]; }; then
                 forward_marker_present=1
+                if ! forward_migration_state="$(
+                    _forward_migration_recovery_state "$active_txn"
+                )"; then
+                    forward_marker_valid=0
+                    forward_migration_state=unknown/interrupted
+                fi
             fi
         fi
         if [ "$active_status" -eq 0 ] \
@@ -2455,13 +2778,17 @@ _cleanup_on_exit() {
         fi
         if [ "$candidate_drain_guard" = 0 ] \
           && [ "$active_status" -eq 0 ] \
-          && { [ "${FORWARD_MIGRATION_APPLIED:-0}" = 1 ] \
-            || [ "$forward_marker_present" = 1 ]; }; then
+          && { [ "$forward_migration_state" = advanced ] \
+            || [ "$forward_migration_state" = unknown/interrupted ] \
+            || { [ "${FORWARD_MIGRATION_APPLIED:-0}" = 1 ] \
+              && [ "$forward_migration_state" = none ]; }; }; then
             forward_recovery_required=1
             asset_action="none"
             restart_pre_promotion_release=0
             if [ "$forward_marker_present" = 1 ] \
-              && ! _forward_migration_candidate_sha "$active_txn" >/dev/null 2>&1; then
+              && { [ "$forward_marker_valid" != 1 ] \
+                || ! _forward_migration_candidate_sha \
+                    "$active_txn" >/dev/null 2>&1; }; then
                 status=1
                 echo "🛑 Forward-migration recovery marker is invalid" >&2
                 echo "   retained candidate/transaction: $active_txn" >&2
@@ -2706,7 +3033,6 @@ _deploy_to_one_peer() {
     local remote_cd_command
     local remote_deploy_command
     local remote_lock_query
-    local remote_presync_command
     local peer_adk_rel=""
     local peer_lock_file=""
     local peer_incoming=""
@@ -2726,17 +3052,6 @@ _deploy_to_one_peer() {
     else
         remote_cd_command='remote_root="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"; cd "${AGENTDESK_REPO_DIR:-$remote_root/workspaces/agentdesk}"'
     fi
-    remote_presync_command="set -e
-${remote_cd_command}
-git fetch --quiet origin main
-git checkout --quiet main
-git merge --quiet --ff-only origin/main"
-    echo "▸ [peer:$peer] Pre-syncing repo (fast-forward only)..."
-    if ! ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" "bash -lc $(printf '%q' "$remote_presync_command")"; then
-        echo "✗ [peer:$peer] Pre-sync failed (diverged, fetch error, or unreachable within ${DEPLOY_SSH_CONNECT_TIMEOUT}s). Resolve on the peer and retry."
-        return 1
-    fi
-
     # Operator-private assets travel only into a unique remote inbox. The peer
     # deploy claims that inbox under its own shared deploy lock, validates it,
     # and merges it into its transaction stage. Pre-sync never mutates live
@@ -2809,7 +3124,28 @@ PY"
         env_prelude="$env_prelude AGENTDESK_ROUTINE_ASSET_INCOMING=$(printf '%q' "$peer_incoming")"
     fi
 
-    remote_deploy_command="${remote_cd_command} && ${env_prelude} bash scripts/deploy-release.sh${quoted_args}"
+    env_prelude="$env_prelude AGENTDESK_PEER_SYNC_MAIN_UNDER_LOCK=1"
+    # The peer checkout itself may predate the under-lock sync protocol. Fetch
+    # without mutating the worktree, extract deploy+common from one exact remote
+    # commit, and let that bootstrap acquire/recover the durable deploy lock
+    # before it fast-forwards the checkout and same-PID re-execs from the result.
+    remote_deploy_command="set -e
+${remote_cd_command}
+peer_repo=\$PWD
+git fetch --quiet origin main
+bootstrap_head=\$(git rev-parse origin/main)
+bootstrap_root=\$(mktemp -d \"\${TMPDIR:-/tmp}/agentdesk-peer-bootstrap.XXXXXXXX\")
+cleanup_peer_bootstrap() { rm -rf -- \"\$bootstrap_root\"; }
+trap cleanup_peer_bootstrap EXIT INT TERM
+mkdir -p \"\$bootstrap_root\"
+git archive \"\$bootstrap_head\" scripts/deploy-release.sh scripts/routine-asset-surface.sh \
+    | tar -xf - -C \"\$bootstrap_root\"
+[ -f \"\$bootstrap_root/scripts/deploy-release.sh\" ]
+[ -f \"\$bootstrap_root/scripts/routine-asset-surface.sh\" ]
+${env_prelude} \
+AGENTDESK_PEER_BOOTSTRAP_HEAD=\"\$bootstrap_head\" \
+AGENTDESK_REPO_DIR=\"\$peer_repo\" \
+bash \"\$bootstrap_root/scripts/deploy-release.sh\"${quoted_args}"
     echo "▸ [peer:$peer] Running deploy-release.sh..."
     if ! ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" "bash -lc $(printf '%q' "$remote_deploy_command")"; then
         if [ "$peer_incoming_created" = 1 ]; then
@@ -2872,6 +3208,109 @@ _acquire_release_deploy_lock() {
     adk_acquire_routine_asset_lock "$DEPLOY_LOCK_FILE" "$DEPLOY_LOCK_TIMEOUT_SECS" \
         || exit 1
     echo "▸ [gate] Release deploy lock acquired"
+}
+
+_peer_git_blob_sha256() {
+    local revision="$1"
+    local relative_path="$2"
+
+    if command -v shasum >/dev/null 2>&1; then
+        git -C "$REPO" show "$revision:$relative_path" \
+            | shasum -a 256 | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        git -C "$REPO" show "$revision:$relative_path" \
+            | sha256sum | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+_validate_peer_bootstrap_generation() {
+    local bootstrap_head="${AGENTDESK_PEER_BOOTSTRAP_HEAD:-}"
+    local relative_path actual_path expected_sha actual_sha
+
+    [ "${DEPLOY_PEER_INVOCATION:-0}" = 1 ] || return 0
+    [ "${AGENTDESK_PEER_SYNC_MAIN_UNDER_LOCK:-0}" = 1 ] || return 0
+    [ "${AGENTDESK_PEER_SYNC_REEXEC:-0}" != 1 ] || return 0
+    adk_routine_asset_lock_owned "$DEPLOY_LOCK_FILE" || return 1
+    case "$bootstrap_head" in
+        ''|*[!0-9a-f]*) return 1 ;;
+    esac
+    [ "${#bootstrap_head}" -ge 40 ] && [ "${#bootstrap_head}" -le 64 ] \
+        || return 1
+    git -C "$REPO" cat-file -e "$bootstrap_head^{commit}" 2>/dev/null \
+        || return 1
+    for relative_path in \
+        scripts/deploy-release.sh scripts/routine-asset-surface.sh; do
+        case "$relative_path" in
+            scripts/deploy-release.sh) actual_path="$SCRIPT_DIR/deploy-release.sh" ;;
+            scripts/routine-asset-surface.sh)
+                actual_path="$SCRIPT_DIR/routine-asset-surface.sh"
+                ;;
+        esac
+        [ -f "$actual_path" ] && [ ! -L "$actual_path" ] || return 1
+        expected_sha="$(_peer_git_blob_sha256 \
+            "$bootstrap_head" "$relative_path")" || return 1
+        actual_sha="$(_sha256_file "$actual_path")" || return 1
+        [ "$actual_sha" = "$expected_sha" ] || return 1
+    done
+}
+
+_peer_post_merge_executable_input_digest() {
+    local common="$REPO/scripts/routine-asset-surface.sh"
+
+    [ -f "$common" ] && [ ! -L "$common" ] || return 1
+    bash -s -- "$common" "$REPO" <<'SH'
+set -euo pipefail
+. "$1"
+adk_executable_input_digest "$2"
+SH
+}
+
+_peer_sync_main_and_reexec_under_lock() {
+    [ "${DEPLOY_PEER_INVOCATION:-0}" = 1 ] || return 0
+    [ "${AGENTDESK_PEER_SYNC_MAIN_UNDER_LOCK:-0}" = 1 ] || return 0
+    [ "${AGENTDESK_PEER_SYNC_REEXEC:-0}" != 1 ] || return 0
+    adk_routine_asset_lock_owned "$DEPLOY_LOCK_FILE" || return 1
+
+    echo "▸ [peer] Syncing main under the release deploy lock..."
+    git -C "$REPO" fetch --quiet origin main || return 1
+    git -C "$REPO" checkout --quiet main || return 1
+    git -C "$REPO" merge --quiet --ff-only origin/main || return 1
+    AGENTDESK_PEER_LOCKED_HEAD="$(git -C "$REPO" rev-parse HEAD)" \
+        || return 1
+    AGENTDESK_PEER_LOCKED_DEPLOY_SHA="$(_sha256_file \
+        "$REPO/scripts/deploy-release.sh")" || return 1
+    AGENTDESK_PEER_LOCKED_COMMON_SHA="$(_sha256_file \
+        "$REPO/scripts/routine-asset-surface.sh")" || return 1
+    # The bootstrap may implement an older digest protocol than the generation
+    # it just merged. Load the post-merge common script in a fresh shell so the
+    # captured digest and the re-exec validator necessarily use one protocol.
+    AGENTDESK_PEER_LOCKED_INPUT_SHA="$(_peer_post_merge_executable_input_digest)" \
+        || return 1
+    export AGENTDESK_PEER_LOCKED_HEAD AGENTDESK_PEER_LOCKED_INPUT_SHA \
+        AGENTDESK_PEER_LOCKED_DEPLOY_SHA AGENTDESK_PEER_LOCKED_COMMON_SHA
+    export ADK_ROUTINE_ASSET_LOCK_DIR ADK_ROUTINE_ASSET_LOCK_TOKEN
+    export AGENTDESK_PEER_SYNC_MAIN_UNDER_LOCK=0
+    export AGENTDESK_PEER_SYNC_REEXEC=1
+    exec bash "$REPO/scripts/deploy-release.sh" "$@"
+}
+
+_validate_peer_locked_generation() {
+    [ "${AGENTDESK_PEER_SYNC_REEXEC:-0}" = 1 ] || return 0
+    adk_routine_asset_lock_owned "$DEPLOY_LOCK_FILE" || return 1
+    [ -n "${AGENTDESK_PEER_LOCKED_HEAD:-}" ] \
+        && [ -n "${AGENTDESK_PEER_LOCKED_INPUT_SHA:-}" ] \
+        && [ -n "${AGENTDESK_PEER_LOCKED_DEPLOY_SHA:-}" ] \
+        && [ -n "${AGENTDESK_PEER_LOCKED_COMMON_SHA:-}" ] || return 1
+    [ "$(git -C "$REPO" rev-parse HEAD)" \
+        = "$AGENTDESK_PEER_LOCKED_HEAD" ] || return 1
+    [ "$(_sha256_file "$REPO/scripts/deploy-release.sh")" \
+        = "$AGENTDESK_PEER_LOCKED_DEPLOY_SHA" ] || return 1
+    [ "$(_sha256_file "$REPO/scripts/routine-asset-surface.sh")" \
+        = "$AGENTDESK_PEER_LOCKED_COMMON_SHA" ] || return 1
+    [ "$(adk_executable_input_digest "$REPO")" \
+        = "$AGENTDESK_PEER_LOCKED_INPUT_SHA" ]
 }
 
 _spawn_detached_helper() {
@@ -2968,6 +3407,18 @@ REL_BINARY="$ADK_REL/bin/agentdesk"
 REL_BINARY_BACKUP="$ADK_REL/bin/agentdesk.prev"
 REL_BINARY_BACKUP_META="$REL_BINARY_BACKUP.meta"
 if ! _recover_durable_forward_migration_before_new_deploy; then
+    exit 1
+fi
+if ! _validate_peer_bootstrap_generation; then
+    echo "✗ Peer bootstrap scripts did not match their fetched generation" >&2
+    exit 1
+fi
+if ! _peer_sync_main_and_reexec_under_lock "$@"; then
+    echo "✗ Peer repository sync failed under the deploy lock" >&2
+    exit 1
+fi
+if ! _validate_peer_locked_generation; then
+    echo "✗ Peer repository generation changed after its locked sync" >&2
     exit 1
 fi
 
@@ -3075,12 +3526,21 @@ if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
     SOURCE_BINARY="$(_resolve_default_release_binary "$DEPLOY_BUILD_PROFILE")"
 fi
 if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
+    DEPLOY_EXECUTABLE_INPUT_SHA="$(adk_executable_input_digest "$REPO")" || {
+        echo "✗ Could not capture executable inputs before cargo build"
+        exit 1
+    }
     if [ "$DEPLOY_BUILD_PROFILE" = "release" ]; then
         echo "▸ Building release binary..."
         (cd "$REPO" && cargo build --release --bin agentdesk)
     else
         echo "▸ Building ${DEPLOY_BUILD_PROFILE} binary (opt-in fast deploy profile)..."
         (cd "$REPO" && cargo build --profile "$DEPLOY_BUILD_PROFILE" --bin agentdesk)
+    fi
+    if [ "$(adk_executable_input_digest "$REPO")" \
+      != "$DEPLOY_EXECUTABLE_INPUT_SHA" ]; then
+        echo "✗ Executable inputs changed while cargo was building"
+        exit 1
     fi
     # Cargo tracks embedded migration inputs via build.rs. The freshness gate
     # below is mtime-based, and a successful current-HEAD cargo build can still
@@ -3164,6 +3624,16 @@ rsync -a --delete "$REPO/policies/" "$POLICIES_STAGED/"
 
 # Stage routine scripts before stopping release so the runtime never executes a
 # stale JS asset after a binary deploy.
+if ! _validate_peer_locked_generation; then
+    echo "✗ Peer repository generation changed before staging" >&2
+    exit 1
+fi
+if [ -z "${DEPLOY_EXECUTABLE_INPUT_SHA:-}" ] \
+  || [ "$(adk_executable_input_digest "$REPO")" \
+    != "$DEPLOY_EXECUTABLE_INPUT_SHA" ]; then
+    echo "✗ Executable inputs changed before generation staging"
+    exit 1
+fi
 if ! ROUTINE_ASSET_TXN="$(
     adk_begin_routine_asset_transaction "$ADK_REL" "$DEPLOY_LOCK_FILE"
 )"; then

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import plistlib
+import hashlib
 import json
 import os
 import shlex
@@ -40,6 +41,46 @@ class ReleaseGenerationBindingTests(unittest.TestCase):
             [str(DEPLOY)], capture_output=True, text=True, env=env, timeout=15
         )
 
+    @staticmethod
+    def _external_bundle_digests(repo: Path) -> tuple[str, str, str]:
+        common = REPO_ROOT / "scripts/routine-asset-surface.sh"
+        script = (
+            f". {shlex.quote(str(common))}\n"
+            f"adk_executable_input_digest {shlex.quote(str(repo))}\n"
+            f"adk_sha256_tree {shlex.quote(str(repo / 'routines'))}\n"
+            f"adk_sha256_tree {shlex.quote(str(repo / 'routine-helpers'))}\n"
+        )
+        result = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0:
+            raise AssertionError(result.stdout + result.stderr)
+        inputs_sha, routines_sha, helpers_sha = result.stdout.splitlines()
+        return inputs_sha, routines_sha, helpers_sha
+
+    @staticmethod
+    def _run_external_bundle_validator(
+        repo: Path, binary: Path, manifest: Path
+    ) -> subprocess.CompletedProcess[str]:
+        deploy = DEPLOY.read_text(encoding="utf-8")
+        start = deploy.index("_sha256_file() {")
+        end = deploy.index("\n_write_release_source_manifest() {", start)
+        validation_functions = deploy[start:end]
+        common = REPO_ROOT / "scripts/routine-asset-surface.sh"
+        script = (
+            "set -euo pipefail\n"
+            f". {shlex.quote(str(common))}\n"
+            f"REPO={shlex.quote(str(repo))}\n"
+            f"SOURCE_BINARY={shlex.quote(str(binary))}\n"
+            f"AGENTDESK_DEPLOY_BINARY={shlex.quote(str(binary))}\n"
+            f"AGENTDESK_DEPLOY_BUNDLE_MANIFEST={shlex.quote(str(manifest))}\n"
+            + validation_functions
+            + "\n_validate_external_deploy_bundle\n"
+        )
+        return subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, timeout=10
+        )
+
     def test_external_binary_without_generation_manifest_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -63,8 +104,9 @@ class ReleaseGenerationBindingTests(unittest.TestCase):
             manifest.write_text(
                 json.dumps(
                     {
-                        "format": "agentdesk-release-bundle-v1",
+                        "format": "agentdesk-release-bundle-v2",
                         "source_git_sha": "0" * 40,
+                        "executable_inputs_sha256": "0" * 64,
                         "binary_sha256": "0" * 64,
                         "routines_sha256": "0" * 64,
                         "routine_helpers_sha256": "0" * 64,
@@ -77,6 +119,103 @@ class ReleaseGenerationBindingTests(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("bundle manifest generation mismatch", result.stderr)
+
+    def test_external_bundle_binds_ignored_inputs_but_excludes_python_bytecode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            for directory in (
+                repo / "src",
+                repo / "migrations/postgres",
+                repo / "routines/monitoring",
+                repo / "routine-helpers/monitoring",
+            ):
+                directory.mkdir(parents=True)
+            (repo / "Cargo.toml").write_text(
+                '[package]\nname="fixture"\nversion="0.1.0"\n', encoding="utf-8"
+            )
+            (repo / "Cargo.lock").write_text("# fixture\n", encoding="utf-8")
+            (repo / "build.rs").write_text("fn main() {}\n", encoding="utf-8")
+            (repo / "src/lib.rs").write_text("pub fn fixture() {}\n", encoding="utf-8")
+            (repo / "migrations/postgres/0100_fixture.sql").write_text(
+                "-- fixture\n", encoding="utf-8"
+            )
+            (repo / "routines/monitoring/fixture.js").write_text(
+                "register({name: 'fixture', tick() { return []; }});\n",
+                encoding="utf-8",
+            )
+            (repo / "routine-helpers/monitoring/fixture.py").write_text(
+                "print('fixture')\n", encoding="utf-8"
+            )
+            subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "-c",
+                    "user.name=AgentDesk",
+                    "-c",
+                    "user.email=agentdesk@example.invalid",
+                    "add",
+                    ".",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "-c",
+                    "user.name=AgentDesk",
+                    "-c",
+                    "user.email=agentdesk@example.invalid",
+                    "commit",
+                    "-qm",
+                    "fixture",
+                ],
+                check=True,
+            )
+            binary = root / "agentdesk"
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            binary.chmod(0o755)
+            inputs_sha, routines_sha, helpers_sha = self._external_bundle_digests(repo)
+            source_sha = subprocess.check_output(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+            ).strip()
+            manifest = root / "bundle.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "format": "agentdesk-release-bundle-v2",
+                        "source_git_sha": source_sha,
+                        "executable_inputs_sha256": inputs_sha,
+                        "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                        "routines_sha256": routines_sha,
+                        "routine_helpers_sha256": helpers_sha,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self._run_external_bundle_validator(repo, binary, manifest)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            pycache = repo / "routine-helpers/__pycache__"
+            pycache.mkdir()
+            (pycache / "fixture.cpython-313.pyc").write_bytes(b"machine-local")
+            result = self._run_external_bundle_validator(repo, binary, manifest)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            (repo / ".git/info/exclude").write_text(
+                "migrations/postgres/9999_ignored.sql\n", encoding="utf-8"
+            )
+            (repo / "migrations/postgres/9999_ignored.sql").write_text(
+                "-- ignored but executable\n", encoding="utf-8"
+            )
+            result = self._run_external_bundle_validator(repo, binary, manifest)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("executable_inputs_sha256", result.stderr)
 
     def test_v0_backup_cannot_pair_with_v1_assets_during_v2(self):
         deploy = DEPLOY.read_text(encoding="utf-8")
@@ -387,9 +526,10 @@ class DeploymentWiringTests(unittest.TestCase):
     def test_database_migration_precedes_restart_request_and_release_stop(self):
         deploy = DEPLOY.read_text(encoding="utf-8")
         stage_at = deploy.index('echo "▸ Staging signed binary from $SOURCE_BINARY..."')
-        tunnel_at = deploy.index("_migrate_pg_tunnel_before_release_stop", stage_at)
+        tunnel_at = deploy.index("\n_migrate_pg_tunnel_before_release_stop\n", stage_at)
         migration_at = deploy.index(
-            'if ! "$STAGED_BINARY" release-migrate-postgres; then', tunnel_at
+            "if ! _apply_release_postgres_migration_with_forward_barrier; then",
+            tunnel_at,
         )
         restart_at = deploy.index("request_restart_drain_mode_or_fail", migration_at)
         persistence_at = deploy.index("wait_for_restart_persistence_or_fail", restart_at)
@@ -402,72 +542,77 @@ class DeploymentWiringTests(unittest.TestCase):
 
     def test_database_migration_failure_cannot_request_restart_or_bootout(self):
         deploy = DEPLOY.read_text(encoding="utf-8")
-        migration_at = deploy.index(
+        function_at = deploy.index(
+            "_apply_release_postgres_migration_with_forward_barrier() {"
+        )
+        function_end = deploy.index("\n_forward_migration_marker_value() {", function_at)
+        migration_function = deploy[function_at:function_end]
+        barrier_at = migration_function.index("unknown/interrupted")
+        child_at = migration_function.index(
             'if ! "$STAGED_BINARY" release-migrate-postgres; then'
         )
+        migration_at = deploy.index(
+            "if ! _apply_release_postgres_migration_with_forward_barrier; then",
+            deploy.index("\n_migrate_pg_tunnel_before_release_stop\n"),
+        )
         failure_exit_at = deploy.index("    exit 1", migration_at)
-        restart_at = deploy.index("request_restart_drain_mode_or_fail", migration_at)
+        restart_at = deploy.index("request_restart_drain_mode_or_fail", failure_exit_at)
         stop_at = deploy.index('echo "▸ Stopping release..."', restart_at)
-        migration_failure = deploy[migration_at:failure_exit_at]
         self.assertLess(failure_exit_at, restart_at)
         self.assertLess(restart_at, stop_at)
-        self.assertNotIn("request_restart_drain_mode_or_fail", migration_failure)
-        self.assertNotIn("restart_pending", migration_failure)
-        self.assertNotIn("launchctl bootout", migration_failure)
-        self.assertNotIn("clear_restart_drain_mode", migration_failure)
-        self.assertIn("the existing runtime remains active", migration_failure)
+        self.assertLess(barrier_at, child_at)
+        self.assertNotIn("request_restart_drain_mode_or_fail", migration_function)
+        self.assertNotIn("restart_pending", migration_function)
+        self.assertNotIn("launchctl bootout", migration_function)
+        self.assertNotIn("clear_restart_drain_mode", migration_function)
+        self.assertIn("retaining the compatible candidate", migration_function)
 
-    def test_database_migration_failure_preserves_live_runtime_without_marker(self):
+    def test_database_migration_failure_persists_unknown_barrier_before_child(self):
         deploy = DEPLOY.read_text(encoding="utf-8")
-        start = deploy.index('LOCK_FILE="$ADK_REL/runtime/dcserver.lock"')
-        end = deploy.index("# Migration 0100 is now a forward-only binary floor", start)
+        start = deploy.index(
+            "_apply_release_postgres_migration_with_forward_barrier() {"
+        )
+        end = deploy.index("\n_forward_migration_marker_value() {", start)
         migration_block = deploy[start:end]
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            runtime = root / "runtime"
-            runtime.mkdir()
             events = root / "events.log"
-            health = runtime / "health"
-            health.write_text("healthy\n", encoding="utf-8")
             candidate = root / "candidate"
             candidate.write_text(
                 "#!/bin/sh\nprintf 'migration:%s\\n' \"$*\" >> \"$EVENT_LOG\"\nexit 1\n",
                 encoding="utf-8",
             )
             candidate.chmod(0o755)
-            old_runtime = subprocess.Popen(["sleep", "30"])
-            try:
-                (runtime / "dcserver.lock").write_text(
-                    f"{old_runtime.pid}\n", encoding="utf-8"
-                )
-                script = (
-                    "set -euo pipefail\n"
-                    f"ADK_REL={shlex.quote(str(root))}\n"
-                    f"STAGED_BINARY={shlex.quote(str(candidate))}\n"
-                    f"EVENT_LOG={shlex.quote(str(events))}\n"
-                    "PLIST_REL=com.agentdesk.release\n"
-                    "REL_PORT=8791\n"
-                    "export EVENT_LOG\n"
-                    "request_restart_drain_mode_or_fail() { "
-                    "printf 'restart-request\\n' >> \"$EVENT_LOG\"; }\n"
-                    "launchctl() { printf 'bootout:%s\\n' \"$*\" >> \"$EVENT_LOG\"; }\n"
-                    + migration_block
-                )
-                result = subprocess.run(
-                    ["bash", "-c", script], capture_output=True, text=True, timeout=10
-                )
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertIsNone(old_runtime.poll(), "old runtime exited on migration failure")
-                self.assertEqual(health.read_text(encoding="utf-8"), "healthy\n")
-                self.assertFalse((runtime / "restart_pending").exists())
-                self.assertEqual(
-                    events.read_text(encoding="utf-8"),
-                    "migration:release-migrate-postgres\n",
-                )
-            finally:
-                old_runtime.terminate()
-                old_runtime.wait(timeout=5)
+            script = (
+                "set -uo pipefail\n"
+                f"STAGED_BINARY={shlex.quote(str(candidate))}\n"
+                f"EVENT_LOG={shlex.quote(str(events))}\n"
+                "ROUTINE_ASSET_TXN=/tmp/txn\n"
+                "export EVENT_LOG\n"
+                "_sha256_file() { printf '%064d\\n' 0; }\n"
+                "_release_executable_inputs_match_built_candidate() { return 0; }\n"
+                "_fsync_forward_recovery_generation() { "
+                "printf 'fsync\\n' >> \"$EVENT_LOG\"; }\n"
+                "_classify_forward_migration_relation() { "
+                "FORWARD_MIGRATION_CLASSIFIED_STATE=advanced; "
+                "FORWARD_ROLLBACK_MIGRATION=0099_old.sql; "
+                "FORWARD_TARGET_MIGRATION=0100_new.sql; }\n"
+                "_persist_forward_migration_applied() { "
+                "printf 'marker:%s\\n' \"$3\" >> \"$EVENT_LOG\"; }\n"
+                + migration_block
+                + "\n_apply_release_postgres_migration_with_forward_barrier\n"
+            )
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True, timeout=10
+            )
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertEqual(
+                events.read_text(encoding="utf-8"),
+                "fsync\n"
+                "marker:unknown/interrupted\n"
+                "migration:release-migrate-postgres\n",
+            )
 
     def _run_block(
         self,

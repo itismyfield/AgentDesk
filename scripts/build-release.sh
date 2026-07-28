@@ -102,13 +102,19 @@ write_checksum() {
 write_local_build_generation_manifest() {
   local binary="$1"
   local expected_source_sha="$2"
+  local expected_inputs_sha="$3"
   local manifest="$PROJECT_DIR/target/release/agentdesk-generation.json"
-  local source_sha binary_sha routines_sha helpers_sha
+  local source_sha binary_sha routines_sha helpers_sha inputs_sha
 
   adk_require_clean_git_worktree "$PROJECT_DIR" || return 1
   source_sha="$(git -C "$PROJECT_DIR" rev-parse HEAD)" || return 1
   [ "$source_sha" = "$expected_source_sha" ] || {
     echo "Error: repository HEAD changed during the release build" >&2
+    return 1
+  }
+  inputs_sha="$(adk_executable_input_digest "$PROJECT_DIR")" || return 1
+  [ "$inputs_sha" = "$expected_inputs_sha" ] || {
+    echo "Error: executable build inputs changed during the release build" >&2
     return 1
   }
   binary_sha="$(adk_sha256_file "$binary")" || return 1
@@ -120,6 +126,7 @@ write_local_build_generation_manifest() {
     return 1
   }
   AGENTDESK_BUILD_SOURCE_SHA="$source_sha" \
+  AGENTDESK_BUILD_INPUTS_SHA="$inputs_sha" \
   AGENTDESK_BUILD_BINARY_SHA="$binary_sha" \
   AGENTDESK_BUILD_ROUTINES_SHA="$routines_sha" \
   AGENTDESK_BUILD_HELPERS_SHA="$helpers_sha" \
@@ -131,9 +138,10 @@ import sys
 
 manifest = sys.argv[1]
 payload = {
-    "format": "agentdesk-local-build-v2",
+    "format": "agentdesk-local-build-v3",
     "worktree_state": "clean",
     "source_git_sha": os.environ["AGENTDESK_BUILD_SOURCE_SHA"],
+    "executable_inputs_sha256": os.environ["AGENTDESK_BUILD_INPUTS_SHA"],
     "binary_sha256": os.environ["AGENTDESK_BUILD_BINARY_SHA"],
     "routines_sha256": os.environ["AGENTDESK_BUILD_ROUTINES_SHA"],
     "routine_helpers_sha256": os.environ["AGENTDESK_BUILD_HELPERS_SHA"],
@@ -183,7 +191,14 @@ adk_require_clean_git_worktree "$PROJECT_DIR" \
   || { echo "Error: release builds require a clean worktree" >&2; exit 1; }
 BUILD_SOURCE_SHA="$(git -C "$PROJECT_DIR" rev-parse HEAD)" \
   || { echo "Error: could not capture release source HEAD" >&2; exit 1; }
+BUILD_EXECUTABLE_INPUT_SHA="$(adk_executable_input_digest "$PROJECT_DIR")" \
+  || { echo "Error: could not capture executable build inputs" >&2; exit 1; }
 cargo build --release 2>&1 | tail -1
+if [ "$(adk_executable_input_digest "$PROJECT_DIR")" \
+    != "$BUILD_EXECUTABLE_INPUT_SHA" ]; then
+  echo "Error: executable inputs changed while cargo was building" >&2
+  exit 1
+fi
 
 BINARY="$PROJECT_DIR/target/release/${BINARY_NAME}"
 if [ ! -f "$BINARY" ]; then
@@ -247,18 +262,22 @@ fi
 # extras that can disappear silently when a checkout is incomplete.
 mkdir -p "$STAGING/routines"
 if command -v rsync &>/dev/null; then
-  rsync -a --delete "routines/" "$STAGING/routines/"
+  rsync -a --delete --exclude='__pycache__/' --exclude='*.pyc' \
+    "routines/" "$STAGING/routines/"
 else
   cp -R "routines/." "$STAGING/routines/"
+  adk_prune_python_bytecode_tree "$STAGING/routines"
 fi
 
 # Deterministic Node/Python helpers intentionally live outside the QuickJS
 # routine loader root and are packaged as their own release asset surface.
 mkdir -p "$STAGING/routine-helpers"
 if command -v rsync &>/dev/null; then
-  rsync -a --delete "routine-helpers/" "$STAGING/routine-helpers/"
+  rsync -a --delete --exclude='__pycache__/' --exclude='*.pyc' \
+    "routine-helpers/" "$STAGING/routine-helpers/"
 else
   cp -R "routine-helpers/." "$STAGING/routine-helpers/"
+  adk_prune_python_bytecode_tree "$STAGING/routine-helpers"
 fi
 
 # Shared staging primitives are required by install.sh when it consumes this
@@ -306,7 +325,8 @@ rm -rf "$ARTIFACT_NAME"
 
 # Checksum
 write_checksum "$ARTIFACT_FILE"
-write_local_build_generation_manifest "$BINARY" "$BUILD_SOURCE_SHA"
+write_local_build_generation_manifest \
+  "$BINARY" "$BUILD_SOURCE_SHA" "$BUILD_EXECUTABLE_INPUT_SHA"
 
 echo ""
 echo "═══ Build Complete ═══"
