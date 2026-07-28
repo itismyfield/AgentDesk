@@ -44,6 +44,37 @@ use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
 use poise::serenity_prelude::ChannelId;
 
+const RESUME_CRITICAL_SECTION_WARN_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+
+struct ResumeCriticalSectionWatchdog(tokio::task::JoinHandle<()>);
+
+impl Drop for ResumeCriticalSectionWatchdog {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn start_resume_critical_section_watchdog(
+    channel_id: ChannelId,
+    provider: &ProviderKind,
+    warn_after: std::time::Duration,
+) -> ResumeCriticalSectionWatchdog {
+    let provider = provider.as_str().to_string();
+    ResumeCriticalSectionWatchdog(tokio::spawn(async move {
+        tokio::time::sleep(warn_after).await;
+        crate::services::observability::metrics::record_resume_critical_section_overrun(
+            channel_id.get(),
+            &provider,
+        );
+        tracing::warn!(
+            channel_id = channel_id.get(),
+            provider,
+            threshold_secs = warn_after.as_secs(),
+            "resume channel transition critical section exceeded its observation threshold"
+        );
+    }))
+}
+
 /// Request body for `POST /api/sessions/{session_key}/resume-previous`.
 ///
 /// Both fields optional: supply `session_id` (+ optional `cwd`) to force a
@@ -143,7 +174,7 @@ impl ResumeRebindError {
                 StatusCode::CONFLICT,
                 Json(json!({
                     "error": format!(
-                        "channel session transition stayed busy for {} seconds; retry /resume",
+                        "채널 세션 전환이 {}초 동안 계속 사용 중입니다. 잠시 후 /resume을 다시 시도해 주세요.",
                         crate::services::discord::SESSION_TRANSITION_LOCK_WAIT_TIMEOUT.as_secs()
                     )
                 })),
@@ -377,9 +408,21 @@ pub(crate) async fn perform_resume_rebind(
     };
     // Keep the guard through the conservatively-biased pane probe below. Releasing
     // it earlier would let intake claim the channel from the old runtime snapshot
-    // while `/resume` is still deciding whether that runtime must be kept. Lock
-    // acquisition is bounded above; once acquired, correctness keeps the critical
-    // section intact and probe failures preserve rather than destroy the runtime.
+    // while `/resume` is still deciding whether that runtime must be kept. The
+    // critical section deliberately has no cancelling timeout: after the durable
+    // DB rebind commits, cancelling before teardown, the pane decision, and the
+    // in-memory mirror complete would expose a mixed binding. Observe overruns
+    // instead, while preserving the transition atomically through completion.
+    let _critical_section_watchdog = match channel_id.zip(provider.as_ref()) {
+        Some((channel_id, provider)) if _transition_guard.is_some() => {
+            Some(start_resume_critical_section_watchdog(
+                channel_id,
+                provider,
+                RESUME_CRITICAL_SECTION_WARN_AFTER,
+            ))
+        }
+        _ => None,
+    };
 
     let Some(SessionRebindContext {
         resolved_session_key: _,
@@ -722,14 +765,70 @@ mod tests {
     use filetime::{FileTime, set_file_mtime};
 
     #[test]
-    fn transition_busy_response_exposes_retryable_three_second_contract() {
+    fn transition_busy_response_exposes_retryable_korean_contract() {
         let (status, Json(body)) = ResumeRebindError::TransitionBusy.into_response();
         assert_eq!(status, StatusCode::CONFLICT);
         let error = body["error"]
             .as_str()
             .expect("busy response has error text");
-        assert!(error.contains("3 seconds"));
-        assert!(error.contains("retry /resume"));
+        assert!(error.contains("3초"));
+        assert!(error.contains("/resume을 다시 시도"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn critical_section_watchdog_records_once_without_cancelling_work() {
+        let channel_id = ChannelId::new(9_479_404);
+        let provider = ProviderKind::Claude;
+        let count = || {
+            crate::services::observability::metrics::snapshot()
+                .into_iter()
+                .find(|row| row.channel_id == channel_id.get() && row.provider == "claude")
+                .map_or(0, |row| row.resume_critical_section_overrun)
+        };
+        let before = count();
+        let watchdog = start_resume_critical_section_watchdog(
+            channel_id,
+            &provider,
+            RESUME_CRITICAL_SECTION_WARN_AFTER,
+        );
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(
+            RESUME_CRITICAL_SECTION_WARN_AFTER - std::time::Duration::from_secs(1),
+        )
+        .await;
+        tokio::task::yield_now().await;
+        assert_eq!(count(), before);
+
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(count(), before + 1);
+        drop(watchdog);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completed_critical_section_cancels_its_watchdog() {
+        let channel_id = ChannelId::new(9_479_405);
+        let provider = ProviderKind::Claude;
+        let before = crate::services::observability::metrics::snapshot()
+            .into_iter()
+            .find(|row| row.channel_id == channel_id.get() && row.provider == "claude")
+            .map_or(0, |row| row.resume_critical_section_overrun);
+        let watchdog = start_resume_critical_section_watchdog(
+            channel_id,
+            &provider,
+            RESUME_CRITICAL_SECTION_WARN_AFTER,
+        );
+        tokio::task::yield_now().await;
+        drop(watchdog);
+        tokio::time::advance(RESUME_CRITICAL_SECTION_WARN_AFTER).await;
+        tokio::task::yield_now().await;
+
+        let after = crate::services::observability::metrics::snapshot()
+            .into_iter()
+            .find(|row| row.channel_id == channel_id.get() && row.provider == "claude")
+            .map_or(0, |row| row.resume_critical_section_overrun);
+        assert_eq!(after, before);
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -96,6 +96,9 @@ pub struct AtomicCounters {
     pub relay_permanent_loss_drift_state_ttl_expired: AtomicU64,
     /// #4794: subset of permanent loss confirmed by a dead/absent pane probe.
     pub relay_permanent_loss_dead_pane: AtomicU64,
+    /// #4794: `/resume` channel transition critical sections that exceeded the
+    /// observation threshold and continued without cancellation.
+    pub resume_critical_section_overrun: AtomicU64,
     /// #4913: canonical Discord identity writes rejected with a typed conflict.
     pub session_identity_conflicts: AtomicU64,
     pub session_identity_conflict_ambiguous_canonical: AtomicU64,
@@ -129,6 +132,9 @@ impl AtomicCounters {
                 .load(Ordering::Relaxed),
             relay_permanent_loss_dead_pane: self
                 .relay_permanent_loss_dead_pane
+                .load(Ordering::Relaxed),
+            resume_critical_section_overrun: self
+                .resume_critical_section_overrun
                 .load(Ordering::Relaxed),
             session_identity_conflicts: self.session_identity_conflicts.load(Ordering::Relaxed),
             session_identity_conflict_ambiguous_canonical: self
@@ -172,6 +178,7 @@ pub struct AtomicCountersSnapshot {
     pub relay_permanent_loss: u64,
     pub relay_permanent_loss_drift_state_ttl_expired: u64,
     pub relay_permanent_loss_dead_pane: u64,
+    pub resume_critical_section_overrun: u64,
     /// #4913: see [`AtomicCounters::session_identity_conflicts`].
     pub session_identity_conflicts: u64,
     pub session_identity_conflict_ambiguous_canonical: u64,
@@ -215,6 +222,8 @@ pub struct CounterSnapshotRow {
     pub relay_permanent_loss: u64,
     pub relay_permanent_loss_drift_state_ttl_expired: u64,
     pub relay_permanent_loss_dead_pane: u64,
+    /// #4794: `/resume` transition critical sections observed beyond the threshold.
+    pub resume_critical_section_overrun: u64,
     /// #4913: canonical identity writes rejected with a typed conflict.
     pub session_identity_conflicts: u64,
     pub session_identity_conflict_ambiguous_canonical: u64,
@@ -333,6 +342,14 @@ impl ObservabilityCounters {
         .fetch_add(count, Ordering::Relaxed);
     }
 
+    /// #4794: a `/resume` transition remained in its non-cancellable critical
+    /// section beyond the observation threshold.
+    pub fn record_resume_critical_section_overrun(&self, channel_id: u64, provider: &str) {
+        self.slot(channel_id, provider)
+            .resume_critical_section_overrun
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn record_session_identity_conflict(
         &self,
         channel_id: u64,
@@ -413,6 +430,7 @@ impl ObservabilityCounters {
                     relay_permanent_loss_drift_state_ttl_expired: snap
                         .relay_permanent_loss_drift_state_ttl_expired,
                     relay_permanent_loss_dead_pane: snap.relay_permanent_loss_dead_pane,
+                    resume_critical_section_overrun: snap.resume_critical_section_overrun,
                     session_identity_conflicts: snap.session_identity_conflicts,
                     session_identity_conflict_ambiguous_canonical: snap
                         .session_identity_conflict_ambiguous_canonical,
@@ -524,6 +542,11 @@ pub fn record_relay_permanent_loss(
         permanent_loss_reason = reason.as_str(),
         "relay emissions became permanently unrecoverable"
     );
+}
+
+/// #4794: record a non-cancelling `/resume` critical-section overrun.
+pub fn record_resume_critical_section_overrun(channel_id: u64, provider: &str) {
+    global().record_resume_critical_section_overrun(channel_id, provider);
 }
 
 pub fn record_relay_circuit_activate_unknown() {
