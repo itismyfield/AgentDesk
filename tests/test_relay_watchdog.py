@@ -3134,6 +3134,37 @@ class TickChannelTests(unittest.TestCase):
         self.assertNotIn("loss_since", state)
         self.assertNotIn("loss_clear_ticks", state)
 
+    def test_realistic_recovery_releases_dwell_within_five_clean_ticks(self):
+        # #4961 upper bound. The other clear-path tests derive their loop count
+        # from COVERAGE_LOSS_RECOVERY_TICKS, so they can never fail no matter how
+        # large it grows — and a large value resurrects the very false positive
+        # this PR removes (an isolated lost=1 tick alarming because the dwell was
+        # never released). The 5 below is therefore a deliberate literal, NOT
+        # derived from the constant: raising the constant past 5 must fail here.
+        # Together with test_oscillating_loss_still_reaches_sustained_threshold
+        # (which pins the lower bound at >= 2) this fixes 2 <= CONST <= 5.
+        rt = self.make_rt()
+        first_tick = self.now + 600
+        state = {
+            "coverage_uncovered_ticks": COVERAGE_CONFIRM_TICKS - 1,
+            "coverage_desync_since": self.now,
+        }
+        self._run_loss_tick(rt, state, first_tick, lost=1)
+        self.assertEqual(state["loss_since"], first_tick)
+
+        for i in range(5):
+            self._run_loss_tick(rt, state, first_tick + 60 * (i + 1), lost=0)
+        self.assertNotIn("loss_since", state)
+
+        # #4961 issue body, ticks=4 gap=799s: an isolated lost=1 whose
+        # neighbours both read lost=0 must not alarm even long after the
+        # original loss, because a real recovery restarted the dwell.
+        relapse_tick = first_tick + rt.cfg.gap_alert_secs + 600
+        self._run_loss_tick(rt, state, relapse_tick, lost=1)
+
+        self.assertEqual(state["loss_since"], relapse_tick)
+        self.assertEqual(rt.alerts, [])
+
     def test_growth_with_stale_relay_and_advanced_inflight_update_is_suppressed(self):
         rt = self.make_rt()
         tick_at = self.now + 600
