@@ -317,6 +317,12 @@ fi
 
 BACKUP_WRAPPER=""
 BACKUP_REAL=""
+ROUTINE_ASSET_TXN=""
+DEPLOY_BINARY_PROMOTED=0
+DEPLOY_SERVICE_RESTARTED=0
+DEPLOY_HEALTH_OK=0
+DEPLOY_LOCK_FILE="${AGENTDESK_DEPLOY_LOCK_FILE:-$AD_HOME/runtime/deploy-release.lock}"
+DEPLOY_LOCK_TIMEOUT_SECS="${AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS:-1800}"
 
 cleanup_backup() {
   if [ -n "${BACKUP_WRAPPER:-}" ] && [ -f "$BACKUP_WRAPPER" ]; then
@@ -327,7 +333,98 @@ cleanup_backup() {
   fi
 }
 
-trap cleanup_backup EXIT
+cleanup_deploy_transaction() {
+  local status=${1:-$?}
+  local active_txn=""
+  local active_status=1
+  local active_phase=""
+  local restore_ok=1
+  local assets_ok=1
+  local asset_action="rollback"
+  local service_stopped=0
+
+  trap - EXIT INT TERM
+  if [ "$DEPLOY_HEALTH_OK" != 1 ]; then
+    if active_txn="$(_adk_active_txn "$AD_HOME")"; then
+      active_status=0
+      if ! active_phase="$(
+        adk_routine_asset_transaction_phase "$AD_HOME" "$active_txn"
+      )"; then
+        active_status=2
+        active_txn=""
+        status=1
+        assets_ok=0
+        asset_action="none"
+        error "Routine asset transaction phase is corrupt; refusing binary-only rollback"
+      fi
+    else
+      active_status=$?
+      active_txn=""
+      if [ "$active_status" -ne 1 ]; then
+        status=1
+        assets_ok=0
+        asset_action="none"
+        error "Routine asset transaction marker is corrupt; refusing binary-only rollback"
+      fi
+    fi
+    if [ "$active_phase" = "committing" ] || [ "$active_phase" = "committed" ]; then
+      asset_action="commit"
+    elif [ "$DEPLOY_BINARY_PROMOTED" = 1 ] && [ "$active_status" -le 1 ]; then
+      if [ "$DEPLOY_SERVICE_RESTARTED" = 1 ]; then
+        case "$OS" in
+          darwin)
+            launchctl bootout "$(_launchd_domain)/$LABEL" 2>/dev/null || true
+            service_stopped=1
+            ;;
+          linux)
+            systemctl --user stop agentdesk-dcserver.service 2>/dev/null || true
+            service_stopped=1
+            ;;
+        esac
+      fi
+      if ! restore_previous_install; then
+        restore_ok=0
+        asset_action="commit"
+        status=1
+        error "Binary rollback failed; committing matching new routine assets"
+      fi
+    fi
+    if [ -n "$active_txn" ] && [ "$asset_action" != "none" ]; then
+      if [ "$asset_action" = "commit" ]; then
+        adk_commit_routine_asset_transaction_forward "$AD_HOME" "$active_txn" \
+          || { error "Routine asset fail-forward failed: $active_txn"; assets_ok=0; status=1; }
+      else
+        adk_rollback_routine_asset_transaction "$AD_HOME" "$active_txn" \
+          || { error "Routine asset rollback failed: $active_txn"; assets_ok=0; status=1; }
+      fi
+    fi
+    if [ "$service_stopped" = 1 ]; then
+      if [ "$restore_ok" = 1 ] && [ "$assets_ok" = 1 ]; then
+        case "$OS" in
+          darwin) restart_launchd >/dev/null 2>&1 || status=1 ;;
+          linux) restart_systemd >/dev/null 2>&1 || status=1 ;;
+        esac
+      fi
+    fi
+  fi
+  adk_release_routine_asset_lock \
+    || { error "Failed to release shared routine asset deploy lock"; status=1; }
+  cleanup_backup
+  return "$status"
+}
+
+_deploy_cleanup_signal() {
+  local status="$1"
+  cleanup_deploy_transaction "$status" || status=$?
+  exit "$status"
+}
+
+trap cleanup_deploy_transaction EXIT
+trap '_deploy_cleanup_signal 130' INT
+trap '_deploy_cleanup_signal 143' TERM
+
+adk_acquire_routine_asset_lock "$DEPLOY_LOCK_FILE" "$DEPLOY_LOCK_TIMEOUT_SECS" \
+  || fail "Could not acquire shared routine asset deploy lock"
 
 print_recent_macos_binary_logs() {
   if [ "$OS" != "darwin" ]; then
@@ -454,6 +551,17 @@ else
   fi
 fi
 
+# Validate and stage both asset surfaces before the binary is touched. Stages
+# live under this transaction's unique directory, so no concurrent entrypoint
+# can promote a payload prepared by another process.
+ROUTINE_ASSET_TXN="$(
+  adk_begin_routine_asset_transaction "$AD_HOME" "$DEPLOY_LOCK_FILE"
+)" || fail "Could not begin durable routine asset transaction"
+adk_stage_routines "$PROJECT_DIR" "$AD_HOME" "$ROUTINE_ASSET_TXN" >/dev/null \
+  || fail "Routine staging failed; refusing to install the binary"
+adk_stage_routine_helpers "$PROJECT_DIR" "$AD_HOME" "$ROUTINE_ASSET_TXN" >/dev/null \
+  || fail "Routine helper staging failed; refusing to install the binary"
+
 # ── Step 2: Copy binary ──────────────────────────────────────────────────────
 info "Installing binary..."
 mkdir -p "$BIN_DIR"
@@ -470,6 +578,7 @@ if [ -e "$REAL_BIN" ]; then
   BACKUP_REAL="$(mktemp "$LIBEXEC_DIR/agentdesk.real.backup.XXXXXX")"
   cp "$REAL_BIN" "$BACKUP_REAL"
 fi
+DEPLOY_BINARY_PROMOTED=1
 install_file_atomically "$PROJECT_DIR/target/release/agentdesk" "$REAL_BIN" 755
 if [ "$OS" = "darwin" ]; then
   resolve_macos_codesign_mode \
@@ -510,35 +619,10 @@ if [ -d "$PROJECT_DIR/policies" ]; then
   ok "Policies: $AD_HOME/policies/"
 fi
 
-ROUTINES_STAGED=""
-ROUTINE_HELPERS_STAGED=""
-ROUTINES_STAGED="$(adk_stage_routines "$PROJECT_DIR" "$AD_HOME")" \
-  || fail "Routine staging failed; refusing to swap an incomplete asset tree"
-
-ROUTINE_HELPERS_STAGED="$(adk_stage_routine_helpers "$PROJECT_DIR" "$AD_HOME")" \
-  || {
-    rm -rf "$ROUTINES_STAGED"
-    fail "Routine helper staging failed; refusing to swap an incomplete asset tree"
-  }
-
-if ! adk_swap_staged_routines "$AD_HOME" "$ROUTINES_STAGED"; then
-  rm -rf "$ROUTINES_STAGED" "$ROUTINE_HELPERS_STAGED" 2>/dev/null || true
-  fail "Routine asset swap failed"
-fi
+adk_promote_routine_asset_transaction "$AD_HOME" "$ROUTINE_ASSET_TXN" \
+  || fail "Routine asset transaction promotion failed"
 ok "Routines: $AD_HOME/routines/"
-
-if ! adk_swap_staged_routine_helpers "$AD_HOME" "$ROUTINE_HELPERS_STAGED"; then
-  adk_rollback_routine_swap "$AD_HOME" \
-    || error "Routine rollback also failed; inspect $AD_HOME/routines.old"
-  rm -rf "$ROUTINE_HELPERS_STAGED" 2>/dev/null || true
-  fail "Routine helper asset swap failed"
-fi
 ok "Routine helpers: $AD_HOME/routine-helpers/"
-
-if ! adk_commit_routine_helper_swap "$AD_HOME" \
-  || ! adk_commit_routine_swap "$AD_HOME"; then
-  fail "Routine assets are live, but transaction backup cleanup failed"
-fi
 
 if [ -d "$PROJECT_DIR/skills" ]; then
   mkdir -p "$AD_HOME/skills"
@@ -647,6 +731,7 @@ case "$OS" in
   linux)  restart_systemd ;;
   *)      info "Restart manually" ;;
 esac
+DEPLOY_SERVICE_RESTARTED=1
 
 # ── Step 5: Smoke test ────────────────────────────────────────────────────────
 info "Waiting for health check (port $HEALTH_PORT)..."
@@ -683,6 +768,12 @@ log_health_degraded_reasons() {
 if wait_for_http_service_health "$LABEL" "$HEALTH_PORT" 10 2 0 1; then
   ok "Health check passed on :$HEALTH_PORT/api/health"
   log_health_degraded_reasons
+  adk_mark_routine_asset_transaction_committing "$AD_HOME" "$ROUTINE_ASSET_TXN" \
+    || fail "Could not persist healthy routine asset commit intent"
+  DEPLOY_HEALTH_OK=1
+  if ! adk_commit_routine_asset_transaction "$AD_HOME" "$ROUTINE_ASSET_TXN"; then
+    error "Healthy deploy retained a committing routine asset transaction"
+  fi
 else
   log_health_degraded_reasons
   fail "Health check failed after waiting for :$HEALTH_PORT/api/health. Check logs:"

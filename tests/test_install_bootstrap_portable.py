@@ -120,6 +120,8 @@ class InstallBootstrapPortableTests(unittest.TestCase):
                   done
                   cp "$PWD/scripts/routine-asset-surface.sh" \
                     "$target/scripts/routine-asset-surface.sh"
+                  cp "$PWD/scripts/validate-quickjs-routines.py" \
+                    "$target/scripts/validate-quickjs-routines.py"
                   exit 0
                 fi
                 /usr/bin/git "$@"

@@ -67,6 +67,7 @@ class PortablePathLintTests(unittest.TestCase):
                 scripts_dir / "ensure-agentdesk-cli.sh",
                 scripts_dir / "queue-stability-batch.sh",
                 scripts_dir / "routine-asset-surface.sh",
+                scripts_dir / "validate-quickjs-routines.py",
             ]
             for path in bad_script_paths:
                 path.write_text("echo /Users/itismyfield/.adk/release\n", encoding="utf-8")
@@ -90,6 +91,7 @@ class PortablePathLintTests(unittest.TestCase):
         self.assertIn("scripts/ensure-agentdesk-cli.sh", result.stderr)
         self.assertIn("scripts/queue-stability-batch.sh", result.stderr)
         self.assertIn("scripts/routine-asset-surface.sh", result.stderr)
+        self.assertIn("scripts/validate-quickjs-routines.py", result.stderr)
         self.assertIn("policies/lib/portable.js", result.stderr)
 
     def test_default_scan_includes_moved_node_routine_helper(self) -> None:
@@ -117,6 +119,34 @@ class PortablePathLintTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(
             "routine-helpers/monitoring/local_worktree_inventory.js",
+            result.stderr,
+        )
+
+    def test_default_scan_includes_moved_python_routine_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            helper = (
+                Path(tmp)
+                / "routine-helpers"
+                / "monitoring"
+                / "weekly_churn_audit.py"
+            )
+            helper.parent.mkdir(parents=True)
+            helper.write_text(
+                "root = '/Users/private-operator/.adk/release'\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--root", tmp],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "routine-helpers/monitoring/weekly_churn_audit.py",
             result.stderr,
         )
 

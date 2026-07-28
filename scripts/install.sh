@@ -57,14 +57,22 @@ ok()    { echo -e "${GREEN}✓${NC} $1"; }
 warn()  { echo -e "${YELLOW}⚠${NC} $1"; }
 fail()  { echo -e "${RED}✗${NC} $1"; exit 1; }
 
-install_routine_asset_surfaces() {
+INSTALL_ROUTINE_ASSET_TXN=""
+INSTALL_ROUTINE_ASSET_RUNTIME=""
+INSTALL_BINARY_PROMOTED=0
+INSTALL_ASSET_FINALIZED=0
+
+prepare_install_routine_asset_surfaces() {
   local source_root="$1"
   local runtime_root="$2"
   local primitives="$source_root/scripts/routine-asset-surface.sh"
-  local routines_staged=""
-  local helpers_staged=""
+  local validator="$source_root/scripts/validate-quickjs-routines.py"
+  local lock_file="${AGENTDESK_DEPLOY_LOCK_FILE:-$runtime_root/runtime/deploy-release.lock}"
+  local lock_timeout="${AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS:-1800}"
+  local required_function
 
   if [ ! -f "$primitives" ] \
+    || [ ! -f "$validator" ] \
     || [ ! -d "$source_root/routines" ] \
     || [ ! -d "$source_root/routine-helpers" ]; then
     echo "Routine asset payload is incomplete under $source_root" >&2
@@ -73,29 +81,105 @@ install_routine_asset_surfaces() {
 
   # The same preservation, exact-tombstone, and atomic-swap primitives power
   # deploy-release.sh, deploy.sh, source installs, and release-artifact installs.
+  # Pin validation to this exact source/artifact instead of inheriting a path
+  # from any previously sourced helper in the caller's shell.
+  ADK_QUICKJS_VALIDATOR="$validator"
   # shellcheck disable=SC1090
   . "$primitives"
 
+  for required_function in \
+    adk_validate_repo_routine_assets \
+    adk_acquire_routine_asset_lock \
+    adk_begin_routine_asset_transaction \
+    adk_stage_routines \
+    adk_stage_routine_helpers \
+    adk_promote_routine_asset_transaction \
+    adk_mark_routine_asset_transaction_committing \
+    adk_commit_routine_asset_transaction_forward \
+    adk_commit_routine_asset_transaction \
+    adk_rollback_routine_asset_transaction \
+    adk_release_routine_asset_lock \
+    _adk_active_txn; do
+    command -v "$required_function" >/dev/null 2>&1 || {
+      echo "Routine asset primitive is too old: $required_function missing" >&2
+      return 1
+    }
+  done
+  # This preflight is deliberately before the lock, transaction, or binary
+  # copy. An old/incomplete artifact therefore leaves existing assets and the
+  # installed binary byte-for-byte untouched.
   adk_validate_repo_routine_assets "$source_root" || return 1
-
-  routines_staged="$(adk_stage_routines "$source_root" "$runtime_root")" \
-    || return 1
-  if ! helpers_staged="$(adk_stage_routine_helpers "$source_root" "$runtime_root")"; then
-    rm -rf "$routines_staged" 2>/dev/null || true
-    return 1
-  fi
-  if ! adk_swap_staged_routines "$runtime_root" "$routines_staged"; then
-    rm -rf "$routines_staged" "$helpers_staged" 2>/dev/null || true
-    return 1
-  fi
-  if ! adk_swap_staged_routine_helpers "$runtime_root" "$helpers_staged"; then
-    adk_rollback_routine_swap "$runtime_root" || true
-    rm -rf "$helpers_staged" 2>/dev/null || true
-    return 1
-  fi
-  adk_commit_routine_helper_swap "$runtime_root" \
-    && adk_commit_routine_swap "$runtime_root"
+  adk_acquire_routine_asset_lock "$lock_file" "$lock_timeout" || return 1
+  INSTALL_ROUTINE_ASSET_RUNTIME="$runtime_root"
+  INSTALL_ROUTINE_ASSET_TXN="$(
+    adk_begin_routine_asset_transaction "$runtime_root" "$lock_file"
+  )" || return 1
+  adk_stage_routines "$source_root" "$runtime_root" \
+    "$INSTALL_ROUTINE_ASSET_TXN" >/dev/null || return 1
+  adk_stage_routine_helpers "$source_root" "$runtime_root" \
+    "$INSTALL_ROUTINE_ASSET_TXN" >/dev/null || return 1
 }
+
+promote_install_routine_asset_surfaces() {
+  adk_promote_routine_asset_transaction \
+    "$INSTALL_ROUTINE_ASSET_RUNTIME" "$INSTALL_ROUTINE_ASSET_TXN"
+}
+
+finalize_install_routine_asset_surfaces() {
+  if ! adk_commit_routine_asset_transaction \
+    "$INSTALL_ROUTINE_ASSET_RUNTIME" "$INSTALL_ROUTINE_ASSET_TXN"; then
+    warn "Installed assets are live; durable commit cleanup will resume next run"
+  fi
+  INSTALL_ASSET_FINALIZED=1
+}
+
+_install_cleanup() {
+  local status=${1:-$?}
+  local active_txn=""
+  local active_status=1
+
+  trap - EXIT INT TERM
+  if command -v _adk_active_txn >/dev/null 2>&1 \
+    && [ -n "$INSTALL_ROUTINE_ASSET_RUNTIME" ] \
+    && [ "$INSTALL_ASSET_FINALIZED" != 1 ]; then
+    if active_txn="$(_adk_active_txn "$INSTALL_ROUTINE_ASSET_RUNTIME")"; then
+      active_status=0
+    else
+      active_status=$?
+      active_txn=""
+      if [ "$active_status" -ne 1 ]; then
+        echo "Install routine asset marker is corrupt; refusing partial recovery" >&2
+        status=1
+      fi
+    fi
+    if [ "$active_status" -eq 0 ]; then
+      if [ "$INSTALL_BINARY_PROMOTED" = 1 ]; then
+        adk_commit_routine_asset_transaction_forward \
+          "$INSTALL_ROUTINE_ASSET_RUNTIME" "$active_txn" \
+          || { echo "Install asset fail-forward failed: $active_txn" >&2; status=1; }
+      else
+        adk_rollback_routine_asset_transaction \
+          "$INSTALL_ROUTINE_ASSET_RUNTIME" "$active_txn" \
+          || { echo "Install asset rollback failed: $active_txn" >&2; status=1; }
+      fi
+    fi
+  fi
+  if command -v adk_release_routine_asset_lock >/dev/null 2>&1; then
+    adk_release_routine_asset_lock \
+      || { echo "Install could not release the shared deploy lock" >&2; status=1; }
+  fi
+  return "$status"
+}
+
+_install_cleanup_signal() {
+  local status="$1"
+  _install_cleanup "$status" || status=$?
+  exit "$status"
+}
+
+trap _install_cleanup EXIT
+trap '_install_cleanup_signal 130' INT
+trap '_install_cleanup_signal 143' TERM
 
 launchd_domain() {
   local uid domain
@@ -356,8 +440,13 @@ if [ -z "$LATEST_TAG" ]; then
     (cd dashboard && npm ci --silent 2>/dev/null && npm run build 2>&1 | tail -1) || true
   fi
 
+  info "Validating and staging routine asset payload..."
+  prepare_install_routine_asset_surfaces "$TMPDIR_BUILD" "$INSTALL_DIR" \
+    || fail "Routine asset preflight failed before binary installation"
+
   # Install
   mkdir -p "$INSTALL_DIR"/{bin,config,data,logs,policies,dashboard,skills}
+  INSTALL_BINARY_PROMOTED=1
   cp target/release/agentdesk "$INSTALL_DIR/bin/"
   chmod +x "$INSTALL_DIR/bin/agentdesk"
 
@@ -373,8 +462,8 @@ if [ -z "$LATEST_TAG" ]; then
     rsync -a --delete "skills/" "$INSTALL_DIR/skills/"
   fi
 
-  info "Installing routine entrypoints and helper assets..."
-  install_routine_asset_surfaces "$TMPDIR_BUILD" "$INSTALL_DIR" \
+  info "Promoting routine entrypoints and helper assets..."
+  promote_install_routine_asset_surfaces \
     || fail "Routine asset installation failed"
 
   cd /
@@ -395,8 +484,13 @@ else
   cd "$TMPDIR_DL"
   tar xzf "${ARTIFACT}.tar.gz"
 
+  info "Validating and staging routine asset payload..."
+  prepare_install_routine_asset_surfaces "$TMPDIR_DL/${ARTIFACT}" "$INSTALL_DIR" \
+    || fail "Routine asset preflight failed before binary installation"
+
   # Install
   mkdir -p "$INSTALL_DIR"/{bin,config,data,logs,skills}
+  INSTALL_BINARY_PROMOTED=1
   cp "${ARTIFACT}/agentdesk" "$INSTALL_DIR/bin/"
   chmod +x "$INSTALL_DIR/bin/agentdesk"
 
@@ -414,8 +508,8 @@ else
     rsync -a --delete "${ARTIFACT}/skills/" "$INSTALL_DIR/skills/"
   fi
 
-  info "Installing routine entrypoints and helper assets..."
-  install_routine_asset_surfaces "$TMPDIR_DL/${ARTIFACT}" "$INSTALL_DIR" \
+  info "Promoting routine entrypoints and helper assets..."
+  promote_install_routine_asset_surfaces \
     || fail "Routine asset installation failed"
 
   cd /
@@ -507,6 +601,11 @@ else
   warn "launchd bootstrap failed. Try manually:"
   echo "  launchctl bootstrap $LAUNCHD_DOMAIN $PLIST_PATH"
 fi
+
+# The installer does not roll back its binary on a deferred launchd readiness
+# warning, so commit the exactly matching asset generation before releasing the
+# shared lock. A cleanup failure remains resumable via the `committing` marker.
+finalize_install_routine_asset_surfaces
 
 # ── Open browser ──────────────────────────────────────────────────────────────
 DASHBOARD_URL="http://${DEFAULT_LOOPBACK}:$INSTALL_PORT"

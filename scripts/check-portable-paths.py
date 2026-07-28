@@ -23,6 +23,7 @@ DEFAULT_PATTERNS = (
     "scripts/install.sh",
     "scripts/queue-stability-batch.sh",
     "scripts/routine-asset-surface.sh",
+    "scripts/validate-quickjs-routines.py",
     "scripts/setup-hooks.sh",
     "scripts/resolve-python-runner.sh",
     "scripts/pg_tunnel.sh",
@@ -35,6 +36,7 @@ DEFAULT_PATTERNS = (
     "policies/**/*",
     "routines/**/*.js",
     "routine-helpers/**/*.js",
+    "routine-helpers/**/*.py",
     "agentdesk.example.yaml",
 )
 

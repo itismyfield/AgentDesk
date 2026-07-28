@@ -198,6 +198,7 @@ fi
 # extracted artifact rather than a full repository checkout.
 mkdir -p "$STAGING/scripts"
 cp "scripts/routine-asset-surface.sh" "$STAGING/scripts/routine-asset-surface.sh"
+cp "scripts/validate-quickjs-routines.py" "$STAGING/scripts/validate-quickjs-routines.py"
 
 # Launchd-migrated shell entrypoints used by bundled routine prompts.
 if [ -d "scripts/launchd-migrated" ]; then

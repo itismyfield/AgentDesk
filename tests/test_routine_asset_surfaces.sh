@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression coverage for #4902 helper-asset deployment boundaries.
+# Behavioral regression coverage for #4902 routine asset transactions.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,7 +29,7 @@ while IFS= read -r routine_ref; do
 done < <(git -C "$REPO_ROOT" ls-files 'routines/*.js' 'routines/**/*.js')
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-routine-assets.XXXXXX")
-trap 'rm -rf "$TMP_ROOT"' EXIT
+trap 'adk_release_routine_asset_lock 2>/dev/null || true; rm -rf "$TMP_ROOT"' EXIT
 
 fail_test() {
     echo "FAIL: $*" >&2
@@ -38,267 +38,477 @@ fail_test() {
 
 seed_required_helpers() {
     local helper_root="$1"
-    local label="$2"
+    local generation="$2"
     local helper_ref
 
     mkdir -p "$helper_root/monitoring"
     for helper_ref in "${ADK_REQUIRED_ROUTINE_HELPER_REFS[@]}"; do
-        printf '%s-%s\n' "$label" "$helper_ref" > "$helper_root/$helper_ref"
+        printf '%s:%s\n' "$generation" "$helper_ref" > "$helper_root/$helper_ref"
     done
+    printf '%s\n' "$generation" > "$helper_root/generation-marker"
 }
 
 write_quickjs_routine() {
     local path="$1"
-    local name="$2"
+    local generation="$2"
 
     mkdir -p "$(dirname "$path")"
     printf 'agentdesk.routines.register({ name: "%s", tick() { return { action: "complete" }; } });\n' \
-        "$name" > "$path"
+        "$generation" > "$path"
 }
 
-SOURCE_ROOT="$TMP_ROOT/repo"
-RUNTIME_ROOT="$TMP_ROOT/release"
-HELPER_DIR="monitoring"
-seed_required_helpers "$SOURCE_ROOT/routine-helpers" 'repo'
-seed_required_helpers "$RUNTIME_ROOT/routine-helpers" 'stale'
-mkdir -p "$RUNTIME_ROOT/routines/$HELPER_DIR"
+seed_source() {
+    local root="$1"
+    local generation="$2"
+
+    seed_required_helpers "$root/routine-helpers" "$generation"
+    write_quickjs_routine "$root/routines/monitoring/bundled.js" "$generation"
+    printf '%s\n' "$generation" > "$root/routines/generation-marker"
+}
+
+seed_live() {
+    local root="$1"
+    local generation="$2"
+
+    seed_required_helpers "$root/routine-helpers" "$generation"
+    write_quickjs_routine "$root/routines/monitoring/bundled.js" "$generation"
+    printf '%s\n' "$generation" > "$root/routines/generation-marker"
+}
+
+acquire_runtime_lock() {
+    local runtime_root="$1"
+    CURRENT_LOCK="$runtime_root/runtime/deploy-release.lock"
+    adk_acquire_routine_asset_lock "$CURRENT_LOCK" 0
+}
+
+begin_staged_transaction() {
+    local source_root="$1"
+    local runtime_root="$2"
+
+    CURRENT_TXN="$(
+        adk_begin_routine_asset_transaction "$runtime_root" "$CURRENT_LOCK"
+    )"
+    adk_stage_routines "$source_root" "$runtime_root" "$CURRENT_TXN" >/dev/null
+    adk_stage_routine_helpers "$source_root" "$runtime_root" "$CURRENT_TXN" >/dev/null
+}
+
+release_runtime_lock() {
+    adk_release_routine_asset_lock
+    CURRENT_LOCK=""
+}
+
+CURRENT_LOCK=""
+CURRENT_TXN=""
+
+# Unique stages preserve operator assets, exact tombstones, and root mode.
+SOURCE_ROOT="$TMP_ROOT/repo-v1"
+RUNTIME_ROOT="$TMP_ROOT/release-v0"
+seed_source "$SOURCE_ROOT" 'v1'
+seed_live "$RUNTIME_ROOT" 'v0'
+printf 'operator helper\n' > "$RUNTIME_ROOT/routine-helpers/operator-private.py"
+write_quickjs_routine "$RUNTIME_ROOT/routines/monitoring/operator.js" 'operator'
 for helper_ref in "${ADK_LEGACY_ROUTINE_HELPER_REFS[@]}"; do
-    printf 'legacy-%s\n' "$helper_ref" > "$RUNTIME_ROOT/routines/$helper_ref"
+    mkdir -p "$(dirname "$RUNTIME_ROOT/routines/$helper_ref")"
+    printf 'legacy helper\n' > "$RUNTIME_ROOT/routines/$helper_ref"
 done
-printf 'operator-private helper\n' \
-    > "$RUNTIME_ROOT/routine-helpers/$HELPER_DIR/operator-private.py"
-write_quickjs_routine \
-    "$RUNTIME_ROOT/routines/$HELPER_DIR/operator-private.js" 'operator-private'
-write_quickjs_routine \
-    "$RUNTIME_ROOT/routines/$HELPER_DIR/daily-log-digest.js" 'old-daily-log-digest'
-write_quickjs_routine \
-    "$SOURCE_ROOT/routines/$HELPER_DIR/daily-log-digest.js" 'daily-log-digest'
 chmod 0710 "$RUNTIME_ROOT/routine-helpers"
+acquire_runtime_lock "$RUNTIME_ROOT"
+begin_staged_transaction "$SOURCE_ROOT" "$RUNTIME_ROOT"
 
-# Existing helper assets survive; tracked source wins only at matching paths.
-# The staged root also inherits the live root's operator-selected mode.
-HELPERS_STAGED="$(adk_stage_routine_helpers "$SOURCE_ROOT" "$RUNTIME_ROOT")"
-[ "$(<"$HELPERS_STAGED/$HELPER_DIR/operator-private.py")" = 'operator-private helper' ] \
+[ "$CURRENT_TXN/staged/routines" != "$RUNTIME_ROOT/routines.new" ] \
+    && [ -d "$CURRENT_TXN/staged/routines" ] \
+    && [ -d "$CURRENT_TXN/staged/routine-helpers" ] \
+    || fail_test 'transaction did not use unique owned stage paths'
+[ -f "$CURRENT_TXN/staged/routine-helpers/operator-private.py" ] \
     || fail_test 'helper staging erased an operator-private asset'
-[ "$(<"$HELPERS_STAGED/$HELPER_DIR/daily_log_digest.py")" = \
-    'repo-monitoring/daily_log_digest.py' ] \
-    || fail_test 'repository helper did not overlay its exact path'
-[ "$(_adk_path_mode "$HELPERS_STAGED")" = \
+[ -f "$CURRENT_TXN/staged/routines/monitoring/operator.js" ] \
+    || fail_test 'routine staging erased an operator-private entrypoint'
+[ "$(_adk_path_mode "$CURRENT_TXN/staged/routine-helpers")" = \
     "$(_adk_path_mode "$RUNTIME_ROOT/routine-helpers")" ] \
-    || fail_test 'helper staging did not preserve the live root mode'
-
-# Exactly the four migrated paths disappear from routines; unrelated QuickJS
-# assets survive, proving the compatibility tombstone is surgical.
-ROUTINES_STAGED="$(adk_stage_routines "$SOURCE_ROOT" "$RUNTIME_ROOT")"
+    || fail_test 'staged helper root did not preserve live mode'
 for helper_ref in "${ADK_LEGACY_ROUTINE_HELPER_REFS[@]}"; do
-    [ ! -e "$ROUTINES_STAGED/$helper_ref" ] \
-        || fail_test "legacy helper survived routine tombstone: $helper_ref"
+    [ ! -e "$CURRENT_TXN/staged/routines/$helper_ref" ] \
+        || fail_test "legacy helper survived exact tombstone: $helper_ref"
 done
-[ -f "$ROUTINES_STAGED/$HELPER_DIR/operator-private.js" ] \
-    && [ -f "$ROUTINES_STAGED/$HELPER_DIR/daily-log-digest.js" ] \
-    || fail_test 'routine tombstone removed a non-legacy entrypoint or operator asset'
 
-# The first successful swap retains .old until an explicit health commit.
-adk_swap_staged_routine_helpers "$RUNTIME_ROOT" "$HELPERS_STAGED"
-[ -d "$RUNTIME_ROOT/routine-helpers.old" ] \
-    || fail_test 'helper swap discarded rollback state before commit'
-[ -f "$RUNTIME_ROOT/routine-helpers/$HELPER_DIR/operator-private.py" ] \
-    && [ -f "$RUNTIME_ROOT/routine-helpers/$HELPER_DIR/weekly_churn_audit.py" ] \
-    || fail_test 'routine helper swap did not produce the expected live surface'
-adk_commit_routine_helper_swap "$RUNTIME_ROOT"
-[ ! -e "$RUNTIME_ROOT/routine-helpers.old" ] \
-    || fail_test 'helper commit retained its transaction backup'
+adk_promote_routine_asset_transaction "$RUNTIME_ROOT" "$CURRENT_TXN"
+[ "$(<"$RUNTIME_ROOT/routines/generation-marker")" = 'v1' ] \
+    && [ "$(<"$RUNTIME_ROOT/routines.old/generation-marker")" = 'v0' ] \
+    && [ "$(<"$RUNTIME_ROOT/routine-helpers/generation-marker")" = 'v1' ] \
+    || fail_test 'paired promotion did not retain the exact v0 rollback generation'
+adk_commit_routine_asset_transaction "$RUNTIME_ROOT" "$CURRENT_TXN"
+[ ! -e "$RUNTIME_ROOT/routines.old" ] \
+    && [ ! -e "$RUNTIME_ROOT/routine-helpers.old" ] \
+    && [ ! -e "$RUNTIME_ROOT/runtime/routine-assets.active" ] \
+    || fail_test 'healthy commit retained transaction state'
+release_runtime_lock
 
-# The deploy-release EXIT path uses this rollback after a post-promotion health
-# failure. It must restore the old surface and consume the transaction backup.
-ROLLBACK_SOURCE_ROOT="$TMP_ROOT/rollback-repo"
-ROLLBACK_RUNTIME_ROOT="$TMP_ROOT/rollback-release"
-seed_required_helpers "$ROLLBACK_SOURCE_ROOT/routine-helpers" 'new'
-seed_required_helpers "$ROLLBACK_RUNTIME_ROOT/routine-helpers" 'old'
-printf 'old live\n' > "$ROLLBACK_RUNTIME_ROOT/routine-helpers/old-marker"
-ROLLBACK_STAGED="$(
-    adk_stage_routine_helpers "$ROLLBACK_SOURCE_ROOT" "$ROLLBACK_RUNTIME_ROOT"
-)"
-adk_swap_staged_routine_helpers "$ROLLBACK_RUNTIME_ROOT" "$ROLLBACK_STAGED"
-adk_rollback_routine_helper_swap "$ROLLBACK_RUNTIME_ROOT"
-[ -f "$ROLLBACK_RUNTIME_ROOT/routine-helpers/old-marker" ] \
-    && [ ! -e "$ROLLBACK_RUNTIME_ROOT/routine-helpers.old" ] \
-    || fail_test 'helper rollback did not restore the pre-swap surface'
+# Once health has durably selected commit, retry/recovery must retain the new
+# generation instead of rolling assets back beside the proven new binary.
+INTENT_RUNTIME="$TMP_ROOT/commit-intent-release"
+INTENT_SOURCE="$TMP_ROOT/commit-intent-source"
+seed_live "$INTENT_RUNTIME" 'v0'
+seed_source "$INTENT_SOURCE" 'v1'
+acquire_runtime_lock "$INTENT_RUNTIME"
+begin_staged_transaction "$INTENT_SOURCE" "$INTENT_RUNTIME"
+INTENT_TXN="$CURRENT_TXN"
+adk_promote_routine_asset_transaction "$INTENT_RUNTIME" "$INTENT_TXN"
+adk_mark_routine_asset_transaction_committing "$INTENT_RUNTIME" "$INTENT_TXN"
+adk_recover_active_routine_asset_transaction "$INTENT_RUNTIME"
+[ "$(<"$INTENT_RUNTIME/routines/generation-marker")" = 'v1' ] \
+    && [ "$(<"$INTENT_RUNTIME/routine-helpers/generation-marker")" = 'v1' ] \
+    && [ ! -e "$INTENT_RUNTIME/routines.old" ] \
+    && [ ! -e "$INTENT_RUNTIME/runtime/routine-assets.active" ] \
+    || fail_test 'durable commit intent recovered by rolling back the new generation'
+release_runtime_lock
 
-# Missing one authoritative source helper fails before staging or live mutation.
-MISSING_SOURCE_ROOT="$TMP_ROOT/missing-repo"
-MISSING_RUNTIME_ROOT="$TMP_ROOT/missing-release"
-seed_required_helpers "$MISSING_SOURCE_ROOT/routine-helpers" 'repo'
-rm "$MISSING_SOURCE_ROOT/routine-helpers/monitoring/weekly_churn_audit.py"
-seed_required_helpers "$MISSING_RUNTIME_ROOT/routine-helpers" 'live'
-printf 'live marker\n' > "$MISSING_RUNTIME_ROOT/routine-helpers/live-marker"
+# v1 -> v2 commit cleanup failure leaves a durable `committing` transaction.
+# The next lock holder must finish that commit, then v3 rollback must restore v2
+# (the immediately previous live), never stale v1.
+GEN_RUNTIME="$TMP_ROOT/generation-release"
+GEN_V2_SOURCE="$TMP_ROOT/generation-v2"
+GEN_V3_SOURCE="$TMP_ROOT/generation-v3"
+seed_live "$GEN_RUNTIME" 'v1'
+seed_source "$GEN_V2_SOURCE" 'v2'
+seed_source "$GEN_V3_SOURCE" 'v3'
+acquire_runtime_lock "$GEN_RUNTIME"
+begin_staged_transaction "$GEN_V2_SOURCE" "$GEN_RUNTIME"
+V2_TXN="$CURRENT_TXN"
+adk_promote_routine_asset_transaction "$GEN_RUNTIME" "$V2_TXN"
+
+COMMIT_FAIL_PATH="$GEN_RUNTIME/routine-helpers.old"
+rm() {
+    local arg
+    for arg in "$@"; do
+        [ "$arg" != "$COMMIT_FAIL_PATH" ] || return 76
+    done
+    command rm "$@"
+}
 set +e
-adk_stage_routine_helpers "$MISSING_SOURCE_ROOT" "$MISSING_RUNTIME_ROOT" >/dev/null
-MISSING_STATUS=$?
+adk_commit_routine_asset_transaction "$GEN_RUNTIME" "$V2_TXN"
+COMMIT_FAIL_STATUS=$?
 set -e
-[ "$MISSING_STATUS" -ne 0 ] || fail_test 'missing required helper passed preflight'
-[ -f "$MISSING_RUNTIME_ROOT/routine-helpers/live-marker" ] \
-    && [ ! -e "$MISSING_RUNTIME_ROOT/routine-helpers.new" ] \
-    || fail_test 'missing-source preflight mutated the live helper surface'
+unset -f rm
+[ "$COMMIT_FAIL_STATUS" -ne 0 ] \
+    && [ "$(<"$GEN_RUNTIME/routines/generation-marker")" = 'v2' ] \
+    && [ "$(<"$GEN_RUNTIME/routines.old/generation-marker")" = 'v1' ] \
+    && [ "$(<"$V2_TXN/phase")" = 'committing' ] \
+    || fail_test 'cleanup failure did not retain live v2 plus durable v1 cleanup state'
+release_runtime_lock
 
-# A deterministic rsync shim fails only the repository helper overlay. Status
-# must propagate; the trailing stage-path print must never mask it.
-FAIL_SOURCE_ROOT="$TMP_ROOT/failing-repo"
-FAIL_RUNTIME_ROOT="$TMP_ROOT/failing-release"
-seed_required_helpers "$FAIL_SOURCE_ROOT/routine-helpers" 'new'
-seed_required_helpers "$FAIL_RUNTIME_ROOT/routine-helpers" 'live'
-printf 'live helper\n' > "$FAIL_RUNTIME_ROOT/routine-helpers/live-marker"
+# First recovery attempt fails the same cleanup again and must not manufacture
+# or promote a new stage. The retry succeeds and bases v3 on authoritative v2.
+acquire_runtime_lock "$GEN_RUNTIME"
+rm() {
+    local arg
+    for arg in "$@"; do
+        [ "$arg" != "$COMMIT_FAIL_PATH" ] || return 77
+    done
+    command rm "$@"
+}
+set +e
+FAILED_BEGIN="$(
+    adk_begin_routine_asset_transaction "$GEN_RUNTIME" "$CURRENT_LOCK"
+)"
+FAILED_BEGIN_STATUS=$?
+set -e
+unset -f rm
+[ "$FAILED_BEGIN_STATUS" -ne 0 ] && [ -z "$FAILED_BEGIN" ] \
+    && [ "$(<"$GEN_RUNTIME/routines/generation-marker")" = 'v2' ] \
+    || fail_test 'failed committing recovery changed authoritative live v2'
+
+begin_staged_transaction "$GEN_V3_SOURCE" "$GEN_RUNTIME"
+V3_TXN="$CURRENT_TXN"
+adk_promote_routine_asset_transaction "$GEN_RUNTIME" "$V3_TXN"
+[ "$(<"$GEN_RUNTIME/routines/generation-marker")" = 'v3' ] \
+    && [ "$(<"$GEN_RUNTIME/routines.old/generation-marker")" = 'v2' ] \
+    && [ "$(<"$GEN_RUNTIME/routine-helpers.old/generation-marker")" = 'v2' ] \
+    || fail_test 'v3 transaction used stale v1 instead of immediate live v2'
+adk_rollback_routine_asset_transaction "$GEN_RUNTIME" "$V3_TXN"
+adk_rollback_routine_asset_transaction "$GEN_RUNTIME" "$V3_TXN"
+[ "$(<"$GEN_RUNTIME/routines/generation-marker")" = 'v2' ] \
+    && [ "$(<"$GEN_RUNTIME/routine-helpers/generation-marker")" = 'v2' ] \
+    && [ ! -e "$GEN_RUNTIME/routines.old" ] \
+    || fail_test 'v3 health rollback or double rollback failed to preserve v2'
+release_runtime_lock
+
+# TERM after live->old but before mv returns is recoverable because `armed` was
+# durable before the first rename. The mv shim performs the rename, then returns
+# a signal-like failure to force the exact interruption window.
+SIGNAL_RUNTIME="$TMP_ROOT/signal-release"
+SIGNAL_SOURCE="$TMP_ROOT/signal-source"
+seed_live "$SIGNAL_RUNTIME" 'v0'
+seed_source "$SIGNAL_SOURCE" 'v1'
+acquire_runtime_lock "$SIGNAL_RUNTIME"
+begin_staged_transaction "$SIGNAL_SOURCE" "$SIGNAL_RUNTIME"
+SIGNAL_TXN="$CURRENT_TXN"
+SIGNAL_FROM="$SIGNAL_RUNTIME/routines"
+SIGNAL_TO="$SIGNAL_RUNTIME/routines.old"
+SAW_DURABLE_ARM=0
+mv() {
+    if [ "$#" -eq 2 ] && [ "$1" = "$SIGNAL_FROM" ] && [ "$2" = "$SIGNAL_TO" ]; then
+        [ "$(<"$SIGNAL_TXN/phase")" = 'armed' ] && SAW_DURABLE_ARM=1
+        command mv "$@"
+        return 143
+    fi
+    command mv "$@"
+}
+set +e
+adk_promote_routine_asset_transaction "$SIGNAL_RUNTIME" "$SIGNAL_TXN"
+SIGNAL_STATUS=$?
+set -e
+unset -f mv
+[ "$SIGNAL_STATUS" -ne 0 ] && [ "$SAW_DURABLE_ARM" = 1 ] \
+    && [ ! -e "$SIGNAL_RUNTIME/routines" ] \
+    && [ "$(<"$SIGNAL_RUNTIME/routines.old/generation-marker")" = 'v0' ] \
+    && [ "$(<"$SIGNAL_TXN/phase")" = 'armed' ] \
+    && [ -e "$SIGNAL_RUNTIME/runtime/routine-assets.active" ] \
+    || fail_test 'signal-window state was not durably recoverable'
+adk_rollback_routine_asset_transaction "$SIGNAL_RUNTIME" "$SIGNAL_TXN"
+[ "$(<"$SIGNAL_RUNTIME/routines/generation-marker")" = 'v0' ] \
+    && [ ! -e "$SIGNAL_RUNTIME/routines.old" ] \
+    && [ ! -e "$SIGNAL_RUNTIME/runtime/routine-assets.active" ] \
+    || fail_test 'signal-window rollback did not recover v0'
+release_runtime_lock
+
+# An interrupted rollback preserves live/new in swap-current while old/v0 is
+# still available. A second call converges without deleting either sole copy.
+RETRY_RUNTIME="$TMP_ROOT/retry-release"
+RETRY_SOURCE="$TMP_ROOT/retry-source"
+seed_live "$RETRY_RUNTIME" 'v0'
+seed_source "$RETRY_SOURCE" 'v1'
+acquire_runtime_lock "$RETRY_RUNTIME"
+begin_staged_transaction "$RETRY_SOURCE" "$RETRY_RUNTIME"
+RETRY_TXN="$CURRENT_TXN"
+adk_promote_routine_asset_transaction "$RETRY_RUNTIME" "$RETRY_TXN"
+ROLLBACK_FAIL_FROM="$RETRY_RUNTIME/routines.old"
+ROLLBACK_FAIL_TO="$RETRY_RUNTIME/routines"
+mv() {
+    if [ "$#" -eq 2 ] && [ "$1" = "$ROLLBACK_FAIL_FROM" ] \
+      && [ "$2" = "$ROLLBACK_FAIL_TO" ]; then
+        return 78
+    fi
+    command mv "$@"
+}
+set +e
+adk_rollback_routine_asset_transaction "$RETRY_RUNTIME" "$RETRY_TXN"
+RETRY_FAIL_STATUS=$?
+set -e
+unset -f mv
+[ "$RETRY_FAIL_STATUS" -ne 0 ] \
+    && [ "$(<"$RETRY_RUNTIME/routines/generation-marker")" = 'v1' ] \
+    && [ "$(<"$RETRY_RUNTIME/routines.old/generation-marker")" = 'v0' ] \
+    && [ "$(<"$RETRY_TXN/phase")" = 'rolling-back' ] \
+    || fail_test 'failed rollback did not preserve both v0 and v1 copies'
+adk_rollback_routine_asset_transaction "$RETRY_RUNTIME" "$RETRY_TXN"
+[ "$(<"$RETRY_RUNTIME/routines/generation-marker")" = 'v0' ] \
+    && [ ! -e "$RETRY_RUNTIME/routines.old" ] \
+    && [ ! -e "$RETRY_RUNTIME/routines.swap-current" ] \
+    || fail_test 'rollback retry failed to converge to v0'
+release_runtime_lock
+
+# Fresh surfaces roll back to absence, and a second rollback is a no-op.
+FRESH_RUNTIME="$TMP_ROOT/fresh-release"
+FRESH_SOURCE="$TMP_ROOT/fresh-source"
+seed_source "$FRESH_SOURCE" 'v1'
+acquire_runtime_lock "$FRESH_RUNTIME"
+begin_staged_transaction "$FRESH_SOURCE" "$FRESH_RUNTIME"
+FRESH_TXN="$CURRENT_TXN"
+adk_promote_routine_asset_transaction "$FRESH_RUNTIME" "$FRESH_TXN"
+adk_rollback_routine_asset_transaction "$FRESH_RUNTIME" "$FRESH_TXN"
+adk_rollback_routine_asset_transaction "$FRESH_RUNTIME" "$FRESH_TXN"
+[ ! -e "$FRESH_RUNTIME/routines" ] && [ ! -e "$FRESH_RUNTIME/routine-helpers" ] \
+    || fail_test 'fresh transaction rollback did not restore absent surfaces'
+release_runtime_lock
+
+# Pre-state-machine interruption may leave the only copies under .old. Beginning
+# a new transaction restores both sole copies before it creates a unique stage.
+SOLE_RUNTIME="$TMP_ROOT/sole-old-release"
+seed_live "$SOLE_RUNTIME" 'v0'
+mv "$SOLE_RUNTIME/routines" "$SOLE_RUNTIME/routines.old"
+mv "$SOLE_RUNTIME/routine-helpers" "$SOLE_RUNTIME/routine-helpers.old"
+acquire_runtime_lock "$SOLE_RUNTIME"
+SOLE_TXN="$(adk_begin_routine_asset_transaction "$SOLE_RUNTIME" "$CURRENT_LOCK")"
+[ "$(<"$SOLE_RUNTIME/routines/generation-marker")" = 'v0' ] \
+    && [ "$(<"$SOLE_RUNTIME/routine-helpers/generation-marker")" = 'v0' ] \
+    && [ ! -e "$SOLE_RUNTIME/routines.old" ] \
+    && [ ! -e "$SOLE_RUNTIME/routine-helpers.old" ] \
+    || fail_test 'sole .old copies were not restored before a new transaction'
+adk_abort_routine_asset_transaction "$SOLE_RUNTIME" "$SOLE_TXN"
+release_runtime_lock
+
+# The shared lock rejects a second entrypoint, and an old transaction cannot
+# promote a later transaction's unique stage.
+LOCK_RUNTIME="$TMP_ROOT/lock-release"
+LOCK_SOURCE="$TMP_ROOT/lock-source"
+seed_source "$LOCK_SOURCE" 'v1'
+acquire_runtime_lock "$LOCK_RUNTIME"
+begin_staged_transaction "$LOCK_SOURCE" "$LOCK_RUNTIME"
+LOCK_TXN="$CURRENT_TXN"
+set +e
+(
+    ADK_ROUTINE_ASSET_LOCK_DIR=""
+    ADK_ROUTINE_ASSET_LOCK_TOKEN=""
+    adk_acquire_routine_asset_lock "$CURRENT_LOCK" 0
+) >/dev/null 2>&1
+SECOND_LOCK_STATUS=$?
+set -e
+[ "$SECOND_LOCK_STATUS" -ne 0 ] || fail_test 'second entrypoint acquired the shared lock'
+adk_abort_routine_asset_transaction "$LOCK_RUNTIME" "$LOCK_TXN"
+LATER_TXN="$(adk_begin_routine_asset_transaction "$LOCK_RUNTIME" "$CURRENT_LOCK")"
+set +e
+adk_promote_routine_asset_transaction "$LOCK_RUNTIME" "$LOCK_TXN" >/dev/null 2>&1
+OLD_PROMOTE_STATUS=$?
+set -e
+[ "$OLD_PROMOTE_STATUS" -ne 0 ] \
+    || fail_test 'closed transaction promoted a later unique payload'
+adk_abort_routine_asset_transaction "$LOCK_RUNTIME" "$LATER_TXN"
+release_runtime_lock
+
+# The bounded lexical validator ignores registration marker text in comments,
+# strings, and templates, rejects an empty bundled root, and accepts a real
+# standalone program-level call even when decoys are present.
+assert_invalid_routine_source() {
+    local name="$1"
+    local body="$2"
+    local root="$TMP_ROOT/lexer-$name"
+
+    mkdir -p "$root/routines"
+    seed_required_helpers "$root/routine-helpers" "$name"
+    printf '%s\n' "$body" > "$root/routines/mutant.js"
+    if adk_validate_repo_routine_assets "$root" >/dev/null 2>&1; then
+        fail_test "lexical validator accepted $name marker mutant"
+    fi
+}
+
+assert_invalid_routine_source block-comment \
+    '/* agentdesk.routines.register({}); */ module.exports = {};'
+assert_invalid_routine_source string \
+    'const marker = "agentdesk.routines.register({})"; module.exports = {};'
+assert_invalid_routine_source template \
+    'const marker = `agentdesk.routines.register({})`; module.exports = {};'
+assert_invalid_routine_source nested \
+    'function later() { agentdesk.routines.register({}); }'
+assert_invalid_routine_source malformed-tail \
+    'agentdesk.routines.register({}); function broken() {'
+EMPTY_ROOT="$TMP_ROOT/lexer-empty"
+mkdir -p "$EMPTY_ROOT/routines"
+seed_required_helpers "$EMPTY_ROOT/routine-helpers" 'empty'
+if adk_validate_repo_routine_assets "$EMPTY_ROOT" >/dev/null 2>&1; then
+    fail_test 'empty bundled routines root passed validation'
+fi
+VALID_ROOT="$TMP_ROOT/lexer-valid"
+seed_required_helpers "$VALID_ROOT/routine-helpers" 'valid'
+mkdir -p "$VALID_ROOT/routines"
+printf '%s\n' \
+    '/* agentdesk.routines.register({}); */' \
+    'agentdesk.routines.register({ name: "real", tick() { return { action: "complete" }; } });' \
+    > "$VALID_ROOT/routines/valid.js"
+adk_validate_repo_routine_assets "$VALID_ROOT"
+printf '%s\n' 'const decoy = "agentdesk.routines.register({})";' \
+    > "$VALID_ROOT/routines/second-invalid.js"
+if adk_validate_repo_routine_assets "$VALID_ROOT" >/dev/null 2>&1; then
+    fail_test 'validator did not require a real registration in every JavaScript file'
+fi
+rm "$VALID_ROOT/routines/second-invalid.js"
+
+# Node/Python helpers must not leak back into the QuickJS entrypoint root, and
+# source/root symlinks remain fail-closed before rsync can follow them.
+printf '%s\n' 'module.exports = {};' \
+    > "$VALID_ROOT/routines/monitoring/local_worktree_inventory.js"
+if adk_validate_repo_routine_assets "$VALID_ROOT" >/dev/null 2>&1; then
+    fail_test 'non-QuickJS helper copied into routines passed validation'
+fi
+rm "$VALID_ROOT/routines/monitoring/local_worktree_inventory.js"
+
+LINK_ROOT="$TMP_ROOT/symlink-source"
+seed_source "$LINK_ROOT" 'linked'
+mv "$LINK_ROOT/routine-helpers/monitoring/weekly_churn_audit.py" \
+    "$TMP_ROOT/linked-helper.py"
+ln -s "$TMP_ROOT/linked-helper.py" \
+    "$LINK_ROOT/routine-helpers/monitoring/weekly_churn_audit.py"
+if adk_validate_repo_routine_assets "$LINK_ROOT" >/dev/null 2>&1; then
+    fail_test 'routine helper descendant symlink passed validation'
+fi
+ln -s "$LINK_ROOT" "$TMP_ROOT/symlink-source-root"
+if adk_validate_repo_routine_assets "$TMP_ROOT/symlink-source-root" >/dev/null 2>&1; then
+    fail_test 'symlinked routine asset source root passed validation'
+fi
+
+# Missing required source fails before transaction start; rsync failure leaves
+# live assets untouched and a staging transaction safely abortable.
+MISSING_ROOT="$TMP_ROOT/missing-source"
+seed_source "$MISSING_ROOT" 'bad'
+rm "$MISSING_ROOT/routine-helpers/monitoring/weekly_churn_audit.py"
+if adk_validate_repo_routine_assets "$MISSING_ROOT" >/dev/null 2>&1; then
+    fail_test 'missing authoritative helper passed source preflight'
+fi
+RSYNC_SOURCE="$TMP_ROOT/rsync-source"
+RSYNC_RUNTIME="$TMP_ROOT/rsync-release"
+seed_source "$RSYNC_SOURCE" 'v1'
+seed_live "$RSYNC_RUNTIME" 'v0'
+acquire_runtime_lock "$RSYNC_RUNTIME"
+RSYNC_TXN="$(adk_begin_routine_asset_transaction "$RSYNC_RUNTIME" "$CURRENT_LOCK")"
+RSYNC_FAIL_SOURCE="$RSYNC_SOURCE/routine-helpers/"
 rsync() {
     local arg
     for arg in "$@"; do
-        if [ "$arg" = "$FAIL_SOURCE_ROOT/routine-helpers/" ]; then
-            return 73
-        fi
+        [ "$arg" != "$RSYNC_FAIL_SOURCE" ] || return 73
     done
     command rsync "$@"
 }
 set +e
-FAILED_STAGE="$(adk_stage_routine_helpers "$FAIL_SOURCE_ROOT" "$FAIL_RUNTIME_ROOT")"
-FAILED_STATUS=$?
+adk_stage_routine_helpers "$RSYNC_SOURCE" "$RSYNC_RUNTIME" "$RSYNC_TXN" >/dev/null
+RSYNC_STATUS=$?
 set -e
 unset -f rsync
-[ "$FAILED_STATUS" -ne 0 ] && [ -z "$FAILED_STAGE" ] \
-    || fail_test 'helper overlay rsync failure was masked by stage output'
-[ -f "$FAIL_RUNTIME_ROOT/routine-helpers/live-marker" ] \
-    && [ ! -e "$FAIL_RUNTIME_ROOT/routine-helpers.new" ] \
-    && [ ! -e "$FAIL_RUNTIME_ROOT/routine-helpers.old" ] \
-    || fail_test 'failed helper staging mutated or swapped the live surface'
+[ "$RSYNC_STATUS" -ne 0 ] \
+    && [ "$(<"$RSYNC_RUNTIME/routine-helpers/generation-marker")" = 'v0' ] \
+    && [ ! -e "$RSYNC_TXN/staged/routine-helpers" ] \
+    || fail_test 'rsync failure was masked or changed live helpers'
+adk_abort_routine_asset_transaction "$RSYNC_RUNTIME" "$RSYNC_TXN"
+release_runtime_lock
 
-# A Node helper copied back into the QuickJS-only routines tree is rejected in
-# both source and staged/default-root validation.
-REENTRY_SOURCE_ROOT="$TMP_ROOT/reentry-repo"
-REENTRY_RUNTIME_ROOT="$TMP_ROOT/reentry-release"
-mkdir -p "$REENTRY_SOURCE_ROOT/routines/monitoring" \
-    "$REENTRY_RUNTIME_ROOT/routines/monitoring"
-cp "$REPO_ROOT/routine-helpers/monitoring/local_worktree_inventory.js" \
-    "$REENTRY_SOURCE_ROOT/routines/monitoring/reentered-helper.js"
-write_quickjs_routine \
-    "$REENTRY_RUNTIME_ROOT/routines/monitoring/operator.js" 'operator'
-set +e
-adk_stage_routines "$REENTRY_SOURCE_ROOT" "$REENTRY_RUNTIME_ROOT" >/dev/null
-REENTRY_STATUS=$?
-set -e
-[ "$REENTRY_STATUS" -ne 0 ] \
-    && [ ! -e "$REENTRY_RUNTIME_ROOT/routines.new" ] \
-    || fail_test 'non-registering Node helper re-entered the routines root'
-
-# Source descendants, the source root itself, and the runtime root all fail
-# closed when symlinked; rsync must never follow them into a transaction.
-LINK_SOURCE_ROOT="$TMP_ROOT/link-repo"
-LINK_RUNTIME_ROOT="$TMP_ROOT/link-release"
-seed_required_helpers "$LINK_SOURCE_ROOT/routine-helpers" 'repo'
-seed_required_helpers "$LINK_RUNTIME_ROOT/routine-helpers" 'live'
-ln -s "$LINK_SOURCE_ROOT/routine-helpers/monitoring/daily_log_digest.py" \
-    "$LINK_SOURCE_ROOT/routine-helpers/linked-helper"
-set +e
-adk_stage_routine_helpers "$LINK_SOURCE_ROOT" "$LINK_RUNTIME_ROOT" >/dev/null
-LINK_STATUS=$?
-set -e
-[ "$LINK_STATUS" -ne 0 ] || fail_test 'helper descendant symlink passed validation'
-
-LINK_ROOT_SOURCE="$TMP_ROOT/link-root-repo"
-mkdir -p "$LINK_ROOT_SOURCE"
-ln -s "$SOURCE_ROOT/routine-helpers" "$LINK_ROOT_SOURCE/routine-helpers"
-set +e
-adk_stage_routine_helpers "$LINK_ROOT_SOURCE" "$LINK_RUNTIME_ROOT" >/dev/null
-LINK_ROOT_STATUS=$?
-set -e
-[ "$LINK_ROOT_STATUS" -ne 0 ] || fail_test 'symlinked helper root passed validation'
-
-REAL_RUNTIME_ROOT="$TMP_ROOT/real-symlink-release"
-SYMLINK_RUNTIME_ROOT="$TMP_ROOT/symlink-release"
-mkdir -p "$REAL_RUNTIME_ROOT"
-ln -s "$REAL_RUNTIME_ROOT" "$SYMLINK_RUNTIME_ROOT"
-set +e
-adk_stage_routine_helpers "$SOURCE_ROOT" "$SYMLINK_RUNTIME_ROOT" >/dev/null
-RUNTIME_LINK_STATUS=$?
-set -e
-[ "$RUNTIME_LINK_STATUS" -ne 0 ] || fail_test 'symlinked runtime root passed validation'
-
-# A staged->live rename failure immediately restores the original live tree and
-# leaves no fake success state. Inject only that exact mv edge.
-MV_SOURCE_ROOT="$TMP_ROOT/mv-repo"
-MV_RUNTIME_ROOT="$TMP_ROOT/mv-release"
-seed_required_helpers "$MV_SOURCE_ROOT/routine-helpers" 'new'
-seed_required_helpers "$MV_RUNTIME_ROOT/routine-helpers" 'live'
-printf 'original live\n' > "$MV_RUNTIME_ROOT/routine-helpers/live-marker"
-MV_STAGED="$(adk_stage_routine_helpers "$MV_SOURCE_ROOT" "$MV_RUNTIME_ROOT")"
-MV_FAIL_FROM="$MV_STAGED"
-MV_FAIL_TO="$MV_RUNTIME_ROOT/routine-helpers"
-mv() {
-    if [ "$#" -eq 2 ] && [ "$1" = "$MV_FAIL_FROM" ] && [ "$2" = "$MV_FAIL_TO" ]; then
-        return 74
-    fi
-    command mv "$@"
+# Peer transport uses a validated absolute root, quoted fake-ssh command, and
+# rsync --protect-args so spaces and shell metacharacters stay one remote path.
+PEER_ROOT="$TMP_ROOT/peer/ADK Root;[\$HOME]"
+mkdir -p "$PEER_ROOT/routines" "$PEER_ROOT/routine-helpers"
+PEER_SSH_ARGS=()
+ssh() {
+    PEER_SSH_ARGS=("$@")
+    command bash -c "${4:?missing fake-ssh remote command}"
 }
-set +e
-adk_swap_staged_routine_helpers "$MV_RUNTIME_ROOT" "$MV_STAGED"
-MV_STATUS=$?
-set -e
-unset -f mv
-[ "$MV_STATUS" -ne 0 ] \
-    && [ -f "$MV_RUNTIME_ROOT/routine-helpers/live-marker" ] \
-    && [ -d "$MV_STAGED" ] \
-    && [ ! -e "$MV_RUNTIME_ROOT/routine-helpers.old" ] \
-    || fail_test 'failed staged rename did not immediately restore live helpers'
-
-# Retrying with a pre-existing .old must preserve that sole known-good backup.
-# A failed retry restores the displaced current live; a successful retry keeps
-# the original .old until commit.
-RETRY_RUNTIME_ROOT="$TMP_ROOT/retry-release"
-seed_required_helpers "$RETRY_RUNTIME_ROOT/routine-helpers" 'current'
-seed_required_helpers "$RETRY_RUNTIME_ROOT/routine-helpers.old" 'known-good'
-seed_required_helpers "$RETRY_RUNTIME_ROOT/routine-helpers.new" 'retry'
-printf 'current live\n' > "$RETRY_RUNTIME_ROOT/routine-helpers/current-marker"
-printf 'known good\n' > "$RETRY_RUNTIME_ROOT/routine-helpers.old/known-good-marker"
-printf 'retry staged\n' > "$RETRY_RUNTIME_ROOT/routine-helpers.new/retry-marker"
-RETRY_STAGED="$RETRY_RUNTIME_ROOT/routine-helpers.new"
-MV_FAIL_FROM="$RETRY_STAGED"
-MV_FAIL_TO="$RETRY_RUNTIME_ROOT/routine-helpers"
-mv() {
-    if [ "$#" -eq 2 ] && [ "$1" = "$MV_FAIL_FROM" ] && [ "$2" = "$MV_FAIL_TO" ]; then
-        return 75
-    fi
-    command mv "$@"
+adk_guard_peer_routine_asset_paths 'operator@peer.local' "$PEER_ROOT" 7
+[ "${#PEER_SSH_ARGS[@]}" -ge 4 ] \
+    && [[ "${PEER_SSH_ARGS[*]}" == *'bash -lc '* ]] \
+    || fail_test 'fake ssh did not receive the quoted peer guard command'
+ln -s "$TMP_ROOT" "$PEER_ROOT/routines/operator-link"
+if adk_guard_peer_routine_asset_paths 'operator@peer.local' "$PEER_ROOT" 7 \
+  >/dev/null 2>&1; then
+    fail_test 'quoted peer guard missed a symlink under a metacharacter path'
+fi
+rm "$PEER_ROOT/routines/operator-link"
+unset -f ssh
+if adk_guard_peer_routine_asset_paths '-oProxyCommand=evil' "$PEER_ROOT" 7 \
+  >/dev/null 2>&1; then
+    fail_test 'peer guard accepted an option-like SSH destination'
+fi
+PEER_RSYNC_ARGS=()
+rsync() {
+    PEER_RSYNC_ARGS=("$@")
+    return 0
 }
-set +e
-adk_swap_staged_routine_helpers "$RETRY_RUNTIME_ROOT" "$RETRY_STAGED"
-RETRY_STATUS=$?
-set -e
-unset -f mv
-[ "$RETRY_STATUS" -ne 0 ] \
-    && [ -f "$RETRY_RUNTIME_ROOT/routine-helpers/current-marker" ] \
-    && [ -f "$RETRY_RUNTIME_ROOT/routine-helpers.old/known-good-marker" ] \
-    && [ -d "$RETRY_STAGED" ] \
-    || fail_test 'failed retry deleted .old or failed to restore current live'
-adk_swap_staged_routine_helpers "$RETRY_RUNTIME_ROOT" "$RETRY_STAGED"
-[ -f "$RETRY_RUNTIME_ROOT/routine-helpers/retry-marker" ] \
-    && [ -f "$RETRY_RUNTIME_ROOT/routine-helpers.old/known-good-marker" ] \
-    || fail_test 'successful retry replaced its original rollback backup'
-adk_commit_routine_helper_swap "$RETRY_RUNTIME_ROOT"
-[ ! -e "$RETRY_RUNTIME_ROOT/routine-helpers.old" ] \
-    || fail_test 'successful retry commit retained .old'
+adk_rsync_peer_asset_surface "$VALID_ROOT/routines" 'operator@peer.local' \
+    "$PEER_ROOT" 'routines' 7
+unset -f rsync
+printf '%s\n' "${PEER_RSYNC_ARGS[@]}" | grep -Fxq -- '--protect-args' \
+    || fail_test 'peer rsync omitted --protect-args'
+[ "${PEER_RSYNC_ARGS[${#PEER_RSYNC_ARGS[@]}-1]}" = \
+    "operator@peer.local:$PEER_ROOT/routines/" ] \
+    || fail_test 'peer rsync split or rewrote the remote metacharacter path'
 
-# An interrupted prior transaction can leave only .old. Staging restores it to
-# live first, then preserves its operator assets in the next staged overlay.
-STALE_SOURCE_ROOT="$TMP_ROOT/stale-repo"
-STALE_RUNTIME_ROOT="$TMP_ROOT/stale-release"
-seed_required_helpers "$STALE_SOURCE_ROOT/routine-helpers" 'repo'
-seed_required_helpers "$STALE_RUNTIME_ROOT/routine-helpers.old" 'old'
-printf 'operator backup\n' \
-    > "$STALE_RUNTIME_ROOT/routine-helpers.old/operator-marker"
-STALE_STAGED="$(adk_stage_routine_helpers "$STALE_SOURCE_ROOT" "$STALE_RUNTIME_ROOT")"
-[ -f "$STALE_RUNTIME_ROOT/routine-helpers/operator-marker" ] \
-    && [ -f "$STALE_STAGED/operator-marker" ] \
-    && [ ! -e "$STALE_RUNTIME_ROOT/routine-helpers.old" ] \
-    || fail_test 'stale .old was not restored before staging'
-
-# Exercise install.sh production wiring without its network/build bootstrap.
+# Exercise installer preflight and promotion functions. An incomplete old
+# artifact must fail before a binary marker or live assets change.
 extract_function() {
     local function_name="$1"
     awk -v start="^${function_name}[(][)] [{]$" '
@@ -307,109 +517,120 @@ extract_function() {
         printing && /^}$/ { exit }
     ' "$REPO_ROOT/scripts/install.sh"
 }
-eval "$(extract_function install_routine_asset_surfaces)"
+eval "$(extract_function prepare_install_routine_asset_surfaces)"
+eval "$(extract_function promote_install_routine_asset_surfaces)"
+eval "$(extract_function finalize_install_routine_asset_surfaces)"
+warn() { :; }
+INSTALL_BINARY_PROMOTED=0
+INSTALL_ASSET_FINALIZED=0
+INSTALL_ROUTINE_ASSET_TXN=""
+INSTALL_ROUTINE_ASSET_RUNTIME=""
 
-INSTALL_SOURCE_ROOT="$TMP_ROOT/install-artifact"
-INSTALL_RUNTIME_ROOT="$TMP_ROOT/install-release"
-mkdir -p "$INSTALL_SOURCE_ROOT/scripts"
-cp "$REPO_ROOT/scripts/routine-asset-surface.sh" \
-    "$INSTALL_SOURCE_ROOT/scripts/routine-asset-surface.sh"
-seed_required_helpers "$INSTALL_SOURCE_ROOT/routine-helpers" 'installed'
-seed_required_helpers "$INSTALL_RUNTIME_ROOT/routine-helpers" 'old-live'
-write_quickjs_routine \
-    "$INSTALL_SOURCE_ROOT/routines/$HELPER_DIR/installed.js" 'installed'
-write_quickjs_routine \
-    "$INSTALL_RUNTIME_ROOT/routines/$HELPER_DIR/operator.js" 'operator'
-printf 'operator helper\n' \
-    > "$INSTALL_RUNTIME_ROOT/routine-helpers/$HELPER_DIR/operator.js"
-for helper_ref in "${ADK_LEGACY_ROUTINE_HELPER_REFS[@]}"; do
-    printf 'old layout\n' > "$INSTALL_RUNTIME_ROOT/routines/$helper_ref"
-done
-install_routine_asset_surfaces "$INSTALL_SOURCE_ROOT" "$INSTALL_RUNTIME_ROOT"
-[ -f "$INSTALL_RUNTIME_ROOT/routines/$HELPER_DIR/installed.js" ] \
-    && [ -f "$INSTALL_RUNTIME_ROOT/routines/$HELPER_DIR/operator.js" ] \
-    && [ -f "$INSTALL_RUNTIME_ROOT/routine-helpers/$HELPER_DIR/weekly_churn_audit.py" ] \
-    && [ -f "$INSTALL_RUNTIME_ROOT/routine-helpers/$HELPER_DIR/operator.js" ] \
-    || fail_test 'install wiring did not preserve and overlay both asset surfaces'
-for helper_ref in "${ADK_LEGACY_ROUTINE_HELPER_REFS[@]}"; do
-    [ ! -e "$INSTALL_RUNTIME_ROOT/routines/$helper_ref" ] \
-        || fail_test "install wiring retained old-layout helper: $helper_ref"
-done
-[ ! -e "$INSTALL_RUNTIME_ROOT/routines.old" ] \
-    && [ ! -e "$INSTALL_RUNTIME_ROOT/routine-helpers.old" ] \
-    || fail_test 'installer did not commit successful local asset swaps'
+BAD_ARTIFACT="$TMP_ROOT/old-artifact"
+INSTALL_RUNTIME="$TMP_ROOT/install-release"
+mkdir -p "$BAD_ARTIFACT/scripts" "$BAD_ARTIFACT/routines" \
+    "$INSTALL_RUNTIME/bin"
+cp "$REPO_ROOT/scripts/routine-asset-surface.sh" "$BAD_ARTIFACT/scripts/"
+cp "$REPO_ROOT/scripts/validate-quickjs-routines.py" "$BAD_ARTIFACT/scripts/"
+write_quickjs_routine "$BAD_ARTIFACT/routines/only.js" 'old-artifact'
+seed_live "$INSTALL_RUNTIME" 'v0'
+printf 'original binary\n' > "$INSTALL_RUNTIME/bin/agentdesk"
+set +e
+prepare_install_routine_asset_surfaces "$BAD_ARTIFACT" "$INSTALL_RUNTIME"
+BAD_PREPARE_STATUS=$?
+set -e
+[ "$BAD_PREPARE_STATUS" -ne 0 ] \
+    && [ "$(<"$INSTALL_RUNTIME/bin/agentdesk")" = 'original binary' ] \
+    && [ "$(<"$INSTALL_RUNTIME/routines/generation-marker")" = 'v0' ] \
+    && [ ! -e "$INSTALL_RUNTIME/runtime/routine-assets.active" ] \
+    || fail_test 'old artifact preflight mutated binary or assets'
 
-# Operator-private helpers stay ignored while the four shipped assets remain
+GOOD_ARTIFACT="$TMP_ROOT/good-artifact"
+seed_source "$GOOD_ARTIFACT" 'v1'
+mkdir -p "$GOOD_ARTIFACT/scripts"
+cp "$REPO_ROOT/scripts/routine-asset-surface.sh" "$GOOD_ARTIFACT/scripts/"
+cp "$REPO_ROOT/scripts/validate-quickjs-routines.py" "$GOOD_ARTIFACT/scripts/"
+printf 'operator routine\n' > "$INSTALL_RUNTIME/routines/operator-private.txt"
+printf 'operator helper\n' > "$INSTALL_RUNTIME/routine-helpers/operator-private.txt"
+prepare_install_routine_asset_surfaces "$GOOD_ARTIFACT" "$INSTALL_RUNTIME"
+printf 'new binary\n' > "$INSTALL_RUNTIME/bin/agentdesk"
+INSTALL_BINARY_PROMOTED=1
+promote_install_routine_asset_surfaces
+finalize_install_routine_asset_surfaces
+[ "$(<"$INSTALL_RUNTIME/routines/generation-marker")" = 'v1' ] \
+    && [ ! -e "$INSTALL_RUNTIME/routines.old" ] \
+    && [ -f "$INSTALL_RUNTIME/routines/operator-private.txt" ] \
+    && [ -f "$INSTALL_RUNTIME/routine-helpers/operator-private.txt" ] \
+    || fail_test 'installer did not promote and finalize the prepared payload'
+adk_release_routine_asset_lock
+
+# Gitignore keeps operator helpers private while the four bundled files remain
 # explicitly trackable.
-git -C "$REPO_ROOT" check-ignore --no-index -q -- \
-    routine-helpers/operator-private.js \
-    || fail_test 'operator-private routine helper is not ignored'
+git -C "$REPO_ROOT" check-ignore --no-index -q -- routine-helpers/operator.py \
+    || fail_test 'operator-private helper is not ignored'
 for helper_ref in "${ADK_REQUIRED_ROUTINE_HELPER_REFS[@]}"; do
-    if git -C "$REPO_ROOT" check-ignore --no-index -q -- \
-        "routine-helpers/$helper_ref"; then
+    if git -C "$REPO_ROOT" check-ignore --no-index -q -- "routine-helpers/$helper_ref"; then
         fail_test "authoritative helper is ignored: $helper_ref"
     fi
 done
 
-# Ratchet release wiring itself, then prove the ratchet catches representative
-# removal and broad-delete mutations rather than only passing production text.
+# Wiring ratchet ignores comment-only pseudo-calls and proves the shared lexer,
+# transaction, lock, health commit, and artifact packaging cannot be removed.
 assert_asset_wiring() {
     local root="$1"
-    local script
-    local health_line
-    local commit_line
+    local prepare_calls
 
-    for script in build-release.sh deploy-release.sh deploy.sh install.sh; do
-        grep -Fq 'routine-helpers' "$root/scripts/$script" || return 1
-    done
-    grep -Fq 'adk_validate_repo_routine_assets "$PROJECT_DIR"' \
+    grep -Fq '"$python_bin" "$ADK_QUICKJS_VALIDATOR" "$root"' \
+        "$root/scripts/routine-asset-surface.sh" || return 1
+    grep -Fq 'adk_acquire_routine_asset_lock "$DEPLOY_LOCK_FILE"' \
+        "$root/scripts/deploy-release.sh" || return 1
+    grep -Fq 'adk_promote_routine_asset_transaction "$ADK_REL"' \
+        "$root/scripts/deploy-release.sh" || return 1
+    grep -Fq 'adk_commit_routine_asset_transaction "$ADK_REL"' \
+        "$root/scripts/deploy-release.sh" || return 1
+    grep -Fq 'DEPLOY_HEALTH_OK=1' "$root/scripts/deploy.sh" || return 1
+    grep -Fq 'adk_commit_routine_asset_transaction "$AD_HOME"' \
+        "$root/scripts/deploy.sh" || return 1
+    grep -Fq 'cp "scripts/validate-quickjs-routines.py"' \
         "$root/scripts/build-release.sh" || return 1
-    grep -Fq 'adk_validate_repo_routine_assets "$REPO"' \
-        "$root/scripts/deploy-release.sh" || return 1
-    grep -Fq 'ROUTINE_SWAP_ARMED=1' "$root/scripts/deploy-release.sh" || return 1
-    grep -Fq 'adk_rollback_routine_helper_swap "$ADK_REL"' \
-        "$root/scripts/deploy-release.sh" || return 1
-    grep -Fq 'adk_commit_routine_swap "$ADK_REL"' \
-        "$root/scripts/deploy-release.sh" || return 1
-    grep -Fq 'remote routine asset symlink guard failed' \
-        "$root/scripts/deploy-release.sh" || return 1
-    [ "$(grep -Fc 'install_routine_asset_surfaces "$TMPDIR_' \
-        "$root/scripts/install.sh")" -eq 2 ] || return 1
-    grep -Fq 'cp "scripts/routine-asset-surface.sh"' \
-        "$root/scripts/build-release.sh" || return 1
-    health_line="$(grep -n '^DEPLOY_OK=1$' "$root/scripts/deploy-release.sh" \
-        | head -1 | cut -d: -f1)"
-    commit_line="$(grep -n 'adk_commit_routine_swap "$ADK_REL"' \
-        "$root/scripts/deploy-release.sh" | head -1 | cut -d: -f1)"
-    [ -n "$health_line" ] && [ -n "$commit_line" ] \
-        && [ "$health_line" -lt "$commit_line" ] || return 1
-    if grep -Fq -- '--delete "$REPO/routines/" "$ROUTINES_STAGED/"' \
-        "$root/scripts/deploy-release.sh"; then
+    prepare_calls="$(awk '
+        /^[[:space:]]*prepare_install_routine_asset_surfaces / { count += 1 }
+        END { print count + 0 }
+    ' "$root/scripts/install.sh")"
+    [ "$prepare_calls" -eq 2 ] || return 1
+    if grep -Fq -- '--delete "$REPO/routines/"' "$root/scripts/deploy-release.sh"; then
         return 1
     fi
 }
 
-assert_asset_wiring "$REPO_ROOT" || fail_test 'production routine asset wiring is incomplete'
-
-REMOVAL_ROOT="$TMP_ROOT/wiring-removal"
-mkdir -p "$REMOVAL_ROOT/scripts"
-cp "$REPO_ROOT/scripts/"{build-release.sh,deploy-release.sh,deploy.sh,install.sh} \
-    "$REMOVAL_ROOT/scripts/"
-awk 'index($0, "install_routine_asset_surfaces \"$TMPDIR_DL/${ARTIFACT}\"") == 0' \
-    "$REMOVAL_ROOT/scripts/install.sh" > "$REMOVAL_ROOT/scripts/install.sh.mutated"
-mv "$REMOVAL_ROOT/scripts/install.sh.mutated" "$REMOVAL_ROOT/scripts/install.sh"
-if assert_asset_wiring "$REMOVAL_ROOT"; then
-    fail_test 'wiring ratchet missed an installer-path removal mutation'
+assert_asset_wiring "$REPO_ROOT" || fail_test 'production asset wiring is incomplete'
+MUTATION_ROOT="$TMP_ROOT/wiring-mutation"
+mkdir -p "$MUTATION_ROOT/scripts"
+cp "$REPO_ROOT/scripts/"{build-release.sh,deploy-release.sh,deploy.sh,install.sh,routine-asset-surface.sh,validate-quickjs-routines.py} \
+    "$MUTATION_ROOT/scripts/"
+awk '
+    /^[[:space:]]*prepare_install_routine_asset_surfaces / {
+        print "  # " $0
+        next
+    }
+    { print }
+' "$MUTATION_ROOT/scripts/install.sh" > "$MUTATION_ROOT/scripts/install.sh.mutated"
+mv "$MUTATION_ROOT/scripts/install.sh.mutated" "$MUTATION_ROOT/scripts/install.sh"
+if assert_asset_wiring "$MUTATION_ROOT"; then
+    fail_test 'wiring ratchet accepted comment-only installer calls'
 fi
 
-BROAD_DELETE_ROOT="$TMP_ROOT/wiring-broad-delete"
-mkdir -p "$BROAD_DELETE_ROOT/scripts"
-cp "$REPO_ROOT/scripts/"{build-release.sh,deploy-release.sh,deploy.sh,install.sh} \
-    "$BROAD_DELETE_ROOT/scripts/"
-printf '\nrsync -a --delete "$REPO/routines/" "$ROUTINES_STAGED/"\n' \
-    >> "$BROAD_DELETE_ROOT/scripts/deploy-release.sh"
-if assert_asset_wiring "$BROAD_DELETE_ROOT"; then
-    fail_test 'wiring ratchet missed a broad routine-delete mutation'
+LEXER_MUTATION_ROOT="$TMP_ROOT/lexer-wiring-mutation"
+mkdir -p "$LEXER_MUTATION_ROOT/scripts"
+cp "$REPO_ROOT/scripts/"{build-release.sh,deploy-release.sh,deploy.sh,install.sh,routine-asset-surface.sh,validate-quickjs-routines.py} \
+    "$LEXER_MUTATION_ROOT/scripts/"
+awk 'index($0, "\"$python_bin\" \"$ADK_QUICKJS_VALIDATOR\" \"$root\"") == 0' \
+    "$LEXER_MUTATION_ROOT/scripts/routine-asset-surface.sh" \
+    > "$LEXER_MUTATION_ROOT/scripts/routine-asset-surface.sh.mutated"
+mv "$LEXER_MUTATION_ROOT/scripts/routine-asset-surface.sh.mutated" \
+    "$LEXER_MUTATION_ROOT/scripts/routine-asset-surface.sh"
+if assert_asset_wiring "$LEXER_MUTATION_ROOT"; then
+    fail_test 'wiring ratchet missed lexical validator removal'
 fi
 
-echo 'routine helper asset surface tests passed'
+echo 'routine helper asset transaction tests passed'

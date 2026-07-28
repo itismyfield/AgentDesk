@@ -125,7 +125,6 @@ DEPLOY_HEALTH_RETRIES="${AGENTDESK_DEPLOY_HEALTH_RETRIES:-60}"
 DEPLOY_HEALTH_DELAY_SECS="${AGENTDESK_DEPLOY_HEALTH_DELAY_SECS:-2}"
 DEPLOY_LOCK_FILE="${AGENTDESK_DEPLOY_LOCK_FILE:-$ADK_REL/runtime/deploy-release.lock}"
 DEPLOY_LOCK_TIMEOUT_SECS="${AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS:-1800}"
-DEPLOY_MKDIR_LOCK_DIR=""
 CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-Developer ID Application: Wonchang Oh (A7LJY7HNGA)}"
 ALLOW_ADHOC_RELEASE_SIGN="${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-0}"
 CODESIGN_KEYCHAIN_PW_FILE="${AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE:-}"
@@ -135,10 +134,7 @@ RESOLVED_RELEASE_SIGNING_MODE=""
 DASHBOARD_SOURCE=""
 STAGED_BINARY=""
 POLICIES_STAGED=""
-ROUTINES_STAGED=""
-ROUTINE_HELPERS_STAGED=""
-ROUTINE_SWAP_ARMED=0
-ROUTINE_HELPER_SWAP_ARMED=0
+ROUTINE_ASSET_TXN=""
 LAUNCHD_MIGRATED_STAGED=""
 RELEASE_ROOT_SCRIPTS_STAGED=""
 PG_TUNNEL_PREFLIGHT_PID=""
@@ -161,9 +157,8 @@ DEPLOY_FAST="${AGENTDESK_DEPLOY_FAST:-0}"
 # remote build is unaffected.
 DEPLOY_SSH_CONNECT_TIMEOUT="${AGENTDESK_DEPLOY_SSH_CONNECT_TIMEOUT:-10}"
 
-# Parse flags non-destructively into shell vars + env so that the lock-acquire
-# re-exec (lockf/flock pass-through) and the detached-helper tmux script both
-# see the same configuration without us having to reconstruct $@.
+# Parse flags non-destructively into shell vars + env so the detached-helper
+# tmux script sees the same configuration without reconstructing $@.
 PARSED_ARGS=()
 _idx=0
 _args=("$@")
@@ -212,9 +207,7 @@ if [ "$DEPLOY_FAST" = "1" ]; then
     export AGENTDESK_DEPLOY_FAST=1
 fi
 
-if [ "${AGENTDESK_DEPLOY_LOCK_HELD:-0}" != "1" ]; then
-    echo "═══ ADK Deploy → Release ═══"
-fi
+echo "═══ ADK Deploy → Release ═══"
 
 _unlock_codesign_keychain_if_configured() {
     [ "$CODESIGN_KEYCHAIN_UNLOCKED" = "1" ] && return 0
@@ -836,16 +829,17 @@ _rollback_would_brick_on_migration() {
 # except the restart is best-effort so a failed re-lock can NEVER skip the
 # restart (#3858 finding 3): the service must always come back up.
 _rollback_release_binary() {
+    local asset_txn="${1:-}"
     local rel_binary="${REL_BINARY:-}"
     local rel_backup="${REL_BINARY_BACKUP:-}"
     local plist="${PLIST_REL:-}"
     local rel_port="${REL_PORT:-${AGENTDESK_REL_PORT:-${ADK_DEFAULT_PORT:-8791}}}"
     local domain
 
-    [ -n "$rel_binary" ] && [ -n "$plist" ] || return 0
+    [ -n "$rel_binary" ] && [ -n "$plist" ] || return 3
     if [ ! -f "$rel_backup" ]; then
         echo "⚠ No rollback backup available (${rel_backup:-unset} missing) — cannot auto-rollback"
-        return 0
+        return 3
     fi
 
     # #4348 Defect 2: fail-forward instead of bricking when the new binary
@@ -875,7 +869,7 @@ _rollback_release_binary() {
         echo "        reverted), set AGENTDESK_DEPLOY_FORCE_ROLLBACK=1."
         echo "     4. Release logs: ${ADK_REL:-}/logs/"
         echo ""
-        return 0
+        return 2
     fi
 
     echo "↩ Rolling back release binary to previous good version..."
@@ -889,12 +883,22 @@ _rollback_release_binary() {
     chflags nouchg "$rel_binary" 2>/dev/null || true
     if ! mv -f "$rel_backup" "$rel_binary"; then
         echo "✗ Failed to restore previous binary from $rel_backup — manual intervention required"
-        return 0
+        return 3
     fi
     # #3858 finding 3: re-lock is best-effort and MUST NOT abort the restart
     # below. A failed chflags can never leave the good binary restored but the
     # service stopped.
     chflags uchg "$rel_binary" 2>/dev/null || true
+    # The previous binary is on disk but remains stopped until its matching
+    # routine assets are restored. This closes the old-binary/new-assets window.
+    if [ -n "$asset_txn" ]; then
+        if ! adk_rollback_routine_asset_transaction "$ADK_REL" "$asset_txn" \
+          && ! adk_rollback_routine_asset_transaction "$ADK_REL" "$asset_txn"; then
+            echo "🛑 Previous binary restored, but matching routine assets could not roll back" >&2
+            echo "   Service remains stopped; durable transaction: $asset_txn" >&2
+            return 5
+        fi
+    fi
     echo "↩ Previous binary restored — restarting release..."
     xattr -d com.apple.quarantine "$HOME/Library/LaunchAgents/$plist.plist" 2>/dev/null || true
     if ! launchctl bootstrap "$domain" "$HOME/Library/LaunchAgents/$plist.plist"; then
@@ -903,8 +907,10 @@ _rollback_release_binary() {
     fi
     if wait_for_http_service_health "$plist" "$rel_port" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1; then
         echo "✓ Rollback succeeded — release healthy on :${rel_port} with previous binary"
+        return 0
     else
         echo "✗ Rollback restart did not reach healthy state — manual intervention required (logs: ${ADK_REL:-}/logs/)"
+        return 4
     fi
 }
 
@@ -1053,6 +1059,11 @@ _rollback_pg_tunnel_migration() {
 
 _cleanup_on_exit() {
     local status=${1:-$?}
+    local binary_rollback_code=0
+    local asset_action="rollback"
+    local active_txn=""
+    local active_status=0
+    local active_phase=""
     trap - EXIT
     trap '' INT TERM
     _cleanup_owned_pg_tunnel_preflight
@@ -1060,26 +1071,92 @@ _cleanup_on_exit() {
         _rollback_pg_tunnel_migration || true
         _cleanup_owned_pg_tunnel_preflight
     fi
-    # Routine surfaces are promoted before restart, but their .old trees stay
-    # intact until the same health gate that commits the binary. Restore assets
-    # first so the old binary never restarts against new/incompatible scripts.
+    # Binary outcome owns the asset disposition. A safe binary rollback means
+    # assets must roll back too. Migration refusal or a pre-restore failure
+    # leaves the new binary in place, so the already-promoted assets must commit
+    # forward with it. The durable marker, not a post-mv caller flag, identifies
+    # a transaction even when TERM lands inside its first rename.
     if [ "${DEPLOY_OK:-0}" != 1 ]; then
-        if [ "${ROUTINE_HELPER_SWAP_ARMED:-0}" = 1 ]; then
-            adk_rollback_routine_helper_swap "$ADK_REL" \
-                || echo "✗ Routine helper rollback failed; inspect $ADK_REL/routine-helpers.old" >&2
+        if active_txn="$(_adk_active_txn "$ADK_REL")"; then
+            active_status=0
+            if ! active_phase="$(
+                adk_routine_asset_transaction_phase "$ADK_REL" "$active_txn"
+            )"; then
+                active_status=2
+                active_txn=""
+                status=1
+                echo "🛑 Routine asset transaction phase is corrupt" >&2
+            fi
+        else
+            active_status=$?
+            active_txn=""
+            if [ "$active_status" -ne 1 ]; then
+                status=1
+                echo "🛑 Routine asset transaction marker is corrupt" >&2
+            fi
         fi
-        if [ "${ROUTINE_SWAP_ARMED:-0}" = 1 ]; then
-            adk_rollback_routine_swap "$ADK_REL" \
-                || echo "✗ Routine rollback failed; inspect $ADK_REL/routines.old" >&2
+        if [ "$active_status" -gt 1 ]; then
+            asset_action="none"
+            status=1
+            if [ "${ROLLBACK_ARMED:-0}" = 1 ]; then
+                echo "🛑 Refusing binary-only rollback while routine asset state is corrupt" >&2
+            fi
+        elif [ "$active_phase" = "committing" ] || [ "$active_phase" = "committed" ]; then
+            # Health passed and commit intent reached disk before the success
+            # flag. Preserve the proven binary if TERM lands in that tiny gap.
+            asset_action="commit"
+        elif [ "${ROLLBACK_ARMED:-0}" = 1 ] \
+          && [ -n "${STAGED_BINARY:-}" ] && [ -e "$STAGED_BINARY" ]; then
+            # The binary rename did not consume its same-directory stage. Keep
+            # the old binary and roll assets back; migration state may make an
+            # automatic restart unsafe, so leave that failure visible/stopped.
+            asset_action="rollback"
+            status=1
+            echo "🛑 Binary promotion did not complete; rolling back assets and leaving release stopped" >&2
+        elif [ "${ROLLBACK_ARMED:-0}" = 1 ]; then
+            asset_action="none"
+            _rollback_release_binary "$active_txn" || binary_rollback_code=$?
+            case "$binary_rollback_code" in
+                0)
+                    asset_action="none"
+                    ;;
+                2)
+                    asset_action="commit"
+                    echo "⚠ Binary rollback refused; committing matching new routine assets" >&2
+                    ;;
+                3)
+                    asset_action="commit"
+                    status=1
+                    echo "🛑 Binary rollback failed before restore; retaining matching new routine assets" >&2
+                    ;;
+                4)
+                    asset_action="none"
+                    status=1
+                    echo "🛑 Previous binary was restored but did not become healthy" >&2
+                    ;;
+                5)
+                    asset_action="rollback"
+                    status=1
+                    echo "🛑 Previous binary restored but asset rollback remains incomplete" >&2
+                    ;;
+                *)
+                    asset_action="commit"
+                    status=1
+                    echo "🛑 Unknown binary rollback outcome: $binary_rollback_code" >&2
+                    ;;
+            esac
         fi
-    fi
-    # #3858: if the binary was promoted (ROLLBACK_ARMED) but the deploy never
-    # reached DEPLOY_OK, restore the last-known-good binary and restart BEFORE the
-    # staging cleanup below. This catches ANY non-zero exit after promotion — an
-    # unguarded post-promotion command under `set -e`, not only the explicit
-    # health-check branch — so a crash-on-boot binary can never stay live (#3858).
-    if [ "${ROLLBACK_ARMED:-0}" = 1 ] && [ "${DEPLOY_OK:-0}" != 1 ]; then
-        _rollback_release_binary
+        if [ -n "$active_txn" ] && [ "$asset_action" != "none" ]; then
+            if [ "$asset_action" = "commit" ]; then
+                if ! adk_commit_routine_asset_transaction_forward "$ADK_REL" "$active_txn"; then
+                    status=1
+                    echo "🛑 Routine assets could not commit with the retained new binary" >&2
+                fi
+            elif ! adk_rollback_routine_asset_transaction "$ADK_REL" "$active_txn"; then
+                status=1
+                echo "🛑 Routine asset rollback failed; durable state retained at $active_txn" >&2
+            fi
+        fi
     fi
     if [ -n "${STAGED_BINARY:-}" ] && [ -e "$STAGED_BINARY" ]; then
         rm -f "$STAGED_BINARY" 2>/dev/null || true
@@ -1087,27 +1164,23 @@ _cleanup_on_exit() {
     if [ -n "${POLICIES_STAGED:-}" ] && [ -d "$POLICIES_STAGED" ]; then
         rm -rf "$POLICIES_STAGED" 2>/dev/null || true
     fi
-    if [ -n "${ROUTINES_STAGED:-}" ] && [ -d "$ROUTINES_STAGED" ]; then
-        rm -rf "$ROUTINES_STAGED" 2>/dev/null || true
-    fi
-    if [ -n "${ROUTINE_HELPERS_STAGED:-}" ] && [ -d "$ROUTINE_HELPERS_STAGED" ]; then
-        rm -rf "$ROUTINE_HELPERS_STAGED" 2>/dev/null || true
-    fi
     if [ -n "${LAUNCHD_MIGRATED_STAGED:-}" ] && [ -d "$LAUNCHD_MIGRATED_STAGED" ]; then
         rm -rf "$LAUNCHD_MIGRATED_STAGED" 2>/dev/null || true
     fi
     if [ -n "${RELEASE_ROOT_SCRIPTS_STAGED:-}" ] && [ -d "$RELEASE_ROOT_SCRIPTS_STAGED" ]; then
         rm -rf "$RELEASE_ROOT_SCRIPTS_STAGED" 2>/dev/null || true
     fi
-    if [ -n "${DEPLOY_MKDIR_LOCK_DIR:-}" ] && [ -d "$DEPLOY_MKDIR_LOCK_DIR" ]; then
-        rm -rf "$DEPLOY_MKDIR_LOCK_DIR" 2>/dev/null || true
+    if ! adk_release_routine_asset_lock; then
+        status=1
+        echo "🛑 Failed to release shared routine asset deploy lock" >&2
     fi
     _finalize_detached_helper "$status"
+    return "$status"
 }
 
 _handle_cleanup_signal() {
     local status=$1
-    _cleanup_on_exit "$status"
+    _cleanup_on_exit "$status" || status=$?
     exit "$status"
 }
 
@@ -1197,6 +1270,11 @@ _deploy_to_one_peer() {
     local remote_cd_command
     local remote_deploy_command
     local remote_presync_command
+    if ! adk_validate_peer_destination "$peer" \
+      || ! _adk_validate_peer_timeout "$DEPLOY_SSH_CONNECT_TIMEOUT"; then
+        echo "✗ Refusing unsafe peer destination or SSH timeout" >&2
+        return 1
+    fi
     env_prelude="$(_deploy_peer_env_prelude)"
     if [ "$#" -gt 0 ]; then
         quoted_args=$(printf ' %q' "$@")
@@ -1226,13 +1304,16 @@ git merge --quiet --ff-only origin/main"
     # may hold local assets this node does not.
     if [ -d "$ADK_REL/routines" ] || [ -d "$ADK_REL/routine-helpers" ]; then
         local peer_adk_rel
-        local remote_asset_guard
         if ! peer_adk_rel="$(ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" \
             'bash -lc '"$(printf '%q' 'echo "${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"')"'')"; then
             echo "✗ [peer:$peer] could not resolve remote AGENTDESK_ROOT_DIR"
             return 1
         fi
         peer_adk_rel="$(printf '%s' "$peer_adk_rel" | tr -d '\r')"
+        if ! adk_validate_peer_runtime_root "$peer_adk_rel"; then
+            echo "✗ [peer:$peer] remote AGENTDESK_ROOT_DIR is not a safe absolute path"
+            return 1
+        fi
         if [ -d "$ADK_REL/routines" ]; then
             adk_validate_quickjs_routine_tree "$ADK_REL/routines" || {
                 echo "✗ [peer:$peer] local routine surface failed portability validation"
@@ -1245,40 +1326,23 @@ git merge --quiet --ff-only origin/main"
                 return 1
             }
         fi
-        remote_asset_guard="runtime_root=$(printf '%q' "$peer_adk_rel")
-runtime_parent=\$(dirname \"\$runtime_root\")
-for path in \"\$runtime_parent\" \"\$runtime_root\" \"\$runtime_root/routines\" \"\$runtime_root/routine-helpers\"; do
-    if [ -L \"\$path\" ]; then
-        echo \"refusing symlinked peer routine asset path: \$path\" >&2
-        exit 1
-    fi
-done
-for root in \"\$runtime_root/routines\" \"\$runtime_root/routine-helpers\"; do
-    if [ -d \"\$root\" ]; then
-        first_link=\$(find \"\$root\" -type l -print -quit) || exit 1
-        [ -z \"\$first_link\" ] || {
-            echo \"refusing symlink in peer routine asset surface: \$first_link\" >&2
-            exit 1
-        }
-    fi
-done"
-        if ! ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" \
-            "bash -lc $(printf '%q' "$remote_asset_guard")"; then
+        if ! adk_guard_peer_routine_asset_paths \
+            "$peer" "$peer_adk_rel" "$DEPLOY_SSH_CONNECT_TIMEOUT"; then
             echo "✗ [peer:$peer] remote routine asset symlink guard failed"
             return 1
         fi
         if [ -d "$ADK_REL/routines" ]; then
             echo "▸ [peer:$peer] Syncing operator routine scripts..."
-            if ! rsync -a -e "ssh -o ConnectTimeout=$DEPLOY_SSH_CONNECT_TIMEOUT" \
-                "$ADK_REL/routines/" "$peer:$peer_adk_rel/routines/"; then
+            if ! adk_rsync_peer_asset_surface "$ADK_REL/routines" "$peer" \
+                "$peer_adk_rel" "routines" "$DEPLOY_SSH_CONNECT_TIMEOUT"; then
                 echo "✗ [peer:$peer] routine script sync failed"
                 return 1
             fi
         fi
         if [ -d "$ADK_REL/routine-helpers" ]; then
             echo "▸ [peer:$peer] Syncing operator routine helper assets..."
-            if ! rsync -a -e "ssh -o ConnectTimeout=$DEPLOY_SSH_CONNECT_TIMEOUT" \
-                "$ADK_REL/routine-helpers/" "$peer:$peer_adk_rel/routine-helpers/"; then
+            if ! adk_rsync_peer_asset_surface "$ADK_REL/routine-helpers" "$peer" \
+                "$peer_adk_rel" "routine-helpers" "$DEPLOY_SSH_CONNECT_TIMEOUT"; then
                 echo "✗ [peer:$peer] routine helper asset sync failed"
                 return 1
             fi
@@ -1329,39 +1393,9 @@ _deploy_to_all_peers() {
 }
 
 _acquire_release_deploy_lock() {
-    if [ "${AGENTDESK_DEPLOY_LOCK_HELD:-0}" = "1" ]; then
-        echo "▸ [gate] Release deploy lock acquired"
-        return 0
-    fi
-
-    mkdir -p "$(dirname "$DEPLOY_LOCK_FILE")"
     echo "▸ [gate] Waiting for release deploy lock: $DEPLOY_LOCK_FILE"
-
-    if command -v lockf >/dev/null 2>&1; then
-        exec env AGENTDESK_DEPLOY_LOCK_HELD=1 \
-            lockf -k -t "$DEPLOY_LOCK_TIMEOUT_SECS" "$DEPLOY_LOCK_FILE" "$0" "$@"
-    fi
-
-    if command -v flock >/dev/null 2>&1; then
-        exec env AGENTDESK_DEPLOY_LOCK_HELD=1 \
-            flock -w "$DEPLOY_LOCK_TIMEOUT_SECS" "$DEPLOY_LOCK_FILE" "$0" "$@"
-    fi
-
-    local lock_dir="${DEPLOY_LOCK_FILE}.d"
-    local waited=0
-    while ! mkdir "$lock_dir" 2>/dev/null; do
-        if [ "$waited" -ge "$DEPLOY_LOCK_TIMEOUT_SECS" ]; then
-            echo "✗ [gate] Timed out waiting for release deploy lock after ${DEPLOY_LOCK_TIMEOUT_SECS}s"
-            if [ -f "$lock_dir/pid" ]; then
-                echo "  holder pid: $(cat "$lock_dir/pid" 2>/dev/null || echo "?")"
-            fi
-            exit 1
-        fi
-        sleep 2
-        waited=$((waited + 2))
-    done
-    DEPLOY_MKDIR_LOCK_DIR="$lock_dir"
-    printf '%s\n' "$$" > "$lock_dir/pid" 2>/dev/null || true
+    adk_acquire_routine_asset_lock "$DEPLOY_LOCK_FILE" "$DEPLOY_LOCK_TIMEOUT_SECS" \
+        || exit 1
     echo "▸ [gate] Release deploy lock acquired"
 }
 
@@ -1418,7 +1452,6 @@ export AGENTDESK_DCSERVER_LABEL=$(printf '%q' "$PLIST_REL")
 export AGENTDESK_PLIST_REL=$(printf '%q' "${AGENTDESK_PLIST_REL:-}")
 export OBSIDIAN_VAULT_ROOT=$(printf '%q' "${OBSIDIAN_VAULT_ROOT:-}")
 export AGENTDESK_OBSIDIAN_AGENTS_SRC=$(printf '%q' "${AGENTDESK_OBSIDIAN_AGENTS_SRC:-}")
-unset AGENTDESK_DEPLOY_LOCK_HELD
 cd $(printf '%q' "$REPO")
 exec $(printf '%q' "$SCRIPT_DIR/deploy-release.sh")${quoted_args}
 EOF
@@ -1619,8 +1652,14 @@ rsync -a --delete "$REPO/policies/" "$POLICIES_STAGED/"
 
 # Stage routine scripts before stopping release so the runtime never executes a
 # stale JS asset after a binary deploy.
+if ! ROUTINE_ASSET_TXN="$(
+    adk_begin_routine_asset_transaction "$ADK_REL" "$DEPLOY_LOCK_FILE"
+)"; then
+    echo "✗ Could not begin durable routine asset transaction"
+    exit 1
+fi
 echo "▸ Staging routines..."
-if ! ROUTINES_STAGED="$(adk_stage_routines "$REPO" "$ADK_REL")"; then
+if ! adk_stage_routines "$REPO" "$ADK_REL" "$ROUTINE_ASSET_TXN" >/dev/null; then
     echo "✗ Routine staging failed; refusing to swap an incomplete asset tree"
     exit 1
 fi
@@ -1629,7 +1668,7 @@ fi
 # Seed with any operator-owned helpers, then overlay repository assets without
 # --delete so unrelated local helpers survive release deployment.
 echo "▸ Staging routine helper assets..."
-if ! ROUTINE_HELPERS_STAGED="$(adk_stage_routine_helpers "$REPO" "$ADK_REL")"; then
+if ! adk_stage_routine_helpers "$REPO" "$ADK_REL" "$ROUTINE_ASSET_TXN" >/dev/null; then
     echo "✗ Routine helper staging failed; refusing to swap an incomplete asset tree"
     exit 1
 fi
@@ -2343,13 +2382,24 @@ elif [ -f "$REL_BINARY" ]; then
     mv -f "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP"
 fi
 
+# Promote the fully validated asset pair before the binary. The durable marker
+# was armed inside the shared state machine before its first rename, while the
+# binary rollback flag is still clear. Therefore a signal in either asset mv
+# rolls assets back without ever exposing a new binary with a partial payload.
+echo "▸ Promoting routine asset transaction..."
+if ! adk_promote_routine_asset_transaction "$ADK_REL" "$ROUTINE_ASSET_TXN"; then
+    echo "✗ Routine asset transaction promotion failed"
+    exit 1
+fi
+
 echo "▸ Promoting staged binary..."
+# Arm the coordinated EXIT path before the atomic rename. A TERM between mv and
+# the next shell statement must still restore the binary and its matching assets.
+ROLLBACK_ARMED=1
 mv -f "$STAGED_BINARY" "$REL_BINARY"
 STAGED_BINARY=""
-# #3858: arm the EXIT-trap rollback the instant the binary is live. From here,
-# ANY non-zero exit before DEPLOY_OK (set on the success path) restores the
-# last-known-good backup and restarts the service — see _rollback_release_binary.
-ROLLBACK_ARMED=1
+# #3858: ANY non-zero exit before DEPLOY_OK (set on the success path) restores
+# the last-known-good backup and matching assets — see _rollback_release_binary.
 # NOTE: the immutable re-lock (chflags uchg) is deferred until AFTER the health
 # check passes (see below). Locking here would force the rollback path to fight
 # the uchg flag on the bad binary, and the lock's only job — blocking unsigned
@@ -2479,24 +2529,6 @@ PYEOF
     esac
 fi
 
-if [ -n "${ROUTINES_STAGED:-}" ] && [ -d "$ROUTINES_STAGED" ]; then
-    if ! adk_swap_staged_routines "$ADK_REL" "$ROUTINES_STAGED"; then
-        echo "✗ Routine asset swap failed"
-        exit 1
-    fi
-    ROUTINES_STAGED=""
-    ROUTINE_SWAP_ARMED=1
-fi
-
-if [ -n "${ROUTINE_HELPERS_STAGED:-}" ] && [ -d "$ROUTINE_HELPERS_STAGED" ]; then
-    if ! adk_swap_staged_routine_helpers "$ADK_REL" "$ROUTINE_HELPERS_STAGED"; then
-        echo "✗ Routine helper asset swap failed"
-        exit 1
-    fi
-    ROUTINE_HELPERS_STAGED=""
-    ROUTINE_HELPER_SWAP_ARMED=1
-fi
-
 if [ -n "${LAUNCHD_MIGRATED_STAGED:-}" ] && [ -d "$LAUNCHD_MIGRATED_STAGED" ]; then
     mkdir -p "$ADK_REL/scripts"
     rm -rf "$ADK_REL/scripts/launchd-migrated.old"
@@ -2566,28 +2598,22 @@ if [ "$REL_HEALTHY" != true ]; then
     exit 1
 fi
 
-# #3858: health passed — the new binary is proven good and serving. Mark the
-# deploy successful FIRST so the EXIT-trap rollback is disarmed BEFORE we drop the
-# backup below — otherwise a failure between here and the backup removal would try
-# to roll back with no .prev, and a hiccup in a non-critical step (lock, manifest)
-# must never tear down a healthy, health-confirmed binary.
+# #3858: health passed — the new binary is proven good and serving. Persist asset
+# commit intent before disarming binary rollback. The EXIT path treats this
+# durable phase as proof that the health-confirmed binary must stay live, including
+# a TERM between the marker write and DEPLOY_OK. Only then may cleanup discard the
+# rollback backup; a later non-critical hiccup must not tear down this release.
+if ! adk_mark_routine_asset_transaction_committing "$ADK_REL" "$ROUTINE_ASSET_TXN"; then
+    echo "✗ Could not persist healthy routine asset commit intent" >&2
+    exit 1
+fi
 DEPLOY_OK=1
 # Routine/helper backups are committed only after the release passed health.
 # Cleanup failure is non-fatal: the live release is proven good and retaining a
-# backup is safer than restarting or attempting a late rollback.
-if [ "$ROUTINE_HELPER_SWAP_ARMED" = 1 ]; then
-    if adk_commit_routine_helper_swap "$ADK_REL"; then
-        ROUTINE_HELPER_SWAP_ARMED=0
-    else
-        echo "⚠ Healthy release retained routine helper rollback backup"
-    fi
-fi
-if [ "$ROUTINE_SWAP_ARMED" = 1 ]; then
-    if adk_commit_routine_swap "$ADK_REL"; then
-        ROUTINE_SWAP_ARMED=0
-    else
-        echo "⚠ Healthy release retained routine rollback backup"
-    fi
+# durable `committing` marker is safer than restarting or attempting a late
+# rollback. The next lock holder finishes that commit before staging anything.
+if ! adk_commit_routine_asset_transaction "$ADK_REL" "$ROUTINE_ASSET_TXN"; then
+    echo "⚠ Healthy release retained a committing routine asset transaction"
 fi
 # Lock it against unsigned overwrites (deferred from promotion) and drop the
 # now-unneeded rollback backup. chflags is best-effort: failing to re-lock a
