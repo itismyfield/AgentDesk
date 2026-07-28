@@ -992,7 +992,7 @@ mod tests {
         let (status, _) = update_dispatch(
             State(state),
             Path("dispatch-publish-only".to_string()),
-            axum::Json(crate::services::dispatches::UpdateDispatchBody {
+            axum::Json(UpdateDispatchBody {
                 status: None,
                 result: None,
                 allowed_from: None,
