@@ -1039,6 +1039,33 @@ mod dispatch_failure_pg_tests {
     }
 
     #[tokio::test]
+    async fn post_commit_failure_emits_result_and_quality_observability() {
+        let dispatch_id = format!("dispatch-observability-{}", uuid::Uuid::new_v4());
+        emit_dispatch_failure_post_commit(DispatchFailurePostCommit {
+            dispatch_id: dispatch_id.clone(),
+            current_status: "dispatched".to_string(),
+            kanban_card_id: Some("card-observability".to_string()),
+            agent_id: Some("agent-observability".to_string()),
+            dispatch_type: Some("implementation".to_string()),
+            transition_source: "test_observability".to_string(),
+            result: dispatch_failure_result("observed failure", None),
+        });
+
+        let events = crate::services::observability::events::recent(32);
+        let dispatch_result = events.iter().find(|event| {
+            event.event_type == "dispatch_result" && event.payload["dispatch_id"] == dispatch_id
+        });
+        let quality = events.iter().find(|event| {
+            event.event_type == "agent_quality_event" && event.payload["dispatch_id"] == dispatch_id
+        });
+        assert!(dispatch_result.is_some(), "dispatch result event must fire");
+        assert_eq!(
+            quality.expect("quality event must fire").payload["quality_event_type"],
+            "turn_error"
+        );
+    }
+
+    #[tokio::test]
     async fn concurrent_failure_has_one_dispatch_and_entry_cas_winner_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;

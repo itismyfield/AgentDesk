@@ -48,6 +48,10 @@ pub(crate) fn emit_dispatch_quality_event(
     let Some(event_type) = (match to_status {
         "dispatched" => Some("dispatch_dispatched"),
         "completed" => Some("dispatch_completed"),
+        // The quality schema has no dispatch_failed variant. `turn_error` is the
+        // existing failure bucket and retains dispatch identity plus terminal
+        // status in the payload for dispatch-specific analysis.
+        "failed" => Some("turn_error"),
         _ => None,
     }) else {
         return;
