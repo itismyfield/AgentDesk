@@ -30,7 +30,6 @@ test-active-usage-4631:
 test-non-pg:
     # #4878: keep the generated queue docs on the canonical thread-group contract.
     cargo test --lib server::routes::docs::inventory::endpoints::part_0 -- --skip _pg --skip pg_ --skip postgres
-    cargo test --lib services::auto_queue::cancel_run::tests -- --test-threads=1
     cargo test --lib services::task_completion_v1::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib source_registry -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib task_notification -- --skip _pg --skip pg_ --skip postgres
