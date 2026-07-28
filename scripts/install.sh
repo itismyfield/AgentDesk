@@ -66,6 +66,7 @@ INSTALL_BINARY_NEW_SHA256=""
 INSTALL_BINARY_OLD_SHA256=""
 INSTALL_BINARY_HAD_LIVE=0
 INSTALL_BINARY_OLD_IMMUTABLE=0
+INSTALL_BINARY_FLAG_SNAPSHOT_TAKEN=0
 INSTALL_BINARY_SWAP_ARMED=0
 INSTALL_BINARY_PROMOTED=0
 INSTALL_COMMIT_INTENT=0
@@ -81,6 +82,8 @@ INSTALL_SERVICE_HEALTHY=0
 INSTALL_LAUNCHD_DOMAIN=""
 INSTALL_SERVICE_OLD_PID=""
 INSTALL_SERVICE_OLD_IDENTITY=""
+INSTALL_SERVICE_CANDIDATE_PID=""
+INSTALL_SERVICE_CANDIDATE_IDENTITY=""
 
 _install_sha256_file() {
   local path="$1"
@@ -94,16 +97,37 @@ _install_sha256_file() {
   fi
 }
 
-_install_binary_has_immutable_flag() {
+_install_binary_immutable_flag_state() {
   local path="$1"
   local flags
 
-  [ "${OS:-}" = "darwin" ] || return 1
+  [ "${OS:-}" = "darwin" ] || { printf '0\n'; return 0; }
+  [ -e "$path" ] || { printf '0\n'; return 0; }
   flags="$(stat -f '%Sf' "$path" 2>/dev/null)" || return 1
   case ",$flags," in
-    *,uchg,*|*,uimmutable,*) return 0 ;;
+    *,uchg,*|*,uimmutable,*) printf '1\n' ;;
+    *) printf '0\n' ;;
+  esac
+}
+
+_install_binary_has_immutable_flag() {
+  [ "$(_install_binary_immutable_flag_state "$1")" = 1 ]
+}
+
+_install_apply_binary_immutable_flag_state() {
+  local path="$1"
+  local expected="$2"
+  local actual
+
+  [ "${OS:-}" = "darwin" ] || return 0
+  [ -e "$path" ] || return 1
+  case "$expected" in
+    0) chflags nouchg "$path" || return 1 ;;
+    1) chflags uchg "$path" || return 1 ;;
     *) return 1 ;;
   esac
+  actual="$(_install_binary_immutable_flag_state "$path")" || return 1
+  [ "$actual" = "$expected" ]
 }
 
 _install_clear_binary_immutable_flag() {
@@ -111,15 +135,16 @@ _install_clear_binary_immutable_flag() {
 
   [ "${OS:-}" = "darwin" ] || return 0
   [ -e "$path" ] || return 0
-  chflags nouchg "$path" || return 1
-  ! _install_binary_has_immutable_flag "$path"
+  _install_apply_binary_immutable_flag_state "$path" 0
 }
 
 _install_restore_old_binary_flag() {
-  [ "$INSTALL_BINARY_OLD_IMMUTABLE" = 1 ] || return 0
+  [ "$INSTALL_BINARY_FLAG_SNAPSHOT_TAKEN" = 1 ] || return 0
   [ "${OS:-}" = "darwin" ] || return 0
+  [ "$INSTALL_BINARY_HAD_LIVE" = 1 ] || return 0
   [ -f "$INSTALL_BINARY_LIVE" ] || return 1
-  chflags uchg "$INSTALL_BINARY_LIVE" || return 1
+  _install_apply_binary_immutable_flag_state \
+    "$INSTALL_BINARY_LIVE" "$INSTALL_BINARY_OLD_IMMUTABLE"
 }
 
 prepare_install_binary_transaction() {
@@ -170,11 +195,10 @@ prepare_install_binary_transaction() {
   INSTALL_BINARY_NEW_SHA256="$(_install_sha256_file "$stage")" || return 1
 
   if [ -f "$INSTALL_BINARY_LIVE" ]; then
-    if _install_binary_has_immutable_flag "$INSTALL_BINARY_LIVE"; then
-      INSTALL_BINARY_OLD_IMMUTABLE=1
-    else
-      INSTALL_BINARY_OLD_IMMUTABLE=0
-    fi
+    INSTALL_BINARY_OLD_IMMUTABLE="$(
+      _install_binary_immutable_flag_state "$INSTALL_BINARY_LIVE"
+    )" || return 1
+    INSTALL_BINARY_FLAG_SNAPSHOT_TAKEN=1
     backup="$(mktemp "$bin_dir/.agentdesk.rollback.XXXXXXXX")" || return 1
     INSTALL_BINARY_BACKUP="$backup"
     if ! cp -p "$INSTALL_BINARY_LIVE" "$backup" \
@@ -189,6 +213,8 @@ prepare_install_binary_transaction() {
     INSTALL_BINARY_HAD_LIVE=1
   else
     INSTALL_BINARY_HAD_LIVE=0
+    INSTALL_BINARY_OLD_IMMUTABLE=0
+    INSTALL_BINARY_FLAG_SNAPSHOT_TAKEN=1
   fi
 }
 
@@ -315,6 +341,9 @@ prepare_install_routine_asset_surfaces() {
     adk_commit_routine_asset_transaction_forward \
     adk_commit_routine_asset_transaction \
     adk_rollback_routine_asset_transaction \
+    adk_persist_routine_asset_candidate_drain_authority \
+    adk_routine_asset_candidate_drain_authority_exists \
+    adk_clear_routine_asset_candidate_drain_authority \
     adk_release_routine_asset_lock \
     _adk_active_txn; do
     command -v "$required_function" >/dev/null 2>&1 || {
@@ -360,6 +389,13 @@ finalize_install_routine_asset_surfaces() {
   INSTALL_ASSET_FINALIZED=1
 }
 
+finalize_healthy_install_generation() {
+  _install_apply_binary_immutable_flag_state "$INSTALL_BINARY_LIVE" 1 \
+    || return 1
+  finalize_install_routine_asset_surfaces || return 1
+  INSTALL_SERVICE_HEALTHY=1
+}
+
 _install_cleanup() {
   local status=${1:-$?}
   local active_txn=""
@@ -370,6 +406,7 @@ _install_cleanup() {
   local live_sha=""
   local lock_owned=0
   local service_safe=1
+  local candidate_drain_guard=0
 
   trap - EXIT INT TERM
   if [ "$INSTALL_LOCK_HELD" = 1 ] \
@@ -402,6 +439,14 @@ _install_cleanup() {
   if [ "$lock_owned" != 1 ]; then
     return "$status"
   fi
+  if [ -n "$active_txn" ] \
+    && adk_routine_asset_candidate_drain_authority_exists "$active_txn" \
+    && [ "${INSTALL_SERVICE_START_ATTEMPTED:-0}" != 1 ]; then
+    candidate_drain_guard=1
+    service_safe=0
+    status=1
+    echo "Exact candidate drain is unresolved; retaining install binary/assets and rollback material" >&2
+  fi
   if [ "$INSTALL_SERVICE_STOP_ATTEMPTED" = 1 ] \
     && [ "$INSTALL_SERVICE_STOP_CONFIRMED" != 1 ] \
     && [ -n "$INSTALL_LAUNCHD_DOMAIN" ] \
@@ -409,7 +454,9 @@ _install_cleanup() {
     INSTALL_SERVICE_STOP_CONFIRMED=1
   fi
 
-  if [ "$INSTALL_ASSET_FINALIZED" = 1 ]; then
+  if [ "$candidate_drain_guard" = 1 ]; then
+    asset_action="none"
+  elif [ "$INSTALL_ASSET_FINALIZED" = 1 ]; then
     pair_resolved=1
   elif [ "$active_status" -eq 0 ]; then
     case "$active_phase" in
@@ -425,20 +472,21 @@ _install_cleanup() {
         fi
         if _install_binary_is_promoted; then
           if [ "$service_safe" != 1 ]; then
-            asset_action="commit"
+            asset_action="none"
           elif _restore_install_binary_transaction; then
             asset_action="rollback"
           else
             live_sha="$(_install_binary_live_sha256 2>/dev/null || true)"
             if [ -n "$INSTALL_BINARY_OLD_SHA256" ] \
-              && [ "$live_sha" = "$INSTALL_BINARY_OLD_SHA256" ]; then
+              && [ "$live_sha" = "$INSTALL_BINARY_OLD_SHA256" ] \
+              && _install_restore_old_binary_flag; then
               INSTALL_BINARY_PROMOTED=0
               INSTALL_BINARY_SWAP_ARMED=0
               asset_action="rollback"
             elif [ -n "$INSTALL_BINARY_NEW_SHA256" ] \
               && [ "$live_sha" = "$INSTALL_BINARY_NEW_SHA256" ]; then
-              echo "Install binary rollback failed; committing matching new assets" >&2
-              asset_action="commit"
+              echo "Install binary rollback failed; retaining the uncommitted new generation" >&2
+              asset_action="none"
               status=1
             else
               echo "Install binary state is unknown; preserving asset transaction" >&2
@@ -489,6 +537,8 @@ _install_cleanup() {
 
   if [ "$pair_resolved" = 1 ] \
     && [ "$asset_action" != "commit" ] \
+    && [ "$INSTALL_COMMIT_INTENT" != 1 ] \
+    && [ "$INSTALL_ASSET_FINALIZED" != 1 ] \
     && [ "$INSTALL_SERVICE_HEALTHY" != 1 ] \
     && [ "$INSTALL_SERVICE_STOP_CONFIRMED" = 1 ] \
     && [ "$INSTALL_SERVICE_WAS_RUNNING" = 1 ]; then
@@ -540,14 +590,101 @@ _install_service_job_is_loaded() {
     >/dev/null 2>&1
 }
 
+_install_current_service_pid() {
+  launchctl print "$INSTALL_LAUNCHD_DOMAIN/$LAUNCHD_LABEL" 2>/dev/null \
+    | awk '$1 == "pid" && $2 == "=" { print $3; exit }'
+}
+
 _capture_install_service_process() {
-  INSTALL_SERVICE_OLD_PID="$(
-    launchctl print "$INSTALL_LAUNCHD_DOMAIN/$LAUNCHD_LABEL" 2>/dev/null \
-      | awk '$1 == "pid" && $2 == "=" { print $3; exit }'
-  )"
+  INSTALL_SERVICE_OLD_PID="$(_install_current_service_pid 2>/dev/null || true)"
   INSTALL_SERVICE_OLD_IDENTITY="$(
     adk_process_identity "$INSTALL_SERVICE_OLD_PID" 2>/dev/null || true
   )"
+}
+
+_capture_install_candidate_process() {
+  local pid identity
+
+  pid="$(_install_current_service_pid 2>/dev/null)" || return 1
+  case "$pid" in
+    ''|*[!0-9]*|0) return 1 ;;
+  esac
+  identity="$(adk_process_identity "$pid" 2>/dev/null)" || return 1
+  [ -n "$identity" ] || return 1
+  INSTALL_SERVICE_CANDIDATE_PID="$pid"
+  INSTALL_SERVICE_CANDIDATE_IDENTITY="$identity"
+}
+
+_persist_install_candidate_drain_authority() {
+  local pid="${1:-}"
+  local identity="${2:-}"
+
+  adk_persist_routine_asset_candidate_drain_authority \
+    "$INSTALL_ROUTINE_ASSET_RUNTIME" "$INSTALL_ROUTINE_ASSET_TXN" install \
+    "$pid" "$identity" "$INSTALL_PORT" \
+    "$INSTALL_LAUNCHD_DOMAIN/$LAUNCHD_LABEL"
+}
+
+capture_install_candidate_process_after_start() {
+  local attempt=0
+  local max_attempts="${1:-15}"
+
+  until _capture_install_candidate_process; do
+    [ "$attempt" -lt "$max_attempts" ] || return 1
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+}
+
+_install_candidate_process_is_alive() {
+  adk_process_instance_alive \
+    "${INSTALL_SERVICE_CANDIDATE_PID:-}" \
+    "${INSTALL_SERVICE_CANDIDATE_IDENTITY:-}"
+}
+
+_install_candidate_port_refuses_connections() {
+  local curl_status
+
+  if curl -sS --connect-timeout 1 --max-time 1 -o /dev/null \
+      "http://${DEFAULT_LOOPBACK}:${INSTALL_PORT}/" >/dev/null 2>&1; then
+    return 1
+  else
+    curl_status=$?
+  fi
+  [ "$curl_status" -eq 7 ]
+}
+
+_install_candidate_drain_is_proven() {
+  ! _install_service_job_is_loaded \
+    && ! _install_candidate_process_is_alive \
+    && _install_candidate_port_refuses_connections
+}
+
+wait_for_install_candidate_stop() {
+  local attempt=0
+  local max_attempts="${1:-15}"
+
+  until _install_candidate_drain_is_proven; do
+    [ "$attempt" -lt "$max_attempts" ] || return 1
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+}
+
+_force_stop_install_candidate() {
+  local attempt=0
+
+  if _install_candidate_process_is_alive; then
+    kill -TERM "$INSTALL_SERVICE_CANDIDATE_PID" 2>/dev/null || return 1
+    while _install_candidate_process_is_alive && [ "$attempt" -lt 5 ]; do
+      sleep 1
+      attempt=$((attempt + 1))
+    done
+  fi
+  if _install_candidate_process_is_alive; then
+    kill -KILL "$INSTALL_SERVICE_CANDIDATE_PID" 2>/dev/null || return 1
+  fi
+  wait_for_install_candidate_stop 5
 }
 
 install_service_is_running() {
@@ -585,21 +722,73 @@ stop_install_service_for_promotion() {
 
 start_install_service() {
   local plist_path="$1"
+  local persist_candidate_authority="${2:-0}"
 
   [ -n "$INSTALL_LAUNCHD_DOMAIN" ] || return 1
   INSTALL_SERVICE_START_ATTEMPTED=1
+  if [ "$persist_candidate_authority" = 1 ]; then
+    _persist_install_candidate_drain_authority || return 1
+  fi
   launchctl bootstrap "$INSTALL_LAUNCHD_DOMAIN" "$plist_path" \
     >/dev/null 2>&1 || return 1
   launchctl print "$INSTALL_LAUNCHD_DOMAIN/$LAUNCHD_LABEL" \
     >/dev/null 2>&1 || return 1
+  capture_install_candidate_process_after_start || {
+    echo "Could not capture the bootstrapped AgentDesk process identity" >&2
+    return 1
+  }
+  if [ "$persist_candidate_authority" = 1 ]; then
+    _persist_install_candidate_drain_authority \
+      "$INSTALL_SERVICE_CANDIDATE_PID" "$INSTALL_SERVICE_CANDIDATE_IDENTITY" \
+      || return 1
+  fi
   INSTALL_SERVICE_START_CONFIRMED=1
 }
 
 stop_install_service_for_recovery() {
+  local candidate_was_loaded=0
+  local candidate_capture_failed=0
+
   [ -n "$INSTALL_LAUNCHD_DOMAIN" ] || return 1
+  if _install_service_job_is_loaded; then
+    candidate_was_loaded=1
+    if [ -z "${INSTALL_SERVICE_CANDIDATE_PID:-}" ] \
+      || [ -z "${INSTALL_SERVICE_CANDIDATE_IDENTITY:-}" ]; then
+      _capture_install_candidate_process || candidate_capture_failed=1
+    fi
+  fi
   launchctl bootout "$INSTALL_LAUNCHD_DOMAIN/$LAUNCHD_LABEL" \
     >/dev/null 2>&1 || true
-  wait_for_install_service_stop
+  if _install_service_job_is_loaded; then
+    echo "New AgentDesk launchd job is still loaded; refusing binary rollback" >&2
+    return 1
+  fi
+  if [ -n "${INSTALL_SERVICE_CANDIDATE_PID:-}" ] \
+    && [ -n "${INSTALL_SERVICE_CANDIDATE_IDENTITY:-}" ]; then
+    if ! wait_for_install_candidate_stop \
+      && ! _force_stop_install_candidate; then
+      echo "New AgentDesk process did not drain; refusing binary rollback" >&2
+      return 1
+    fi
+  elif [ "$candidate_was_loaded" = 1 ] \
+    || [ "$candidate_capture_failed" = 1 ] \
+    || [ "$INSTALL_SERVICE_START_ATTEMPTED" = 1 ] \
+    || [ "$INSTALL_SERVICE_START_CONFIRMED" = 1 ]; then
+    echo "New AgentDesk process identity is unknown; refusing binary rollback" >&2
+    return 1
+  fi
+  if ! _install_candidate_drain_is_proven; then
+    echo "New AgentDesk supervisor/process/port drain is not proven; refusing rollback" >&2
+    return 1
+  fi
+  if [ -n "${INSTALL_ROUTINE_ASSET_TXN:-}" ] \
+    && adk_routine_asset_candidate_drain_authority_exists \
+      "$INSTALL_ROUTINE_ASSET_TXN" \
+    && ! adk_clear_routine_asset_candidate_drain_authority \
+      "$INSTALL_ROUTINE_ASSET_RUNTIME" "$INSTALL_ROUTINE_ASSET_TXN"; then
+    echo "Candidate drained, but its durable drain authority could not be cleared" >&2
+    return 1
+  fi
 }
 
 restart_previous_install_service() {
@@ -1006,7 +1195,7 @@ LAUNCHD_DOMAIN="$INSTALL_LAUNCHD_DOMAIN"
 # Remove quarantine flag if present
 xattr -d com.apple.quarantine "$PLIST_PATH" 2>/dev/null || true
 
-start_install_service "$PLIST_PATH" \
+start_install_service "$PLIST_PATH" 1 \
   || fail "launchd bootstrap did not produce a running AgentDesk service"
 
 INSTALL_HEALTH_ATTEMPT=1
@@ -1023,16 +1212,12 @@ while [ "$INSTALL_HEALTH_ATTEMPT" -le 10 ]; do
 done
 [ "$INSTALL_HEALTH_OK" = 1 ] \
   || fail "AgentDesk health check failed after launchd bootstrap"
-INSTALL_SERVICE_HEALTHY=1
 ok "AgentDesk is running on port $INSTALL_PORT"
 
-finalize_install_routine_asset_surfaces \
-  || fail "Could not commit the healthy binary and routine asset generation"
-
-# Immutable protection belongs to the committed generation, never to a staged
-# or rollback candidate. Applying it here cannot block transaction recovery.
-chflags uchg "$INSTALL_BINARY_LIVE" \
-  || fail "Could not protect the committed AgentDesk binary"
+# Protection is applied and stat-verified while rollback is still armed. The
+# helper commits assets and disarms recovery only after that exact flag state.
+finalize_healthy_install_generation \
+  || fail "Could not protect and commit the healthy install generation"
 
 # ── Open browser ──────────────────────────────────────────────────────────────
 DASHBOARD_URL="http://${DEFAULT_LOOPBACK}:$INSTALL_PORT"

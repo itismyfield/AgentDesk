@@ -330,6 +330,12 @@ DEPLOY_SERVICE_STOP_CONFIRMED=0
 DEPLOY_SERVICE_WAS_RUNNING=0
 DEPLOY_SERVICE_OLD_PID=""
 DEPLOY_SERVICE_OLD_IDENTITY=""
+DEPLOY_SERVICE_CANDIDATE_PID=""
+DEPLOY_SERVICE_CANDIDATE_IDENTITY=""
+DEPLOY_WRAPPER_OLD_IMMUTABLE=0
+DEPLOY_REAL_OLD_IMMUTABLE=0
+DEPLOY_IMMUTABLE_SNAPSHOT_TAKEN=0
+DEPLOY_IMMUTABLE_MUTATION_ARMED=0
 DEPLOY_HEALTH_OK=0
 DEPLOY_LOCK_HELD=0
 DEPLOY_LOCK_FILE="${AGENTDESK_DEPLOY_LOCK_FILE:-$AD_HOME/runtime/deploy-release.lock}"
@@ -355,6 +361,10 @@ validate_local_build_generation_manifest() {
   [ -f "$manifest" ] && [ ! -L "$manifest" ] \
     && [ -f "$binary" ] && [ ! -L "$binary" ] || {
     error "Local build generation manifest is missing or unsafe: $manifest"
+    return 1
+  }
+  adk_require_clean_git_worktree "$PROJECT_DIR" || {
+    error "Local build generation cannot be reused from a dirty worktree"
     return 1
   }
   source_sha="$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null)" || return 1
@@ -383,7 +393,9 @@ expected = {
     "routines_sha256": os.environ["AGENTDESK_BUILD_ROUTINES_SHA"],
     "routine_helpers_sha256": os.environ["AGENTDESK_BUILD_HELPERS_SHA"],
 }
-if data.get("format") != "agentdesk-local-build-v1":
+if data.get("format") != "agentdesk-local-build-v2":
+    raise SystemExit(1)
+if data.get("worktree_state") != "clean":
     raise SystemExit(1)
 for key, value in expected.items():
     recorded = data.get(key)
@@ -395,18 +407,83 @@ for key, value in expected.items():
 PY
 }
 
-clear_deploy_immutable_flag() {
+_deploy_immutable_flag_state() {
   local path="$1"
   local flags
 
-  [ "$OS" = darwin ] || return 0
-  [ -e "$path" ] || return 0
-  chflags nouchg "$path" || return 1
+  [ "$OS" = darwin ] || { printf '0\n'; return 0; }
+  [ -e "$path" ] || { printf '0\n'; return 0; }
   flags="$(stat -f '%Sf' "$path" 2>/dev/null)" || return 1
   case ",$flags," in
-    *,uchg,*|*,uimmutable,*) return 1 ;;
-    *) return 0 ;;
+    *,uchg,*|*,uimmutable,*) printf '1\n' ;;
+    *) printf '0\n' ;;
   esac
+}
+
+_deploy_apply_immutable_flag_state() {
+  local path="$1"
+  local expected="$2"
+  local actual
+
+  [ "$OS" = darwin ] || return 0
+  [ -e "$path" ] || return 1
+  case "$expected" in
+    0) chflags nouchg "$path" || return 1 ;;
+    1) chflags uchg "$path" || return 1 ;;
+    *) return 1 ;;
+  esac
+  actual="$(_deploy_immutable_flag_state "$path")" || return 1
+  [ "$actual" = "$expected" ]
+}
+
+clear_deploy_immutable_flag() {
+  local path="$1"
+
+  [ "$OS" = darwin ] || return 0
+  [ -e "$path" ] || return 0
+  _deploy_apply_immutable_flag_state "$path" 0
+}
+
+snapshot_deploy_immutable_flags() {
+  [ "$OS" = darwin ] || { DEPLOY_IMMUTABLE_SNAPSHOT_TAKEN=1; return 0; }
+  DEPLOY_WRAPPER_OLD_IMMUTABLE="$(_deploy_immutable_flag_state "$WRAPPER_BIN")" \
+    || return 1
+  DEPLOY_REAL_OLD_IMMUTABLE="$(_deploy_immutable_flag_state "$REAL_BIN")" \
+    || return 1
+  DEPLOY_IMMUTABLE_SNAPSHOT_TAKEN=1
+}
+
+restore_deploy_snapshot_immutable_flags() {
+  [ "$OS" = darwin ] || { DEPLOY_IMMUTABLE_MUTATION_ARMED=0; return 0; }
+  [ "$DEPLOY_IMMUTABLE_SNAPSHOT_TAKEN" = 1 ] || return 1
+  if [ -e "$WRAPPER_BIN" ]; then
+    _deploy_apply_immutable_flag_state \
+      "$WRAPPER_BIN" "$DEPLOY_WRAPPER_OLD_IMMUTABLE" || return 1
+  fi
+  if [ -e "$REAL_BIN" ]; then
+    _deploy_apply_immutable_flag_state \
+      "$REAL_BIN" "$DEPLOY_REAL_OLD_IMMUTABLE" || return 1
+  fi
+  DEPLOY_IMMUTABLE_MUTATION_ARMED=0
+}
+
+apply_deploy_committed_immutable_flags() {
+  [ "$OS" = darwin ] || return 0
+  [ "$DEPLOY_IMMUTABLE_SNAPSHOT_TAKEN" = 1 ] || return 1
+  _deploy_apply_immutable_flag_state \
+    "$WRAPPER_BIN" "$DEPLOY_WRAPPER_OLD_IMMUTABLE" || return 1
+  _deploy_apply_immutable_flag_state "$REAL_BIN" 1
+}
+
+finalize_healthy_deploy_generation() {
+  apply_deploy_committed_immutable_flags || return 1
+  adk_mark_routine_asset_transaction_committing "$AD_HOME" "$ROUTINE_ASSET_TXN" \
+    || return 1
+  DEPLOY_HEALTH_OK=1
+  DEPLOY_IMMUTABLE_MUTATION_ARMED=0
+  if ! adk_commit_routine_asset_transaction "$AD_HOME" "$ROUTINE_ASSET_TXN"; then
+    error "Healthy deploy retained a committing routine asset transaction"
+  fi
 }
 
 _deploy_service_job_is_running() {
@@ -424,24 +501,117 @@ _deploy_service_job_is_running() {
   esac
 }
 
-_capture_deploy_service_process() {
+_deploy_current_service_pid() {
   case "$OS" in
     darwin)
-      DEPLOY_SERVICE_OLD_PID="$(
-        launchctl print "$(_launchd_domain)/$LABEL" 2>/dev/null \
-          | awk '$1 == "pid" && $2 == "=" { print $3; exit }'
-      )"
+      launchctl print "$(_launchd_domain)/$LABEL" 2>/dev/null \
+        | awk '$1 == "pid" && $2 == "=" { print $3; exit }'
       ;;
     linux)
-      DEPLOY_SERVICE_OLD_PID="$(
-        systemctl --user show agentdesk-dcserver.service \
-          --property MainPID --value 2>/dev/null || true
-      )"
+      systemctl --user show agentdesk-dcserver.service \
+        --property MainPID --value 2>/dev/null
       ;;
   esac
+}
+
+_capture_deploy_service_process() {
+  DEPLOY_SERVICE_OLD_PID="$(_deploy_current_service_pid 2>/dev/null || true)"
   DEPLOY_SERVICE_OLD_IDENTITY="$(
     adk_process_identity "$DEPLOY_SERVICE_OLD_PID" 2>/dev/null || true
   )"
+}
+
+_capture_deploy_candidate_process() {
+  local pid identity
+
+  pid="$(_deploy_current_service_pid 2>/dev/null)" || return 1
+  case "$pid" in
+    ''|*[!0-9]*|0) return 1 ;;
+  esac
+  identity="$(adk_process_identity "$pid" 2>/dev/null)" || return 1
+  [ -n "$identity" ] || return 1
+  DEPLOY_SERVICE_CANDIDATE_PID="$pid"
+  DEPLOY_SERVICE_CANDIDATE_IDENTITY="$identity"
+}
+
+_persist_deploy_candidate_drain_authority() {
+  local pid="${1:-}"
+  local identity="${2:-}"
+  local supervisor
+
+  case "$OS" in
+    darwin) supervisor="$(_launchd_domain)/$LABEL" ;;
+    linux) supervisor='systemd-user/agentdesk-dcserver.service' ;;
+    *) return 1 ;;
+  esac
+  adk_persist_routine_asset_candidate_drain_authority \
+    "$AD_HOME" "$ROUTINE_ASSET_TXN" deploy "$pid" "$identity" \
+    "$HEALTH_PORT" "$supervisor"
+}
+
+capture_deploy_candidate_process_after_start() {
+  local attempt=0
+  local max_attempts="${1:-15}"
+
+  until _capture_deploy_candidate_process; do
+    [ "$attempt" -lt "$max_attempts" ] || return 1
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+  _persist_deploy_candidate_drain_authority \
+    "$DEPLOY_SERVICE_CANDIDATE_PID" "$DEPLOY_SERVICE_CANDIDATE_IDENTITY"
+}
+
+_deploy_candidate_process_is_alive() {
+  adk_process_instance_alive \
+    "${DEPLOY_SERVICE_CANDIDATE_PID:-}" \
+    "${DEPLOY_SERVICE_CANDIDATE_IDENTITY:-}"
+}
+
+_deploy_candidate_port_refuses_connections() {
+  local curl_status
+
+  if curl -sS --connect-timeout 1 --max-time 1 -o /dev/null \
+      "http://${ADK_DEFAULT_LOOPBACK:-127.0.0.1}:${HEALTH_PORT}/" \
+      >/dev/null 2>&1; then
+    return 1
+  else
+    curl_status=$?
+  fi
+  [ "$curl_status" -eq 7 ]
+}
+
+_deploy_candidate_drain_is_proven() {
+  ! _deploy_service_job_is_running \
+    && ! _deploy_candidate_process_is_alive \
+    && _deploy_candidate_port_refuses_connections
+}
+
+wait_for_deploy_candidate_stop() {
+  local attempt=0
+  local max_attempts="${1:-15}"
+
+  until _deploy_candidate_drain_is_proven; do
+    [ "$attempt" -lt "$max_attempts" ] || return 1
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+}
+
+_force_stop_deploy_candidate() {
+  local attempt=0
+
+  if _deploy_candidate_process_is_alive; then
+    kill -TERM "$DEPLOY_SERVICE_CANDIDATE_PID" 2>/dev/null || return 1
+    while _deploy_candidate_process_is_alive && [ "$attempt" -lt 5 ]; do
+      sleep 1
+      attempt=$((attempt + 1))
+    done
+  fi
+  if _deploy_candidate_process_is_alive; then
+    kill -KILL "$DEPLOY_SERVICE_CANDIDATE_PID" 2>/dev/null || return 1
+  fi
+  wait_for_deploy_candidate_stop 5
 }
 
 deploy_service_is_running() {
@@ -517,6 +687,16 @@ start_previous_deploy_service() {
 }
 
 stop_deploy_service_for_rollback() {
+  local candidate_was_loaded=0
+  local candidate_capture_failed=0
+
+  if _deploy_service_job_is_running; then
+    candidate_was_loaded=1
+    if [ -z "${DEPLOY_SERVICE_CANDIDATE_PID:-}" ] \
+      || [ -z "${DEPLOY_SERVICE_CANDIDATE_IDENTITY:-}" ]; then
+      _capture_deploy_candidate_process || candidate_capture_failed=1
+    fi
+  fi
   case "$OS" in
     darwin)
       launchctl bootout "$(_launchd_domain)/$LABEL" 2>/dev/null || true
@@ -534,6 +714,31 @@ stop_deploy_service_for_rollback() {
       fi
       ;;
   esac
+  if [ -n "${DEPLOY_SERVICE_CANDIDATE_PID:-}" ] \
+    && [ -n "${DEPLOY_SERVICE_CANDIDATE_IDENTITY:-}" ]; then
+    if ! wait_for_deploy_candidate_stop \
+      && ! _force_stop_deploy_candidate; then
+      error "New service process did not drain; refusing in-place binary rollback"
+      return 1
+    fi
+  elif [ "$candidate_was_loaded" = 1 ] \
+    || [ "$candidate_capture_failed" = 1 ] \
+    || [ "$DEPLOY_SERVICE_START_ATTEMPTED" = 1 ] \
+    || [ "$DEPLOY_SERVICE_START_CONFIRMED" = 1 ]; then
+    error "New service identity is unknown; refusing in-place binary rollback"
+    return 1
+  fi
+  if ! _deploy_candidate_drain_is_proven; then
+    error "New service supervisor/process/port drain is not proven; refusing rollback"
+    return 1
+  fi
+  if [ -n "${ROUTINE_ASSET_TXN:-}" ] \
+    && adk_routine_asset_candidate_drain_authority_exists "$ROUTINE_ASSET_TXN" \
+    && ! adk_clear_routine_asset_candidate_drain_authority \
+      "$AD_HOME" "$ROUTINE_ASSET_TXN"; then
+    error "Candidate drained, but its durable drain authority could not be cleared"
+    return 1
+  fi
 }
 
 cleanup_deploy_transaction() {
@@ -546,6 +751,8 @@ cleanup_deploy_transaction() {
   local asset_action="rollback"
   local service_stopped=0
   local lock_owned=0
+  local pair_resolved="${DEPLOY_HEALTH_OK:-0}"
+  local candidate_drain_guard=0
 
   trap - EXIT INT TERM
   if [ "$DEPLOY_LOCK_HELD" = 1 ] \
@@ -575,7 +782,29 @@ cleanup_deploy_transaction() {
         error "Routine asset transaction marker is corrupt; refusing binary-only rollback"
       fi
     fi
-    if [ "$active_phase" = "committing" ] || [ "$active_phase" = "committed" ]; then
+    if [ -n "$active_txn" ] \
+      && adk_routine_asset_candidate_drain_authority_exists "$active_txn" \
+      && [ "${DEPLOY_SERVICE_START_ATTEMPTED:-0}" != 1 ]; then
+      candidate_drain_guard=1
+      asset_action="none"
+      restore_ok=0
+      status=1
+      error "Exact candidate drain is unresolved; retaining binary/assets and rollback material"
+    fi
+    if [ "$active_status" -eq 1 ] \
+      && [ "${DEPLOY_BINARY_PROMOTED:-0}" != 1 ]; then
+      pair_resolved=1
+    fi
+    if [ "${DEPLOY_BINARY_PROMOTED:-0}" != 1 ] \
+      && [ "${DEPLOY_IMMUTABLE_MUTATION_ARMED:-0}" = 1 ] \
+      && ! restore_deploy_snapshot_immutable_flags; then
+      restore_ok=0
+      status=1
+      error "Previous immutable flags could not be restored; leaving the service stopped"
+    fi
+    if [ "$candidate_drain_guard" = 1 ]; then
+      :
+    elif [ "$active_phase" = "committing" ] || [ "$active_phase" = "committed" ]; then
       asset_action="commit"
     elif [ "$DEPLOY_BINARY_PROMOTED" = 1 ] && [ "$active_status" -le 1 ]; then
       if [ "$DEPLOY_RESTART_ARMED" = 1 ] \
@@ -586,25 +815,35 @@ cleanup_deploy_transaction() {
           service_stopped=1
         else
           restore_ok=0
-          asset_action="commit"
+          asset_action="none"
           status=1
-          error "Service could not be stopped; retaining matching new binary and assets"
+          error "Service could not be stopped; retaining the uncommitted new generation and rollback material"
         fi
       fi
       if [ "$restore_ok" = 1 ] && ! restore_previous_install; then
         restore_ok=0
-        asset_action="commit"
+        asset_action="none"
         status=1
-        error "Binary rollback failed; committing matching new routine assets"
+        error "Binary rollback failed; retaining the transaction and rollback material"
       fi
     fi
     if [ -n "$active_txn" ] && [ "$asset_action" != "none" ]; then
       if [ "$asset_action" = "commit" ]; then
-        adk_commit_routine_asset_transaction_forward "$AD_HOME" "$active_txn" \
-          || { error "Routine asset fail-forward failed: $active_txn"; assets_ok=0; status=1; }
+        if adk_commit_routine_asset_transaction_forward "$AD_HOME" "$active_txn"; then
+          pair_resolved=1
+        else
+          error "Routine asset fail-forward failed: $active_txn"
+          assets_ok=0
+          status=1
+        fi
       else
-        adk_rollback_routine_asset_transaction "$AD_HOME" "$active_txn" \
-          || { error "Routine asset rollback failed: $active_txn"; assets_ok=0; status=1; }
+        if adk_rollback_routine_asset_transaction "$AD_HOME" "$active_txn"; then
+          pair_resolved=1
+        else
+          error "Routine asset rollback failed: $active_txn"
+          assets_ok=0
+          status=1
+        fi
       fi
     fi
     if [ "$DEPLOY_SERVICE_STOP_CONFIRMED" = 1 ]; then
@@ -618,7 +857,10 @@ cleanup_deploy_transaction() {
       DEPLOY_SERVICE_STOP_CONFIRMED=1
       service_stopped=1
     fi
-    if [ "$service_stopped" = 1 ] && [ "$DEPLOY_SERVICE_WAS_RUNNING" = 1 ]; then
+    if [ "$service_stopped" = 1 ] \
+      && [ "$DEPLOY_SERVICE_WAS_RUNNING" = 1 ] \
+      && [ "$asset_action" = "rollback" ] \
+      && [ "$pair_resolved" = 1 ]; then
       if [ "$restore_ok" = 1 ] && [ "$assets_ok" = 1 ]; then
         start_previous_deploy_service >/dev/null 2>&1 || status=1
       fi
@@ -629,7 +871,12 @@ cleanup_deploy_transaction() {
       || { error "Failed to release shared routine asset deploy lock"; status=1; }
     DEPLOY_LOCK_HELD=0
   fi
-  cleanup_backup
+  if [ "$pair_resolved" = 1 ] || [ "${DEPLOY_BINARY_PROMOTED:-0}" != 1 ]; then
+    cleanup_backup
+  elif [ -n "${DEPLOY_BINARY_STAGE:-}" ] && [ -f "$DEPLOY_BINARY_STAGE" ]; then
+    rm -f "$DEPLOY_BINARY_STAGE" \
+      || { error "Failed to remove abandoned binary stage"; status=1; }
+  fi
   return "$status"
 }
 
@@ -689,17 +936,22 @@ install_file_atomically() {
 }
 
 restore_previous_install() {
+  clear_deploy_immutable_flag "$WRAPPER_BIN" || return 1
+  clear_deploy_immutable_flag "$REAL_BIN" || return 1
+
   if [ -n "${BACKUP_WRAPPER:-}" ] && [ -f "$BACKUP_WRAPPER" ]; then
-    install_file_atomically "$BACKUP_WRAPPER" "$WRAPPER_BIN" 755
+    install_file_atomically "$BACKUP_WRAPPER" "$WRAPPER_BIN" 755 || return 1
   else
-    rm -f "$WRAPPER_BIN"
+    rm -f "$WRAPPER_BIN" || return 1
   fi
 
   if [ -n "${BACKUP_REAL:-}" ] && [ -f "$BACKUP_REAL" ]; then
-    install_file_atomically "$BACKUP_REAL" "$REAL_BIN" 755
+    install_file_atomically "$BACKUP_REAL" "$REAL_BIN" 755 || return 1
   else
-    rm -f "$REAL_BIN"
+    rm -f "$REAL_BIN" || return 1
   fi
+
+  restore_deploy_snapshot_immutable_flags
 }
 
 restore_previous_install_and_fail() {
@@ -838,7 +1090,11 @@ ok "Routine helpers: $AD_HOME/routine-helpers/"
 info "Installing binary..."
 mkdir -p "$BIN_DIR"
 if [ "$OS" = "darwin" ]; then
-  # Previous installs may have been immutable; unlock before backup/replace.
+  # Snapshot both old paths before the first flag mutation. The generated
+  # wrapper preserves its prior policy; the committed real binary is protected.
+  snapshot_deploy_immutable_flags \
+    || fail "Could not snapshot immutable flags from the existing install"
+  DEPLOY_IMMUTABLE_MUTATION_ARMED=1
   clear_deploy_immutable_flag "$WRAPPER_BIN" \
     || fail "Could not clear immutable flag from existing wrapper"
   clear_deploy_immutable_flag "$REAL_BIN" \
@@ -966,9 +1222,13 @@ restart_launchd() {
   # "operation already in progress" immediately after bootout.
   for attempt in $(seq 1 "$max_attempts"); do
     DEPLOY_SERVICE_START_ATTEMPTED=1
+    _persist_deploy_candidate_drain_authority \
+      || { error "Could not arm durable candidate drain authority"; return 1; }
     if launchctl bootstrap "$(_launchd_domain)" "$PLIST" >/dev/null 2>&1; then
-      DEPLOY_SERVICE_START_CONFIRMED=1
       _kickstart_launchd_job_if_needed "$LABEL" || true
+      capture_deploy_candidate_process_after_start \
+        || { error "Could not capture the bootstrapped launchd process identity"; return 1; }
+      DEPLOY_SERVICE_START_CONFIRMED=1
       ok "Service restarted via launchd"
       return
     fi
@@ -979,7 +1239,12 @@ restart_launchd() {
 
   # Surface the real launchctl error on the final attempt.
   DEPLOY_SERVICE_START_ATTEMPTED=1
+  _persist_deploy_candidate_drain_authority \
+    || { error "Could not arm durable candidate drain authority"; return 1; }
   launchctl bootstrap "$(_launchd_domain)" "$PLIST" || return $?
+  _kickstart_launchd_job_if_needed "$LABEL" || true
+  capture_deploy_candidate_process_after_start \
+    || { error "Could not capture the bootstrapped launchd process identity"; return 1; }
   DEPLOY_SERVICE_START_CONFIRMED=1
   ok "Service restarted via launchd"
 }
@@ -987,7 +1252,11 @@ restart_launchd() {
 restart_systemd() {
   DEPLOY_SERVICE_STOP_ATTEMPTED=1
   DEPLOY_SERVICE_START_ATTEMPTED=1
+  _persist_deploy_candidate_drain_authority \
+    || { error "Could not arm durable candidate drain authority"; return 1; }
   systemctl --user restart agentdesk-dcserver.service
+  capture_deploy_candidate_process_after_start \
+    || { error "Could not capture the restarted systemd process identity"; return 1; }
   DEPLOY_SERVICE_START_CONFIRMED=1
   ok "Service restarted via systemd"
 }
@@ -1039,12 +1308,8 @@ log_health_degraded_reasons() {
 if wait_for_http_service_health "$LABEL" "$HEALTH_PORT" 10 2 0 1; then
   ok "Health check passed on :$HEALTH_PORT/api/health"
   log_health_degraded_reasons
-  adk_mark_routine_asset_transaction_committing "$AD_HOME" "$ROUTINE_ASSET_TXN" \
-    || fail "Could not persist healthy routine asset commit intent"
-  DEPLOY_HEALTH_OK=1
-  if ! adk_commit_routine_asset_transaction "$AD_HOME" "$ROUTINE_ASSET_TXN"; then
-    error "Healthy deploy retained a committing routine asset transaction"
-  fi
+  finalize_healthy_deploy_generation \
+    || fail "Could not protect and commit the healthy deploy generation"
 else
   log_health_degraded_reasons
   fail "Health check failed after waiting for :$HEALTH_PORT/api/health. Check logs:"

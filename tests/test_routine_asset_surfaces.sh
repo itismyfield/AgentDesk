@@ -108,6 +108,64 @@ PY
     TEST_GUARD_PID=$!
 }
 
+hold_test_peer_claim_guard() {
+    local lock_file="$1"
+    local incoming="$2"
+    local ready_file="$3"
+    local publish_file="$4"
+
+    python3 - "$lock_file" "$incoming" "$ready_file" "$publish_file" <<'PY' &
+import fcntl
+import json
+import os
+import sys
+import tempfile
+import time
+
+lock_file, incoming, ready_file, publish_file = sys.argv[1:]
+guard_path = lock_file + ".d.guard"
+record_path = lock_file + ".d"
+guard = os.open(guard_path, os.O_RDWR | os.O_CREAT, 0o600)
+try:
+    fcntl.flock(guard, fcntl.LOCK_EX)
+    with open(ready_file, "w", encoding="utf-8"):
+        pass
+    while not os.path.exists(publish_file):
+        time.sleep(0.01)
+    record = {
+        "format": 1,
+        "identity": "deterministic-test-receiver",
+        "pid": os.getpid(),
+        "token": "deterministic.receiver.token",
+    }
+    fd, temporary = tempfile.mkstemp(
+        prefix=os.path.basename(record_path) + ".replace.",
+        dir=os.path.dirname(record_path),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(record, handle, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, record_path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    claimed = os.path.join(incoming, ".claimed")
+    claim_fd = os.open(claimed, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(claim_fd, "w", encoding="utf-8") as handle:
+        handle.write("deterministic.receiver.token\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+finally:
+    os.close(guard)
+PY
+    TEST_GUARD_PID=$!
+}
+
 seed_required_helpers() {
     local helper_root="$1"
     local generation="$2"
@@ -438,6 +496,106 @@ fi
 ADK_ROUTINE_ASSET_LOCK_DIR="$REPLACED_RECORD" \
     ADK_ROUTINE_ASSET_LOCK_TOKEN="$REPLACEMENT_TOKEN" \
     adk_release_routine_asset_lock
+
+# A release migration marker binds this transaction to a compatible binary.
+# Generic deploy/install recovery has no authority to roll it backward, even
+# when the marker itself is corrupt or a broken symlink.
+FORWARD_RUNTIME="$TMP_ROOT/forward-boundary-release"
+FORWARD_SOURCE="$TMP_ROOT/forward-boundary-source"
+seed_live "$FORWARD_RUNTIME" 'v0'
+seed_source "$FORWARD_SOURCE" 'v1'
+acquire_runtime_lock "$FORWARD_RUNTIME"
+begin_staged_transaction "$FORWARD_SOURCE" "$FORWARD_RUNTIME"
+FORWARD_TXN="$CURRENT_TXN"
+FORWARD_MARKER="$FORWARD_TXN/forward-migration-applied.json"
+printf 'invalid-but-durable-boundary\n' > "$FORWARD_MARKER"
+if adk_recover_active_routine_asset_transaction "$FORWARD_RUNTIME" \
+    >/dev/null 2>&1; then
+    fail_test 'generic recovery accepted a forward-migration transaction'
+fi
+if adk_begin_routine_asset_transaction "$FORWARD_RUNTIME" "$CURRENT_LOCK" \
+    >/dev/null 2>&1; then
+    fail_test 'generic begin replaced a forward-migration transaction'
+fi
+[ -d "$FORWARD_TXN/staged/release-root/routines" ] \
+    && [ -f "$FORWARD_RUNTIME/runtime/routine-assets.active" ] \
+    || fail_test 'generic recovery damaged the forward-migration transaction'
+rm -f "$FORWARD_MARKER"
+ln -s "$FORWARD_TXN/missing-forward-marker" "$FORWARD_MARKER"
+if adk_recover_active_routine_asset_transaction "$FORWARD_RUNTIME" \
+    >/dev/null 2>&1; then
+    fail_test 'generic recovery ignored a broken forward-migration marker'
+fi
+rm -f "$FORWARD_MARKER"
+adk_recover_active_routine_asset_transaction "$FORWARD_RUNTIME"
+release_runtime_lock
+
+# Invocation 1 can unload a candidate yet fail to prove its exact PID/port
+# drained. Its fsynced authority marker must make invocation 2 fail closed;
+# neither generic recovery nor begin may change one byte of the promoted pair.
+DRAIN_RUNTIME="$TMP_ROOT/candidate-drain-release"
+DRAIN_SOURCE="$TMP_ROOT/candidate-drain-source"
+seed_live "$DRAIN_RUNTIME" 'v0'
+seed_source "$DRAIN_SOURCE" 'v1'
+acquire_runtime_lock "$DRAIN_RUNTIME"
+begin_staged_transaction "$DRAIN_SOURCE" "$DRAIN_RUNTIME"
+DRAIN_TXN="$CURRENT_TXN"
+printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    '[ "${1:-}" = validate-routines ]' \
+    '[ "${2:-}" = --root ]' \
+    'root="${3:-}"' \
+    '[ "${4:-}" = --runtime-root ]' \
+    'runtime_root="${5:-}"' \
+    '[ "$root" = "$runtime_root/routines" ]' \
+    '[ -d "$root" ] && [ -d "$runtime_root/routine-helpers" ]' \
+    > "$TMP_ROOT/candidate-binary"
+chmod +x "$TMP_ROOT/candidate-binary"
+adk_promote_routine_asset_transaction "$DRAIN_RUNTIME" "$DRAIN_TXN" \
+    "$TMP_ROOT/candidate-binary"
+adk_persist_routine_asset_candidate_drain_authority \
+    "$DRAIN_RUNTIME" "$DRAIN_TXN" deploy 4242 'candidate-start-identity' \
+    8791 'gui/test/com.agentdesk.release'
+DRAIN_MARKER="$DRAIN_TXN/candidate-drain-required.json"
+python3 - "$DRAIN_MARKER" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+expected = {
+    "capture_state": "exact",
+    "entrypoint": "deploy",
+    "identity": "candidate-start-identity",
+    "pid": "4242",
+    "port": 8791,
+    "supervisor": "gui/test/com.agentdesk.release",
+}
+raise SystemExit(0 if all(data.get(key) == value for key, value in expected.items()) else 1)
+PY
+if adk_recover_active_routine_asset_transaction "$DRAIN_RUNTIME" \
+    >/dev/null 2>&1; then
+    fail_test 'generic recovery ignored unresolved candidate drain authority'
+fi
+if adk_begin_routine_asset_transaction "$DRAIN_RUNTIME" "$CURRENT_LOCK" \
+    >/dev/null 2>&1; then
+    fail_test 'second invocation replaced unresolved candidate drain authority'
+fi
+[ "$(<"$DRAIN_RUNTIME/routines/generation-marker")" = v1 ] \
+    && [ "$(<"$DRAIN_RUNTIME/routines.old/generation-marker")" = v0 ] \
+    && [ -f "$DRAIN_RUNTIME/runtime/routine-assets.active" ] \
+    && [ -f "$DRAIN_MARKER" ] \
+    || fail_test 'second invocation mutated the unresolved candidate generation'
+rm -f "$DRAIN_MARKER"
+ln -s "$DRAIN_TXN/missing-candidate-drain" "$DRAIN_MARKER"
+if adk_recover_active_routine_asset_transaction "$DRAIN_RUNTIME" \
+    >/dev/null 2>&1; then
+    fail_test 'generic recovery ignored a broken candidate drain authority'
+fi
+rm -f "$DRAIN_MARKER"
+adk_rollback_routine_asset_transaction "$DRAIN_RUNTIME" "$DRAIN_TXN"
+release_runtime_lock
 
 # Once health has durably selected commit, retry/recovery must retain the new
 # generation instead of rolling assets back beside the proven new binary.
@@ -945,6 +1103,54 @@ if adk_claim_routine_asset_incoming "$INBOX_RUNTIME" "$INBOX_PATH" \
     "$INBOX_RUNTIME/runtime/deploy-release.lock" >/dev/null 2>&1; then
     fail_test 'peer inbox claim succeeded without owning the shared lock'
 fi
+
+# Sender disconnect cleanup must take the receiver's exact custom deploy guard:
+# <lock>.d.guard. Hold that guard across receiver owner-record + claim
+# publication and prove cleanup blocks, then refuses deletion after publication.
+RACE_TOKEN='guard-race.123.safe'
+ssh() {
+    command bash -c "${4:?missing guard-race prepare command}"
+}
+RACE_PATH="$(adk_prepare_peer_asset_incoming 'operator@peer.local' \
+    "$INBOX_RUNTIME" "$RACE_TOKEN" 7)"
+unset -f ssh
+RACE_LOCK="$INBOX_RUNTIME/runtime/custom-receiver.lock"
+RACE_READY="$TMP_ROOT/peer-guard.ready"
+RACE_PUBLISH="$TMP_ROOT/peer-guard.publish"
+RACE_CLEANUP_ENTERED="$TMP_ROOT/peer-cleanup.entered"
+RACE_CLEANUP_RESULT="$TMP_ROOT/peer-cleanup.result"
+hold_test_peer_claim_guard "$RACE_LOCK" "$RACE_PATH" \
+    "$RACE_READY" "$RACE_PUBLISH"
+wait_for_test_file "$RACE_READY"
+ssh() {
+    : > "$RACE_CLEANUP_ENTERED"
+    command bash -c "${4:?missing guard-race cleanup command}"
+}
+(
+    if adk_remove_peer_asset_incoming 'operator@peer.local' "$INBOX_RUNTIME" \
+        "$RACE_TOKEN" 7 "$RACE_LOCK" >/dev/null 2>&1; then
+        printf 'deleted\n' > "$RACE_CLEANUP_RESULT"
+    else
+        printf 'refused\n' > "$RACE_CLEANUP_RESULT"
+    fi
+) &
+RACE_CLEANUP_PID=$!
+wait_for_test_file "$RACE_CLEANUP_ENTERED"
+kill -0 "$RACE_CLEANUP_PID" 2>/dev/null \
+    && [ ! -e "$RACE_CLEANUP_RESULT" ] \
+    && [ -d "$RACE_PATH" ] \
+    || fail_test 'sender cleanup did not block on receiver custom .d.guard'
+: > "$RACE_PUBLISH"
+wait "$TEST_GUARD_PID"
+wait "$RACE_CLEANUP_PID"
+unset -f ssh
+[ "$(<"$RACE_CLEANUP_RESULT")" = refused ] \
+    && [ -f "$RACE_LOCK.d" ] \
+    && [ -f "$RACE_PATH/.claimed" ] \
+    || fail_test 'sender cleanup deleted inbox after receiver lock/claim publication'
+rm -rf "$RACE_PATH"
+rm -f "$RACE_LOCK.d" "$RACE_LOCK.d.guard"
+
 CURRENT_LOCK="$INBOX_RUNTIME/runtime/custom-deploy.lock"
 adk_acquire_routine_asset_lock "$CURRENT_LOCK" 0
 ssh() {
@@ -1027,7 +1233,9 @@ eval "$(extract_function prepare_install_routine_asset_surfaces)"
 eval "$(extract_function promote_install_routine_asset_surfaces)"
 eval "$(extract_function finalize_install_routine_asset_surfaces)"
 eval "$(extract_function _install_sha256_file)"
+eval "$(extract_function _install_binary_immutable_flag_state)"
 eval "$(extract_function _install_binary_has_immutable_flag)"
+eval "$(extract_function _install_apply_binary_immutable_flag_state)"
 eval "$(extract_function _install_clear_binary_immutable_flag)"
 eval "$(extract_function _install_restore_old_binary_flag)"
 eval "$(extract_function sign_binary_with_fallback)"
@@ -1038,7 +1246,16 @@ eval "$(extract_function _install_binary_is_promoted)"
 eval "$(extract_function _restore_install_binary_transaction)"
 eval "$(extract_function _install_cleanup)"
 eval "$(extract_function _install_service_job_is_loaded)"
+eval "$(extract_function _install_current_service_pid)"
 eval "$(extract_function _capture_install_service_process)"
+eval "$(extract_function _capture_install_candidate_process)"
+eval "$(extract_function _persist_install_candidate_drain_authority)"
+eval "$(extract_function capture_install_candidate_process_after_start)"
+eval "$(extract_function _install_candidate_process_is_alive)"
+eval "$(extract_function _install_candidate_port_refuses_connections)"
+eval "$(extract_function _install_candidate_drain_is_proven)"
+eval "$(extract_function wait_for_install_candidate_stop)"
+eval "$(extract_function _force_stop_install_candidate)"
 eval "$(extract_function install_service_is_running)"
 eval "$(extract_function wait_for_install_service_stop)"
 eval "$(extract_function stop_install_service_for_promotion)"
@@ -1057,6 +1274,7 @@ reset_install_transaction_state() {
     INSTALL_BINARY_OLD_SHA256=""
     INSTALL_BINARY_HAD_LIVE=0
     INSTALL_BINARY_OLD_IMMUTABLE=0
+    INSTALL_BINARY_FLAG_SNAPSHOT_TAKEN=0
     INSTALL_BINARY_SWAP_ARMED=0
     INSTALL_BINARY_PROMOTED=0
     INSTALL_COMMIT_INTENT=0
@@ -1072,6 +1290,8 @@ reset_install_transaction_state() {
     INSTALL_LAUNCHD_DOMAIN=""
     INSTALL_SERVICE_OLD_PID=""
     INSTALL_SERVICE_OLD_IDENTITY=""
+    INSTALL_SERVICE_CANDIDATE_PID=""
+    INSTALL_SERVICE_CANDIDATE_IDENTITY=""
 
     [ -z "$INSTALL_ROUTINE_ASSET_TXN" ] \
         && [ -z "$INSTALL_ROUTINE_ASSET_RUNTIME" ] \
@@ -1081,6 +1301,7 @@ reset_install_transaction_state() {
         && [ -z "$INSTALL_BINARY_NEW_SHA256" ] \
         && [ -z "$INSTALL_BINARY_OLD_SHA256" ] \
         && [ "$INSTALL_BINARY_HAD_LIVE" -eq 0 ] \
+        && [ "$INSTALL_BINARY_FLAG_SNAPSHOT_TAKEN" -eq 0 ] \
         && [ "$INSTALL_BINARY_SWAP_ARMED" -eq 0 ] \
         && [ "$INSTALL_BINARY_PROMOTED" -eq 0 ] \
         && [ "$INSTALL_COMMIT_INTENT" -eq 0 ] \
@@ -1367,7 +1588,10 @@ mkdir -p "$BOOTSTRAP_HOME/Library/LaunchAgents"
     launchd_domain() { printf 'gui/test\n'; }
     launchctl() {
         case "${1:-}" in
-            print) [ "$SERVICE_ACTIVE" = 1 ] ;;
+            print)
+                [ "$SERVICE_ACTIVE" = 1 ] || return 1
+                printf '    pid = 5252\n'
+                ;;
             bootout)
                 SERVICE_ACTIVE=0
                 SERVICE_EVENTS="${SERVICE_EVENTS}stop "
@@ -1383,8 +1607,29 @@ mkdir -p "$BOOTSTRAP_HOME/Library/LaunchAgents"
                 ;;
         esac
     }
+    adk_process_identity() {
+        [ "$1" = 5252 ] || return 1
+        printf 'install-candidate-start\n'
+    }
+    adk_process_instance_alive() {
+        [ "$1" = 5252 ] && [ "$2" = install-candidate-start ] \
+            && [ "$SERVICE_ACTIVE" = 1 ]
+    }
+    _install_candidate_port_refuses_connections() {
+        [ "$SERVICE_ACTIVE" = 0 ]
+    }
     prepare_install_routine_asset_surfaces "$GOOD_ARTIFACT" "$BOOTSTRAP_RUNTIME"
     prepare_install_binary_transaction "$GOOD_ARTIFACT/agentdesk" "$BOOTSTRAP_RUNTIME"
+    # Asset preparation intentionally sources the artifact's shared primitives;
+    # reinstall this fixture's deterministic process identity after that source.
+    adk_process_identity() {
+        [ "$1" = 5252 ] || return 1
+        printf 'install-candidate-start\n'
+    }
+    adk_process_instance_alive() {
+        [ "$1" = 5252 ] && [ "$2" = install-candidate-start ] \
+            && [ "$SERVICE_ACTIVE" = 1 ]
+    }
     stop_install_service_for_promotion
     promote_install_routine_asset_surfaces
     promote_install_binary_transaction
@@ -1515,12 +1760,23 @@ set -e
 # pair, and restart it. A second case covers failure immediately after bootout.
 eval "$(extract_function stop_deploy_service_for_rollback "$REPO_ROOT/scripts/deploy.sh")"
 eval "$(extract_function _deploy_service_job_is_running "$REPO_ROOT/scripts/deploy.sh")"
+eval "$(extract_function _deploy_current_service_pid "$REPO_ROOT/scripts/deploy.sh")"
 eval "$(extract_function _capture_deploy_service_process "$REPO_ROOT/scripts/deploy.sh")"
+eval "$(extract_function _capture_deploy_candidate_process "$REPO_ROOT/scripts/deploy.sh")"
+eval "$(extract_function _persist_deploy_candidate_drain_authority "$REPO_ROOT/scripts/deploy.sh")"
+eval "$(extract_function capture_deploy_candidate_process_after_start "$REPO_ROOT/scripts/deploy.sh")"
+eval "$(extract_function _deploy_candidate_process_is_alive "$REPO_ROOT/scripts/deploy.sh")"
+eval "$(extract_function _deploy_candidate_port_refuses_connections "$REPO_ROOT/scripts/deploy.sh")"
+eval "$(extract_function _deploy_candidate_drain_is_proven "$REPO_ROOT/scripts/deploy.sh")"
+eval "$(extract_function wait_for_deploy_candidate_stop "$REPO_ROOT/scripts/deploy.sh")"
+eval "$(extract_function _force_stop_deploy_candidate "$REPO_ROOT/scripts/deploy.sh")"
 eval "$(extract_function deploy_service_is_running "$REPO_ROOT/scripts/deploy.sh")"
 eval "$(extract_function wait_for_deploy_service_stop "$REPO_ROOT/scripts/deploy.sh")"
 eval "$(extract_function stop_deploy_service_for_promotion "$REPO_ROOT/scripts/deploy.sh")"
 eval "$(extract_function cleanup_deploy_transaction "$REPO_ROOT/scripts/deploy.sh")"
 eval "$(extract_function restart_launchd "$REPO_ROOT/scripts/deploy.sh")"
+eval "$(extract_function _deploy_immutable_flag_state "$REPO_ROOT/scripts/deploy.sh")"
+eval "$(extract_function _deploy_apply_immutable_flag_state "$REPO_ROOT/scripts/deploy.sh")"
 eval "$(extract_function clear_deploy_immutable_flag "$REPO_ROOT/scripts/deploy.sh")"
 
 (
@@ -1530,6 +1786,8 @@ eval "$(extract_function clear_deploy_immutable_flag "$REPO_ROOT/scripts/deploy.
     OS=darwin
     LABEL='com.agentdesk.release'
     AD_HOME="$TMP_ROOT/restart-gap-runtime"
+    ROUTINE_ASSET_TXN="$AD_HOME/runtime/fake-txn"
+    HEALTH_PORT=8791
     DEPLOY_HEALTH_OK=0
     DEPLOY_BINARY_PROMOTED=1
     DEPLOY_RESTART_ARMED=1
@@ -1538,10 +1796,22 @@ eval "$(extract_function clear_deploy_immutable_flag "$REPO_ROOT/scripts/deploy.
     DEPLOY_SERVICE_START_CONFIRMED=0
     DEPLOY_SERVICE_STOP_CONFIRMED=1
     DEPLOY_SERVICE_WAS_RUNNING=1
+    DEPLOY_SERVICE_CANDIDATE_PID=""
+    DEPLOY_SERVICE_CANDIDATE_IDENTITY=""
     DEPLOY_LOCK_HELD=1
     DEPLOY_LOCK_FILE="$AD_HOME/runtime/deploy-release.lock"
     SERVICE_ACTIVE=0
     RESTART_EVENTS=''
+    DRAIN_AUTHORITY=0
+    adk_persist_routine_asset_candidate_drain_authority() {
+        DRAIN_AUTHORITY=1
+    }
+    adk_routine_asset_candidate_drain_authority_exists() {
+        [ "$DRAIN_AUTHORITY" = 1 ]
+    }
+    adk_clear_routine_asset_candidate_drain_authority() {
+        DRAIN_AUTHORITY=0
+    }
     _launchd_domain() { printf 'gui/test\n'; }
     _kickstart_launchd_job_if_needed() { :; }
     info() { :; }
@@ -1564,8 +1834,22 @@ eval "$(extract_function clear_deploy_immutable_flag "$REPO_ROOT/scripts/deploy.
                 RESTART_EVENTS="${RESTART_EVENTS}bootstrap-gap "
                 return 143
                 ;;
-            print) [ "$SERVICE_ACTIVE" = 1 ] ;;
+            print)
+                [ "$SERVICE_ACTIVE" = 1 ] || return 1
+                printf '    pid = 4242\n'
+                ;;
         esac
+    }
+    adk_process_identity() {
+        [ "$1" = 4242 ] || return 1
+        printf 'candidate-start\n'
+    }
+    adk_process_instance_alive() {
+        [ "$1" = 4242 ] && [ "$2" = candidate-start ] \
+            && [ "$SERVICE_ACTIVE" = 1 ]
+    }
+    _deploy_candidate_port_refuses_connections() {
+        [ "$SERVICE_ACTIVE" = 0 ]
     }
     set +e
     restart_launchd
@@ -1620,6 +1904,7 @@ eval "$(extract_function clear_deploy_immutable_flag "$REPO_ROOT/scripts/deploy.
     DEPLOY_SERVICE_WAS_RUNNING=1
     DEPLOY_LOCK_HELD=1
     DEPLOY_LOCK_FILE="$AD_HOME/runtime/deploy-release.lock"
+    HEALTH_PORT=8791
     STOP_EVENTS=''
     [ "$OS" = linux ] \
         && [ "$DEPLOY_HEALTH_OK" -eq 0 ] \
@@ -1633,6 +1918,7 @@ eval "$(extract_function clear_deploy_immutable_flag "$REPO_ROOT/scripts/deploy.
             *' stop '*) STOP_EVENTS="${STOP_EVENTS}stop-new "; return 0 ;;
         esac
     }
+    curl() { return 7; }
     _adk_active_txn() { printf '%s\n' "$AD_HOME/runtime/fake-txn"; }
     adk_routine_asset_transaction_phase() { printf 'promoted\n'; }
     restore_previous_install() { STOP_EVENTS="${STOP_EVENTS}restore-binary "; }
@@ -1769,24 +2055,60 @@ eval "$(extract_function validate_local_build_generation_manifest \
     "$REPO_ROOT/scripts/deploy.sh")"
 (
     PROJECT_DIR="$TMP_ROOT/local-build-generation"
-    mkdir -p "$PROJECT_DIR/target/release"
+    mkdir -p "$PROJECT_DIR/target/release" "$PROJECT_DIR/dist" \
+        "$PROJECT_DIR/src" "$PROJECT_DIR/migrations/postgres"
     seed_source "$PROJECT_DIR" 'build-v0'
     write_fake_install_candidate "$PROJECT_DIR/target/release/agentdesk"
+    printf 'target/\ndist/\n' > "$PROJECT_DIR/.gitignore"
+    printf 'pub fn fixture() {}\n' > "$PROJECT_DIR/src/lib.rs"
+    printf '%s\n' '-- fixture migration' \
+        > "$PROJECT_DIR/migrations/postgres/0100_fixture.sql"
     git -C "$PROJECT_DIR" init -q
     git -C "$PROJECT_DIR" -c user.name=AgentDesk -c user.email=agentdesk@example.invalid \
-        add routines routine-helpers
+        add .gitignore src migrations routines routine-helpers
     git -C "$PROJECT_DIR" -c user.name=AgentDesk -c user.email=agentdesk@example.invalid \
         commit -qm 'fixture generation'
-    write_local_build_generation_manifest \
-        "$PROJECT_DIR/target/release/agentdesk"
+    BUILD_SOURCE_SHA="$(git -C "$PROJECT_DIR" rev-parse HEAD)"
+    (
+        cd "$PROJECT_DIR/dist"
+        write_local_build_generation_manifest \
+            "$PROJECT_DIR/target/release/agentdesk" "$BUILD_SOURCE_SHA"
+    )
     error() { :; }
+    validate_local_build_generation_manifest
+    printf 'pub fn fixture() { panic!("dirty"); }\n' > "$PROJECT_DIR/src/lib.rs"
+    if write_local_build_generation_manifest \
+        "$PROJECT_DIR/target/release/agentdesk" "$BUILD_SOURCE_SHA" \
+        >/dev/null 2>&1; then
+        exit 95
+    fi
+    printf 'pub fn fixture() {}\n' > "$PROJECT_DIR/src/lib.rs"
+    printf '%s\n' '-- dirty migration' \
+        > "$PROJECT_DIR/migrations/postgres/0100_fixture.sql"
+    if validate_local_build_generation_manifest >/dev/null 2>&1; then
+        exit 96
+    fi
+    printf '%s\n' '-- fixture migration' \
+        > "$PROJECT_DIR/migrations/postgres/0100_fixture.sql"
     validate_local_build_generation_manifest
     printf '%s\n' '// evaluator-compatible v1 asset edit' \
         >> "$PROJECT_DIR/routines/monitoring/bundled.js"
     if validate_local_build_generation_manifest >/dev/null 2>&1; then
         exit 94
     fi
+    git -C "$PROJECT_DIR" -c user.name=AgentDesk -c user.email=agentdesk@example.invalid \
+        add routines
+    git -C "$PROJECT_DIR" -c user.name=AgentDesk -c user.email=agentdesk@example.invalid \
+        commit -qm 'clean head drift'
+    if write_local_build_generation_manifest \
+        "$PROJECT_DIR/target/release/agentdesk" "$BUILD_SOURCE_SHA" \
+        >/dev/null 2>&1; then
+        exit 97
+    fi
 ) || fail_test 'stale skip-build binary was accepted with a different asset generation'
+rg -Fq 'BINARY="$PROJECT_DIR/target/release/${BINARY_NAME}"' \
+    "$REPO_ROOT/scripts/build-release.sh" \
+    || fail_test 'build-release hashes a cwd-relative binary after entering dist'
 
 # An EXIT/TERM trap installed before lock acquisition must be inert with respect
 # to another owner's transaction. No marker lookup, rollback, or release is

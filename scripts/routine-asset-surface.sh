@@ -100,6 +100,21 @@ print(digest.hexdigest())
 PY
 }
 
+adk_require_clean_git_worktree() {
+    local repo_root="$1"
+    local status
+
+    [ -d "$repo_root" ] && [ ! -L "$repo_root" ] || return 1
+    git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+        || return 1
+    status="$(git -C "$repo_root" status --porcelain --untracked-files=all)" \
+        || return 1
+    if [ -n "$status" ]; then
+        echo "Build generation requires a clean git worktree: $repo_root" >&2
+        return 1
+    fi
+}
+
 _adk_path_mode() {
     local path="$1"
     local mode
@@ -672,6 +687,152 @@ adk_routine_asset_transaction_phase() {
     _adk_read_txn_phase "$txn_root"
 }
 
+_adk_candidate_drain_authority_path() {
+    printf '%s/candidate-drain-required.json\n' "$1"
+}
+
+adk_routine_asset_candidate_drain_authority_exists() {
+    local marker
+
+    marker="$(_adk_candidate_drain_authority_path "$1")" || return 1
+    [ -e "$marker" ] || [ -L "$marker" ]
+}
+
+adk_persist_routine_asset_candidate_drain_authority() {
+    local runtime_root="$1"
+    local txn_root="$2"
+    local entrypoint="$3"
+    local pid="$4"
+    local identity="$5"
+    local port="$6"
+    local supervisor="$7"
+    local capture_state marker
+
+    _adk_assert_active_txn "$runtime_root" "$txn_root" || return 1
+    case "$entrypoint" in deploy|deploy-release|install) ;; *) return 1 ;; esac
+    case "$port" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
+    if [ -n "$pid" ] || [ -n "$identity" ]; then
+        case "$pid" in ''|*[!0-9]*|0) return 1 ;; esac
+        [ -n "$identity" ] || return 1
+        capture_state=exact
+    else
+        capture_state=provisional
+    fi
+    case "$identity$supervisor" in *$'\n'*|*$'\r'*) return 1 ;; esac
+    [ "${#identity}" -le 4096 ] && [ "${#supervisor}" -le 1024 ] || return 1
+    marker="$(_adk_candidate_drain_authority_path "$txn_root")" || return 1
+    [ ! -L "$marker" ] || return 1
+    ADK_DRAIN_ENTRYPOINT="$entrypoint" \
+    ADK_DRAIN_PID="$pid" \
+    ADK_DRAIN_IDENTITY="$identity" \
+    ADK_DRAIN_PORT="$port" \
+    ADK_DRAIN_SUPERVISOR="$supervisor" \
+    ADK_DRAIN_CAPTURE_STATE="$capture_state" \
+    python3 - "$marker" <<'PY'
+import json
+import os
+import tempfile
+import sys
+
+marker = sys.argv[1]
+payload = {
+    "format": "agentdesk-candidate-drain-v1",
+    "entrypoint": os.environ["ADK_DRAIN_ENTRYPOINT"],
+    "capture_state": os.environ["ADK_DRAIN_CAPTURE_STATE"],
+    "pid": os.environ["ADK_DRAIN_PID"],
+    "identity": os.environ["ADK_DRAIN_IDENTITY"],
+    "port": int(os.environ["ADK_DRAIN_PORT"]),
+    "supervisor": os.environ["ADK_DRAIN_SUPERVISOR"],
+}
+fd, temporary = tempfile.mkstemp(prefix=".candidate-drain.", dir=os.path.dirname(marker))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, marker)
+    directory = os.open(os.path.dirname(marker), os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+adk_routine_asset_candidate_drain_authority_value() {
+    local txn_root="$1"
+    local expected_entrypoint="$2"
+    local field="$3"
+    local marker
+
+    case "$field" in pid|identity|port|supervisor) ;; *) return 1 ;; esac
+    marker="$(_adk_candidate_drain_authority_path "$txn_root")" || return 1
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    ADK_DRAIN_EXPECTED_ENTRYPOINT="$expected_entrypoint" \
+    ADK_DRAIN_FIELD="$field" \
+    python3 - "$marker" <<'PY' 2>/dev/null
+import json
+import os
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception:
+    raise SystemExit(1)
+if data.get("format") != "agentdesk-candidate-drain-v1":
+    raise SystemExit(1)
+if data.get("entrypoint") != os.environ["ADK_DRAIN_EXPECTED_ENTRYPOINT"]:
+    raise SystemExit(1)
+if data.get("capture_state") != "exact":
+    raise SystemExit(1)
+pid = data.get("pid") or ""
+identity = data.get("identity") or ""
+port = data.get("port")
+supervisor = data.get("supervisor") or ""
+if not re.fullmatch(r"[1-9][0-9]*", pid):
+    raise SystemExit(1)
+if not identity or len(identity) > 4096 or "\n" in identity or "\r" in identity:
+    raise SystemExit(1)
+if not isinstance(port, int) or not 1 <= port <= 65535:
+    raise SystemExit(1)
+if not supervisor or len(supervisor) > 1024 or "\n" in supervisor or "\r" in supervisor:
+    raise SystemExit(1)
+value = data.get(os.environ["ADK_DRAIN_FIELD"])
+print(value)
+PY
+}
+
+adk_clear_routine_asset_candidate_drain_authority() {
+    local runtime_root="$1"
+    local txn_root="$2"
+    local marker
+
+    _adk_assert_active_txn "$runtime_root" "$txn_root" || return 1
+    marker="$(_adk_candidate_drain_authority_path "$txn_root")" || return 1
+    [ ! -L "$marker" ] || return 1
+    [ ! -e "$marker" ] && return 0
+    ADK_DRAIN_MARKER="$marker" python3 <<'PY'
+import os
+
+marker = os.environ["ADK_DRAIN_MARKER"]
+os.unlink(marker)
+directory = os.open(os.path.dirname(marker), os.O_RDONLY)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+}
+
 _adk_close_txn() {
     local runtime_root="$1"
     local txn_root="$2"
@@ -1184,6 +1345,15 @@ adk_recover_active_routine_asset_transaction() {
         return 1
     fi
     phase="$(_adk_read_txn_phase "$txn_root")" || return 1
+    if adk_routine_asset_candidate_drain_authority_exists "$txn_root"; then
+        echo "Refusing generic recovery until the exact candidate process and port drain" >&2
+        return 1
+    fi
+    if [ -e "$txn_root/forward-migration-applied.json" ] \
+      || [ -L "$txn_root/forward-migration-applied.json" ]; then
+        echo "Refusing generic recovery of a forward-migration transaction; deploy-release must recover its compatible binary" >&2
+        return 1
+    fi
     case "$phase" in
         staging) adk_abort_routine_asset_transaction "$runtime_root" "$txn_root" ;;
         armed|promoted|rolling-back)
@@ -1310,7 +1480,7 @@ import stat
 import sys
 
 runtime_root, incoming, lock_file = sys.argv[1:]
-guard_path = lock_file + \".guard\"
+guard_path = lock_file + \".d.guard\"
 record_path = lock_file + \".d\"
 
 guard = os.open(guard_path, os.O_RDWR | os.O_CREAT, 0o600)

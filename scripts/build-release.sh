@@ -101,13 +101,24 @@ write_checksum() {
 
 write_local_build_generation_manifest() {
   local binary="$1"
+  local expected_source_sha="$2"
   local manifest="$PROJECT_DIR/target/release/agentdesk-generation.json"
   local source_sha binary_sha routines_sha helpers_sha
 
+  adk_require_clean_git_worktree "$PROJECT_DIR" || return 1
   source_sha="$(git -C "$PROJECT_DIR" rev-parse HEAD)" || return 1
+  [ "$source_sha" = "$expected_source_sha" ] || {
+    echo "Error: repository HEAD changed during the release build" >&2
+    return 1
+  }
   binary_sha="$(adk_sha256_file "$binary")" || return 1
   routines_sha="$(adk_sha256_tree "$PROJECT_DIR/routines")" || return 1
   helpers_sha="$(adk_sha256_tree "$PROJECT_DIR/routine-helpers")" || return 1
+  adk_require_clean_git_worktree "$PROJECT_DIR" || return 1
+  [ "$(git -C "$PROJECT_DIR" rev-parse HEAD)" = "$expected_source_sha" ] || {
+    echo "Error: repository HEAD changed while binding the release manifest" >&2
+    return 1
+  }
   AGENTDESK_BUILD_SOURCE_SHA="$source_sha" \
   AGENTDESK_BUILD_BINARY_SHA="$binary_sha" \
   AGENTDESK_BUILD_ROUTINES_SHA="$routines_sha" \
@@ -120,7 +131,8 @@ import sys
 
 manifest = sys.argv[1]
 payload = {
-    "format": "agentdesk-local-build-v1",
+    "format": "agentdesk-local-build-v2",
+    "worktree_state": "clean",
     "source_git_sha": os.environ["AGENTDESK_BUILD_SOURCE_SHA"],
     "binary_sha256": os.environ["AGENTDESK_BUILD_BINARY_SHA"],
     "routines_sha256": os.environ["AGENTDESK_BUILD_ROUTINES_SHA"],
@@ -167,9 +179,13 @@ if ! command -v cargo &>/dev/null; then
 fi
 
 echo "[1/3] Building Rust binary (release)..."
+adk_require_clean_git_worktree "$PROJECT_DIR" \
+  || { echo "Error: release builds require a clean worktree" >&2; exit 1; }
+BUILD_SOURCE_SHA="$(git -C "$PROJECT_DIR" rev-parse HEAD)" \
+  || { echo "Error: could not capture release source HEAD" >&2; exit 1; }
 cargo build --release 2>&1 | tail -1
 
-BINARY="target/release/${BINARY_NAME}"
+BINARY="$PROJECT_DIR/target/release/${BINARY_NAME}"
 if [ ! -f "$BINARY" ]; then
   echo "Error: Binary not found at $BINARY"
   exit 1
@@ -290,7 +306,7 @@ rm -rf "$ARTIFACT_NAME"
 
 # Checksum
 write_checksum "$ARTIFACT_FILE"
-write_local_build_generation_manifest "$BINARY"
+write_local_build_generation_manifest "$BINARY" "$BUILD_SOURCE_SHA"
 
 echo ""
 echo "═══ Build Complete ═══"

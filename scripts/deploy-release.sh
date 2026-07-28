@@ -10,6 +10,7 @@ set -euo pipefail
 # AGENTDESK_DEPLOY_NO_DETACH=1 (e.g. to stream logs in the foreground).
 if [[ "$(uname)" == "Darwin" \
       && "${AGENTDESK_DEPLOY_DETACHED:-0}" != "1" \
+      && "${AGENTDESK_DEPLOY_PEER_INVOCATION:-0}" != "1" \
       && "${AGENTDESK_DEPLOY_NO_DETACH:-0}" != "1" ]]; then
     _adk_deploy_log="${AGENTDESK_DEPLOY_LOG:-$HOME/.adk/release/logs/deploy-release.$$.log}"
     mkdir -p "$(dirname "$_adk_deploy_log")" 2>/dev/null || true
@@ -154,6 +155,13 @@ PG_TUNNEL_ROLLBACK_JOB_LOADED=0
 PG_TUNNEL_ROLLBACK_MANUAL_KIND="none"
 PG_TUNNEL_ROLLBACK_MANUAL_CONFIG=""
 PG_TUNNEL_ROLLBACK_WRAPPER_SOURCE=""
+FORWARD_MIGRATION_APPLIED=0
+FORWARD_MIGRATION_CANDIDATE_SHA=""
+RELEASE_BINARY_FLAG_SNAPSHOT=0
+RELEASE_BINARY_OLD_IMMUTABLE=0
+RELEASE_CANDIDATE_PID=""
+RELEASE_CANDIDATE_IDENTITY=""
+RELEASE_CANDIDATE_CAPTURED=0
 DEPLOY_ALL_NODES="${AGENTDESK_DEPLOY_ALL_NODES:-0}"
 DEPLOY_PEERS_OVERRIDE=()
 DEPLOY_PEERS_FILE="${AGENTDESK_DEPLOY_PEERS_FILE:-$ADK_REL/config/deploy-peers.txt}"
@@ -1167,6 +1175,67 @@ print(migration)
 PY
 }
 
+_release_host_uses_immutable_flags() {
+    [ "$(uname 2>/dev/null || true)" = Darwin ]
+}
+
+_release_binary_immutable_state() {
+    local path="$1"
+    local flags
+
+    [ -f "$path" ] && [ ! -L "$path" ] || return 1
+    if ! _release_host_uses_immutable_flags; then
+        printf '0\n'
+        return 0
+    fi
+    flags="$(stat -f '%Sf' "$path" 2>/dev/null)" || return 1
+    case ",$flags," in
+        *,uchg,*|*,uimmutable,*) printf '1\n' ;;
+        *) printf '0\n' ;;
+    esac
+}
+
+_snapshot_release_binary_immutable_flag() {
+    local state=0
+
+    RELEASE_BINARY_FLAG_SNAPSHOT=0
+    RELEASE_BINARY_OLD_IMMUTABLE=0
+    if [ -e "$REL_BINARY" ]; then
+        state="$(_release_binary_immutable_state "$REL_BINARY")" || return 1
+        case "$state" in
+            0|1) ;;
+            *) return 1 ;;
+        esac
+        RELEASE_BINARY_OLD_IMMUTABLE="$state"
+    fi
+    RELEASE_BINARY_FLAG_SNAPSHOT=1
+}
+
+_set_release_binary_immutable_state() {
+    local path="$1"
+    local desired="$2"
+    local actual
+
+    [ "$desired" = 0 ] || [ "$desired" = 1 ] || return 1
+    [ -f "$path" ] && [ ! -L "$path" ] || return 1
+    if ! _release_host_uses_immutable_flags; then
+        return 0
+    fi
+    if [ "$desired" = 1 ]; then
+        chflags uchg "$path" || return 1
+    else
+        chflags nouchg "$path" || return 1
+    fi
+    actual="$(_release_binary_immutable_state "$path")" || return 1
+    [ "$actual" = "$desired" ]
+}
+
+_restore_release_binary_immutable_flag() {
+    [ "${RELEASE_BINARY_FLAG_SNAPSHOT:-0}" = 1 ] || return 1
+    _set_release_binary_immutable_state \
+        "$REL_BINARY" "${RELEASE_BINARY_OLD_IMMUTABLE:-0}"
+}
+
 _prepare_release_rollback_generation() {
     # Decide every rollback-artifact branch while the old service is still
     # running. In particular, a pre-helper release gets one explicit empty
@@ -1197,6 +1266,10 @@ _prepare_release_rollback_generation() {
     if [ -L "$REL_BINARY" ] \
       || { [ -e "$REL_BINARY" ] && [ ! -f "$REL_BINARY" ]; }; then
         echo "✗ Refusing unsafe live release binary before release stop: $REL_BINARY" >&2
+        return 1
+    fi
+    if ! _snapshot_release_binary_immutable_flag; then
+        echo "✗ Could not snapshot the live release binary immutable flag" >&2
         return 1
     fi
     if [ -f "$REL_BINARY_BACKUP" ] && [ ! -f "$REL_BINARY_BACKUP_META" ]; then
@@ -1283,6 +1356,612 @@ _prepare_release_rollback_generation() {
     return 0
 }
 
+_forward_migration_marker_path() {
+    printf '%s/forward-migration-applied.json\n' "$1"
+}
+
+_persist_forward_migration_applied() {
+    local txn_root="$1"
+    local candidate_sha="$2"
+    local marker txn_id migration_path migration_name source_sha candidate_name candidate_suffix
+
+    _adk_assert_active_txn "$ADK_REL" "$txn_root" || return 1
+    case "$candidate_sha" in
+        ''|*[!0-9a-f]*) return 1 ;;
+    esac
+    candidate_name="$(basename "${STAGED_BINARY:-}")" || return 1
+    case "$candidate_name" in
+        agentdesk.deploy.*) candidate_suffix="${candidate_name#agentdesk.deploy.}" ;;
+        *) return 1 ;;
+    esac
+    case "$candidate_suffix" in
+        ''|*[!A-Za-z0-9]*) return 1 ;;
+    esac
+    txn_id="$(basename "$txn_root")" || return 1
+    migration_path="$(_latest_postgres_migration_path 2>/dev/null || true)"
+    [ -n "$migration_path" ] || return 1
+    migration_name="$(basename "$migration_path")"
+    _release_migration_name_is_valid "$migration_name" || return 1
+    source_sha="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
+    case "$source_sha" in
+        ''|*[!0-9a-f]*) return 1 ;;
+    esac
+    marker="$(_forward_migration_marker_path "$txn_root")" || return 1
+    [ ! -L "$marker" ] || return 1
+    AGENTDESK_FORWARD_TXN_ID="$txn_id" \
+    AGENTDESK_FORWARD_CANDIDATE_SHA="$candidate_sha" \
+    AGENTDESK_FORWARD_CANDIDATE_NAME="$candidate_name" \
+    AGENTDESK_FORWARD_MIGRATION="$migration_name" \
+    AGENTDESK_FORWARD_SOURCE_SHA="$source_sha" \
+    python3 - "$marker" <<'PY'
+import json
+import os
+import tempfile
+import sys
+
+marker = sys.argv[1]
+payload = {
+    "format": "agentdesk-forward-migration-v1",
+    "asset_transaction": os.environ["AGENTDESK_FORWARD_TXN_ID"],
+    "candidate_binary_sha256": os.environ["AGENTDESK_FORWARD_CANDIDATE_SHA"],
+    "candidate_binary_name": os.environ["AGENTDESK_FORWARD_CANDIDATE_NAME"],
+    "latest_postgres_migration": os.environ["AGENTDESK_FORWARD_MIGRATION"],
+    "source_git_sha": os.environ["AGENTDESK_FORWARD_SOURCE_SHA"],
+}
+fd, temporary = tempfile.mkstemp(
+    prefix=".forward-migration.", dir=os.path.dirname(marker)
+)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, marker)
+    directory = os.open(os.path.dirname(marker), os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+_fsync_forward_recovery_generation() {
+    local txn_root="$1"
+    local candidate_binary="$2"
+    local staged_root="$txn_root/staged/release-root"
+
+    [ -f "$candidate_binary" ] && [ ! -L "$candidate_binary" ] || return 1
+    [ -d "$staged_root/routines" ] && [ ! -L "$staged_root/routines" ] \
+        || return 1
+    [ -d "$staged_root/routine-helpers" ] \
+        && [ ! -L "$staged_root/routine-helpers" ] || return 1
+    python3 - "$candidate_binary" "$txn_root" <<'PY'
+import os
+import stat
+import sys
+
+candidate, txn_root = sys.argv[1:]
+staged_root = os.path.join(txn_root, "staged", "release-root")
+roots = [
+    os.path.join(staged_root, "routines"),
+    os.path.join(staged_root, "routine-helpers"),
+]
+
+def fsync_regular(path):
+    mode = os.lstat(path).st_mode
+    if stat.S_ISLNK(mode):
+        return
+    if not stat.S_ISREG(mode):
+        raise OSError(f"non-regular recovery file: {path}")
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+fsync_regular(candidate)
+for root in roots:
+    for current, directories, files in os.walk(root, topdown=False, followlinks=False):
+        for name in files:
+            fsync_regular(os.path.join(current, name))
+        for name in directories:
+            path = os.path.join(current, name)
+            if os.path.islink(path):
+                continue
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        fd = os.open(current, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+for directory in [
+    os.path.dirname(candidate),
+    staged_root,
+    os.path.dirname(staged_root),
+    txn_root,
+    os.path.dirname(txn_root),
+]:
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+PY
+}
+
+_apply_release_postgres_migration_with_forward_barrier() {
+    local candidate_sha
+
+    candidate_sha="$(_sha256_file "$STAGED_BINARY")" || {
+        echo "✗ Could not bind the staged candidate before forward migration" >&2
+        return 1
+    }
+    _fsync_forward_recovery_generation "$ROUTINE_ASSET_TXN" "$STAGED_BINARY" \
+        || { echo "✗ Could not durably flush the forward recovery generation" >&2; return 1; }
+    # Arm conservatively before publishing the marker. If marker persistence or
+    # migration itself fails, retaining/starting this newer candidate is still
+    # compatible with the previous schema and avoids an unguarded TERM window.
+    FORWARD_MIGRATION_CANDIDATE_SHA="$candidate_sha"
+    FORWARD_MIGRATION_APPLIED=1
+    # Persist the compatible candidate before entering the foreground migration
+    # command. Bash may deliver TERM immediately after that child returns, before
+    # any following assignment can run; the marker is the fail-forward authority
+    # across that otherwise unguarded process boundary.
+    if ! _persist_forward_migration_applied \
+        "$ROUTINE_ASSET_TXN" "$candidate_sha"; then
+        echo "✗ Could not persist the forward-migration recovery barrier" >&2
+        return 1
+    fi
+    if ! "$STAGED_BINARY" release-migrate-postgres; then
+        echo "✗ Release PostgreSQL migration failed; retaining the compatible candidate for fail-forward recovery." >&2
+        return 1
+    fi
+}
+
+_forward_migration_marker_value() {
+    local txn_root="$1"
+    local field="$2"
+    local marker
+
+    case "$field" in
+        candidate_binary_sha256|candidate_binary_name) ;;
+        *) return 1 ;;
+    esac
+    marker="$(_forward_migration_marker_path "$txn_root")" || return 1
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    AGENTDESK_FORWARD_EXPECTED_TXN="$(basename "$txn_root")" \
+    AGENTDESK_FORWARD_MARKER_FIELD="$field" \
+    python3 - "$marker" <<'PY' 2>/dev/null
+import json
+import os
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception:
+    raise SystemExit(1)
+if data.get("format") != "agentdesk-forward-migration-v1":
+    raise SystemExit(1)
+if data.get("asset_transaction") != os.environ["AGENTDESK_FORWARD_EXPECTED_TXN"]:
+    raise SystemExit(1)
+candidate_sha = data.get("candidate_binary_sha256") or ""
+candidate_name = data.get("candidate_binary_name") or ""
+source_sha = data.get("source_git_sha") or ""
+migration = data.get("latest_postgres_migration") or ""
+if not re.fullmatch(r"[0-9a-f]{64}", candidate_sha):
+    raise SystemExit(1)
+if not re.fullmatch(r"agentdesk\.deploy\.[A-Za-z0-9]+", candidate_name):
+    raise SystemExit(1)
+if not re.fullmatch(r"[0-9a-f]{40,64}", source_sha):
+    raise SystemExit(1)
+if not re.fullmatch(r"[0-9]{4}_[A-Za-z0-9._-]+\.sql", migration):
+    raise SystemExit(1)
+print(data[os.environ["AGENTDESK_FORWARD_MARKER_FIELD"]])
+PY
+}
+
+_forward_migration_candidate_sha() {
+    _forward_migration_marker_value "$1" candidate_binary_sha256
+}
+
+_forward_migration_staged_binary() {
+    local candidate_name candidate_path
+
+    candidate_name="$(_forward_migration_marker_value \
+        "$1" candidate_binary_name)" || return 1
+    candidate_path="$ADK_REL/bin/$candidate_name"
+    [ "$(dirname "$candidate_path")" = "$ADK_REL/bin" ] || return 1
+    [ ! -L "$candidate_path" ] || return 1
+    printf '%s\n' "$candidate_path"
+}
+
+_finish_forward_asset_promotion() {
+    local txn_root="$1"
+    local candidate_binary="$2"
+    local phase
+
+    phase="$(adk_routine_asset_transaction_phase "$ADK_REL" "$txn_root")" \
+        || return 1
+    case "$phase" in
+        staging)
+            adk_promote_routine_asset_transaction \
+                "$ADK_REL" "$txn_root" "$candidate_binary"
+            ;;
+        armed)
+            _adk_finish_promote_surface "$ADK_REL" "$txn_root" routines \
+                || return 1
+            _adk_finish_promote_surface "$ADK_REL" "$txn_root" routine-helpers \
+                || return 1
+            _adk_write_phase "$txn_root" promoted
+            ;;
+        promoted|committing|committed)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+_release_current_service_pid() {
+    local domain pid=""
+    local lock_file="${LOCK_FILE:-${ADK_REL:-}/runtime/dcserver.lock}"
+
+    domain="${LAUNCHD_DOMAIN:-$(_launchd_domain 2>/dev/null || true)}"
+    if [ -n "$domain" ]; then
+        pid="$(
+            launchctl print "$domain/$PLIST_REL" 2>/dev/null \
+                | awk '$1 == "pid" && $2 == "=" { print $3; exit }'
+        )"
+    fi
+    case "$pid" in
+        ''|*[!0-9]*|0)
+            pid=""
+            if [ -f "$lock_file" ] && [ ! -L "$lock_file" ]; then
+                pid="$(sed -n '1p' "$lock_file" 2>/dev/null || true)"
+            fi
+            ;;
+    esac
+    case "$pid" in
+        ''|*[!0-9]*|0) return 1 ;;
+    esac
+    printf '%s\n' "$pid"
+}
+
+_capture_release_candidate_process() {
+    local attempt=0
+    local max_attempts="${1:-15}"
+    local pid identity
+
+    RELEASE_CANDIDATE_PID=""
+    RELEASE_CANDIDATE_IDENTITY=""
+    RELEASE_CANDIDATE_CAPTURED=0
+    while [ "$attempt" -lt "$max_attempts" ]; do
+        pid="$(_release_current_service_pid 2>/dev/null || true)"
+        identity="$(adk_process_identity "$pid" 2>/dev/null || true)"
+        if [ -n "$pid" ] && [ -n "$identity" ] \
+          && kill -0 "$pid" 2>/dev/null; then
+            RELEASE_CANDIDATE_PID="$pid"
+            RELEASE_CANDIDATE_IDENTITY="$identity"
+            RELEASE_CANDIDATE_CAPTURED=1
+            return 0
+        fi
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+    echo "✗ Could not capture the exact post-bootstrap release candidate process" >&2
+    return 1
+}
+
+_persist_release_candidate_drain_authority() {
+    local txn_root="$1"
+    local pid="${2:-}"
+    local identity="${3:-}"
+    local domain
+
+    domain="${LAUNCHD_DOMAIN:-$(_launchd_domain)}"
+    adk_persist_routine_asset_candidate_drain_authority \
+        "$ADK_REL" "$txn_root" deploy-release "$pid" "$identity" \
+        "${REL_PORT:-$(_resolve_release_server_port)}" "$domain/$PLIST_REL"
+}
+
+_resume_release_candidate_drain_authority() {
+    local txn_root="$1"
+    local pid identity marker_port supervisor expected_supervisor current_port
+
+    adk_routine_asset_candidate_drain_authority_exists "$txn_root" || return 0
+    pid="$(adk_routine_asset_candidate_drain_authority_value \
+        "$txn_root" deploy-release pid)" || return 1
+    identity="$(adk_routine_asset_candidate_drain_authority_value \
+        "$txn_root" deploy-release identity)" || return 1
+    marker_port="$(adk_routine_asset_candidate_drain_authority_value \
+        "$txn_root" deploy-release port)" || return 1
+    supervisor="$(adk_routine_asset_candidate_drain_authority_value \
+        "$txn_root" deploy-release supervisor)" || return 1
+    LAUNCHD_DOMAIN="${LAUNCHD_DOMAIN:-$(_launchd_domain)}"
+    expected_supervisor="$LAUNCHD_DOMAIN/$PLIST_REL"
+    current_port="${REL_PORT:-$(_resolve_release_server_port)}"
+    [ "$supervisor" = "$expected_supervisor" ] \
+        && [ "$marker_port" = "$current_port" ] || return 1
+    REL_PORT="$current_port"
+    RELEASE_CANDIDATE_PID="$pid"
+    RELEASE_CANDIDATE_IDENTITY="$identity"
+    RELEASE_CANDIDATE_CAPTURED=1
+    _stop_and_drain_release_candidate "$txn_root" || return 1
+    RELEASE_CANDIDATE_PID=""
+    RELEASE_CANDIDATE_IDENTITY=""
+    RELEASE_CANDIDATE_CAPTURED=0
+}
+
+_release_candidate_process_is_alive() {
+    [ "${RELEASE_CANDIDATE_CAPTURED:-0}" = 1 ] || return 1
+    adk_process_instance_alive \
+        "${RELEASE_CANDIDATE_PID:-}" \
+        "${RELEASE_CANDIDATE_IDENTITY:-}"
+}
+
+_release_candidate_port_refuses_connections() {
+    local port="${REL_PORT:-${AGENTDESK_REL_PORT:-${ADK_DEFAULT_PORT:-8791}}}"
+    local curl_status
+
+    if curl -sS --connect-timeout 1 --max-time 1 -o /dev/null \
+        "http://${ADK_DEFAULT_LOOPBACK:-127.0.0.1}:${port}/api/health" \
+        >/dev/null 2>&1; then
+        return 1
+    else
+        curl_status=$?
+    fi
+    [ "$curl_status" -eq 7 ]
+}
+
+_capture_release_old_process() {
+    local pid identity
+
+    OLD_PID=""
+    OLD_PID_IDENTITY=""
+    if ! _release_launchd_job_is_loaded \
+      && _release_candidate_port_refuses_connections; then
+        return 0
+    fi
+    pid="$(_release_current_service_pid 2>/dev/null || true)"
+    identity="$(adk_process_identity "$pid" 2>/dev/null || true)"
+    case "$pid" in
+        ''|*[!0-9]*|0) return 1 ;;
+    esac
+    [ -n "$identity" ] && kill -0 "$pid" 2>/dev/null || return 1
+    OLD_PID="$pid"
+    OLD_PID_IDENTITY="$identity"
+}
+
+_stop_and_drain_release_candidate() {
+    local txn_root="${1:-${ROUTINE_ASSET_TXN:-}}"
+    local domain wait_secs=0
+
+    [ "${RELEASE_CANDIDATE_CAPTURED:-0}" = 1 ] || {
+        echo "🛑 Refusing rollback without an exact candidate PID/identity" >&2
+        return 1
+    }
+    domain="${LAUNCHD_DOMAIN:-$(_launchd_domain)}"
+    launchctl bootout "$domain/$PLIST_REL" 2>/dev/null || true
+    tmux kill-session \
+        -t "${AGENTDESK_RELEASE_TMUX_SESSION:-AgentDesk-dcserver-release-manual}" \
+        2>/dev/null || true
+    while { _release_launchd_job_is_loaded \
+          || _release_candidate_process_is_alive \
+          || ! _release_candidate_port_refuses_connections; } \
+      && [ "$wait_secs" -lt 15 ]; do
+        sleep 1
+        wait_secs=$((wait_secs + 1))
+    done
+    if _release_launchd_job_is_loaded \
+      || _release_candidate_process_is_alive \
+      || ! _release_candidate_port_refuses_connections; then
+        if _release_candidate_process_is_alive; then
+            kill -TERM "$RELEASE_CANDIDATE_PID" 2>/dev/null || return 1
+            wait_secs=0
+            while _release_candidate_process_is_alive && [ "$wait_secs" -lt 5 ]; do
+                sleep 1
+                wait_secs=$((wait_secs + 1))
+            done
+        fi
+        if _release_candidate_process_is_alive; then
+            kill -KILL "$RELEASE_CANDIDATE_PID" 2>/dev/null || return 1
+        fi
+        wait_secs=0
+        while { _release_candidate_process_is_alive \
+              || ! _release_candidate_port_refuses_connections; } \
+          && [ "$wait_secs" -lt 5 ]; do
+            sleep 1
+            wait_secs=$((wait_secs + 1))
+        done
+        if _release_launchd_job_is_loaded \
+          || _release_candidate_process_is_alive \
+          || ! _release_candidate_port_refuses_connections; then
+            echo "🛑 Candidate process/port did not drain; old generation remains untouched" >&2
+            return 1
+        fi
+    fi
+    if [ -n "$txn_root" ] \
+      && adk_routine_asset_candidate_drain_authority_exists "$txn_root" \
+      && ! adk_clear_routine_asset_candidate_drain_authority \
+        "$ADK_REL" "$txn_root"; then
+        echo "🛑 Candidate drained, but its durable drain authority could not be cleared" >&2
+        return 1
+    fi
+    return 0
+}
+
+_retire_release_rollback_material() {
+    local rollback_tmp
+
+    [ -n "${REL_BINARY_BACKUP:-}" ] \
+        && [ -n "${REL_BINARY_BACKUP_META:-}" ] || return 1
+    chflags nouchg "$REL_BINARY_BACKUP" 2>/dev/null || true
+    if ! rm -f "$REL_BINARY_BACKUP" 2>/dev/null \
+      || [ -e "$REL_BINARY_BACKUP" ]; then
+        return 1
+    fi
+    if ! rm -f "$REL_BINARY_BACKUP_META" 2>/dev/null \
+      || [ -e "$REL_BINARY_BACKUP_META" ]; then
+        return 1
+    fi
+    for rollback_tmp in \
+        "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP_META.tmp"; do
+        if ! rm -f "$rollback_tmp" 2>/dev/null \
+          || [ -e "$rollback_tmp" ]; then
+            return 1
+        fi
+    done
+}
+
+_start_forward_migrated_release() {
+    local txn_root="$1"
+    local domain
+
+    domain="${LAUNCHD_DOMAIN:-$(_launchd_domain)}"
+    _persist_release_candidate_drain_authority "$txn_root" || return 1
+    xattr -d com.apple.quarantine \
+        "$HOME/Library/LaunchAgents/$PLIST_REL.plist" 2>/dev/null || true
+    if ! launchctl bootstrap \
+        "$domain" "$HOME/Library/LaunchAgents/$PLIST_REL.plist"; then
+        echo "⚠ Forward recovery launchd bootstrap failed — using tmux fallback" >&2
+        start_release_tmux_fallback || return 1
+    fi
+    _capture_release_candidate_process || return 1
+    _persist_release_candidate_drain_authority "$txn_root" \
+        "$RELEASE_CANDIDATE_PID" "$RELEASE_CANDIDATE_IDENTITY" || return 1
+    wait_for_http_service_health \
+        "$PLIST_REL" "$REL_PORT" "$DEPLOY_HEALTH_RETRIES" \
+        "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1
+}
+
+_recover_forward_migrated_release() {
+    local txn_root="$1"
+    local candidate_sha actual_sha candidate_binary durable_staged phase
+
+    candidate_sha="$(_forward_migration_candidate_sha "$txn_root" 2>/dev/null || true)"
+    if [ -z "$candidate_sha" ] \
+      && [ "${FORWARD_MIGRATION_APPLIED:-0}" = 1 ]; then
+        candidate_sha="${FORWARD_MIGRATION_CANDIDATE_SHA:-}"
+    fi
+    case "$candidate_sha" in
+        ''|*[!0-9a-f]*) return 1 ;;
+    esac
+    phase="$(adk_routine_asset_transaction_phase "$ADK_REL" "$txn_root")" \
+        || return 1
+
+    if [ -n "${STAGED_BINARY:-}" ] && [ -f "$STAGED_BINARY" ] \
+      && [ ! -L "$STAGED_BINARY" ]; then
+        candidate_binary="$STAGED_BINARY"
+    elif durable_staged="$(_forward_migration_staged_binary \
+        "$txn_root" 2>/dev/null)" \
+      && [ -f "$durable_staged" ] && [ ! -L "$durable_staged" ]; then
+        STAGED_BINARY="$durable_staged"
+        candidate_binary="$STAGED_BINARY"
+    elif [ -n "${REL_BINARY:-}" ] && [ -f "$REL_BINARY" ] \
+      && [ ! -L "$REL_BINARY" ] && [ "$phase" != staging ]; then
+        candidate_binary="$REL_BINARY"
+    else
+        return 1
+    fi
+    actual_sha="$(_sha256_file "$candidate_binary")" || return 1
+    [ "$actual_sha" = "$candidate_sha" ] || return 1
+
+    _resume_release_candidate_drain_authority "$txn_root" || return 1
+
+    if [ "$candidate_binary" = "${REL_BINARY:-}" ] \
+      && ! _release_service_is_stopped \
+      && [ "${RELEASE_CANDIDATE_CAPTURED:-0}" != 1 ]; then
+        _capture_release_candidate_process || return 1
+    fi
+    if [ "${RELEASE_CANDIDATE_CAPTURED:-0}" = 1 ]; then
+        _stop_and_drain_release_candidate "$txn_root" || return 1
+    elif ! _release_service_is_stopped; then
+        LAUNCHD_DOMAIN="${LAUNCHD_DOMAIN:-$(_launchd_domain)}"
+        _stop_release_for_promotion || return 1
+    fi
+    if [ "$candidate_binary" = "${STAGED_BINARY:-}" ]; then
+        _finish_forward_asset_promotion "$txn_root" "$candidate_binary" \
+            || return 1
+        if [ -e "$REL_BINARY" ]; then
+            _set_release_binary_immutable_state "$REL_BINARY" 0 || return 1
+        fi
+        mv -f "$candidate_binary" "$REL_BINARY" || return 1
+        STAGED_BINARY=""
+    elif [ "$phase" = armed ]; then
+        _finish_forward_asset_promotion "$txn_root" "$candidate_binary" \
+            || return 1
+    elif [ "$phase" = staging ]; then
+        return 1
+    fi
+
+    echo "↪ Forward-only migration applied — retaining compatible candidate generation" >&2
+    _start_forward_migrated_release "$txn_root" || return 1
+    _set_release_binary_immutable_state "$REL_BINARY" 1 || {
+        echo "🛑 Forward candidate is healthy but immutable protection could not be verified" >&2
+        return 1
+    }
+    _retire_release_rollback_material || {
+        echo "🛑 Forward candidate is serving, but rollback material could not be retired" >&2
+        echo "   retaining the promoted asset transaction for deterministic recovery" >&2
+        return 1
+    }
+    adk_commit_routine_asset_transaction_forward "$ADK_REL" "$txn_root" \
+        || return 1
+    ROLLBACK_ARMED=0
+    return 0
+}
+
+_recover_durable_forward_migration_before_new_deploy() {
+    local active_txn active_status marker phase
+
+    if active_txn="$(_adk_active_txn "$ADK_REL")"; then
+        :
+    else
+        active_status=$?
+        [ "$active_status" -eq 1 ] && return 0
+        echo "🛑 Existing routine asset transaction marker is corrupt" >&2
+        return 1
+    fi
+    marker="$(_forward_migration_marker_path "$active_txn")" || return 1
+    { [ -e "$marker" ] || [ -L "$marker" ]; } || return 0
+    if ! _forward_migration_candidate_sha "$active_txn" >/dev/null 2>&1; then
+        echo "🛑 Existing forward-migration recovery marker is invalid: $marker" >&2
+        return 1
+    fi
+
+    echo "↪ Recovering durable forward-migrated generation before new deploy work" >&2
+    REL_PORT="${REL_PORT:-$(_resolve_release_server_port)}"
+    LOCK_FILE="${LOCK_FILE:-$ADK_REL/runtime/dcserver.lock}"
+    phase="$(adk_routine_asset_transaction_phase "$ADK_REL" "$active_txn")" \
+        || return 1
+    if [ "$phase" = staging ] && ! _capture_release_old_process; then
+        echo "🛑 Could not capture the exact pre-recovery release process" >&2
+        return 1
+    fi
+    if ! _recover_forward_migrated_release "$active_txn"; then
+        echo "🛑 Durable forward-migrated generation remains incomplete" >&2
+        return 1
+    fi
+    if _adk_active_txn "$ADK_REL" >/dev/null 2>&1; then
+        echo "🛑 Forward recovery returned without closing its asset transaction" >&2
+        return 1
+    fi
+}
+
 _rollback_would_brick_on_migration() {
     # #4348 Defect 2: refuse a rollback that would strand the previous binary
     # behind a migration the new binary already applied to the SHARED Postgres.
@@ -1329,6 +2008,7 @@ _rollback_release_binary() {
     local plist="${PLIST_REL:-}"
     local rel_port="${REL_PORT:-${AGENTDESK_REL_PORT:-${ADK_DEFAULT_PORT:-8791}}}"
     local domain
+    local flag_restore_ok=1
 
     [ -n "$rel_binary" ] && [ -n "$plist" ] || return 3
     if [ ! -f "$rel_backup" ]; then
@@ -1368,13 +2048,18 @@ _rollback_release_binary() {
 
     echo "↩ Rolling back release binary to previous good version..."
     domain="$(_launchd_domain)" || domain="gui/$(id -u 2>/dev/null)"
-    # Stop the crash-looping new process before swapping the binary back.
-    launchctl bootout "$domain/$plist" 2>/dev/null || true
-    tmux kill-session -t "${AGENTDESK_RELEASE_TMUX_SESSION:-AgentDesk-dcserver-release-manual}" 2>/dev/null || true
-    # The bad binary is never locked (uchg is deferred to the success path), so
-    # nouchg here is defensive. mv is an atomic same-dir rename: the backup
-    # replaces the bad binary in one step — at no instant are both copies gone.
-    chflags nouchg "$rel_binary" 2>/dev/null || true
+    # The exact post-bootstrap candidate instance and its listener must both be
+    # gone before old bytes or assets can be restored. Otherwise a draining
+    # candidate can keep executing while the rollback generation is published.
+    if ! _stop_and_drain_release_candidate "$asset_txn"; then
+        return 6
+    fi
+    if ! _set_release_binary_immutable_state "$rel_binary" 0; then
+        echo "🛑 Candidate immutable flag could not be cleared; old generation remains untouched" >&2
+        return 6
+    fi
+    # mv is an atomic same-dir rename: the backup replaces the bad binary in one
+    # step — at no instant are both copies gone.
     if ! mv -f "$rel_backup" "$rel_binary"; then
         echo "✗ Failed to restore previous binary from $rel_backup — manual intervention required"
         return 3
@@ -1382,10 +2067,12 @@ _rollback_release_binary() {
     if [ -n "${REL_BINARY_BACKUP_META:-}" ]; then
         rm -f "$REL_BINARY_BACKUP_META" 2>/dev/null || true
     fi
-    # #3858 finding 3: re-lock is best-effort and MUST NOT abort the restart
-    # below. A failed chflags can never leave the good binary restored but the
-    # service stopped.
-    chflags uchg "$rel_binary" 2>/dev/null || true
+    # Restore the exact pre-deploy immutable state before restart. Failure is
+    # reported transactionally, but must not strand a byte-restored service.
+    if ! _restore_release_binary_immutable_flag; then
+        flag_restore_ok=0
+        echo "⚠ Previous binary restored, but its immutable flag could not be verified" >&2
+    fi
     # The previous binary is on disk but remains stopped until its matching
     # routine assets are restored. This closes the old-binary/new-assets window.
     if [ -n "$asset_txn" ]; then
@@ -1404,6 +2091,7 @@ _rollback_release_binary() {
     fi
     if wait_for_http_service_health "$plist" "$rel_port" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1; then
         echo "✓ Rollback succeeded — release healthy on :${rel_port} with previous binary"
+        [ "$flag_restore_ok" = 1 ] || return 7
         return 0
     else
         echo "✗ Rollback restart did not reach healthy state — manual intervention required (logs: ${ADK_REL:-}/logs/)"
@@ -1427,7 +2115,9 @@ _release_old_process_is_alive() {
 }
 
 _release_service_is_stopped() {
-    ! _release_launchd_job_is_loaded && ! _release_old_process_is_alive
+    ! _release_launchd_job_is_loaded \
+        && ! _release_old_process_is_alive \
+        && _release_candidate_port_refuses_connections
 }
 
 _pre_promotion_release_restart_is_safe() {
@@ -1487,6 +2177,10 @@ _restart_pre_promotion_release() {
         echo "🛑 Refusing recovery start: previous release is not confirmed stopped" >&2
         return 1
     }
+    if ! _restore_release_binary_immutable_flag; then
+        echo "🛑 Previous release immutable flag could not be restored; leaving it stopped" >&2
+        return 1
+    fi
 
     domain="${LAUNCHD_DOMAIN:-$(_launchd_domain)}"
     rel_port="${REL_PORT:-${AGENTDESK_REL_PORT:-${ADK_DEFAULT_PORT:-8791}}}"
@@ -1699,6 +2393,10 @@ _cleanup_on_exit() {
     local active_phase=""
     local asset_lock_held=0
     local restart_pre_promotion_release=0
+    local forward_recovery_required=0
+    local forward_marker=""
+    local forward_marker_present=0
+    local candidate_drain_guard=0
 
     # Cleanup traps are installed before this invocation acquires the shared
     # deploy lock. A pre-lock signal must not inspect another deploy's durable
@@ -1737,17 +2435,59 @@ _cleanup_on_exit() {
                 echo "🛑 Routine asset transaction marker is corrupt" >&2
             fi
         fi
-        if [ "$active_status" -gt 1 ]; then
+        if [ "$active_status" -eq 0 ]; then
+            forward_marker="$(_forward_migration_marker_path "$active_txn")" \
+                || forward_marker=""
+            if [ -n "$forward_marker" ] \
+              && { [ -e "$forward_marker" ] || [ -L "$forward_marker" ]; }; then
+                forward_marker_present=1
+            fi
+        fi
+        if [ "$active_status" -eq 0 ] \
+          && adk_routine_asset_candidate_drain_authority_exists "$active_txn" \
+          && [ "${RELEASE_CANDIDATE_CAPTURED:-0}" != 1 ]; then
+            candidate_drain_guard=1
+            forward_recovery_required=1
+            asset_action="none"
+            restart_pre_promotion_release=0
+            status=1
+            echo "🛑 Exact candidate drain is unresolved; retaining binary/assets and rollback material" >&2
+        fi
+        if [ "$candidate_drain_guard" = 0 ] \
+          && [ "$active_status" -eq 0 ] \
+          && { [ "${FORWARD_MIGRATION_APPLIED:-0}" = 1 ] \
+            || [ "$forward_marker_present" = 1 ]; }; then
+            forward_recovery_required=1
+            asset_action="none"
+            restart_pre_promotion_release=0
+            if [ "$forward_marker_present" = 1 ] \
+              && ! _forward_migration_candidate_sha "$active_txn" >/dev/null 2>&1; then
+                status=1
+                echo "🛑 Forward-migration recovery marker is invalid" >&2
+                echo "   retained candidate/transaction: $active_txn" >&2
+            elif _recover_forward_migrated_release "$active_txn"; then
+                active_txn=""
+                active_phase=""
+            else
+                status=1
+                echo "🛑 Forward-migrated candidate recovery remains incomplete" >&2
+                echo "   retained candidate/transaction: $active_txn" >&2
+            fi
+        fi
+        if [ "$forward_recovery_required" = 0 ] && [ "$active_status" -gt 1 ]; then
             asset_action="none"
             status=1
             if [ "${ROLLBACK_ARMED:-0}" = 1 ]; then
                 echo "🛑 Refusing binary-only rollback while routine asset state is corrupt" >&2
             fi
-        elif [ "$active_phase" = "committing" ] || [ "$active_phase" = "committed" ]; then
+        elif [ "$forward_recovery_required" = 0 ] \
+          && { [ "$active_phase" = "committing" ] \
+            || [ "$active_phase" = "committed" ]; }; then
             # Health passed and commit intent reached disk before the success
             # flag. Preserve the proven binary if TERM lands in that tiny gap.
             asset_action="commit"
-        elif [ "${ROLLBACK_ARMED:-0}" = 1 ] \
+        elif [ "$forward_recovery_required" = 0 ] \
+          && [ "${ROLLBACK_ARMED:-0}" = 1 ] \
           && [ -n "${STAGED_BINARY:-}" ] && [ -e "$STAGED_BINARY" ]; then
             # The binary rename did not consume its same-directory stage. Keep
             # the old binary, roll assets back, then restart that exact pair
@@ -1756,7 +2496,8 @@ _cleanup_on_exit() {
             restart_pre_promotion_release=1
             status=1
             echo "🛑 Binary promotion did not complete; restoring the previous release pair" >&2
-        elif [ "${ROLLBACK_ARMED:-0}" = 1 ]; then
+        elif [ "$forward_recovery_required" = 0 ] \
+          && [ "${ROLLBACK_ARMED:-0}" = 1 ]; then
             asset_action="none"
             _rollback_release_binary "$active_txn" || binary_rollback_code=$?
             case "$binary_rollback_code" in
@@ -1782,6 +2523,16 @@ _cleanup_on_exit() {
                     status=1
                     echo "🛑 Previous binary restored but asset rollback remains incomplete" >&2
                     ;;
+                6)
+                    asset_action="none"
+                    status=1
+                    echo "🛑 Candidate did not drain; retaining the uncommitted generation and rollback material" >&2
+                    ;;
+                7)
+                    asset_action="none"
+                    status=1
+                    echo "🛑 Previous generation restored, but immutable flag verification failed" >&2
+                    ;;
                 *)
                     asset_action="commit"
                     status=1
@@ -1789,7 +2540,8 @@ _cleanup_on_exit() {
                     ;;
             esac
         fi
-        if [ -n "$active_txn" ] && [ "$asset_action" != "none" ]; then
+        if [ "$forward_recovery_required" = 0 ] \
+          && [ -n "$active_txn" ] && [ "$asset_action" != "none" ]; then
             if [ "$asset_action" = "commit" ]; then
                 if ! adk_commit_routine_asset_transaction_forward "$ADK_REL" "$active_txn"; then
                     status=1
@@ -1801,14 +2553,34 @@ _cleanup_on_exit() {
                 echo "🛑 Routine asset rollback failed; durable state retained at $active_txn" >&2
             fi
         fi
-        if [ "$restart_pre_promotion_release" = 1 ]; then
+        if [ "$forward_recovery_required" = 0 ] \
+          && [ "$restart_pre_promotion_release" = 1 ]; then
             if ! _restart_pre_promotion_release; then
                 status=1
             fi
         fi
     fi
-    if [ -n "${STAGED_BINARY:-}" ] && [ -e "$STAGED_BINARY" ]; then
+    if [ "$forward_recovery_required" = 0 ] \
+      && [ -n "${ROUTINE_ASSET_TXN:-}" ]; then
+        forward_marker="$(_forward_migration_marker_path "$ROUTINE_ASSET_TXN")" \
+            || forward_marker=""
+        if [ -n "$forward_marker" ] \
+          && { [ -e "$forward_marker" ] || [ -L "$forward_marker" ]; }; then
+            forward_recovery_required=1
+            echo "⚠ Retaining the durable forward candidate despite unverifiable lock ownership" >&2
+        fi
+    fi
+    if [ "$candidate_drain_guard" = 1 ] \
+      && [ -n "${STAGED_BINARY:-}" ] && [ -e "$STAGED_BINARY" ]; then
         rm -f "$STAGED_BINARY" 2>/dev/null || true
+    elif [ "$forward_recovery_required" = 0 ] \
+      && [ "${FORWARD_MIGRATION_APPLIED:-0}" != 1 ] \
+      && [ -n "${STAGED_BINARY:-}" ] && [ -e "$STAGED_BINARY" ]; then
+        rm -f "$STAGED_BINARY" 2>/dev/null || true
+    elif { [ "$forward_recovery_required" = 1 ] \
+          || [ "${FORWARD_MIGRATION_APPLIED:-0}" = 1 ]; } \
+      && [ -n "${STAGED_BINARY:-}" ] && [ -e "$STAGED_BINARY" ]; then
+        echo "⚠ Retaining forward-compatible staged binary: $STAGED_BINARY" >&2
     fi
     if [ -n "${POLICIES_STAGED:-}" ] && [ -d "$POLICIES_STAGED" ]; then
         rm -rf "$POLICIES_STAGED" 2>/dev/null || true
@@ -2191,6 +2963,13 @@ if _self_hosted_release_session; then
 fi
 
 _acquire_release_deploy_lock "$@"
+
+REL_BINARY="$ADK_REL/bin/agentdesk"
+REL_BINARY_BACKUP="$ADK_REL/bin/agentdesk.prev"
+REL_BINARY_BACKUP_META="$REL_BINARY_BACKUP.meta"
+if ! _recover_durable_forward_migration_before_new_deploy; then
+    exit 1
+fi
 
 if [ -n "$ROUTINE_ASSET_INCOMING" ]; then
     if ! adk_claim_routine_asset_incoming \
@@ -2586,9 +3365,6 @@ if ! adk_validate_staged_routine_asset_transaction \
     echo "✗ Candidate runtime rejected staged routines before migration/service stop"
     exit 1
 fi
-REL_BINARY="$ADK_REL/bin/agentdesk"
-REL_BINARY_BACKUP="$ADK_REL/bin/agentdesk.prev"
-REL_BINARY_BACKUP_META="$REL_BINARY_BACKUP.meta"
 echo "▸ Preflighting current release rollback generation..."
 if ! _prepare_release_rollback_generation; then
     echo "✗ Current release rollback generation is unsafe; service was not stopped"
@@ -2947,11 +3723,9 @@ _migrate_pg_tunnel_before_release_stop() {
 _migrate_pg_tunnel_before_release_stop
 
 LOCK_FILE="$ADK_REL/runtime/dcserver.lock"
-OLD_PID=""
-OLD_PID_IDENTITY=""
-if [ -f "$LOCK_FILE" ]; then
-    OLD_PID=$(cat "$LOCK_FILE" 2>/dev/null || true)
-    OLD_PID_IDENTITY="$(adk_process_identity "$OLD_PID" 2>/dev/null || true)"
+if ! _capture_release_old_process; then
+    echo "✗ Could not capture the exact current release process before migration" >&2
+    exit 1
 fi
 
 # Apply the forward-only database boundary before requesting restart_pending.
@@ -2960,8 +3734,7 @@ fi
 # tunnel migration above is a fail-closed, SQL-ready prerequisite; its EXIT trap
 # restores the previous tunnel state if that prerequisite itself fails.
 echo "▸ Applying release PostgreSQL migrations before restart drain..."
-if ! "$STAGED_BINARY" release-migrate-postgres; then
-    echo "✗ Release PostgreSQL migration failed before restart was requested; the existing runtime remains active."
+if ! _apply_release_postgres_migration_with_forward_barrier; then
     exit 1
 fi
 
@@ -3100,7 +3873,11 @@ unset POST_DEPLOY_SMOKE_LOG_FINGERPRINT_BYTES POST_DEPLOY_SMOKE_LOG_FINGERPRINT_
 # #3858: back up the current good binary BEFORE overwriting it so a runtime-only
 # crash (passes compile/doctor/sign but crash-loops on boot) can be rolled back
 # instead of leaving the release down with the last-good binary already gone.
-chflags nouchg "$REL_BINARY" 2>/dev/null || true
+if [ -e "$REL_BINARY" ] \
+  && ! _set_release_binary_immutable_state "$REL_BINARY" 0; then
+    echo "✗ Could not clear and verify the live release binary immutable flag" >&2
+    exit 1
+fi
 case "$REL_ROLLBACK_MATERIAL_MODE" in
 preserve)
     # #3858 (re-entrancy / finding 2): treat .prev as last-KNOWN-GOOD. A leftover
@@ -3358,13 +4135,26 @@ fi
 echo "▸ Starting release..."
 xattr -d com.apple.quarantine "$HOME/Library/LaunchAgents/$PLIST_REL.plist" 2>/dev/null || true
 LAUNCHD_DOMAIN="$(_launchd_domain)"
+REL_PORT="$(_resolve_release_server_port)"
+if ! _persist_release_candidate_drain_authority "$ROUTINE_ASSET_TXN"; then
+    echo "✗ Could not arm durable release candidate drain authority" >&2
+    exit 1
+fi
 if ! launchctl bootstrap "$LAUNCHD_DOMAIN" "$HOME/Library/LaunchAgents/$PLIST_REL.plist"; then
     echo "⚠ launchd bootstrap failed for $LAUNCHD_DOMAIN/$PLIST_REL — using tmux fallback"
     start_release_tmux_fallback
 fi
+if ! _capture_release_candidate_process; then
+    echo "✗ Release started without a provable candidate PID/identity; refusing commit" >&2
+    exit 1
+fi
+if ! _persist_release_candidate_drain_authority "$ROUTINE_ASSET_TXN" \
+    "$RELEASE_CANDIDATE_PID" "$RELEASE_CANDIDATE_IDENTITY"; then
+    echo "✗ Could not persist the exact release candidate drain authority" >&2
+    exit 1
+fi
 
 # Health check (server health + dashboard availability)
-REL_PORT="$(_resolve_release_server_port)"
 echo "▸ Waiting for release health on :${REL_PORT}..."
 REL_HEALTHY=false
 # #4348 Defect 1: the trailing `1` opts the DEPLOY readiness gate into treating a
@@ -3386,33 +4176,20 @@ if [ "$REL_HEALTHY" != true ]; then
     exit 1
 fi
 
+# Immutable protection is part of the generation transaction: apply and verify
+# it while rollback is still armed, before backup retirement, commit intent, or
+# DEPLOY_OK can make the candidate authoritative.
+if ! _set_release_binary_immutable_state "$REL_BINARY" 1; then
+    echo "✗ Healthy release could not be protected with a verified immutable flag" >&2
+    exit 1
+fi
+
 # #4902: retire the old rollback binary BEFORE committing its matching .old
-# asset trees. If canonical .prev cleanup fails, DEPLOY_OK remains unset and the
-# EXIT transaction restores the exact binary+asset generation described by its
-# metadata. We never commit v1 assets while leaving a usable v0 .prev behind.
-chflags nouchg "$REL_BINARY_BACKUP" 2>/dev/null || true
-ROLLBACK_BACKUP_CLEANUP_OK=1
-if ! rm -f "$REL_BINARY_BACKUP" 2>/dev/null \
-  || [ -e "$REL_BINARY_BACKUP" ]; then
-    ROLLBACK_BACKUP_CLEANUP_OK=0
-fi
-if [ "$ROLLBACK_BACKUP_CLEANUP_OK" = 1 ]; then
-    if ! rm -f "$REL_BINARY_BACKUP_META" 2>/dev/null \
-      || [ -e "$REL_BINARY_BACKUP_META" ]; then
-        ROLLBACK_BACKUP_CLEANUP_OK=0
-    fi
-fi
-# Also drop atomic temps before the asset commit. A persistent temp is not a
-# rollback target, but keeping this gate strict makes every successful deploy
-# start from one unambiguous generation lineage.
-for rollback_tmp in "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP_META.tmp"; do
-    if ! rm -f "$rollback_tmp" 2>/dev/null || [ -e "$rollback_tmp" ]; then
-        ROLLBACK_BACKUP_CLEANUP_OK=0
-    fi
-done
-if [ "$ROLLBACK_BACKUP_CLEANUP_OK" != 1 ]; then
+# asset trees. Forward-only recovery uses the same gate; neither path may
+# publish a committed new generation while a usable incompatible .prev remains.
+if ! _retire_release_rollback_material; then
     echo "✗ Healthy binary is serving, but rollback backup cleanup failed" >&2
-    echo "  asset commit was withheld; coordinated rollback will preserve generation identity" >&2
+    echo "  asset commit was withheld; durable forward recovery retains generation identity" >&2
     exit 1
 fi
 
@@ -3427,8 +4204,6 @@ DEPLOY_OK=1
 if ! adk_commit_routine_asset_transaction "$ADK_REL" "$ROUTINE_ASSET_TXN"; then
     echo "⚠ Healthy release retained a committing routine asset transaction"
 fi
-# Lock against unsigned overwrites after the coordinated generation commits.
-chflags uchg "$REL_BINARY" 2>/dev/null || true
 
 if _health_json_unhealthy_only_no_provider_runtimes "${WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON:-}"; then
     echo "✓ Release is serving on :${REL_PORT} (deploy-ready: no provider runtimes registered —"
