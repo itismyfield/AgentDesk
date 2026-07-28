@@ -75,7 +75,7 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                     continue;
                 }
                 let Some(channel_id) =
-                    owner_channel_for_tmux_session(&shared, &ProviderKind::Codex, &tmux_session_name)
+                    owner_channel_for_tmux_session(&shared, &ProviderKind::Codex, &tmux_session_name, RelayEmissionKind::Poll)
                 else {
                     // #3018/#3306/#3656: registry miss ⇒ drop; Codex repair-ineligible.
                     continue;

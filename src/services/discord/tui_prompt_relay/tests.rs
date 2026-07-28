@@ -377,7 +377,12 @@ async fn owner_channel_chokepoint_triggers_drift_repair_on_drift_drop() {
 
     crate::services::tui_prompt_dedupe::register_tmux_channel(tmux, owner.get());
     assert_eq!(
-        owner_channel_for_tmux_session(&shared, &ProviderKind::Claude, tmux),
+        owner_channel_for_tmux_session(
+            &shared,
+            &ProviderKind::Claude,
+            tmux,
+            RelayEmissionKind::Poll
+        ),
         None,
         "registry miss + mirror hit still drops rather than routing from the mirror"
     );
@@ -414,7 +419,12 @@ fn live_session_relay_self_heals_via_authoritative_registry_not_mirror() {
     // (1)+(2): the mirror alone must never be used as the delivery owner —
     // the resolver drops (the #3018 single-authority rule stays intact).
     assert_eq!(
-        owner_channel_for_tmux_session(&shared, &ProviderKind::Claude, tmux),
+        owner_channel_for_tmux_session(
+            &shared,
+            &ProviderKind::Claude,
+            tmux,
+            RelayEmissionKind::Poll
+        ),
         None,
         "registry miss + dedupe mirror hit must drop, never route from the mirror"
     );
@@ -429,7 +439,12 @@ fn live_session_relay_self_heals_via_authoritative_registry_not_mirror() {
         "first restore reports a change (single bounded incident)"
     );
     assert_eq!(
-        owner_channel_for_tmux_session(&shared, &ProviderKind::Claude, tmux),
+        owner_channel_for_tmux_session(
+            &shared,
+            &ProviderKind::Claude,
+            tmux,
+            RelayEmissionKind::Poll
+        ),
         Some(owner),
         "after authoritative re-registration the live session must route again"
     );
@@ -463,7 +478,12 @@ fn drift_triggered_restore_makes_routine_session_route_again() {
     // Drift precondition: mirror holds a mapping, registry misses ⇒ drop.
     crate::services::tui_prompt_dedupe::register_tmux_channel(tmux, owner.get());
     assert_eq!(
-        owner_channel_for_tmux_session(&shared, &ProviderKind::Claude, tmux),
+        owner_channel_for_tmux_session(
+            &shared,
+            &ProviderKind::Claude,
+            tmux,
+            RelayEmissionKind::Poll
+        ),
         None,
         "registry miss + mirror hit must drop (drift), never route from mirror"
     );
@@ -476,7 +496,12 @@ fn drift_triggered_restore_makes_routine_session_route_again() {
         .restore_owner_channel_for_tmux_session(tmux, owner);
     assert!(repaired, "first drift-triggered restore reports a change");
     assert_eq!(
-        owner_channel_for_tmux_session(&shared, &ProviderKind::Claude, tmux),
+        owner_channel_for_tmux_session(
+            &shared,
+            &ProviderKind::Claude,
+            tmux,
+            RelayEmissionKind::Poll
+        ),
         Some(owner),
         "after the drift-triggered authoritative restore the session routes again"
     );
@@ -545,7 +570,12 @@ fn dead_orphaned_session_mirror_is_evicted_and_stops_drift_spam() {
         "precondition: dead session's binding is in the relay loop's iteration set"
     );
     assert_eq!(
-        owner_channel_for_tmux_session(&shared, &ProviderKind::Claude, tmux),
+        owner_channel_for_tmux_session(
+            &shared,
+            &ProviderKind::Claude,
+            tmux,
+            RelayEmissionKind::Poll
+        ),
         None,
         "precondition: registry misses + mirror hit == the drift the relay loop hits"
     );

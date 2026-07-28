@@ -173,8 +173,22 @@ pub(super) fn should_emit_drift_warn(tmux_session_name: &str) -> WarnDecision {
     let state = map
         .entry(tmux_session_name.to_string())
         .or_insert_with(|| DriftState::new(now));
-    state.pending_emission_count = state.pending_emission_count.saturating_add(1);
     decide_drift_warn(state, now)
+}
+
+fn note_pending_emission_count(tmux_session_name: &str, count: u64) {
+    if count == 0 {
+        return;
+    }
+    let now = Instant::now();
+    let mut map = DRIFT_STATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    purge_expired_locked(&mut map, now);
+    let state = map
+        .entry(tmux_session_name.to_string())
+        .or_insert_with(|| DriftState::new(now));
+    state.pending_emission_count = state.pending_emission_count.saturating_add(count);
 }
 
 fn take_pending_emission_count(tmux_session_name: &str) -> u64 {
@@ -358,6 +372,7 @@ pub(super) fn on_idle_relay_drift(
     _shared: &std::sync::Arc<super::SharedData>,
     _provider: crate::services::provider::ProviderKind,
     _tmux_session_name: &str,
+    _emission_count: u64,
 ) {
 }
 
@@ -369,7 +384,9 @@ pub(super) fn on_idle_relay_drift(
     shared: &Arc<SharedData>,
     provider: ProviderKind,
     tmux_session_name: &str,
+    emission_count: u64,
 ) {
+    note_pending_emission_count(tmux_session_name, emission_count);
     // Repair is Claude-only: the settings resolver is Claude-specific and the
     // durable DB column is written by the Claude/routine hook flow. Codex drift
     // is WARN-only at the resolver.
