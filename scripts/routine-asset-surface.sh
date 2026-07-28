@@ -224,10 +224,11 @@ _adk_read_txn_phase() {
 _adk_validate_txn_path() {
     local runtime_root="$1"
     local txn_root="$2"
-    local state_dir="$(_adk_state_dir "$runtime_root")"
+    local state_dir
     local txn_parent
     local txn_name
 
+    state_dir="$(_adk_state_dir "$runtime_root")" || return 1
     txn_parent="$(dirname "$txn_root")" || return 1
     txn_name="$(basename "$txn_root")" || return 1
     [ "$txn_parent" = "$state_dir" ] || return 1
@@ -243,10 +244,11 @@ _adk_validate_txn_path() {
 
 _adk_active_txn() {
     local runtime_root="$1"
-    local marker="$(_adk_active_marker "$runtime_root")"
+    local marker
     local txn_name
     local txn_root
 
+    marker="$(_adk_active_marker "$runtime_root")" || return 1
     [ -e "$marker" ] || return 1
     if [ -L "$marker" ] || [ ! -f "$marker" ]; then
         echo "Invalid routine asset transaction marker: $marker" >&2
@@ -294,8 +296,9 @@ adk_routine_asset_transaction_phase() {
 _adk_close_txn() {
     local runtime_root="$1"
     local txn_root="$2"
-    local marker="$(_adk_active_marker "$runtime_root")"
+    local marker
 
+    marker="$(_adk_active_marker "$runtime_root")" || return 1
     _adk_assert_active_txn "$runtime_root" "$txn_root" || return 1
     rm -f "$marker" || return 1
     rm -rf "$txn_root"
@@ -358,12 +361,14 @@ _adk_reconcile_unmarked_surface() {
 adk_begin_routine_asset_transaction() {
     local runtime_root="$1"
     local lock_file="${2:-$runtime_root/runtime/deploy-release.lock}"
-    local state_dir="$(_adk_state_dir "$runtime_root")"
-    local marker="$(_adk_active_marker "$runtime_root")"
+    local state_dir
+    local marker
     local marker_tmp
     local txn_root
     local txn_name
 
+    state_dir="$(_adk_state_dir "$runtime_root")" || return 1
+    marker="$(_adk_active_marker "$runtime_root")" || return 1
     [ "$ADK_ROUTINE_ASSET_LOCK_DIR" = "${lock_file}.d" ] || {
         echo "Routine asset transaction requires the shared deploy lock" >&2
         return 1

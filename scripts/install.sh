@@ -217,13 +217,13 @@ prepare_install_routine_asset_surfaces() {
   local source_root="$1"
   local runtime_root="$2"
   local primitives="$source_root/scripts/routine-asset-surface.sh"
-  local validator="$source_root/scripts/validate-quickjs-routines.py"
   local lock_file="${AGENTDESK_DEPLOY_LOCK_FILE:-$runtime_root/runtime/deploy-release.lock}"
   local lock_timeout="${AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS:-1800}"
   local required_function
 
+  ADK_QUICKJS_VALIDATOR="$source_root/scripts/validate-quickjs-routines.py"
   if [ ! -f "$primitives" ] \
-    || [ ! -f "$validator" ] \
+    || [ ! -f "$ADK_QUICKJS_VALIDATOR" ] \
     || [ ! -d "$source_root/routines" ] \
     || [ ! -d "$source_root/routine-helpers" ]; then
     echo "Routine asset payload is incomplete under $source_root" >&2
@@ -234,7 +234,6 @@ prepare_install_routine_asset_surfaces() {
   # deploy-release.sh, deploy.sh, source installs, and release-artifact installs.
   # Pin validation to this exact source/artifact instead of inheriting a path
   # from any previously sourced helper in the caller's shell.
-  ADK_QUICKJS_VALIDATOR="$validator"
   # shellcheck disable=SC1090
   . "$primitives"
 

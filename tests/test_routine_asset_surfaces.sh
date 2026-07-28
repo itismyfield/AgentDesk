@@ -123,7 +123,8 @@ chmod 0710 "$RUNTIME_ROOT/routine-helpers"
 acquire_runtime_lock "$RUNTIME_ROOT"
 begin_staged_transaction "$SOURCE_ROOT" "$RUNTIME_ROOT"
 
-[ "$CURRENT_TXN/staged/routines" != "$RUNTIME_ROOT/routines.new" ] \
+LEGACY_ROUTINE_STAGE="$RUNTIME_ROOT/routines.new"
+[ "$CURRENT_TXN/staged/routines" != "$LEGACY_ROUTINE_STAGE" ] \
     && [ -d "$CURRENT_TXN/staged/routines" ] \
     && [ -d "$CURRENT_TXN/staged/routine-helpers" ] \
     || fail_test 'transaction did not use unique owned stage paths'
@@ -362,9 +363,9 @@ begin_staged_transaction "$LOCK_SOURCE" "$LOCK_RUNTIME"
 LOCK_TXN="$CURRENT_TXN"
 set +e
 (
-    ADK_ROUTINE_ASSET_LOCK_DIR=""
-    ADK_ROUTINE_ASSET_LOCK_TOKEN=""
-    adk_acquire_routine_asset_lock "$CURRENT_LOCK" 0
+    ADK_ROUTINE_ASSET_LOCK_DIR="" \
+        ADK_ROUTINE_ASSET_LOCK_TOKEN="" \
+        adk_acquire_routine_asset_lock "$CURRENT_LOCK" 0
 ) >/dev/null 2>&1
 SECOND_LOCK_STATUS=$?
 set -e
@@ -679,6 +680,19 @@ reset_install_transaction_state() {
     INSTALL_BINARY_PROMOTED=0
     INSTALL_COMMIT_INTENT=0
     INSTALL_ASSET_FINALIZED=0
+
+    [ -z "$INSTALL_ROUTINE_ASSET_TXN" ] \
+        && [ -z "$INSTALL_ROUTINE_ASSET_RUNTIME" ] \
+        && [ -z "$INSTALL_BINARY_LIVE" ] \
+        && [ -z "$INSTALL_BINARY_STAGE" ] \
+        && [ -z "$INSTALL_BINARY_BACKUP" ] \
+        && [ -z "$INSTALL_BINARY_NEW_SHA256" ] \
+        && [ -z "$INSTALL_BINARY_OLD_SHA256" ] \
+        && [ "$INSTALL_BINARY_HAD_LIVE" -eq 0 ] \
+        && [ "$INSTALL_BINARY_SWAP_ARMED" -eq 0 ] \
+        && [ "$INSTALL_BINARY_PROMOTED" -eq 0 ] \
+        && [ "$INSTALL_COMMIT_INTENT" -eq 0 ] \
+        && [ "$INSTALL_ASSET_FINALIZED" -eq 0 ]
 }
 
 assert_install_generation() {
@@ -866,12 +880,12 @@ printf '%s\n' '-- M101' > "$MIGRATION_REPO/migrations/postgres/0101_m101.sql"
 printf 'v0-binary\n' > "$MIGRATION_RUNTIME/bin/agentdesk.prev"
 printf '%s\n' '{"latest_postgres_migration":"0100_m100.sql"}' \
     > "$MIGRATION_RUNTIME/runtime/release-source.json"
-ADK_REL="$MIGRATION_RUNTIME"
-REPO="$MIGRATION_REPO"
 REL_BINARY_BACKUP="$MIGRATION_RUNTIME/bin/agentdesk.prev"
 REL_BINARY_BACKUP_META="$REL_BINARY_BACKUP.meta"
-_write_rollback_backup_metadata "$REL_BINARY_BACKUP" "$REL_BINARY_BACKUP_META"
-[ "$(_rollback_backup_latest_migration_name)" = '0100_m100.sql' ] \
+ADK_REL="$MIGRATION_RUNTIME" REPO="$MIGRATION_REPO" \
+    _write_rollback_backup_metadata "$REL_BINARY_BACKUP" "$REL_BINARY_BACKUP_META"
+[ "$(ADK_REL="$MIGRATION_RUNTIME" REPO="$MIGRATION_REPO" \
+    _rollback_backup_latest_migration_name)" = '0100_m100.sql' ] \
     || fail_test 'rollback sidecar was not bound to the v0 backup generation'
 
 # v1 became healthy and wrote M101, but its simulated backup cleanup failed.
@@ -879,7 +893,8 @@ printf 'v1-binary\n' > "$MIGRATION_RUNTIME/bin/agentdesk"
 printf '%s\n' '{"latest_postgres_migration":"0101_m101.sql"}' \
     > "$MIGRATION_RUNTIME/runtime/release-source.json"
 set +e
-_rollback_would_brick_on_migration >/dev/null 2>&1
+ADK_REL="$MIGRATION_RUNTIME" REPO="$MIGRATION_REPO" \
+    _rollback_would_brick_on_migration >/dev/null 2>&1
 STALE_BACKUP_GUARD_STATUS=$?
 set -e
 [ "$STALE_BACKUP_GUARD_STATUS" -eq 0 ] \
@@ -889,12 +904,12 @@ set -e
 # must never turn a digest-mismatched or metadata-less file into executable
 # rollback material.
 printf 'tampered-v0-binary\n' > "$REL_BINARY_BACKUP"
-AGENTDESK_DEPLOY_FORCE_ROLLBACK=1
 set +e
-_rollback_would_brick_on_migration >/dev/null 2>&1
+ADK_REL="$MIGRATION_RUNTIME" REPO="$MIGRATION_REPO" \
+    AGENTDESK_DEPLOY_FORCE_ROLLBACK=1 \
+    _rollback_would_brick_on_migration >/dev/null 2>&1
 TAMPERED_BACKUP_GUARD_STATUS=$?
 set -e
-unset AGENTDESK_DEPLOY_FORCE_ROLLBACK
 [ "$TAMPERED_BACKUP_GUARD_STATUS" -eq 0 ] \
     || fail_test 'forced rollback bypassed backup digest verification'
 
@@ -913,15 +928,12 @@ eval "$(extract_function restart_launchd "$REPO_ROOT/scripts/deploy.sh")"
     OS=darwin
     LABEL='com.agentdesk.release'
     AD_HOME="$TMP_ROOT/restart-gap-runtime"
-    DEPLOY_LOCK_FILE="$AD_HOME/runtime/deploy-release.lock"
     DEPLOY_HEALTH_OK=0
     DEPLOY_BINARY_PROMOTED=1
     DEPLOY_RESTART_ARMED=1
     DEPLOY_SERVICE_STOP_ATTEMPTED=0
     DEPLOY_SERVICE_START_ATTEMPTED=0
     DEPLOY_SERVICE_START_CONFIRMED=0
-    BACKUP_WRAPPER='old-wrapper'
-    BACKUP_REAL='old-real'
     SERVICE_ACTIVE=0
     RESTART_EVENTS=''
     _launchd_domain() { printf 'gui/test\n'; }
@@ -931,6 +943,8 @@ eval "$(extract_function restart_launchd "$REPO_ROOT/scripts/deploy.sh")"
     error() { :; }
     sleep() { :; }
     seq() { printf '1\n'; }
+    [ "$OS" = darwin ] && [ "$LABEL" = 'com.agentdesk.release' ] \
+        || exit 80
     launchctl() {
         case "${1:-}" in
             bootout)
@@ -989,7 +1003,6 @@ eval "$(extract_function restart_launchd "$REPO_ROOT/scripts/deploy.sh")"
 (
     OS=linux
     AD_HOME="$TMP_ROOT/restart-stop-runtime"
-    DEPLOY_LOCK_FILE="$AD_HOME/runtime/deploy-release.lock"
     DEPLOY_HEALTH_OK=0
     DEPLOY_BINARY_PROMOTED=1
     DEPLOY_RESTART_ARMED=1
@@ -997,6 +1010,11 @@ eval "$(extract_function restart_launchd "$REPO_ROOT/scripts/deploy.sh")"
     DEPLOY_SERVICE_START_ATTEMPTED=0
     DEPLOY_SERVICE_START_CONFIRMED=0
     STOP_EVENTS=''
+    [ "$OS" = linux ] \
+        && [ "$DEPLOY_HEALTH_OK" -eq 0 ] \
+        && [ "$DEPLOY_BINARY_PROMOTED" -eq 1 ] \
+        && [ "$DEPLOY_RESTART_ARMED" -eq 1 ] \
+        || exit 84
     error() { :; }
     systemctl() {
         case "$*" in
