@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
+import * as timeoutShadowGate from "../timeout-shadow-gate.mjs";
 
 import { aggregateFile, aggregateFiles, aggregateText, parseArgs, run, runFromReadable } from "../timeout-shadow-gate.mjs";
 
@@ -80,8 +81,8 @@ test("timestamp token parsing rejects partial offsets and accepts year zero leap
   const options = ["--stdin", "--since", "0000-02-29T00:00:00Z", "--min-a-samples", "0", "--min-j-samples", "0"];
   const result = run(options, [
     `0000-02-29T00:00:00Z INFO ${shadow("_section_A")}`,
-    `0000-02-29T00:00:00+09:000 INFO ${shadow("_section_A")}`,
-    `0000-02-29T00:00:00+09 INFO ${shadow("_section_A")}`
+    `0000-02-29T00:00:00+01:000 INFO ${shadow("_section_A")}`,
+    `0000-02-29T00:00:00+01 INFO ${shadow("_section_A")}`
   ].join("\n"));
   assert.equal(JSON.parse(result.output)._section_A.total, 1);
 });
@@ -130,6 +131,18 @@ test("J reducer errors are not successful minimum evidence and fail closed by de
   assert.equal(result.exitCode, 1);
   assert.match(result.failures.join(" "), /_section_J successful samples 0 < 1/);
   assert.match(result.failures.join(" "), /shadow errors 1 > 0/);
+});
+
+test("A derives agreement from decisions so forged agree cannot evade divergence gates", async () => {
+  const forgedTrue = shadow("_section_A", { reducer_decision: "exhaust", agree: true });
+  const forgedFalse = shadow("_section_A", { reducer_decision: "retry", agree: false });
+  const result = await runFromReadable([
+    "--stdin", "--min-a-samples", "2", "--min-j-samples", "0", "--max-divergence", "0", "--max-errors", "2"
+  ], Readable.from([Buffer.from(`${forgedTrue}\n${forgedFalse}\n`)]));
+  const a = JSON.parse(result.output)._section_A;
+  assert.deepEqual(a, { total: 2, comparable: 2, agreement: 0, divergence: 1, error: 2 });
+  assert.equal(result.exitCode, 1);
+  assert.match(result.failures.join(" "), /_section_A divergence 1 > 0/);
 });
 
 test("rejects decimal counts and invalid ISO-8601 calendar timestamps", () => {
@@ -355,18 +368,47 @@ test("streamed stdin rejects an unterminated line over the documented record cap
   assert.match(result.stderr, /log line exceeds 1048576 bytes/);
 });
 
-test("text and run library exports enforce the same bounded scanner cap", () => {
+test("raw-byte scanner accepts exactly capped LF and CRLF text records", () => {
+  const base = shadow("_section_A");
+  const padding = " ".repeat(1024 * 1024 - Buffer.byteLength(base));
+  assert.equal(aggregateText([`${base}${padding}\n`])._section_A.total, 1);
+  assert.equal(aggregateText([`${base}${padding}\r\n`])._section_A.total, 1);
+});
+
+test("raw invalid UTF-8 below the cap is malformed evidence, not inflated cap failure", async () => {
+  const invalidRecord = Buffer.concat([
+    Buffer.from("[timeout_shadow] "),
+    Buffer.alloc(400 * 1024, 0xff),
+    Buffer.from("\n")
+  ]);
+  const result = await runFromReadable([
+    "--stdin", "--min-a-samples", "0", "--min-j-samples", "0", "--max-errors", "1"
+  ], Readable.from([invalidRecord]));
+  assert.equal(result.exitCode, 0);
+  assert.equal(JSON.parse(result.output)._unclassified.malformed, 1);
+});
+
+test("text and run library exports enforce the same cap above one MiB", () => {
   const oversized = "x".repeat(1024 * 1024 + 1);
   assert.throws(() => aggregateText([oversized]), /log line exceeds 1048576 bytes/);
   assert.throws(() => run(["--min-a-samples", "0", "--min-j-samples", "0"], oversized), /log line exceeds 1048576 bytes/);
 });
 
-test("CLI readable input uses chunk iteration rather than a synchronous fd read", async () => {
+test("CLI readable input never reaches a synchronous fd0 EAGAIN path", async () => {
   const readable = Readable.from([
     Buffer.from(`prefix ${shadow("_section_A")}\n`),
     Buffer.from(shadow("_section_J", { reducer_decision: "incomparable", agree: false, incomparable: true }))
   ]);
-  const result = await runFromReadable(["--stdin"], readable);
+  const io = {
+    ...fs,
+    readSync() {
+      const error = new Error("simulated nonblocking fd");
+      error.code = "EAGAIN";
+      throw error;
+    }
+  };
+  assert.equal("runFromStdin" in timeoutShadowGate, false);
+  const result = await runFromReadable(["--stdin"], readable, io);
   assert.equal(result.exitCode, 0);
   assert.deepEqual(JSON.parse(result.output)._section_J, { total: 1, successful: 1, incomparable: 1, ratio: 1, error: 0 });
 });

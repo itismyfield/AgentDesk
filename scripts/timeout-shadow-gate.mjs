@@ -10,12 +10,12 @@
 import fs from "node:fs";
 import process from "node:process";
 import { createHash } from "node:crypto";
-import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SHADOW_PREFIX = "[timeout_shadow] ";
 const SHADOW_TARGET = "agentdesk::timeout_shadow";
 const SECTIONS = new Set(["_section_A", "_section_J"]);
+const COMPARABLE_A_DECISIONS = new Set(["retry", "exhaust"]);
 const FILE_READ_CHUNK_BYTES = 64 * 1024;
 const STABLE_READ_ATTEMPTS = 2;
 // A shadow record is one log line.  This cap prevents a malformed stdin/log
@@ -200,9 +200,23 @@ function addRecord(report, record) {
   if (record.section === "_section_J") section.successful += 1;
   if (record.section === "_section_A") {
     if (!isIncomparableRecord(record)) {
+      if (!COMPARABLE_A_DECISIONS.has(record.js_decision) || !COMPARABLE_A_DECISIONS.has(record.reducer_decision)) {
+        section.error += 1;
+        return;
+      }
       section.comparable += 1;
-      if (record.agree) section.agreement += 1;
-      else section.divergence += 1;
+      const derivedAgreement = record.js_decision === record.reducer_decision;
+      // `agree` is producer-controlled observability data, never gate
+      // authority. A forged true cannot hide a decision divergence; any
+      // mismatch is error evidence and a real divergence stays divergent.
+      if (record.agree !== derivedAgreement) {
+        section.error += 1;
+        if (!derivedAgreement) section.divergence += 1;
+      } else if (derivedAgreement) {
+        section.agreement += 1;
+      } else {
+        section.divergence += 1;
+      }
     }
   } else if (isIncomparableRecord(record)) {
     section.incomparable += 1;
@@ -255,42 +269,49 @@ function statSignature(stat) {
 }
 
 function createLineScanner(onLine) {
-  let remainder = "";
-  let remainderBytes = 0;
-  const decoder = new StringDecoder("utf8");
+  let segments = [];
+  let rawBytes = 0;
 
-  function appendPart(part, complete) {
-    const partBytes = Buffer.byteLength(part);
-    if (remainderBytes + partBytes > MAX_RECORD_LINE_BYTES) {
+  function append(segment) {
+    if (segment.length === 0) return;
+    // Allow one extra raw CR until the record terminator confirms CRLF.
+    // Anything larger cannot become a valid <= 1 MiB record.
+    if (rawBytes + segment.length > MAX_RECORD_LINE_BYTES + 1) {
       throw new Error(`log line exceeds ${MAX_RECORD_LINE_BYTES} bytes`);
     }
-    remainder += part;
-    remainderBytes += partBytes;
-    if (complete) {
-      onLine(remainder.endsWith("\r") ? remainder.slice(0, -1) : remainder);
-      remainder = "";
-      remainderBytes = 0;
-    }
+    segments.push(segment);
+    rawBytes += segment.length;
   }
 
-  function consume(text) {
-    let cursor = 0;
-    for (;;) {
-      const newline = text.indexOf("\n", cursor);
-      if (newline === -1) {
-        appendPart(text.slice(cursor), false);
-        return;
-      }
-      appendPart(text.slice(cursor, newline), true);
-      cursor = newline + 1;
+  function finishLine() {
+    const raw = Buffer.concat(segments, rawBytes);
+    const contentLength = rawBytes > 0 && raw[rawBytes - 1] === 0x0d ? rawBytes - 1 : rawBytes;
+    if (contentLength > MAX_RECORD_LINE_BYTES) {
+      throw new Error(`log line exceeds ${MAX_RECORD_LINE_BYTES} bytes`);
     }
+    // Decode only after raw-byte enforcement. Invalid UTF-8 consequently
+    // becomes malformed JSON evidence instead of inflating the cap.
+    onLine(raw.subarray(0, contentLength).toString("utf8"));
+    segments = [];
+    rawBytes = 0;
   }
 
   return {
-    write(buffer) { consume(decoder.write(buffer)); },
+    write(buffer) {
+      let cursor = 0;
+      for (;;) {
+        const newline = buffer.indexOf(0x0a, cursor);
+        if (newline === -1) {
+          append(buffer.subarray(cursor));
+          return;
+        }
+        append(buffer.subarray(cursor, newline));
+        finishLine();
+        cursor = newline + 1;
+      }
+    },
     end() {
-      consume(decoder.end());
-      if (remainderBytes > 0) appendPart("", true);
+      if (rawBytes > 0) finishLine();
     }
   };
 }
@@ -414,12 +435,6 @@ export function aggregateFile(file, options = {}, io = fs) {
   return aggregateFiles([file], options, io);
 }
 
-function aggregateDescriptor(descriptor, options, io = fs) {
-  const report = emptyReport();
-  forEachDescriptorLine(descriptor, null, (line) => processLine(report, line, options), io);
-  return finalizeReport(report);
-}
-
 /**
  * Consume a Node Readable without touching its descriptor.  process.stdin is
  * sometimes nonblocking under node:test; Readable owns readiness/EAGAIN
@@ -475,16 +490,6 @@ export function run(argv, stdinText) {
     const stdinReport = aggregateText([stdinText], options);
     mergeReport(report, stdinReport);
   }
-  finalizeReport(report);
-  const failures = thresholdFailures(report, options);
-  return { help: false, output: JSON.stringify(report), failures, exitCode: failures.length === 0 ? 0 : 1 };
-}
-
-export function runFromStdin(argv, io = fs) {
-  const options = parseArgs(argv);
-  if (options.help) return { help: true, output: helpText(), exitCode: 0 };
-  const report = aggregateFiles(options.files, options, io);
-  if (options.readStdin) mergeReport(report, aggregateDescriptor(0, options, io));
   finalizeReport(report);
   const failures = thresholdFailures(report, options);
   return { help: false, output: JSON.stringify(report), failures, exitCode: failures.length === 0 ? 0 : 1 };
