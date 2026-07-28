@@ -379,6 +379,7 @@ src/
 │   │   ├── route_types.rs
 │   │   ├── runtime.rs
 │   │   ├── slot_routes.rs
+│   │   ├── thread_group_contract.rs
 │   │   ├── view.rs
 │   │   └── view_admin_routes.rs
 │   ├── automation_candidate_materializer/
