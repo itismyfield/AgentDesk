@@ -2931,9 +2931,11 @@ class TickChannelTests(unittest.TestCase):
         state = {
             "coverage_uncovered_ticks": COVERAGE_CONFIRM_TICKS - 1,
             "coverage_desync_since": self.now,
-            # #4961: loss corroborates only once it has persisted for
-            # gap_alert_secs, so this fixture carries a sustained timer.
-            "loss_since": tick_at - rt.cfg.gap_alert_secs,
+            # #4961: transcript loss no longer corroborates a desync on its own.
+            # Corroboration is delegated to `gap_since`, the delivery-gap
+            # watermark that `evaluate()` already maintains monotonically, so
+            # this fixture carries the sustained-loss evidence in that key.
+            "gap_since": tick_at - rt.cfg.gap_alert_secs,
         }
 
         tick_coverage(
@@ -2954,10 +2956,13 @@ class TickChannelTests(unittest.TestCase):
             last_relay_ts_ms=int(tick_at * 1000) - 1,
         )
 
-    def test_first_transcript_loss_tick_records_timer_without_alarm(self):
+    def test_isolated_transcript_loss_without_gap_since_does_not_corroborate(self):
         # #4961 regression: two real false positives (ticks=83 gap=678s and
         # ticks=4 gap=799s, same channel) fired off a single lost>0 tick whose
         # neighbours both reported lost=0 — relay batching, not a dead relay.
+        # A momentary `lost > 0` carries no duration evidence, so on its own it
+        # must not corroborate the desync. Sustained loss is expressed by
+        # `gap_since`, which is absent here.
         rt = self.make_rt()
         tick_at = self.now + 600
         self.arm_coverage(rt, self._loss_corroboration_probe(tick_at))
@@ -2976,24 +2981,27 @@ class TickChannelTests(unittest.TestCase):
 
         self.assertEqual(rt.alerts, [])
         self.assertNotIn("last_coverage_alert", state)
-        self.assertEqual(state["loss_since"], tick_at)
+        # tick_coverage observes only; it must not invent a corroboration key.
+        self.assertNotIn("gap_since", state)
         self.assertTrue(
             any(
-                "transcript loss not yet sustained" in line
-                and "duration=0s" in line
-                and "lost=1" in line
-                for line in rt.log_lines
+                "coverage desync uncorroborated" in line for line in rt.log_lines
             )
         )
 
-    def test_sustained_transcript_loss_corroborates_desync_coverage_alarm(self):
+    def test_transcript_loss_with_gap_since_corroborates_desync_coverage_alarm(self):
+        # The real signal is preserved: once `evaluate()` has opened a delivery
+        # gap (STATE_GAP -> `gap_since`), transcript loss corroborates the
+        # desync and the alarm fires. `gap_since` is owned by the gap path, so
+        # tick_coverage must read it without rewriting it.
         rt = self.make_rt()
         tick_at = self.now + 600
         self.arm_coverage(rt, self._loss_corroboration_probe(tick_at))
+        gap_since = tick_at - rt.cfg.gap_alert_secs
         state = {
             "coverage_uncovered_ticks": COVERAGE_CONFIRM_TICKS - 1,
             "coverage_desync_since": self.now,
-            "loss_since": tick_at - rt.cfg.gap_alert_secs,
+            "gap_since": gap_since,
         }
 
         tick_coverage(
@@ -3006,164 +3014,7 @@ class TickChannelTests(unittest.TestCase):
 
         self.assertEqual(len(rt.alerts), 1)
         self.assertIn("attached_but_desynced", rt.alerts[0][0])
-        self.assertEqual(state["loss_since"], tick_at - rt.cfg.gap_alert_secs)
-
-    def test_clean_tick_clears_loss_timer_and_restarts_dwell(self):
-        rt = self.make_rt()
-        first_tick = self.now + 600
-        self.arm_coverage(rt, self._loss_corroboration_probe(first_tick))
-        state = {
-            "coverage_uncovered_ticks": COVERAGE_CONFIRM_TICKS - 1,
-            "coverage_desync_since": self.now,
-        }
-
-        tick_coverage(
-            rt,
-            TICK_CHANNEL,
-            state,
-            first_tick,
-            CoverageTranscriptProbe(growing=True, blocks=723, lost=1),
-        )
-        self.assertEqual(state["loss_since"], first_tick)
-
-        # #4961 B1: a single clean tick must NOT release the dwell — `lost`
-        # legitimately returns to 0 while earlier blocks stay dropped. Only a
-        # sustained healthy run clears it.
-        for i in range(relay_watchdog.COVERAGE_LOSS_RECOVERY_TICKS):
-            clean_tick = first_tick + 60 * (i + 1)
-            rt.watcher_probe = self._loss_corroboration_probe(clean_tick)
-            tick_coverage(
-                rt,
-                TICK_CHANNEL,
-                state,
-                clean_tick,
-                CoverageTranscriptProbe(growing=True, blocks=723, lost=0),
-            )
-        self.assertNotIn("loss_since", state)
-
-        # A later loss restarts the dwell from zero: without the clear this
-        # tick would already be gap_alert_secs old and would alarm.
-        relapse_tick = first_tick + rt.cfg.gap_alert_secs + 60
-        rt.watcher_probe = self._loss_corroboration_probe(relapse_tick)
-        tick_coverage(
-            rt,
-            TICK_CHANNEL,
-            state,
-            relapse_tick,
-            CoverageTranscriptProbe(growing=True, blocks=723, lost=1),
-        )
-
-        self.assertEqual(rt.alerts, [])
-        self.assertEqual(state["loss_since"], relapse_tick)
-
-    def _run_loss_tick(self, rt, state, tick_at, lost, blocks=723):
-        self.arm_coverage(rt, self._loss_corroboration_probe(tick_at))
-        tick_coverage(
-            rt,
-            TICK_CHANNEL,
-            state,
-            tick_at,
-            CoverageTranscriptProbe(growing=True, blocks=blocks, lost=lost),
-        )
-
-    def test_oscillating_loss_still_reaches_sustained_threshold(self):
-        # #4961 B1: chronic partial loss oscillates lost>0 -> 0 -> lost>0 because
-        # `evaluate()` drops permanently-lost blocks below the advancing
-        # delivered_ts watermark. If a single clean tick reset the dwell this
-        # channel would starve the threshold forever and never alarm.
-        rt = self.make_rt()
-        start = self.now + 600
-        state = {
-            "coverage_uncovered_ticks": COVERAGE_CONFIRM_TICKS - 1,
-            "coverage_desync_since": self.now,
-        }
-        poll = rt.cfg.poll_secs
-        # Alternate lost=1 / lost=0 (starting and ending on loss) well past
-        # gap_alert_secs of wall clock.
-        ticks = (rt.cfg.gap_alert_secs // poll) * 2 + 5
-        for i in range(ticks):
-            self._run_loss_tick(rt, state, start + poll * i, lost=1 - i % 2)
-
-        # The dwell survived every clean tick, so it still dates to the first
-        # loss and the elapsed wall clock clears the threshold.
-        self.assertEqual(state["loss_since"], start)
-        self.assertGreater(
-            start + poll * (ticks - 1) - state["loss_since"],
-            rt.cfg.gap_alert_secs,
-        )
-        self.assertTrue(rt.alerts)
-        self.assertIn("attached_but_desynced", rt.alerts[0][0])
-
-    def test_unobserved_zero_block_tick_preserves_loss_dwell(self):
-        # #4961 B2: blocks==0 carries no evidence — it is the same unobserved
-        # state as a missing probe, not proof of recovery.
-        rt = self.make_rt()
-        first_tick = self.now + 600
-        state = {
-            "coverage_uncovered_ticks": COVERAGE_CONFIRM_TICKS - 1,
-            "coverage_desync_since": self.now,
-        }
-        self._run_loss_tick(rt, state, first_tick, lost=1)
-        self.assertEqual(state["loss_since"], first_tick)
-
-        for i in range(relay_watchdog.COVERAGE_LOSS_RECOVERY_TICKS + 2):
-            self._run_loss_tick(
-                rt, state, first_tick + 60 * (i + 1), lost=0, blocks=0
-            )
-
-        self.assertEqual(state["loss_since"], first_tick)
-        self.assertNotIn("loss_clear_ticks", state)
-
-    def test_sustained_recovery_clears_dwell_only_at_full_streak(self):
-        # Pairs with B1: hysteresis must not pin a recovered channel in alarm.
-        rt = self.make_rt()
-        first_tick = self.now + 600
-        state = {
-            "coverage_uncovered_ticks": COVERAGE_CONFIRM_TICKS - 1,
-            "coverage_desync_since": self.now,
-        }
-        self._run_loss_tick(rt, state, first_tick, lost=1)
-
-        streak = relay_watchdog.COVERAGE_LOSS_RECOVERY_TICKS
-        for i in range(streak - 1):
-            self._run_loss_tick(rt, state, first_tick + 60 * (i + 1), lost=0)
-            self.assertEqual(state["loss_since"], first_tick)
-            self.assertEqual(state["loss_clear_ticks"], i + 1)
-
-        self._run_loss_tick(rt, state, first_tick + 60 * streak, lost=0)
-        self.assertNotIn("loss_since", state)
-        self.assertNotIn("loss_clear_ticks", state)
-
-    def test_realistic_recovery_releases_dwell_within_five_clean_ticks(self):
-        # #4961 upper bound. The other clear-path tests derive their loop count
-        # from COVERAGE_LOSS_RECOVERY_TICKS, so they can never fail no matter how
-        # large it grows — and a large value resurrects the very false positive
-        # this PR removes (an isolated lost=1 tick alarming because the dwell was
-        # never released). The 5 below is therefore a deliberate literal, NOT
-        # derived from the constant: raising the constant past 5 must fail here.
-        # Together with test_oscillating_loss_still_reaches_sustained_threshold
-        # (which pins the lower bound at >= 2) this fixes 2 <= CONST <= 5.
-        rt = self.make_rt()
-        first_tick = self.now + 600
-        state = {
-            "coverage_uncovered_ticks": COVERAGE_CONFIRM_TICKS - 1,
-            "coverage_desync_since": self.now,
-        }
-        self._run_loss_tick(rt, state, first_tick, lost=1)
-        self.assertEqual(state["loss_since"], first_tick)
-
-        for i in range(5):
-            self._run_loss_tick(rt, state, first_tick + 60 * (i + 1), lost=0)
-        self.assertNotIn("loss_since", state)
-
-        # #4961 issue body, ticks=4 gap=799s: an isolated lost=1 whose
-        # neighbours both read lost=0 must not alarm even long after the
-        # original loss, because a real recovery restarted the dwell.
-        relapse_tick = first_tick + rt.cfg.gap_alert_secs + 600
-        self._run_loss_tick(rt, state, relapse_tick, lost=1)
-
-        self.assertEqual(state["loss_since"], relapse_tick)
-        self.assertEqual(rt.alerts, [])
+        self.assertEqual(state["gap_since"], gap_since)
 
     def test_growth_with_stale_relay_and_advanced_inflight_update_is_suppressed(self):
         rt = self.make_rt()
