@@ -1249,9 +1249,32 @@ src/
 │   ├── routines/
 │   │   ├── loader/
 │   │   │   ├── discovery/
-│   │   │   │   └── authority.rs
+│   │   │   │   ├── authority/
+│   │   │   │   │   └── tests.rs
+│   │   │   │   ├── authority.rs
+│   │   │   │   └── tests.rs
+│   │   │   ├── evaluator/
+│   │   │   │   └── tests.rs
+│   │   │   ├── tests/
+│   │   │   │   ├── automation_recommender/
+│   │   │   │   │   ├── assessment.rs
+│   │   │   │   │   ├── checkpoint.rs
+│   │   │   │   │   ├── inventory.rs
+│   │   │   │   │   ├── prompt.rs
+│   │   │   │   │   └── support.rs
+│   │   │   │   ├── cache/
+│   │   │   │   │   ├── failure.rs
+│   │   │   │   │   └── registry.rs
+│   │   │   │   ├── tick/
+│   │   │   │   │   ├── bundled.rs
+│   │   │   │   │   └── execution.rs
+│   │   │   │   ├── automation_recommender.rs
+│   │   │   │   ├── cache.rs
+│   │   │   │   ├── loading.rs
+│   │   │   │   └── tick.rs
 │   │   │   ├── discovery.rs
-│   │   │   └── evaluator.rs
+│   │   │   ├── evaluator.rs
+│   │   │   └── tests.rs
 │   │   ├── action.rs
 │   │   ├── agent_executor.rs
 │   │   ├── discord_log.rs
