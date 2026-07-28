@@ -772,11 +772,6 @@ impl SessionBoundDiscordRelaySink {
         start: u64,
         end: u64,
     ) -> Result<SessionRelayDeliveryOutcome, RelaySinkError> {
-        let sink_turn = super::turn_finalizer::TurnKey::new(
-            channel,
-            delivery.frame_turn_user_msg_id,
-            shared.restart.current_generation,
-        );
         let sink_lease_key = delivery_lease_key_for_frame(
             channel,
             shared.restart.current_generation,
@@ -802,8 +797,12 @@ impl SessionBoundDiscordRelaySink {
         let outcome = toc::deliver_turn_output(
             gateway,
             toc::TurnOutputCtx {
-                turn: sink_turn,
-                lease_key: Some(sink_lease_key),
+                turn: super::turn_finalizer::TurnKey::new(
+                    channel,
+                    delivery.frame_turn_user_msg_id,
+                    shared.restart.current_generation,
+                ),
+                lease_key: Some(sink_lease_key.clone()),
                 owner: RelayOwnerKind::SessionBoundRelay,
                 holder: super::LeaseHolder::Sink,
                 lease: &*cell,
@@ -842,6 +841,7 @@ impl SessionBoundDiscordRelaySink {
             dr::outcome_is_shadow_delivered(&outcome),
             msg_id.get(),
             delivered_fingerprint_body,
+            sink_lease_key.user_msg_id,
         );
 
         match outcome {
@@ -3651,6 +3651,7 @@ mod tests {
         let channel = ChannelId::new(8_041_4081);
         let session = "AgentDesk-claude-session-sink-raw-4081";
         let raw_body = "# heading\nbody line\n".to_string();
+        let user_msg_id = 8_041_4080;
         let relay_text = formatting::format_for_discord_with_provider(&raw_body, &provider);
         assert_ne!(
             raw_body, relay_text,
@@ -3681,8 +3682,13 @@ mod tests {
 
         let start = 0;
         let end = raw_body.len() as u64;
-        let mut delivery =
-            delivery_with_fence_offset(session, Some(end), 0, "2026-07-04T00:00:00Z", Some(start));
+        let mut delivery = delivery_with_fence_offset(
+            session,
+            Some(end),
+            user_msg_id,
+            "2026-07-04T00:00:00Z",
+            Some(start),
+        );
         delivery.provider = provider.clone();
         delivery.channel_id = channel.get();
         delivery.response_text = raw_body.clone();
@@ -3690,7 +3696,7 @@ mod tests {
         let matching = inflight_with_identity_offset(
             channel.get(),
             session,
-            0,
+            user_msg_id,
             "2026-07-04T00:00:00Z",
             Some(start),
         );
@@ -3729,6 +3735,14 @@ mod tests {
         assert!(
             !dr::recent_delivered_content_matches(&provider, channel, session, &relay_text),
             "formatted Discord relay text must not satisfy the raw-body refusal lookup"
+        );
+        assert!(
+            super::super::outbound::completed_turn_ledger::settled_user_msg_ids(
+                &provider,
+                channel.get(),
+            )
+            .contains(&user_msg_id),
+            "sink controller must settle the lease-pinned nonzero inbound id"
         );
     }
 

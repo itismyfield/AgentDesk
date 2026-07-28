@@ -550,10 +550,11 @@ fn long_chunk_delivery_fingerprint_refuses_phantom_rerelay_4081() {
 }
 
 fn watcher_long_chunk_identity(
+    shared: &crate::services::discord::SharedData,
     channel: poise::serenity_prelude::ChannelId,
     tmux_session_name: &str,
     user_msg_id: u64,
-) -> super::super::terminal_long_chunks::WatcherLongChunkIdentity {
+) -> super::super::terminal_long_chunks::WatcherDeliveryIdentity {
     let lease_key = crate::services::discord::DeliveryLeaseKey::new_for_site(
         channel,
         33,
@@ -562,7 +563,12 @@ fn watcher_long_chunk_identity(
         None,
         "turn_identity_tests.watcher_long_chunk",
     );
-    super::super::terminal_long_chunks::watcher_long_chunk_identity(tmux_session_name, &lease_key)
+    super::super::terminal_long_chunks::watcher_delivery_identity(
+        shared,
+        channel,
+        tmux_session_name,
+        Some(&lease_key),
+    )
 }
 
 #[test]
@@ -586,7 +592,7 @@ fn watcher_long_chunk_wrapper_uses_caller_identity_without_registry_4911() {
     .unwrap();
     let generation =
         crate::services::discord::outbound::delivery_record::current_generation_mtime_ns(tmux);
-    let identity = watcher_long_chunk_identity(channel, tmux, pinned_user_msg_id);
+    let identity = watcher_long_chunk_identity(&shared, channel, tmux, pinned_user_msg_id);
     let coord = shared.tmux_relay_coord(channel);
     coord
         .confirmed_end_generation_mtime_ns
@@ -597,7 +603,7 @@ fn watcher_long_chunk_wrapper_uses_caller_identity_without_registry_4911() {
 
     // The send has committed, but both the inflight row and registry binding are
     // gone. The immutable caller identity still supplies the receipt-less guard.
-    super::super::terminal_long_chunks::record_watcher_long_chunk_terminal_delivery(
+    super::super::terminal_long_chunks::record_watcher_terminal_delivery(
         &shared,
         &provider,
         channel,
@@ -651,7 +657,7 @@ fn watcher_long_chunk_a_range_is_not_stamped_as_replacement_b_4911() {
     .unwrap();
     let generation_a =
         crate::services::discord::outbound::delivery_record::current_generation_mtime_ns(tmux);
-    let identity_a = watcher_long_chunk_identity(channel, tmux, a_user_msg_id);
+    let identity_a = watcher_long_chunk_identity(&shared, channel, tmux, a_user_msg_id);
     let coord = shared.tmux_relay_coord(channel);
     coord
         .confirmed_end_generation_mtime_ns
@@ -702,7 +708,7 @@ fn watcher_long_chunk_a_range_is_not_stamped_as_replacement_b_4911() {
     crate::services::discord::inflight::save_inflight_state(&inflight_b)
         .expect("seed replacement B inflight");
 
-    super::super::terminal_long_chunks::record_watcher_long_chunk_terminal_delivery(
+    super::super::terminal_long_chunks::record_watcher_terminal_delivery(
         &shared,
         &provider,
         channel,
@@ -729,6 +735,103 @@ fn watcher_long_chunk_a_range_is_not_stamped_as_replacement_b_4911() {
             &provider, channel, tmux, a_body,
         ),
         "rejected A must not leave a G2 fingerprint that suppresses byte-identical B"
+    );
+}
+
+#[test]
+fn watcher_legacy_same_generation_reset_rejects_delayed_record_4911() {
+    let temp = tempfile::TempDir::new().expect("temp runtime root");
+    let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let provider = ProviderKind::Codex;
+    let channel = poise::serenity_prelude::ChannelId::new(7_491_301);
+    let tmux = "AgentDesk-codex-phase-a-r8-same-generation";
+    let a_user_msg_id = 7_491_310;
+    let a_body = "delayed legacy body";
+
+    let generation_path = crate::services::tmux_common::session_temp_path(tmux, "generation");
+    std::fs::create_dir_all(std::path::Path::new(&generation_path).parent().unwrap()).unwrap();
+    std::fs::write(&generation_path, "same-generation").unwrap();
+    filetime::set_file_mtime(
+        &generation_path,
+        filetime::FileTime::from_unix_time(1_700_491_301, 123),
+    )
+    .unwrap();
+    let generation =
+        crate::services::discord::outbound::delivery_record::current_generation_mtime_ns(tmux);
+    let coord = shared.tmux_relay_coord(channel);
+    coord
+        .confirmed_end_generation_mtime_ns
+        .store(generation, std::sync::atomic::Ordering::Release);
+    coord
+        .confirmed_end_offset
+        .store(128, std::sync::atomic::Ordering::Release);
+    let identity_a = watcher_long_chunk_identity(&shared, channel, tmux, a_user_msg_id);
+
+    assert!(coord.reset_confirmed_frontier(128, 0));
+    crate::services::discord::tmux::advance_watcher_confirmed_end(
+        &shared,
+        &provider,
+        channel,
+        tmux,
+        64,
+        "turn_identity_tests:same_generation_replacement_b",
+    );
+    let b_frontier = crate::services::discord::outbound::delivery_record::DeliveredCommit {
+        range: (0, 64),
+        generation_mtime_ns: generation,
+        attempts: 1,
+        panel_msg_id: Some(7_491_302),
+        panel_channel_id: Some(channel.get()),
+    };
+    crate::services::discord::outbound::delivery_record::write_delivered_frontier(
+        &provider,
+        channel.get(),
+        tmux,
+        b_frontier.clone(),
+    )
+    .expect("seed same-generation replacement frontier");
+    crate::services::discord::outbound::delivery_record::record_delivered_content_fingerprint(
+        &provider,
+        channel,
+        tmux,
+        "replacement legacy body",
+    );
+
+    super::super::terminal_long_chunks::record_watcher_terminal_delivery(
+        &shared,
+        &provider,
+        channel,
+        tmux,
+        identity_a,
+        (0, 128),
+        Some(7_491_303),
+        a_body,
+    );
+    let record =
+        crate::services::discord::outbound::delivery_record::read_record(&provider, channel.get())
+            .expect("replacement record survives delayed A");
+    assert_eq!(record.delivered_frontier, Some(b_frontier));
+    assert_eq!(record.recent_delivered_contents.len(), 1);
+    assert!(
+        crate::services::discord::outbound::delivery_record::recent_delivered_content_matches(
+            &provider,
+            channel,
+            tmux,
+            "replacement legacy body",
+        )
+    );
+    assert!(
+        !crate::services::discord::outbound::completed_turn_ledger::settled_user_msg_ids(
+            &provider,
+            channel.get(),
+        )
+        .contains(&a_user_msg_id)
+    );
+    assert!(
+        !crate::services::discord::outbound::delivery_record::recent_delivered_content_matches(
+            &provider, channel, tmux, a_body,
+        )
     );
 }
 

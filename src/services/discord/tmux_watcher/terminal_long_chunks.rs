@@ -12,39 +12,54 @@ use crate::services::provider::ProviderKind;
 
 use super::controller_heartbeat::WatcherPostHeartbeat;
 
-/// Lease-captured immutable identity for the watcher legacy long-chunk commit.
+/// Lease-captured immutable identity for a watcher terminal delivery commit.
 /// Exact receipts still require a matching fresh inflight row; the pinned user
 /// message id is used only for post-persist completed-turn settlement.
 #[derive(Clone, Copy)]
-pub(super) struct WatcherLongChunkIdentity {
+pub(super) struct WatcherDeliveryIdentity {
     pub(super) generation_mtime_ns: i64,
+    pub(super) lease_reset_incarnation: u64,
     pub(super) ledger_user_msg_id: Option<u64>,
 }
 
-pub(super) fn watcher_long_chunk_identity(
+pub(super) fn watcher_delivery_identity(
+    shared: &SharedData,
+    channel_id: ChannelId,
     tmux_session_name: &str,
-    lease_key: &crate::services::discord::DeliveryLeaseKey,
-) -> WatcherLongChunkIdentity {
-    WatcherLongChunkIdentity {
+    lease_key: Option<&crate::services::discord::DeliveryLeaseKey>,
+) -> WatcherDeliveryIdentity {
+    WatcherDeliveryIdentity {
         generation_mtime_ns: dr::current_generation_mtime_ns(tmux_session_name),
-        ledger_user_msg_id: (lease_key.user_msg_id != 0).then_some(lease_key.user_msg_id),
+        lease_reset_incarnation: shared.relay_frontier_token(channel_id).reset_incarnation,
+        ledger_user_msg_id: lease_key
+            .map(|key| key.user_msg_id)
+            .filter(|user_msg_id| *user_msg_id != 0),
     }
 }
 
-/// Record only after the legacy long-chunk send, lease commit, and in-memory
-/// advance all succeed. The mutation guard prevents a generation reset from
-/// crossing the identity snapshot and durable record mutation.
-pub(in crate::services::discord) fn record_watcher_long_chunk_terminal_delivery(
+/// Record only after watcher transport, lease commit, and in-memory advance all
+/// succeed. The mutation guard prevents a reset from crossing the lease-time
+/// identity snapshot and durable record mutation.
+pub(in crate::services::discord) fn record_watcher_terminal_delivery(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     tmux_session_name: &str,
-    identity: WatcherLongChunkIdentity,
+    identity: WatcherDeliveryIdentity,
     range: (u64, u64),
     last_chunk_anchor_msg_id: Option<u64>,
     delivered_body: &str,
 ) {
     let frontier_token = shared.relay_frontier_token(channel_id);
+    if frontier_token.reset_incarnation != identity.lease_reset_incarnation {
+        tracing::warn!(
+            provider = provider.as_str(),
+            channel_id = channel_id.get(),
+            range = ?range,
+            "watcher frontier reset after delivery lease capture"
+        );
+        return;
+    }
     let Some(_frontier_mutation) =
         shared.acquire_relay_frontier_mutation(channel_id, frontier_token)
     else {
@@ -52,17 +67,18 @@ pub(in crate::services::discord) fn record_watcher_long_chunk_terminal_delivery(
             provider = provider.as_str(),
             channel_id = channel_id.get(),
             range = ?range,
-            "watcher long-chunk frontier changed before durable record"
+            "watcher frontier changed before durable record"
         );
         return;
     };
-    dr::record_watcher_long_chunk_terminal_delivery(
+    dr::record_watcher_terminal_delivery(
         shared,
         provider,
         channel_id,
         tmux_session_name,
-        dr::WatcherLongChunkRecordAuthority {
+        dr::WatcherDeliveryRecordAuthority {
             frontier_token,
+            lease_reset_incarnation: identity.lease_reset_incarnation,
             generation_mtime_ns: identity.generation_mtime_ns,
             ledger_user_msg_id: identity.ledger_user_msg_id,
         },
@@ -91,6 +107,8 @@ pub(in crate::services::discord) async fn deliver_long_chunks_via_controller<
     start: u64,
     end: u64,
 ) -> toc::DeliveryOutcome {
+    let delivery_identity =
+        watcher_delivery_identity(shared, channel_id, tmux_session_name, lease_key.as_ref());
     let holder = LeaseHolder::Watcher { instance_id };
     cell.reclaim_if_expired(lease_now_ms());
     let heartbeat = WatcherPostHeartbeat { cell: cell.clone() };
@@ -143,16 +161,15 @@ pub(in crate::services::discord) async fn deliver_long_chunks_via_controller<
         ..
     } = &outcome
     {
-        dr::record_long_chunk_terminal_delivery(
+        record_watcher_terminal_delivery(
             shared,
             provider,
             channel_id,
-            channel_id,
-            Some(tmux_session_name),
+            tmux_session_name,
+            delivery_identity,
             (start, end),
             chunks.tail_message_id.map(|m| m.get()),
             delivered_body,
-            None,
         );
     }
     outcome

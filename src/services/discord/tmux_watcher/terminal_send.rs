@@ -184,6 +184,12 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
     start: u64,
     end: u64,
 ) -> WatcherShortReplaceResult {
+    let delivery_identity = super::terminal_long_chunks::watcher_delivery_identity(
+        shared,
+        channel_id,
+        tmux_session_name,
+        lease_key.as_ref(),
+    );
     let holder = LeaseHolder::Watcher { instance_id };
     // Self-heal like the legacy acquire (tmux_watcher.rs:5964): reclaim an EXPIRED
     // prior holder before the controller's acquire (a stale dead lease must not make
@@ -273,20 +279,18 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
     // `status_message_id`. Records the true terminal anchor for PR-2.
     // #3610 PR-1b: the anchor pair's channel is this same `channel_id` (same-channel
     // path — the frontier key, edit target, and placeholder all share `channel_id`).
-    dr::shadow_mirror_delivered_frontier(
-        shared,
-        provider,
-        channel_id,
-        Some(tmux_session_name),
-        (start, end),
-        dr::outcome_is_shadow_delivered(&outcome),
-        Some(msg_id.get()),
-        Some(channel_id.get()),
-        Some(delivered_body),
-        // #4564: no unqualified row reload; ledger settlement is skipped unless the
-        // exact receipt identity is still provable inside the record funnel.
-        None,
-    );
+    if dr::outcome_is_shadow_delivered(&outcome) {
+        super::terminal_long_chunks::record_watcher_terminal_delivery(
+            shared,
+            provider,
+            channel_id,
+            tmux_session_name,
+            delivery_identity,
+            (start, end),
+            Some(msg_id.get()),
+            delivered_body,
+        );
+    }
 
     match outcome {
         // Confirmed POST (edit OR #2757 fallback): the controller already ran
@@ -629,13 +633,14 @@ mod tests {
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel = ChannelId::new(556_677_889);
         // Does not panic; missing generation → writes nothing.
-        super::super::terminal_long_chunks::record_watcher_long_chunk_terminal_delivery(
+        super::super::terminal_long_chunks::record_watcher_terminal_delivery(
             &shared,
             &ProviderKind::Claude,
             channel,
             "AgentDesk-claude-watcher-off-noop",
-            super::super::terminal_long_chunks::WatcherLongChunkIdentity {
+            super::super::terminal_long_chunks::WatcherDeliveryIdentity {
                 generation_mtime_ns: 0,
+                lease_reset_incarnation: 0,
                 ledger_user_msg_id: None,
             },
             (0, 8192),
@@ -657,13 +662,14 @@ mod tests {
         let _shadow = dr::shadow_test_seam::force(false);
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel = ChannelId::new(112_233_445);
-        super::super::terminal_long_chunks::record_watcher_long_chunk_terminal_delivery(
+        super::super::terminal_long_chunks::record_watcher_terminal_delivery(
             &shared,
             &ProviderKind::Claude,
             channel,
             "AgentDesk-claude-watcher-none-anchor-noop",
-            super::super::terminal_long_chunks::WatcherLongChunkIdentity {
+            super::super::terminal_long_chunks::WatcherDeliveryIdentity {
                 generation_mtime_ns: 0,
+                lease_reset_incarnation: 0,
                 ledger_user_msg_id: None,
             },
             (0, 2048),

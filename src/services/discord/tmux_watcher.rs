@@ -1844,17 +1844,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             prompt_anchor_present_before_relay || external_input_lease_before_relay;
 
         // #3041 P1-1: acquire the delivery lease BEFORE the watcher direct-sends. Lease
-        // identity = the turn-pinned id (`pinned_finalizer_turn_id`, the #3141
-        // id-pinning) + the byte range `[data_start_offset, terminal_event_consumed_offset)`
+        // identity = the turn-pinned id plus the byte range
+        // `[data_start_offset, terminal_event_consumed_offset)`
         // — the SAME consumed end the commit/advance uses, so acquire and commit carry one
         // identity. Acquire only on the watcher-direct path (delegation is the sink's lease
         // P1-2; suppression/no-response deliver nothing).
         //
         // B2 (single-holder, §5.2): if a DIFFERENT watcher instance holds this cell
         // (Leased) `try_acquire` fails → this watcher MUST NOT direct-send (skip arm
-        // below). Acquire is the atomic fast-path (B4); commit/advance/release run INLINE
-        // (preserving the pre-P1-1 advance timing, avoiding an actor-deferral duplicate).
-        // The actor CommitDelivery/ReleaseDelivery messages remain dormant.
+        // below). Commit/advance/release stay inline; actor messages remain dormant.
         let watcher_lease_start = data_start_offset;
         let watcher_lease_end = terminal_event_consumed_offset(current_offset, &all_data);
         let (watcher_lease_turn, watcher_lease_key, watcher_lease_holder) =
@@ -1867,9 +1865,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 current_offset,
                 watcher_lease_start,
             );
-        let watcher_long_chunk_identity = terminal_long_chunks::watcher_long_chunk_identity(
+        let watcher_long_chunk_identity = terminal_long_chunks::watcher_delivery_identity(
+            &shared,
+            channel_id,
             &tmux_session_name,
-            &watcher_lease_key,
+            Some(&watcher_lease_key),
         );
         let mut watcher_long_chunk_anchor_msg_id: Option<MessageId> = None;
         let mut watcher_long_chunk_delivered_body: Option<String> = None;
@@ -2760,7 +2760,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 watcher_response_frontier_committed = true;
                 if let Some(anchor) = watcher_long_chunk_anchor_msg_id {
                     if let Some(body) = watcher_long_chunk_delivered_body.as_deref() {
-                        terminal_long_chunks::record_watcher_long_chunk_terminal_delivery(
+                        terminal_long_chunks::record_watcher_terminal_delivery(
                             &shared,
                             &watcher_provider,
                             channel_id,

@@ -463,12 +463,14 @@ struct WatcherFrontierLockAuthority<'a> {
     shared: &'a crate::services::discord::SharedData,
     channel: ChannelId,
     frontier_token: crate::services::discord::RelayFrontierToken,
+    lease_reset_incarnation: u64,
     generation_mtime_ns: i64,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(in crate::services::discord) struct WatcherLongChunkRecordAuthority {
+pub(in crate::services::discord) struct WatcherDeliveryRecordAuthority {
     pub(in crate::services::discord) frontier_token: crate::services::discord::RelayFrontierToken,
+    pub(in crate::services::discord) lease_reset_incarnation: u64,
     pub(in crate::services::discord) generation_mtime_ns: i64,
     pub(in crate::services::discord) ledger_user_msg_id: Option<u64>,
 }
@@ -528,6 +530,7 @@ fn write_confirmed_frontier_guarded_at_with_lock_authority(
             .confirmed_end_generation_mtime_ns
             .load(Ordering::Acquire);
         if current_token != authority.frontier_token
+            || current_token.reset_incarnation != authority.lease_reset_incarnation
             || current_coord_generation != authority.generation_mtime_ns
             || current_generation != authority.generation_mtime_ns
         {
@@ -2028,7 +2031,7 @@ fn shadow_mirror_delivered_frontier_inner(
     terminal_anchor_channel_id: Option<u64>,
     delivered_body: Option<&str>,
     ledger_user_msg_id: Option<u64>,
-    watcher_authority: Option<WatcherLongChunkRecordAuthority>,
+    watcher_authority: Option<WatcherDeliveryRecordAuthority>,
 ) {
     let channel_id = channel.get();
     let coord = shared.tmux_relay_coord(channel);
@@ -2111,6 +2114,7 @@ fn shadow_mirror_delivered_frontier_inner(
         shared,
         channel,
         frontier_token: authority.frontier_token,
+        lease_reset_incarnation: authority.lease_reset_incarnation,
         generation_mtime_ns: authority.generation_mtime_ns,
     });
     if let Err(error) = persist_confirmed_frontier_and_receipt(
@@ -2194,9 +2198,8 @@ pub(in crate::services::discord) fn shadow_mirror_same_channel_frontier_with_bod
     is_delivered: bool,
     terminal_anchor_msg_id: u64,
     body: &str,
+    ledger_user_msg_id: u64,
 ) {
-    // Same-channel (sink) path: no caller-pinned ledger id is available here.
-    // Settlement is skipped unless the exact receipt identity remains provable.
     shadow_mirror_delivered_frontier(
         shared,
         provider,
@@ -2207,7 +2210,7 @@ pub(in crate::services::discord) fn shadow_mirror_same_channel_frontier_with_bod
         Some(terminal_anchor_msg_id),
         Some(channel.get()),
         Some(body),
-        None,
+        (ledger_user_msg_id != 0).then_some(ledger_user_msg_id),
     );
 }
 
@@ -2268,15 +2271,15 @@ pub(in crate::services::discord) fn record_long_chunk_terminal_delivery(
     );
 }
 
-/// Watcher-only long-chunk funnel. The caller captures generation and turn
+/// Watcher-only terminal-delivery funnel. The caller captures generation and turn
 /// identity with its delivery lease, while the wrapper holds the matching relay
 /// frontier mutation guard through this durable mutation.
-pub(in crate::services::discord) fn record_watcher_long_chunk_terminal_delivery(
+pub(in crate::services::discord) fn record_watcher_terminal_delivery(
     shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,
     channel_id: ChannelId,
     tmux_session_name: &str,
-    authority: WatcherLongChunkRecordAuthority,
+    authority: WatcherDeliveryRecordAuthority,
     range: (u64, u64),
     last_chunk_anchor_msg_id: Option<u64>,
     delivered_body: &str,
@@ -4561,9 +4564,9 @@ mod tests {
     // The watcher long-chunk fallback arm (tmux_watcher.rs — the
     // `watcher_should_send_ordered_new_chunks_for_terminal_fallback` branch) is the
     // watcher-owned counterpart of the bridge arm above. Its sibling helper
-    // `terminal_long_chunks::record_watcher_long_chunk_terminal_delivery` is SAME-CHANNEL:
-    // it forwards `watcher_owner_channel_id == delivery_channel_id == channel_id`
-    // into `record_long_chunk_terminal_delivery`. So the frontier key (record path)
+    // `terminal_long_chunks::record_watcher_terminal_delivery` is SAME-CHANNEL:
+    // it preserves `watcher_owner_channel_id == delivery_channel_id == channel_id`.
+    // So the frontier key (record path)
     // and the recorded `panel_channel_id` are the SAME channel — UNLIKE the bridge's
     // cross-channel `long_chunk_cross_channel_separates_owner_and_delivery_3610c`.
     // Pinned here via the path-core (the helper's flag is env-global OnceLock).
