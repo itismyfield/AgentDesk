@@ -1019,29 +1019,69 @@ done
 
 # Wiring ratchet ignores comment-only pseudo-calls and proves the shared lexer,
 # transaction, lock, health commit, and artifact packaging cannot be removed.
+shell_command_count() {
+    local source_file="$1"
+    local command_name="$2"
+    local required_fragment="${3:-$2}"
+
+    awk -v command_name="$command_name" -v fragment="$required_fragment" '
+        {
+            line = $0
+            sub(/^[[:space:]]+/, "", line)
+            if (line == "" || line ~ /^#/) next
+            if (line ~ /^[A-Za-z_][A-Za-z0-9_]*[(][)][[:space:]]*[{]/) next
+            if (line ~ /^(if|elif|while|until)[[:space:]]+/) {
+                sub(/^(if|elif|while|until)[[:space:]]+/, "", line)
+            }
+            sub(/^![[:space:]]+/, "", line)
+            first = line
+            sub(/[[:space:];(].*$/, "", first)
+            if (first == command_name && index(line, fragment) > 0) count += 1
+        }
+        END { print count + 0 }
+    ' "$source_file"
+}
+
+shell_has_command() {
+    [ "$(shell_command_count "$1" "$2" "$3")" -gt 0 ]
+}
+
 assert_asset_wiring() {
     local root="$1"
     local prepare_calls
 
-    grep -Fq '"$python_bin" "$ADK_QUICKJS_VALIDATOR" "$root"' \
-        "$root/scripts/routine-asset-surface.sh" || return 1
-    grep -Fq 'adk_acquire_routine_asset_lock "$DEPLOY_LOCK_FILE"' \
-        "$root/scripts/deploy-release.sh" || return 1
-    grep -Fq 'adk_promote_routine_asset_transaction "$ADK_REL"' \
-        "$root/scripts/deploy-release.sh" || return 1
-    grep -Fq 'adk_commit_routine_asset_transaction "$ADK_REL"' \
-        "$root/scripts/deploy-release.sh" || return 1
-    grep -Fq 'DEPLOY_HEALTH_OK=1' "$root/scripts/deploy.sh" || return 1
-    grep -Fq 'adk_commit_routine_asset_transaction "$AD_HOME"' \
-        "$root/scripts/deploy.sh" || return 1
-    grep -Fq 'cp "scripts/validate-quickjs-routines.py"' \
-        "$root/scripts/build-release.sh" || return 1
-    prepare_calls="$(awk '
-        /^[[:space:]]*prepare_install_routine_asset_surfaces / { count += 1 }
-        END { print count + 0 }
-    ' "$root/scripts/install.sh")"
+    shell_has_command "$root/scripts/routine-asset-surface.sh" \
+        '"$python_bin"' \
+        '"$python_bin" "$ADK_QUICKJS_VALIDATOR" "$root"' || return 1
+    shell_has_command "$root/scripts/deploy-release.sh" \
+        'adk_acquire_routine_asset_lock' \
+        'adk_acquire_routine_asset_lock "$DEPLOY_LOCK_FILE"' || return 1
+    shell_has_command "$root/scripts/deploy-release.sh" \
+        '_acquire_release_deploy_lock' '_acquire_release_deploy_lock "$@"' \
+        || return 1
+    shell_has_command "$root/scripts/deploy-release.sh" \
+        'adk_promote_routine_asset_transaction' \
+        'adk_promote_routine_asset_transaction "$ADK_REL" "$ROUTINE_ASSET_TXN"' \
+        || return 1
+    shell_has_command "$root/scripts/deploy-release.sh" \
+        'adk_commit_routine_asset_transaction' \
+        'adk_commit_routine_asset_transaction "$ADK_REL" "$ROUTINE_ASSET_TXN"' \
+        || return 1
+    shell_has_command "$root/scripts/deploy.sh" \
+        'DEPLOY_HEALTH_OK=1' 'DEPLOY_HEALTH_OK=1' || return 1
+    shell_has_command "$root/scripts/deploy.sh" \
+        'adk_commit_routine_asset_transaction' \
+        'adk_commit_routine_asset_transaction "$AD_HOME" "$ROUTINE_ASSET_TXN"' \
+        || return 1
+    shell_has_command "$root/scripts/build-release.sh" 'cp' \
+        'cp "scripts/validate-quickjs-routines.py" "$STAGING/scripts/validate-quickjs-routines.py"' \
+        || return 1
+    prepare_calls="$(shell_command_count "$root/scripts/install.sh" \
+        'prepare_install_routine_asset_surfaces' \
+        'prepare_install_routine_asset_surfaces')"
     [ "$prepare_calls" -eq 2 ] || return 1
-    if grep -Fq -- '--delete "$REPO/routines/"' "$root/scripts/deploy-release.sh"; then
+    if [ "$(shell_command_count "$root/scripts/deploy-release.sh" 'rsync' \
+        '--delete "$REPO/routines/"')" -gt 0 ]; then
         return 1
     fi
 }
@@ -1062,6 +1102,53 @@ mv "$MUTATION_ROOT/scripts/install.sh.mutated" "$MUTATION_ROOT/scripts/install.s
 if assert_asset_wiring "$MUTATION_ROOT"; then
     fail_test 'wiring ratchet accepted comment-only installer calls'
 fi
+
+comment_first_executable_fragment() {
+    local source_file="$1"
+    local fragment="$2"
+    local mutated_file="${source_file}.mutated"
+
+    awk -v fragment="$fragment" '
+        {
+            executable = $0
+            sub(/^[[:space:]]+/, "", executable)
+            if (!done && executable !~ /^#/ && index(executable, fragment) > 0) {
+                print "# COMMENTED-OUT MUTANT: " $0
+                done = 1
+                next
+            }
+            print
+        }
+        END { if (!done) exit 92 }
+    ' "$source_file" > "$mutated_file" || return 1
+    mv "$mutated_file" "$source_file"
+}
+
+# Regression for the exact weak-ratchet defect: leaving the full call text in
+# a comment must not satisfy deploy-release, deploy.sh, or artifact packaging.
+WIRING_MUTANT_FILES=(
+    'deploy-release.sh'
+    'deploy.sh'
+    'build-release.sh'
+)
+WIRING_MUTANT_FRAGMENTS=(
+    'adk_commit_routine_asset_transaction "$ADK_REL" "$ROUTINE_ASSET_TXN"'
+    'adk_commit_routine_asset_transaction "$AD_HOME" "$ROUTINE_ASSET_TXN"'
+    'cp "scripts/validate-quickjs-routines.py" "$STAGING/scripts/validate-quickjs-routines.py"'
+)
+for mutant_index in "${!WIRING_MUTANT_FILES[@]}"; do
+    EXEC_MUTATION_ROOT="$TMP_ROOT/executable-wiring-mutation-$mutant_index"
+    mkdir -p "$EXEC_MUTATION_ROOT/scripts"
+    cp "$REPO_ROOT/scripts/"{build-release.sh,deploy-release.sh,deploy.sh,install.sh,routine-asset-surface.sh,validate-quickjs-routines.py} \
+        "$EXEC_MUTATION_ROOT/scripts/"
+    comment_first_executable_fragment \
+        "$EXEC_MUTATION_ROOT/scripts/${WIRING_MUTANT_FILES[$mutant_index]}" \
+        "${WIRING_MUTANT_FRAGMENTS[$mutant_index]}" \
+        || fail_test "could not create executable wiring mutant $mutant_index"
+    if assert_asset_wiring "$EXEC_MUTATION_ROOT"; then
+        fail_test "wiring ratchet accepted commented ${WIRING_MUTANT_FILES[$mutant_index]} call"
+    fi
+done
 
 LEXER_MUTATION_ROOT="$TMP_ROOT/lexer-wiring-mutation"
 mkdir -p "$LEXER_MUTATION_ROOT/scripts"
