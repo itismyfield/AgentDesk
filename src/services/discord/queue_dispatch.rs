@@ -262,7 +262,7 @@ async fn mailbox_take_soft_intervention(
                 kind: stale.queue_exit_kind,
             }];
             super::apply_queue_exit_feedback(shared, channel_id, &queue_exit_events).await;
-            super::mailbox_abandon_pending_dispatch(
+            let _ = super::mailbox_abandon_pending_dispatch(
                 shared,
                 provider,
                 channel_id,

@@ -2,6 +2,20 @@ use super::*;
 
 pub(in crate::services::discord::router::message_handler) mod mailbox_reaction;
 
+fn race_loss_persistence_failure(
+    channel_id: ChannelId,
+    persistence_error: Option<&str>,
+) -> Result<(), Error> {
+    let Some(persistence_error) = persistence_error else {
+        return Ok(());
+    };
+    Err(std::io::Error::other(format!(
+        "failed to persist queued intake for channel {}: {persistence_error}",
+        channel_id.get()
+    ))
+    .into())
+}
+
 async fn enqueue_race_loss_requeued_intervention(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -19,21 +33,37 @@ async fn enqueue_race_loss_requeued_intervention(
     )
     .await;
     if outcome.persistence_error.is_some() {
-        crate::services::discord::mailbox_clear_pending_dispatch_reservation(
+        let cleared = crate::services::discord::mailbox_clear_pending_dispatch_reservation(
             shared,
             provider,
             channel_id,
             user_msg_id,
         )
         .await;
+        if !cleared {
+            tracing::error!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                user_message_id = user_msg_id.get(),
+                "race-loss persistence rollback could not clear the pending dispatch reservation"
+            );
+        }
     } else {
-        crate::services::discord::mailbox_abandon_pending_dispatch(
+        let abandoned = crate::services::discord::mailbox_abandon_pending_dispatch(
             shared,
             provider,
             channel_id,
             user_msg_id,
         )
         .await;
+        if !abandoned {
+            tracing::debug!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                user_message_id = user_msg_id.get(),
+                "race-loss enqueue had no matching pending dispatch reservation to abandon"
+            );
+        }
     }
     if outcome.enqueued && outcome.persistence_error.is_none() {
         crate::services::discord::queue_io::schedule_race_loss_requeue_post_enqueue_idle_recheck(
@@ -142,6 +172,25 @@ pub(super) async fn handle_race_loss_enqueue(
     // enqueue-then-check invariant with a strict post-enqueue snapshot: still-live
     // holder => stay silent and let its completion event wake us; already-idle
     // channel => one missed-completion kick.
+
+    if let Some(persistence_error) = enqueue_outcome.persistence_error.as_ref() {
+        mailbox_reaction::clear_rejected_attempt_pending(
+            shared,
+            http,
+            channel_id,
+            user_msg_id,
+            turn_start_attempt,
+        )
+        .await;
+        tracing::error!(
+            provider = provider.as_str(),
+            channel_id = channel_id.get(),
+            user_message_id = user_msg_id.get(),
+            error = %persistence_error,
+            "race-lost intake could not be persisted; returning failure to the caller"
+        );
+        return race_loss_persistence_failure(channel_id, Some(persistence_error));
+    }
 
     // If the enqueue was rejected (dedup / duplicate) there is nothing
     // for the dispatch path to pick up. Skip the placeholder POST + the
@@ -744,6 +793,14 @@ mod race_loss_requeue_tests {
         )
         .await;
         assert!(outcome.persistence_error.is_some());
+        let surfaced =
+            race_loss_persistence_failure(channel_id, outcome.persistence_error.as_deref())
+                .expect_err("durable enqueue failure must reach the caller");
+        assert!(
+            surfaced
+                .to_string()
+                .contains("failed to persist queued intake")
+        );
         let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
         assert!(snapshot.intervention_queue.is_empty());
         assert_eq!(snapshot.pending_user_dispatch, None);

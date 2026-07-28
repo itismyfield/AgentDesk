@@ -3696,10 +3696,7 @@ async fn idle_queue_take_next_soft_if_ready(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> MailboxTakeNextSoftOutcome {
-    let _transition_guard = match shared
-        .session_transition_lock(channel_id)
-        .try_lock_owned()
-    {
+    let _transition_guard = match shared.session_transition_lock(channel_id).try_lock_owned() {
         Ok(guard) => guard,
         Err(_) => {
             tracing::debug!(
@@ -3801,14 +3798,14 @@ pub(in crate::services::discord) async fn mailbox_abandon_pending_dispatch(
     provider: &ProviderKind,
     channel_id: ChannelId,
     user_message_id: MessageId,
-) {
+) -> bool {
     shared
         .mailbox(channel_id)
         .abandon_pending_dispatch(
             user_message_id,
             queue_persistence_context(shared, provider, channel_id),
         )
-        .await;
+        .await
 }
 
 async fn mailbox_clear_pending_dispatch_reservation(
@@ -3816,14 +3813,14 @@ async fn mailbox_clear_pending_dispatch_reservation(
     provider: &ProviderKind,
     channel_id: ChannelId,
     user_message_id: MessageId,
-) {
+) -> bool {
     shared
         .mailbox(channel_id)
         .clear_pending_dispatch_reservation(
             user_message_id,
             queue_persistence_context(shared, provider, channel_id),
         )
-        .await;
+        .await
 }
 
 pub(in crate::services::discord) use busy_followup_retry_store::requeue_inflight_for_followup_retry as mailbox_requeue_inflight_for_followup_retry;

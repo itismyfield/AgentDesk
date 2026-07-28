@@ -1683,8 +1683,13 @@ mod presleep_tests {
                         )
                         .await;
                         assert!(requeue.enqueued, "race-loss path requeues the message");
-                        mailbox_abandon_pending_dispatch(&shared, &provider, channel, requeued_msg)
-                            .await;
+                        let _ = mailbox_abandon_pending_dispatch(
+                            &shared,
+                            &provider,
+                            channel,
+                            requeued_msg,
+                        )
+                        .await;
                         schedule_race_loss_requeue_post_enqueue_idle_recheck(
                             shared.clone(),
                             provider.clone(),
@@ -1877,7 +1882,10 @@ mod presleep_tests {
         shared
             .mailbox(channel_id)
             .replace_queue(
-                vec![user_intervention(queued_msg.get(), "queued during transition")],
+                vec![user_intervention(
+                    queued_msg.get(),
+                    "queued during transition",
+                )],
                 queue_persistence_context(&shared, &provider, channel_id),
             )
             .await;
@@ -2029,7 +2037,7 @@ mod presleep_tests {
         ))
         .await;
         assert!(requeue.enqueued, "race-loss requeue lands durably");
-        mailbox_abandon_pending_dispatch(&shared, &provider, channel_id, queued_msg).await;
+        let _ = mailbox_abandon_pending_dispatch(&shared, &provider, channel_id, queued_msg).await;
         schedule_race_loss_requeue_post_enqueue_idle_recheck(
             shared.clone(),
             provider.clone(),
