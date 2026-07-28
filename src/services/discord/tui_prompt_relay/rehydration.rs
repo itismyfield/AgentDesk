@@ -113,11 +113,12 @@ pub(super) fn evict_dead_orphaned_claude_tui_mirrors(shared: &Arc<SharedData>) {
         let mirror_channel =
             crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(&tmux_session_name)
                 .unwrap_or(0);
-        let permanent_loss_count = super::super::idle_relay_drift::record_confirmed_dead_orphan_loss(
-            &ProviderKind::Claude,
-            &tmux_session_name,
-            mirror_channel,
-        );
+        let permanent_loss_count =
+            super::super::idle_relay_drift::record_confirmed_dead_orphan_loss(
+                &ProviderKind::Claude,
+                &tmux_session_name,
+                mirror_channel,
+            );
         if crate::services::tui_prompt_dedupe::evict_dead_tmux_mirror(&tmux_session_name) {
             tracing::warn!(
                 tmux_session_name = %tmux_session_name,
@@ -161,11 +162,12 @@ fn evict_dead_orphaned_codex_tui_mirrors(shared: &Arc<SharedData>) {
         let mirror_channel =
             crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(&tmux_session_name)
                 .unwrap_or(0);
-        let permanent_loss_count = super::super::idle_relay_drift::record_confirmed_dead_orphan_loss(
-            &ProviderKind::Codex,
-            &tmux_session_name,
-            mirror_channel,
-        );
+        let permanent_loss_count =
+            super::super::idle_relay_drift::record_confirmed_dead_orphan_loss(
+                &ProviderKind::Codex,
+                &tmux_session_name,
+                mirror_channel,
+            );
         if crate::services::tui_prompt_dedupe::evict_dead_tmux_mirror(&tmux_session_name) {
             tracing::warn!(
                 tmux_session_name = %tmux_session_name,
