@@ -397,15 +397,23 @@ assert_invalid_routine_source() {
 }
 
 assert_invalid_routine_source block-comment \
-    '/* agentdesk.routines.register({}); */ module.exports = {};'
+    '/* agentdesk.routines.register({ tick() { return { action: "complete" }; } }); */ module.exports = {};'
 assert_invalid_routine_source string \
-    'const marker = "agentdesk.routines.register({})"; module.exports = {};'
+    'const marker = "agentdesk.routines.register({ tick() {} })"; module.exports = {};'
 assert_invalid_routine_source template \
-    'const marker = `agentdesk.routines.register({})`; module.exports = {};'
+    'const marker = `agentdesk.routines.register({ tick() {} })`; module.exports = {};'
 assert_invalid_routine_source nested \
-    'function later() { agentdesk.routines.register({}); }'
+    'function later() { agentdesk.routines.register({ tick() { return { action: "complete" }; } }); }'
 assert_invalid_routine_source malformed-tail \
-    'agentdesk.routines.register({}); function broken() {'
+    'agentdesk.routines.register({ tick() { return { action: "complete" }; } }); function broken() {'
+assert_invalid_routine_source shadowed-agentdesk \
+    'const agentdesk = { routines: { register() {} } }; agentdesk.routines.register({ name: "fake", tick() { return { action: "complete" }; } });'
+assert_invalid_routine_source empty-register \
+    'agentdesk.routines.register();'
+assert_invalid_routine_source missing-tick \
+    'agentdesk.routines.register({ name: "missing" });'
+assert_invalid_routine_source noncallable-tick \
+    'agentdesk.routines.register({ name: "primitive", tick: true });'
 EMPTY_ROOT="$TMP_ROOT/lexer-empty"
 mkdir -p "$EMPTY_ROOT/routines"
 seed_required_helpers "$EMPTY_ROOT/routine-helpers" 'empty'
@@ -419,6 +427,12 @@ printf '%s\n' \
     '/* agentdesk.routines.register({}); */' \
     'agentdesk.routines.register({ name: "real", tick() { return { action: "complete" }; } });' \
     > "$VALID_ROOT/routines/valid.js"
+printf '%s\n' \
+    'agentdesk.routines.register({ name: "function", tick: function(ctx) { return { action: "complete" }; } });' \
+    > "$VALID_ROOT/routines/function-value.js"
+printf '%s\n' \
+    'agentdesk.routines.register({ name: "arrow", tick: (ctx) => ({ action: "complete" }) });' \
+    > "$VALID_ROOT/routines/arrow-value.js"
 adk_validate_repo_routine_assets "$VALID_ROOT"
 printf '%s\n' 'const decoy = "agentdesk.routines.register({})";' \
     > "$VALID_ROOT/routines/second-invalid.js"
