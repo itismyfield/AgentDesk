@@ -452,7 +452,10 @@ fn merge_confirmed_frontier(
 #[derive(Clone, Copy)]
 enum EqualRangeAnchorPolicy {
     PreserveExisting,
-    ReplaceProvenGone,
+    ReplaceProvenGone {
+        expected_panel_channel_id: u64,
+        expected_panel_msg_id: u64,
+    },
 }
 
 fn write_confirmed_frontier_guarded_at_with_before_lock(
@@ -485,23 +488,35 @@ fn write_confirmed_frontier_guarded_at_with_before_lock(
     }
 
     let mut record = read_record_at(path).unwrap_or_default();
-    let replace_equal_range_anchor = matches!(
-        equal_range_anchor_policy,
-        EqualRangeAnchorPolicy::ReplaceProvenGone
-    ) && frontier.panel_msg_id.is_some()
-        && frontier.panel_channel_id.is_some()
-        && record.delivered_frontier.as_ref().is_some_and(|existing| {
-            existing.generation_mtime_ns == frontier.generation_mtime_ns
-                && existing.range == frontier.range
-        });
-    record.delivered_frontier = Some(if replace_equal_range_anchor {
-        // The caller has already proved this exact recorded anchor gone. This is
-        // the sole equal-END replacement exception; a different range still goes
-        // through the ordinary highest-END whole-commit merge below.
-        frontier
-    } else {
-        merge_confirmed_frontier(record.delivered_frontier.as_ref(), frontier)
-    });
+    match equal_range_anchor_policy {
+        EqualRangeAnchorPolicy::PreserveExisting => {
+            record.delivered_frontier = Some(merge_confirmed_frontier(
+                record.delivered_frontier.as_ref(),
+                frontier,
+            ));
+        }
+        EqualRangeAnchorPolicy::ReplaceProvenGone {
+            expected_panel_channel_id,
+            expected_panel_msg_id,
+        } => {
+            let expected_anchor_still_current =
+                record.delivered_frontier.as_ref().is_some_and(|existing| {
+                    existing.generation_mtime_ns == frontier.generation_mtime_ns
+                        && existing.range == frontier.range
+                        && existing.panel_channel_id == Some(expected_panel_channel_id)
+                        && existing.panel_msg_id == Some(expected_panel_msg_id)
+                });
+            if expected_anchor_still_current
+                && frontier.panel_msg_id.is_some()
+                && frontier.panel_channel_id.is_some()
+            {
+                // The exact anchor proved gone is still current under this lock.
+                // Any concurrent re-anchor makes the comparison fail and leaves
+                // that newer whole commit untouched.
+                record.delivered_frontier = Some(frontier);
+            }
+        }
+    }
 
     if let Some(receipt) = receipt {
         // A delayed, lower-range receipt remains exact proof for its own restored
@@ -575,15 +590,35 @@ pub(in crate::services::discord) fn write_proven_gone_equal_range_frontier(
     provider: &ProviderKind,
     channel_id: u64,
     tmux_session_name: &str,
+    expected_gone_anchor: (u64, u64),
     frontier: DeliveredCommit,
 ) -> Result<(), String> {
-    write_confirmed_frontier_guarded_at_with_before_lock(
+    write_proven_gone_equal_range_frontier_at_with_before_lock(
         &record_path_or_err(provider, channel_id)?,
+        tmux_session_name,
+        expected_gone_anchor,
+        frontier,
+        || {},
+    )
+}
+
+fn write_proven_gone_equal_range_frontier_at_with_before_lock(
+    path: &Path,
+    tmux_session_name: &str,
+    expected_gone_anchor: (u64, u64),
+    frontier: DeliveredCommit,
+    before_lock: impl FnOnce(),
+) -> Result<(), String> {
+    write_confirmed_frontier_guarded_at_with_before_lock(
+        path,
         tmux_session_name,
         frontier,
         None,
-        EqualRangeAnchorPolicy::ReplaceProvenGone,
-        || {},
+        EqualRangeAnchorPolicy::ReplaceProvenGone {
+            expected_panel_channel_id: expected_gone_anchor.0,
+            expected_panel_msg_id: expected_gone_anchor.1,
+        },
+        before_lock,
     )
 }
 
@@ -3860,6 +3895,80 @@ mod tests {
 
         assert!(stale_writer.join().expect("join legacy writer").is_err());
         assert_eq!(read_record_at(&path), Some(current_record));
+    }
+
+    #[test]
+    fn proven_gone_reanchor_blocked_writer_preserves_concurrent_anchor_swap_4911() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Claude;
+        let owner = 4_911_661;
+        let tmux = "AgentDesk-claude-phase-a-r5-reanchor-race";
+        let generation = set_phase_a_generation(tmux, 1_700_491_661);
+        let path = record_path_or_err(&provider, owner).expect("record path");
+        let range = (100, 300);
+        let gone_anchor = (4_911_662, 4_911_663);
+        write_delivered_frontier(
+            &provider,
+            owner,
+            tmux,
+            DeliveredCommit {
+                range,
+                generation_mtime_ns: generation,
+                attempts: 1,
+                panel_channel_id: Some(gone_anchor.0),
+                panel_msg_id: Some(gone_anchor.1),
+            },
+        )
+        .expect("seed anchor later proved gone");
+
+        let held_lock = lock_record_path(&path).expect("hold record lock");
+        let stale_path = path.clone();
+        let stale_tmux = tmux.to_string();
+        let (about_to_lock_tx, about_to_lock_rx) = std::sync::mpsc::channel();
+        let stale_writer = std::thread::spawn(move || {
+            write_proven_gone_equal_range_frontier_at_with_before_lock(
+                &stale_path,
+                &stale_tmux,
+                gone_anchor,
+                DeliveredCommit {
+                    range,
+                    generation_mtime_ns: generation,
+                    attempts: 2,
+                    panel_channel_id: Some(4_911_664),
+                    panel_msg_id: Some(4_911_665),
+                },
+                || about_to_lock_tx.send(()).expect("signal lock attempt"),
+            )
+        });
+        about_to_lock_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("re-anchor writer reached record lock");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!stale_writer.is_finished(), "re-anchor writer must block");
+
+        let swapped_frontier = DeliveredCommit {
+            range,
+            generation_mtime_ns: generation,
+            attempts: 3,
+            panel_channel_id: Some(4_911_666),
+            panel_msg_id: Some(4_911_667),
+        };
+        let swapped_record = DeliveryRecord {
+            delivered_frontier: Some(swapped_frontier),
+            ..DeliveryRecord::default()
+        };
+        write_record_at(&path, &swapped_record).expect("install concurrent anchor swap");
+        drop(held_lock);
+
+        stale_writer
+            .join()
+            .expect("join re-anchor writer")
+            .expect("anchor mismatch is a conservative no-op");
+        assert_eq!(
+            read_record_at(&path),
+            Some(swapped_record),
+            "the under-lock anchor CAS must preserve the concurrent whole commit"
+        );
     }
 
     #[test]

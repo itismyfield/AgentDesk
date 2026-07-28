@@ -600,9 +600,7 @@ pub(in crate::services::discord) fn apply_watcher_short_replace_result(
 /// is `(watcher_lease_start, watcher_lease_end)` — the SAME offset range the lease
 /// committed and `confirmed_end_offset` advanced to (never mix offset spaces).
 /// Delegates to the shared `dr::record_long_chunk_terminal_delivery` (PR-1c) with
-/// `watcher_owner_channel_id == delivery_channel_id == channel_id`; the delivered
-/// frontier still obeys the shadow flag, while #4081 records the confirmed body
-/// fingerprint for degenerate-key duplicate refusal.
+/// `watcher_owner_channel_id == delivery_channel_id == channel_id`.
 pub(in crate::services::discord) fn record_watcher_long_chunk_terminal_delivery(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -611,12 +609,14 @@ pub(in crate::services::discord) fn record_watcher_long_chunk_terminal_delivery(
     last_chunk_anchor_msg_id: Option<u64>,
     delivered_body: &str,
 ) {
+    let tmux = shared.tmux_watchers.channel_binding(&channel_id);
     dr::record_long_chunk_terminal_delivery(
         shared,
         provider,
         channel_id,
         channel_id,
-        None,
+        tmux.as_ref()
+            .map(|binding| binding.tmux_session_name.as_str()),
         range,
         last_chunk_anchor_msg_id,
         delivered_body,

@@ -549,6 +549,77 @@ fn long_chunk_delivery_fingerprint_refuses_phantom_rerelay_4081() {
     );
 }
 
+#[test]
+fn watcher_long_chunk_wrapper_uses_active_binding_after_inflight_clear_4911() {
+    let temp = tempfile::TempDir::new().expect("temp runtime root");
+    let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let provider = ProviderKind::Codex;
+    let channel = poise::serenity_prelude::ChannelId::new(7_491_101);
+    let tmux = "AgentDesk-codex-phase-a-r5-watcher-binding";
+    crate::services::discord::register_resume_watcher_for_tests(&shared, channel, tmux);
+
+    let generation_path = crate::services::tmux_common::session_temp_path(tmux, "generation");
+    std::fs::create_dir_all(std::path::Path::new(&generation_path).parent().unwrap()).unwrap();
+    std::fs::write(&generation_path, "r5-current").unwrap();
+    filetime::set_file_mtime(
+        &generation_path,
+        filetime::FileTime::from_unix_time(1_700_491_101, 123),
+    )
+    .unwrap();
+    let generation =
+        crate::services::discord::outbound::delivery_record::current_generation_mtime_ns(tmux);
+    let coord = shared.tmux_relay_coord(channel);
+    coord
+        .confirmed_end_generation_mtime_ns
+        .store(generation, std::sync::atomic::Ordering::Release);
+    coord
+        .confirmed_end_offset
+        .store(128, std::sync::atomic::Ordering::Release);
+
+    // No inflight row exists. The active watcher binding supplies only the
+    // receipt-less incarnation fallback; exact receipt creation remains empty.
+    super::super::terminal_send::record_watcher_long_chunk_terminal_delivery(
+        &shared,
+        &provider,
+        channel,
+        (0, 128),
+        Some(7_491_102),
+        "confirmed long response",
+    );
+    let before =
+        crate::services::discord::outbound::delivery_record::read_record(&provider, channel.get())
+            .expect("watcher wrapper persisted receipt-less frontier");
+    assert_eq!(before.delivered_frontier.as_ref().unwrap().range, (0, 128));
+    assert!(before.confirmed_deliveries.is_empty());
+
+    filetime::set_file_mtime(
+        &generation_path,
+        filetime::FileTime::from_unix_time(1_700_491_102, 123),
+    )
+    .unwrap();
+    assert_ne!(
+        generation,
+        crate::services::discord::outbound::delivery_record::current_generation_mtime_ns(tmux)
+    );
+    super::super::terminal_send::record_watcher_long_chunk_terminal_delivery(
+        &shared,
+        &provider,
+        channel,
+        (0, 256),
+        Some(7_491_103),
+        "stale long response",
+    );
+    let after =
+        crate::services::discord::outbound::delivery_record::read_record(&provider, channel.get())
+            .expect("delivery record survives stale wrapper call");
+    assert_eq!(
+        after.delivered_frontier, before.delivered_frontier,
+        "stale coord generation must reject the frontier despite an active binding"
+    );
+    assert!(after.confirmed_deliveries.is_empty());
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn live_long_chunk_delivery_fingerprint_uses_raw_body_4081() {
     use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
