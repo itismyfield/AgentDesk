@@ -276,6 +276,80 @@ adk_recover_active_routine_asset_transaction "$FAULT_RUNTIME"
     || fail_test 'preserved active-marker failure pair did not recover cleanly'
 release_runtime_lock
 
+# Closing authority is ordered marker-unlink -> parent fsync -> transaction
+# deletion. A post-unlink fsync fault must retain the transaction tree, while a
+# successful retry path records the marker removal before the tree removal.
+CLOSE_FAULT_RUNTIME="$TMP_ROOT/close-marker-fsync-fault"
+acquire_runtime_lock "$CLOSE_FAULT_RUNTIME"
+CLOSE_FAULT_TXN="$(
+    adk_begin_routine_asset_transaction "$CLOSE_FAULT_RUNTIME" "$CURRENT_LOCK"
+)"
+export ADK_ROUTINE_ASSET_TEST_FAIL_AFTER_REMOVE_LABEL=active-marker
+set +e
+adk_abort_routine_asset_transaction \
+    "$CLOSE_FAULT_RUNTIME" "$CLOSE_FAULT_TXN" \
+    >/dev/null 2>"$TMP_ROOT/close-marker-fsync-fault.err"
+CLOSE_FAULT_STATUS=$?
+set -e
+unset ADK_ROUTINE_ASSET_TEST_FAIL_AFTER_REMOVE_LABEL
+[ "$CLOSE_FAULT_STATUS" -ne 0 ] \
+    && [ ! -e "$CLOSE_FAULT_RUNTIME/runtime/routine-assets.active" ] \
+    && [ -d "$CLOSE_FAULT_TXN" ] \
+    && [ "$(<"$CLOSE_FAULT_TXN/phase")" = rolled-back ] \
+    || fail_test 'active marker fsync fault deleted its recovery transaction'
+adk_durable_remove_path "$CLOSE_FAULT_TXN" required close-fault-orphan
+release_runtime_lock
+
+CLOSE_RUNTIME="$TMP_ROOT/close-order"
+CLOSE_TRACE="$TMP_ROOT/close-order.log"
+acquire_runtime_lock "$CLOSE_RUNTIME"
+CLOSE_TXN="$(adk_begin_routine_asset_transaction "$CLOSE_RUNTIME" "$CURRENT_LOCK")"
+: > "$CLOSE_TRACE"
+ADK_ROUTINE_ASSET_DURABILITY_TRACE_FILE="$CLOSE_TRACE" \
+    adk_abort_routine_asset_transaction "$CLOSE_RUNTIME" "$CLOSE_TXN"
+CLOSE_MARKER_LINE="$(awk '/remove:active-marker:parent/ { print NR; exit }' "$CLOSE_TRACE")"
+CLOSE_TXN_LINE="$(awk '/remove:transaction-root:parent/ { print NR; exit }' "$CLOSE_TRACE")"
+[ -n "$CLOSE_MARKER_LINE" ] && [ -n "$CLOSE_TXN_LINE" ] \
+    && [ "$CLOSE_MARKER_LINE" -lt "$CLOSE_TXN_LINE" ] \
+    || fail_test 'transaction tree deletion preceded durable active-marker unlink'
+release_runtime_lock
+
+# Executable input binding includes every root compile input while excluding
+# machine-local Python bytecode consistently across every recursively walked
+# input root.
+EXEC_INPUT_ROOT="$TMP_ROOT/executable-inputs"
+mkdir -p "$EXEC_INPUT_ROOT/src" "$EXEC_INPUT_ROOT/migrations/postgres" \
+    "$EXEC_INPUT_ROOT/.cargo"
+printf '[package]\nname="digest-fixture"\nversion="0.1.0"\n' \
+    > "$EXEC_INPUT_ROOT/Cargo.toml"
+printf '# lock\n' > "$EXEC_INPUT_ROOT/Cargo.lock"
+printf '{}\n' > "$EXEC_INPUT_ROOT/defaults.json"
+printf 'pub fn fixture() {}\n' > "$EXEC_INPUT_ROOT/src/lib.rs"
+printf '%s\n' '-- migration' \
+    > "$EXEC_INPUT_ROOT/migrations/postgres/0100_fixture.sql"
+EXEC_INPUT_BASE="$(adk_executable_input_digest "$EXEC_INPUT_ROOT")"
+printf '{"changed":true}\n' > "$EXEC_INPUT_ROOT/defaults.json"
+[ "$(adk_executable_input_digest "$EXEC_INPUT_ROOT")" != "$EXEC_INPUT_BASE" ] \
+    || fail_test 'root defaults.json was omitted from executable input binding'
+printf '{}\n' > "$EXEC_INPUT_ROOT/defaults.json"
+mkdir -p "$EXEC_INPUT_ROOT/src/__pycache__" \
+    "$EXEC_INPUT_ROOT/migrations/postgres/__pycache__" \
+    "$EXEC_INPUT_ROOT/.cargo/__pycache__"
+printf 'src-bytecode-v1\n' > "$EXEC_INPUT_ROOT/src/probe.pyc"
+printf 'migration-bytecode-v1\n' \
+    > "$EXEC_INPUT_ROOT/migrations/postgres/__pycache__/probe.pyc"
+printf 'cargo-bytecode-v1\n' \
+    > "$EXEC_INPUT_ROOT/.cargo/__pycache__/probe.pyc"
+[ "$(adk_executable_input_digest "$EXEC_INPUT_ROOT")" = "$EXEC_INPUT_BASE" ] \
+    || fail_test 'executable input binding included machine-local bytecode'
+printf 'src-bytecode-v2\n' > "$EXEC_INPUT_ROOT/src/probe.pyc"
+printf 'migration-bytecode-v2\n' \
+    > "$EXEC_INPUT_ROOT/migrations/postgres/__pycache__/probe.pyc"
+printf 'cargo-bytecode-v2\n' \
+    > "$EXEC_INPUT_ROOT/.cargo/__pycache__/probe.pyc"
+[ "$(adk_executable_input_digest "$EXEC_INPUT_ROOT")" = "$EXEC_INPUT_BASE" ] \
+    || fail_test 'bytecode content drift changed executable input binding'
+
 # Unique stages preserve operator assets, exact tombstones, and root mode.
 SOURCE_ROOT="$TMP_ROOT/repo-v1"
 RUNTIME_ROOT="$TMP_ROOT/release-v0"
@@ -690,19 +764,12 @@ begin_staged_transaction "$GEN_V2_SOURCE" "$GEN_RUNTIME"
 V2_TXN="$CURRENT_TXN"
 adk_promote_routine_asset_transaction "$GEN_RUNTIME" "$V2_TXN"
 
-COMMIT_FAIL_PATH="$GEN_RUNTIME/routine-helpers.old"
-rm() {
-    local arg
-    for arg in "$@"; do
-        [ "$arg" != "$COMMIT_FAIL_PATH" ] || return 76
-    done
-    command rm "$@"
-}
+export ADK_ROUTINE_ASSET_TEST_FAIL_BEFORE_REMOVE_LABEL=commit-routine-helpers-old
 set +e
 adk_commit_routine_asset_transaction "$GEN_RUNTIME" "$V2_TXN"
 COMMIT_FAIL_STATUS=$?
 set -e
-unset -f rm
+unset ADK_ROUTINE_ASSET_TEST_FAIL_BEFORE_REMOVE_LABEL
 [ "$COMMIT_FAIL_STATUS" -ne 0 ] \
     && [ "$(<"$GEN_RUNTIME/routines/generation-marker")" = 'v2' ] \
     && [ "$(<"$GEN_RUNTIME/routines.old/generation-marker")" = 'v1' ] \
@@ -713,20 +780,14 @@ release_runtime_lock
 # First recovery attempt fails the same cleanup again and must not manufacture
 # or promote a new stage. The retry succeeds and bases v3 on authoritative v2.
 acquire_runtime_lock "$GEN_RUNTIME"
-rm() {
-    local arg
-    for arg in "$@"; do
-        [ "$arg" != "$COMMIT_FAIL_PATH" ] || return 77
-    done
-    command rm "$@"
-}
+export ADK_ROUTINE_ASSET_TEST_FAIL_BEFORE_REMOVE_LABEL=commit-routine-helpers-old
 set +e
 FAILED_BEGIN="$(
     adk_begin_routine_asset_transaction "$GEN_RUNTIME" "$CURRENT_LOCK"
 )"
 FAILED_BEGIN_STATUS=$?
 set -e
-unset -f rm
+unset ADK_ROUTINE_ASSET_TEST_FAIL_BEFORE_REMOVE_LABEL
 [ "$FAILED_BEGIN_STATUS" -ne 0 ] && [ -z "$FAILED_BEGIN" ] \
     && [ "$(<"$GEN_RUNTIME/routines/generation-marker")" = 'v2' ] \
     || fail_test 'failed committing recovery changed authoritative live v2'
@@ -756,23 +817,13 @@ seed_source "$SIGNAL_SOURCE" 'v1'
 acquire_runtime_lock "$SIGNAL_RUNTIME"
 begin_staged_transaction "$SIGNAL_SOURCE" "$SIGNAL_RUNTIME"
 SIGNAL_TXN="$CURRENT_TXN"
-SIGNAL_FROM="$SIGNAL_RUNTIME/routines"
-SIGNAL_TO="$SIGNAL_RUNTIME/routines.old"
-SAW_DURABLE_ARM=0
-mv() {
-    if [ "$#" -eq 2 ] && [ "$1" = "$SIGNAL_FROM" ] && [ "$2" = "$SIGNAL_TO" ]; then
-        [ "$(<"$SIGNAL_TXN/phase")" = 'armed' ] && SAW_DURABLE_ARM=1
-        command mv "$@"
-        return 143
-    fi
-    command mv "$@"
-}
+export ADK_ROUTINE_ASSET_TEST_FAIL_AFTER_RENAME_LABEL=promote-routines-live-to-old
 set +e
 adk_promote_routine_asset_transaction "$SIGNAL_RUNTIME" "$SIGNAL_TXN"
 SIGNAL_STATUS=$?
 set -e
-unset -f mv
-[ "$SIGNAL_STATUS" -ne 0 ] && [ "$SAW_DURABLE_ARM" = 1 ] \
+unset ADK_ROUTINE_ASSET_TEST_FAIL_AFTER_RENAME_LABEL
+[ "$SIGNAL_STATUS" -ne 0 ] \
     && [ ! -e "$SIGNAL_RUNTIME/routines" ] \
     && [ "$(<"$SIGNAL_RUNTIME/routines.old/generation-marker")" = 'v0' ] \
     && [ "$(<"$SIGNAL_TXN/phase")" = 'armed' ] \
@@ -795,20 +846,12 @@ acquire_runtime_lock "$RETRY_RUNTIME"
 begin_staged_transaction "$RETRY_SOURCE" "$RETRY_RUNTIME"
 RETRY_TXN="$CURRENT_TXN"
 adk_promote_routine_asset_transaction "$RETRY_RUNTIME" "$RETRY_TXN"
-ROLLBACK_FAIL_FROM="$RETRY_RUNTIME/routines.old"
-ROLLBACK_FAIL_TO="$RETRY_RUNTIME/routines"
-mv() {
-    if [ "$#" -eq 2 ] && [ "$1" = "$ROLLBACK_FAIL_FROM" ] \
-      && [ "$2" = "$ROLLBACK_FAIL_TO" ]; then
-        return 78
-    fi
-    command mv "$@"
-}
+export ADK_ROUTINE_ASSET_TEST_FAIL_BEFORE_RENAME_LABEL=rollback-routines-old-to-live
 set +e
 adk_rollback_routine_asset_transaction "$RETRY_RUNTIME" "$RETRY_TXN"
 RETRY_FAIL_STATUS=$?
 set -e
-unset -f mv
+unset ADK_ROUTINE_ASSET_TEST_FAIL_BEFORE_RENAME_LABEL
 [ "$RETRY_FAIL_STATUS" -ne 0 ] \
     && [ "$(<"$RETRY_RUNTIME/routines/generation-marker")" = 'v1' ] \
     && [ "$(<"$RETRY_RUNTIME/routines.old/generation-marker")" = 'v0' ] \
@@ -2124,29 +2167,87 @@ eval "$(extract_function validate_local_build_generation_manifest \
     printf '[package]\nname="fixture"\nversion="0.1.0"\n' \
         > "$PROJECT_DIR/Cargo.toml"
     printf '# fixture lock\n' > "$PROJECT_DIR/Cargo.lock"
+    printf '{}\n' > "$PROJECT_DIR/defaults.json"
     printf 'fn main() {}\n' > "$PROJECT_DIR/build.rs"
     printf 'pub fn fixture() {}\n' > "$PROJECT_DIR/src/lib.rs"
     printf '%s\n' '-- fixture migration' \
         > "$PROJECT_DIR/migrations/postgres/0100_fixture.sql"
     git -C "$PROJECT_DIR" init -q
     git -C "$PROJECT_DIR" -c user.name=AgentDesk -c user.email=agentdesk@example.invalid \
-        add .gitignore Cargo.toml Cargo.lock build.rs src migrations routines routine-helpers
+        add .gitignore Cargo.toml Cargo.lock defaults.json build.rs src migrations routines routine-helpers
     git -C "$PROJECT_DIR" -c user.name=AgentDesk -c user.email=agentdesk@example.invalid \
         commit -qm 'fixture generation'
     BUILD_SOURCE_SHA="$(git -C "$PROJECT_DIR" rev-parse HEAD)"
     BUILD_INPUT_SHA="$(adk_executable_input_digest "$PROJECT_DIR")"
+    BUILD_BINARY_SHA="$(adk_sha256_file \
+        "$PROJECT_DIR/target/release/agentdesk")"
+    BUILD_ROUTINES_SHA="$(adk_sha256_tree "$PROJECT_DIR/routines")"
+    BUILD_HELPERS_SHA="$(adk_sha256_tree "$PROJECT_DIR/routine-helpers")"
     (
         cd "$PROJECT_DIR/dist"
         write_local_build_generation_manifest \
             "$PROJECT_DIR/target/release/agentdesk" "$BUILD_SOURCE_SHA" \
-            "$BUILD_INPUT_SHA"
+            "$BUILD_INPUT_SHA" "$BUILD_BINARY_SHA" \
+            "$BUILD_ROUTINES_SHA" "$BUILD_HELPERS_SHA"
     )
     error() { :; }
     validate_local_build_generation_manifest
+
+    # Retained manifest hashes must reject bytes changed after validation, both
+    # in the actual binary copy and in repository-owned staged projections.
+    TOCTOU_BINARY_BACKUP="$PROJECT_DIR/target/release/agentdesk.bound"
+    TOCTOU_BINARY_STAGE="$PROJECT_DIR/target/release/agentdesk.toctou"
+    cp "$PROJECT_DIR/target/release/agentdesk" "$TOCTOU_BINARY_BACKUP"
+    printf '# post-validation mutation\n' \
+        >> "$PROJECT_DIR/target/release/agentdesk"
+    cp "$PROJECT_DIR/target/release/agentdesk" "$TOCTOU_BINARY_STAGE"
+    if adk_verify_file_sha256 \
+        "$TOCTOU_BINARY_STAGE" "$DEPLOY_EXPECTED_BINARY_SHA"; then
+        exit 101
+    fi
+    cp "$TOCTOU_BINARY_BACKUP" "$PROJECT_DIR/target/release/agentdesk"
+    rm -f "$TOCTOU_BINARY_BACKUP" "$TOCTOU_BINARY_STAGE"
+    validate_local_build_generation_manifest
+
+    TOCTOU_RUNTIME="$TMP_ROOT/local-build-toctou-runtime"
+    acquire_runtime_lock "$TOCTOU_RUNTIME"
+    TOCTOU_TXN="$(
+        adk_begin_routine_asset_transaction "$TOCTOU_RUNTIME" "$CURRENT_LOCK"
+    )"
+    printf '%s\n' '// post-validation routine mutation' \
+        >> "$PROJECT_DIR/routines/monitoring/bundled.js"
+    printf '%s\n' '# post-validation helper mutation' \
+        >> "$PROJECT_DIR/routine-helpers/monitoring/weekly_churn_audit.py"
+    adk_stage_routines "$PROJECT_DIR" "$TOCTOU_RUNTIME" "$TOCTOU_TXN" \
+        >/dev/null
+    adk_stage_routine_helpers \
+        "$PROJECT_DIR" "$TOCTOU_RUNTIME" "$TOCTOU_TXN" >/dev/null
+    if adk_verify_staged_tree_projection \
+        "$PROJECT_DIR/routines" \
+        "$TOCTOU_TXN/staged/release-root/routines" \
+        "$DEPLOY_EXPECTED_ROUTINES_SHA"; then
+        exit 102
+    fi
+    if adk_verify_staged_tree_projection \
+        "$PROJECT_DIR/routine-helpers" \
+        "$TOCTOU_TXN/staged/release-root/routine-helpers" \
+        "$DEPLOY_EXPECTED_HELPERS_SHA"; then
+        exit 103
+    fi
+    adk_abort_routine_asset_transaction "$TOCTOU_RUNTIME" "$TOCTOU_TXN"
+    release_runtime_lock
+    git -C "$PROJECT_DIR" show HEAD:routines/monitoring/bundled.js \
+        > "$PROJECT_DIR/routines/monitoring/bundled.js"
+    git -C "$PROJECT_DIR" show \
+        HEAD:routine-helpers/monitoring/weekly_churn_audit.py \
+        > "$PROJECT_DIR/routine-helpers/monitoring/weekly_churn_audit.py"
+    validate_local_build_generation_manifest
+
     printf 'pub fn fixture() { panic!("dirty"); }\n' > "$PROJECT_DIR/src/lib.rs"
     if write_local_build_generation_manifest \
         "$PROJECT_DIR/target/release/agentdesk" "$BUILD_SOURCE_SHA" \
-        "$BUILD_INPUT_SHA" \
+        "$BUILD_INPUT_SHA" "$BUILD_BINARY_SHA" \
+        "$BUILD_ROUTINES_SHA" "$BUILD_HELPERS_SHA" \
         >/dev/null 2>&1; then
         exit 95
     fi
@@ -2186,7 +2287,8 @@ eval "$(extract_function validate_local_build_generation_manifest \
         commit -qm 'clean head drift'
     if write_local_build_generation_manifest \
         "$PROJECT_DIR/target/release/agentdesk" "$BUILD_SOURCE_SHA" \
-        "$BUILD_INPUT_SHA" \
+        "$BUILD_INPUT_SHA" "$BUILD_BINARY_SHA" \
+        "$BUILD_ROUTINES_SHA" "$BUILD_HELPERS_SHA" \
         >/dev/null 2>&1; then
         exit 97
     fi
@@ -2221,7 +2323,7 @@ DEPLOY_STOP_LINE="$(awk '/^stop_deploy_service_for_promotion \\/ { print NR; exi
     "$REPO_ROOT/scripts/deploy.sh")"
 DEPLOY_PREFLIGHT_LINE="$(awk '/^adk_validate_staged_routine_asset_transaction \\/ { print NR; exit }' \
     "$REPO_ROOT/scripts/deploy.sh")"
-DEPLOY_BINARY_LINE="$(awk '/^mv -f "\$DEPLOY_BINARY_STAGE" "\$REAL_BIN"/ { print NR; exit }' \
+DEPLOY_BINARY_LINE="$(awk '/^adk_durable_rename_path "\$DEPLOY_BINARY_STAGE" "\$REAL_BIN"/ { print NR; exit }' \
     "$REPO_ROOT/scripts/deploy.sh")"
 DEPLOY_ASSET_LINE="$(awk '/^adk_promote_routine_asset_transaction \\/ { print NR; exit }' \
     "$REPO_ROOT/scripts/deploy.sh")"
@@ -2251,8 +2353,10 @@ RELEASE_MIGRATION_LINE="$(awk '/^_migrate_pg_tunnel_before_release_stop$/ { prin
     "$REPO_ROOT/scripts/deploy-release.sh")"
 RELEASE_STOP_LINE="$(awk '/^if ! _stop_release_for_promotion; then/ { print NR; exit }' \
     "$REPO_ROOT/scripts/deploy-release.sh")"
-RELEASE_PROMOTE_LINE="$(awk '/^if ! adk_promote_routine_asset_transaction \\/ { print NR; exit }' \
-    "$REPO_ROOT/scripts/deploy-release.sh")"
+RELEASE_PROMOTE_LINE="$(awk '
+    /^echo "▸ Promoting routine asset transaction\.\.\."/ { section = 1 }
+    section && /adk_promote_routine_asset_transaction \\/ { print NR; exit }
+' "$REPO_ROOT/scripts/deploy-release.sh")"
 [ -n "$RELEASE_PREFLIGHT_LINE" ] \
     && [ "$RELEASE_PREFLIGHT_LINE" -lt "$RELEASE_MIGRATION_LINE" ] \
     && [ "$RELEASE_PREFLIGHT_LINE" -lt "$RELEASE_STOP_LINE" ] \

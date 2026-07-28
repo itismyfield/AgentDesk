@@ -138,6 +138,12 @@ CODESIGN_KEYCHAIN_UNLOCKED=0
 RESOLVED_RELEASE_SIGNING_MODE=""
 DASHBOARD_SOURCE=""
 STAGED_BINARY=""
+DEPLOY_EXPECTED_SOURCE_SHA=""
+DEPLOY_EXPECTED_INPUTS_SHA=""
+DEPLOY_EXPECTED_BINARY_SHA=""
+DEPLOY_EXPECTED_ROUTINES_SHA=""
+DEPLOY_EXPECTED_HELPERS_SHA=""
+DEPLOY_SIGNED_CANDIDATE_SHA=""
 POLICIES_STAGED=""
 ROUTINE_ASSET_TXN=""
 REL_ROLLBACK_MATERIAL_MODE=""
@@ -547,6 +553,56 @@ _sha256_tree() {
     adk_sha256_tree "$1"
 }
 
+_capture_current_deploy_generation() {
+    DEPLOY_EXPECTED_SOURCE_SHA="$(git -C "$REPO" rev-parse HEAD 2>/dev/null)" \
+        || return 1
+    DEPLOY_EXPECTED_INPUTS_SHA="$(adk_executable_input_digest "$REPO")" \
+        || return 1
+    DEPLOY_EXPECTED_BINARY_SHA="$(_sha256_file "$SOURCE_BINARY")" || return 1
+    DEPLOY_EXPECTED_ROUTINES_SHA="$(_sha256_tree "$REPO/routines")" || return 1
+    DEPLOY_EXPECTED_HELPERS_SHA="$(_sha256_tree "$REPO/routine-helpers")" \
+        || return 1
+    DEPLOY_EXECUTABLE_INPUT_SHA="$DEPLOY_EXPECTED_INPUTS_SHA"
+}
+
+_verify_deploy_source_asset_generation() {
+    local source_sha inputs_sha
+
+    [ -n "$DEPLOY_EXPECTED_SOURCE_SHA" ] \
+        && [ -n "$DEPLOY_EXPECTED_INPUTS_SHA" ] \
+        && [ -n "$DEPLOY_EXPECTED_ROUTINES_SHA" ] \
+        && [ -n "$DEPLOY_EXPECTED_HELPERS_SHA" ] || return 1
+    source_sha="$(git -C "$REPO" rev-parse HEAD 2>/dev/null)" || return 1
+    inputs_sha="$(adk_executable_input_digest "$REPO")" || return 1
+    [ "$source_sha" = "$DEPLOY_EXPECTED_SOURCE_SHA" ] \
+        && [ "$inputs_sha" = "$DEPLOY_EXPECTED_INPUTS_SHA" ] \
+        && adk_verify_tree_sha256 \
+            "$REPO/routines" "$DEPLOY_EXPECTED_ROUTINES_SHA" \
+        && adk_verify_tree_sha256 \
+            "$REPO/routine-helpers" "$DEPLOY_EXPECTED_HELPERS_SHA"
+}
+
+_verify_deploy_generation_sources() {
+    [ -n "$DEPLOY_EXPECTED_BINARY_SHA" ] \
+        && _verify_deploy_source_asset_generation \
+        && adk_verify_file_sha256 \
+            "$SOURCE_BINARY" "$DEPLOY_EXPECTED_BINARY_SHA"
+}
+
+_verify_deploy_staged_asset_generation() {
+    local txn_root="$1"
+
+    _verify_deploy_source_asset_generation || return 1
+    adk_verify_staged_tree_projection \
+        "$REPO/routines" \
+        "$txn_root/staged/release-root/routines" \
+        "$DEPLOY_EXPECTED_ROUTINES_SHA" \
+        && adk_verify_staged_tree_projection \
+            "$REPO/routine-helpers" \
+            "$txn_root/staged/release-root/routine-helpers" \
+            "$DEPLOY_EXPECTED_HELPERS_SHA"
+}
+
 _validate_external_deploy_bundle() {
     [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ] || return 0
 
@@ -614,6 +670,11 @@ PY
         echo "✗ External deploy bundle manifest did not match binary/current assets" >&2
         return 1
     }
+    DEPLOY_EXPECTED_SOURCE_SHA="$source_sha"
+    DEPLOY_EXPECTED_INPUTS_SHA="$inputs_sha"
+    DEPLOY_EXPECTED_BINARY_SHA="$binary_sha"
+    DEPLOY_EXPECTED_ROUTINES_SHA="$routines_sha"
+    DEPLOY_EXPECTED_HELPERS_SHA="$helpers_sha"
     DEPLOY_EXECUTABLE_INPUT_SHA="$inputs_sha"
     echo "▸ External deploy bundle generation verified: ${source_sha:0:12}"
 }
@@ -627,7 +688,9 @@ _write_release_source_manifest() {
     local manifest_binary binary_sha routines_sha helpers_sha inputs_sha
 
     generated_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    repo_head="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
+    repo_head="${DEPLOY_EXPECTED_SOURCE_SHA:-}"
+    [ -n "$repo_head" ] \
+        || repo_head="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
     repo_branch="$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
     repo_upstream="$(git -C "$REPO" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
     repo_upstream_sha=""
@@ -651,13 +714,25 @@ _write_release_source_manifest() {
         latest_migration_sha="$(_sha256_file "$latest_migration")"
     fi
     manifest_binary="${REL_BINARY:-${SOURCE_BINARY:-}}"
-    binary_sha="$(_sha256_file "$manifest_binary")"
-    inputs_sha="$(adk_executable_input_digest "$REPO")"
+    if [ -n "${DEPLOY_SIGNED_CANDIDATE_SHA:-}" ]; then
+        adk_verify_file_sha256 \
+            "$manifest_binary" "$DEPLOY_SIGNED_CANDIDATE_SHA" || return 1
+        binary_sha="$DEPLOY_SIGNED_CANDIDATE_SHA"
+    else
+        binary_sha="$(_sha256_file "$manifest_binary")"
+    fi
+    inputs_sha="${DEPLOY_EXPECTED_INPUTS_SHA:-}"
+    [ -n "$inputs_sha" ] \
+        || inputs_sha="$(adk_executable_input_digest "$REPO")"
     # These are bundle-generation digests, so bind the repository payload that
     # travels with the binary. Operator-preserved runtime files intentionally do
     # not alter the reusable source bundle manifest.
-    routines_sha="$(_sha256_tree "$REPO/routines")"
-    helpers_sha="$(_sha256_tree "$REPO/routine-helpers")"
+    routines_sha="${DEPLOY_EXPECTED_ROUTINES_SHA:-}"
+    [ -n "$routines_sha" ] \
+        || routines_sha="$(_sha256_tree "$REPO/routines")"
+    helpers_sha="${DEPLOY_EXPECTED_HELPERS_SHA:-}"
+    [ -n "$helpers_sha" ] \
+        || helpers_sha="$(_sha256_tree "$REPO/routine-helpers")"
 
     AGENTDESK_MANIFEST_GENERATED_AT="$generated_at" \
     AGENTDESK_MANIFEST_REPO="$REPO" \
@@ -715,7 +790,8 @@ with open(path, "w", encoding="utf-8") as handle:
     json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
     handle.write("\n")
 PY
-    mv -f "$manifest_tmp" "$manifest_path"
+    adk_durable_rename_path "$manifest_tmp" "$manifest_path" \
+        release-source-manifest
     echo "▸ Release source manifest: $manifest_path"
 }
 
@@ -1325,9 +1401,13 @@ _prepare_release_rollback_generation() {
     # authority. Normalize them while the old release is still healthy.
     chflags nouchg "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP_META.tmp" \
         "$REL_BINARY_BACKUP_META" 2>/dev/null || true
-    rm -f "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP_META.tmp" || return 1
+    adk_durable_remove_path "$REL_BINARY_BACKUP.tmp" missing-ok \
+        rollback-binary-temp || return 1
+    adk_durable_remove_path "$REL_BINARY_BACKUP_META.tmp" missing-ok \
+        rollback-metadata-temp || return 1
     if [ ! -f "$REL_BINARY_BACKUP" ] && [ -f "$REL_BINARY_BACKUP_META" ]; then
-        rm -f "$REL_BINARY_BACKUP_META" || return 1
+        adk_durable_remove_path "$REL_BINARY_BACKUP_META" required \
+            rollback-orphan-metadata || return 1
     fi
 
     if [ -f "$REL_BINARY_BACKUP" ]; then
@@ -1395,7 +1475,8 @@ _prepare_release_rollback_generation() {
         REL_ROLLBACK_MATERIAL_MODE=""
         return 1
     fi
-    rm -f "$preflight_metadata" || return 1
+    adk_durable_remove_path "$preflight_metadata" missing-ok \
+        rollback-preflight-metadata || return 1
     if ! _write_rollback_backup_metadata \
         "$preflight_binary" "$preflight_metadata" "$ROUTINE_ASSET_TXN"; then
         echo "✗ Rollback metadata preflight failed before release stop" >&2
@@ -1851,6 +1932,23 @@ _finish_forward_asset_promotion() {
     esac
 }
 
+_release_listener_pid() {
+    local port="${REL_PORT:-${AGENTDESK_REL_PORT:-${ADK_DEFAULT_PORT:-8791}}}"
+    local pids
+
+    command -v lsof >/dev/null 2>&1 || return 1
+    pids="$(
+        lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null \
+            | awk '!seen[$0]++' \
+            | sed -n '1,2p'
+    )" || return 1
+    [ "$(printf '%s\n' "$pids" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 ] \
+        || return 1
+    case "$pids" in ''|*[!0-9]*|0) return 1 ;; esac
+    kill -0 "$pids" 2>/dev/null || return 1
+    printf '%s\n' "$pids"
+}
+
 _release_current_service_pid() {
     local domain pid=""
     local lock_file="${LOCK_FILE:-${ADK_REL:-}/runtime/dcserver.lock}"
@@ -1871,8 +1969,12 @@ _release_current_service_pid() {
             ;;
     esac
     case "$pid" in
-        ''|*[!0-9]*|0) return 1 ;;
+        ''|*[!0-9]*|0) pid="" ;;
     esac
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+        pid="$(_release_listener_pid 2>/dev/null || true)"
+    fi
+    case "$pid" in ''|*[!0-9]*|0) return 1 ;; esac
     printf '%s\n' "$pid"
 }
 
@@ -1964,7 +2066,8 @@ _resume_release_candidate_drain_authority() {
     [ "$live_sha" = "$expected_candidate_sha" ] || return 1
     REL_PORT="$current_port"
     if [ "$capture_state" = provisional ]; then
-        if _release_launchd_job_is_loaded; then
+        if _release_launchd_job_is_loaded \
+          || ! _release_candidate_port_refuses_connections; then
             _capture_release_candidate_process || return 1
             _release_candidate_command_matches_live_binary \
                 "$RELEASE_CANDIDATE_PID" || return 1
@@ -2097,17 +2200,18 @@ _retire_release_rollback_material() {
     [ -n "${REL_BINARY_BACKUP:-}" ] \
         && [ -n "${REL_BINARY_BACKUP_META:-}" ] || return 1
     chflags nouchg "$REL_BINARY_BACKUP" 2>/dev/null || true
-    if ! rm -f "$REL_BINARY_BACKUP" 2>/dev/null \
-      || [ -e "$REL_BINARY_BACKUP" ]; then
+    if ! adk_durable_remove_path "$REL_BINARY_BACKUP" missing-ok \
+        rollback-binary 2>/dev/null || [ -e "$REL_BINARY_BACKUP" ]; then
         return 1
     fi
-    if ! rm -f "$REL_BINARY_BACKUP_META" 2>/dev/null \
-      || [ -e "$REL_BINARY_BACKUP_META" ]; then
+    if ! adk_durable_remove_path "$REL_BINARY_BACKUP_META" missing-ok \
+        rollback-metadata 2>/dev/null || [ -e "$REL_BINARY_BACKUP_META" ]; then
         return 1
     fi
     for rollback_tmp in \
         "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP_META.tmp"; do
-        if ! rm -f "$rollback_tmp" 2>/dev/null \
+        if ! adk_durable_remove_path "$rollback_tmp" missing-ok \
+            rollback-temp 2>/dev/null \
           || [ -e "$rollback_tmp" ]; then
             return 1
         fi
@@ -2187,7 +2291,9 @@ _recover_forward_migrated_release() {
         if [ -e "$REL_BINARY" ]; then
             _set_release_binary_immutable_state "$REL_BINARY" 0 || return 1
         fi
-        mv -f "$candidate_binary" "$REL_BINARY" || return 1
+        adk_durable_rename_path "$candidate_binary" "$REL_BINARY" \
+            recovery-candidate-to-live || return 1
+        adk_verify_file_sha256 "$REL_BINARY" "$candidate_sha" || return 1
         STAGED_BINARY=""
     elif [ "$phase" = armed ]; then
         _finish_forward_asset_promotion "$txn_root" "$candidate_binary" \
@@ -2375,12 +2481,17 @@ _rollback_release_binary() {
     fi
     # mv is an atomic same-dir rename: the backup replaces the bad binary in one
     # step — at no instant are both copies gone.
-    if ! mv -f "$rel_backup" "$rel_binary"; then
+    local rollback_binary_sha
+    rollback_binary_sha="$(_sha256_file "$rel_backup")" || return 3
+    if ! adk_durable_rename_path "$rel_backup" "$rel_binary" \
+        rollback-binary-to-live; then
         echo "✗ Failed to restore previous binary from $rel_backup — manual intervention required"
         return 3
     fi
+    adk_verify_file_sha256 "$rel_binary" "$rollback_binary_sha" || return 3
     if [ -n "${REL_BINARY_BACKUP_META:-}" ]; then
-        rm -f "$REL_BINARY_BACKUP_META" 2>/dev/null || true
+        adk_durable_remove_path "$REL_BINARY_BACKUP_META" missing-ok \
+            rollback-consumed-metadata 2>/dev/null || true
     fi
     # Restore the exact pre-deploy immutable state before restart. Failure is
     # reported transactionally, but must not strand a byte-restored service.
@@ -3138,9 +3249,11 @@ bootstrap_root=\$(mktemp -d \"\${TMPDIR:-/tmp}/agentdesk-peer-bootstrap.XXXXXXXX
 cleanup_peer_bootstrap() { rm -rf -- \"\$bootstrap_root\"; }
 trap cleanup_peer_bootstrap EXIT INT TERM
 mkdir -p \"\$bootstrap_root\"
-git archive \"\$bootstrap_head\" scripts/deploy-release.sh scripts/routine-asset-surface.sh \
+git archive \"\$bootstrap_head\" scripts/deploy-release.sh scripts/_defaults.sh \
+    scripts/routine-asset-surface.sh \
     | tar -xf - -C \"\$bootstrap_root\"
 [ -f \"\$bootstrap_root/scripts/deploy-release.sh\" ]
+[ -f \"\$bootstrap_root/scripts/_defaults.sh\" ]
 [ -f \"\$bootstrap_root/scripts/routine-asset-surface.sh\" ]
 ${env_prelude} \
 AGENTDESK_PEER_BOOTSTRAP_HEAD=\"\$bootstrap_head\" \
@@ -3241,9 +3354,11 @@ _validate_peer_bootstrap_generation() {
     git -C "$REPO" cat-file -e "$bootstrap_head^{commit}" 2>/dev/null \
         || return 1
     for relative_path in \
-        scripts/deploy-release.sh scripts/routine-asset-surface.sh; do
+        scripts/deploy-release.sh scripts/_defaults.sh \
+        scripts/routine-asset-surface.sh; do
         case "$relative_path" in
             scripts/deploy-release.sh) actual_path="$SCRIPT_DIR/deploy-release.sh" ;;
+            scripts/_defaults.sh) actual_path="$SCRIPT_DIR/_defaults.sh" ;;
             scripts/routine-asset-surface.sh)
                 actual_path="$SCRIPT_DIR/routine-asset-surface.sh"
                 ;;
@@ -3546,6 +3661,13 @@ if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
     # below is mtime-based, and a successful current-HEAD cargo build can still
     # reuse an existing artifact, so align the mtime after build.
     [ -e "$SOURCE_BINARY" ] && touch "$SOURCE_BINARY"
+    if ! _capture_current_deploy_generation; then
+        echo "✗ Could not bind the built binary/routine generation"
+        exit 1
+    fi
+elif ! _verify_deploy_generation_sources; then
+    echo "✗ External deploy generation changed after manifest validation"
+    exit 1
 fi
 
 # Rebuild dashboard so deploy never ships a stale dist.
@@ -3628,10 +3750,8 @@ if ! _validate_peer_locked_generation; then
     echo "✗ Peer repository generation changed before staging" >&2
     exit 1
 fi
-if [ -z "${DEPLOY_EXECUTABLE_INPUT_SHA:-}" ] \
-  || [ "$(adk_executable_input_digest "$REPO")" \
-    != "$DEPLOY_EXECUTABLE_INPUT_SHA" ]; then
-    echo "✗ Executable inputs changed before generation staging"
+if ! _verify_deploy_generation_sources; then
+    echo "✗ Manifest-bound generation changed before staging"
     exit 1
 fi
 if ! ROUTINE_ASSET_TXN="$(
@@ -3661,6 +3781,10 @@ fi
 if ! _strip_legacy_helper_sentinel_from_staged_generation \
     "$ROUTINE_ASSET_TXN/staged/release-root/routine-helpers"; then
     echo "✗ Reserved legacy helper sentinel contaminated the staged generation"
+    exit 1
+fi
+if ! _verify_deploy_staged_asset_generation "$ROUTINE_ASSET_TXN"; then
+    echo "✗ Staged routine bytes differ from the bound deploy generation"
     exit 1
 fi
 
@@ -3824,10 +3948,25 @@ _doctor_postgres_preflight "Doctor preflight"
 # certificate or failed codesign from taking down a healthy dcserver.
 echo "▸ Staging signed binary from $SOURCE_BINARY..."
 STAGED_BINARY="$(_staged_deploy_binary_path)"
+if ! _verify_deploy_staged_asset_generation "$ROUTINE_ASSET_TXN" \
+  || ! adk_verify_file_sha256 \
+      "$SOURCE_BINARY" "$DEPLOY_EXPECTED_BINARY_SHA"; then
+    echo "✗ Deploy generation changed before private binary copy"
+    exit 1
+fi
 cp "$SOURCE_BINARY" "$STAGED_BINARY"
 chmod +x "$STAGED_BINARY"
+if ! adk_verify_file_sha256 "$STAGED_BINARY" "$DEPLOY_EXPECTED_BINARY_SHA" \
+  || ! adk_verify_file_sha256 "$SOURCE_BINARY" "$DEPLOY_EXPECTED_BINARY_SHA"; then
+    echo "✗ Private binary copy differs from the bound deploy generation"
+    exit 1
+fi
 xattr -d com.apple.provenance "$STAGED_BINARY" 2>/dev/null || true
 sign_binary_with_fallback "$STAGED_BINARY"
+DEPLOY_SIGNED_CANDIDATE_SHA="$(_sha256_file "$STAGED_BINARY")" || {
+    echo "✗ Could not bind the signed candidate bytes"
+    exit 1
+}
 _clean_release_build_cache_after_staging
 echo "▸ Exact-validating staged routine generation with candidate runtime..."
 if ! adk_validate_staged_routine_asset_transaction \
@@ -4369,8 +4508,11 @@ preserve)
     if ! _write_rollback_backup_metadata \
         "$REL_BINARY_BACKUP" "$REL_BINARY_BACKUP_META.tmp" \
         "$ROUTINE_ASSET_TXN" \
-      || ! mv -f "$REL_BINARY_BACKUP_META.tmp" "$REL_BINARY_BACKUP_META"; then
-        rm -f "$REL_BINARY_BACKUP_META.tmp" 2>/dev/null || true
+      || ! adk_durable_rename_path \
+          "$REL_BINARY_BACKUP_META.tmp" "$REL_BINARY_BACKUP_META" \
+          rollback-preserved-metadata; then
+        adk_durable_remove_path "$REL_BINARY_BACKUP_META.tmp" missing-ok \
+            rollback-preserved-metadata-temp 2>/dev/null || true
         echo "✗ Could not rebind preserved rollback generation to current asset transaction"
         exit 1
     fi
@@ -4400,9 +4542,14 @@ capture)
     _write_rollback_backup_metadata \
         "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP_META.tmp" \
         "$ROUTINE_ASSET_TXN"
-    mv -f "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP"
-    if ! mv -f "$REL_BINARY_BACKUP_META.tmp" "$REL_BINARY_BACKUP_META"; then
-        rm -f "$REL_BINARY_BACKUP" 2>/dev/null || true
+    adk_durable_rename_path \
+        "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP" \
+        rollback-binary-publish
+    if ! adk_durable_rename_path \
+        "$REL_BINARY_BACKUP_META.tmp" "$REL_BINARY_BACKUP_META" \
+        rollback-metadata-publish; then
+        adk_durable_remove_path "$REL_BINARY_BACKUP" missing-ok \
+            rollback-unbound-binary 2>/dev/null || true
         echo "✗ Could not atomically bind rollback metadata to the backup"
         exit 1
     fi
@@ -4421,6 +4568,12 @@ esac
 # binary rollback flag is still clear. Therefore a signal in either asset mv
 # rolls assets back without ever exposing a new binary with a partial payload.
 echo "▸ Promoting routine asset transaction..."
+if ! adk_verify_file_sha256 \
+      "$STAGED_BINARY" "$DEPLOY_SIGNED_CANDIDATE_SHA" \
+  || ! _verify_deploy_staged_asset_generation "$ROUTINE_ASSET_TXN"; then
+    echo "✗ Private candidate generation changed before live promotion"
+    exit 1
+fi
 if ! adk_promote_routine_asset_transaction \
     "$ADK_REL" "$ROUTINE_ASSET_TXN" "$STAGED_BINARY"; then
     echo "✗ Routine asset transaction promotion failed"
@@ -4431,8 +4584,13 @@ echo "▸ Promoting staged binary..."
 # Arm the coordinated EXIT path before the atomic rename. A TERM between mv and
 # the next shell statement must still restore the binary and its matching assets.
 ROLLBACK_ARMED=1
-mv -f "$STAGED_BINARY" "$REL_BINARY"
+adk_durable_rename_path "$STAGED_BINARY" "$REL_BINARY" \
+    candidate-binary-to-live
 STAGED_BINARY=""
+if ! adk_verify_file_sha256 "$REL_BINARY" "$DEPLOY_SIGNED_CANDIDATE_SHA"; then
+    echo "✗ Promoted binary differs from the signed candidate generation"
+    exit 1
+fi
 # #3858: ANY non-zero exit before DEPLOY_OK (set on the success path) restores
 # the last-known-good backup and matching assets — see _rollback_release_binary.
 # NOTE: the immutable re-lock (chflags uchg) is deferred until AFTER the health

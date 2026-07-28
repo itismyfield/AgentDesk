@@ -343,13 +343,15 @@ DEPLOY_LOCK_TIMEOUT_SECS="${AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS:-1800}"
 
 cleanup_backup() {
   if [ -n "${DEPLOY_BINARY_STAGE:-}" ] && [ -f "$DEPLOY_BINARY_STAGE" ]; then
-    rm -f "$DEPLOY_BINARY_STAGE"
+    adk_durable_remove_path "$DEPLOY_BINARY_STAGE" missing-ok \
+      deploy-candidate-stage
   fi
   if [ -n "${BACKUP_WRAPPER:-}" ] && [ -f "$BACKUP_WRAPPER" ]; then
-    rm -f "$BACKUP_WRAPPER"
+    adk_durable_remove_path "$BACKUP_WRAPPER" missing-ok \
+      deploy-wrapper-backup
   fi
   if [ -n "${BACKUP_REAL:-}" ] && [ -f "$BACKUP_REAL" ]; then
-    rm -f "$BACKUP_REAL"
+    adk_durable_remove_path "$BACKUP_REAL" missing-ok deploy-real-backup
   fi
 }
 
@@ -377,7 +379,7 @@ validate_local_build_generation_manifest() {
   AGENTDESK_BUILD_BINARY_SHA="$binary_sha" \
   AGENTDESK_BUILD_ROUTINES_SHA="$routines_sha" \
   AGENTDESK_BUILD_HELPERS_SHA="$helpers_sha" \
-  python3 - "$manifest" <<'PY'
+  python3 - "$manifest" <<'PY' || return 1
 import json
 import os
 import re
@@ -408,6 +410,11 @@ for key, value in expected.items():
         print(f"Local build generation mismatch: {key}", file=sys.stderr)
         raise SystemExit(1)
 PY
+  DEPLOY_EXPECTED_SOURCE_SHA="$source_sha"
+  DEPLOY_EXPECTED_INPUTS_SHA="$inputs_sha"
+  DEPLOY_EXPECTED_BINARY_SHA="$binary_sha"
+  DEPLOY_EXPECTED_ROUTINES_SHA="$routines_sha"
+  DEPLOY_EXPECTED_HELPERS_SHA="$helpers_sha"
 }
 
 _deploy_immutable_flag_state() {
@@ -923,7 +930,7 @@ write_wrapper_script() {
 exec "$REAL_BIN" "\$@"
 EOF
   chmod +x "$tmp_wrapper"
-  mv -f "$tmp_wrapper" "$WRAPPER_BIN"
+  adk_durable_rename_path "$tmp_wrapper" "$WRAPPER_BIN" wrapper-publish
 }
 
 install_file_atomically() {
@@ -935,7 +942,7 @@ install_file_atomically() {
   tmp_dest="$(mktemp "$dest.new.XXXXXX")"
   cp "$src" "$tmp_dest"
   chmod "$mode" "$tmp_dest"
-  mv -f "$tmp_dest" "$dest"
+  adk_durable_rename_path "$tmp_dest" "$dest" install-file-publish
 }
 
 restore_previous_install() {
@@ -945,13 +952,13 @@ restore_previous_install() {
   if [ -n "${BACKUP_WRAPPER:-}" ] && [ -f "$BACKUP_WRAPPER" ]; then
     install_file_atomically "$BACKUP_WRAPPER" "$WRAPPER_BIN" 755 || return 1
   else
-    rm -f "$WRAPPER_BIN" || return 1
+    adk_durable_remove_path "$WRAPPER_BIN" missing-ok wrapper-rollback || return 1
   fi
 
   if [ -n "${BACKUP_REAL:-}" ] && [ -f "$BACKUP_REAL" ]; then
     install_file_atomically "$BACKUP_REAL" "$REAL_BIN" 755 || return 1
   else
-    rm -f "$REAL_BIN" || return 1
+    adk_durable_remove_path "$REAL_BIN" missing-ok real-binary-rollback || return 1
   fi
 
   restore_deploy_snapshot_immutable_flags
@@ -1038,10 +1045,28 @@ validate_local_build_generation_manifest \
 ROUTINE_ASSET_TXN="$(
   adk_begin_routine_asset_transaction "$AD_HOME" "$DEPLOY_LOCK_FILE"
 )" || fail "Could not begin durable routine asset transaction"
+adk_verify_tree_sha256 "$PROJECT_DIR/routines" "$DEPLOY_EXPECTED_ROUTINES_SHA" \
+  || fail "Routines changed after build-manifest validation"
 adk_stage_routines "$PROJECT_DIR" "$AD_HOME" "$ROUTINE_ASSET_TXN" >/dev/null \
   || fail "Routine staging failed; refusing to install the binary"
+adk_verify_tree_sha256 "$PROJECT_DIR/routines" "$DEPLOY_EXPECTED_ROUTINES_SHA" \
+  && adk_verify_staged_tree_projection \
+    "$PROJECT_DIR/routines" \
+    "$ROUTINE_ASSET_TXN/staged/release-root/routines" \
+    "$DEPLOY_EXPECTED_ROUTINES_SHA" \
+  || fail "Staged routines differ from the manifest-bound generation"
+adk_verify_tree_sha256 \
+  "$PROJECT_DIR/routine-helpers" "$DEPLOY_EXPECTED_HELPERS_SHA" \
+  || fail "Routine helpers changed after build-manifest validation"
 adk_stage_routine_helpers "$PROJECT_DIR" "$AD_HOME" "$ROUTINE_ASSET_TXN" >/dev/null \
   || fail "Routine helper staging failed; refusing to install the binary"
+adk_verify_tree_sha256 \
+  "$PROJECT_DIR/routine-helpers" "$DEPLOY_EXPECTED_HELPERS_SHA" \
+  && adk_verify_staged_tree_projection \
+    "$PROJECT_DIR/routine-helpers" \
+    "$ROUTINE_ASSET_TXN/staged/release-root/routine-helpers" \
+    "$DEPLOY_EXPECTED_HELPERS_SHA" \
+  || fail "Staged routine helpers differ from the manifest-bound generation"
 
 # Prepare the exact bytes that will become live, including their final
 # signature, before any live binary or asset path changes. The candidate CLI
@@ -1050,7 +1075,9 @@ info "Staging candidate binary..."
 mkdir -p "$LIBEXEC_DIR"
 DEPLOY_BINARY_STAGE="$(mktemp "$LIBEXEC_DIR/.agentdesk.deploy.XXXXXXXX")" \
   || fail "Could not create private binary stage"
-if ! cp "$PROJECT_DIR/target/release/agentdesk" "$DEPLOY_BINARY_STAGE" \
+if ! adk_verify_file_sha256 \
+    "$PROJECT_DIR/target/release/agentdesk" "$DEPLOY_EXPECTED_BINARY_SHA" \
+  || ! cp "$PROJECT_DIR/target/release/agentdesk" "$DEPLOY_BINARY_STAGE" \
   || ! chmod 755 "$DEPLOY_BINARY_STAGE" \
   || [ ! -f "$DEPLOY_BINARY_STAGE" ] \
   || [ -L "$DEPLOY_BINARY_STAGE" ] \
@@ -1058,6 +1085,10 @@ if ! cp "$PROJECT_DIR/target/release/agentdesk" "$DEPLOY_BINARY_STAGE" \
   || [ ! -x "$DEPLOY_BINARY_STAGE" ]; then
   fail "Could not stage the candidate binary"
 fi
+adk_verify_file_sha256 "$DEPLOY_BINARY_STAGE" "$DEPLOY_EXPECTED_BINARY_SHA" \
+  && adk_verify_file_sha256 \
+    "$PROJECT_DIR/target/release/agentdesk" "$DEPLOY_EXPECTED_BINARY_SHA" \
+  || fail "Candidate copy differs from the manifest-bound binary"
 if [ "$OS" = "darwin" ]; then
   resolve_macos_codesign_mode \
     || fail "Could not resolve macOS codesign mode from: $CODESIGN_MODE"
@@ -1069,6 +1100,8 @@ if [ "$OS" = "darwin" ]; then
   codesign_real_binary_if_needed "$RESOLVED_CODESIGN_MODE" "$DEPLOY_BINARY_STAGE" \
     || fail "Failed to sign the staged candidate using mode: $RESOLVED_CODESIGN_MODE"
 fi
+DEPLOY_SIGNED_CANDIDATE_SHA="$(adk_sha256_file "$DEPLOY_BINARY_STAGE")" \
+  || fail "Could not bind the signed candidate bytes"
 adk_validate_staged_routine_asset_transaction \
   "$AD_HOME" "$ROUTINE_ASSET_TXN" "$DEPLOY_BINARY_STAGE" \
   || fail "Candidate runtime rejected the staged routine generation"
@@ -1083,6 +1116,16 @@ stop_deploy_service_for_promotion \
 # asset boundary, then the fully validated asset pair is promoted while the old
 # service is confirmed quiescent. The staged binary remains private until both
 # surfaces are in place.
+adk_verify_file_sha256 "$DEPLOY_BINARY_STAGE" "$DEPLOY_SIGNED_CANDIDATE_SHA" \
+  && adk_verify_staged_tree_projection \
+    "$PROJECT_DIR/routines" \
+    "$ROUTINE_ASSET_TXN/staged/release-root/routines" \
+    "$DEPLOY_EXPECTED_ROUTINES_SHA" \
+  && adk_verify_staged_tree_projection \
+    "$PROJECT_DIR/routine-helpers" \
+    "$ROUTINE_ASSET_TXN/staged/release-root/routine-helpers" \
+    "$DEPLOY_EXPECTED_HELPERS_SHA" \
+  || fail "Private candidate generation changed before live promotion"
 adk_promote_routine_asset_transaction \
   "$AD_HOME" "$ROUTINE_ASSET_TXN" "$DEPLOY_BINARY_STAGE" \
   || fail "Routine asset transaction promotion failed"
@@ -1112,15 +1155,21 @@ if [ -e "$REAL_BIN" ]; then
   cp "$REAL_BIN" "$BACKUP_REAL"
 fi
 DEPLOY_BINARY_PROMOTED=1
-mv -f "$DEPLOY_BINARY_STAGE" "$REAL_BIN"
+adk_durable_rename_path "$DEPLOY_BINARY_STAGE" "$REAL_BIN" \
+  candidate-binary-to-live \
+  || fail "Could not durably publish the candidate binary"
 DEPLOY_BINARY_STAGE=""
+adk_verify_file_sha256 "$REAL_BIN" "$DEPLOY_SIGNED_CANDIDATE_SHA" \
+  || restore_previous_install_and_fail \
+    "Published binary differs from the signed candidate generation"
 write_wrapper_script \
   || restore_previous_install_and_fail \
     "Failed to update binary wrapper at $WRAPPER_BIN" \
     "Restored previous install after failed wrapper update"
 ok "Binary wrapper: $WRAPPER_BIN -> $REAL_BIN"
 run_installed_binary_self_check
-rm -f "$BIN_DIR/agentdesk-real"
+adk_durable_remove_path "$BIN_DIR/agentdesk-real" missing-ok \
+  legacy-real-binary
 
 # Build and copy dashboard dist
 if [ -d "$PROJECT_DIR/dashboard" ]; then

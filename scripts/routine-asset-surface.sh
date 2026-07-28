@@ -111,7 +111,7 @@ import stat
 import sys
 
 root = os.path.abspath(sys.argv[1])
-required_files = ["Cargo.toml", "Cargo.lock"]
+required_files = ["Cargo.toml", "Cargo.lock", "defaults.json"]
 optional_files = ["build.rs", "rust-toolchain", "rust-toolchain.toml"]
 input_roots = ["src", "migrations/postgres", ".cargo"]
 paths = []
@@ -147,8 +147,10 @@ for relative_root in input_roots:
     for current, directories, files in os.walk(
         absolute_root, topdown=True, followlinks=False
     ):
-        directories.sort()
-        files.sort()
+        directories[:] = sorted(
+            name for name in directories if name != "__pycache__"
+        )
+        files = sorted(name for name in files if not name.endswith(".pyc"))
         for name in directories:
             entry = os.lstat(os.path.join(current, name))
             if stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode):
@@ -160,7 +162,7 @@ for relative_root in input_roots:
                 raise SystemExit(1)
             paths.append(os.path.relpath(path, root).replace(os.sep, "/"))
 
-digest = hashlib.sha256(b"agentdesk-executable-inputs-v1\0")
+digest = hashlib.sha256(b"agentdesk-executable-inputs-v2\0")
 for relative in sorted(paths):
     encoded = relative.encode("utf-8")
     digest.update(encoded + b"\0")
@@ -170,6 +172,116 @@ for relative in sorted(paths):
             digest.update(chunk)
     digest.update(b"\0")
 print(digest.hexdigest())
+PY
+}
+
+adk_verify_file_sha256() {
+    local path="$1"
+    local expected="$2"
+    local actual
+
+    case "$expected" in
+        *[!0-9a-f]*|'') return 1 ;;
+    esac
+    [ "${#expected}" -eq 64 ] || return 1
+    actual="$(adk_sha256_file "$path")" || return 1
+    [ "$actual" = "$expected" ]
+}
+
+adk_verify_tree_sha256() {
+    local root="$1"
+    local expected="$2"
+    local actual
+
+    case "$expected" in
+        *[!0-9a-f]*|'') return 1 ;;
+    esac
+    [ "${#expected}" -eq 64 ] || return 1
+    actual="$(adk_sha256_tree "$root")" || return 1
+    [ "$actual" = "$expected" ]
+}
+
+# A staged routine surface may contain preserved operator-owned files. Verify
+# only the repository-owned projection, but hash those staged bytes/modes with
+# the same domain as adk_sha256_tree so the manifest digest remains authoritative.
+adk_verify_staged_tree_projection() {
+    local reference_root="$1"
+    local staged_root="$2"
+    local expected="$3"
+
+    case "$expected" in
+        *[!0-9a-f]*|'') return 1 ;;
+    esac
+    [ "${#expected}" -eq 64 ] || return 1
+    python3 - "$reference_root" "$staged_root" "$expected" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+reference, staged = map(os.path.abspath, sys.argv[1:3])
+expected = sys.argv[3]
+for root in (reference, staged):
+    entry = os.lstat(root)
+    if stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode):
+        raise SystemExit(1)
+
+digest = hashlib.sha256(b"agentdesk-tree-v2-python-bytecode-excluded\0")
+for current, directories, files in os.walk(
+    reference, topdown=True, followlinks=False
+):
+    directories[:] = sorted(
+        name for name in directories if name != "__pycache__"
+    )
+    files = sorted(name for name in files if not name.endswith(".pyc"))
+    for name in directories:
+        relative = os.path.relpath(os.path.join(current, name), reference)
+        reference_path = os.path.join(reference, relative)
+        staged_path = os.path.join(staged, relative)
+        reference_entry = os.lstat(reference_path)
+        staged_entry = os.lstat(staged_path)
+        if (
+            stat.S_ISLNK(reference_entry.st_mode)
+            or not stat.S_ISDIR(reference_entry.st_mode)
+            or stat.S_ISLNK(staged_entry.st_mode)
+            or not stat.S_ISDIR(staged_entry.st_mode)
+        ):
+            raise SystemExit(1)
+        encoded = relative.encode("utf-8")
+        digest.update(
+            b"D\0"
+            + encoded
+            + b"\0"
+            + oct(stat.S_IMODE(staged_entry.st_mode)).encode()
+            + b"\0"
+        )
+    for name in files:
+        relative = os.path.relpath(os.path.join(current, name), reference)
+        reference_path = os.path.join(reference, relative)
+        staged_path = os.path.join(staged, relative)
+        reference_entry = os.lstat(reference_path)
+        staged_entry = os.lstat(staged_path)
+        if (
+            stat.S_ISLNK(reference_entry.st_mode)
+            or not stat.S_ISREG(reference_entry.st_mode)
+            or stat.S_ISLNK(staged_entry.st_mode)
+            or not stat.S_ISREG(staged_entry.st_mode)
+        ):
+            raise SystemExit(1)
+        encoded = relative.encode("utf-8")
+        digest.update(
+            b"F\0"
+            + encoded
+            + b"\0"
+            + oct(stat.S_IMODE(staged_entry.st_mode)).encode()
+            + b"\0"
+        )
+        digest.update(str(staged_entry.st_size).encode() + b"\0")
+        with open(staged_path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+if digest.hexdigest() != expected:
+    raise SystemExit(1)
 PY
 }
 
@@ -690,6 +802,118 @@ _adk_trace_durability_event() {
     printf '%s\n' "$event" >> "$trace_file"
 }
 
+adk_durable_rename_path() {
+    local source="$1"
+    local destination="$2"
+    local label="${3:-$(basename "$destination")}"
+
+    ADK_DURABLE_SOURCE="$source" \
+    ADK_DURABLE_DESTINATION="$destination" \
+    ADK_DURABLE_LABEL="$label" python3 <<'PY' || return 1
+import os
+import stat
+
+source = os.environ["ADK_DURABLE_SOURCE"]
+destination = os.environ["ADK_DURABLE_DESTINATION"]
+label = os.environ["ADK_DURABLE_LABEL"]
+source_parent = os.path.dirname(source)
+destination_parent = os.path.dirname(destination)
+
+for parent in (source_parent, destination_parent):
+    entry = os.lstat(parent)
+    if stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode):
+        raise SystemExit(1)
+source_entry = os.lstat(source)
+if stat.S_ISLNK(source_entry.st_mode) or not (
+    stat.S_ISREG(source_entry.st_mode) or stat.S_ISDIR(source_entry.st_mode)
+):
+    raise SystemExit(1)
+try:
+    destination_entry = os.lstat(destination)
+except FileNotFoundError:
+    destination_entry = None
+if destination_entry is not None and stat.S_ISLNK(destination_entry.st_mode):
+    raise SystemExit(1)
+
+# Flush regular-file bytes (or a directory's entries) before publishing its
+# name. The parent fsyncs below make the rename itself durable.
+descriptor = os.open(source, os.O_RDONLY)
+try:
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+if os.environ.get("ADK_ROUTINE_ASSET_TEST_FAIL_BEFORE_RENAME_LABEL") == label:
+    raise OSError("injected failure before durable rename")
+os.replace(source, destination)
+if os.environ.get("ADK_ROUTINE_ASSET_TEST_FAIL_AFTER_RENAME_LABEL") == label:
+    raise OSError("injected failure after durable rename")
+parents = [destination_parent]
+if source_parent != destination_parent:
+    parents.append(source_parent)
+for parent in parents:
+    descriptor = os.open(parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+PY
+    _adk_trace_durability_event "rename:${label}:parents"
+}
+
+# policy is explicit so callers must choose whether an already-missing path is
+# an idempotent success or evidence of a corrupt lifecycle transition.
+adk_durable_remove_path() {
+    local path="$1"
+    local policy="$2"
+    local label="${3:-$(basename "$path")}"
+
+    case "$policy" in required|missing-ok) ;; *) return 1 ;; esac
+    ADK_DURABLE_REMOVE_PATH="$path" \
+    ADK_DURABLE_REMOVE_POLICY="$policy" \
+    ADK_DURABLE_LABEL="$label" python3 <<'PY' || return 1
+import os
+import shutil
+import stat
+
+path = os.environ["ADK_DURABLE_REMOVE_PATH"]
+policy = os.environ["ADK_DURABLE_REMOVE_POLICY"]
+label = os.environ["ADK_DURABLE_LABEL"]
+parent = os.path.dirname(path)
+parent_entry = os.lstat(parent)
+if stat.S_ISLNK(parent_entry.st_mode) or not stat.S_ISDIR(parent_entry.st_mode):
+    raise SystemExit(1)
+try:
+    entry = os.lstat(path)
+except FileNotFoundError:
+    if policy == "missing-ok":
+        descriptor = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        raise SystemExit(0)
+    raise SystemExit(1)
+if os.environ.get("ADK_ROUTINE_ASSET_TEST_FAIL_BEFORE_REMOVE_LABEL") == label:
+    raise OSError("injected failure before durable remove")
+if stat.S_ISLNK(entry.st_mode):
+    raise SystemExit(1)
+if stat.S_ISDIR(entry.st_mode):
+    shutil.rmtree(path)
+elif stat.S_ISREG(entry.st_mode):
+    os.unlink(path)
+else:
+    raise SystemExit(1)
+if os.environ.get("ADK_ROUTINE_ASSET_TEST_FAIL_AFTER_REMOVE_LABEL") == label:
+    raise OSError("injected failure after durable remove")
+descriptor = os.open(parent, os.O_RDONLY)
+try:
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+    _adk_trace_durability_event "remove:${label}:parent"
+}
+
 _adk_write_atomic_file() {
     local path="$1"
     local value="$2"
@@ -1088,8 +1312,11 @@ _adk_close_txn() {
 
     marker="$(_adk_active_marker "$runtime_root")" || return 1
     _adk_assert_active_txn "$runtime_root" "$txn_root" || return 1
-    rm -f "$marker" || return 1
-    rm -rf "$txn_root"
+    # The active authority must disappear durably before its transaction tree.
+    # A crash after marker unlink may leave a harmless orphan; reversing this
+    # order can leave a marker that permanently names deleted recovery state.
+    adk_durable_remove_path "$marker" required active-marker || return 1
+    adk_durable_remove_path "$txn_root" required transaction-root
 }
 
 _adk_assert_surface_paths_safe() {
@@ -1132,17 +1359,25 @@ _adk_reconcile_unmarked_surface() {
 
     _adk_assert_surface_paths_safe "$runtime_root" "$surface" || return 1
     if [ -d "$live" ]; then
-        [ ! -d "$old" ] || rm -rf "$old" || return 1
-        [ ! -d "$retry" ] || rm -rf "$retry" || return 1
+        [ ! -d "$old" ] \
+            || adk_durable_remove_path "$old" required \
+                "reconcile-${surface}-old" || return 1
+        [ ! -d "$retry" ] \
+            || adk_durable_remove_path "$retry" required \
+                "reconcile-${surface}-retry" || return 1
         return 0
     fi
     if [ -d "$old" ]; then
-        mv "$old" "$live" || return 1
-        [ ! -d "$retry" ] || rm -rf "$retry" || return 1
+        adk_durable_rename_path "$old" "$live" \
+            "reconcile-${surface}-old-to-live" || return 1
+        [ ! -d "$retry" ] \
+            || adk_durable_remove_path "$retry" required \
+                "reconcile-${surface}-retry" || return 1
         return 0
     fi
     if [ -d "$retry" ]; then
-        mv "$retry" "$live" || return 1
+        adk_durable_rename_path "$retry" "$live" \
+            "reconcile-${surface}-retry-to-live" || return 1
     fi
 }
 
@@ -1341,13 +1576,15 @@ _adk_promote_surface() {
     [ ! -e "$old" ] && [ ! -e "$retry" ] || return 1
     if [ "$had_live" = 1 ]; then
         [ -d "$live" ] || return 1
-        mv "$live" "$old" || return 1
+        adk_durable_rename_path "$live" "$old" \
+            "promote-${surface}-live-to-old" || return 1
     elif [ "$had_live" = 0 ]; then
         [ ! -e "$live" ] || return 1
     else
         return 1
     fi
-    mv "$staged" "$live"
+    adk_durable_rename_path "$staged" "$live" \
+        "promote-${surface}-staged-to-live"
 }
 
 adk_validate_staged_routine_asset_transaction() {
@@ -1414,10 +1651,13 @@ _adk_finish_promote_surface() {
     if [ "$had_live" = 1 ]; then
         if [ -d "$staged" ]; then
             if [ -d "$old" ] && [ ! -e "$live" ]; then
-                mv "$staged" "$live" || return 1
+                adk_durable_rename_path "$staged" "$live" \
+                    "finish-${surface}-staged-to-live" || return 1
             elif [ ! -e "$old" ] && [ -d "$live" ]; then
-                mv "$live" "$old" || return 1
-                mv "$staged" "$live" || return 1
+                adk_durable_rename_path "$live" "$old" \
+                    "finish-${surface}-live-to-old" || return 1
+                adk_durable_rename_path "$staged" "$live" \
+                    "finish-${surface}-staged-to-live" || return 1
             else
                 return 1
             fi
@@ -1427,7 +1667,8 @@ _adk_finish_promote_surface() {
     elif [ "$had_live" = 0 ]; then
         [ ! -e "$old" ] || return 1
         if [ -d "$staged" ] && [ ! -e "$live" ]; then
-            mv "$staged" "$live" || return 1
+            adk_durable_rename_path "$staged" "$live" \
+                "finish-${surface}-staged-to-live" || return 1
         elif [ ! -e "$staged" ] && [ -d "$live" ]; then
             :
         else
@@ -1481,11 +1722,15 @@ _adk_rollback_surface() {
         if [ -d "$old" ]; then
             if [ -d "$live" ]; then
                 [ ! -e "$retry" ] || return 1
-                mv "$live" "$retry" || return 1
+                adk_durable_rename_path "$live" "$retry" \
+                    "rollback-${surface}-live-to-retry" || return 1
             fi
-            if ! mv "$old" "$live"; then
+            if ! adk_durable_rename_path "$old" "$live" \
+                "rollback-${surface}-old-to-live"; then
                 [ -d "$live" ] || [ ! -d "$retry" ] \
-                    || mv "$retry" "$live" 2>/dev/null || true
+                    || adk_durable_rename_path "$retry" "$live" \
+                        "rollback-${surface}-retry-to-live" \
+                        2>/dev/null || true
                 return 1
             fi
         fi
@@ -1493,16 +1738,21 @@ _adk_rollback_surface() {
             echo "Rollback lost the original $surface live tree" >&2
             return 1
         }
-        [ ! -d "$retry" ] || rm -rf "$retry" || return 1
+        [ ! -d "$retry" ] \
+            || adk_durable_remove_path "$retry" required \
+                "rollback-${surface}-retry" || return 1
     elif [ "$had_live" = 0 ]; then
         [ ! -e "$old" ] || return 1
         if [ -d "$staged" ]; then
             [ ! -e "$live" ] || return 1
         elif [ -d "$live" ]; then
             [ ! -e "$retry" ] || return 1
-            mv "$live" "$retry" || return 1
+            adk_durable_rename_path "$live" "$retry" \
+                "rollback-${surface}-live-to-retry" || return 1
         fi
-        [ ! -d "$retry" ] || rm -rf "$retry" || return 1
+        [ ! -d "$retry" ] \
+            || adk_durable_remove_path "$retry" required \
+                "rollback-${surface}-retry" || return 1
     else
         return 1
     fi
@@ -1583,9 +1833,12 @@ adk_commit_routine_asset_transaction() {
     for surface in routine-helpers routines; do
         _adk_assert_surface_paths_safe "$runtime_root" "$surface" || return 1
         [ -d "$runtime_root/$surface" ] || return 1
-        rm -rf "$runtime_root/$surface.old" \
-            "$runtime_root/$surface.swap-current" \
-            "$txn_root/staged/release-root/$surface" || return 1
+        adk_durable_remove_path "$runtime_root/$surface.old" missing-ok \
+            "commit-${surface}-old" || return 1
+        adk_durable_remove_path "$runtime_root/$surface.swap-current" missing-ok \
+            "commit-${surface}-retry" || return 1
+        adk_durable_remove_path "$txn_root/staged/release-root/$surface" \
+            missing-ok "commit-${surface}-staged" || return 1
     done
     _adk_write_phase "$txn_root" "committed" || return 1
     _adk_close_txn "$runtime_root" "$txn_root"

@@ -385,6 +385,7 @@ PY
     mkdir -p "$REPO/src" "$REPO/migrations/postgres"
     printf '[package]\nname="fence"\nversion="0.1.0"\n' > "$REPO/Cargo.toml"
     printf '# lock\n' > "$REPO/Cargo.lock"
+    printf '{}\n' > "$REPO/defaults.json"
     printf 'fn main() {}\n' > "$REPO/build.rs"
     printf 'pub fn fence() {}\n' > "$REPO/src/lib.rs"
     printf '%s\n' '-- initial target' > "$REPO/migrations/postgres/0100_target.sql"
@@ -455,6 +456,7 @@ PY
     mkdir -p "$ADK_REL/bin" "$REPO/src" "$REPO/migrations/postgres"
     printf '[package]\nname="fresh-none"\nversion="0.1.0"\n' > "$REPO/Cargo.toml"
     printf '# lock\n' > "$REPO/Cargo.lock"
+    printf '{}\n' > "$REPO/defaults.json"
     printf 'fn main() {}\n' > "$REPO/build.rs"
     printf 'pub fn fresh() {}\n' > "$REPO/src/lib.rs"
     printf '%s\n' '-- fresh migration' \
@@ -856,6 +858,7 @@ BEGIN_TXN_LINE="$(rg -n '^[[:space:]]+adk_begin_routine_asset_transaction "\$ADK
         ': > "${AGENTDESK_REPO_DIR:?}/stale-ran"' \
         > "$SEED/scripts/deploy-release.sh"
     printf '# stale common\n' > "$SEED/scripts/routine-asset-surface.sh"
+    printf '# stale defaults\n' > "$SEED/scripts/_defaults.sh"
     git -C "$SEED" -c user.name=AgentDesk \
         -c user.email=agentdesk@example.invalid add scripts
     git -C "$SEED" -c user.name=AgentDesk \
@@ -868,10 +871,12 @@ BEGIN_TXN_LINE="$(rg -n '^[[:space:]]+adk_begin_routine_asset_transaction "\$ADK
     printf '%s\n' \
         '#!/usr/bin/env bash' \
         'set -euo pipefail' \
+        '[ -f "$(dirname "$0")/_defaults.sh" ]' \
         '[ -f "$(dirname "$0")/routine-asset-surface.sh" ]' \
         ': > "${AGENTDESK_REPO_DIR:?}/fresh-bootstrap-ran"' \
         > "$SEED/scripts/deploy-release.sh"
     printf '# fresh common\n' > "$SEED/scripts/routine-asset-surface.sh"
+    printf '# fresh defaults\n' > "$SEED/scripts/_defaults.sh"
     git -C "$SEED" -c user.name=AgentDesk \
         -c user.email=agentdesk@example.invalid add scripts
     git -C "$SEED" -c user.name=AgentDesk \
@@ -910,6 +915,7 @@ BEGIN_TXN_LINE="$(rg -n '^[[:space:]]+adk_begin_routine_asset_transaction "\$ADK
         "$REPO/.cargo" "$BIN_DIR" "$(dirname "$LOCK_FILE")"
     printf '[package]\nname="peer-fixture"\nversion="0.1.0"\n' > "$REPO/Cargo.toml"
     printf '# lock\n' > "$REPO/Cargo.lock"
+    printf '{}\n' > "$REPO/defaults.json"
     printf 'fn main() {}\n' > "$REPO/build.rs"
     printf 'base\n' > "$REPO/src/generation.rs"
     printf '%s\n' '-- migration' > "$REPO/migrations/postgres/0100_peer.sql"
@@ -1287,6 +1293,221 @@ for PROVISIONAL_MODE in loaded unloaded; do
 ) || fail "fresh ${PROVISIONAL_MODE} provisional marker did not recover forward"
 done
 
+# Reproduce the tmux/manual crash window with real marker, lock-file PID,
+# process identity, command-path, and SHA checks. Launchd is unloaded while the
+# candidate still owns the port: recovery must upgrade provisional authority to
+# exact and drain it. A foreign lock-file process must remain fail-closed.
+(
+    # shellcheck source=../scripts/routine-asset-surface.sh
+    . "$ASSET_SURFACE"
+    for function_name in \
+        _sha256_file \
+        _release_listener_pid \
+        _release_current_service_pid \
+        _capture_release_candidate_process \
+        _persist_release_candidate_drain_authority \
+        _release_candidate_command_matches_live_binary \
+        _resume_release_candidate_drain_authority \
+        _release_candidate_process_is_alive \
+        _stop_and_drain_release_candidate; do
+        eval "$(extract_function "$function_name")"
+    done
+
+    TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/adk-manual-candidate.XXXXXX")"
+    CANDIDATE_PID=''
+    trap '
+        [ -z "${CANDIDATE_PID:-}" ] || kill "$CANDIDATE_PID" 2>/dev/null || true
+        adk_release_routine_asset_lock 2>/dev/null || true
+        rm -rf "$TEST_ROOT"
+    ' EXIT
+    ADK_REL="$TEST_ROOT/release"
+    REL_BINARY="$ADK_REL/bin/agentdesk"
+    LOCK_FILE="$ADK_REL/runtime/dcserver.lock"
+    DEPLOY_LOCK_FILE="$ADK_REL/runtime/deploy-release.lock"
+    mkdir -p "$ADK_REL/bin" "$ADK_REL/runtime"
+    printf 'candidate bytes\n' > "$REL_BINARY"
+    chmod +x "$REL_BINARY"
+    CANDIDATE_SHA="$(adk_sha256_file "$REL_BINARY")"
+    PLIST_REL=com.agentdesk.release
+    LAUNCHD_DOMAIN=gui/test
+    REL_PORT=8791
+    FORWARD_MIGRATION_CANDIDATE_SHA="$CANDIDATE_SHA"
+    RELEASE_CANDIDATE_CAPTURED=0
+    RELEASE_CANDIDATE_PID=''
+    RELEASE_CANDIDATE_IDENTITY=''
+    _launchd_domain() { printf 'gui/test\n'; }
+    _resolve_release_server_port() { printf '8791\n'; }
+    _release_launchd_job_is_loaded() { return 1; }
+    _release_candidate_port_refuses_connections() {
+        [ -z "${CANDIDATE_PID:-}" ] \
+            || ! kill -0 "$CANDIDATE_PID" 2>/dev/null
+    }
+    launchctl() { [ "${1:-}" = bootout ]; }
+    tmux() {
+        [ "${1:-}" = kill-session ] || return 1
+        if [ -n "${CANDIDATE_PID:-}" ] \
+          && kill -0 "$CANDIDATE_PID" 2>/dev/null; then
+            kill -TERM "$CANDIDATE_PID"
+            wait "$CANDIDATE_PID" 2>/dev/null || true
+        fi
+    }
+
+    adk_acquire_routine_asset_lock "$DEPLOY_LOCK_FILE" 0
+    TXN="$(adk_begin_routine_asset_transaction "$ADK_REL" "$DEPLOY_LOCK_FILE")"
+    _persist_release_candidate_drain_authority "$TXN"
+    bash -c 'exec -a "$1" /bin/sleep 60' _ "$REL_BINARY" &
+    CANDIDATE_PID=$!
+    printf '%s\n' "$CANDIDATE_PID" > "$LOCK_FILE"
+    _release_candidate_command_matches_live_binary "$CANDIDATE_PID"
+    _resume_release_candidate_drain_authority "$TXN" "$CANDIDATE_SHA"
+    [ ! -e "$TXN/candidate-drain-required.json" ] \
+        && ! kill -0 "$CANDIDATE_PID" 2>/dev/null \
+        || exit 181
+    CANDIDATE_PID=''
+    adk_abort_routine_asset_transaction "$ADK_REL" "$TXN"
+
+    FOREIGN_BINARY="$TEST_ROOT/foreign-agentdesk"
+    printf 'foreign bytes\n' > "$FOREIGN_BINARY"
+    chmod +x "$FOREIGN_BINARY"
+    TXN="$(adk_begin_routine_asset_transaction "$ADK_REL" "$DEPLOY_LOCK_FILE")"
+    _persist_release_candidate_drain_authority "$TXN"
+    bash -c 'exec -a "$1" /bin/sleep 60' _ "$FOREIGN_BINARY" &
+    CANDIDATE_PID=$!
+    printf '%s\n' "$CANDIDATE_PID" > "$LOCK_FILE"
+    set +e
+    _resume_release_candidate_drain_authority "$TXN" "$CANDIDATE_SHA"
+    FOREIGN_STATUS=$?
+    set -e
+    [ "$FOREIGN_STATUS" -ne 0 ] \
+        && [ "$(adk_routine_asset_candidate_drain_authority_value \
+            "$TXN" deploy-release capture_state)" = provisional ] \
+        && kill -0 "$CANDIDATE_PID" 2>/dev/null \
+        || exit 182
+    kill -TERM "$CANDIDATE_PID"
+    wait "$CANDIDATE_PID" 2>/dev/null || true
+    CANDIDATE_PID=''
+    adk_clear_routine_asset_candidate_drain_authority "$ADK_REL" "$TXN"
+    adk_abort_routine_asset_transaction "$ADK_REL" "$TXN"
+    adk_release_routine_asset_lock
+) || fail 'manual candidate provisional recovery did not capture exact authority safely'
+
+# Rollback material retirement is itself a durable terminal transition. A
+# post-unlink parent-fsync fault must stop before commit intent; retry converges
+# all binary/metadata/temp paths to absence.
+(
+    # shellcheck source=../scripts/routine-asset-surface.sh
+    . "$ASSET_SURFACE"
+    eval "$(extract_function _retire_release_rollback_material)"
+    TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/adk-retire-rollback.XXXXXX")"
+    trap 'rm -rf "$TEST_ROOT"' EXIT
+    REL_BINARY_BACKUP="$TEST_ROOT/agentdesk.prev"
+    REL_BINARY_BACKUP_META="$REL_BINARY_BACKUP.meta"
+    printf 'backup\n' > "$REL_BINARY_BACKUP"
+    printf 'metadata\n' > "$REL_BINARY_BACKUP_META"
+    printf 'backup-temp\n' > "$REL_BINARY_BACKUP.tmp"
+    printf 'metadata-temp\n' > "$REL_BINARY_BACKUP_META.tmp"
+    chflags() { :; }
+    export ADK_ROUTINE_ASSET_TEST_FAIL_AFTER_REMOVE_LABEL=rollback-binary
+    set +e
+    _retire_release_rollback_material \
+        >/dev/null 2>"$TEST_ROOT/retire-fault.err"
+    RETIRE_STATUS=$?
+    set -e
+    unset ADK_ROUTINE_ASSET_TEST_FAIL_AFTER_REMOVE_LABEL
+    [ "$RETIRE_STATUS" -ne 0 ] \
+        && [ ! -e "$REL_BINARY_BACKUP" ] \
+        && [ -e "$REL_BINARY_BACKUP_META" ] \
+        && [ -e "$REL_BINARY_BACKUP.tmp" ] \
+        && [ -e "$REL_BINARY_BACKUP_META.tmp" ] \
+        || exit 183
+    _retire_release_rollback_material
+    [ ! -e "$REL_BINARY_BACKUP" ] \
+        && [ ! -e "$REL_BINARY_BACKUP_META" ] \
+        && [ ! -e "$REL_BINARY_BACKUP.tmp" ] \
+        && [ ! -e "$REL_BINARY_BACKUP_META.tmp" ] \
+        || exit 184
+) || fail 'rollback material retirement advanced across an undurable unlink'
+
+RETIRE_LINE="$(awk '
+    /^if ! _retire_release_rollback_material; then/ { print NR; exit }
+' "$DEPLOY_RELEASE")"
+COMMIT_INTENT_LINE="$(awk '
+    /^if ! adk_mark_routine_asset_transaction_committing / { print NR; exit }
+' "$DEPLOY_RELEASE")"
+[ -n "$RETIRE_LINE" ] && [ -n "$COMMIT_INTENT_LINE" ] \
+    && [ "$RETIRE_LINE" -lt "$COMMIT_INTENT_LINE" ] \
+    || fail 'asset commit intent can precede durable rollback retirement'
+
+# The success manifest describes the deployed immutable snapshot, not mutable
+# repository bytes re-read after staging/promotion.
+(
+    # shellcheck source=../scripts/routine-asset-surface.sh
+    . "$ASSET_SURFACE"
+    eval "$(extract_function _latest_postgres_migration_path)"
+    eval "$(extract_function _sha256_file)"
+    eval "$(extract_function _sha256_tree)"
+    eval "$(extract_function _write_release_source_manifest)"
+    TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/adk-frozen-manifest.XXXXXX")"
+    trap 'rm -rf "$TEST_ROOT"' EXIT
+    REPO="$TEST_ROOT/repo"
+    ADK_REL="$TEST_ROOT/release"
+    REL_BINARY="$ADK_REL/bin/agentdesk"
+    SOURCE_BINARY="$REL_BINARY"
+    mkdir -p "$REPO/src" "$REPO/migrations/postgres" "$REPO/routines" \
+        "$REPO/routine-helpers" "$ADK_REL/bin"
+    printf '[package]\nname="manifest-fixture"\nversion="0.1.0"\n' \
+        > "$REPO/Cargo.toml"
+    printf '# lock\n' > "$REPO/Cargo.lock"
+    printf '{}\n' > "$REPO/defaults.json"
+    printf 'pub fn fixture() {}\n' > "$REPO/src/lib.rs"
+    printf '%s\n' '-- migration' \
+        > "$REPO/migrations/postgres/0100_fixture.sql"
+    printf 'routine-v1\n' > "$REPO/routines/generation"
+    printf 'helper-v1\n' > "$REPO/routine-helpers/generation"
+    printf 'signed-candidate\n' > "$REL_BINARY"
+    chmod +x "$REL_BINARY"
+    git -C "$REPO" init -q
+    git -C "$REPO" -c user.name=AgentDesk \
+        -c user.email=agentdesk@example.invalid add .
+    git -C "$REPO" -c user.name=AgentDesk \
+        -c user.email=agentdesk@example.invalid commit -qm fixture
+    DEPLOY_EXPECTED_SOURCE_SHA="$(git -C "$REPO" rev-parse HEAD)"
+    DEPLOY_EXPECTED_INPUTS_SHA="$(adk_executable_input_digest "$REPO")"
+    DEPLOY_EXPECTED_ROUTINES_SHA="$(adk_sha256_tree "$REPO/routines")"
+    DEPLOY_EXPECTED_HELPERS_SHA="$(adk_sha256_tree "$REPO/routine-helpers")"
+    DEPLOY_SIGNED_CANDIDATE_SHA="$(adk_sha256_file "$REL_BINARY")"
+    DEPLOY_BUILD_PROFILE=release
+    RESOLVED_RELEASE_SIGNING_MODE=adhoc
+    CODESIGN_IDENTITY=''
+    ALLOW_ADHOC_RELEASE_SIGN=1
+    printf '{"changed":true}\n' > "$REPO/defaults.json"
+    printf 'routine-v2\n' > "$REPO/routines/generation"
+    printf 'helper-v2\n' > "$REPO/routine-helpers/generation"
+    _write_release_source_manifest >/dev/null
+    EXPECTED_SOURCE="$DEPLOY_EXPECTED_SOURCE_SHA" \
+    EXPECTED_INPUTS="$DEPLOY_EXPECTED_INPUTS_SHA" \
+    EXPECTED_BINARY="$DEPLOY_SIGNED_CANDIDATE_SHA" \
+    EXPECTED_ROUTINES="$DEPLOY_EXPECTED_ROUTINES_SHA" \
+    EXPECTED_HELPERS="$DEPLOY_EXPECTED_HELPERS_SHA" \
+    python3 - "$ADK_REL/runtime/release-source.json" <<'PY'
+import json
+import os
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+expected = {
+    "source_git_sha": os.environ["EXPECTED_SOURCE"],
+    "executable_inputs_sha256": os.environ["EXPECTED_INPUTS"],
+    "binary_sha256": os.environ["EXPECTED_BINARY"],
+    "routines_sha256": os.environ["EXPECTED_ROUTINES"],
+    "routine_helpers_sha256": os.environ["EXPECTED_HELPERS"],
+}
+if any(data.get(key) != value for key, value in expected.items()):
+    raise SystemExit(1)
+PY
+) || fail 'release source manifest rehashed mutable post-stage repository bytes'
+
 (
     eval "$(extract_function _release_candidate_port_refuses_connections)"
     CURL_STATUS=28
@@ -1304,7 +1525,7 @@ DRAIN_LINE="$(awk '
 ' "$DEPLOY_RELEASE")"
 RESTORE_LINE="$(awk '
     /^_rollback_release_binary[(][)] [{]$/ { inside = 1 }
-    inside && /mv -f "\$rel_backup" "\$rel_binary"/ { print NR; exit }
+    inside && /adk_durable_rename_path "\$rel_backup" "\$rel_binary"/ { print NR; exit }
 ' "$DEPLOY_RELEASE")"
 [ -n "$DRAIN_LINE" ] && [ -n "$RESTORE_LINE" ] \
     && [ "$DRAIN_LINE" -lt "$RESTORE_LINE" ] \

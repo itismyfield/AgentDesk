@@ -60,7 +60,7 @@ class ReleaseGenerationBindingTests(unittest.TestCase):
 
     @staticmethod
     def _run_external_bundle_validator(
-        repo: Path, binary: Path, manifest: Path
+        repo: Path, binary: Path, manifest: Path, post_validation: str = ""
     ) -> subprocess.CompletedProcess[str]:
         deploy = DEPLOY.read_text(encoding="utf-8")
         start = deploy.index("_sha256_file() {")
@@ -76,6 +76,7 @@ class ReleaseGenerationBindingTests(unittest.TestCase):
             f"AGENTDESK_DEPLOY_BUNDLE_MANIFEST={shlex.quote(str(manifest))}\n"
             + validation_functions
             + "\n_validate_external_deploy_bundle\n"
+            + post_validation
         )
         return subprocess.run(
             ["bash", "-c", script], capture_output=True, text=True, timeout=10
@@ -135,6 +136,7 @@ class ReleaseGenerationBindingTests(unittest.TestCase):
                 '[package]\nname="fixture"\nversion="0.1.0"\n', encoding="utf-8"
             )
             (repo / "Cargo.lock").write_text("# fixture\n", encoding="utf-8")
+            (repo / "defaults.json").write_text("{}\n", encoding="utf-8")
             (repo / "build.rs").write_text("fn main() {}\n", encoding="utf-8")
             (repo / "src/lib.rs").write_text("pub fn fixture() {}\n", encoding="utf-8")
             (repo / "migrations/postgres/0100_fixture.sql").write_text(
@@ -201,11 +203,73 @@ class ReleaseGenerationBindingTests(unittest.TestCase):
             result = self._run_external_bundle_validator(repo, binary, manifest)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+            original_binary = binary.read_bytes()
+            result = self._run_external_bundle_validator(
+                repo,
+                binary,
+                manifest,
+                """
+printf '# post-validation mutation\\n' >> "$SOURCE_BINARY"
+stage="${SOURCE_BINARY}.stage"
+cp "$SOURCE_BINARY" "$stage"
+if _verify_deploy_generation_sources; then exit 91; fi
+if adk_verify_file_sha256 "$stage" "$DEPLOY_EXPECTED_BINARY_SHA"; then exit 92; fi
+rm -f "$stage"
+""",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            binary.write_bytes(original_binary)
+            binary.chmod(0o755)
+
+            routine_path = repo / "routines/monitoring/fixture.js"
+            original_routine = routine_path.read_text(encoding="utf-8")
+            result = self._run_external_bundle_validator(
+                repo,
+                binary,
+                manifest,
+                """
+printf '// post-validation mutation\\n' >> "$REPO/routines/monitoring/fixture.js"
+stage="${REPO}.routine-stage"
+mkdir -p "$stage"
+cp -R "$REPO/routines/." "$stage/"
+if _verify_deploy_source_asset_generation; then exit 93; fi
+if adk_verify_staged_tree_projection "$REPO/routines" "$stage" \
+    "$DEPLOY_EXPECTED_ROUTINES_SHA"; then exit 94; fi
+rm -rf "$stage"
+""",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            routine_path.write_text(original_routine, encoding="utf-8")
+
             pycache = repo / "routine-helpers/__pycache__"
             pycache.mkdir()
             (pycache / "fixture.cpython-313.pyc").write_bytes(b"machine-local")
             result = self._run_external_bundle_validator(repo, binary, manifest)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            for pyc in (
+                repo / "src/probe.pyc",
+                repo / "migrations/postgres/__pycache__/probe.pyc",
+                repo / ".cargo/__pycache__/probe.pyc",
+            ):
+                pyc.parent.mkdir(parents=True, exist_ok=True)
+                pyc.write_bytes(b"machine-local-input-bytecode-v1")
+            result = self._run_external_bundle_validator(repo, binary, manifest)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for pyc in (
+                repo / "src/probe.pyc",
+                repo / "migrations/postgres/__pycache__/probe.pyc",
+                repo / ".cargo/__pycache__/probe.pyc",
+            ):
+                pyc.write_bytes(b"machine-local-input-bytecode-v2")
+            result = self._run_external_bundle_validator(repo, binary, manifest)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            defaults = repo / "defaults.json"
+            defaults.write_text('{"changed":true}\n', encoding="utf-8")
+            result = self._run_external_bundle_validator(repo, binary, manifest)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            defaults.write_text("{}\n", encoding="utf-8")
 
             (repo / ".git/info/exclude").write_text(
                 "migrations/postgres/9999_ignored.sql\n", encoding="utf-8"
@@ -285,7 +349,9 @@ fi
 
     def test_backup_cleanup_precedes_asset_commit_intent(self):
         deploy = DEPLOY.read_text(encoding="utf-8")
-        cleanup = deploy.index('if ! rm -f "$REL_BINARY_BACKUP"')
+        cleanup = deploy.index(
+            'adk_durable_remove_path "$REL_BINARY_BACKUP" missing-ok'
+        )
         commit_intent = deploy.index(
             'adk_mark_routine_asset_transaction_committing "$ADK_REL" "$ROUTINE_ASSET_TXN"',
             cleanup,

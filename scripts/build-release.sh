@@ -103,6 +103,9 @@ write_local_build_generation_manifest() {
   local binary="$1"
   local expected_source_sha="$2"
   local expected_inputs_sha="$3"
+  local expected_binary_sha="$4"
+  local expected_routines_sha="$5"
+  local expected_helpers_sha="$6"
   local manifest="$PROJECT_DIR/target/release/agentdesk-generation.json"
   local source_sha binary_sha routines_sha helpers_sha inputs_sha
 
@@ -120,6 +123,12 @@ write_local_build_generation_manifest() {
   binary_sha="$(adk_sha256_file "$binary")" || return 1
   routines_sha="$(adk_sha256_tree "$PROJECT_DIR/routines")" || return 1
   helpers_sha="$(adk_sha256_tree "$PROJECT_DIR/routine-helpers")" || return 1
+  [ "$binary_sha" = "$expected_binary_sha" ] \
+    && [ "$routines_sha" = "$expected_routines_sha" ] \
+    && [ "$helpers_sha" = "$expected_helpers_sha" ] || {
+    echo "Error: binary/routine generation changed before manifest publication" >&2
+    return 1
+  }
   adk_require_clean_git_worktree "$PROJECT_DIR" || return 1
   [ "$(git -C "$PROJECT_DIR" rev-parse HEAD)" = "$expected_source_sha" ] || {
     echo "Error: repository HEAD changed while binding the release manifest" >&2
@@ -211,6 +220,12 @@ if ! "$BINARY" validate-routines \
   echo "Error: candidate runtime rejected repository routine assets"
   exit 1
 fi
+BUILD_BINARY_SHA="$(adk_sha256_file "$BINARY")" \
+  || { echo "Error: could not bind release binary bytes" >&2; exit 1; }
+BUILD_ROUTINES_SHA="$(adk_sha256_tree "$PROJECT_DIR/routines")" \
+  || { echo "Error: could not bind release routines" >&2; exit 1; }
+BUILD_HELPERS_SHA="$(adk_sha256_tree "$PROJECT_DIR/routine-helpers")" \
+  || { echo "Error: could not bind release routine helpers" >&2; exit 1; }
 echo "  Binary: $(ls -lh "$BINARY" | awk '{print $5}')"
 
 # ── 2. Verify + build dashboard ──────────────────────────────────────────────
@@ -235,18 +250,30 @@ rm -rf "$STAGING"
 mkdir -p "$STAGING"
 
 # Binary
+adk_verify_file_sha256 "$BINARY" "$BUILD_BINARY_SHA" \
+  || { echo "Error: binary changed before artifact copy" >&2; exit 1; }
 cp "$BINARY" "$STAGING/"
 chmod +x "$STAGING/$BINARY_NAME"
+adk_verify_file_sha256 "$STAGING/$BINARY_NAME" "$BUILD_BINARY_SHA" \
+  || { echo "Error: staged artifact binary differs from bound generation" >&2; exit 1; }
 
 # Dashboard — rebuild to ensure dist matches current source
 if [ -d "dashboard" ] && command -v npm &>/dev/null; then
   echo "▸ Building dashboard..."
   (cd dashboard && npm run build --silent)
 fi
+adk_verify_tree_sha256 "$PROJECT_DIR/routines" "$BUILD_ROUTINES_SHA" \
+  || { echo "Error: routines changed during artifact staging" >&2; exit 1; }
+adk_verify_tree_sha256 "$STAGING/routines" "$BUILD_ROUTINES_SHA" \
+  || { echo "Error: staged routines differ from bound generation" >&2; exit 1; }
 if [ -d "dashboard/dist" ]; then
   mkdir -p "$STAGING/dashboard"
   cp -r dashboard/dist "$STAGING/dashboard/dist"
 fi
+adk_verify_tree_sha256 "$PROJECT_DIR/routine-helpers" "$BUILD_HELPERS_SHA" \
+  || { echo "Error: routine helpers changed during artifact staging" >&2; exit 1; }
+adk_verify_tree_sha256 "$STAGING/routine-helpers" "$BUILD_HELPERS_SHA" \
+  || { echo "Error: staged routine helpers differ from bound generation" >&2; exit 1; }
 
 # Policies
 if [ -d "policies" ]; then
@@ -318,6 +345,10 @@ fi
 echo "$VERSION" > "$STAGING/VERSION"
 
 # Create tarball
+adk_verify_file_sha256 "$STAGING/$BINARY_NAME" "$BUILD_BINARY_SHA" \
+  && adk_verify_tree_sha256 "$STAGING/routines" "$BUILD_ROUTINES_SHA" \
+  && adk_verify_tree_sha256 "$STAGING/routine-helpers" "$BUILD_HELPERS_SHA" \
+  || { echo "Error: staged generation changed before archive creation" >&2; exit 1; }
 cd "$DIST_DIR"
 ARTIFACT_FILE="${ARTIFACT_NAME}.${PACKAGE_EXT}"
 create_archive "$ARTIFACT_NAME" "$ARTIFACT_FILE"
@@ -326,7 +357,8 @@ rm -rf "$ARTIFACT_NAME"
 # Checksum
 write_checksum "$ARTIFACT_FILE"
 write_local_build_generation_manifest \
-  "$BINARY" "$BUILD_SOURCE_SHA" "$BUILD_EXECUTABLE_INPUT_SHA"
+  "$BINARY" "$BUILD_SOURCE_SHA" "$BUILD_EXECUTABLE_INPUT_SHA" \
+  "$BUILD_BINARY_SHA" "$BUILD_ROUTINES_SHA" "$BUILD_HELPERS_SHA"
 
 echo ""
 echo "═══ Build Complete ═══"
