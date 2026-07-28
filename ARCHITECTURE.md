@@ -1441,6 +1441,7 @@ src/
 ├── manual_intervention.rs
 ├── phase_gate.rs
 ├── pipeline.rs
+├── queue_contract.rs
 ├── receipt.rs
 └── reconcile.rs
 ```
@@ -1487,6 +1488,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/manual_intervention.rs` | Manual intervention parsing and helpers shared by Discord reply/requeue flows. |
 | `src/phase_gate.rs` | Immutable typed phase-gate declarations and snapshot compatibility checks shared by HTTP, policy dispatch, and durable reducers. |
 | `src/pipeline.rs` | Pipeline stage loading, resolution, and transition helpers. |
+| `src/queue_contract.rs` | Queue field compatibility contracts shared by planner prompts, API documentation, and runtime-facing consumers. |
 | `src/receipt.rs` | Receipt parsing and workspace attribution helpers. |
 | `src/reconcile.rs` | Boot-time reconciliation for persisted state and dispatch-runtime drift. |
 <!-- END GENERATED: TOP LEVEL MODULE MAP -->
