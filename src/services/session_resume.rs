@@ -472,14 +472,18 @@ pub(crate) async fn perform_resume_rebind(
     // If teardown actually retired the pane, forget its stale transcript/session
     // mirror. Otherwise keep the live binding and its scan offset so output that
     // arrives during the rebind remains eligible for delayed delivery.
-    let runtime_binding_clear =
-        if tmux_killed || !crate::services::platform::tmux::has_session(tmux_name) {
-            clear_resume_runtime_binding(tmux_name)
-        } else {
-            ResumeRuntimeBindingClearOutcome::RetainedLive {
-                tmux_session: tmux_name.trim().to_string(),
-            }
-        };
+    let tmux_still_present = if tmux_killed {
+        false
+    } else {
+        crate::services::tmux_diagnostics::probe_tmux_session_exists(tmux_name).await
+    };
+    let runtime_binding_clear = if tmux_still_present {
+        ResumeRuntimeBindingClearOutcome::RetainedLive {
+            tmux_session: tmux_name.trim().to_string(),
+        }
+    } else {
+        clear_resume_runtime_binding(tmux_name)
+    };
 
     // In-memory mirror so the next turn resumes without a restart.
     let in_memory_rebound = if let (Some(shared), Some(provider), Some(channel_id)) =
