@@ -68,6 +68,9 @@ echo "=== Policy DB capability manifest guard (#3734) ==="
 echo "=== Merge automation policy tests (#4250) ==="
 node --test policies/__tests__/merge-automation.test.js
 
+echo "=== Timeout shadow aggregation gate tests (#3950) ==="
+node --test scripts/__tests__/timeout-shadow-gate.test.mjs
+
 echo "=== Daily log-digest routine tests (#4263) ==="
 node --test policies/__tests__/daily-log-digest.test.js
 "$PYTHON" -m unittest tests.test_daily_log_digest

@@ -1,5 +1,7 @@
 use serde_json::json;
 
+use crate::queue_contract::THREAD_GROUP_SERIAL_LANE_CONTRACT;
+
 #[allow(unused_imports)]
 use super::super::{EndpointDoc, ParamDoc, body_param, ep, header_param, path_param, query_param};
 
@@ -759,6 +761,10 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 ),
             ),
             (
+                "entries[].thread_group",
+                body_param("integer", false, THREAD_GROUP_SERIAL_LANE_CONTRACT),
+            ),
+            (
                 "unified_thread",
                 body_param(
                     "boolean",
@@ -807,4 +813,23 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         )
         .with_curl("curl -X POST http://localhost:8787/api/queue/generate -H 'Content-Type: application/json' -d '{\"repo\":\"test-repo\",\"issue_numbers\":[423,405]}'")
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_generate_docs_use_canonical_thread_group_contract() {
+        let endpoint = endpoints()
+            .into_iter()
+            .find(|endpoint| endpoint.path == "/api/queue/generate")
+            .expect("queue generate endpoint");
+        let param = endpoint
+            .params
+            .get("entries[].thread_group")
+            .expect("entries[].thread_group parameter");
+
+        assert_eq!(param.description, THREAD_GROUP_SERIAL_LANE_CONTRACT);
+    }
 }
