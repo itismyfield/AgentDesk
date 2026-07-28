@@ -2,7 +2,10 @@ use super::discovery::{
     RoutineDiscoveryHooks, bind_routine_root_authority, collect_routine_script_paths,
     require_nonempty_routine_tree, script_ref,
 };
-use super::evaluator::validate_routine_script_source;
+use super::evaluator::{
+    MAX_ROUTINE_RETAINED_OUTPUT_BYTES, RetainedOutputBudget,
+    load_single_routine_script_from_source_with_budget,
+};
 use super::{verify_bound_root_set, verify_bound_runtime_surface, verify_bound_scan_surface};
 use anyhow::{Result, anyhow};
 use serde::Serialize;
@@ -38,6 +41,18 @@ pub(crate) struct RoutineValidationReport {
 pub(crate) fn validate_routine_tree(
     configured_root: &Path,
     configured_runtime_root: &Path,
+) -> Result<RoutineValidationReport> {
+    validate_routine_tree_with_retained_output_limit(
+        configured_root,
+        configured_runtime_root,
+        MAX_ROUTINE_RETAINED_OUTPUT_BYTES,
+    )
+}
+
+fn validate_routine_tree_with_retained_output_limit(
+    configured_root: &Path,
+    configured_runtime_root: &Path,
+    maximum_retained_output_bytes: usize,
 ) -> Result<RoutineValidationReport> {
     let configured_roots = [configured_root.to_path_buf()];
     let (runtime_authority, roots, helper_authority) =
@@ -97,7 +112,9 @@ pub(crate) fn validate_routine_tree(
         });
     }
     let mut validated_files = Vec::with_capacity(snapshots.len());
+    let mut retained_output_budget = RetainedOutputBudget::new(maximum_retained_output_bytes);
     for snapshot in snapshots {
+        let candidate_output_budget = retained_output_budget.fork();
         authority_check()?;
         let path = snapshot.path.clone();
         let script_ref = script_ref(&root.canonical, &path);
@@ -112,24 +129,31 @@ pub(crate) fn validate_routine_tree(
                 continue;
             }
         };
-        let fallback_name = path
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        match validate_routine_script_source(&source, &fallback_name, &script_ref, &path) {
-            Ok(validated) => validated_files.push(RoutineValidationFile {
-                path,
-                script_ref,
-                name: validated.name,
-            }),
+        let evaluation = load_single_routine_script_from_source_with_budget(
+            &root.canonical,
+            &path,
+            source,
+            &candidate_output_budget,
+        );
+        authority_check()?;
+        if candidate_output_budget.is_exhausted() {
+            return Err(candidate_output_budget.limit_error());
+        }
+        match evaluation {
+            Ok(validated) => {
+                retained_output_budget = candidate_output_budget;
+                validated_files.push(RoutineValidationFile {
+                    path,
+                    script_ref,
+                    name: validated.name,
+                });
+            }
             Err(error) => failures.push(RoutineValidationFailure {
                 path,
                 script_ref,
                 message: error.to_string(),
             }),
         }
-        authority_check()?;
     }
 
     verify_bound_root_set(
@@ -181,6 +205,109 @@ mod tests {
         assert_eq!(report.validated_files.len(), 1);
         assert_eq!(report.failures.len(), 1);
         assert_eq!(report.failures[0].script_ref, "invalid.js");
+    }
+
+    #[test]
+    fn validation_and_runtime_share_exact_multiscript_name_and_metadata_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_root = temp.path().join("release-root");
+        let root = runtime_root.join("routines");
+        fs::create_dir_all(runtime_root.join("routine-helpers")).unwrap();
+        write_routine(
+            &root,
+            "first.js",
+            r#"agentdesk.routines.register({ name: "one", metadata: { key: "value" }, tick() { return {}; } });"#,
+        );
+        write_routine(
+            &root,
+            "second.js",
+            r#"agentdesk.routines.register({ name: "two", metadata: { "é": "💣" }, tick() { return {}; } });"#,
+        );
+
+        // first: 3 + 3 + 5 bytes; second: 3 + 2 + 4 bytes.
+        let report =
+            validate_routine_tree_with_retained_output_limit(&root, &runtime_root, 20).unwrap();
+        assert!(report.valid);
+        assert_eq!(report.validated_files.len(), 2);
+
+        let runtime_loader = super::super::RoutineScriptLoader::new().unwrap();
+        assert_eq!(
+            runtime_loader
+                .load_dirs_with_retained_output_limit(&[root.clone()], 20)
+                .unwrap(),
+            2
+        );
+
+        let error =
+            validate_routine_tree_with_retained_output_limit(&root, &runtime_root, 19).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "routine retained output exceeds maximum 19 bytes"
+        );
+
+        let constrained_runtime_loader = super::super::RoutineScriptLoader::new().unwrap();
+        let runtime_error = constrained_runtime_loader
+            .load_dirs_with_retained_output_limit(&[root], 19)
+            .unwrap_err();
+        assert_eq!(runtime_error.to_string(), error.to_string());
+        assert!(constrained_runtime_loader.script_refs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_script_retained_budget_is_rolled_back_before_next_script() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_root = temp.path().join("release-root");
+        let root = runtime_root.join("routines");
+        fs::create_dir_all(runtime_root.join("routine-helpers")).unwrap();
+        write_routine(
+            &root,
+            "a-failed.js",
+            r#"agentdesk.routines.register({ name: "fail", tick: 1 });"#,
+        );
+        write_routine(
+            &root,
+            "b-valid.js",
+            r#"agentdesk.routines.register({ name: "ok", metadata: { k: "v" }, tick() { return {}; } });"#,
+        );
+
+        let report =
+            validate_routine_tree_with_retained_output_limit(&root, &runtime_root, 4).unwrap();
+
+        assert!(!report.valid);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].script_ref, "a-failed.js");
+        assert_eq!(report.validated_files.len(), 1);
+        assert_eq!(report.validated_files[0].name, "ok");
+    }
+
+    #[test]
+    fn validation_report_schema_does_not_expose_metadata_or_budget_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_root = temp.path().join("release-root");
+        let root = runtime_root.join("routines");
+        fs::create_dir_all(runtime_root.join("routine-helpers")).unwrap();
+        write_routine(
+            &root,
+            "valid.js",
+            r#"agentdesk.routines.register({ name: "valid", metadata: { hidden: "payload" }, tick() { return {}; } });"#,
+        );
+
+        let report = validate_routine_tree(&root, &runtime_root).unwrap();
+        let serialized = serde_json::to_value(report).unwrap();
+        let object = serialized.as_object().unwrap();
+        assert_eq!(object.len(), 5);
+        for key in ["valid", "root", "runtimeRoot", "validatedFiles", "failures"] {
+            assert!(object.contains_key(key), "missing report field {key}");
+        }
+        assert!(!object.contains_key("metadata"));
+        assert!(!object.contains_key("retainedOutputBudget"));
+
+        let validated_file = object["validatedFiles"][0].as_object().unwrap();
+        assert_eq!(validated_file.len(), 3);
+        assert!(validated_file.contains_key("path"));
+        assert!(validated_file.contains_key("scriptRef"));
+        assert!(validated_file.contains_key("name"));
+        assert!(!validated_file.contains_key("metadata"));
     }
 
     #[test]

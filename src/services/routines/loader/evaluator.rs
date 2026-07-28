@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow};
 use rquickjs::function::Opt;
 use rquickjs::{Array, Context, Function, Object, Runtime};
 use serde_json::{Map, Number, Value};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::fmt::Display;
 use std::path::Path;
@@ -18,6 +18,64 @@ const MAX_ROUTINE_JSON_DEPTH: usize = 128;
 const MAX_ROUTINE_JSON_ARRAY_LENGTH: usize = 16_384;
 const MAX_ROUTINE_JSON_NODES: usize = 32_768;
 const MAX_ROUTINE_JSON_CONVERTED_BYTES: usize = ROUTINE_QUICKJS_MEMORY_LIMIT_BYTES;
+pub(super) const MAX_ROUTINE_RETAINED_OUTPUT_BYTES: usize = ROUTINE_QUICKJS_MEMORY_LIMIT_BYTES;
+
+#[derive(Debug)]
+struct RetainedOutputBudgetState {
+    remaining: Cell<usize>,
+    exhausted: Cell<bool>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct RetainedOutputBudget {
+    maximum: usize,
+    state: Rc<RetainedOutputBudgetState>,
+}
+
+impl RetainedOutputBudget {
+    pub(super) fn new(maximum: usize) -> Self {
+        Self {
+            maximum,
+            state: Rc::new(RetainedOutputBudgetState {
+                remaining: Cell::new(maximum),
+                exhausted: Cell::new(false),
+            }),
+        }
+    }
+
+    pub(super) fn fork(&self) -> Self {
+        Self {
+            maximum: self.maximum,
+            state: Rc::new(RetainedOutputBudgetState {
+                remaining: Cell::new(self.state.remaining.get()),
+                exhausted: Cell::new(self.state.exhausted.get()),
+            }),
+        }
+    }
+
+    fn charge(&self, bytes: usize) -> Result<()> {
+        if self.state.exhausted.get() {
+            return Err(self.limit_error());
+        }
+        let Some(remaining) = self.state.remaining.get().checked_sub(bytes) else {
+            self.state.exhausted.set(true);
+            return Err(self.limit_error());
+        };
+        self.state.remaining.set(remaining);
+        Ok(())
+    }
+
+    pub(super) fn is_exhausted(&self) -> bool {
+        self.state.exhausted.get()
+    }
+
+    pub(super) fn limit_error(&self) -> anyhow::Error {
+        anyhow!(
+            "routine retained output exceeds maximum {} bytes",
+            self.maximum
+        )
+    }
+}
 
 #[cfg(test)]
 mod tests;
@@ -34,15 +92,27 @@ pub(super) fn load_single_routine_script_from_source(
     path: &Path,
     source: String,
 ) -> Result<LoadedRoutineScript> {
-    let fallback_name = path
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
+    let retained_output_budget = RetainedOutputBudget::new(MAX_ROUTINE_RETAINED_OUTPUT_BYTES);
+    load_single_routine_script_from_source_with_budget(root, path, source, &retained_output_budget)
+}
+
+pub(super) fn load_single_routine_script_from_source_with_budget(
+    root: &Path,
+    path: &Path,
+    source: String,
+    retained_output_budget: &RetainedOutputBudget,
+) -> Result<LoadedRoutineScript> {
+    let fallback_name = path.file_stem().unwrap_or_default().to_string_lossy();
     let script_ref = script_ref(root, path);
     let script_version = compute_policy_version(&source);
 
-    let validation = validate_routine_script_source(&source, &fallback_name, &script_ref, path)?;
+    let validation = validate_routine_script_source_with_budget(
+        &source,
+        &fallback_name,
+        &script_ref,
+        path,
+        retained_output_budget,
+    )?;
 
     Ok(LoadedRoutineScript {
         name: validation.name,
@@ -67,9 +137,32 @@ pub(super) fn validate_routine_script_source(
     script_ref: &str,
     path: &Path,
 ) -> Result<ValidatedRoutineSource> {
+    let retained_output_budget = RetainedOutputBudget::new(MAX_ROUTINE_RETAINED_OUTPUT_BYTES);
+    validate_routine_script_source_with_budget(
+        source,
+        fallback_name,
+        script_ref,
+        path,
+        &retained_output_budget,
+    )
+}
+
+fn validate_routine_script_source_with_budget(
+    source: &str,
+    fallback_name: &str,
+    script_ref: &str,
+    path: &Path,
+    retained_output_budget: &RetainedOutputBudget,
+) -> Result<ValidatedRoutineSource> {
     with_bounded_quickjs_context(|ctx| -> Result<ValidatedRoutineSource> {
-        let registration =
-            capture_registered_routine(ctx.clone(), source, fallback_name, script_ref, path)?;
+        let registration = capture_registered_routine(
+            ctx.clone(),
+            source,
+            fallback_name,
+            script_ref,
+            path,
+            retained_output_budget,
+        )?;
         Ok(ValidatedRoutineSource {
             name: registration.name,
             metadata: registration.metadata,
@@ -81,20 +174,34 @@ pub(super) fn evaluate_tick_action(
     script: &LoadedRoutineScript,
     tick_context: &RoutineTickContext,
 ) -> Result<Value> {
+    evaluate_tick_action_with_retained_output_limit(
+        script,
+        tick_context,
+        MAX_ROUTINE_RETAINED_OUTPUT_BYTES,
+    )
+}
+
+fn evaluate_tick_action_with_retained_output_limit(
+    script: &LoadedRoutineScript,
+    tick_context: &RoutineTickContext,
+    maximum_action_retained_output_bytes: usize,
+) -> Result<Value> {
     let fallback_name = script
         .file
         .file_stem()
         .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
+        .to_string_lossy();
 
     with_bounded_quickjs_context(|ctx| -> Result<Value> {
+        let registration_retained_output_budget =
+            RetainedOutputBudget::new(MAX_ROUTINE_RETAINED_OUTPUT_BYTES);
         let registration = capture_registered_routine(
             ctx.clone(),
             &script.source,
             &fallback_name,
             &script.script_ref,
             &script.file,
+            &registration_retained_output_budget,
         )?;
         let context_json = serde_json::to_string(tick_context)
             .map_err(|e| anyhow!("encode routine tick context: {e}"))?;
@@ -119,10 +226,13 @@ pub(super) fn evaluate_tick_action(
                 script.script_ref
             ));
         }
-        js_value_to_json(
+        let action_retained_output_budget =
+            RetainedOutputBudget::new(maximum_action_retained_output_bytes);
+        js_value_to_json_with_retained_output_budget(
             action_value,
             "routine action",
             &registration.json_container_policy,
+            &action_retained_output_budget,
         )
     })
 }
@@ -293,16 +403,26 @@ fn snapshot_registered_routine<'js>(
     script_ref: &str,
     tick_classifier: &Function<'js>,
     json_container_policy: &JsonContainerPolicy<'js>,
+    retained_output_budget: &RetainedOutputBudget,
 ) -> Result<CapturedRoutineRegistration<'js>> {
     let routine_obj = registered
         .and_then(|value| value.into_object())
         .ok_or_else(|| anyhow!("agentdesk.routines.register argument is not an object"))?;
 
-    let name: String = routine_obj
-        .get::<_, rquickjs::Value>("name")
-        .ok()
-        .and_then(|v| v.as_string().and_then(|s| s.to_string().ok()))
-        .unwrap_or_else(|| fallback_name.to_string());
+    let name_value = routine_obj.get::<_, rquickjs::Value>("name").ok();
+    let name = match name_value.as_ref().and_then(rquickjs::Value::as_string) {
+        Some(name) => copy_quickjs_string_with_budgets(
+            name.clone(),
+            "routine name",
+            "string",
+            None,
+            Some(retained_output_budget),
+        )?,
+        None => {
+            retained_output_budget.charge(fallback_name.len())?;
+            fallback_name.to_owned()
+        }
+    };
 
     let tick_value: rquickjs::Value = routine_obj
         .get("tick")
@@ -340,7 +460,14 @@ fn snapshot_registered_routine<'js>(
         .get::<_, rquickjs::Value>("metadata")
         .ok()
         .filter(|value| !value.is_null() && !value.is_undefined())
-        .map(|value| js_value_to_json(value, "routine metadata", json_container_policy))
+        .map(|value| {
+            js_value_to_json_with_retained_output_budget(
+                value,
+                "routine metadata",
+                json_container_policy,
+                retained_output_budget,
+            )
+        })
         .transpose()?
         .unwrap_or(Value::Null);
 
@@ -358,6 +485,7 @@ fn capture_registered_routine<'js>(
     fallback_name: &str,
     script_ref: &str,
     path: &Path,
+    retained_output_budget: &RetainedOutputBudget,
 ) -> Result<CapturedRoutineRegistration<'js>> {
     let globals = ctx.globals();
     let tick_classifier = create_tick_function_classifier(ctx.clone())?;
@@ -372,8 +500,9 @@ fn capture_registered_routine<'js>(
         json_container_policy: Some(json_container_policy),
     }));
     let callback_capture = Rc::clone(&capture);
-    let callback_fallback_name = fallback_name.to_string();
-    let callback_script_ref = script_ref.to_string();
+    let callback_fallback_name = fallback_name.to_owned();
+    let callback_script_ref = script_ref.to_owned();
+    let callback_retained_output_budget = retained_output_budget.clone();
     let register = Function::new(
         ctx.clone(),
         move |callback_ctx: rquickjs::Ctx<'js>, Opt(registered): Opt<rquickjs::Value<'js>>| {
@@ -400,6 +529,7 @@ fn capture_registered_routine<'js>(
                             &callback_script_ref,
                             &tick_classifier,
                             &json_container_policy,
+                            &callback_retained_output_budget,
                         )
                     });
                 callback_capture.borrow_mut().registration = Some(registration);
@@ -463,16 +593,50 @@ fn capture_registered_routine<'js>(
     })?
 }
 
-fn js_value_to_json<'js>(
+pub(super) fn charge_existing_routine_output(
+    retained_output_budget: &RetainedOutputBudget,
+    name: &str,
+    metadata: &Value,
+) -> Result<()> {
+    retained_output_budget.charge(name.len())?;
+    charge_existing_json_payload(retained_output_budget, metadata)
+}
+
+fn charge_existing_json_payload(
+    retained_output_budget: &RetainedOutputBudget,
+    value: &Value,
+) -> Result<()> {
+    match value {
+        Value::String(value) => retained_output_budget.charge(value.len()),
+        Value::Array(values) => {
+            for value in values {
+                charge_existing_json_payload(retained_output_budget, value)?;
+            }
+            Ok(())
+        }
+        Value::Object(values) => {
+            for (key, value) in values {
+                retained_output_budget.charge(key.len())?;
+                charge_existing_json_payload(retained_output_budget, value)?;
+            }
+            Ok(())
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => Ok(()),
+    }
+}
+
+fn js_value_to_json_with_retained_output_budget<'js>(
     value: rquickjs::Value<'js>,
     label: &'static str,
     json_container_policy: &JsonContainerPolicy<'js>,
+    retained_output_budget: &RetainedOutputBudget,
 ) -> Result<Value> {
-    js_value_to_json_with_byte_budget(
+    js_value_to_json_with_budgets(
         value,
         label,
         json_container_policy,
         MAX_ROUTINE_JSON_CONVERTED_BYTES,
+        Some(retained_output_budget),
     )
 }
 
@@ -501,11 +665,29 @@ impl JsonConversionByteBudget {
     }
 }
 
-fn copy_json_string_with_budget<'js>(
+struct JsonConversionBudgets<'a> {
+    converted: JsonConversionByteBudget,
+    retained_output: Option<&'a RetainedOutputBudget>,
+}
+
+impl<'a> JsonConversionBudgets<'a> {
+    fn new(
+        maximum_converted_bytes: usize,
+        retained_output: Option<&'a RetainedOutputBudget>,
+    ) -> Self {
+        Self {
+            converted: JsonConversionByteBudget::new(maximum_converted_bytes),
+            retained_output,
+        }
+    }
+}
+
+fn copy_quickjs_string_with_budgets<'js>(
     value: rquickjs::String<'js>,
     label: &'static str,
     kind: &'static str,
-    byte_budget: &mut JsonConversionByteBudget,
+    byte_budget: Option<&mut JsonConversionByteBudget>,
+    retained_output_budget: Option<&RetainedOutputBudget>,
 ) -> Result<String> {
     let ctx = value.ctx().clone();
     let value = value.to_cstring().map_err(|e| {
@@ -517,8 +699,13 @@ fn copy_json_string_with_budget<'js>(
     let bytes = unsafe { std::slice::from_raw_parts(value.as_ptr().cast::<u8>(), value.len()) };
     let value = std::str::from_utf8(bytes)
         .map_err(|error| anyhow!("{label} {kind} conversion failed: invalid UTF-8: {error}"))?;
-    // Debit the aggregate budget before creating the retained Rust String.
-    byte_budget.charge(label, value.len())?;
+    // Debit every applicable budget before creating the retained Rust String.
+    if let Some(byte_budget) = byte_budget {
+        byte_budget.charge(label, value.len())?;
+    }
+    if let Some(retained_output_budget) = retained_output_budget {
+        retained_output_budget.charge(value.len())?;
+    }
     Ok(value.to_owned())
 }
 
@@ -528,9 +715,25 @@ fn js_value_to_json_with_byte_budget<'js>(
     json_container_policy: &JsonContainerPolicy<'js>,
     maximum_converted_bytes: usize,
 ) -> Result<Value> {
+    js_value_to_json_with_budgets(
+        value,
+        label,
+        json_container_policy,
+        maximum_converted_bytes,
+        None,
+    )
+}
+
+fn js_value_to_json_with_budgets<'js>(
+    value: rquickjs::Value<'js>,
+    label: &'static str,
+    json_container_policy: &JsonContainerPolicy<'js>,
+    maximum_converted_bytes: usize,
+    retained_output_budget: Option<&RetainedOutputBudget>,
+) -> Result<Value> {
     let mut active = HashSet::new();
     let mut remaining_nodes = MAX_ROUTINE_JSON_NODES;
-    let mut byte_budget = JsonConversionByteBudget::new(maximum_converted_bytes);
+    let mut budgets = JsonConversionBudgets::new(maximum_converted_bytes, retained_output_budget);
     js_value_to_json_inner(
         value,
         label,
@@ -538,7 +741,7 @@ fn js_value_to_json_with_byte_budget<'js>(
         0,
         &mut active,
         &mut remaining_nodes,
-        &mut byte_budget,
+        &mut budgets,
     )
 }
 
@@ -549,7 +752,7 @@ fn js_value_to_json_inner<'js>(
     depth: usize,
     active: &mut HashSet<rquickjs::Value<'js>>,
     remaining_nodes: &mut usize,
-    byte_budget: &mut JsonConversionByteBudget,
+    budgets: &mut JsonConversionBudgets<'_>,
 ) -> Result<Value> {
     if *remaining_nodes == 0 {
         return Err(anyhow!(
@@ -573,11 +776,13 @@ fn js_value_to_json_inner<'js>(
         return Ok(Value::Number(number));
     }
     if let Some(value) = value.as_string() {
-        return Ok(Value::String(copy_json_string_with_budget(
+        let retained_output_budget = budgets.retained_output;
+        return Ok(Value::String(copy_quickjs_string_with_budgets(
             value.clone(),
             label,
             "string",
-            byte_budget,
+            Some(&mut budgets.converted),
+            retained_output_budget,
         )?));
     }
     if value.is_promise() {
@@ -639,7 +844,7 @@ fn js_value_to_json_inner<'js>(
                     depth + 1,
                     active,
                     remaining_nodes,
-                    byte_budget,
+                    budgets,
                 )?);
             }
             Ok(Value::Array(out))
@@ -682,7 +887,14 @@ fn js_value_to_json_inner<'js>(
                         "{label} exceeds maximum value count {MAX_ROUTINE_JSON_NODES}"
                     ));
                 }
-                let key = copy_json_string_with_budget(key, label, "object key", byte_budget)?;
+                let retained_output_budget = budgets.retained_output;
+                let key = copy_quickjs_string_with_budgets(
+                    key,
+                    label,
+                    "object key",
+                    Some(&mut budgets.converted),
+                    retained_output_budget,
+                )?;
                 let item: rquickjs::Value = object.get(key.as_str()).map_err(|e| {
                     conversion_js_error(
                         object.ctx(),
@@ -699,7 +911,7 @@ fn js_value_to_json_inner<'js>(
                         depth + 1,
                         active,
                         remaining_nodes,
-                        byte_budget,
+                        budgets,
                     )?,
                 );
             }

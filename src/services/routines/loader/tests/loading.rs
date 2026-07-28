@@ -1,5 +1,16 @@
 use super::*;
 
+fn write_budgeted_routine(path: &Path, name: &str, metadata: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        path,
+        format!(
+            "agentdesk.routines.register({{ name: {name:?}, metadata: {metadata}, tick() {{ return {{ action: 'skip' }}; }} }});"
+        ),
+    )
+    .unwrap();
+}
+
 #[test]
 fn load_dir_recurses_into_nested_script_dirs() {
     let dir = tempfile::tempdir().unwrap();
@@ -198,4 +209,96 @@ fn load_dirs_skips_invalid_root_and_keeps_loading_remaining_roots() {
         loader.get_script("healthy.js").unwrap().unwrap().file,
         healthy_root.canonicalize().unwrap().join("healthy.js")
     );
+}
+
+#[test]
+fn retained_output_budget_is_shared_across_roots_and_accepts_exact_boundary() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    write_budgeted_routine(&first.path().join("a.js"), "é", "{ 'é': '💣' }");
+    write_budgeted_routine(&second.path().join("b.js"), "é", "{ 'é': '💣' }");
+    let roots = [first.path().to_path_buf(), second.path().to_path_buf()];
+    let loader = RoutineScriptLoader::new().unwrap();
+
+    let error = loader
+        .load_dirs_with_retained_output_limit(&roots, 15)
+        .unwrap_err();
+    assert!(error.to_string().contains("retained output"), "{error}");
+    assert!(loader.script_refs().unwrap().is_empty());
+    assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
+
+    assert_eq!(
+        loader
+            .load_dirs_with_retained_output_limit(&roots, 16)
+            .unwrap(),
+        2
+    );
+    assert_eq!(loader.script_refs().unwrap(), vec!["a.js", "b.js"]);
+}
+
+#[test]
+fn retained_output_budget_includes_implicit_lkg_and_commits_atomically() {
+    let root = tempfile::tempdir().unwrap();
+    let retained = root.path().join("a.js");
+    write_budgeted_routine(&retained, "A", "{ k: '12' }");
+    let loader = RoutineScriptLoader::new().unwrap();
+    assert_eq!(loader.load_dir(root.path()).unwrap(), 1);
+    let retained_version = loader.get_script("a.js").unwrap().unwrap().script_version;
+
+    std::fs::write(
+        &retained,
+        "agentdesk.routines.register({ name: 'Broken' });",
+    )
+    .unwrap();
+    write_budgeted_routine(&root.path().join("b.js"), "B", "{ k: '12' }");
+
+    let error = loader
+        .load_dirs_with_retained_output_limit(&[root.path().to_path_buf()], 7)
+        .unwrap_err();
+    assert!(error.to_string().contains("retained output"), "{error}");
+    assert_eq!(loader.script_refs().unwrap(), vec!["a.js"]);
+    assert_eq!(
+        loader.get_script("a.js").unwrap().unwrap().script_version,
+        retained_version
+    );
+    assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
+
+    assert_eq!(
+        loader
+            .load_dirs_with_retained_output_limit(&[root.path().to_path_buf()], 8)
+            .unwrap(),
+        1
+    );
+    assert_eq!(loader.script_refs().unwrap(), vec!["a.js", "b.js"]);
+    assert_eq!(
+        loader.get_script("a.js").unwrap().unwrap().script_version,
+        retained_version
+    );
+}
+
+#[test]
+fn retained_output_budget_includes_explicit_cached_scan_fallback() {
+    let parent = tempfile::tempdir().unwrap();
+    let retained_root = parent.path().join("retained");
+    let fresh_root = parent.path().join("fresh");
+    write_budgeted_routine(&retained_root.join("a.js"), "A", "{ k: '12' }");
+    let loader = RoutineScriptLoader::new().unwrap();
+    assert_eq!(loader.load_dir(&retained_root).unwrap(), 1);
+    std::fs::remove_dir_all(&retained_root).unwrap();
+    write_budgeted_routine(&fresh_root.join("b.js"), "B", "{ k: '12' }");
+    let roots = [retained_root, fresh_root];
+
+    let error = loader
+        .load_dirs_with_retained_output_limit(&roots, 7)
+        .unwrap_err();
+    assert!(error.to_string().contains("retained output"), "{error}");
+    assert_eq!(loader.script_refs().unwrap(), vec!["a.js"]);
+
+    assert_eq!(
+        loader
+            .load_dirs_with_retained_output_limit(&roots, 8)
+            .unwrap(),
+        1
+    );
+    assert_eq!(loader.script_refs().unwrap(), vec!["a.js", "b.js"]);
 }

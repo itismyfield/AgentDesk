@@ -19,7 +19,10 @@ use discovery::{
 };
 #[cfg(test)]
 use evaluator::load_single_routine_script;
-use evaluator::{evaluate_tick_action, load_single_routine_script_from_source};
+use evaluator::{
+    MAX_ROUTINE_RETAINED_OUTPUT_BYTES, RetainedOutputBudget, charge_existing_routine_output,
+    evaluate_tick_action, load_single_routine_script_from_source_with_budget,
+};
 pub(crate) use validation::{RoutineValidationReport, validate_routine_tree};
 
 fn verify_bound_root_set(
@@ -402,6 +405,14 @@ impl RoutineScriptLoader {
     }
 
     pub fn load_dirs(&self, roots: &[PathBuf]) -> Result<usize> {
+        self.load_dirs_with_retained_output_limit(roots, MAX_ROUTINE_RETAINED_OUTPUT_BYTES)
+    }
+
+    fn load_dirs_with_retained_output_limit(
+        &self,
+        roots: &[PathBuf],
+        maximum_retained_output_bytes: usize,
+    ) -> Result<usize> {
         let _load_permit = self
             .state
             .load_gate
@@ -587,6 +598,7 @@ impl RoutineScriptLoader {
 
         let mut loaded = 0;
         let mut loaded_scripts = Vec::new();
+        let mut retained_output_budget = RetainedOutputBudget::new(maximum_retained_output_bytes);
         for (script_ref, candidates) in candidates_by_ref {
             let has_existing = existing_refs.contains(&script_ref);
             let mut selected = None;
@@ -676,14 +688,20 @@ impl RoutineScriptLoader {
                 self.state
                     .evaluation_attempts
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let evaluation = load_single_routine_script_from_source(
+                let candidate_output_budget = retained_output_budget.fork();
+                let evaluation = load_single_routine_script_from_source_with_budget(
                     &candidate.root,
                     &candidate.path,
                     source,
+                    &candidate_output_budget,
                 );
                 self.verify_bound_authority(&runtime_root, current_dir_override.as_deref())?;
+                if candidate_output_budget.is_exhausted() {
+                    return Err(candidate_output_budget.limit_error());
+                }
                 match evaluation {
                     Ok(script) => {
+                        retained_output_budget = candidate_output_budget;
                         staged_failures.remove(&candidate_key);
                         if candidates.len() > 1 {
                             tracing::info!(
@@ -735,7 +753,8 @@ impl RoutineScriptLoader {
 
         staged_failures.retain(|path, _| candidate_paths.contains(path));
         self.verify_bound_authority(&runtime_root, current_dir_override.as_deref())?;
-        let pruned = self.apply_dir_reload(loaded_scripts, &seen_refs)?;
+        let pruned =
+            self.apply_dir_reload(loaded_scripts, &seen_refs, maximum_retained_output_bytes)?;
         *self
             .state
             .failed_scripts
@@ -890,18 +909,30 @@ impl RoutineScriptLoader {
         &self,
         loaded_scripts: Vec<LoadedRoutineScript>,
         seen_refs: &HashSet<String>,
+        maximum_retained_output_bytes: usize,
     ) -> Result<usize> {
         let mut scripts = self
             .state
             .scripts
             .lock()
             .unwrap_or_else(recover_poisoned_lock);
+        let mut staged_scripts = scripts.clone();
         for script in loaded_scripts {
-            scripts.insert(script.script_ref.clone(), script);
+            staged_scripts.insert(script.script_ref.clone(), script);
         }
-        let before = scripts.len();
-        scripts.retain(|script_ref, _| seen_refs.contains(script_ref));
-        Ok(before.saturating_sub(scripts.len()))
+        let before = staged_scripts.len();
+        staged_scripts.retain(|script_ref, _| seen_refs.contains(script_ref));
+        let retained_output_budget = RetainedOutputBudget::new(maximum_retained_output_bytes);
+        for script in staged_scripts.values() {
+            charge_existing_routine_output(
+                &retained_output_budget,
+                &script.name,
+                &script.metadata,
+            )?;
+        }
+        let pruned = before.saturating_sub(staged_scripts.len());
+        *scripts = staged_scripts;
+        Ok(pruned)
     }
 }
 
