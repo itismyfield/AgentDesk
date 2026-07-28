@@ -1,29 +1,35 @@
 use super::*;
 use crate::services::discord::router::turn_start::IntakeRuntimeTransition;
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn acquire_after_redirect_or_requeue(
-    http: &Arc<serenity::http::Http>,
-    shared: &Arc<SharedData>,
-    token: &str,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    original_channel_id: ChannelId,
-    turn_kind: TurnKind,
-    original_request_owner: UserId,
-    user_msg_id: MessageId,
-    user_text: &str,
-    reply_context: &Option<String>,
-    has_reply_boundary: bool,
-    merge_consecutive: bool,
-    pending_uploads: &[String],
-    voice_announcement: &Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
-    reply_to_user_message: bool,
-    dispatch_id_for_thread: &Option<String>,
-    turn_start_attempt: Option<crate::services::discord::turn_view_reconciler::TurnStartAttempt>,
-    preserve_on_cancel: bool,
+    runtime: (
+        &Arc<serenity::http::Http>,
+        &Arc<SharedData>,
+        &str,
+        &ProviderKind,
+    ),
+    channels: (ChannelId, ChannelId),
+    request: (TurnKind, UserId, MessageId, &str),
+    reply: (&Option<String>, bool, bool),
+    uploads: (
+        &[String],
+        &Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
+    ),
+    requeue: (
+        bool,
+        &Option<String>,
+        Option<crate::services::discord::turn_view_reconciler::TurnStartAttempt>,
+        bool,
+    ),
     fallback_state: (Option<String>, bool, String),
 ) -> Result<Option<IntakeRuntimeTransition>, Error> {
+    let (http, shared, token, provider) = runtime;
+    let (channel_id, original_channel_id) = channels;
+    let (turn_kind, original_request_owner, user_msg_id, user_text) = request;
+    let (reply_context, has_reply_boundary, merge_consecutive) = reply;
+    let (pending_uploads, voice_announcement) = uploads;
+    let (reply_to_user_message, dispatch_id_for_thread, turn_start_attempt, preserve_on_cancel) =
+        requeue;
     // Redirect resolution is complete. Never wait outside durable storage for a
     // concurrent `/resume`: if the channel transition is already held, enqueue
     // immediately and let the normal queued consumer retry after the transition.

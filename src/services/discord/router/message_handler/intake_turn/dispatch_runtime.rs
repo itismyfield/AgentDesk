@@ -1,22 +1,21 @@
 use super::*;
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn prepare_post_redirect_dispatch_runtime(
     http: &Arc<serenity::http::Http>,
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
     dispatch_id_for_thread: Option<&String>,
     dispatch_info_cached: Option<super::super::super::thread_binding::DispatchInfo>,
-    dispatch_worktree_path: Option<&String>,
-    dispatch_target_repo_path: Option<&String>,
-    dispatch_type_str: &mut Option<String>,
-    dispatch_effective_path: &mut String,
+    dispatch_paths: (Option<&String>, Option<&String>),
+    dispatch_runtime: (&mut Option<String>, &mut String),
 ) -> (
     Option<(ChannelId, Option<String>)>,
     bool,
     Option<super::super::super::thread_binding::DispatchInfo>,
     Option<String>,
 ) {
+    let (dispatch_worktree_path, dispatch_target_repo_path) = dispatch_paths;
+    let (dispatch_type_str, dispatch_effective_path) = dispatch_runtime;
     let final_thread_parent =
         crate::services::discord::resolve_thread_parent(http, channel_id).await;
     let mut authoritative = dispatch_worktree_path.is_some() || dispatch_target_repo_path.is_some();
