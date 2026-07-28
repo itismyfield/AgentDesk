@@ -56,6 +56,36 @@ use self::identity_gate::{
 #[path = "save_store/bridge_entry_guard_tests.rs"]
 mod bridge_entry_guard_tests;
 
+/// Saves bridge-entry mutations without recreating or overwriting a row this turn no longer owns.
+///
+/// #4259: `turn_bridge` held the last blind `save_inflight_state(` call site. The guard body lives
+/// here (per the #4183 precedent) so the hot `turn_bridge/mod.rs` carries only the call site.
+pub(in crate::services::discord) fn persist_bridge_entry_inflight_state(
+    inflight_state: &InflightTurnState,
+) -> GuardedSaveOutcome {
+    const CALLER: &str = "turn_bridge::spawn_turn_bridge::bridge_entry";
+    let outcome = save_inflight_state_if_identity_unchanged(inflight_state, CALLER);
+    match outcome {
+        GuardedSaveOutcome::Saved => {}
+        GuardedSaveOutcome::Missing => tracing::warn!(
+            channel_id = inflight_state.channel_id,
+            caller = CALLER,
+            "bridge-entry guarded save skipped: durable row missing; row was not recreated"
+        ),
+        GuardedSaveOutcome::IdentityMismatch => tracing::warn!(
+            channel_id = inflight_state.channel_id,
+            caller = CALLER,
+            "bridge-entry guarded save skipped: durable row belongs to another turn"
+        ),
+        GuardedSaveOutcome::IoError => tracing::warn!(
+            channel_id = inflight_state.channel_id,
+            caller = CALLER,
+            "bridge-entry guarded save failed: inflight store I/O error"
+        ),
+    }
+    outcome
+}
+
 /// Blind whole-blob write of `InflightTurnState`: serializes the ENTIRE row and
 /// clobbers whatever is on disk, with no compare-and-set on turn identity.
 ///

@@ -141,38 +141,9 @@ pub(super) use watcher_orphan_cleanup::{
 };
 // Re-export pub(crate) items
 pub(crate) use tmux_runtime::tmux_runtime_paths;
-
-/// Saves bridge-entry mutations without recreating or overwriting a row this turn no longer owns.
-fn persist_bridge_entry_inflight_state(
-    inflight_state: &InflightTurnState,
-) -> crate::services::discord::inflight::GuardedSaveOutcome {
-    use crate::services::discord::inflight::{
-        GuardedSaveOutcome, save_inflight_state_if_identity_unchanged,
-    };
-
-    const CALLER: &str = "turn_bridge::spawn_turn_bridge::bridge_entry";
-    let outcome = save_inflight_state_if_identity_unchanged(inflight_state, CALLER);
-    match outcome {
-        GuardedSaveOutcome::Saved => {}
-        GuardedSaveOutcome::Missing => tracing::warn!(
-            channel_id = inflight_state.channel_id,
-            caller = CALLER,
-            "bridge-entry guarded save skipped: durable row missing; row was not recreated"
-        ),
-        GuardedSaveOutcome::IdentityMismatch => tracing::warn!(
-            channel_id = inflight_state.channel_id,
-            caller = CALLER,
-            "bridge-entry guarded save skipped: durable row belongs to another turn"
-        ),
-        GuardedSaveOutcome::IoError => tracing::warn!(
-            channel_id = inflight_state.channel_id,
-            caller = CALLER,
-            "bridge-entry guarded save failed: inflight store I/O error"
-        ),
-    }
-    outcome
-}
-
+// #4259: the bridge-entry guarded-save body lives in inflight/save_store.rs; this hotfile
+// carries only the call site.
+use crate::services::discord::inflight::persist_bridge_entry_inflight_state;
 // Items used by spawn_turn_bridge from submodules
 use super::watcher_lifecycle_decision::should_resume_watcher_after_turn;
 use crate::db::session_status::{AWAITING_BG, IDLE, TURN_ACTIVE};

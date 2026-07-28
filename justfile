@@ -57,6 +57,8 @@ test-non-pg:
     cargo test --lib busy_followup_retry_store -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::claude_tui::input::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::tmux_common::sentinel_tests -- --skip _pg --skip pg_ --skip postgres
+    # #4259: keep the bridge-entry guarded-save contract in the retained lane.
+    cargo test --lib services::discord::inflight::save_store::bridge_entry_guard_tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::turn_bridge::followup_requeue::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::turn_bridge::terminal_outcome_delivery::busy_followup_retry::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::gateway::tests -- --skip _pg --skip pg_ --skip postgres
