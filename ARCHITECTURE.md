@@ -908,12 +908,18 @@ src/
 │   │   │   │   │   ├── provider_error_presentation.rs
 │   │   │   │   │   ├── tui_error_classification.rs
 │   │   │   │   │   └── types.rs
+│   │   │   │   ├── tool_arms/
+│   │   │   │   │   ├── authority.rs
+│   │   │   │   │   ├── authority_tests.rs
+│   │   │   │   │   ├── task_notification.rs
+│   │   │   │   │   └── types.rs
 │   │   │   │   ├── content_arms.rs
 │   │   │   │   ├── exit_reconcile.rs
 │   │   │   │   ├── expected_identity.rs
 │   │   │   │   ├── expected_identity_tests.rs
 │   │   │   │   ├── message_conversion.rs
-│   │   │   │   └── tool_arms.rs
+│   │   │   │   ├── tool_arms.rs
+│   │   │   │   └── types.rs
 │   │   │   ├── stream_tick/
 │   │   │   │   └── guarded_persist.rs
 │   │   │   ├── terminal_outcome_delivery/

@@ -773,16 +773,6 @@ decompose_issue = "#4712"
 # registry entry is retired; the root is below the 1000-prod-LoC giant threshold.
 
 [[entry]]
-# Crossed the 1000-prod-LoC threshold in #4259 while the stream loop gained
-# exact retained-frame retry, owner-epoch invalidation, and terminal-progress
-# authority guards. Decomposition should lift the pending-message drain and
-# retained-retry policy clusters into narrower stream_loop siblings.
-file = "src/services/discord/turn_bridge/stream_loop.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4712"
-
-[[entry]]
 # Crossed the 1000-prod-LoC threshold in #4259 while stream persistence gained
 # guarded durable-winner reconciliation and identity-aware exit handling.
 # Decomposition should lift guarded persistence/reconciliation orchestration
