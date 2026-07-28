@@ -467,6 +467,13 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
     );
     assert_eq!(durable_b[0].message_id, MessageId::new(B_MESSAGE_ID));
 
+    // Subscribe before the release that makes A's placeholder-failure recovery publish its
+    // completion event. `broadcast` only buffers sends that happen after a receiver exists, so
+    // subscribing later left the negative assertion below racing A's normal `QueueEligible`
+    // publish instead of observing the local-only halves.
+    let mut completion_rx =
+        super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+
     state.release_first_placeholder.notify_waiters();
     assert!(
         wait_until(std::time::Duration::from_secs(1), {
@@ -487,6 +494,14 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
         .await,
         "production placeholder-failure recovery must leave idle durable B behind an armed normal worker"
     );
+
+    // Drain A's release event explicitly so the local-only assertion below observes only the
+    // `/model` halves rather than whatever A left buffered.
+    let a_release = tokio::time::timeout(std::time::Duration::from_secs(2), completion_rx.recv())
+        .await
+        .expect("A placeholder-failure release must publish one completion event")
+        .expect("completion bus open");
+    assert_eq!(a_release.channel_id, channel_id);
 
     let before_model = mailbox_snapshot(&shared, channel_id).await;
     assert!(before_model.active_user_message_id.is_none());
@@ -513,8 +528,6 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
         .insert(channel_id, test_watcher_handle(tmux, &transcript_path));
     super::spawn_tui_prompt_relay(shared.clone(), ProviderKind::Claude);
 
-    let mut completion_rx =
-        super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
     let command_half = "<command-message>x</command-message>\n<command-name>/model</command-name>";
     let stdout_half = "<local-command-stdout>Set model to Fable 5</local-command-stdout>";
     assert_eq!(
