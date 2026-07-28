@@ -82,7 +82,9 @@ test("timestamp token parsing rejects partial offsets and accepts year zero leap
   const result = run(options, [
     `0000-02-29T00:00:00Z INFO ${shadow("_section_A")}`,
     `0000-02-29T00:00:00+01:000 INFO ${shadow("_section_A")}`,
-    `0000-02-29T00:00:00+01 INFO ${shadow("_section_A")}`
+    `0000-02-29T00:00:00+01 INFO ${shadow("_section_A")}`,
+    `12026-02-29T00:00:00Z INFO ${shadow("_section_A")}`,
+    `0000-02-29T00:00:00ZBAD INFO ${shadow("_section_A")}`
   ].join("\n"));
   assert.equal(JSON.parse(result.output)._section_A.total, 1);
 });
@@ -140,9 +142,36 @@ test("A derives agreement from decisions so forged agree cannot evade divergence
     "--stdin", "--min-a-samples", "2", "--min-j-samples", "0", "--max-divergence", "0", "--max-errors", "2"
   ], Readable.from([Buffer.from(`${forgedTrue}\n${forgedFalse}\n`)]));
   const a = JSON.parse(result.output)._section_A;
-  assert.deepEqual(a, { total: 2, comparable: 2, agreement: 0, divergence: 1, error: 2 });
+  assert.deepEqual(a, { total: 2, comparable: 2, agreement: 1, divergence: 1, error: 2 });
   assert.equal(result.exitCode, 1);
   assert.match(result.failures.join(" "), /_section_A divergence 1 > 0/);
+});
+
+test("A incomparable and agree diagnostics cannot hide decision-derived divergence", () => {
+  const result = run([
+    "--stdin", "--min-a-samples", "1", "--min-j-samples", "0", "--max-divergence", "0", "--max-errors", "1"
+  ], shadow("_section_A", { reducer_decision: "exhaust", agree: false, incomparable: true }));
+  assert.deepEqual(JSON.parse(result.output)._section_A, {
+    total: 1, comparable: 1, agreement: 0, divergence: 1, error: 1
+  });
+  assert.equal(result.exitCode, 1);
+});
+
+test("J unknown and missing preview labels are errors, never successful evidence", () => {
+  for (const reducerDecision of ["unknown", "missing", ""]) {
+    const result = run(["--stdin", "--min-a-samples", "0"], shadow("_section_J", {
+      reducer_decision: reducerDecision, agree: false
+    }));
+    const j = JSON.parse(result.output)._section_J;
+    assert.equal(j.successful, 0);
+    assert.equal(j.error, 1);
+    assert.equal(result.exitCode, 1);
+  }
+  const forgedDiagnostic = run(["--stdin", "--min-a-samples", "0"], shadow("_section_J", {
+    reducer_decision: "retry", agree: false
+  }));
+  assert.equal(JSON.parse(forgedDiagnostic.output)._section_J.successful, 0);
+  assert.equal(forgedDiagnostic.exitCode, 1);
 });
 
 test("rejects decimal counts and invalid ISO-8601 calendar timestamps", () => {
@@ -153,30 +182,28 @@ test("rejects decimal counts and invalid ISO-8601 calendar timestamps", () => {
   assert.throws(() => parseArgs(["--since", "2026-07-28 00:00:00Z"]), /ISO-8601 calendar/);
 });
 
-test("retries a changed opened-file snapshot without double counting", () => {
+test("fails closed when opened-file metadata changes during verification", () => {
   const directory = mkdtempSync(join(tmpdir(), "timeout-shadow-gate-"));
   try {
     const log = join(directory, "dcserver.stdout.log.1");
     writeFileSync(log, `${shadow("_section_A")}\n`);
-    const signatureMtimes = [1, 2, 3, 3];
     let stats = 0;
     const io = {
       ...fs,
-      fstatSync(descriptor) {
+      fstatSync(descriptor, options) {
         const stat = fs.fstatSync(descriptor, { bigint: true });
-        const stamp = BigInt(signatureMtimes[stats++]);
-        return { ...stat, mtimeNs: stamp, ctimeNs: stamp };
+        stats += 1;
+        return stats % 2 === 0 ? { ...stat, mtimeNs: stat.mtimeNs + 1n } : stat;
       }
     };
-    const report = aggregateFile(log, {}, io);
-    assert.equal(report._section_A.total, 1);
+    assert.throws(() => aggregateFile(log, {}, io), /snapshot/);
     assert.equal(stats, 4);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });
 
-test("content recheck rejects same-inode rewrite with restored metadata and keeps only the fresh retry aggregate", () => {
+test("content recheck rejects same-inode rewrite even with restored metadata", () => {
   const directory = mkdtempSync(join(tmpdir(), "timeout-shadow-gate-"));
   try {
     const log = join(directory, "dcserver.stdout.log");
@@ -188,6 +215,7 @@ test("content recheck rejects same-inode rewrite with restored metadata and keep
     let rewritten = false;
     const io = {
       ...fs,
+      statSync() { return { ...baseline }; },
       fstatSync() { return { ...baseline }; },
       readSync(...args) {
         const bytes = fs.readSync(...args);
@@ -198,15 +226,13 @@ test("content recheck rejects same-inode rewrite with restored metadata and keep
         return bytes;
       }
     };
-    const report = aggregateFile(log, {}, io);
-    assert.equal(report._section_A.total, 0);
-    assert.equal(report._section_J.total, 1);
+    assert.throws(() => aggregateFile(log, {}, io), /content changed|snapshot/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });
 
-test("shrink during first scan retries with a fresh snapshot", () => {
+test("shrink during first scan retries then fails closed", () => {
   const directory = mkdtempSync(join(tmpdir(), "timeout-shadow-gate-"));
   try {
     const log = join(directory, "dcserver.stdout.log");
@@ -223,13 +249,13 @@ test("shrink during first scan retries with a fresh snapshot", () => {
         return bytes;
       }
     };
-    assert.equal(aggregateFile(log, {}, io)._section_A.total, 0);
+    assert.throws(() => aggregateFile(log, {}, io), /snapshot|shrank|manifest/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });
 
-test("opened-inode collision caused by rotation retries as one fresh all-file snapshot", () => {
+test("caller-order-independent rotation during open cannot erase divergence", () => {
   const directory = mkdtempSync(join(tmpdir(), "timeout-shadow-gate-"));
   try {
     const current = join(directory, "dcserver.stdout.log");
@@ -238,9 +264,11 @@ test("opened-inode collision caused by rotation retries as one fresh all-file sn
     writeFileSync(current, `${shadow("_section_A")}\n`);
     writeFileSync(rotated, `${shadow("_section_J")}\n`);
     let rotatedOnce = false;
+    const openedPaths = [];
     const io = {
       ...fs,
       openSync(path, flags) {
+        openedPaths.push(path);
         const descriptor = fs.openSync(path, flags);
         if (!rotatedOnce) {
           rotatedOnce = true;
@@ -251,32 +279,66 @@ test("opened-inode collision caused by rotation retries as one fresh all-file sn
         return descriptor;
       }
     };
-    const report = aggregateFiles([current, rotated], {}, io);
-    assert.equal(report._section_A.total, 1);
-    assert.equal(report._section_J.total, 1);
+    assert.throws(() => aggregateFiles([rotated, current], {}, io), /manifest|opened inode|changed while opening/);
+    assert.equal(openedPaths[0], current);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });
 
-test("opened descriptors close on fstat and realpath failures", () => {
+test("opened descriptors close on fstat failures while pre-open realpath failure opens none", () => {
   const directory = mkdtempSync(join(tmpdir(), "timeout-shadow-gate-"));
   try {
     const log = join(directory, "dcserver.stdout.log");
     writeFileSync(log, `${shadow("_section_A")}\n`);
-    for (const failedMethod of ["fstatSync", "realpathSync"]) {
-      let closes = 0;
-      const io = {
-        ...fs,
-        [failedMethod]() { throw new Error(`${failedMethod} injected failure`); },
-        closeSync(descriptor) {
-          closes += 1;
-          return fs.closeSync(descriptor);
+    let closes = 0;
+    const fstatIo = {
+      ...fs,
+      fstatSync() { throw new Error("fstatSync injected failure"); },
+      closeSync(descriptor) {
+        closes += 1;
+        return fs.closeSync(descriptor);
+      }
+    };
+    assert.throws(() => aggregateFile(log, {}, fstatIo), /injected failure/);
+    assert.equal(closes, 2);
+
+    let opens = 0;
+    const realpathIo = {
+      ...fs,
+      realpathSync() { throw new Error("realpathSync injected failure"); },
+      openSync(...args) { opens += 1; return fs.openSync(...args); }
+    };
+    assert.throws(() => aggregateFile(log, {}, realpathIo), /injected failure/);
+    assert.equal(opens, 0);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("close errors still attempt every descriptor and propagate the first failure", () => {
+  const directory = mkdtempSync(join(tmpdir(), "timeout-shadow-gate-"));
+  try {
+    const first = join(directory, "a.log");
+    const second = join(directory, "b.log");
+    writeFileSync(first, `${shadow("_section_A")}\n`);
+    writeFileSync(second, `${shadow("_section_J")}\n`);
+    const closeCalls = [];
+    let injected = false;
+    const io = {
+      ...fs,
+      closeSync(descriptor) {
+        closeCalls.push(descriptor);
+        if (!injected) {
+          injected = true;
+          throw new Error("first close injected failure");
         }
-      };
-      assert.throws(() => aggregateFile(log, {}, io), /injected failure/);
-      assert.equal(closes, 2);
-    }
+        return fs.closeSync(descriptor);
+      }
+    };
+    assert.throws(() => aggregateFiles([first, second], {}, io), /first close injected failure/);
+    assert.equal(new Set(closeCalls).size, 2);
+    assert.equal(closeCalls.length, 3);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -373,19 +435,45 @@ test("raw-byte scanner accepts exactly capped LF and CRLF text records", () => {
   const padding = " ".repeat(1024 * 1024 - Buffer.byteLength(base));
   assert.equal(aggregateText([`${base}${padding}\n`])._section_A.total, 1);
   assert.equal(aggregateText([`${base}${padding}\r\n`])._section_A.total, 1);
+  assert.throws(() => aggregateText([Buffer.from(`${base}${padding}\r`)]), /log line exceeds 1048576 bytes/);
 });
 
-test("raw invalid UTF-8 below the cap is malformed evidence, not inflated cap failure", async () => {
+test("raw invalid UTF-8 is rejected identically by Buffer and Readable inputs", async () => {
   const invalidRecord = Buffer.concat([
     Buffer.from("[timeout_shadow] "),
     Buffer.alloc(400 * 1024, 0xff),
     Buffer.from("\n")
   ]);
-  const result = await runFromReadable([
-    "--stdin", "--min-a-samples", "0", "--min-j-samples", "0", "--max-errors", "1"
-  ], Readable.from([invalidRecord]));
-  assert.equal(result.exitCode, 0);
-  assert.equal(JSON.parse(result.output)._unclassified.malformed, 1);
+  assert.throws(() => aggregateText([invalidRecord]), /invalid UTF-8 log line/);
+  await assert.rejects(
+    runFromReadable(["--stdin"], Readable.from([invalidRecord])),
+    /invalid UTF-8 log line/
+  );
+  for (const section of ["_section_A", "_section_J"]) {
+    const corrupted = Buffer.concat([
+      Buffer.from(`[timeout_shadow] {"target":"agentdesk::timeout_shadow","section":"${section}","bad":"`),
+      Buffer.from([0xff]),
+      Buffer.from('"}\n')
+    ]);
+    await assert.rejects(runFromReadable(["--stdin"], Readable.from([corrupted])), /invalid UTF-8 log line/);
+  }
+});
+
+test("file snapshots reject invalid UTF-8 corruption in A and J records", () => {
+  const directory = mkdtempSync(join(tmpdir(), "timeout-shadow-gate-"));
+  try {
+    for (const section of ["_section_A", "_section_J"]) {
+      const log = join(directory, `${section}.log`);
+      writeFileSync(log, Buffer.concat([
+        Buffer.from(`[timeout_shadow] {"target":"agentdesk::timeout_shadow","section":"${section}","bad":"`),
+        Buffer.from([0xff]),
+        Buffer.from('"}\n')
+      ]));
+      assert.throws(() => aggregateFile(log), /invalid UTF-8 log line/);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("text and run library exports enforce the same cap above one MiB", () => {

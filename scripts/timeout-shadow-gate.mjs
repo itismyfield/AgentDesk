@@ -11,11 +11,14 @@ import fs from "node:fs";
 import process from "node:process";
 import { createHash } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { TextDecoder } from "node:util";
 
 const SHADOW_PREFIX = "[timeout_shadow] ";
 const SHADOW_TARGET = "agentdesk::timeout_shadow";
 const SECTIONS = new Set(["_section_A", "_section_J"]);
 const COMPARABLE_A_DECISIONS = new Set(["retry", "exhaust"]);
+const VALID_J_REDUCER_DECISIONS = new Set(["retry", "exhaust", "incomparable"]);
+const STRICT_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 const FILE_READ_CHUNK_BYTES = 64 * 1024;
 const STABLE_READ_ATTEMPTS = 2;
 // A shadow record is one log line.  This cap prevents a malformed stdin/log
@@ -138,9 +141,11 @@ function timestampFromPrefix(prefix) {
   if (matches.length === 0) return null;
   const match = matches[matches.length - 1];
   const raw = match[0];
-  // Do not turn a partial offset such as +09 or +09:000 into UTC by matching
-  // only the timestamp prefix.  A valid tracing timestamp is token-bounded.
-  if (/^[0-9:+-]/.test(prefix.slice(match.index + raw.length))) return null;
+  const before = match.index > 0 ? prefix[match.index - 1] : "";
+  const after = prefix.slice(match.index + raw.length, match.index + raw.length + 1);
+  // Only standalone timestamp tokens are eligible. This rejects a timestamp
+  // embedded in 12026-... and suffixes such as ZBAD, plus partial offsets.
+  if ((before && /[0-9A-Za-z_]/.test(before)) || (after && /[0-9A-Za-z_:+-]/.test(after))) return null;
   const normalizedBase = raw.replace(" ", "T");
   const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/.test(normalizedBase)
     ? normalizedBase.replace(/([+-]\d{2})(\d{2})$/, "$1:$2")
@@ -162,10 +167,6 @@ function isErrorRecord(record) {
     (typeof record.error === "string" && record.error.length > 0);
 }
 
-function isIncomparableRecord(record) {
-  return record.incomparable === true || record.reducer_decision === "incomparable";
-}
-
 function validateRecord(record) {
   if (!record || typeof record !== "object" || Array.isArray(record)) return "record is not an object";
   if (record.target !== SHADOW_TARGET) return "unexpected target";
@@ -173,6 +174,9 @@ function validateRecord(record) {
   if (typeof record.js_decision !== "string") return "missing js_decision";
   if (typeof record.reducer_decision !== "string") return "missing reducer_decision";
   if (typeof record.agree !== "boolean") return "missing agree";
+  if (Object.prototype.hasOwnProperty.call(record, "incomparable") && typeof record.incomparable !== "boolean") {
+    return "invalid incomparable";
+  }
   return null;
 }
 
@@ -197,29 +201,37 @@ function addRecord(report, record) {
     section.error += 1;
     return;
   }
-  if (record.section === "_section_J") section.successful += 1;
   if (record.section === "_section_A") {
-    if (!isIncomparableRecord(record)) {
-      if (!COMPARABLE_A_DECISIONS.has(record.js_decision) || !COMPARABLE_A_DECISIONS.has(record.reducer_decision)) {
-        section.error += 1;
-        return;
-      }
-      section.comparable += 1;
-      const derivedAgreement = record.js_decision === record.reducer_decision;
-      // `agree` is producer-controlled observability data, never gate
-      // authority. A forged true cannot hide a decision divergence; any
-      // mismatch is error evidence and a real divergence stays divergent.
-      if (record.agree !== derivedAgreement) {
-        section.error += 1;
-        if (!derivedAgreement) section.divergence += 1;
-      } else if (derivedAgreement) {
-        section.agreement += 1;
-      } else {
-        section.divergence += 1;
-      }
+    const reducerComparable = COMPARABLE_A_DECISIONS.has(record.reducer_decision);
+    const derivedIncomparable = record.reducer_decision === "incomparable";
+    if (!COMPARABLE_A_DECISIONS.has(record.js_decision) || (!reducerComparable && !derivedIncomparable)) {
+      section.error += 1;
+      return;
     }
-  } else if (isIncomparableRecord(record)) {
-    section.incomparable += 1;
+    const derivedAgreement = reducerComparable && record.js_decision === record.reducer_decision;
+    const diagnosticMismatch = (record.incomparable === true) !== derivedIncomparable ||
+      record.agree !== derivedAgreement;
+    if (diagnosticMismatch) section.error += 1;
+    if (reducerComparable) {
+      section.comparable += 1;
+      if (derivedAgreement) section.agreement += 1;
+      else section.divergence += 1;
+    }
+  } else {
+    const reducerValid = VALID_J_REDUCER_DECISIONS.has(record.reducer_decision);
+    if (record.js_decision !== "retry" || !reducerValid) {
+      section.error += 1;
+      return;
+    }
+    const derivedIncomparable = record.reducer_decision === "incomparable";
+    const derivedAgreement = record.reducer_decision === record.js_decision && !derivedIncomparable;
+    const diagnosticMismatch = (record.incomparable === true) !== derivedIncomparable ||
+      record.agree !== derivedAgreement;
+    if (diagnosticMismatch) section.error += 1;
+    else {
+      section.successful += 1;
+      if (derivedIncomparable) section.incomparable += 1;
+    }
   }
 }
 
@@ -244,7 +256,9 @@ export function aggregateText(inputs, options = {}) {
   const report = emptyReport();
   for (const input of inputs) {
     const scanner = createLineScanner((line) => processLine(report, line, effectiveOptions));
-    scanner.write(Buffer.from(String(input)));
+    if (typeof input === "string") scanner.write(Buffer.from(input));
+    else if (Buffer.isBuffer(input)) scanner.write(input);
+    else throw new TypeError("aggregateText inputs must be strings or Buffers");
     scanner.end();
   }
   return finalizeReport(report);
@@ -279,19 +293,24 @@ function createLineScanner(onLine) {
     if (rawBytes + segment.length > MAX_RECORD_LINE_BYTES + 1) {
       throw new Error(`log line exceeds ${MAX_RECORD_LINE_BYTES} bytes`);
     }
-    segments.push(segment);
+    // File reads reuse their 64 KiB buffer, so retain an owned bounded copy.
+    segments.push(Buffer.from(segment));
     rawBytes += segment.length;
   }
 
-  function finishLine() {
+  function finishLine(terminatedByLf) {
     const raw = Buffer.concat(segments, rawBytes);
-    const contentLength = rawBytes > 0 && raw[rawBytes - 1] === 0x0d ? rawBytes - 1 : rawBytes;
+    const contentLength = terminatedByLf && rawBytes > 0 && raw[rawBytes - 1] === 0x0d ? rawBytes - 1 : rawBytes;
     if (contentLength > MAX_RECORD_LINE_BYTES) {
       throw new Error(`log line exceeds ${MAX_RECORD_LINE_BYTES} bytes`);
     }
-    // Decode only after raw-byte enforcement. Invalid UTF-8 consequently
-    // becomes malformed JSON evidence instead of inflating the cap.
-    onLine(raw.subarray(0, contentLength).toString("utf8"));
+    let decoded;
+    try {
+      decoded = STRICT_UTF8_DECODER.decode(raw.subarray(0, contentLength));
+    } catch {
+      throw new Error("invalid UTF-8 log line");
+    }
+    onLine(decoded);
     segments = [];
     rawBytes = 0;
   }
@@ -306,12 +325,12 @@ function createLineScanner(onLine) {
           return;
         }
         append(buffer.subarray(cursor, newline));
-        finishLine();
+        finishLine(true);
         cursor = newline + 1;
       }
     },
     end() {
-      if (rawBytes > 0) finishLine();
+      if (rawBytes > 0) finishLine(false);
     }
   };
 }
@@ -368,22 +387,58 @@ function mergeReport(target, source) {
   target._unclassified.malformed += source._unclassified.malformed;
 }
 
-function openFileSnapshots(files, snapshots, io) {
-  const canonicalPaths = new Set();
+function rotationOrder(canonical) {
+  const match = /^(.*)\.(\d+)$/.exec(canonical);
+  return match ? { family: match[1], generation: BigInt(match[2]) } : { family: canonical, generation: 0n };
+}
+
+function canonicalizeFiles(files, io) {
+  const seen = new Set();
+  const entries = files.map((input) => {
+    const canonical = io.realpathSync(input);
+    if (seen.has(canonical)) throw new Error(`duplicate log input: ${input}`);
+    seen.add(canonical);
+    return { input, canonical, order: rotationOrder(canonical) };
+  });
+  entries.sort((left, right) => {
+    if (left.order.family !== right.order.family) return left.order.family < right.order.family ? -1 : 1;
+    if (left.order.generation !== right.order.generation) return left.order.generation < right.order.generation ? -1 : 1;
+    return left.canonical < right.canonical ? -1 : left.canonical > right.canonical ? 1 : 0;
+  });
+  return entries;
+}
+
+function capturePathManifest(entries, io) {
+  const manifest = [];
   const identities = new Set();
-  for (const file of files) {
-    const descriptor = io.openSync(file, "r");
+  for (const entry of entries) {
+    const stat = io.statSync(entry.canonical, { bigint: true });
+    const identity = `${stat.dev}:${stat.ino}`;
+    if (identities.has(identity)) throw new Error(`duplicate log input (opened inode): ${entry.input}`);
+    identities.add(identity);
+    manifest.push({ ...entry, identity, signature: statSignature(stat), stat });
+  }
+  return manifest;
+}
+
+function manifestSignature(manifest) {
+  return manifest.map((entry) => `${entry.canonical}=${entry.signature}`).join("\n");
+}
+
+function openFileSnapshots(manifest, snapshots, io) {
+  const identities = new Set();
+  for (const expected of manifest) {
+    const descriptor = io.openSync(expected.canonical, "r");
     // Push before every later failure so the enclosing attempt closes this fd.
-    const snapshot = { descriptor, file };
+    const snapshot = { descriptor, file: expected.canonical };
     snapshots.push(snapshot);
     const stat = io.fstatSync(descriptor, { bigint: true });
-    const canonical = io.realpathSync(file);
     const identity = `${stat.dev}:${stat.ino}`;
-    if (canonicalPaths.has(canonical) || identities.has(identity)) {
-      throw new Error(`duplicate log input: ${file}`);
+    if (identities.has(identity)) throw new Error(`duplicate log input (opened inode): ${expected.input}`);
+    if (identity !== expected.identity || statSignature(stat) !== expected.signature) {
+      throw new Error(`log path changed while opening snapshot: ${expected.input}`);
     }
-    if (stat.size > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`log too large for bounded scan: ${file}`);
-    canonicalPaths.add(canonical);
+    if (stat.size > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`log too large for bounded scan: ${expected.input}`);
     identities.add(identity);
     snapshot.stat = stat;
     snapshot.signature = statSignature(stat);
@@ -393,7 +448,18 @@ function openFileSnapshots(files, snapshots, io) {
 }
 
 function closeSnapshots(snapshots, io) {
-  for (const snapshot of snapshots) io.closeSync(snapshot.descriptor);
+  let firstError = null;
+  for (const snapshot of snapshots) {
+    try {
+      io.closeSync(snapshot.descriptor);
+    } catch (error) {
+      if (!firstError) firstError = error;
+      // Retry this fd once for transient close failures, while still moving on
+      // to every other descriptor regardless of either result.
+      try { io.closeSync(snapshot.descriptor); } catch (_) {}
+    }
+  }
+  return firstError;
 }
 
 /**
@@ -403,30 +469,57 @@ function closeSnapshots(snapshots, io) {
  */
 export function aggregateFiles(files, options = {}, io = fs) {
   const effectiveOptions = { since: null, until: null, ...options };
+  const entries = canonicalizeFiles(files, io);
   let lastError = null;
+  let baselineManifest = null;
+  let baselineContent = null;
+  let coherenceLost = false;
   for (let attempt = 0; attempt < STABLE_READ_ATTEMPTS; attempt += 1) {
     const snapshots = [];
     const report = emptyReport();
+    let attemptError = null;
+    let stable = false;
     try {
-      openFileSnapshots(files, snapshots, io);
+      const manifest = capturePathManifest(entries, io);
+      const currentManifest = manifestSignature(manifest);
+      if (baselineManifest === null) baselineManifest = currentManifest;
+      else if (baselineManifest !== currentManifest) throw new Error("log path manifest changed between snapshot attempts");
+      openFileSnapshots(manifest, snapshots, io);
+      if (manifestSignature(capturePathManifest(entries, io)) !== currentManifest) {
+        throw new Error("log path manifest changed while opening snapshot");
+      }
+      const attemptContent = new Map();
       for (const snapshot of snapshots) {
         const hash = createHash("sha256");
         forEachDescriptorLine(snapshot.descriptor, snapshot.size, (line) => processLine(report, line, effectiveOptions), io, hash);
         snapshot.firstHash = hash.digest("hex");
+        attemptContent.set(snapshot.file, snapshot.firstHash);
       }
-      let stable = true;
+      if (baselineContent === null) baselineContent = attemptContent;
+      else {
+        for (const [file, digest] of attemptContent) {
+          if (baselineContent.get(file) !== digest) throw new Error(`log content changed between snapshot attempts: ${file}`);
+        }
+      }
+      stable = true;
       for (const snapshot of snapshots) {
         const contentMatches = snapshot.firstHash === hashDescriptor(snapshot.descriptor, snapshot.size, io);
         const metadataMatches = statSignature(io.fstatSync(snapshot.descriptor, { bigint: true })) === snapshot.signature;
         if (!contentMatches || !metadataMatches) stable = false;
       }
-      if (stable) return finalizeReport(report);
-      lastError = new Error("log changed while reading snapshot");
+      if (!stable) throw new Error("log changed while reading snapshot");
     } catch (error) {
-      lastError = error;
-    } finally {
-      closeSnapshots(snapshots, io);
+      attemptError = error;
+      coherenceLost = true;
     }
+    const closeError = closeSnapshots(snapshots, io);
+    if (!attemptError && closeError) attemptError = closeError;
+    if (closeError) {
+      lastError = attemptError;
+      break;
+    }
+    if (stable && !attemptError && !coherenceLost) return finalizeReport(report);
+    lastError = attemptError || new Error("log snapshot coherence could not be proven");
   }
   throw lastError || new Error("log changed while reading snapshot");
 }
