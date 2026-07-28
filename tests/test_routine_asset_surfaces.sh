@@ -105,6 +105,14 @@ SOURCE_ROOT="$TMP_ROOT/repo-v1"
 RUNTIME_ROOT="$TMP_ROOT/release-v0"
 seed_source "$SOURCE_ROOT" 'v1'
 seed_live "$RUNTIME_ROOT" 'v0'
+# Make different same-size source/live bytes share mtimes so rsync's default
+# quick-check cannot accidentally satisfy this authoritative-overlay regression.
+touch -r "$RUNTIME_ROOT/routines/generation-marker" \
+    "$SOURCE_ROOT/routines/generation-marker"
+touch -r "$RUNTIME_ROOT/routines/monitoring/bundled.js" \
+    "$SOURCE_ROOT/routines/monitoring/bundled.js"
+touch -r "$RUNTIME_ROOT/routine-helpers/monitoring/weekly_churn_audit.py" \
+    "$SOURCE_ROOT/routine-helpers/monitoring/weekly_churn_audit.py"
 printf 'operator helper\n' > "$RUNTIME_ROOT/routine-helpers/operator-private.py"
 write_quickjs_routine "$RUNTIME_ROOT/routines/monitoring/operator.js" 'operator'
 for helper_ref in "${ADK_LEGACY_ROUTINE_HELPER_REFS[@]}"; do
@@ -123,6 +131,13 @@ begin_staged_transaction "$SOURCE_ROOT" "$RUNTIME_ROOT"
     || fail_test 'helper staging erased an operator-private asset'
 [ -f "$CURRENT_TXN/staged/routines/monitoring/operator.js" ] \
     || fail_test 'routine staging erased an operator-private entrypoint'
+cmp "$SOURCE_ROOT/routines/generation-marker" \
+    "$CURRENT_TXN/staged/routines/generation-marker" >/dev/null \
+    && cmp "$SOURCE_ROOT/routines/monitoring/bundled.js" \
+        "$CURRENT_TXN/staged/routines/monitoring/bundled.js" >/dev/null \
+    && cmp "$SOURCE_ROOT/routine-helpers/monitoring/weekly_churn_audit.py" \
+        "$CURRENT_TXN/staged/routine-helpers/monitoring/weekly_churn_audit.py" >/dev/null \
+    || fail_test 'source overlay lost authoritative bytes at equal size and mtime'
 [ "$(_adk_path_mode "$CURRENT_TXN/staged/routine-helpers")" = \
     "$(_adk_path_mode "$RUNTIME_ROOT/routine-helpers")" ] \
     || fail_test 'staged helper root did not preserve live mode'
@@ -414,6 +429,7 @@ rm "$VALID_ROOT/routines/second-invalid.js"
 
 # Node/Python helpers must not leak back into the QuickJS entrypoint root, and
 # source/root symlinks remain fail-closed before rsync can follow them.
+mkdir -p "$VALID_ROOT/routines/monitoring"
 printf '%s\n' 'module.exports = {};' \
     > "$VALID_ROOT/routines/monitoring/local_worktree_inventory.js"
 if adk_validate_repo_routine_assets "$VALID_ROOT" >/dev/null 2>&1; then

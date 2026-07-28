@@ -422,7 +422,11 @@ _adk_stage_preserved_asset_surface() {
             return 1
         fi
     fi
-    if ! rsync -a "$source_root/" "$staged_root/"; then
+    # Repository/artifact bytes are authoritative at matching relative paths.
+    # --checksum defeats rsync's size+mtime quick-check: successive v0/v1 test
+    # payloads (and real generated assets) can legitimately share both while
+    # containing different bytes.
+    if ! rsync -a --checksum "$source_root/" "$staged_root/"; then
         rm -rf "$staged_root" 2>/dev/null || true
         return 1
     fi
