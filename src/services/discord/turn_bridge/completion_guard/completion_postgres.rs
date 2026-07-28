@@ -364,42 +364,13 @@ async fn fail_runtime_dispatch_on_pg_tx(
     } else {
         1
     };
-    let entry_results = record_runtime_dispatch_failure_entries_on_pg_tx(
+    record_runtime_dispatch_failure_entries_on_pg_tx(
         tx,
         dispatch_id,
         retry_limit,
         transition_source,
     )
     .await?;
-    let retry_run_ids = entry_results
-        .iter()
-        .filter(|result| {
-            result.changed && result.to_status == crate::db::auto_queue::ENTRY_STATUS_PENDING
-        })
-        .map(|result| result.run_id.clone())
-        .collect::<Vec<_>>();
-    if !retry_run_ids.is_empty() {
-        let live_statuses = crate::db::auto_queue::run_status::LIVE_RUN_STATUSES;
-        let run_rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT DISTINCT r.id, r.status
-             FROM auto_queue_runs r
-             WHERE r.id = ANY($1)",
-        )
-        .bind(&retry_run_ids)
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(|error| {
-            format!("verify runnable auto-queue runs for failed dispatch {dispatch_id}: {error}")
-        })?;
-        if let Some((run_id, run_status)) = run_rows
-            .iter()
-            .find(|(_, status)| !live_statuses.contains(&status.as_str()))
-        {
-            return Err(format!(
-                "failed dispatch {dispatch_id} would leave a retry entry in non-live run {run_id} ({run_status})"
-            ));
-        }
-    }
 
     let changed = sqlx::query(
         "UPDATE task_dispatches
@@ -584,13 +555,15 @@ async fn fail_runtime_dispatch_with_pool(
     tx.commit().await.map_err(|error| {
         format!("commit postgres failure transaction for {dispatch_id}: {error}")
     })?;
-    if outcome == DispatchFailureWriteOutcome::Updated
-        && let Err(error) =
-            crate::services::dispatches::wait_queue::wake_cached_constraint_release_pg(
-                pool,
-                "constraint_release",
-            )
-            .await
+    if matches!(
+        outcome,
+        DispatchFailureWriteOutcome::Updated | DispatchFailureWriteOutcome::AlreadyTerminal
+    ) && let Err(error) =
+        crate::services::dispatches::wait_queue::wake_cached_constraint_release_pg(
+            pool,
+            "constraint_release",
+        )
+        .await
     {
         tracing::warn!(
             dispatch_id,
@@ -598,6 +571,10 @@ async fn fail_runtime_dispatch_with_pool(
             "post-commit constraint wait-queue wake failed"
         );
     }
+    // AlreadyTerminal can be a replay after the original terminal transition
+    // missed its immediate wake. The periodic leader sweep is the correctness
+    // backstop, but replaying the wake here preserves the canonical writer's
+    // low-latency contract instead of accepting up to the default 30s delay.
     Ok((outcome, post_commit))
 }
 
@@ -627,14 +604,9 @@ fn runtime_pg_fail_dispatch_with_result_source(
     error_code: Option<&str>,
     retryable: bool,
     transition_source: &str,
-    fallback: bool,
 ) -> DispatchFailureWriteOutcome {
     let dispatch_id = dispatch_id.to_string();
-    let mut failure_result = dispatch_failure_result(error_msg, error_code);
-    if fallback {
-        failure_result["fallback"] = serde_json::json!(true);
-    }
-    let failure_result = failure_result.to_string();
+    let failure_result = dispatch_failure_result(error_msg, error_code).to_string();
     let transition_source = transition_source.to_string();
     finish_dispatch_failure_write(with_runtime_postgres_result(move |pool| {
         Box::pin(async move {
@@ -662,7 +634,6 @@ pub(super) fn runtime_pg_fail_dispatch_with_result(
         error_code,
         retryable,
         "turn_bridge_dispatch_failure",
-        false,
     )
 }
 
@@ -834,6 +805,64 @@ mod dispatch_failure_pg_tests {
                 "pending".to_string(),
                 1,
                 "active".to_string(),
+                1,
+                1,
+            )
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_run_window_terminalizes_dispatch_and_entry_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let (run_id, entry_id, dispatch_id) =
+            seed_failure_fixture(&pool, "cancel-window", "dispatched", 3).await;
+        sqlx::query("UPDATE auto_queue_runs SET status = 'cancelled' WHERE id = $1")
+            .bind(&run_id)
+            .execute(&pool)
+            .await
+            .expect("enter real run-cancel window");
+
+        let result_json =
+            dispatch_failure_result("failure during run cancellation", None).to_string();
+        let mut tx = pool.begin().await.expect("begin cancel-window tx");
+        let (outcome, _) = fail_runtime_dispatch_on_pg_tx(
+            &mut tx,
+            &dispatch_id,
+            &result_json,
+            true,
+            "test_cancel_window",
+        )
+        .await
+        .expect("cancel window must not block dispatch termination");
+        tx.commit().await.expect("commit cancel-window failure");
+
+        let state = sqlx::query_as::<_, (String, String, i64, String, i64, i64)>(
+            "SELECT d.status, e.status, e.retry_count, r.status,
+                    (SELECT COUNT(*) FROM dispatch_events WHERE dispatch_id = d.id),
+                    (SELECT COUNT(*) FROM auto_queue_entry_transitions WHERE entry_id = e.id)
+             FROM task_dispatches d
+             JOIN auto_queue_entries e ON e.id = $2
+             JOIN auto_queue_runs r ON r.id = $3
+             WHERE d.id = $1",
+        )
+        .bind(&dispatch_id)
+        .bind(&entry_id)
+        .bind(&run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load cancel-window state");
+        assert_eq!(outcome, DispatchFailureWriteOutcome::Updated);
+        assert_eq!(
+            state,
+            (
+                "failed".to_string(),
+                "failed".to_string(),
+                1,
+                "cancelled".to_string(),
                 1,
                 1,
             )
@@ -1061,7 +1090,7 @@ mod dispatch_failure_pg_tests {
         assert!(dispatch_result.is_some(), "dispatch result event must fire");
         assert_eq!(
             quality.expect("quality event must fire").payload["quality_event_type"],
-            "turn_error"
+            "dispatch_failed"
         );
     }
 

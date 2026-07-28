@@ -470,6 +470,8 @@ async fn fail_dispatch_with_policy(
     error_code: Option<&str>,
     reset_auto_queue_entries: bool,
 ) {
+    use tracing::Instrument as _;
+
     let Some(dispatch_id) = dispatch_id else {
         return;
     };
@@ -479,60 +481,68 @@ async fn fail_dispatch_with_policy(
         "fail_dispatch_terminal"
     };
     let dispatch_span = crate::logging::dispatch_span(span_name, Some(dispatch_id), None, None);
-    let _guard = dispatch_span.enter();
-    // A generic loopback PATCH terminalizes the linked entry before this retry
-    // policy can run. Make the specialized Postgres reducer the sole writer so
-    // dispatch, entry retry/terminal state, audit, and run finalization commit
-    // atomically instead of compensating after a PATCH-created split brain.
-    match runtime_pg_fail_dispatch_with_result(
-        dispatch_id,
-        error_msg,
-        error_code,
-        reset_auto_queue_entries,
-    ) {
-        DispatchFailureWriteOutcome::Updated => {
-            tracing::warn!(dispatch_id = %dispatch_id, "marked dispatch as failed");
-            // The reducer commits before entering the HTTP/UI plane. A result-only
-            // PATCH then reuses the canonical route's task_dispatch_updated
-            // broadcast without re-running the terminal transition or entry policy.
-            let broadcast_payload = crate::services::dispatches::UpdateDispatchBody {
-                status: None,
-                result: Some(dispatch_failure_result(error_msg, error_code)),
-                allowed_from: None,
-            };
-            if let Err(error) = crate::services::discord::internal_api::update_dispatch(
-                dispatch_id,
-                broadcast_payload,
-            )
-            .await
-            {
+    async {
+        // A generic loopback PATCH terminalizes the linked entry before this retry
+        // policy can run. Make the specialized Postgres reducer the sole writer so
+        // dispatch, entry retry/terminal state, audit, and run finalization commit
+        // atomically instead of compensating after a PATCH-created split brain.
+        match runtime_pg_fail_dispatch_with_result(
+            dispatch_id,
+            error_msg,
+            error_code,
+            reset_auto_queue_entries,
+        ) {
+            DispatchFailureWriteOutcome::Updated => {
+                tracing::warn!(dispatch_id = %dispatch_id, "marked dispatch as failed");
+                // Publish-only PATCH deliberately carries no mutable fields. The
+                // route reads the canonical row and emits task_dispatch_updated,
+                // so a concurrent richer result cannot be clobbered and phase-gate
+                // reconciliation cannot run twice.
+                match crate::services::discord::internal_api::publish_dispatch_update(dispatch_id)
+                    .await
+                {
+                    Ok(crate::services::discord::internal_api::DispatchUpdateOutcome::Updated(
+                        _,
+                    )) => {}
+                    Ok(
+                        crate::services::discord::internal_api::DispatchUpdateOutcome::Conflict {
+                            body,
+                        },
+                    ) => tracing::warn!(
+                        dispatch_id = %dispatch_id,
+                        response = %body,
+                        "post-commit dispatch failure publish returned conflict"
+                    ),
+                    Err(error) => tracing::warn!(
+                        dispatch_id = %dispatch_id,
+                        error = %error,
+                        "failed to publish post-commit dispatch failure update"
+                    ),
+                }
+            }
+            DispatchFailureWriteOutcome::AlreadyTerminal => {
+                tracing::info!(
+                    dispatch_id = %dispatch_id,
+                    "dispatch failure writer preserved existing terminal dispatch"
+                );
+            }
+            DispatchFailureWriteOutcome::Missing => {
                 tracing::warn!(
                     dispatch_id = %dispatch_id,
+                    "dispatch failure writer found no dispatch row"
+                );
+            }
+            DispatchFailureWriteOutcome::HardError(error) => {
+                tracing::error!(
+                    dispatch_id = %dispatch_id,
                     error = %error,
-                    "failed to publish post-commit dispatch failure update"
+                    "dispatch failure writer failed; dispatch may remain open"
                 );
             }
         }
-        DispatchFailureWriteOutcome::AlreadyTerminal => {
-            tracing::info!(
-                dispatch_id = %dispatch_id,
-                "dispatch failure writer preserved existing terminal dispatch"
-            );
-        }
-        DispatchFailureWriteOutcome::Missing => {
-            tracing::warn!(
-                dispatch_id = %dispatch_id,
-                "dispatch failure writer found no dispatch row"
-            );
-        }
-        DispatchFailureWriteOutcome::HardError(error) => {
-            tracing::error!(
-                dispatch_id = %dispatch_id,
-                error = %error,
-                "dispatch failure writer failed; dispatch may remain open"
-            );
-        }
     }
+    .instrument(dispatch_span)
+    .await;
 }
 
 /// Complete an implementation/rework dispatch via finalize_dispatch (#143).

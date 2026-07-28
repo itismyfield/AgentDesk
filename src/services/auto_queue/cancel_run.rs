@@ -5,7 +5,7 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::db::auto_queue::run_status::{LIVE_RUN_STATUSES_SQL, is_live_run_status};
+use crate::db::auto_queue::run_status::{is_live_run_status, live_run_statuses_sql};
 
 impl AutoQueueService {
     pub async fn cancel_run_with_pg(
@@ -888,7 +888,7 @@ pub(crate) async fn cancel_selected_runs_with_pg(
         for run_id in target_run_ids {
             separated.push_bind(run_id);
         }
-        separated.push_unseparated(format!(") AND status IN ({LIVE_RUN_STATUSES_SQL})"));
+        separated.push_unseparated(format!(") AND status IN ({})", live_run_statuses_sql()));
         query
             .build()
             .execute(pool)

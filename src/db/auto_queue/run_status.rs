@@ -1,8 +1,14 @@
 /// Run states that still own live dispatch and slot obligations.
 pub const LIVE_RUN_STATUSES: &[&str] = &["active", "paused", "restoring"];
 
-/// SQL literal for queries that must use the same live-run state set.
-pub const LIVE_RUN_STATUSES_SQL: &str = "'active', 'paused', 'restoring'";
+/// Build a SQL literal list from the canonical live-run state set.
+pub fn live_run_statuses_sql() -> String {
+    LIVE_RUN_STATUSES
+        .iter()
+        .map(|status| format!("'{status}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 /// Run states that can still own live dispatch and slot obligations.
 pub fn is_live_run_status(status: &str) -> bool {
@@ -21,5 +27,6 @@ mod tests {
         for status in ["generated", "pending", "cancelled", "completed"] {
             assert!(!is_live_run_status(status), "{status} must not be live");
         }
+        assert_eq!(live_run_statuses_sql(), "'active', 'paused', 'restoring'");
     }
 }

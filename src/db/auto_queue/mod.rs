@@ -19,6 +19,5 @@ pub use consultation::*;
 pub use entries::*;
 pub use phase_gates::*;
 pub use queries::*;
-pub use run_status::*;
 pub use runs::*;
 pub use slots::*;

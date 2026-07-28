@@ -96,9 +96,9 @@ impl EntryDispatchFailureResult {
     /// Apply one dispatch failure inside a caller-owned transaction.
     ///
     /// Locking the entry and its run makes the retry decision, transition audit,
-    /// and conditional run finalization one ordered write. A retry is rejected
-    /// when its run is already terminal instead of creating a completed-run /
-    /// pending-entry split brain that a later compensating resume would hide.
+    /// and conditional run finalization one ordered write. When the run is not
+    /// live, the entry becomes terminal instead of blocking the owning dispatch
+    /// terminal write or creating a terminal-run / pending-entry split brain.
     pub async fn record_on_pg_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         entry_id: &str,
@@ -120,11 +120,6 @@ impl EntryDispatchFailureResult {
         }
 
         let retry_count = current.retry_count.saturating_add(1);
-        let target_status = if retry_count >= retry_limit {
-            ENTRY_STATUS_FAILED
-        } else {
-            ENTRY_STATUS_PENDING
-        };
         let run_status = sqlx::query_scalar::<_, String>(
             "SELECT status
              FROM auto_queue_runs
@@ -141,14 +136,18 @@ impl EntryDispatchFailureResult {
             )
         })?
         .ok_or_else(|| format!("auto-queue run not found: {}", current.run_id))?;
-        if target_status == ENTRY_STATUS_PENDING
-            && !crate::db::auto_queue::run_status::is_live_run_status(&run_status)
+        // Dispatch termination must never depend on whether the owning run can
+        // accept another attempt. A live run receives the retry while a terminal
+        // or otherwise non-live run converts the entry to terminal `failed`.
+        // This also closes the real cancel window where the run is already
+        // `cancelled` but its dispatched entry has not reached `skipped` yet.
+        let target_status = if retry_count >= retry_limit
+            || !crate::db::auto_queue::run_status::is_live_run_status(&run_status)
         {
-            return Err(format!(
-                "refusing retry for auto-queue entry {entry_id}: run {} is not resumable ({run_status})",
-                current.run_id
-            ));
-        }
+            ENTRY_STATUS_FAILED
+        } else {
+            ENTRY_STATUS_PENDING
+        };
 
         let rows_affected = sqlx::query(
             "UPDATE auto_queue_entries
@@ -509,51 +508,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_run_rejects_retry_without_split_brain_pg() {
-        let pg_db = TestPostgresDb::create().await;
-        let pool = pg_db.connect_and_migrate().await;
-        seed_failure_entry(&pool, "run-completed", "entry-completed", "completed", 0).await;
-        sqlx::query("UPDATE auto_queue_runs SET completed_at = NOW() WHERE id = 'run-completed'")
-            .execute(&pool)
-            .await
-            .expect("stamp completed run");
+    async fn non_live_runs_terminalize_entry_instead_of_blocking_dispatch_failure_pg() {
+        for run_status in ["cancelled", "completed", "generated", "unknown-status"] {
+            let pg_db = TestPostgresDb::create().await;
+            let pool = pg_db.connect_and_migrate().await;
+            let run_id = format!("run-non-live-{run_status}");
+            let entry_id = format!("entry-non-live-{run_status}");
+            seed_failure_entry(&pool, &run_id, &entry_id, run_status, 0).await;
+            if run_status == "completed" {
+                sqlx::query("UPDATE auto_queue_runs SET completed_at = NOW() WHERE id = $1")
+                    .bind(&run_id)
+                    .execute(&pool)
+                    .await
+                    .expect("stamp completed run");
+            }
 
-        let rejected = record_entry_dispatch_failure_on_pg(
-            &pool,
-            "entry-completed",
-            3,
-            "test_completed_run_retry",
-        )
-        .await;
-        assert!(
-            rejected
-                .as_ref()
-                .is_err_and(|error| error.contains("not resumable"))
-        );
-        let state = sqlx::query_as::<_, (String, i64, String, bool, i64)>(
-            "SELECT e.status, e.retry_count, r.status, r.completed_at IS NOT NULL,
-                    (SELECT COUNT(*) FROM auto_queue_entry_transitions
-                     WHERE entry_id = e.id)
-             FROM auto_queue_entries e
-             JOIN auto_queue_runs r ON r.id = e.run_id
-             WHERE e.id = 'entry-completed'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("load rejected retry state");
-        assert_eq!(
-            state,
-            (
-                "dispatched".to_string(),
-                0,
-                "completed".to_string(),
-                true,
-                0
+            let result = record_entry_dispatch_failure_on_pg(
+                &pool,
+                &entry_id,
+                3,
+                "test_non_live_run_failure",
             )
-        );
+            .await
+            .expect("non-live run must not block entry terminalization");
+            assert_eq!(result.to_status, ENTRY_STATUS_FAILED);
+            let state = sqlx::query_as::<_, (String, i64, String, i64)>(
+                "SELECT e.status, e.retry_count, r.status,
+                        (SELECT COUNT(*) FROM auto_queue_entry_transitions
+                         WHERE entry_id = e.id AND to_status = 'failed')
+                 FROM auto_queue_entries e
+                 JOIN auto_queue_runs r ON r.id = e.run_id
+                 WHERE e.id = $1",
+            )
+            .bind(&entry_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load non-live terminal state");
+            assert_eq!(
+                state,
+                ("failed".to_string(), 1, run_status.to_string(), 1),
+                "run status {run_status} must preserve the run and terminalize its entry"
+            );
 
-        pool.close().await;
-        pg_db.drop().await;
+            pool.close().await;
+            pg_db.drop().await;
+        }
     }
 
     #[tokio::test]

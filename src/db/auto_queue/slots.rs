@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 
-use super::run_status::LIVE_RUN_STATUSES_SQL;
+use super::run_status::live_run_statuses_sql;
 use super::slot_predicate::{
     DispatchSlotPolarity, active_dispatch_on_slot_predicate, dispatch_slot_index_expr,
 };
@@ -49,6 +49,7 @@ pub async fn clear_inactive_slot_assignments_pg(pool: &PgPool) -> Result<u64, sq
     // have its slots yanked by a concurrent activate call. `restoring`
     // is a transient holding status (see fsm::apply_restore_state_changes_pg)
     // and must be treated as held-open for slot purposes.
+    let live_statuses = live_run_statuses_sql();
     let query = format!(
         "UPDATE auto_queue_slots
          SET assigned_run_id = NULL,
@@ -57,7 +58,7 @@ pub async fn clear_inactive_slot_assignments_pg(pool: &PgPool) -> Result<u64, sq
          WHERE assigned_run_id IS NOT NULL
            AND assigned_run_id NOT IN (
                SELECT id FROM auto_queue_runs
-               WHERE status IN ({LIVE_RUN_STATUSES_SQL})
+               WHERE status IN ({live_statuses})
            )"
     );
     let result = sqlx::query(&query).execute(pool).await?;
@@ -105,32 +106,6 @@ pub async fn slot_has_recent_terminal_auto_queue_dispatch_pg(
         .bind(SLOT_TERMINAL_DISPATCH_COOLDOWN_SECONDS)
         .fetch_one(pool)
         .await
-}
-
-pub async fn release_slot_for_group_agent_pg(
-    pool: &PgPool,
-    run_id: &str,
-    thread_group: i64,
-    agent_id: &str,
-    slot_index: i64,
-) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(
-        "UPDATE auto_queue_slots
-         SET assigned_run_id = NULL,
-             assigned_thread_group = NULL,
-             updated_at = NOW()
-         WHERE agent_id = $1
-           AND slot_index = $2
-           AND assigned_run_id = $3
-           AND COALESCE(assigned_thread_group, 0) = $4",
-    )
-    .bind(agent_id)
-    .bind(slot_index)
-    .bind(run_id)
-    .bind(thread_group)
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected())
 }
 
 pub async fn slot_has_active_dispatch_pg(
