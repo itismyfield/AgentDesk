@@ -636,6 +636,121 @@ mod race_loss_requeue_tests {
 
     #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
+    async fn busy_transition_is_durable_before_the_guard_is_released() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_794_101);
+        let message_id = MessageId::new(4_794_102);
+        let held = shared
+            .session_transition_lock(channel_id)
+            .lock_owned()
+            .await;
+
+        assert!(
+            super::super::super::super::turn_start::try_intake_runtime_transition_after_redirect(
+                &shared,
+                channel_id,
+                (None, false, "/fallback".to_string()),
+            )
+            .await
+            .is_err(),
+            "busy intake must not wait outside durable storage"
+        );
+        let outcome = enqueue_race_loss_requeued_intervention(
+            &shared,
+            &provider,
+            channel_id,
+            message_id,
+            user_intervention(message_id.get(), "resume transition queue"),
+        )
+        .await;
+        assert!(outcome.enqueued);
+
+        let (disk_queue, _) =
+            crate::services::turn_orchestrator::load_channel_pending_queue_for_tests(
+                &provider,
+                &shared.token_hash,
+                channel_id,
+            );
+        assert_eq!(disk_queue.len(), 1);
+        assert_eq!(disk_queue[0].message_id, message_id);
+        assert_eq!(disk_queue[0].text, "resume transition queue");
+        assert!(
+            shared
+                .session_transition_lock(channel_id)
+                .try_lock_owned()
+                .is_err(),
+            "durability must be established while `/resume` still owns the transition"
+        );
+        drop(held);
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn persistence_failure_rolls_back_queue_and_clears_dispatch_reservation() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_794_111);
+        let message_id = MessageId::new(4_794_112);
+        let seed = crate::services::discord::mailbox_enqueue_intervention(
+            &shared,
+            &provider,
+            channel_id,
+            user_intervention(message_id.get(), "reserved before persistence failure"),
+        )
+        .await;
+        assert!(seed.enqueued && seed.persistence_error.is_none());
+        let taken = shared
+            .mailbox(channel_id)
+            .take_next_soft(
+                crate::services::turn_orchestrator::QueuePersistenceContext::new(
+                    &provider,
+                    &shared.token_hash,
+                    None,
+                ),
+            )
+            .await;
+        assert!(taken.intervention.is_some());
+        assert_eq!(
+            crate::services::discord::mailbox_snapshot(&shared, channel_id)
+                .await
+                .pending_user_dispatch,
+            Some(message_id)
+        );
+        let blocking_root = tmp.path().join("blocking-root");
+        std::fs::write(&blocking_root, "not a directory").expect("blocking root file");
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &blocking_root) };
+
+        let outcome = enqueue_race_loss_requeued_intervention(
+            &shared,
+            &provider,
+            channel_id,
+            message_id,
+            user_intervention(message_id.get(), "must roll back"),
+        )
+        .await;
+        assert!(outcome.persistence_error.is_some());
+        let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
+        assert!(snapshot.intervention_queue.is_empty());
+        assert_eq!(snapshot.pending_user_dispatch, None);
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
     async fn race_loss_requeue_suppresses_post_enqueue_idle_kick_while_holder_active() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()

@@ -552,6 +552,21 @@ impl IntakeRuntimeTransition {
     }
 }
 
+async fn intake_runtime_transition_with_guard(
+    shared: &Arc<SharedData>,
+    effective_channel_id: ChannelId,
+    fallback_state: (Option<String>, bool, String),
+    guard: tokio::sync::OwnedMutexGuard<()>,
+) -> IntakeRuntimeTransition {
+    let mut data = shared.core.lock().await;
+    let state = load_session_runtime_state(&mut data.sessions, effective_channel_id)
+        .unwrap_or(fallback_state);
+    IntakeRuntimeTransition {
+        state,
+        _guard: guard,
+    }
+}
+
 pub(crate) async fn intake_runtime_transition_after_redirect(
     shared: &Arc<SharedData>,
     effective_channel_id: ChannelId,
@@ -560,13 +575,25 @@ pub(crate) async fn intake_runtime_transition_after_redirect(
     let guard = shared
         .acquire_session_transition(effective_channel_id)
         .await?;
-    let mut data = shared.core.lock().await;
-    let state = load_session_runtime_state(&mut data.sessions, effective_channel_id)
-        .unwrap_or(fallback_state);
-    Ok(IntakeRuntimeTransition {
-        state,
-        _guard: guard,
-    })
+    Ok(
+        intake_runtime_transition_with_guard(shared, effective_channel_id, fallback_state, guard)
+            .await,
+    )
+}
+
+pub(crate) async fn try_intake_runtime_transition_after_redirect(
+    shared: &Arc<SharedData>,
+    effective_channel_id: ChannelId,
+    fallback_state: (Option<String>, bool, String),
+) -> Result<IntakeRuntimeTransition, super::super::SessionTransitionBusy> {
+    let guard = shared
+        .session_transition_lock(effective_channel_id)
+        .try_lock_owned()
+        .map_err(|_| super::super::SessionTransitionBusy)?;
+    Ok(
+        intake_runtime_transition_with_guard(shared, effective_channel_id, fallback_state, guard)
+            .await,
+    )
 }
 
 pub(in crate::services::discord) async fn release_mailbox_after_placeholder_post_failure(
