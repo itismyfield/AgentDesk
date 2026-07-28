@@ -22,6 +22,7 @@ BUSY_RETRY_4888_TEST_COMMAND = (
 # update this test deliberately. The duplication is a drift-prevention gate, not an
 # attempt to derive the expected coverage from the justfile under test.
 EXPECTED_TEST_NON_PG_COMMANDS = (
+    "cargo test --lib server::routes::docs::inventory::endpoints::part_0 -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::task_completion_v1::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib source_registry -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib task_notification -- --skip _pg --skip pg_ --skip postgres",
