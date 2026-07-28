@@ -36,9 +36,10 @@ mod dispatch_terminal_sync_pg_tests {
         ENTRY_STATUS_DONE, ENTRY_STATUS_FAILED, ENTRY_STATUS_SKIPPED, ENTRY_STATUS_USER_CANCELLED,
         EntryStatusUpdateOptions, PhaseGateStateWrite, SlotAllocation,
         allocate_slot_for_group_agent_pg, clear_phase_gate_state_on_pg,
-        finalize_completed_dispatch_terminal_entry_on_pg_tx, save_phase_gate_state_on_pg,
-        slot_has_active_dispatch_pg, slot_has_recent_terminal_auto_queue_dispatch_pg,
-        sync_dispatch_terminal_entries_on_pg_tx, update_entry_status_on_pg,
+        finalize_completed_dispatch_terminal_entry_on_pg_tx, record_entry_dispatch_failure_on_pg,
+        save_phase_gate_state_on_pg, slot_has_active_dispatch_pg,
+        slot_has_recent_terminal_auto_queue_dispatch_pg, sync_dispatch_terminal_entries_on_pg_tx,
+        update_entry_status_on_pg,
     };
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use chrono::{DateTime, Utc};
@@ -367,6 +368,56 @@ mod dispatch_terminal_sync_pg_tests {
                 .await
                 .expect("next entry slot");
         assert_eq!(slot_index, Some(1));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn allocate_slot_for_group_agent_pg_retains_group_slot_after_retryable_failure() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, slot_index, thread_group,
+                 batch_phase, retry_count)
+             VALUES ('entry-retry-slot', 'run-1', NULL, 'agent-1', 'dispatched', 0, 0, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed retryable failed entry");
+
+        let failure = record_entry_dispatch_failure_on_pg(
+            &pool,
+            "entry-retry-slot",
+            3,
+            "test_retry_slot_retention",
+        )
+        .await
+        .expect("record retryable failure");
+        assert_eq!(failure.to_status, "pending");
+
+        let slot_assignment = sqlx::query_as::<_, (Option<String>, Option<i64>)>(
+            "SELECT assigned_run_id, assigned_thread_group
+             FROM auto_queue_slots
+             WHERE agent_id = 'agent-1' AND slot_index = 0",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load retained slot assignment");
+        assert_eq!(slot_assignment, (Some("run-1".to_string()), Some(0)));
+
+        let allocation = allocate_slot_for_group_agent_pg(&pool, "run-1", 0, "agent-1")
+            .await
+            .expect("reuse retained group slot");
+        assert_eq!(
+            allocation,
+            Some(SlotAllocation {
+                slot_index: 0,
+                newly_assigned: false,
+                reassigned_from_other_group: false,
+            })
+        );
 
         pool.close().await;
         pg_db.drop().await;
