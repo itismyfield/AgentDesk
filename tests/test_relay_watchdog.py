@@ -6483,6 +6483,35 @@ class TickChannelTests(unittest.TestCase):
             any("permanent-loss-state-corrupt" in line for line in rt.log_lines)
         )
 
+    def test_corrupt_state_suppresses_unpersisted_loss_confirmation(self):
+        missing = (self.now - 4000, "corrupt unpersisted skipped response")
+        first = (self.now - 3000, "corrupt first successor")
+        second = (self.now - 2000, "corrupt second successor")
+        rt = self.make_rt()
+        state: dict = {}
+        self.write_transcript([missing, first])
+        rt.haystack = norm(first[1])
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        chs = state["999"]
+        raw_tombstones = {"bad": "shape"}
+        chs[relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY] = raw_tombstones.copy()
+        self.append_transcript_block(*second)
+        rt.haystack = norm(f"{first[1]} {second[1]}")
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+
+        self.assertEqual(
+            chs[relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY], raw_tombstones
+        )
+        self.assertFalse(
+            any("permanent-loss-confirmed" in line for line in rt.log_lines)
+        )
+        self.assertFalse(any("PERMANENT LOSS ALERT" in line for line in rt.log_lines))
+        self.assertEqual(rt.alerts, [])
+        self.assertTrue(
+            any("permanent-loss-state-corrupt" in line for line in rt.log_lines)
+        )
+
     def test_corrupt_tombstone_map_cannot_double_count_total(self):
         state = {
             relay_watchdog.PERMANENT_LOSS_TOTAL_KEY: 9,

@@ -1704,6 +1704,9 @@ def update_permanent_loss_tombstones(
     if not corrupted:
         _store_loss_state(channel_state, observations, tombstones)
         channel_state[PERMANENT_LOSS_TOTAL_KEY] = len(tombstones)
+    else:
+        newly_tombstoned.clear()
+        retracted.clear()
     if overflowed:
         previous_overflow = channel_state.get(PERMANENT_LOSS_OVERFLOW_TOTAL_KEY, 0)
         if not isinstance(previous_overflow, int) or isinstance(previous_overflow, bool):
