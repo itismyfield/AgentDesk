@@ -551,6 +551,7 @@ src/
 │   │   │   │   │   ├── heartbeat.rs
 │   │   │   │   │   ├── runtime_stamp.rs
 │   │   │   │   │   └── stream_loop_patch.rs
+│   │   │   │   ├── bridge_entry_guard_tests.rs
 │   │   │   │   ├── delivery_rewind.rs
 │   │   │   │   ├── identity_gate.rs
 │   │   │   │   ├── post_loop_identity_guard_tests.rs
