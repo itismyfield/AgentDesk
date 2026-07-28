@@ -2931,6 +2931,9 @@ class TickChannelTests(unittest.TestCase):
         state = {
             "coverage_uncovered_ticks": COVERAGE_CONFIRM_TICKS - 1,
             "coverage_desync_since": self.now,
+            # #4961: loss corroborates only once it has persisted for
+            # gap_alert_secs, so this fixture carries a sustained timer.
+            "loss_since": tick_at - rt.cfg.gap_alert_secs,
         }
 
         tick_coverage(
@@ -2943,6 +2946,111 @@ class TickChannelTests(unittest.TestCase):
 
         self.assertEqual(len(rt.alerts), 1)
         self.assertIn("attached_but_desynced", rt.alerts[0][0])
+
+    def _loss_corroboration_probe(self, tick_at):
+        return self.active_foreground_probe(
+            queue_depth=1,
+            last_outbound_activity_ms=None,
+            last_relay_ts_ms=int(tick_at * 1000) - 1,
+        )
+
+    def test_first_transcript_loss_tick_records_timer_without_alarm(self):
+        # #4961 regression: two real false positives (ticks=83 gap=678s and
+        # ticks=4 gap=799s, same channel) fired off a single lost>0 tick whose
+        # neighbours both reported lost=0 — relay batching, not a dead relay.
+        rt = self.make_rt()
+        tick_at = self.now + 600
+        self.arm_coverage(rt, self._loss_corroboration_probe(tick_at))
+        state = {
+            "coverage_uncovered_ticks": COVERAGE_CONFIRM_TICKS - 1,
+            "coverage_desync_since": self.now,
+        }
+
+        tick_coverage(
+            rt,
+            TICK_CHANNEL,
+            state,
+            tick_at,
+            CoverageTranscriptProbe(growing=True, blocks=723, lost=1),
+        )
+
+        self.assertEqual(rt.alerts, [])
+        self.assertNotIn("last_coverage_alert", state)
+        self.assertEqual(state["loss_since"], tick_at)
+        self.assertTrue(
+            any(
+                "transcript loss not yet sustained" in line
+                and "duration=0s" in line
+                and "lost=1" in line
+                for line in rt.log_lines
+            )
+        )
+
+    def test_sustained_transcript_loss_corroborates_desync_coverage_alarm(self):
+        rt = self.make_rt()
+        tick_at = self.now + 600
+        self.arm_coverage(rt, self._loss_corroboration_probe(tick_at))
+        state = {
+            "coverage_uncovered_ticks": COVERAGE_CONFIRM_TICKS - 1,
+            "coverage_desync_since": self.now,
+            "loss_since": tick_at - rt.cfg.gap_alert_secs,
+        }
+
+        tick_coverage(
+            rt,
+            TICK_CHANNEL,
+            state,
+            tick_at,
+            CoverageTranscriptProbe(growing=True, blocks=723, lost=1),
+        )
+
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertIn("attached_but_desynced", rt.alerts[0][0])
+        self.assertEqual(state["loss_since"], tick_at - rt.cfg.gap_alert_secs)
+
+    def test_clean_tick_clears_loss_timer_and_restarts_dwell(self):
+        rt = self.make_rt()
+        first_tick = self.now + 600
+        self.arm_coverage(rt, self._loss_corroboration_probe(first_tick))
+        state = {
+            "coverage_uncovered_ticks": COVERAGE_CONFIRM_TICKS - 1,
+            "coverage_desync_since": self.now,
+        }
+
+        tick_coverage(
+            rt,
+            TICK_CHANNEL,
+            state,
+            first_tick,
+            CoverageTranscriptProbe(growing=True, blocks=723, lost=1),
+        )
+        self.assertEqual(state["loss_since"], first_tick)
+
+        clean_tick = first_tick + 60
+        rt.watcher_probe = self._loss_corroboration_probe(clean_tick)
+        tick_coverage(
+            rt,
+            TICK_CHANNEL,
+            state,
+            clean_tick,
+            CoverageTranscriptProbe(growing=True, blocks=723, lost=0),
+        )
+        self.assertNotIn("loss_since", state)
+
+        # A later loss restarts the dwell from zero: without the clear this
+        # tick would already be gap_alert_secs old and would alarm.
+        relapse_tick = first_tick + rt.cfg.gap_alert_secs + 60
+        rt.watcher_probe = self._loss_corroboration_probe(relapse_tick)
+        tick_coverage(
+            rt,
+            TICK_CHANNEL,
+            state,
+            relapse_tick,
+            CoverageTranscriptProbe(growing=True, blocks=723, lost=1),
+        )
+
+        self.assertEqual(rt.alerts, [])
+        self.assertEqual(state["loss_since"], relapse_tick)
 
     def test_growth_with_stale_relay_and_advanced_inflight_update_is_suppressed(self):
         rt = self.make_rt()

@@ -3076,6 +3076,23 @@ def tick_coverage(
     transcript_probe: CoverageTranscriptProbe | None = None,
 ) -> None:
     """Observe I2 only; never repair, return early from, or suppress gap checks."""
+    # #4961: a momentary lost>0 is ordinary relay batching, so it must not
+    # corroborate a desync on its own. Persist the first loss observation the
+    # same way the sibling delivery-gap alarm persists `gap_since` (set once,
+    # popped on the first clean observation) so the corroboration check below
+    # can demand the same gap_alert_secs dwell that alarm already demands.
+    # Maintained before any verdict branch returns, so a covered tick with
+    # lost==0 still clears the timer.
+    if transcript_probe is not None:
+        if transcript_probe.lost > 0:
+            raw_loss_since = chs.get("loss_since")
+            if not (
+                _is_finite_nonnegative_number(raw_loss_since)
+                and float(raw_loss_since) <= now
+            ):
+                chs["loss_since"] = now
+        else:
+            chs.pop("loss_since", None)
     expected_name = expected_tmux_session_name(ch)
     live_sessions = rt.live_tmux_sessions()
     expected_alive = None if live_sessions is None else expected_name in live_sessions
@@ -3180,8 +3197,18 @@ def tick_coverage(
         growing_without_loss = bool(
             zero_loss_observed and transcript_probe is not None and transcript_probe.growing
         )
-        transcript_loss_active = bool(
+        transcript_loss_observed = bool(
             transcript_probe is not None and transcript_probe.lost > 0
+        )
+        # `loss_since` is set/validated for exactly this condition earlier in
+        # the tick, so the read is safe whenever loss is observed.
+        loss_for = (
+            max(0.0, now - float(chs["loss_since"]))
+            if transcript_loss_observed
+            else 0.0
+        )
+        transcript_loss_active = bool(
+            transcript_loss_observed and loss_for >= rt.cfg.gap_alert_secs
         )
         inflight_progress_alive = bool(
             inflight_update_advanced or inflight_update_recent
@@ -3212,6 +3239,14 @@ def tick_coverage(
                 f"[{cid}] coverage desync has zero loss and recent relay "
                 f"blocks={transcript_probe.blocks} growing={transcript_probe.growing} "
                 "— not alarming"
+            )
+            return
+        if not delivery_gap_active and transcript_loss_observed:
+            rt.log(
+                f"[{cid}] coverage desync transcript loss not yet sustained "
+                f"duration={int(loss_for)}s lost={transcript_probe.lost} "
+                f"(< {rt.cfg.gap_alert_secs}s alert threshold — relay batching, "
+                "not down) — not alarming"
             )
             return
         if not delivery_gap_active:
