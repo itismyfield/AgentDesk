@@ -145,9 +145,6 @@ PERMANENT_LOSS_UNANNOUNCED_KEY = "permanent_loss_unannounced"
 PERMANENT_LOSS_TOTAL_KEY = "permanent_loss_total"
 PERMANENT_LOSS_SUSPECTED_KEY = "permanent_loss_suspected"
 PERMANENT_LOSS_OVERFLOW_TOTAL_KEY = "permanent_loss_overflow_total"
-PERMANENT_LOSS_QUARANTINE_KEY = "permanent_loss_quarantine"
-PERMANENT_LOSS_QUARANTINE_TOTAL_KEY = "permanent_loss_quarantine_total"
-PERMANENT_LOSS_IDENTITY_WARNING_KEY = "permanent_loss_identity_warnings"
 LAST_ACTUAL_DELIVERY_AT_KEY = "last_actual_delivery_at"
 LAST_ACTUAL_DELIVERY_BY_PATH_KEY = "last_actual_delivery_by_path"
 # Permanent loss requires two different delivered-frontier advances beyond the
@@ -1482,7 +1479,6 @@ class PermanentLossUpdate:
     retracted: tuple[str, ...]
     suspected: int = 0
     overflowed: int = 0
-    quarantined: int = 0
     corrupted: bool = False
 
 
@@ -1588,60 +1584,6 @@ def _permanent_loss_tombstones_with_status(
     return bounded, corrupted
 
 
-def _quarantine_corrupt_loss_state(
-    channel_state: dict[str, Any],
-    *,
-    observations_corrupted: bool,
-    tombstones_corrupted: bool,
-    now: float,
-) -> int:
-    """Move malformed loss state out of the authoritative state machine."""
-    quarantined: dict[str, dict[str, Any]] = {}
-    for key, corrupted, validator in (
-        (
-            LOSS_OBSERVATIONS_KEY,
-            observations_corrupted,
-            _validated_loss_observations_with_status,
-        ),
-        (
-            PERMANENT_LOSS_TOMBSTONES_KEY,
-            tombstones_corrupted,
-            _permanent_loss_tombstones_with_status,
-        ),
-    ):
-        if not corrupted:
-            continue
-        raw = channel_state.get(key)
-        valid = validator(channel_state, now)[0]
-        if isinstance(raw, dict):
-            invalid = {
-                str(entry_id): entry
-                for entry_id, entry in raw.items()
-                if entry_id not in valid
-            }
-        else:
-            invalid = {"<root>": raw}
-        if invalid:
-            quarantined[key] = invalid
-        if valid:
-            channel_state[key] = valid
-        else:
-            channel_state.pop(key, None)
-
-    if not quarantined:
-        return 0
-    existing = channel_state.get(PERMANENT_LOSS_QUARANTINE_KEY, [])
-    bucket = list(existing) if isinstance(existing, list) else []
-    bucket.append({"quarantined_at": now, "entries": quarantined})
-    channel_state[PERMANENT_LOSS_QUARANTINE_KEY] = bucket[-MAX_LOSS_OBSERVATIONS:]
-    count = sum(len(entries) for entries in quarantined.values())
-    previous = channel_state.get(PERMANENT_LOSS_QUARANTINE_TOTAL_KEY, 0)
-    if not isinstance(previous, int) or isinstance(previous, bool) or previous < 0:
-        previous = 0
-    channel_state[PERMANENT_LOSS_QUARANTINE_TOTAL_KEY] = previous + count
-    return count
-
-
 def permanent_loss_tombstones(
     channel_state: Mapping[str, Any], now: float | None = None
 ) -> dict[str, dict[str, Any]]:
@@ -1700,12 +1642,6 @@ def update_permanent_loss_tombstones(
         channel_state, now
     )
     corrupted = tombstones_corrupted or observations_corrupted
-    quarantined = _quarantine_corrupt_loss_state(
-        channel_state,
-        observations_corrupted=observations_corrupted,
-        tombstones_corrupted=tombstones_corrupted,
-        now=now,
-    )
     durable_tombstone_ids = set(tombstones)
     if len(block_source_ids) != len(blocks):
         raise ValueError("block_source_ids must identify every source block")
@@ -1766,15 +1702,17 @@ def update_permanent_loss_tombstones(
     active_blocks = [
         block for block, identity in zip(blocks, block_ids) if identity not in tombstones
     ]
-    if corrupted:
+    if not corrupted:
+        _store_loss_state(channel_state, observations, tombstones)
+        channel_state[PERMANENT_LOSS_TOTAL_KEY] = len(tombstones)
+    else:
         active_blocks = [
             block
             for block, identity in zip(blocks, block_ids)
             if identity not in durable_tombstone_ids
         ]
         newly_tombstoned.clear()
-    _store_loss_state(channel_state, observations, tombstones)
-    channel_state[PERMANENT_LOSS_TOTAL_KEY] = len(tombstones)
+        retracted.clear()
     if overflowed and not corrupted:
         previous_overflow = channel_state.get(PERMANENT_LOSS_OVERFLOW_TOTAL_KEY, 0)
         if not isinstance(previous_overflow, int) or isinstance(previous_overflow, bool):
@@ -1786,7 +1724,6 @@ def update_permanent_loss_tombstones(
         retracted=tuple(retracted),
         suspected=suspected,
         overflowed=overflowed,
-        quarantined=quarantined,
         corrupted=corrupted,
     )
 
