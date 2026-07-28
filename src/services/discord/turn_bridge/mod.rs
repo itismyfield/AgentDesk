@@ -19,6 +19,7 @@ mod panel_lifecycle;
 mod post_loop_finalize;
 mod recall_feedback;
 pub(in crate::services::discord) mod recovery_text;
+mod response_delivery;
 mod retry_state;
 mod runtime_handoff_loop;
 mod single_message_footer;
@@ -36,22 +37,10 @@ mod terminal_outcome_delivery;
 mod thinking;
 mod tmux_runtime;
 mod turn_analytics;
-// #3805 P2 (PR-B): two-message sink creation order (answer-first, panel below)
-// + the pure generation-epoch staleness guard. Isolated sibling so the EXTREME
-// turn_bridge/mod.rs giant and the 700-capped status_panel.rs stay lean; the
-// call sites here and in single_message_footer.rs are thin.
 mod two_message_panel;
 mod voice_completion;
 mod watcher_handoff;
 mod watcher_orphan_cleanup;
-// #3479: the pure response-delivery + transcript-event helpers (the transcript
-// event-recording filter, the response-after-offset slice, the terminal delivery
-// sanitization+fallback builder, and the full-terminal-replay predicate) moved
-// verbatim to a capped sibling module. All four are `pub(super)` and re-imported
-// below so this parent's call sites (and the inline test modules) stay
-// byte-identical; deps are reached via `use super::*;` (the two discord-level
-// `super::` refs become `super::super::` from the child).
-mod response_delivery;
 use super::gateway::TurnGateway;
 use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
 use super::turn_view_reconciler::{
@@ -525,14 +514,8 @@ pub(super) fn spawn_turn_bridge(
             inflight_state.current_msg_len,
         );
 
-        // Register finalizer/broadcast/cleanup side effects only after both the
-        // bridge-entry store gate and any absent-anchor bind proved authority.
-        let (mut completion_guard, mut inflight_guard) = make_bridge_guards(
-            &mut bridge,
-            &inflight_state,
-            &shared_owned,
-            &provider,
-        );
+        let (mut completion_guard, mut inflight_guard) =
+            make_bridge_guards(&mut bridge, &inflight_state, &shared_owned, &provider);
 
         let resumed_long_running_placeholder_notice_msg_id =
             bridge_entry_persist::resumed_long_running_placeholder_notice_message_id(
@@ -722,10 +705,6 @@ pub(super) fn spawn_turn_bridge(
         match stream_loop_output.outcome {
             stream_loop::StreamLoopOutcome::Completed => {}
             stream_loop::StreamLoopOutcome::AuthorityLost => {
-                // The same-turn watcher/successor now owns both visible relay
-                // and durable cleanup. Wake only this bridge's waiter: a
-                // Completed broadcast or abandon-on-drop would kill/clear the
-                // relay that just became authoritative.
                 completion_guard.relinquish_bridge_authority();
                 inflight_guard.defuse();
                 return;

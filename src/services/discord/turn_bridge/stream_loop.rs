@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use super::bridge_latency_spans::BridgeLatencySpans;
 use super::runtime_handoff_loop::{
-    RuntimeHandoffLoopContext, RuntimeHandoffLoopMessage, RuntimeHandoffLoopOutcome,
-    RuntimeHandoffLoopState, handle_runtime_handoff_loop_message,
+    RuntimeHandoffLoopContext, RuntimeHandoffLoopMessage, RuntimeHandoffLoopState,
+    handle_runtime_handoff_loop_message,
 };
 use super::stream_tick::guarded_persist::settle_pending_current_message_candidate_on_loop_exit;
 use super::stream_tick::{
@@ -35,6 +35,17 @@ mod tool_arms;
 pub(super) use exit_reconcile::StreamLoopOutcome;
 use exit_reconcile::reconcile_saved_exit_candidate;
 use expected_identity::refresh_stream_tick_expected_identity_after_handoff;
+
+fn stream_loop_should_continue(
+    done: bool,
+    terminal_control_drain_until: Option<std::time::Instant>,
+    runtime_handoff_retry_retained: bool,
+    now: std::time::Instant,
+) -> bool {
+    !done
+        || runtime_handoff_retry_retained
+        || terminal_control_drain_until.is_some_and(|deadline| now < deadline)
+}
 
 pub(super) struct StreamLoopContext {
     pub(super) shared_owned: Arc<SharedData>,
@@ -241,6 +252,31 @@ pub(super) async fn run_stream_loop(
         };
     }
 
+    macro_rules! refresh_or_retain_runtime_handoff {
+        ($outcome:expr, $retry_pending:ident, $retry_retained:ident) => {{
+            let outcome = $outcome;
+            refresh_expected_after_handoff!(outcome.guarded_save_outcome);
+            if let Some(retry_message) = outcome.retry_message {
+                pending_stream_messages.push_front(retry_message.into_stream_message());
+                $retry_pending = true;
+                $retry_retained = true;
+                true
+            } else {
+                $retry_retained = false;
+                false
+            }
+        }};
+    }
+
+    macro_rules! stop_on_tool_authority_loss {
+        ($outcome:expr, $loop_outcome:ident, $label:lifetime) => {
+            if matches!($outcome, StreamToolArmOutcome::AuthorityLost) {
+                $loop_outcome = StreamLoopOutcome::AuthorityLost;
+                break $label;
+            }
+        };
+    }
+
     // #2289: both cancel guards share this macro to keep inflight sync, cancellation, and child abort atomic without closure borrow conflicts.
     // Callers must then exit `'outer` (explicitly or by fallthrough) into cancel post-processing.
     macro_rules! finalize_cancel_inner {
@@ -273,10 +309,14 @@ pub(super) async fn run_stream_loop(
     let mut pending_long_running_retarget_after_state_save = None;
     let mut state_dirty = false;
     let mut loop_outcome = StreamLoopOutcome::Completed;
+    let mut runtime_handoff_retry_retained = false;
 
-    'outer: while !done
-        || terminal_control_drain_until.is_some_and(|deadline| std::time::Instant::now() < deadline)
-    {
+    'outer: while stream_loop_should_continue(
+        done,
+        terminal_control_drain_until,
+        runtime_handoff_retry_retained,
+        std::time::Instant::now(),
+    ) {
         // #2172: Done wins over a later cancel during residual-control drain;
         // only `!done` may run cancel finalization.
         if !done && cancel_requested(Some(cancel_token.as_ref())) {
@@ -314,6 +354,7 @@ pub(super) async fn run_stream_loop(
             break 'outer;
         }
 
+        let mut runtime_handoff_retry_pending = false;
         loop {
             // #2172 cancel boundary: re-check the cancel flag between
             // drained messages. Without this, the outer loop samples
@@ -486,6 +527,9 @@ pub(super) async fn run_stream_loop(
                                 StreamToolArmState {
                                     state_dirty: &mut state_dirty,
                                     inflight_state: &mut inflight_state,
+                                    persisted_inflight_baseline: &mut persisted_inflight_baseline,
+                                    stream_tick_expected_identity: &stream_tick_expected_identity,
+                                    expected_current_message: &mut expected_current_message,
                                     current_tool_line: &mut current_tool_line,
                                     prev_tool_status: &mut prev_tool_status,
                                     last_tool_name: &mut last_tool_name,
@@ -513,9 +557,7 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            match outcome {
-                                StreamToolArmOutcome::Continue => {}
-                            }
+                            stop_on_tool_authority_loss!(outcome, loop_outcome, 'outer);
                         }
                         StreamMessage::ToolResult {
                             content,
@@ -546,6 +588,9 @@ pub(super) async fn run_stream_loop(
                                 StreamToolArmState {
                                     state_dirty: &mut state_dirty,
                                     inflight_state: &mut inflight_state,
+                                    persisted_inflight_baseline: &mut persisted_inflight_baseline,
+                                    stream_tick_expected_identity: &stream_tick_expected_identity,
+                                    expected_current_message: &mut expected_current_message,
                                     current_tool_line: &mut current_tool_line,
                                     prev_tool_status: &mut prev_tool_status,
                                     last_tool_name: &mut last_tool_name,
@@ -573,9 +618,7 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            match outcome {
-                                StreamToolArmOutcome::Continue => {}
-                            }
+                            stop_on_tool_authority_loss!(outcome, loop_outcome, 'outer);
                         }
                         StreamMessage::TaskNotification {
                             tool_use_id,
@@ -609,6 +652,9 @@ pub(super) async fn run_stream_loop(
                                 StreamToolArmState {
                                     state_dirty: &mut state_dirty,
                                     inflight_state: &mut inflight_state,
+                                    persisted_inflight_baseline: &mut persisted_inflight_baseline,
+                                    stream_tick_expected_identity: &stream_tick_expected_identity,
+                                    expected_current_message: &mut expected_current_message,
                                     current_tool_line: &mut current_tool_line,
                                     prev_tool_status: &mut prev_tool_status,
                                     last_tool_name: &mut last_tool_name,
@@ -636,9 +682,7 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            match outcome {
-                                StreamToolArmOutcome::Continue => {}
-                            }
+                            stop_on_tool_authority_loss!(outcome, loop_outcome, 'outer);
                         }
                         StreamMessage::TmuxReady {
                             output_path,
@@ -679,7 +723,13 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            refresh_expected_after_handoff!(outcome);
+                            if refresh_or_retain_runtime_handoff!(
+                                outcome,
+                                runtime_handoff_retry_pending,
+                                runtime_handoff_retry_retained
+                            ) {
+                                break;
+                            }
                         }
                         StreamMessage::RuntimeReady { handoff } => {
                             let outcome = handle_runtime_handoff_loop_message(
@@ -710,7 +760,13 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            refresh_expected_after_handoff!(outcome);
+                            if refresh_or_retain_runtime_handoff!(
+                                outcome,
+                                runtime_handoff_retry_pending,
+                                runtime_handoff_retry_retained
+                            ) {
+                                break;
+                            }
                         }
                         StreamMessage::ProcessReady {
                             output_path,
@@ -749,7 +805,13 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            refresh_expected_after_handoff!(outcome);
+                            if refresh_or_retain_runtime_handoff!(
+                                outcome,
+                                runtime_handoff_retry_pending,
+                                runtime_handoff_retry_retained
+                            ) {
+                                break;
+                            }
                         }
                         StreamMessage::OutputOffset { offset } => {
                             let outcome = handle_runtime_handoff_loop_message(
@@ -780,7 +842,13 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            refresh_expected_after_handoff!(outcome);
+                            if refresh_or_retain_runtime_handoff!(
+                                outcome,
+                                runtime_handoff_retry_pending,
+                                runtime_handoff_retry_retained
+                            ) {
+                                break;
+                            }
                         }
                     }
                 }
@@ -807,6 +875,25 @@ pub(super) async fn run_stream_loop(
                     break;
                 }
             }
+        }
+
+        if runtime_handoff_retry_pending {
+            // A multi-step handoff may have durably landed its first exact
+            // snapshot before a later stamp hit transient I/O. Its original
+            // stream identity is intentionally not refreshed until the whole
+            // handoff succeeds, so running the generic tick here would
+            // misclassify that exact partial snapshot as authority loss.
+            // Retry the retained frame on the next normal stream wake instead.
+            // Once a completed turn's residual drain expires there is no next
+            // receiver wake, so keep the loop alive with a bounded retry
+            // backoff rather than dropping the exact frame or busy-spinning.
+            if done
+                && terminal_control_drain_until
+                    .is_none_or(|deadline| std::time::Instant::now() >= deadline)
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            continue 'outer;
         }
 
         let tick_outcome = run_bridge_stream_tick(

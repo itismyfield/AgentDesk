@@ -5,6 +5,9 @@ use std::sync::Arc;
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::tool_output_guard::matched_or_last_tool;
 
+use super::super::stream_tick::guarded_persist::{
+    VisibleMutationAuthority, visible_mutation_authority_after_guarded_save,
+};
 use super::*;
 
 pub(super) enum StreamToolArmMessage {
@@ -29,6 +32,17 @@ pub(super) enum StreamToolArmMessage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StreamToolArmOutcome {
     Continue,
+    AuthorityLost,
+}
+
+fn stream_tool_outcome_after_restart_authority(
+    authority: Option<VisibleMutationAuthority>,
+) -> StreamToolArmOutcome {
+    if authority == Some(VisibleMutationAuthority::AuthorityLost) {
+        StreamToolArmOutcome::AuthorityLost
+    } else {
+        StreamToolArmOutcome::Continue
+    }
 }
 
 pub(super) struct StreamToolArmContext<'a> {
@@ -50,6 +64,10 @@ pub(super) struct StreamToolArmContext<'a> {
 pub(super) struct StreamToolArmState<'a> {
     pub(super) state_dirty: &'a mut bool,
     pub(super) inflight_state: &'a mut InflightTurnState,
+    pub(super) persisted_inflight_baseline: &'a mut InflightTurnState,
+    pub(super) stream_tick_expected_identity:
+        &'a crate::services::discord::inflight::InflightTurnIdentity,
+    pub(super) expected_current_message: &'a mut (u64, usize),
     pub(super) current_tool_line: &'a mut Option<String>,
     pub(super) prev_tool_status: &'a mut Option<String>,
     pub(super) last_tool_name: &'a mut Option<String>,
@@ -95,6 +113,9 @@ pub(super) async fn handle_stream_tool_message(
 
     let mut state_dirty = *state.state_dirty;
     let inflight_state = &mut *state.inflight_state;
+    let persisted_inflight_baseline = &mut *state.persisted_inflight_baseline;
+    let stream_tick_expected_identity = state.stream_tick_expected_identity;
+    let expected_current_message = &mut *state.expected_current_message;
     let mut current_tool_line = state.current_tool_line.take();
     let mut prev_tool_status = state.prev_tool_status.take();
     let mut last_tool_name = state.last_tool_name.take();
@@ -118,6 +139,7 @@ pub(super) async fn handle_stream_tool_message(
     let mut last_edit_text = std::mem::take(state.last_edit_text);
     let mut full_response = std::mem::take(state.full_response);
     let mut status_panel_dirty = *state.status_panel_dirty;
+    let mut restart_visible_authority = None;
 
     match message {
         StreamToolArmMessage::ToolUse {
@@ -327,7 +349,42 @@ pub(super) async fn handle_stream_tool_message(
                     is_error: false,
                 },
             );
-            if !restart_followup_pending && is_dcserver_restart_command(&input) {
+            let restart_bridge_authorized = if !restart_followup_pending
+                && is_dcserver_restart_command(&input)
+            {
+                let intended_authority =
+                    crate::services::discord::inflight::StreamRelayAuthority::from_state(
+                        inflight_state,
+                    );
+                let outcome =
+                    crate::services::discord::inflight::save_stream_tick_state_if_bridge_authority(
+                        persisted_inflight_baseline,
+                        inflight_state,
+                        stream_tick_expected_identity,
+                        expected_current_message.0,
+                        expected_current_message.1,
+                        "turn_bridge::stream_loop::tool_restart_visible_fence",
+                    );
+                if matches!(
+                    outcome,
+                    crate::services::discord::inflight::GuardedSaveOutcome::Saved
+                ) {
+                    *expected_current_message = (
+                        inflight_state.current_msg_id,
+                        inflight_state.current_msg_len,
+                    );
+                }
+                let authority = visible_mutation_authority_after_guarded_save(
+                    outcome,
+                    inflight_state,
+                    intended_authority,
+                );
+                restart_visible_authority = Some(authority);
+                authority == VisibleMutationAuthority::Authorized
+            } else {
+                false
+            };
+            if restart_bridge_authorized {
                 let mut report = RestartCompletionReport::new(
                     provider.clone(),
                     channel_id.get(),
@@ -680,5 +737,60 @@ pub(super) async fn handle_stream_tool_message(
     *state.full_response = full_response;
     *state.status_panel_dirty = status_panel_dirty;
 
-    StreamToolArmOutcome::Continue
+    stream_tool_outcome_after_restart_authority(restart_visible_authority)
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+
+    fn bridge_state(channel_id: u64) -> InflightTurnState {
+        InflightTurnState::new(
+            ProviderKind::Codex,
+            channel_id,
+            Some("adk-4259-r8".to_string()),
+            343_742_347_365_974_026,
+            77_010,
+            18,
+            "queued restart".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-codex-r8-restart".to_string()),
+            Some("/tmp/AgentDesk-codex-r8-restart.jsonl".to_string()),
+            None,
+            512,
+        )
+    }
+
+    #[test]
+    fn queued_restart_foreign_authority_propagates_loss_while_self_delegation_continues() {
+        let bridge = bridge_state(42_593_120);
+        let intended =
+            crate::services::discord::inflight::StreamRelayAuthority::from_state(&bridge);
+        let mut foreign = bridge.clone();
+        foreign.set_watcher_owner_channel_id(foreign.channel_id + 1);
+        foreign.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+        let foreign_authority = visible_mutation_authority_after_guarded_save(
+            crate::services::discord::inflight::GuardedSaveOutcome::IdentityMismatch,
+            &foreign,
+            intended,
+        );
+        assert_eq!(foreign_authority, VisibleMutationAuthority::AuthorityLost);
+        assert_eq!(
+            stream_tool_outcome_after_restart_authority(Some(foreign_authority)),
+            StreamToolArmOutcome::AuthorityLost,
+        );
+
+        let delegated =
+            crate::services::discord::inflight::StreamRelayAuthority::from_state(&foreign);
+        let self_delegated = visible_mutation_authority_after_guarded_save(
+            crate::services::discord::inflight::GuardedSaveOutcome::Saved,
+            &foreign,
+            delegated,
+        );
+        assert_eq!(self_delegated, VisibleMutationAuthority::Suppressed);
+        assert_eq!(
+            stream_tool_outcome_after_restart_authority(Some(self_delegated)),
+            StreamToolArmOutcome::Continue,
+        );
+    }
 }

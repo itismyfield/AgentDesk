@@ -152,7 +152,7 @@ pub(super) use self::save_store::{
     save_inflight_state_create_new, save_inflight_state_if_absent,
 };
 pub(in crate::services::discord) use self::save_store::{
-    GuardedSaveOutcome, bind_recovery_anchor_if_matches_identity,
+    GuardedSaveOutcome, StreamRelayAuthority, bind_recovery_anchor_if_matches_identity,
     clear_long_running_placeholder_if_matches_identity,
     mark_readopted_from_inflight_if_identity_unchanged,
     patch_bridge_entry_state_if_identity_unchanged,

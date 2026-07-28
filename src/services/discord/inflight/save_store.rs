@@ -22,7 +22,7 @@ mod rebind_adoption;
 
 pub(in crate::services::discord) use self::delivery_rewind::save_inflight_delivery_rewind_if_matches_identity;
 pub(in crate::services::discord) use self::identity_gate::{
-    GuardedSaveOutcome, bind_recovery_anchor_if_matches_identity,
+    GuardedSaveOutcome, StreamRelayAuthority, bind_recovery_anchor_if_matches_identity,
     clear_long_running_placeholder_if_matches_identity,
     mark_readopted_from_inflight_if_identity_unchanged,
     patch_bridge_entry_state_if_identity_unchanged,
@@ -355,11 +355,13 @@ mod tests {
         let (raw, cleaned) = api_friction_response_pair();
         let mut state = state_with_full_response(44_086, &raw, "AgentDesk-codex-normal-clean-4185");
         save_inflight_state(&state).expect("seed raw normal row");
+        state = super::super::load_inflight_state(&ProviderKind::Codex, state.channel_id)
+            .expect("load exact seeded normal row");
 
         state.full_response = cleaned.clone();
         assert_eq!(
             save_inflight_state_if_identity_unchanged(
-                &state,
+                &mut state,
                 "test::normal_cleaned_identity_refresh",
             ),
             GuardedSaveOutcome::Saved
@@ -408,8 +410,10 @@ mod tests {
                 &identity,
                 state.turn_start_offset,
                 state.current_msg_id,
+                Some(state.current_msg_len),
                 88_006,
                 11,
+                None,
                 None,
             ),
             GuardedSaveOutcome::IdentityMismatch,
@@ -790,7 +794,7 @@ mod tests {
     }
 
     #[test]
-    fn matches_identity_save_skips_after_adoption_changes_only_output_path() {
+    fn matches_identity_save_preserves_adopted_output_and_commits_completion() {
         let temp = tempfile::TempDir::new().expect("runtime root");
         let provider = ProviderKind::Codex;
         let old_rollout_path = temp.path().join("old-rollout.jsonl");
@@ -832,7 +836,7 @@ mod tests {
             expected_turn_start_offset,
         );
 
-        assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+        assert_eq!(outcome, GuardedSaveOutcome::Saved);
         let persisted_path = inflight_state_path(temp.path(), &provider, channel_id);
         let persisted: InflightTurnState = serde_json::from_str(
             &std::fs::read_to_string(persisted_path).expect("read persisted inflight"),
@@ -843,7 +847,7 @@ mod tests {
             Some(adopted_rollout_path.display().to_string())
         );
         assert_eq!(persisted.full_response, "adopted durable response");
-        assert!(!persisted.terminal_delivery_committed);
+        assert!(persisted.terminal_delivery_committed);
     }
 }
 

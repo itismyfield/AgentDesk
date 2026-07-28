@@ -1,4 +1,4 @@
-use super::refresh_stream_tick_expected_identity_after_handoff;
+use super::{refresh_stream_tick_expected_identity_after_handoff, stream_loop_should_continue};
 use crate::services::discord::inflight::{
     GuardedSaveOutcome, InflightTurnIdentity, InflightTurnState, load_inflight_state,
     save_inflight_state, stamp_runtime_handoff_if_matches_identity,
@@ -37,6 +37,22 @@ fn with_runtime_root(test: impl FnOnce()) {
         temp.path(),
     );
     test();
+}
+
+#[test]
+fn done_runtime_handoff_retry_survives_expired_terminal_drain() {
+    let now = std::time::Instant::now();
+    assert!(stream_loop_should_continue(true, None, true, now));
+    assert!(stream_loop_should_continue(
+        true,
+        Some(now - std::time::Duration::from_millis(1)),
+        true,
+        now,
+    ));
+    assert!(
+        !stream_loop_should_continue(true, None, false, now),
+        "a completed turn without an exact retained handoff may exit normally",
+    );
 }
 
 #[test]

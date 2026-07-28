@@ -5,6 +5,44 @@
 
 use super::super::super::*;
 
+#[cfg(test)]
+std::thread_local! {
+    static TEST_ATOMIC_STAMP_FAILURE_COUNTDOWN: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) struct AtomicStampFailureGuard;
+
+#[cfg(test)]
+impl Drop for AtomicStampFailureGuard {
+    fn drop(&mut self) {
+        TEST_ATOMIC_STAMP_FAILURE_COUNTDOWN.set(None);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn fail_guarded_runtime_atomic_stamp_on_call(call: usize) -> AtomicStampFailureGuard {
+    assert!(call > 0, "fault-injected stamp call is one-based");
+    TEST_ATOMIC_STAMP_FAILURE_COUNTDOWN.set(Some(call));
+    AtomicStampFailureGuard
+}
+
+#[cfg(test)]
+fn injected_atomic_stamp_failure() -> bool {
+    TEST_ATOMIC_STAMP_FAILURE_COUNTDOWN.with(|countdown| match countdown.get() {
+        Some(1) => {
+            countdown.set(None);
+            true
+        }
+        Some(remaining) => {
+            countdown.set(Some(remaining - 1));
+            false
+        }
+        None => false,
+    })
+}
+
 /// Identity-guarded replacement for the legacy tmux-wrapper `TmuxReady` blind
 /// `save_inflight_state`. The caller captures the expected 4-field identity
 /// (`user_msg_id`, `started_at`, `tmux_session_name`, `turn_start_offset`)
@@ -32,10 +70,13 @@ pub(super) fn guarded_runtime_handoff_save(
         GuardedSaveOutcome, stamp_runtime_handoff_if_matches_identity,
     };
     let outcome = stamp_runtime_handoff_if_matches_identity(
-        (persisted_baseline, inflight_state),
+        (persisted_baseline, &mut *inflight_state),
         expected,
         caller,
     );
+    if outcome == GuardedSaveOutcome::IoError {
+        inflight_state.clone_from(persisted_baseline);
+    }
     if matches!(
         outcome,
         GuardedSaveOutcome::Missing | GuardedSaveOutcome::IdentityMismatch
@@ -65,11 +106,19 @@ pub(super) fn guarded_runtime_atomic_stamp(
     use crate::services::discord::inflight::{
         GuardedSaveOutcome, stamp_runtime_handoff_if_matches_identity,
     };
+    #[cfg(test)]
+    if injected_atomic_stamp_failure() {
+        inflight_state.clone_from(persisted_baseline);
+        return GuardedSaveOutcome::IoError;
+    }
     let outcome = stamp_runtime_handoff_if_matches_identity(
-        (persisted_baseline, inflight_state),
+        (persisted_baseline, &mut *inflight_state),
         expected,
         caller,
     );
+    if outcome == GuardedSaveOutcome::IoError {
+        inflight_state.clone_from(persisted_baseline);
+    }
     if matches!(
         outcome,
         GuardedSaveOutcome::Missing | GuardedSaveOutcome::IdentityMismatch
@@ -93,7 +142,9 @@ pub(super) fn guarded_runtime_atomic_stamp(
 /// reducing the guard to decoration.
 ///
 /// - `Saved` → mark dirty (legacy behavior; later mutations still flush).
-/// - `IoError` → mark dirty (legacy retry semantics: the flush is the retry).
+/// - `IoError` → preserve the pre-existing dirty bit. The handoff request is
+///   requeued by the runtime loop; a generic stream flush must never retry its
+///   identity-mutated local projection.
 /// - `Missing` / `IdentityMismatch` → this turn no longer owns the row; do NOT
 ///   newly mark the arm's mutations dirty (a pre-existing dirty flag from
 ///   earlier loop work is preserved — clearing it could drop an unrelated
@@ -109,7 +160,8 @@ pub(super) fn tmux_ready_state_dirty_after_guarded_save(
         Some(GuardedSaveOutcome::Missing | GuardedSaveOutcome::IdentityMismatch) => {
             previous_state_dirty
         }
-        Some(GuardedSaveOutcome::Saved | GuardedSaveOutcome::IoError) | None => true,
+        Some(GuardedSaveOutcome::Saved) | None => true,
+        Some(GuardedSaveOutcome::IoError) => previous_state_dirty,
     }
 }
 
@@ -273,13 +325,13 @@ mod tests {
         );
     }
 
-    // #4259 PR-2a (codex r1): outcome → dirty policy table. Missing/mismatch
-    // never NEWLY mark dirty (but preserve an earlier mark); Saved/IoError/no
-    // guarded save keep the legacy unconditional marking.
+    // #4259 R8: outcome → dirty policy table. Missing/mismatch/IoError never
+    // NEWLY mark dirty (but preserve an earlier mark); the runtime frame itself
+    // is the IoError retry, not a generic flush of identity-mutated local state.
     #[test]
     fn tmux_ready_dirty_marking_follows_guarded_save_outcome() {
         use GuardedSaveOutcome::*;
-        for lost in [Missing, IdentityMismatch] {
+        for lost in [Missing, IdentityMismatch, IoError] {
             assert!(!tmux_ready_state_dirty_after_guarded_save(
                 false,
                 Some(lost)
@@ -289,7 +341,7 @@ mod tests {
                 "an earlier pending flush must not be dropped"
             );
         }
-        for kept in [Some(Saved), Some(IoError), None] {
+        for kept in [Some(Saved), None] {
             assert!(tmux_ready_state_dirty_after_guarded_save(false, kept));
             assert!(tmux_ready_state_dirty_after_guarded_save(true, kept));
         }

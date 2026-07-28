@@ -355,6 +355,10 @@ pub(super) async fn run_bridge_stream_tick(
     macro_rules! authorize_visible_mutation {
         ($caller:expr) => {{
             stage_tick_state_for_guard!();
+            let intended_authority =
+                crate::services::discord::inflight::StreamRelayAuthority::from_state(
+                    inflight_state,
+                );
             let current_msg_id_before_fence = current_msg_id;
             let guarded_outcome = fence_stream_tick_visible_mutation_with_candidate_cleanup(
                 gateway.as_ref(),
@@ -378,10 +382,15 @@ pub(super) async fn run_bridge_stream_tick(
             {
                 reconcile_tick_runtime_from_inflight!(current_msg_id_before_fence);
             }
-            match visible_mutation_authority_after_guarded_save(guarded_outcome, inflight_state) {
-                VisibleMutationAuthority::Authorized => true,
-                VisibleMutationAuthority::Retry => false,
-                VisibleMutationAuthority::AuthorityLost => {
+            match visible_mutation_authority_after_guarded_save(
+                guarded_outcome,
+                inflight_state,
+                intended_authority,
+            )
+            .mutation_permission()
+            {
+                Some(allowed) => allowed,
+                None => {
                     tracing::warn!(
                         channel_id = channel_id.get(),
                         caller = $caller,
@@ -921,6 +930,8 @@ pub(super) async fn run_bridge_stream_tick(
             &last_tool_name,
             &last_tool_summary,
         );
+        let intended_authority =
+            crate::services::discord::inflight::StreamRelayAuthority::from_state(inflight_state);
         let current_msg_id_before_flush = current_msg_id;
         let flush_outcome = persist_stream_tick_state_with_candidate_cleanup(
             gateway.as_ref(),
@@ -941,8 +952,11 @@ pub(super) async fn run_bridge_stream_tick(
         if flush_outcome == GuardedSaveOutcome::Saved {
             reconcile_tick_runtime_from_inflight!(current_msg_id_before_flush);
         }
-        if visible_mutation_authority_after_guarded_save(flush_outcome, inflight_state)
-            == VisibleMutationAuthority::AuthorityLost
+        if visible_mutation_authority_after_guarded_save(
+            flush_outcome,
+            inflight_state,
+            intended_authority,
+        ) == VisibleMutationAuthority::AuthorityLost
         {
             return_authority_lost!();
         }
@@ -1296,7 +1310,7 @@ mod provider_output_guard_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn competing_same_owner_anchor_is_adopted_without_candidate_resurrection() {
+    async fn competing_same_owner_anchor_aborts_stale_bridge_candidate() {
         let temp = tempfile::TempDir::new().expect("runtime root");
         let _env_guard =
             crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
@@ -1315,7 +1329,7 @@ mod provider_output_guard_tests {
         let gateway = CapturingGateway::default();
 
         assert!(
-            ensure_bridge_current_message_anchor(
+            !ensure_bridge_current_message_anchor(
                 &gateway,
                 &ProviderKind::Codex,
                 "anchor-test-token",
@@ -1328,9 +1342,9 @@ mod provider_output_guard_tests {
             )
             .await
         );
-        assert_eq!(detached, MessageId::new(900_003));
-        assert_eq!(local.current_msg_id, 900_003);
-        assert_eq!(local.full_response, competing.full_response);
+        assert_eq!(durable_current_msg_id_from_detached(detached), 0);
+        assert_eq!(local.current_msg_id, 0);
+        assert!(local.full_response.is_empty());
         assert_eq!(created_candidate, None);
         assert_eq!(
             gateway.deletes.lock().expect("deletes lock").as_slice(),

@@ -30,6 +30,31 @@ fn merge_stream_response_progress(
     )
 }
 
+/// Exact durable relay-authority projection used by the stream loop's
+/// lock-held visible-mutation fence.  A non-bridge projection can be a valid
+/// self-handoff (watcher/standby); callers must suppress Discord mutations
+/// without treating that exact projection as loss of turn lifecycle authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) struct StreamRelayAuthority {
+    watcher_owner_channel_id: Option<u64>,
+    watcher_owns_live_relay: bool,
+    relay_owner_kind: RelayOwnerKind,
+}
+
+impl StreamRelayAuthority {
+    pub(in crate::services::discord) fn from_state(state: &InflightTurnState) -> Self {
+        Self {
+            watcher_owner_channel_id: state.watcher_owner_channel_id,
+            watcher_owns_live_relay: state.watcher_owns_live_relay,
+            relay_owner_kind: state.effective_relay_owner_kind(),
+        }
+    }
+
+    pub(in crate::services::discord) fn bridge_owns_relay(self) -> bool {
+        self.relay_owner_kind == RelayOwnerKind::None
+    }
+}
+
 /// Three-way merges the stream loop's owned fields onto a lock-held durable
 /// row. The persisted baseline keeps unsaved local deltas visible across retry;
 /// durable same-turn owner/session/tool changes win conflicts, response progress
@@ -178,26 +203,43 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
         return GuardedSaveOutcome::IdentityMismatch;
     }
 
+    let baseline_authority = StreamRelayAuthority::from_state(persisted_baseline);
+    let local_authority = StreamRelayAuthority::from_state(state);
+    let durable_authority = StreamRelayAuthority::from_state(&on_disk);
     let baseline_current_message = (expected_current_msg_id, expected_current_msg_len);
     let durable_current_message = (on_disk.current_msg_id, on_disk.current_msg_len);
-    if mode == StreamTickSaveMode::StrictBridgeMutation
-        && (on_disk.effective_relay_owner_kind() != RelayOwnerKind::None
-            || durable_current_message != baseline_current_message)
-    {
-        tracing::warn!(
-            provider = %provider.as_str(),
-            channel_id = state.channel_id,
-            caller,
-            relay_owner = on_disk.effective_relay_owner_kind().as_str(),
-            expected_current_msg_id,
-            expected_current_msg_len,
-            durable_current_msg_id = on_disk.current_msg_id,
-            durable_current_msg_len = on_disk.current_msg_len,
-            "strict stream mutation fence rejected changed durable authority"
-        );
-        state.clone_from(&on_disk);
-        persisted_baseline.clone_from(&on_disk);
-        return GuardedSaveOutcome::IdentityMismatch;
+    if mode == StreamTickSaveMode::StrictBridgeMutation {
+        let authority_changed =
+            local_authority != baseline_authority || durable_authority != baseline_authority;
+        let bridge_message_epoch_changed = baseline_authority.bridge_owns_relay()
+            && durable_current_message != baseline_current_message;
+        if authority_changed || bridge_message_epoch_changed {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id = state.channel_id,
+                caller,
+                baseline_relay_owner = baseline_authority.relay_owner_kind.as_str(),
+                local_relay_owner = local_authority.relay_owner_kind.as_str(),
+                durable_relay_owner = durable_authority.relay_owner_kind.as_str(),
+                expected_current_msg_id,
+                expected_current_msg_len,
+                durable_current_msg_id = on_disk.current_msg_id,
+                durable_current_msg_len = on_disk.current_msg_len,
+                "strict stream mutation fence rejected changed durable authority"
+            );
+            state.clone_from(&on_disk);
+            persisted_baseline.clone_from(&on_disk);
+            return GuardedSaveOutcome::IdentityMismatch;
+        }
+
+        if !baseline_authority.bridge_owns_relay() {
+            // Exact watcher/standby self-handoff: adopt any same-authority
+            // progress (including its current-message epoch) but never merge
+            // or write bridge-local visible deltas after delegation.
+            state.clone_from(&on_disk);
+            persisted_baseline.clone_from(&on_disk);
+            return GuardedSaveOutcome::Saved;
+        }
     }
 
     let mut updated = on_disk.clone();
@@ -328,24 +370,8 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
         &mut updated.long_running_placeholder_active,
     );
 
-    let local_owner_changed = (
-        state.watcher_owner_channel_id,
-        state.watcher_owns_live_relay,
-        state.relay_owner_kind,
-    ) != (
-        persisted_baseline.watcher_owner_channel_id,
-        persisted_baseline.watcher_owns_live_relay,
-        persisted_baseline.relay_owner_kind,
-    );
-    let durable_owner_changed = (
-        on_disk.watcher_owner_channel_id,
-        on_disk.watcher_owns_live_relay,
-        on_disk.relay_owner_kind,
-    ) != (
-        persisted_baseline.watcher_owner_channel_id,
-        persisted_baseline.watcher_owns_live_relay,
-        persisted_baseline.relay_owner_kind,
-    );
+    let local_owner_changed = local_authority != baseline_authority;
+    let durable_owner_changed = durable_authority != baseline_authority;
     if local_owner_changed && !durable_owner_changed {
         updated.watcher_owner_channel_id = state.watcher_owner_channel_id;
         updated.watcher_owns_live_relay = state.watcher_owns_live_relay;
@@ -700,6 +726,103 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&baseline).unwrap(),
             serde_json::to_value(&persisted).unwrap()
+        );
+    }
+
+    #[test]
+    fn strict_visible_fence_accepts_exact_self_delegation_and_adopts_relay_epoch() {
+        for (case, relay_owner, watcher_owns_live_relay) in [
+            ("watcher", RelayOwnerKind::Watcher, true),
+            ("standby", RelayOwnerKind::StandbyRelay, false),
+        ] {
+            let root = tempfile::tempdir().expect("runtime root");
+            let channel_id = if case == "watcher" {
+                42_593_116
+            } else {
+                42_593_117
+            };
+            let mut baseline = owner_state(channel_id, 77_010);
+            baseline.full_response = "delegated base".to_string();
+            (baseline.current_msg_id, baseline.current_msg_len) = (921, 12);
+            baseline.set_watcher_owner_channel_id(channel_id + 50);
+            baseline.watcher_owns_live_relay = watcher_owns_live_relay;
+            baseline.set_relay_owner_kind(relay_owner);
+            save_inflight_state_in_root(root.path(), &baseline).expect("seed delegated row");
+            let expected = InflightTurnIdentity::from_state(&baseline);
+
+            let mut local = baseline.clone();
+            local.full_response = "delegated base plus forbidden bridge delta".to_string();
+            let mut relay = baseline.clone();
+            relay.full_response = format!("delegated base plus {case} progress");
+            relay.response_sent_offset = relay.full_response.len();
+            (relay.current_msg_id, relay.current_msg_len) = (922, 24);
+            save_inflight_state_in_root(root.path(), &relay).expect("advance relay row");
+
+            assert_eq!(
+                save_stream_tick_state_if_bridge_authority_in_root(
+                    root.path(),
+                    &mut baseline,
+                    &mut local,
+                    &expected,
+                    921,
+                    12,
+                    "test::strict_exact_self_delegation",
+                ),
+                GuardedSaveOutcome::Saved,
+                "{case} self-delegation must suppress rather than lose lifecycle authority",
+            );
+            let persisted = load(root.path(), &ProviderKind::Codex, channel_id);
+            assert_eq!(persisted.full_response, relay.full_response);
+            assert_eq!(
+                (persisted.current_msg_id, persisted.current_msg_len),
+                (922, 24)
+            );
+            assert_eq!(
+                StreamRelayAuthority::from_state(&local),
+                StreamRelayAuthority::from_state(&relay)
+            );
+            assert_eq!(
+                serde_json::to_value(&local).unwrap(),
+                serde_json::to_value(&persisted).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(&baseline).unwrap(),
+                serde_json::to_value(&persisted).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn strict_visible_fence_rejects_foreign_delegated_owner_projection() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let channel_id = 42_593_118;
+        let mut baseline = owner_state(channel_id, 77_010);
+        baseline.set_watcher_owner_channel_id(channel_id + 1);
+        baseline.watcher_owns_live_relay = true;
+        baseline.set_relay_owner_kind(RelayOwnerKind::Watcher);
+        save_inflight_state_in_root(root.path(), &baseline).expect("seed delegated row");
+        let expected = InflightTurnIdentity::from_state(&baseline);
+        let mut local = baseline.clone();
+
+        let mut foreign = baseline.clone();
+        foreign.set_watcher_owner_channel_id(channel_id + 2);
+        save_inflight_state_in_root(root.path(), &foreign).expect("foreign watcher takes owner");
+
+        assert_eq!(
+            save_stream_tick_state_if_bridge_authority_in_root(
+                root.path(),
+                &mut baseline,
+                &mut local,
+                &expected,
+                0,
+                0,
+                "test::strict_foreign_delegated_projection",
+            ),
+            GuardedSaveOutcome::IdentityMismatch,
+        );
+        assert_eq!(
+            StreamRelayAuthority::from_state(&local),
+            StreamRelayAuthority::from_state(&foreign)
         );
     }
 

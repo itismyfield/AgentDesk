@@ -112,7 +112,7 @@ pub(super) async fn handle_delivery_epilogue(
             inflight_state.terminal_delivery_committed = true;
             inflight_state.full_response = full_response.clone();
             match crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
-                &inflight_state,
+                &mut *inflight_state,
                 "turn_bridge::terminal_delivery_committed_mirror@5536",
             ) {
                 crate::services::discord::inflight::GuardedSaveOutcome::IoError => {

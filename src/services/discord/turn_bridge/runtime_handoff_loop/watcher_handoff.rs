@@ -10,6 +10,7 @@ pub(super) struct WatcherRuntimeHandoffContext<'a> {
     pub(super) output_path: String,
     pub(super) input_fifo_path: Option<String>,
     pub(super) tmux_session_name: String,
+    pub(super) session_id: Option<String>,
     pub(super) last_offset: u64,
     pub(super) done: bool,
 }
@@ -52,6 +53,7 @@ pub(super) fn handle_watcher_runtime_handoff(
     let output_path = ctx.output_path;
     let input_fifo_path = ctx.input_fifo_path;
     let tmux_session_name = ctx.tmux_session_name;
+    let session_id = ctx.session_id;
     let last_offset = ctx.last_offset;
     let done = ctx.done;
     let inflight_state = state.inflight_state;
@@ -73,6 +75,9 @@ pub(super) fn handle_watcher_runtime_handoff(
     inflight_state.runtime_kind = Some(runtime_kind);
     inflight_state.tmux_session_name = Some(tmux_session_name.clone());
     inflight_state.output_path = Some(output_path.clone());
+    if let Some(session_id) = session_id {
+        inflight_state.session_id = Some(session_id);
+    }
     let mut fifo_path = input_fifo_path.filter(|path| !path.is_empty());
     // #2235 one-release compat window: ClaudeTui rows must still ship a
     // populated `input_fifo_path` so a rollback to an old binary can satisfy

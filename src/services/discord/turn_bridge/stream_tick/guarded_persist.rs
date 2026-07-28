@@ -12,23 +12,44 @@ pub(super) type GuardedSaveOutcome = crate::services::discord::inflight::Guarded
 /// but remain retryable; a missing/reowned row or a durable non-bridge relay
 /// owner permanently ends bridge authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum VisibleMutationAuthority {
+pub(in crate::services::discord::turn_bridge) enum VisibleMutationAuthority {
     Authorized,
+    Suppressed,
     Retry,
     AuthorityLost,
 }
 
-pub(super) fn visible_mutation_authority_after_guarded_save(
+impl VisibleMutationAuthority {
+    /// `None` is the only disposition that terminates stream lifecycle.
+    /// Delegated owners suppress the individual Discord mutation while the
+    /// tick continues through reclaim, post-loop finalization, and analytics.
+    pub(in crate::services::discord::turn_bridge) fn mutation_permission(self) -> Option<bool> {
+        match self {
+            Self::Authorized => Some(true),
+            Self::Suppressed | Self::Retry => Some(false),
+            Self::AuthorityLost => None,
+        }
+    }
+}
+
+pub(in crate::services::discord::turn_bridge) fn visible_mutation_authority_after_guarded_save(
     outcome: GuardedSaveOutcome,
     inflight_state: &InflightTurnState,
+    intended_authority: crate::services::discord::inflight::StreamRelayAuthority,
 ) -> VisibleMutationAuthority {
-    use crate::services::discord::inflight::RelayOwnerKind;
+    use crate::services::discord::inflight::StreamRelayAuthority;
 
     match outcome {
         GuardedSaveOutcome::Saved
-            if inflight_state.effective_relay_owner_kind() == RelayOwnerKind::None =>
+            if StreamRelayAuthority::from_state(inflight_state) == intended_authority
+                && intended_authority.bridge_owns_relay() =>
         {
             VisibleMutationAuthority::Authorized
+        }
+        GuardedSaveOutcome::Saved
+            if StreamRelayAuthority::from_state(inflight_state) == intended_authority =>
+        {
+            VisibleMutationAuthority::Suppressed
         }
         GuardedSaveOutcome::Saved
         | GuardedSaveOutcome::Missing
@@ -436,6 +457,63 @@ mod tests {
         let _env_reset =
             crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
         test()
+    }
+
+    #[test]
+    fn visible_authority_distinguishes_bridge_self_delegation_and_foreign_projection() {
+        let bridge = owner_state(4_259_119, 77_010);
+        let bridge_authority =
+            crate::services::discord::inflight::StreamRelayAuthority::from_state(&bridge);
+        assert_eq!(
+            visible_mutation_authority_after_guarded_save(
+                GuardedSaveOutcome::Saved,
+                &bridge,
+                bridge_authority,
+            ),
+            VisibleMutationAuthority::Authorized,
+        );
+
+        for (relay_owner, watcher_live) in [
+            (
+                crate::services::discord::inflight::RelayOwnerKind::Watcher,
+                true,
+            ),
+            (
+                crate::services::discord::inflight::RelayOwnerKind::StandbyRelay,
+                false,
+            ),
+        ] {
+            let mut delegated = bridge.clone();
+            delegated.set_watcher_owner_channel_id(delegated.channel_id + 1);
+            delegated.watcher_owns_live_relay = watcher_live;
+            delegated.set_relay_owner_kind(relay_owner);
+            let intended =
+                crate::services::discord::inflight::StreamRelayAuthority::from_state(&delegated);
+            assert_eq!(
+                visible_mutation_authority_after_guarded_save(
+                    GuardedSaveOutcome::Saved,
+                    &delegated,
+                    intended,
+                ),
+                VisibleMutationAuthority::Suppressed,
+            );
+            assert_eq!(
+                VisibleMutationAuthority::Suppressed.mutation_permission(),
+                Some(false),
+                "self delegation suppresses the visible mutation without terminating lifecycle",
+            );
+
+            let mut foreign = delegated.clone();
+            foreign.set_watcher_owner_channel_id(delegated.channel_id + 2);
+            assert_eq!(
+                visible_mutation_authority_after_guarded_save(
+                    GuardedSaveOutcome::Saved,
+                    &foreign,
+                    intended,
+                ),
+                VisibleMutationAuthority::AuthorityLost,
+            );
+        }
     }
 
     #[test]
@@ -868,6 +946,8 @@ mod tests {
         save_inflight_state(&watcher).expect("watcher takes relay authority");
 
         let gateway = super::super::provider_output_guard_tests::CapturingGateway::default();
+        let intended_authority =
+            crate::services::discord::inflight::StreamRelayAuthority::from_state(&stale);
         let outcome = fence_stream_tick_visible_mutation_with_candidate_cleanup(
             &gateway,
             &ProviderKind::Codex,
@@ -883,7 +963,8 @@ mod tests {
             "turn_bridge::stream_tick::strict_authority_interleaving_test",
         )
         .await;
-        let authority = visible_mutation_authority_after_guarded_save(outcome, &stale);
+        let authority =
+            visible_mutation_authority_after_guarded_save(outcome, &stale, intended_authority);
         if authority == VisibleMutationAuthority::Authorized {
             TurnGateway::edit_message(
                 &gateway,
@@ -946,6 +1027,8 @@ mod tests {
         let mut pending_candidate = Some(current_msg_id);
         let mut bridge_created_candidate = Some(current_msg_id);
         let gateway = super::super::provider_output_guard_tests::CapturingGateway::default();
+        let intended_authority =
+            crate::services::discord::inflight::StreamRelayAuthority::from_state(&state);
 
         let outcome = fence_stream_tick_visible_mutation_with_candidate_cleanup(
             &gateway,
@@ -964,7 +1047,7 @@ mod tests {
         .await;
         assert_eq!(outcome, GuardedSaveOutcome::IoError);
         assert_eq!(
-            visible_mutation_authority_after_guarded_save(outcome, &state),
+            visible_mutation_authority_after_guarded_save(outcome, &state, intended_authority,),
             VisibleMutationAuthority::Retry
         );
         assert_eq!(pending_candidate, Some(MessageId::new(3)));

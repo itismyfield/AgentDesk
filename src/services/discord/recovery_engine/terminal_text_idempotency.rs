@@ -222,8 +222,10 @@ impl RecoveryDeliveryContext {
             &self.identity,
             self.expected_turn_start_offset,
             self.expected_current_msg_id,
+            None,
             anchor.get(),
             text.len(),
+            None,
             None,
         );
         if matches!(

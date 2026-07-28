@@ -21,6 +21,7 @@ pub(in crate::services::discord::inflight) fn stamp_claude_e_process_if_matches_
     expected: &InflightTurnIdentity,
 ) -> GuardedSaveOutcome {
     let requested = InflightTurnState::clone(state.local_state());
+    let baseline = state.baseline_state().cloned();
     let Some(provider) = requested.provider_kind() else {
         return GuardedSaveOutcome::IoError;
     };
@@ -46,6 +47,51 @@ pub(in crate::services::discord::inflight) fn stamp_claude_e_process_if_matches_
         return GuardedSaveOutcome::IdentityMismatch;
     }
 
+    let requested_process_runtime = (
+        Some(RuntimeHandoffKind::ClaudeEAdapter),
+        Option::<&str>::None,
+        requested.output_path.as_deref(),
+        Option::<&str>::None,
+        requested.claude_e_pid,
+        requested.claude_e_process_starttime,
+        requested.claude_e_macos_lstart_hash,
+    );
+    let durable_process_runtime = (
+        on_disk.runtime_kind,
+        on_disk.tmux_session_name.as_deref(),
+        on_disk.output_path.as_deref(),
+        on_disk.input_fifo_path.as_deref(),
+        on_disk.claude_e_pid,
+        on_disk.claude_e_process_starttime,
+        on_disk.claude_e_macos_lstart_hash,
+    );
+    let apply_process_runtime = if let Some(baseline) = baseline.as_ref() {
+        let baseline_process_runtime = (
+            baseline.runtime_kind,
+            baseline.tmux_session_name.as_deref(),
+            baseline.output_path.as_deref(),
+            baseline.input_fifo_path.as_deref(),
+            baseline.claude_e_pid,
+            baseline.claude_e_process_starttime,
+            baseline.claude_e_macos_lstart_hash,
+        );
+        let process_runtime_changed = requested_process_runtime != baseline_process_runtime;
+        if process_runtime_changed
+            && durable_process_runtime != baseline_process_runtime
+            && durable_process_runtime != requested_process_runtime
+        {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id = requested.channel_id,
+                "ClaudeE process-evidence stamp skipped because the durable process/runtime group changed"
+            );
+            return GuardedSaveOutcome::IdentityMismatch;
+        }
+        process_runtime_changed
+    } else {
+        true
+    };
+
     if !merge_runtime_stamp_progress(&mut on_disk, &requested) {
         tracing::warn!(
             provider = %provider.as_str(),
@@ -54,14 +100,16 @@ pub(in crate::services::discord::inflight) fn stamp_claude_e_process_if_matches_
         );
         return GuardedSaveOutcome::IoError;
     }
-    on_disk.runtime_kind = Some(RuntimeHandoffKind::ClaudeEAdapter);
-    on_disk.tmux_session_name = None;
-    on_disk.output_path = requested.output_path.clone();
-    on_disk.input_fifo_path = None;
+    if apply_process_runtime {
+        on_disk.runtime_kind = Some(RuntimeHandoffKind::ClaudeEAdapter);
+        on_disk.tmux_session_name = None;
+        on_disk.output_path.clone_from(&requested.output_path);
+        on_disk.input_fifo_path = None;
+        on_disk.claude_e_pid = requested.claude_e_pid;
+        on_disk.claude_e_process_starttime = requested.claude_e_process_starttime;
+        on_disk.claude_e_macos_lstart_hash = requested.claude_e_macos_lstart_hash;
+    }
     on_disk.last_offset = on_disk.last_offset.max(requested.last_offset);
-    on_disk.claude_e_pid = requested.claude_e_pid;
-    on_disk.claude_e_process_starttime = requested.claude_e_process_starttime;
-    on_disk.claude_e_macos_lstart_hash = requested.claude_e_macos_lstart_hash;
     match persist_under_lock_with_snapshot(
         root,
         &path,
@@ -110,6 +158,23 @@ mod tests {
         let path = inflight_state_path(root, &ProviderKind::Claude, channel_id);
         serde_json::from_str(&std::fs::read_to_string(path).expect("read inflight row"))
             .expect("parse inflight row")
+    }
+
+    fn claude_e_request(
+        baseline: &InflightTurnState,
+        output_path: &str,
+        pid: u32,
+    ) -> InflightTurnState {
+        let mut request = baseline.clone();
+        request.runtime_kind = Some(RuntimeHandoffKind::ClaudeEAdapter);
+        request.tmux_session_name = None;
+        request.output_path = Some(output_path.to_string());
+        request.input_fifo_path = None;
+        request.last_offset = 4_096;
+        request.claude_e_pid = Some(pid);
+        request.claude_e_process_starttime = Some(u128::from(pid) + 10_000);
+        request.claude_e_macos_lstart_hash = Some(u128::from(pid) + 20_000);
+        request
     }
 
     #[test]
@@ -176,5 +241,70 @@ mod tests {
         assert_eq!(persisted.claude_e_process_starttime, Some(123_456));
         assert_eq!(persisted.claude_e_macos_lstart_hash, Some(654_321));
         assert_eq!(persisted.last_offset, 4_096);
+    }
+
+    #[test]
+    fn stale_claude_e_stamp_cannot_overwrite_newer_runtime_or_process_group() {
+        for (case, p1_output, p1_pid, p2_output, p2_pid) in [
+            (
+                "runtime",
+                "/runtime/claude-e-p1.jsonl",
+                42_561,
+                "/runtime/claude-e-p2.jsonl",
+                42_561,
+            ),
+            (
+                "process",
+                "/runtime/claude-e-shared.jsonl",
+                42_562,
+                "/runtime/claude-e-shared.jsonl",
+                42_563,
+            ),
+        ] {
+            let root = tempfile::tempdir().expect("runtime root");
+            let channel_id = if case == "runtime" {
+                42_592_561
+            } else {
+                42_592_562
+            };
+            let seed = claude_e_seed(channel_id);
+            save_inflight_state_in_root(root.path(), &seed).expect("seed owner row");
+            let baseline = load(root.path(), channel_id);
+            let expected = InflightTurnIdentity::from_state(&baseline);
+            let mut stale_p1 = claude_e_request(&baseline, p1_output, p1_pid);
+            let mut p2 = claude_e_request(&baseline, p2_output, p2_pid);
+
+            assert_eq!(
+                stamp_claude_e_process_if_matches_identity_in_root(
+                    root.path(),
+                    (&baseline, &mut p2),
+                    &expected,
+                ),
+                GuardedSaveOutcome::Saved,
+                "{case} P2 stamp",
+            );
+            let persisted_p2 = load(root.path(), channel_id);
+            assert_eq!(
+                serde_json::to_value(&p2).expect("serialize adopted P2"),
+                serde_json::to_value(&persisted_p2).expect("serialize persisted P2"),
+                "{case} P2 must adopt the exact persisted snapshot",
+            );
+
+            assert_eq!(
+                stamp_claude_e_process_if_matches_identity_in_root(
+                    root.path(),
+                    (&baseline, &mut stale_p1),
+                    &expected,
+                ),
+                GuardedSaveOutcome::IdentityMismatch,
+                "stale {case} P1 must lose the group CAS",
+            );
+            let preserved_p2 = load(root.path(), channel_id);
+            assert_eq!(
+                serde_json::to_value(&preserved_p2).expect("serialize preserved P2"),
+                serde_json::to_value(&persisted_p2).expect("serialize expected P2"),
+                "stale {case} P1 must not overwrite P2",
+            );
+        }
     }
 }

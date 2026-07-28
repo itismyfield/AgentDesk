@@ -147,7 +147,7 @@ pub(super) async fn run_post_loop_finalize(
     if pending_long_running_open_after_state_save.take().is_some() {
         inflight_state.long_running_placeholder_active = false;
         let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
-            &inflight_state,
+            &mut inflight_state,
             "turn_bridge::post_loop_finalize::pending_long_running_open",
         );
     }
@@ -167,7 +167,7 @@ pub(super) async fn run_post_loop_finalize(
             shared_owned.ui.placeholder_controller.detach(&key);
             inflight_state.long_running_placeholder_active = false;
             let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
-                &inflight_state,
+                &mut inflight_state,
                 "turn_bridge::post_loop_finalize::relay_owned_retarget",
             );
         }
@@ -200,7 +200,7 @@ pub(super) async fn run_post_loop_finalize(
                 }
             }
             let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
-                &inflight_state,
+                &mut inflight_state,
                 "turn_bridge::post_loop_finalize::terminal_placeholder_transition",
             );
         }
@@ -235,7 +235,7 @@ pub(super) async fn run_post_loop_finalize(
             inflight_state.current_tool_line = current_tool_line.clone();
             inflight_state.prev_tool_status = prev_tool_status.clone();
             let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
-                &inflight_state,
+                &mut inflight_state,
                 "turn_bridge::post_loop_finalize::orphaned_tool_status",
             );
         }

@@ -14,6 +14,7 @@ use watcher_handoff::{
     cancel_provisional_watcher_claim_if_matches, handle_watcher_runtime_handoff,
 };
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum RuntimeHandoffLoopMessage {
     TmuxReady {
         output_path: String,
@@ -34,8 +35,39 @@ pub(super) enum RuntimeHandoffLoopMessage {
     },
 }
 
-pub(super) type RuntimeHandoffLoopOutcome =
-    Option<crate::services::discord::inflight::GuardedSaveOutcome>;
+impl RuntimeHandoffLoopMessage {
+    pub(super) fn into_stream_message(self) -> StreamMessage {
+        match self {
+            Self::TmuxReady {
+                output_path,
+                input_fifo_path,
+                tmux_session_name,
+                last_offset,
+            } => StreamMessage::TmuxReady {
+                output_path,
+                input_fifo_path,
+                tmux_session_name,
+                last_offset,
+            },
+            Self::RuntimeReady { handoff } => StreamMessage::RuntimeReady { handoff },
+            Self::ProcessReady {
+                output_path,
+                session_name,
+                last_offset,
+            } => StreamMessage::ProcessReady {
+                output_path,
+                session_name,
+                last_offset,
+            },
+            Self::OutputOffset { offset } => StreamMessage::OutputOffset { offset },
+        }
+    }
+}
+
+pub(super) struct RuntimeHandoffLoopOutcome {
+    pub(super) guarded_save_outcome: Option<crate::services::discord::inflight::GuardedSaveOutcome>,
+    pub(super) retry_message: Option<RuntimeHandoffLoopMessage>,
+}
 
 pub(super) struct RuntimeHandoffLoopContext<'a> {
     pub(super) shared_owned: &'a Arc<SharedData>,
@@ -73,6 +105,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
     ctx: RuntimeHandoffLoopContext<'_>,
     state: RuntimeHandoffLoopState<'_>,
 ) -> RuntimeHandoffLoopOutcome {
+    let retry_message = message.clone();
     let shared_owned = Arc::clone(ctx.shared_owned);
     let provider = ctx.provider.clone();
     let channel_id = ctx.channel_id;
@@ -92,6 +125,18 @@ pub(super) async fn handle_runtime_handoff_loop_message(
     let mut terminal_control_drain_until = *state.terminal_control_drain_until;
     let mut last_activity_heartbeat_at = *state.last_activity_heartbeat_at;
     let mut guarded_save_outcome = None;
+    let pre_frame_inflight_state = inflight_state.clone();
+    let pre_frame_terminal_control_ready_observed = terminal_control_ready_observed;
+    let pre_frame_tmux_last_offset = tmux_last_offset;
+    let pre_frame_watcher_owner_channel_id = watcher_owner_channel_id;
+    let pre_frame_standby_relay_owns_output = standby_relay_owns_output;
+    let pre_frame_watcher_relay_available_for_turn = watcher_relay_available_for_turn;
+    let pre_frame_watcher_handoff_claim_outcome = watcher_handoff_claim_outcome;
+    let pre_frame_tmux_handed_off = tmux_handed_off;
+    let pre_frame_watcher_owns_assistant_relay = watcher_owns_assistant_relay;
+    let pre_frame_state_dirty = state_dirty;
+    let pre_frame_terminal_control_drain_until = terminal_control_drain_until;
+    let pre_frame_last_activity_heartbeat_at = last_activity_heartbeat_at;
 
     match message {
         RuntimeHandoffLoopMessage::TmuxReady {
@@ -521,6 +566,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             output_path,
                             input_fifo_path: Some(input_fifo_path),
                             tmux_session_name,
+                            session_id: None,
                             last_offset,
                             done,
                         },
@@ -552,6 +598,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             output_path: transcript_path,
                             input_fifo_path: None,
                             tmux_session_name,
+                            session_id: None,
                             last_offset,
                             done,
                         },
@@ -575,9 +622,6 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                     tmux_session_name,
                     last_offset,
                 } => {
-                    if let Some(thread_id) = thread_id {
-                        inflight_state.session_id = Some(thread_id);
-                    }
                     guarded_save_outcome = Some(handle_watcher_runtime_handoff(
                         WatcherRuntimeHandoffContext {
                             shared_owned: &shared_owned,
@@ -587,6 +631,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             output_path: rollout_path,
                             input_fifo_path: None,
                             tmux_session_name,
+                            session_id: thread_id,
                             last_offset,
                             done,
                         },
@@ -738,6 +783,36 @@ pub(super) async fn handle_runtime_handoff_loop_message(
         }
     }
 
+    if matches!(
+        guarded_save_outcome,
+        Some(crate::services::discord::inflight::GuardedSaveOutcome::IoError)
+    ) {
+        // The exact handoff frame is the retry unit. Roll back every local
+        // projection mutated while attempting it, not only the persisted row:
+        // CodexTui stamps session_id before watcher admission and the second
+        // watcher-owner CAS mutates a detached owner channel after claiming.
+        // Retrying either partial projection could reuse cancelled authority.
+        // A later phase can fail after an earlier stamp already committed.
+        // Keep that exact adopted durable checkpoint so the retained frame's
+        // identity matches on retry; when no generation advanced, restore the
+        // true pre-frame row so no unsaved pre-admission mutation (including
+        // CodexTui session_id) leaks into the retained retry.
+        if inflight_state.save_generation == pre_frame_inflight_state.save_generation {
+            inflight_state.clone_from(&pre_frame_inflight_state);
+        }
+        terminal_control_ready_observed = pre_frame_terminal_control_ready_observed;
+        tmux_last_offset = pre_frame_tmux_last_offset;
+        watcher_owner_channel_id = pre_frame_watcher_owner_channel_id;
+        standby_relay_owns_output = pre_frame_standby_relay_owns_output;
+        watcher_relay_available_for_turn = pre_frame_watcher_relay_available_for_turn;
+        watcher_handoff_claim_outcome = pre_frame_watcher_handoff_claim_outcome;
+        tmux_handed_off = pre_frame_tmux_handed_off;
+        watcher_owns_assistant_relay = pre_frame_watcher_owns_assistant_relay;
+        state_dirty = pre_frame_state_dirty;
+        terminal_control_drain_until = pre_frame_terminal_control_drain_until;
+        last_activity_heartbeat_at = pre_frame_last_activity_heartbeat_at;
+    }
+
     *state.terminal_control_ready_observed = terminal_control_ready_observed;
     *state.tmux_last_offset = tmux_last_offset;
     *state.watcher_owner_channel_id = watcher_owner_channel_id;
@@ -750,5 +825,12 @@ pub(super) async fn handle_runtime_handoff_loop_message(
     *state.terminal_control_drain_until = terminal_control_drain_until;
     *state.last_activity_heartbeat_at = last_activity_heartbeat_at;
 
-    guarded_save_outcome
+    RuntimeHandoffLoopOutcome {
+        retry_message: matches!(
+            guarded_save_outcome,
+            Some(crate::services::discord::inflight::GuardedSaveOutcome::IoError)
+        )
+        .then_some(retry_message),
+        guarded_save_outcome,
+    }
 }

@@ -55,8 +55,9 @@ pub(super) async fn cleanup_unbound_bridge_anchor<G: TurnGateway + ?Sized>(
 }
 
 /// Sends an absent response anchor, then adopts it only after a guarded durable
-/// 0 -> real bind. A competing same-turn bind is re-read and adopted; every
-/// unbound candidate is deleted or queued for orphan cleanup.
+/// 0 -> real bind. Any authority or current-message epoch advance during the
+/// send aborts this bridge lease; every unbound candidate is deleted or queued
+/// for orphan cleanup.
 pub(super) async fn ensure_bridge_current_message_anchor<G: TurnGateway + ?Sized>(
     gateway: &G,
     provider: &ProviderKind,
@@ -70,6 +71,18 @@ pub(super) async fn ensure_bridge_current_message_anchor<G: TurnGateway + ?Sized
 ) -> bool {
     if durable_current_msg_id_from_detached(*current_msg_id) != 0 {
         return true;
+    }
+    let expected_current_message = (
+        inflight_state.current_msg_id,
+        inflight_state.current_msg_len,
+    );
+    if expected_current_message.0 != 0 {
+        return false;
+    }
+    let expected_relay_authority =
+        crate::services::discord::inflight::StreamRelayAuthority::from_state(inflight_state);
+    if !expected_relay_authority.bridge_owns_relay() {
+        return false;
     }
 
     if let Some(stale_candidate) = bridge_created_response_placeholder_msg_id.take() {
@@ -93,9 +106,11 @@ pub(super) async fn ensure_bridge_current_message_anchor<G: TurnGateway + ?Sized
         channel_id.get(),
         expected_identity,
         expected_turn_start_offset,
-        0,
+        expected_current_message.0,
+        Some(expected_current_message.1),
         candidate.get(),
         anchor_text.len(),
+        Some(expected_relay_authority),
         Some(inflight_state),
     );
     if bind == crate::services::discord::inflight::GuardedSaveOutcome::Saved {
@@ -113,6 +128,8 @@ pub(super) async fn ensure_bridge_current_message_anchor<G: TurnGateway + ?Sized
             channel_id.get(),
             expected_identity,
             expected_turn_start_offset,
+            Some(expected_current_message),
+            Some(expected_relay_authority),
             Some(inflight_state),
         )
     else {
@@ -152,6 +169,9 @@ mod tests {
     enum AuthorityMarker {
         Restart,
         Rebind,
+        Watcher,
+        Standby,
+        CompetingBridgeAnchor,
     }
 
     struct MarkerDuringSendGateway {
@@ -179,6 +199,24 @@ mod tests {
                         crate::services::discord::InflightRestartMode::DrainRestart,
                     ),
                     AuthorityMarker::Rebind => durable.rebind_origin = true,
+                    AuthorityMarker::Watcher => {
+                        durable.set_watcher_owner_channel_id(self.channel_id + 100);
+                        durable.watcher_owns_live_relay = true;
+                        durable.set_relay_owner_kind(
+                            crate::services::discord::inflight::RelayOwnerKind::Watcher,
+                        );
+                    }
+                    AuthorityMarker::Standby => {
+                        durable.set_watcher_owner_channel_id(self.channel_id + 100);
+                        durable.watcher_owns_live_relay = false;
+                        durable.set_relay_owner_kind(
+                            crate::services::discord::inflight::RelayOwnerKind::StandbyRelay,
+                        );
+                    }
+                    AuthorityMarker::CompetingBridgeAnchor => {
+                        durable.current_msg_id = self.candidate.get() + 1_000;
+                        durable.current_msg_len = 17;
+                    }
                 }
                 crate::services::discord::inflight::save_inflight_state(&durable)
                     .expect("install authority marker during send");
@@ -283,7 +321,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authority_marker_installed_during_anchor_send_aborts_bind_and_deletes_candidate() {
+    async fn authority_or_message_epoch_advance_during_send_aborts_and_deletes_candidate() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -293,9 +331,15 @@ mod tests {
             root.path(),
         );
 
-        for (index, marker) in [AuthorityMarker::Restart, AuthorityMarker::Rebind]
-            .into_iter()
-            .enumerate()
+        for (index, marker) in [
+            AuthorityMarker::Restart,
+            AuthorityMarker::Rebind,
+            AuthorityMarker::Watcher,
+            AuthorityMarker::Standby,
+            AuthorityMarker::CompetingBridgeAnchor,
+        ]
+        .into_iter()
+        .enumerate()
         {
             let provider = ProviderKind::Codex;
             let channel_id = 42_592_710 + index as u64;
@@ -353,10 +397,27 @@ mod tests {
             let durable =
                 crate::services::discord::inflight::load_inflight_state(&provider, channel_id)
                     .expect("preserved marked row");
-            assert_eq!(durable.current_msg_id, 0);
+            let expected_durable_message =
+                if matches!(marker, AuthorityMarker::CompetingBridgeAnchor) {
+                    candidate.get() + 1_000
+                } else {
+                    0
+                };
+            assert_eq!(durable.current_msg_id, expected_durable_message);
             match marker {
                 AuthorityMarker::Restart => assert!(durable.restart_mode.is_some()),
                 AuthorityMarker::Rebind => assert!(durable.rebind_origin),
+                AuthorityMarker::Watcher => assert_eq!(
+                    durable.effective_relay_owner_kind(),
+                    crate::services::discord::inflight::RelayOwnerKind::Watcher,
+                ),
+                AuthorityMarker::Standby => assert_eq!(
+                    durable.effective_relay_owner_kind(),
+                    crate::services::discord::inflight::RelayOwnerKind::StandbyRelay,
+                ),
+                AuthorityMarker::CompetingBridgeAnchor => {
+                    assert_eq!(durable.current_msg_len, 17)
+                }
             }
         }
     }
