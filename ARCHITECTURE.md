@@ -547,10 +547,15 @@ src/
 │   │   │   │   └── mod.rs
 │   │   │   ├── save_store/
 │   │   │   │   ├── identity_gate/
+│   │   │   │   │   ├── bridge_entry.rs
 │   │   │   │   │   ├── claude_e_stamp.rs
+│   │   │   │   │   ├── completion_preserve.rs
+│   │   │   │   │   ├── guarded_read.rs
 │   │   │   │   │   ├── heartbeat.rs
 │   │   │   │   │   ├── runtime_stamp.rs
+│   │   │   │   │   ├── stamp_merge.rs
 │   │   │   │   │   └── stream_loop_patch.rs
+│   │   │   │   ├── bridge_entry_guard_tests.rs
 │   │   │   │   ├── delivery_rewind.rs
 │   │   │   │   ├── identity_gate.rs
 │   │   │   │   ├── post_loop_identity_guard_tests.rs
@@ -892,7 +897,8 @@ src/
 │   │   │   ├── runtime_handoff_loop/
 │   │   │   │   ├── claude_e.rs
 │   │   │   │   ├── guarded_save.rs
-│   │   │   │   └── tests.rs
+│   │   │   │   ├── tests.rs
+│   │   │   │   └── watcher_handoff.rs
 │   │   │   ├── status_panel/
 │   │   │   │   ├── fallback.rs
 │   │   │   │   ├── purge.rs
@@ -903,6 +909,8 @@ src/
 │   │   │   │   │   ├── tui_error_classification.rs
 │   │   │   │   │   └── types.rs
 │   │   │   │   ├── content_arms.rs
+│   │   │   │   ├── exit_reconcile.rs
+│   │   │   │   ├── expected_identity.rs
 │   │   │   │   ├── expected_identity_tests.rs
 │   │   │   │   ├── message_conversion.rs
 │   │   │   │   └── tool_arms.rs
@@ -927,6 +935,7 @@ src/
 │   │   │   │   ├── process_backend_cancel.rs
 │   │   │   │   └── process_table.rs
 │   │   │   ├── activity_heartbeat.rs
+│   │   │   ├── bridge_entry_persist.rs
 │   │   │   ├── bridge_latency_spans.rs
 │   │   │   ├── cancel_finalize_policy.rs
 │   │   │   ├── chunk_compose.rs
@@ -934,6 +943,7 @@ src/
 │   │   │   ├── completion_guard.rs
 │   │   │   ├── completion_postlude.rs
 │   │   │   ├── context_window.rs
+│   │   │   ├── current_message_anchor.rs
 │   │   │   ├── early_tui_completion.rs
 │   │   │   ├── finalize_epilogue.rs
 │   │   │   ├── followup_requeue.rs
