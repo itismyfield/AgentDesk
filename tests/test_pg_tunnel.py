@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import plistlib
+import json
+import os
 import shlex
 import subprocess
 import tempfile
@@ -13,6 +15,143 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = REPO_ROOT / "scripts/deploy-release.sh"
 WRAPPER = REPO_ROOT / "scripts/pg_tunnel.sh"
+
+
+class ReleaseGenerationBindingTests(unittest.TestCase):
+    @staticmethod
+    def _run_external_test_mode(binary: Path, root: Path, manifest: Path | None = None):
+        env = os.environ.copy()
+        for name in ("TMUX", "AGENTDESK_REPORT_CHANNEL_ID", "AGENTDESK_REPORT_PROVIDER"):
+            env.pop(name, None)
+        env.update(
+            {
+                "AGENTDESK_DEPLOY_NO_DETACH": "1",
+                "AGENTDESK_DEPLOY_TEST_MODE": "1",
+                "AGENTDESK_ROOT_DIR": str(root),
+                "AGENTDESK_REPO_DIR": str(REPO_ROOT),
+                "AGENTDESK_DEPLOY_BINARY": str(binary),
+                "AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS": "0",
+                "AGENTDESK_REL_PORT": "1",
+            }
+        )
+        if manifest is not None:
+            env["AGENTDESK_DEPLOY_BUNDLE_MANIFEST"] = str(manifest)
+        return subprocess.run(
+            [str(DEPLOY)], capture_output=True, text=True, env=env, timeout=15
+        )
+
+    def test_external_binary_without_generation_manifest_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = root / "agentdesk"
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            binary.chmod(0o755)
+            result = self._run_external_test_mode(binary, root / "release")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(
+                "AGENTDESK_DEPLOY_BINARY requires AGENTDESK_DEPLOY_BUNDLE_MANIFEST",
+                result.stderr,
+            )
+
+    def test_external_binary_manifest_must_match_current_generation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = root / "agentdesk"
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            binary.chmod(0o755)
+            manifest = root / "bundle.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "format": "agentdesk-release-bundle-v1",
+                        "source_git_sha": "0" * 40,
+                        "binary_sha256": "0" * 64,
+                        "routines_sha256": "0" * 64,
+                        "routine_helpers_sha256": "0" * 64,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self._run_external_test_mode(
+                binary, root / "release", manifest
+            )
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("bundle manifest generation mismatch", result.stderr)
+
+    def test_v0_backup_cannot_pair_with_v1_assets_during_v2(self):
+        deploy = DEPLOY.read_text(encoding="utf-8")
+        surface = (REPO_ROOT / "scripts/routine-asset-surface.sh").read_text(
+            encoding="utf-8"
+        )
+        common_hash_helpers = surface[
+            surface.index("adk_sha256_file() {") : surface.index("_adk_path_mode() {")
+        ]
+        hash_helpers = deploy[
+            deploy.index("_sha256_file() {") : deploy.index(
+                "_write_release_source_manifest() {"
+            )
+        ]
+        rollback_helpers = deploy[
+            deploy.index("_manifest_latest_migration_name() {") : deploy.index(
+                "_rollback_would_brick_on_migration() {"
+            )
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            adk = root / "release"
+            (adk / "bin").mkdir(parents=True)
+            (adk / "runtime").mkdir()
+            for surface in ("routines", "routine-helpers"):
+                (adk / surface).mkdir()
+                (adk / surface / "generation").write_text("v0\n", encoding="utf-8")
+            (adk / "bin/agentdesk.prev").write_text("binary-v0\n", encoding="utf-8")
+            (adk / "runtime/release-source.json").write_text(
+                json.dumps(
+                    {
+                        "repo_head": "a" * 40,
+                        "latest_postgres_migration": "0001_init.sql",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            script = f"""
+set -euo pipefail
+{common_hash_helpers}
+{hash_helpers}
+{rollback_helpers}
+ADK_REL={shlex.quote(str(adk))}
+REL_BINARY_BACKUP="$ADK_REL/bin/agentdesk.prev"
+REL_BINARY_BACKUP_META="$REL_BINARY_BACKUP.meta"
+ROUTINE_ASSET_TXN="$ADK_REL/runtime/routine-assets.txn.V1"
+mkdir -p "$ROUTINE_ASSET_TXN"
+_write_rollback_backup_metadata "$REL_BINARY_BACKUP" "$REL_BINARY_BACKUP_META" "$ROUTINE_ASSET_TXN"
+mv "$ADK_REL/routines" "$ADK_REL/routines.old"
+mv "$ADK_REL/routine-helpers" "$ADK_REL/routine-helpers.old"
+mkdir "$ADK_REL/routines" "$ADK_REL/routine-helpers"
+printf 'v1\n' > "$ADK_REL/routines/generation"
+printf 'v1\n' > "$ADK_REL/routine-helpers/generation"
+_rollback_backup_latest_migration_name current >/dev/null
+rm -rf "$ADK_REL/routines.old" "$ADK_REL/routine-helpers.old" "$ROUTINE_ASSET_TXN"
+ROUTINE_ASSET_TXN="$ADK_REL/runtime/routine-assets.txn.V2"
+mkdir -p "$ROUTINE_ASSET_TXN"
+if _rollback_backup_latest_migration_name allow-prior >/dev/null; then
+    echo 'accepted v0 binary with v1 rollback assets' >&2
+    exit 90
+fi
+"""
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True, timeout=15
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_backup_cleanup_precedes_asset_commit_intent(self):
+        deploy = DEPLOY.read_text(encoding="utf-8")
+        cleanup = deploy.index('if ! rm -f "$REL_BINARY_BACKUP"')
+        commit_intent = deploy.index(
+            'adk_mark_routine_asset_transaction_committing "$ADK_REL" "$ROUTINE_ASSET_TXN"',
+            cleanup,
+        )
+        self.assertLess(cleanup, commit_intent)
 
 
 class WrapperSafetyTests(unittest.TestCase):
@@ -628,6 +767,9 @@ _launchd_domain() { printf '%s\\n' gui/999999; }
                 "LAUNCHD_MIGRATED_STAGED=\"\"\n"
                 "RELEASE_ROOT_SCRIPTS_STAGED=\"\"\n"
                 "DEPLOY_MKDIR_LOCK_DIR=\"\"\n"
+                f"DEPLOY_LOCK_FILE={shlex.quote(str(root / 'deploy.lock'))}\n"
+                "adk_routine_asset_lock_owned() { return 0; }\n"
+                "adk_release_routine_asset_lock() { return 0; }\n"
                 "_rollback_pg_tunnel_migration() { :; }\n"
                 "_rollback_release_binary() { :; }\n"
                 "_finalize_detached_helper() { printf 'cleanup=%s\\n' \"$1\" >> \"$EVENT_LOG\"; }\n"

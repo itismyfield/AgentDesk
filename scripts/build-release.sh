@@ -99,6 +99,51 @@ write_checksum() {
   fi
 }
 
+write_local_build_generation_manifest() {
+  local binary="$1"
+  local manifest="$PROJECT_DIR/target/release/agentdesk-generation.json"
+  local source_sha binary_sha routines_sha helpers_sha
+
+  source_sha="$(git -C "$PROJECT_DIR" rev-parse HEAD)" || return 1
+  binary_sha="$(adk_sha256_file "$binary")" || return 1
+  routines_sha="$(adk_sha256_tree "$PROJECT_DIR/routines")" || return 1
+  helpers_sha="$(adk_sha256_tree "$PROJECT_DIR/routine-helpers")" || return 1
+  AGENTDESK_BUILD_SOURCE_SHA="$source_sha" \
+  AGENTDESK_BUILD_BINARY_SHA="$binary_sha" \
+  AGENTDESK_BUILD_ROUTINES_SHA="$routines_sha" \
+  AGENTDESK_BUILD_HELPERS_SHA="$helpers_sha" \
+  python3 - "$manifest" <<'PY'
+import json
+import os
+import tempfile
+import sys
+
+manifest = sys.argv[1]
+payload = {
+    "format": "agentdesk-local-build-v1",
+    "source_git_sha": os.environ["AGENTDESK_BUILD_SOURCE_SHA"],
+    "binary_sha256": os.environ["AGENTDESK_BUILD_BINARY_SHA"],
+    "routines_sha256": os.environ["AGENTDESK_BUILD_ROUTINES_SHA"],
+    "routine_helpers_sha256": os.environ["AGENTDESK_BUILD_HELPERS_SHA"],
+}
+fd, temporary = tempfile.mkstemp(
+    prefix=".agentdesk-generation.", dir=os.path.dirname(manifest)
+)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, manifest)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+}
+
 echo "═══ Building AgentDesk v${VERSION} for ${OS}/${ARCH} ═══"
 echo ""
 
@@ -127,6 +172,12 @@ cargo build --release 2>&1 | tail -1
 BINARY="target/release/${BINARY_NAME}"
 if [ ! -f "$BINARY" ]; then
   echo "Error: Binary not found at $BINARY"
+  exit 1
+fi
+if ! "$BINARY" validate-routines \
+    --root "$PROJECT_DIR/routines" \
+    --runtime-root "$PROJECT_DIR"; then
+  echo "Error: candidate runtime rejected repository routine assets"
   exit 1
 fi
 echo "  Binary: $(ls -lh "$BINARY" | awk '{print $5}')"
@@ -239,6 +290,7 @@ rm -rf "$ARTIFACT_NAME"
 
 # Checksum
 write_checksum "$ARTIFACT_FILE"
+write_local_build_generation_manifest "$BINARY"
 
 echo ""
 echo "═══ Build Complete ═══"

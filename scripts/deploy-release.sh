@@ -46,6 +46,10 @@ fi
 #                                      offline/emergency deploy.
 #   AGENTDESK_DEPLOY_FAST=1            opt into the release-fast Cargo profile
 #                                      for lower-latency dev-loop deploys.
+#   AGENTDESK_DEPLOY_BUNDLE_MANIFEST   required JSON generation manifest when
+#                                      AGENTDESK_DEPLOY_BINARY is set. It binds
+#                                      source git SHA, binary SHA256, and both
+#                                      repository routine asset tree digests.
 # Resource-contention pre-flight (#4255 — runs on every node before the build):
 #   AGENTDESK_DEPLOY_MAX_LOADAVG           1-min load-average ceiling; over it the
 #                                          deploy refuses. Default: 1.5 × logical
@@ -158,6 +162,10 @@ DEPLOY_FAST="${AGENTDESK_DEPLOY_FAST:-0}"
 # whole cluster deploy. Only the connect is bounded; a reachable peer's long
 # remote build is unaffected.
 DEPLOY_SSH_CONNECT_TIMEOUT="${AGENTDESK_DEPLOY_SSH_CONNECT_TIMEOUT:-10}"
+ROLLBACK_ARMED=0
+RELEASE_SERVICE_RECOVERY_ARMED=0
+RELEASE_SERVICE_STOP_CONFIRMED=0
+RELEASE_SERVICE_RESTART_SAFE=0
 
 # Parse flags non-destructively into shell vars + env so the detached-helper
 # tmux script sees the same configuration without reconstructing $@.
@@ -516,14 +524,80 @@ _latest_postgres_migration_path() {
 
 _sha256_file() {
     local path="$1"
-    if [ -z "$path" ] || [ ! -f "$path" ]; then
-        return 0
+
+    [ -n "$path" ] || return 0
+    adk_sha256_file "$path"
+}
+
+_sha256_tree() {
+    adk_sha256_tree "$1"
+}
+
+_validate_external_deploy_bundle() {
+    [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ] || return 0
+
+    local manifest="${AGENTDESK_DEPLOY_BUNDLE_MANIFEST:-}"
+    local source_sha binary_sha routines_sha helpers_sha
+    if [ -z "$manifest" ]; then
+        echo "✗ AGENTDESK_DEPLOY_BINARY requires AGENTDESK_DEPLOY_BUNDLE_MANIFEST" >&2
+        echo "  binary-only overrides cannot prove binary/routine asset generation identity" >&2
+        return 1
     fi
-    if command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$path" | awk '{print $1}'
-    elif command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$path" | awk '{print $1}'
+    if [ ! -f "$manifest" ] || [ -L "$manifest" ]; then
+        echo "✗ External deploy bundle manifest is missing or unsafe: $manifest" >&2
+        return 1
     fi
+    if [ ! -f "$SOURCE_BINARY" ] || [ -L "$SOURCE_BINARY" ]; then
+        echo "✗ External deploy binary is missing or symlinked: $SOURCE_BINARY" >&2
+        return 1
+    fi
+    source_sha="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
+    binary_sha="$(_sha256_file "$SOURCE_BINARY")"
+    routines_sha="$(_sha256_tree "$REPO/routines")"
+    helpers_sha="$(_sha256_tree "$REPO/routine-helpers")"
+    if [ -z "$source_sha" ] || [ -z "$binary_sha" ] \
+      || [ -z "$routines_sha" ] || [ -z "$helpers_sha" ]; then
+        echo "✗ Could not resolve external deploy generation identity" >&2
+        return 1
+    fi
+    AGENTDESK_BUNDLE_SOURCE_SHA="$source_sha" \
+    AGENTDESK_BUNDLE_BINARY_SHA="$binary_sha" \
+    AGENTDESK_BUNDLE_ROUTINES_SHA="$routines_sha" \
+    AGENTDESK_BUNDLE_HELPERS_SHA="$helpers_sha" \
+    python3 - "$manifest" <<'PY' || {
+import json
+import os
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception as exc:
+    print(f"invalid JSON: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+expected = {
+    "source_git_sha": os.environ["AGENTDESK_BUNDLE_SOURCE_SHA"],
+    "binary_sha256": os.environ["AGENTDESK_BUNDLE_BINARY_SHA"],
+    "routines_sha256": os.environ["AGENTDESK_BUNDLE_ROUTINES_SHA"],
+    "routine_helpers_sha256": os.environ["AGENTDESK_BUNDLE_HELPERS_SHA"],
+}
+if data.get("format") != "agentdesk-release-bundle-v1":
+    print("unsupported bundle manifest format", file=sys.stderr)
+    raise SystemExit(1)
+for key, value in expected.items():
+    recorded = data.get(key)
+    if not isinstance(recorded, str) or not re.fullmatch(r"[0-9a-f]+", recorded):
+        print(f"invalid bundle manifest field: {key}", file=sys.stderr)
+        raise SystemExit(1)
+    if recorded != value:
+        print(f"bundle manifest generation mismatch: {key}", file=sys.stderr)
+        raise SystemExit(1)
+PY
+        echo "✗ External deploy bundle manifest did not match binary/current assets" >&2
+        return 1
+    }
+    echo "▸ External deploy bundle generation verified: ${source_sha:0:12}"
 }
 
 _write_release_source_manifest() {
@@ -532,6 +606,7 @@ _write_release_source_manifest() {
     local manifest_tmp="$ADK_REL/runtime/release-source.json.new"
     local manifest_path="$ADK_REL/runtime/release-source.json"
     local generated_at repo_head repo_branch repo_upstream repo_upstream_sha repo_dirty latest_migration latest_migration_name latest_migration_sha
+    local manifest_binary binary_sha routines_sha helpers_sha
 
     generated_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     repo_head="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
@@ -557,6 +632,13 @@ _write_release_source_manifest() {
         latest_migration_name="$(basename "$latest_migration")"
         latest_migration_sha="$(_sha256_file "$latest_migration")"
     fi
+    manifest_binary="${REL_BINARY:-${SOURCE_BINARY:-}}"
+    binary_sha="$(_sha256_file "$manifest_binary")"
+    # These are bundle-generation digests, so bind the repository payload that
+    # travels with the binary. Operator-preserved runtime files intentionally do
+    # not alter the reusable source bundle manifest.
+    routines_sha="$(_sha256_tree "$REPO/routines")"
+    helpers_sha="$(_sha256_tree "$REPO/routine-helpers")"
 
     AGENTDESK_MANIFEST_GENERATED_AT="$generated_at" \
     AGENTDESK_MANIFEST_REPO="$REPO" \
@@ -569,6 +651,9 @@ _write_release_source_manifest() {
     AGENTDESK_MANIFEST_BUILD_PROFILE="$DEPLOY_BUILD_PROFILE" \
     AGENTDESK_MANIFEST_LATEST_MIGRATION="$latest_migration_name" \
     AGENTDESK_MANIFEST_LATEST_MIGRATION_SHA="$latest_migration_sha" \
+    AGENTDESK_MANIFEST_BINARY_SHA="$binary_sha" \
+    AGENTDESK_MANIFEST_ROUTINES_SHA="$routines_sha" \
+    AGENTDESK_MANIFEST_HELPERS_SHA="$helpers_sha" \
     AGENTDESK_MANIFEST_SIGNING_MODE="${RESOLVED_RELEASE_SIGNING_MODE:-unknown}" \
     AGENTDESK_MANIFEST_CODESIGN_IDENTITY="$CODESIGN_IDENTITY" \
     AGENTDESK_MANIFEST_ALLOW_ADHOC_RELEASE_SIGN="$ALLOW_ADHOC_RELEASE_SIGN" \
@@ -582,10 +667,12 @@ import sys
 
 path = sys.argv[1]
 payload = {
+    "format": "agentdesk-release-bundle-v1",
     "generated_at": os.environ.get("AGENTDESK_MANIFEST_GENERATED_AT", ""),
     "repo_path": os.environ.get("AGENTDESK_MANIFEST_REPO", ""),
     "repo_branch": os.environ.get("AGENTDESK_MANIFEST_REPO_BRANCH", ""),
     "repo_head": os.environ.get("AGENTDESK_MANIFEST_REPO_HEAD", ""),
+    "source_git_sha": os.environ.get("AGENTDESK_MANIFEST_REPO_HEAD", ""),
     "repo_upstream": os.environ.get("AGENTDESK_MANIFEST_REPO_UPSTREAM", ""),
     "repo_upstream_sha": os.environ.get("AGENTDESK_MANIFEST_REPO_UPSTREAM_SHA", ""),
     "repo_dirty": os.environ.get("AGENTDESK_MANIFEST_REPO_DIRTY", "unknown"),
@@ -593,6 +680,9 @@ payload = {
     "build_profile": os.environ.get("AGENTDESK_MANIFEST_BUILD_PROFILE", ""),
     "latest_postgres_migration": os.environ.get("AGENTDESK_MANIFEST_LATEST_MIGRATION", ""),
     "latest_postgres_migration_sha256": os.environ.get("AGENTDESK_MANIFEST_LATEST_MIGRATION_SHA", ""),
+    "binary_sha256": os.environ.get("AGENTDESK_MANIFEST_BINARY_SHA", ""),
+    "routines_sha256": os.environ.get("AGENTDESK_MANIFEST_ROUTINES_SHA", ""),
+    "routine_helpers_sha256": os.environ.get("AGENTDESK_MANIFEST_HELPERS_SHA", ""),
     "signing_mode": os.environ.get("AGENTDESK_MANIFEST_SIGNING_MODE", ""),
     "codesign_identity": os.environ.get("AGENTDESK_MANIFEST_CODESIGN_IDENTITY", ""),
     "allow_adhoc_release_sign": os.environ.get("AGENTDESK_MANIFEST_ALLOW_ADHOC_RELEASE_SIGN", ""),
@@ -791,26 +881,69 @@ print(value)
 PY
 }
 
+_manifest_source_git_sha() {
+    local manifest="$ADK_REL/runtime/release-source.json"
+    [ -f "$manifest" ] || return 1
+    python3 - "$manifest" <<'PY' 2>/dev/null
+import json
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception:
+    raise SystemExit(1)
+value = data.get("source_git_sha") or data.get("repo_head") or ""
+if not re.fullmatch(r"[0-9a-fA-F]{40,64}", value):
+    raise SystemExit(1)
+print(value.lower())
+PY
+}
+
 _write_rollback_backup_metadata() {
     local backup_binary="$1"
     local metadata_path="$2"
-    local binary_sha latest_migration
+    local asset_txn="${3:-${ROUTINE_ASSET_TXN:-}}"
+    local binary_sha latest_migration source_git_sha routines_sha helpers_sha txn_id
 
     [ -f "$backup_binary" ] && [ ! -L "$backup_binary" ] \
         && [ ! -L "$metadata_path" ] || return 1
+    [ -n "$asset_txn" ] || return 1
+    txn_id="$(basename "$asset_txn")"
+    case "$txn_id" in
+        routine-assets.txn.*) ;;
+        *) return 1 ;;
+    esac
+    case "${txn_id#routine-assets.txn.}" in
+        ''|*[!A-Za-z0-9]*) return 1 ;;
+    esac
     binary_sha="$(_sha256_file "$backup_binary")"
     [ -n "$binary_sha" ] || return 1
     latest_migration="$(_manifest_latest_migration_name 2>/dev/null || true)"
+    source_git_sha="$(_manifest_source_git_sha 2>/dev/null || true)"
+    routines_sha="$(_sha256_tree "$ADK_REL/routines")" || return 1
+    helpers_sha="$(_sha256_tree "$ADK_REL/routine-helpers")" || return 1
+    [ -n "$latest_migration" ] && [ -n "$source_git_sha" ] \
+        && [ -n "$routines_sha" ] && [ -n "$helpers_sha" ] || return 1
     AGENTDESK_BACKUP_BINARY_SHA256="$binary_sha" \
     AGENTDESK_BACKUP_LATEST_MIGRATION="$latest_migration" \
+    AGENTDESK_BACKUP_SOURCE_GIT_SHA="$source_git_sha" \
+    AGENTDESK_BACKUP_ASSET_TXN="$txn_id" \
+    AGENTDESK_BACKUP_ROUTINES_SHA256="$routines_sha" \
+    AGENTDESK_BACKUP_HELPERS_SHA256="$helpers_sha" \
     python3 - "$metadata_path" <<'PY'
 import json
 import os
 import sys
 
 payload = {
-    "format_version": 1,
+    "format_version": 2,
     "binary_sha256": os.environ["AGENTDESK_BACKUP_BINARY_SHA256"],
+    "source_git_sha": os.environ["AGENTDESK_BACKUP_SOURCE_GIT_SHA"],
+    "asset_transaction": os.environ["AGENTDESK_BACKUP_ASSET_TXN"],
+    "routines_sha256": os.environ["AGENTDESK_BACKUP_ROUTINES_SHA256"],
+    "routine_helpers_sha256": os.environ["AGENTDESK_BACKUP_HELPERS_SHA256"],
     "latest_postgres_migration": os.environ.get(
         "AGENTDESK_BACKUP_LATEST_MIGRATION", ""
     ),
@@ -827,7 +960,9 @@ _rollback_backup_latest_migration_name() {
     # reason about a preserved backup from an older deploy generation.
     local backup_binary="${REL_BINARY_BACKUP:-}"
     local metadata_path="${REL_BINARY_BACKUP_META:-${backup_binary}.meta}"
-    local binary_sha
+    local transaction_mode="${1:-current}"
+    local binary_sha routines_sha helpers_sha expected_txn expected_source_sha
+    local routines_root helpers_root
 
     [ -n "$backup_binary" ] \
         && [ -f "$backup_binary" ] \
@@ -836,7 +971,31 @@ _rollback_backup_latest_migration_name() {
         && [ ! -L "$metadata_path" ] || return 1
     binary_sha="$(_sha256_file "$backup_binary")"
     [ -n "$binary_sha" ] || return 1
+    if [ -d "$ADK_REL/routines.old" ] && [ -d "$ADK_REL/routine-helpers.old" ]; then
+        routines_root="$ADK_REL/routines.old"
+        helpers_root="$ADK_REL/routine-helpers.old"
+    elif [ -d "$ADK_REL/routines" ] && [ -d "$ADK_REL/routine-helpers" ]; then
+        routines_root="$ADK_REL/routines"
+        helpers_root="$ADK_REL/routine-helpers"
+    else
+        return 1
+    fi
+    routines_sha="$(_sha256_tree "$routines_root")" || return 1
+    helpers_sha="$(_sha256_tree "$helpers_root")" || return 1
+    expected_source_sha="$(_manifest_source_git_sha 2>/dev/null || true)"
+    [ -n "$expected_source_sha" ] || return 1
+    expected_txn=""
+    if [ "$transaction_mode" = current ]; then
+        [ -n "${ROUTINE_ASSET_TXN:-}" ] || return 1
+        expected_txn="$(basename "$ROUTINE_ASSET_TXN")"
+    elif [ "$transaction_mode" != allow-prior ]; then
+        return 1
+    fi
     AGENTDESK_BACKUP_ACTUAL_SHA256="$binary_sha" \
+    AGENTDESK_BACKUP_ACTUAL_ROUTINES_SHA256="$routines_sha" \
+    AGENTDESK_BACKUP_ACTUAL_HELPERS_SHA256="$helpers_sha" \
+    AGENTDESK_BACKUP_EXPECTED_TXN="$expected_txn" \
+    AGENTDESK_BACKUP_EXPECTED_SOURCE_SHA="$expected_source_sha" \
     python3 - "$metadata_path" <<'PY' 2>/dev/null
 import json
 import os
@@ -848,9 +1007,23 @@ try:
         data = json.load(handle)
 except Exception:
     sys.exit(1)
-if data.get("format_version") != 1:
+if data.get("format_version") != 2:
     sys.exit(1)
 if data.get("binary_sha256") != os.environ["AGENTDESK_BACKUP_ACTUAL_SHA256"]:
+    sys.exit(1)
+if data.get("routines_sha256") != os.environ["AGENTDESK_BACKUP_ACTUAL_ROUTINES_SHA256"]:
+    sys.exit(1)
+if data.get("routine_helpers_sha256") != os.environ["AGENTDESK_BACKUP_ACTUAL_HELPERS_SHA256"]:
+    sys.exit(1)
+source_sha = data.get("source_git_sha") or ""
+expected_source_sha = os.environ["AGENTDESK_BACKUP_EXPECTED_SOURCE_SHA"]
+if not re.fullmatch(r"[0-9a-f]{40,64}", source_sha) or source_sha != expected_source_sha:
+    sys.exit(1)
+transaction = data.get("asset_transaction") or ""
+if not re.fullmatch(r"routine-assets\.txn\.[A-Za-z0-9]+", transaction):
+    sys.exit(1)
+expected_transaction = os.environ.get("AGENTDESK_BACKUP_EXPECTED_TXN") or ""
+if expected_transaction and transaction != expected_transaction:
     sys.exit(1)
 migration = data.get("latest_postgres_migration") or ""
 if not re.fullmatch(r"[0-9]{4}_[A-Za-z0-9._-]+\.sql", migration):
@@ -985,6 +1158,142 @@ _rollback_release_binary() {
         echo "✗ Rollback restart did not reach healthy state — manual intervention required (logs: ${ADK_REL:-}/logs/)"
         return 4
     fi
+}
+
+# The stop happens well before the binary/asset renames.  Keep its recovery
+# state separate from the rename state so a failure in that gap cannot strand a
+# proven release merely because no live file was swapped yet.
+_release_launchd_job_is_loaded() {
+    local domain="${LAUNCHD_DOMAIN:-}"
+
+    [ -n "$domain" ] || domain="$(_launchd_domain)" || return 1
+    launchctl print "$domain/$PLIST_REL" >/dev/null 2>&1
+}
+
+_release_old_process_is_alive() {
+    adk_process_instance_alive \
+        "${OLD_PID:-}" "${OLD_PID_IDENTITY:-}"
+}
+
+_release_service_is_stopped() {
+    ! _release_launchd_job_is_loaded && ! _release_old_process_is_alive
+}
+
+_pre_promotion_release_restart_is_safe() {
+    # Before the first live rename the current binary/assets are already a
+    # matching pair.  The manifest is only trustworthy for that pair when no
+    # older .prev is pending from an interrupted deploy.  Refuse an ambiguous
+    # restart instead of booting a binary behind a newly-applied migration.
+    local old_name new_path new_name
+
+    if [ -e "$ADK_REL/bin/agentdesk.prev" ] \
+      || [ -e "$ADK_REL/bin/agentdesk.prev.meta" ]; then
+        echo "  ⚠ [rollback-guard] prior rollback material exists; pre-promotion restart is ambiguous" >&2
+        return 1
+    fi
+    old_name="$(_manifest_latest_migration_name 2>/dev/null || true)"
+    new_path="$(_latest_postgres_migration_path 2>/dev/null || true)"
+    if [ -z "$old_name" ] || [ -z "$new_path" ]; then
+        echo "  ⚠ [rollback-guard] cannot prove pre-promotion migration compatibility" >&2
+        return 1
+    fi
+    new_name="$(basename "$new_path")"
+    if _migration_advanced "$new_name" "$old_name"; then
+        echo "  ▸ [rollback-guard] ${new_name} is ahead of running ${old_name}; old restart is unsafe" >&2
+        return 1
+    fi
+    return 0
+}
+
+_restart_pre_promotion_release() {
+    local domain rel_port wait_secs=0
+
+    [ "${RELEASE_SERVICE_RECOVERY_ARMED:-0}" = 1 ] || return 1
+    if [ "${RELEASE_SERVICE_STOP_CONFIRMED:-0}" != 1 ]; then
+        if _release_launchd_job_is_loaded; then
+            echo "↩ Previous release never stopped — no recovery start required"
+            return 0
+        fi
+        # launchd can unload before its old PID finishes draining. TERM in that
+        # window must wait for the exact old process instance, then restart;
+        # treating a still-draining PID as "never stopped" strands the service
+        # as soon as that process exits.
+        while _release_old_process_is_alive && [ "$wait_secs" -lt 15 ]; do
+            sleep 1
+            wait_secs=$((wait_secs + 1))
+        done
+        if ! _release_service_is_stopped; then
+            echo "🛑 Previous release did not quiesce during recovery" >&2
+            return 1
+        fi
+        RELEASE_SERVICE_STOP_CONFIRMED=1
+    fi
+    [ "${RELEASE_SERVICE_RESTART_SAFE:-0}" = 1 ] || {
+        echo "🛑 Previous release retained but left stopped: migration-safe restart was not proven" >&2
+        return 2
+    }
+    _release_service_is_stopped || {
+        echo "🛑 Refusing recovery start: previous release is not confirmed stopped" >&2
+        return 1
+    }
+
+    domain="${LAUNCHD_DOMAIN:-$(_launchd_domain)}"
+    rel_port="${REL_PORT:-${AGENTDESK_REL_PORT:-${ADK_DEFAULT_PORT:-8791}}}"
+    echo "↩ No live promotion completed — restarting previous release pair..."
+    xattr -d com.apple.quarantine "$HOME/Library/LaunchAgents/$PLIST_REL.plist" 2>/dev/null || true
+    if ! launchctl bootstrap "$domain" "$HOME/Library/LaunchAgents/$PLIST_REL.plist"; then
+        echo "⚠ launchd bootstrap failed during pre-promotion recovery — using tmux fallback"
+        start_release_tmux_fallback || return 1
+    fi
+    if wait_for_http_service_health "$PLIST_REL" "$rel_port" "$DEPLOY_HEALTH_RETRIES" "$DEPLOY_HEALTH_DELAY_SECS" 1 1 1; then
+        echo "✓ Previous release pair restarted and healthy on :${rel_port}"
+        return 0
+    fi
+    echo "✗ Previous release restart did not reach healthy state — manual intervention required" >&2
+    return 1
+}
+
+_stop_release_for_promotion() {
+    local wait_secs=0
+
+    # This is deliberately armed before bootout, not before the first mv.  A
+    # signal or an unguarded failure after launchd unloads but before promotion
+    # must still recover the untouched old binary/asset pair.
+    ROLLBACK_ARMED=1
+    RELEASE_SERVICE_RECOVERY_ARMED=1
+    RELEASE_SERVICE_STOP_CONFIRMED=0
+    RELEASE_SERVICE_RESTART_SAFE=0
+    if _pre_promotion_release_restart_is_safe; then
+        RELEASE_SERVICE_RESTART_SAFE=1
+    fi
+
+    launchctl bootout "$LAUNCHD_DOMAIN/$PLIST_REL" 2>/dev/null || true
+    # A previous launchd bootstrap may have fallen back to this manual server.
+    # It must not survive long enough to observe a newly promoted pair.
+    tmux kill-session -t "${AGENTDESK_RELEASE_TMUX_SESSION:-AgentDesk-dcserver-release-manual}" 2>/dev/null || true
+    while ! _release_service_is_stopped; do
+        if [ "$wait_secs" -ge 15 ]; then
+            break
+        fi
+        sleep 1
+        wait_secs=$((wait_secs + 1))
+    done
+    if ! _release_service_is_stopped \
+      && [ -n "${OLD_PID:-}" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+        echo "  ⚠ PID $OLD_PID did not exit after ${wait_secs}s — sending SIGKILL"
+        kill -9 "$OLD_PID" 2>/dev/null || true
+        wait_secs=0
+        while ! _release_service_is_stopped && [ "$wait_secs" -lt 5 ]; do
+            sleep 1
+            wait_secs=$((wait_secs + 1))
+        done
+    fi
+    if ! _release_service_is_stopped; then
+        echo "✗ Previous release stop was not confirmed; refusing live promotion" >&2
+        return 1
+    fi
+    RELEASE_SERVICE_STOP_CONFIRMED=1
+    echo "  ✓ old process terminated"
 }
 
 _cleanup_owned_pg_tunnel_preflight() {
@@ -1138,11 +1447,14 @@ _cleanup_on_exit() {
     local active_status=0
     local active_phase=""
     local asset_lock_held=0
+    local restart_pre_promotion_release=0
 
     # Cleanup traps are installed before this invocation acquires the shared
     # deploy lock. A pre-lock signal must not inspect another deploy's durable
     # asset marker or turn the original signal status into a cleanup failure.
-    [ -z "${ADK_ROUTINE_ASSET_LOCK_DIR:-}" ] || asset_lock_held=1
+    if adk_routine_asset_lock_owned "$DEPLOY_LOCK_FILE"; then
+        asset_lock_held=1
+    fi
     trap - EXIT
     trap '' INT TERM
     _cleanup_owned_pg_tunnel_preflight
@@ -1187,11 +1499,12 @@ _cleanup_on_exit() {
         elif [ "${ROLLBACK_ARMED:-0}" = 1 ] \
           && [ -n "${STAGED_BINARY:-}" ] && [ -e "$STAGED_BINARY" ]; then
             # The binary rename did not consume its same-directory stage. Keep
-            # the old binary and roll assets back; migration state may make an
-            # automatic restart unsafe, so leave that failure visible/stopped.
+            # the old binary, roll assets back, then restart that exact pair
+            # only when the pre-stop migration guard proved it safe.
             asset_action="rollback"
+            restart_pre_promotion_release=1
             status=1
-            echo "🛑 Binary promotion did not complete; rolling back assets and leaving release stopped" >&2
+            echo "🛑 Binary promotion did not complete; restoring the previous release pair" >&2
         elif [ "${ROLLBACK_ARMED:-0}" = 1 ]; then
             asset_action="none"
             _rollback_release_binary "$active_txn" || binary_rollback_code=$?
@@ -1233,7 +1546,13 @@ _cleanup_on_exit() {
                 fi
             elif ! adk_rollback_routine_asset_transaction "$ADK_REL" "$active_txn"; then
                 status=1
+                restart_pre_promotion_release=0
                 echo "🛑 Routine asset rollback failed; durable state retained at $active_txn" >&2
+            fi
+        fi
+        if [ "$restart_pre_promotion_release" = 1 ]; then
+            if ! _restart_pre_promotion_release; then
+                status=1
             fi
         fi
     fi
@@ -1319,6 +1638,7 @@ _deploy_peer_env_prelude() {
         AGENTDESK_CODESIGN_KEYCHAIN_NAME \
         AGENTDESK_DEPLOY_ALL_NODES \
         AGENTDESK_DEPLOY_BINARY \
+        AGENTDESK_DEPLOY_BUNDLE_MANIFEST \
         AGENTDESK_DEPLOY_DELAY_SECS \
         AGENTDESK_DEPLOY_FAST \
         AGENTDESK_DEPLOY_HEALTH_DELAY_SECS \
@@ -1362,8 +1682,10 @@ _deploy_to_one_peer() {
     local env_prelude
     local remote_cd_command
     local remote_deploy_command
+    local remote_lock_query
     local remote_presync_command
     local peer_adk_rel=""
+    local peer_lock_file=""
     local peer_incoming=""
     local peer_incoming_token=""
     local peer_incoming_created=0
@@ -1411,6 +1733,26 @@ git merge --quiet --ff-only origin/main"
             echo "✗ [peer:$peer] remote AGENTDESK_ROOT_DIR is not a safe absolute path"
             return 1
         fi
+        remote_lock_query="set -e
+${env_prelude}
+${remote_cd_command}
+runtime_root=$(printf '%q' "$peer_adk_rel")
+lock_file=\${AGENTDESK_DEPLOY_LOCK_FILE:-\$runtime_root/runtime/deploy-release.lock}
+python3 - \"\$lock_file\" <<'PY'
+import os
+import sys
+print(os.path.abspath(sys.argv[1]))
+PY"
+        if ! peer_lock_file="$(ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" \
+            "$peer" "bash -lc $(printf '%q' "$remote_lock_query")")"; then
+            echo "✗ [peer:$peer] could not resolve remote deploy lock path"
+            return 1
+        fi
+        peer_lock_file="$(printf '%s' "$peer_lock_file" | tr -d '\r')"
+        if ! adk_validate_peer_runtime_root "$peer_lock_file"; then
+            echo "✗ [peer:$peer] remote deploy lock path is not a safe absolute path"
+            return 1
+        fi
         adk_validate_quickjs_routine_tree "$ADK_REL/routines" || {
             echo "✗ [peer:$peer] local routine surface failed portability validation"
             return 1
@@ -1436,6 +1778,7 @@ git merge --quiet --ff-only origin/main"
             "$peer_incoming" "routine-helpers" "$DEPLOY_SSH_CONNECT_TIMEOUT"; then
             adk_remove_peer_asset_incoming "$peer" "$peer_adk_rel" \
                 "$peer_incoming_token" "$DEPLOY_SSH_CONNECT_TIMEOUT" \
+                "$peer_lock_file" \
                 >/dev/null 2>&1 || true
             echo "✗ [peer:$peer] routine asset inbox transfer failed"
             return 1
@@ -1449,6 +1792,7 @@ git merge --quiet --ff-only origin/main"
         if [ "$peer_incoming_created" = 1 ]; then
             adk_remove_peer_asset_incoming "$peer" "$peer_adk_rel" \
                 "$peer_incoming_token" "$DEPLOY_SSH_CONNECT_TIMEOUT" \
+                "$peer_lock_file" \
                 >/dev/null 2>&1 || true
         fi
         echo "✗ [peer:$peer] deploy-release.sh failed"
@@ -1457,7 +1801,8 @@ git merge --quiet --ff-only origin/main"
 
     if [ "$peer_incoming_created" = 1 ] \
       && ! adk_remove_peer_asset_incoming "$peer" "$peer_adk_rel" \
-          "$peer_incoming_token" "$DEPLOY_SSH_CONNECT_TIMEOUT"; then
+          "$peer_incoming_token" "$DEPLOY_SSH_CONNECT_TIMEOUT" \
+          "$peer_lock_file"; then
         echo "✗ [peer:$peer] deployed but could not verify routine asset inbox cleanup"
         return 1
     fi
@@ -1537,6 +1882,7 @@ export AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN=$(printf '%q' "${AGENTDESK_ALLOW_ADHOC
 export AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE=$(printf '%q' "${AGENTDESK_CODESIGN_KEYCHAIN_PW_FILE:-}")
 export AGENTDESK_CODESIGN_KEYCHAIN_NAME=$(printf '%q' "${AGENTDESK_CODESIGN_KEYCHAIN_NAME:-}")
 export AGENTDESK_DEPLOY_BINARY=$(printf '%q' "${AGENTDESK_DEPLOY_BINARY:-}")
+export AGENTDESK_DEPLOY_BUNDLE_MANIFEST=$(printf '%q' "${AGENTDESK_DEPLOY_BUNDLE_MANIFEST:-}")
 export AGENTDESK_DEPLOY_FAST=$(printf '%q' "${AGENTDESK_DEPLOY_FAST:-0}")
 export AGENTDESK_DEPLOY_SKIP_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_SKIP_FRESHNESS:-0}")
 export AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS=$(printf '%q' "${AGENTDESK_DEPLOY_SKIP_REMOTE_FRESHNESS:-0}")
@@ -1658,6 +2004,16 @@ fi
 
 _check_repo_source_identity
 
+# An external executable is trusted only as one member of a manifest-bound
+# generation. Validate this even in DEPLOY_TEST_MODE so CI can exercise the
+# rejection gate without reaching service lifecycle operations.
+if [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
+    SOURCE_BINARY="$AGENTDESK_DEPLOY_BINARY"
+    if ! _validate_external_deploy_bundle; then
+        exit 1
+    fi
+fi
+
 if [ "$DEPLOY_TEST_MODE" = "1" ]; then
     echo "▸ TEST MODE: skipping release bootout/copy/bootstrap"
     echo "✓ Detached helper dry run complete"
@@ -1685,9 +2041,7 @@ fi
 # artifact is provided explicitly, keep the existing override behavior.
 _ensure_dashboard_dependencies
 _check_repo_remote_freshness
-if [ -n "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
-    SOURCE_BINARY="$AGENTDESK_DEPLOY_BINARY"
-else
+if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
     SOURCE_BINARY="$(_resolve_default_release_binary "$DEPLOY_BUILD_PROFILE")"
 fi
 if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
@@ -1970,6 +2324,12 @@ chmod +x "$STAGED_BINARY"
 xattr -d com.apple.provenance "$STAGED_BINARY" 2>/dev/null || true
 sign_binary_with_fallback "$STAGED_BINARY"
 _clean_release_build_cache_after_staging
+echo "▸ Exact-validating staged routine generation with candidate runtime..."
+if ! adk_validate_staged_routine_asset_transaction \
+    "$ADK_REL" "$ROUTINE_ASSET_TXN" "$STAGED_BINARY"; then
+    echo "✗ Candidate runtime rejected staged routines before migration/service stop"
+    exit 1
+fi
 
 # ── Fail-closed PostgreSQL tunnel migration (#4378) ───────────────────────────
 # Prove the new remote Unix-socket route on an alternate local port, then replace
@@ -2324,8 +2684,10 @@ _migrate_pg_tunnel_before_release_stop
 
 LOCK_FILE="$ADK_REL/runtime/dcserver.lock"
 OLD_PID=""
+OLD_PID_IDENTITY=""
 if [ -f "$LOCK_FILE" ]; then
     OLD_PID=$(cat "$LOCK_FILE" 2>/dev/null || true)
+    OLD_PID_IDENTITY="$(adk_process_identity "$OLD_PID" 2>/dev/null || true)"
 fi
 
 # Apply the forward-only database boundary before requesting restart_pending.
@@ -2376,22 +2738,8 @@ rm -f "$ADK_REL/runtime/restart_persisted" 2>/dev/null || true
 # Stop release only after migration and the durable persistence acknowledgement.
 echo "▸ Stopping release..."
 LAUNCHD_DOMAIN="$(_launchd_domain)"
-launchctl bootout "$LAUNCHD_DOMAIN/$PLIST_REL" 2>/dev/null || true
-if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-    echo "  waiting for PID $OLD_PID to exit..."
-    WAIT_SECS=0
-    while kill -0 "$OLD_PID" 2>/dev/null && [ "$WAIT_SECS" -lt 15 ]; do
-        sleep 1
-        WAIT_SECS=$((WAIT_SECS + 1))
-    done
-    if kill -0 "$OLD_PID" 2>/dev/null; then
-        echo "  ⚠ PID $OLD_PID did not exit after 15s — sending SIGKILL"
-        kill -9 "$OLD_PID" 2>/dev/null || true
-        sleep 1
-    fi
-    echo "  ✓ old process terminated (${WAIT_SECS}s)"
-else
-    sleep 2
+if ! _stop_release_for_promotion; then
+    exit 1
 fi
 
 _post_deploy_smoke_log_identity_and_size() {
@@ -2509,12 +2857,23 @@ if [ -f "$REL_BINARY_BACKUP" ]; then
     # still healthy). The CURRENT live binary may be the unverified/bad binary the
     # prior deploy promoted — do NOT overwrite a good .prev with it. Preserve the
     # existing last-known-good as the rollback target so a re-run can still recover.
-    if ! _rollback_backup_latest_migration_name >/dev/null; then
-        echo "✗ Existing rollback backup metadata is absent, corrupt, or digest-mismatched"
+    if ! _rollback_backup_latest_migration_name allow-prior >/dev/null; then
+        echo "✗ Existing rollback backup metadata is absent, corrupt, or not bound to current assets"
         echo "  refusing to trust stale $REL_BINARY_BACKUP"
         exit 1
     fi
-    echo "▸ Preserving integrity-verified last-known-good backup for rollback (prior deploy left one)..."
+    # The preserved bytes and current live assets are an exact generation. Bind
+    # that pair to THIS transaction before it can become this deploy's rollback
+    # target; a later rollback refuses metadata from any unrelated transaction.
+    if ! _write_rollback_backup_metadata \
+        "$REL_BINARY_BACKUP" "$REL_BINARY_BACKUP_META.tmp" \
+        "$ROUTINE_ASSET_TXN" \
+      || ! mv -f "$REL_BINARY_BACKUP_META.tmp" "$REL_BINARY_BACKUP_META"; then
+        rm -f "$REL_BINARY_BACKUP_META.tmp" 2>/dev/null || true
+        echo "✗ Could not rebind preserved rollback generation to current asset transaction"
+        exit 1
+    fi
+    echo "▸ Preserving generation-verified last-known-good rollback bundle..."
     # Ensure it is mutable so the rollback's `mv -f` can consume it.
     chflags nouchg "$REL_BINARY_BACKUP" 2>/dev/null || true
 elif [ -f "$REL_BINARY" ]; then
@@ -2537,7 +2896,8 @@ elif [ -f "$REL_BINARY" ]; then
     echo "▸ Backing up current release binary for rollback..."
     cp -p "$REL_BINARY" "$REL_BINARY_BACKUP.tmp"
     _write_rollback_backup_metadata \
-        "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP_META.tmp"
+        "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP_META.tmp" \
+        "$ROUTINE_ASSET_TXN"
     mv -f "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP"
     if ! mv -f "$REL_BINARY_BACKUP_META.tmp" "$REL_BINARY_BACKUP_META"; then
         rm -f "$REL_BINARY_BACKUP" 2>/dev/null || true
@@ -2555,7 +2915,8 @@ fi
 # binary rollback flag is still clear. Therefore a signal in either asset mv
 # rolls assets back without ever exposing a new binary with a partial payload.
 echo "▸ Promoting routine asset transaction..."
-if ! adk_promote_routine_asset_transaction "$ADK_REL" "$ROUTINE_ASSET_TXN"; then
+if ! adk_promote_routine_asset_transaction \
+    "$ADK_REL" "$ROUTINE_ASSET_TXN" "$STAGED_BINARY"; then
     echo "✗ Routine asset transaction promotion failed"
     exit 1
 fi
@@ -2766,27 +3127,10 @@ if [ "$REL_HEALTHY" != true ]; then
     exit 1
 fi
 
-# #3858: health passed — the new binary is proven good and serving. Persist asset
-# commit intent before disarming binary rollback. The EXIT path treats this
-# durable phase as proof that the health-confirmed binary must stay live, including
-# a TERM between the marker write and DEPLOY_OK. Only then may cleanup discard the
-# rollback backup; a later non-critical hiccup must not tear down this release.
-if ! adk_mark_routine_asset_transaction_committing "$ADK_REL" "$ROUTINE_ASSET_TXN"; then
-    echo "✗ Could not persist healthy routine asset commit intent" >&2
-    exit 1
-fi
-DEPLOY_OK=1
-# Routine/helper backups are committed only after the release passed health.
-# Cleanup failure is non-fatal: the live release is proven good and retaining a
-# durable `committing` marker is safer than restarting or attempting a late
-# rollback. The next lock holder finishes that commit before staging anything.
-if ! adk_commit_routine_asset_transaction "$ADK_REL" "$ROUTINE_ASSET_TXN"; then
-    echo "⚠ Healthy release retained a committing routine asset transaction"
-fi
-# Lock it against unsigned overwrites (deferred from promotion) and drop the
-# now-unneeded rollback backup. chflags is best-effort: failing to re-lock a
-# healthy serving binary must not fail the deploy.
-chflags uchg "$REL_BINARY" 2>/dev/null || true
+# #4902: retire the old rollback binary BEFORE committing its matching .old
+# asset trees. If canonical .prev cleanup fails, DEPLOY_OK remains unset and the
+# EXIT transaction restores the exact binary+asset generation described by its
+# metadata. We never commit v1 assets while leaving a usable v0 .prev behind.
 chflags nouchg "$REL_BINARY_BACKUP" 2>/dev/null || true
 ROLLBACK_BACKUP_CLEANUP_OK=1
 if ! rm -f "$REL_BINARY_BACKUP" 2>/dev/null \
@@ -2799,8 +3143,9 @@ if [ "$ROLLBACK_BACKUP_CLEANUP_OK" = 1 ]; then
         ROLLBACK_BACKUP_CLEANUP_OK=0
     fi
 fi
-# Also drop atomic temps. A persistent temp is not a rollback target, but a
-# failed cleanup is reported before the release manifest can bless this deploy.
+# Also drop atomic temps before the asset commit. A persistent temp is not a
+# rollback target, but keeping this gate strict makes every successful deploy
+# start from one unambiguous generation lineage.
 for rollback_tmp in "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP_META.tmp"; do
     if ! rm -f "$rollback_tmp" 2>/dev/null || [ -e "$rollback_tmp" ]; then
         ROLLBACK_BACKUP_CLEANUP_OK=0
@@ -2808,9 +3153,23 @@ for rollback_tmp in "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP_META.tmp"; do
 done
 if [ "$ROLLBACK_BACKUP_CLEANUP_OK" != 1 ]; then
     echo "✗ Healthy binary is serving, but rollback backup cleanup failed" >&2
-    echo "  release manifest was not advanced; repair $REL_BINARY_BACKUP and retry" >&2
+    echo "  asset commit was withheld; coordinated rollback will preserve generation identity" >&2
     exit 1
 fi
+
+# Health passed and no prior rollback target survived. Persist commit intent
+# only now, then disarm binary rollback. A signal after the durable intent keeps
+# the proven binary and finishes the matching asset generation forward.
+if ! adk_mark_routine_asset_transaction_committing "$ADK_REL" "$ROUTINE_ASSET_TXN"; then
+    echo "✗ Could not persist healthy routine asset commit intent" >&2
+    exit 1
+fi
+DEPLOY_OK=1
+if ! adk_commit_routine_asset_transaction "$ADK_REL" "$ROUTINE_ASSET_TXN"; then
+    echo "⚠ Healthy release retained a committing routine asset transaction"
+fi
+# Lock against unsigned overwrites after the coordinated generation commits.
+chflags uchg "$REL_BINARY" 2>/dev/null || true
 
 if _health_json_unhealthy_only_no_provider_runtimes "${WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON:-}"; then
     echo "✓ Release is serving on :${REL_PORT} (deploy-ready: no provider runtimes registered —"

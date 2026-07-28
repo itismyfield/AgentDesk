@@ -70,6 +70,8 @@ class InstallBootstrapPortableTests(unittest.TestCase):
             fakebin.mkdir()
             home.mkdir()
             tmpdir.mkdir()
+            launchctl_state = temp / "launchctl.state"
+            lifecycle_events = temp / "lifecycle.events"
 
             self.write_executable(
                 fakebin / "uname",
@@ -181,7 +183,38 @@ class InstallBootstrapPortableTests(unittest.TestCase):
                 exit 0
                 """,
             )
-            for command in ("codesign", "chflags", "launchctl", "sudo", "xattr", "open"):
+            self.write_executable(
+                fakebin / "launchctl",
+                r"""
+                printf 'launchctl:%s\n' "$*" >> "$AGENTDESK_TEST_LIFECYCLE_EVENTS"
+                case "${1:-}" in
+                  print)
+                    if [[ "${2:-}" == */com.agentdesk.* ]]; then
+                      [[ -f "$AGENTDESK_TEST_LAUNCHCTL_STATE" ]]
+                    else
+                      exit 0
+                    fi
+                    ;;
+                  bootout) rm -f "$AGENTDESK_TEST_LAUNCHCTL_STATE" ;;
+                  bootstrap) : > "$AGENTDESK_TEST_LAUNCHCTL_STATE" ;;
+                esac
+                """,
+            )
+            self.write_executable(
+                fakebin / "codesign",
+                """
+                printf 'codesign:%s\n' "$*" >> "$AGENTDESK_TEST_LIFECYCLE_EVENTS"
+                exit 0
+                """,
+            )
+            self.write_executable(
+                fakebin / "chflags",
+                """
+                printf 'chflags:%s\n' "$*" >> "$AGENTDESK_TEST_LIFECYCLE_EVENTS"
+                exit 0
+                """,
+            )
+            for command in ("sudo", "xattr", "open"):
                 self.write_executable(fakebin / command, "exit 0\n")
 
             env = os.environ.copy()
@@ -193,6 +226,8 @@ class InstallBootstrapPortableTests(unittest.TestCase):
                     "AGENTDESK_INSTALL_REPO": "example/AgentDesk",
                     "AGENTDESK_INSTALL_DIR": str(runtime_root),
                     "AGENTDESK_CODESIGN_IDENTITY": "-",
+                    "AGENTDESK_TEST_LAUNCHCTL_STATE": str(launchctl_state),
+                    "AGENTDESK_TEST_LIFECYCLE_EVENTS": str(lifecycle_events),
                 }
             )
 
@@ -245,6 +280,17 @@ class InstallBootstrapPortableTests(unittest.TestCase):
             self.assertNotIn("/Users/itismyfield", rendered)
             self.assertNotIn("/Users/kunkun", rendered)
             self.assertNotIn("mac-mini-release", rendered)
+            events = lifecycle_events.read_text(encoding="utf-8").splitlines()
+            sign_event = next(line for line in events if line.startswith("codesign:-s "))
+            self.assertIn("/.agentdesk.install.", sign_event)
+            self.assertNotIn("/bin/agentdesk", sign_event)
+            bootstrap_index = next(
+                index for index, line in enumerate(events) if line.startswith("launchctl:bootstrap ")
+            )
+            immutable_index = next(
+                index for index, line in enumerate(events) if line == f"chflags:uchg {normalized_runtime_root}/bin/agentdesk"
+            )
+            self.assertLess(bootstrap_index, immutable_index)
 
     def write_executable(self, path: Path, body: str) -> None:
         path.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + textwrap.dedent(body).lstrip(), encoding="utf-8")

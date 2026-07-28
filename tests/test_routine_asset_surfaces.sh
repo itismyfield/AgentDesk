@@ -30,10 +30,82 @@ done < <(git -C "$REPO_ROOT" ls-files 'routines/*.js' 'routines/**/*.js')
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-routine-assets.XXXXXX")
 trap 'adk_release_routine_asset_lock 2>/dev/null || true; rm -rf "$TMP_ROOT"' EXIT
+ADK_ROUTINE_VALIDATOR_BINARY="$TMP_ROOT/fake-routine-validator"
+printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    '[ "${1:-}" = validate-routines ]' \
+    '[ "${2:-}" = --root ]' \
+    'root="${3:-}"' \
+    '[ "${4:-}" = --runtime-root ]' \
+    'runtime_root="${5:-}"' \
+    '[ "$root" = "$runtime_root/routines" ]' \
+    '[ -d "$root" ] && [ -d "$runtime_root/routine-helpers" ]' \
+    > "$ADK_ROUTINE_VALIDATOR_BINARY"
+chmod +x "$ADK_ROUTINE_VALIDATOR_BINARY"
 
 fail_test() {
     echo "FAIL: $*" >&2
     exit 1
+}
+
+wait_for_test_file() {
+    local path="$1"
+    local attempts=0
+
+    while [ ! -e "$path" ]; do
+        [ "$attempts" -lt 500 ] \
+            || fail_test "timed out waiting for test synchronization file: $path"
+        sleep 0.01
+        attempts=$((attempts + 1))
+    done
+}
+
+launch_lock_contender() {
+    local lock_file="$1"
+    local result_file="$2"
+    local release_file="$3"
+    local ready_file="${result_file}.ready"
+
+    bash -c '
+        set -u
+        . "$1"
+        : > "$5"
+        if adk_acquire_routine_asset_lock "$2" 0 >/dev/null 2>&1; then
+            printf "won:%s\n" "$ADK_ROUTINE_ASSET_LOCK_TOKEN" > "$3"
+            while [ ! -e "$4" ]; do sleep 0.01; done
+            adk_release_routine_asset_lock
+        else
+            printf "lost\n" > "$3"
+        fi
+    ' _ "$REPO_ROOT/scripts/routine-asset-surface.sh" \
+        "$lock_file" "$result_file" "$release_file" "$ready_file" &
+    LAST_LOCK_CONTENDER_PID=$!
+}
+
+hold_test_lock_guard() {
+    local guard_path="$1"
+    local ready_file="$2"
+    local release_file="$3"
+
+    python3 - "$guard_path" "$ready_file" "$release_file" <<'PY' &
+import fcntl
+import os
+import sys
+import time
+
+guard_path, ready_file, release_file = sys.argv[1:]
+guard = os.open(guard_path, os.O_RDWR | os.O_CREAT, 0o600)
+try:
+    fcntl.flock(guard, fcntl.LOCK_EX)
+    with open(ready_file, "w", encoding="utf-8"):
+        pass
+    while not os.path.exists(release_file):
+        time.sleep(0.01)
+finally:
+    os.close(guard)
+PY
+    TEST_GUARD_PID=$!
 }
 
 seed_required_helpers() {
@@ -105,6 +177,10 @@ SOURCE_ROOT="$TMP_ROOT/repo-v1"
 RUNTIME_ROOT="$TMP_ROOT/release-v0"
 seed_source "$SOURCE_ROOT" 'v1'
 seed_live "$RUNTIME_ROOT" 'v0'
+write_quickjs_routine \
+    "$SOURCE_ROOT/routines/monitoring/bundled-v1-only.js" 'v1-only'
+printf 'v1-only helper\n' \
+    > "$SOURCE_ROOT/routine-helpers/monitoring/bundled-v1-only.py"
 # Make different same-size source/live bytes share mtimes so rsync's default
 # quick-check cannot accidentally satisfy this authoritative-overlay regression.
 touch -r "$RUNTIME_ROOT/routines/generation-marker" \
@@ -124,28 +200,50 @@ acquire_runtime_lock "$RUNTIME_ROOT"
 begin_staged_transaction "$SOURCE_ROOT" "$RUNTIME_ROOT"
 
 LEGACY_ROUTINE_STAGE="$RUNTIME_ROOT/routines.new"
-[ "$CURRENT_TXN/staged/routines" != "$LEGACY_ROUTINE_STAGE" ] \
-    && [ -d "$CURRENT_TXN/staged/routines" ] \
-    && [ -d "$CURRENT_TXN/staged/routine-helpers" ] \
+[ "$CURRENT_TXN/staged/release-root/routines" != "$LEGACY_ROUTINE_STAGE" ] \
+    && [ -d "$CURRENT_TXN/staged/release-root/routines" ] \
+    && [ -d "$CURRENT_TXN/staged/release-root/routine-helpers" ] \
     || fail_test 'transaction did not use unique owned stage paths'
-[ -f "$CURRENT_TXN/staged/routine-helpers/operator-private.py" ] \
+[ -f "$CURRENT_TXN/staged/release-root/routine-helpers/operator-private.py" ] \
     || fail_test 'helper staging erased an operator-private asset'
-[ -f "$CURRENT_TXN/staged/routines/monitoring/operator.js" ] \
+[ -f "$CURRENT_TXN/staged/release-root/routines/monitoring/operator.js" ] \
     || fail_test 'routine staging erased an operator-private entrypoint'
 cmp "$SOURCE_ROOT/routines/generation-marker" \
-    "$CURRENT_TXN/staged/routines/generation-marker" >/dev/null \
+    "$CURRENT_TXN/staged/release-root/routines/generation-marker" >/dev/null \
     && cmp "$SOURCE_ROOT/routines/monitoring/bundled.js" \
-        "$CURRENT_TXN/staged/routines/monitoring/bundled.js" >/dev/null \
+        "$CURRENT_TXN/staged/release-root/routines/monitoring/bundled.js" >/dev/null \
     && cmp "$SOURCE_ROOT/routine-helpers/monitoring/weekly_churn_audit.py" \
-        "$CURRENT_TXN/staged/routine-helpers/monitoring/weekly_churn_audit.py" >/dev/null \
+        "$CURRENT_TXN/staged/release-root/routine-helpers/monitoring/weekly_churn_audit.py" >/dev/null \
     || fail_test 'source overlay lost authoritative bytes at equal size and mtime'
-[ "$(_adk_path_mode "$CURRENT_TXN/staged/routine-helpers")" = \
+[ "$(_adk_path_mode "$CURRENT_TXN/staged/release-root/routine-helpers")" = \
     "$(_adk_path_mode "$RUNTIME_ROOT/routine-helpers")" ] \
     || fail_test 'staged helper root did not preserve live mode'
 for helper_ref in "${ADK_LEGACY_ROUTINE_HELPER_REFS[@]}"; do
-    [ ! -e "$CURRENT_TXN/staged/routines/$helper_ref" ] \
+    [ ! -e "$CURRENT_TXN/staged/release-root/routines/$helper_ref" ] \
         || fail_test "legacy helper survived exact tombstone: $helper_ref"
 done
+
+if adk_commit_routine_asset_transaction_forward \
+    "$RUNTIME_ROOT" "$CURRENT_TXN" >/dev/null 2>&1; then
+    fail_test 'lexical staging state was accepted as fail-forward authority'
+fi
+[ "$(adk_routine_asset_transaction_phase "$RUNTIME_ROOT" "$CURRENT_TXN")" = \
+    'staging' ] \
+    && [ "$(<"$RUNTIME_ROOT/routines/generation-marker")" = 'v0' ] \
+    || fail_test 'rejected staging fail-forward mutated live routine state'
+
+REJECTING_VALIDATOR="$TMP_ROOT/rejecting-routine-validator"
+printf '%s\n' '#!/bin/sh' 'exit 19' > "$REJECTING_VALIDATOR"
+chmod +x "$REJECTING_VALIDATOR"
+if adk_promote_routine_asset_transaction \
+    "$RUNTIME_ROOT" "$CURRENT_TXN" "$REJECTING_VALIDATOR" \
+    >/dev/null 2>&1; then
+    fail_test 'candidate runtime rejection was ignored before asset promotion'
+fi
+[ "$(adk_routine_asset_transaction_phase "$RUNTIME_ROOT" "$CURRENT_TXN")" = \
+    'staging' ] \
+    && [ "$(<"$RUNTIME_ROOT/routines/generation-marker")" = 'v0' ] \
+    || fail_test 'candidate rejection mutated live assets or transaction phase'
 
 adk_promote_routine_asset_transaction "$RUNTIME_ROOT" "$CURRENT_TXN"
 [ "$(<"$RUNTIME_ROOT/routines/generation-marker")" = 'v1' ] \
@@ -158,6 +256,188 @@ adk_commit_routine_asset_transaction "$RUNTIME_ROOT" "$CURRENT_TXN"
     && [ ! -e "$RUNTIME_ROOT/runtime/routine-assets.active" ] \
     || fail_test 'healthy commit retained transaction state'
 release_runtime_lock
+
+# The managed inventory written by v1 is authoritative for removals in v2:
+# files formerly shipped by the repository disappear, while files absent from
+# that inventory remain operator-owned and survive the preserve/overlay stage.
+MANAGED_V2_SOURCE="$TMP_ROOT/repo-v2"
+seed_source "$MANAGED_V2_SOURCE" 'v2'
+acquire_runtime_lock "$RUNTIME_ROOT"
+begin_staged_transaction "$MANAGED_V2_SOURCE" "$RUNTIME_ROOT"
+[ ! -e "$CURRENT_TXN/staged/release-root/routines/monitoring/bundled-v1-only.js" ] \
+    && [ ! -e "$CURRENT_TXN/staged/release-root/routine-helpers/monitoring/bundled-v1-only.py" ] \
+    && [ -f "$CURRENT_TXN/staged/release-root/routines/monitoring/operator.js" ] \
+    && [ -f "$CURRENT_TXN/staged/release-root/routine-helpers/operator-private.py" ] \
+    || fail_test 'v2 staging did not remove old managed files and preserve operator files'
+adk_promote_routine_asset_transaction "$RUNTIME_ROOT" "$CURRENT_TXN"
+adk_commit_routine_asset_transaction "$RUNTIME_ROOT" "$CURRENT_TXN"
+[ "$(<"$RUNTIME_ROOT/routines/generation-marker")" = 'v2' ] \
+    && [ ! -e "$RUNTIME_ROOT/routines/monitoring/bundled-v1-only.js" ] \
+    && [ ! -e "$RUNTIME_ROOT/routine-helpers/monitoring/bundled-v1-only.py" ] \
+    && [ -f "$RUNTIME_ROOT/routines/monitoring/operator.js" ] \
+    && [ -f "$RUNTIME_ROOT/routine-helpers/operator-private.py" ] \
+    || fail_test 'v2 commit retained removed managed files or erased operator files'
+release_runtime_lock
+
+# Lock publication and stale-owner replacement are serialized by the guard:
+# at the boundary no partial owner record is visible and exactly one live
+# contender can replace either an absent record or a dead owner's record.
+run_competing_lock_case() {
+    local case_name="$1"
+    local lock_file="$2"
+    local lock_record="${lock_file}.d"
+    local sync_root="$TMP_ROOT/lock-race-$case_name"
+    local first_result="$sync_root/first.result"
+    local second_result="$sync_root/second.result"
+    local guard_ready="$sync_root/guard.ready"
+    local guard_release="$sync_root/guard.release"
+    local owner_release="$sync_root/owner.release"
+    local first_pid
+    local second_pid
+    local guard_pid
+    local winners=0
+    local result_file
+
+    mkdir -p "$sync_root" "$(dirname "$lock_file")"
+    hold_test_lock_guard "${lock_record}.guard" "$guard_ready" "$guard_release"
+    guard_pid=$TEST_GUARD_PID
+    wait_for_test_file "$guard_ready"
+    launch_lock_contender "$lock_file" "$first_result" "$owner_release"
+    first_pid=$LAST_LOCK_CONTENDER_PID
+    launch_lock_contender "$lock_file" "$second_result" "$owner_release"
+    second_pid=$LAST_LOCK_CONTENDER_PID
+    wait_for_test_file "${first_result}.ready"
+    wait_for_test_file "${second_result}.ready"
+    if [ "$case_name" = atomic ] && [ -e "$lock_record" ]; then
+        fail_test 'lock owner record appeared before the publication guard opened'
+    elif [ "$case_name" = stale ] \
+      && ! grep -Fq '"token": "stale.token"' "$lock_record"; then
+        fail_test 'stale lock record changed while its replacement guard was held'
+    fi
+    : > "$guard_release"
+    wait "$guard_pid"
+    wait_for_test_file "$first_result"
+    wait_for_test_file "$second_result"
+    for result_file in "$first_result" "$second_result"; do
+        case "$(<"$result_file")" in
+            won:*) winners=$((winners + 1)) ;;
+            lost) ;;
+            *) fail_test "invalid $case_name lock contender result" ;;
+        esac
+    done
+    [ "$winners" -eq 1 ] \
+        || fail_test "$case_name lock race admitted $winners owners"
+    python3 - "$lock_record" <<'PY'
+import json
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+entry = os.lstat(path)
+assert stat.S_ISREG(entry.st_mode)
+with open(path, "r", encoding="utf-8") as handle:
+    record = json.load(handle)
+assert set(record) == {"format", "identity", "pid", "token"}
+assert record["format"] == 1 and record["pid"] > 0 and record["token"]
+PY
+    : > "$owner_release"
+    wait "$first_pid"
+    wait "$second_pid"
+    [ ! -e "$lock_record" ] \
+        || fail_test "$case_name lock winner did not release its exact record"
+}
+
+ATOMIC_LOCK_FILE="$TMP_ROOT/atomic-lock/runtime/deploy-release.lock"
+run_competing_lock_case atomic "$ATOMIC_LOCK_FILE"
+
+STALE_LOCK_FILE="$TMP_ROOT/stale-lock/runtime/deploy-release.lock"
+mkdir -p "$(dirname "$STALE_LOCK_FILE")"
+python3 - "${STALE_LOCK_FILE}.d" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
+path = sys.argv[1]
+record = {"format": 1, "identity": "dead-owner", "pid": 2147483647, "token": "stale.token"}
+fd, temporary = tempfile.mkstemp(prefix=os.path.basename(path) + ".seed.", dir=os.path.dirname(path))
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    json.dump(record, handle, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, path)
+PY
+run_competing_lock_case stale "$STALE_LOCK_FILE"
+
+# A former owner must neither validate nor unlink a record atomically replaced
+# under the guard. This is the ABA boundary cleanup paths rely on.
+REPLACED_LOCK_FILE="$TMP_ROOT/replaced-lock/runtime/deploy-release.lock"
+REPLACED_RECORD="${REPLACED_LOCK_FILE}.d"
+REPLACED_READY="$TMP_ROOT/replaced-lock/owner.ready"
+REPLACED_CHECK="$TMP_ROOT/replaced-lock/owner.check"
+REPLACED_RESULT="$TMP_ROOT/replaced-lock/owner.result"
+mkdir -p "$(dirname "$REPLACED_LOCK_FILE")"
+bash -c '
+    set -u
+    . "$1"
+    adk_acquire_routine_asset_lock "$2" 0
+    : > "$3"
+    while [ ! -e "$4" ]; do sleep 0.01; done
+    if adk_routine_asset_lock_owned "$2"; then
+        owned=owned
+    else
+        owned=replaced
+    fi
+    if adk_release_routine_asset_lock >/dev/null 2>&1; then
+        released=released
+    else
+        released=refused
+    fi
+    printf "%s:%s\n" "$owned" "$released" > "$5"
+' _ "$REPO_ROOT/scripts/routine-asset-surface.sh" "$REPLACED_LOCK_FILE" \
+    "$REPLACED_READY" "$REPLACED_CHECK" "$REPLACED_RESULT" &
+REPLACED_OWNER_PID=$!
+wait_for_test_file "$REPLACED_READY"
+REPLACEMENT_TOKEN='replacement.owner.token'
+python3 - "$REPLACED_RECORD" "$$" "$REPLACEMENT_TOKEN" <<'PY'
+import fcntl
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+path, pid_text, token = sys.argv[1:]
+guard = os.open(path + ".guard", os.O_RDWR | os.O_CREAT, 0o600)
+try:
+    fcntl.flock(guard, fcntl.LOCK_EX)
+    identity = subprocess.run(
+        ["ps", "-o", "lstart=", "-p", pid_text],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    ).stdout.strip()
+    record = {"format": 1, "identity": identity, "pid": int(pid_text), "token": token}
+    fd, temporary = tempfile.mkstemp(prefix=os.path.basename(path) + ".replace.", dir=os.path.dirname(path))
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(record, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+finally:
+    os.close(guard)
+PY
+: > "$REPLACED_CHECK"
+wait "$REPLACED_OWNER_PID"
+if [ "$(<"$REPLACED_RESULT")" != 'replaced:refused' ] \
+  || ! grep -Fq "\"token\": \"$REPLACEMENT_TOKEN\"" "$REPLACED_RECORD"; then
+    fail_test 'replaced lock record was accepted or removed by its former owner'
+fi
+ADK_ROUTINE_ASSET_LOCK_DIR="$REPLACED_RECORD" \
+    ADK_ROUTINE_ASSET_LOCK_TOKEN="$REPLACEMENT_TOKEN" \
+    adk_release_routine_asset_lock
 
 # Once health has durably selected commit, retry/recovery must retain the new
 # generation instead of rolling assets back beside the proven new binary.
@@ -392,7 +672,7 @@ assert_invalid_routine_source() {
     mkdir -p "$root/routines"
     seed_required_helpers "$root/routine-helpers" "$name"
     printf '%s\n' "$body" > "$root/routines/mutant.js"
-    if adk_validate_repo_routine_assets "$root" >/dev/null 2>&1; then
+    if adk_validate_quickjs_routine_tree "$root/routines" >/dev/null 2>&1; then
         fail_test "lexical validator accepted $name marker mutant"
     fi
 }
@@ -418,7 +698,7 @@ assert_invalid_routine_source noncallable-tick \
 EMPTY_ROOT="$TMP_ROOT/lexer-empty"
 mkdir -p "$EMPTY_ROOT/routines"
 seed_required_helpers "$EMPTY_ROOT/routine-helpers" 'empty'
-if adk_validate_repo_routine_assets "$EMPTY_ROOT" >/dev/null 2>&1; then
+if adk_validate_quickjs_routine_tree "$EMPTY_ROOT/routines" >/dev/null 2>&1; then
     fail_test 'empty bundled routines root passed validation'
 fi
 VALID_ROOT="$TMP_ROOT/lexer-valid"
@@ -434,10 +714,10 @@ printf '%s\n' \
 printf '%s\n' \
     'agentdesk.routines.register({ name: "arrow", tick: (ctx) => ({ action: "complete" }) });' \
     > "$VALID_ROOT/routines/arrow-value.js"
-adk_validate_repo_routine_assets "$VALID_ROOT"
+adk_validate_quickjs_routine_tree "$VALID_ROOT/routines"
 printf '%s\n' 'const decoy = "agentdesk.routines.register({})";' \
     > "$VALID_ROOT/routines/second-invalid.js"
-if adk_validate_repo_routine_assets "$VALID_ROOT" >/dev/null 2>&1; then
+if adk_validate_quickjs_routine_tree "$VALID_ROOT/routines" >/dev/null 2>&1; then
     fail_test 'validator did not require a real registration in every JavaScript file'
 fi
 rm "$VALID_ROOT/routines/second-invalid.js"
@@ -447,10 +727,26 @@ rm "$VALID_ROOT/routines/second-invalid.js"
 mkdir -p "$VALID_ROOT/routines/monitoring"
 printf '%s\n' 'module.exports = {};' \
     > "$VALID_ROOT/routines/monitoring/local_worktree_inventory.js"
-if adk_validate_repo_routine_assets "$VALID_ROOT" >/dev/null 2>&1; then
+if adk_validate_quickjs_routine_tree "$VALID_ROOT/routines" >/dev/null 2>&1; then
     fail_test 'non-QuickJS helper copied into routines passed validation'
 fi
 rm "$VALID_ROOT/routines/monitoring/local_worktree_inventory.js"
+
+# Lexical inspection is diagnostic only. Runtime-valid registrations can build
+# their spec programmatically; exact candidate evaluation owns acceptance.
+PROGRAMMATIC_ROOT="$TMP_ROOT/programmatic-registration"
+seed_required_helpers "$PROGRAMMATIC_ROOT/routine-helpers" 'programmatic'
+mkdir -p "$PROGRAMMATIC_ROOT/routines"
+printf '%s\n' \
+    'const spec = { name: "programmatic", tick() { return { action: "complete" }; } };' \
+    'agentdesk.routines.register(spec);' \
+    > "$PROGRAMMATIC_ROOT/routines/programmatic.js"
+if adk_validate_quickjs_routine_tree \
+    "$PROGRAMMATIC_ROOT/routines" >/dev/null 2>&1; then
+    fail_test 'lexical diagnostic unexpectedly modeled programmatic registration'
+fi
+adk_validate_repo_routine_assets "$PROGRAMMATIC_ROOT" >/dev/null 2>&1 \
+    || fail_test 'lexical diagnostic remained an authoritative production gate'
 
 LINK_ROOT="$TMP_ROOT/symlink-source"
 seed_source "$LINK_ROOT" 'linked'
@@ -495,7 +791,7 @@ set -e
 unset -f rsync
 [ "$RSYNC_STATUS" -ne 0 ] \
     && [ "$(<"$RSYNC_RUNTIME/routine-helpers/generation-marker")" = 'v0' ] \
-    && [ ! -e "$RSYNC_TXN/staged/routine-helpers" ] \
+    && [ ! -e "$RSYNC_TXN/staged/release-root/routine-helpers" ] \
     || fail_test 'rsync failure was masked or changed live helpers'
 adk_abort_routine_asset_transaction "$RSYNC_RUNTIME" "$RSYNC_TXN"
 release_runtime_lock
@@ -525,18 +821,70 @@ if adk_guard_peer_routine_asset_paths '-oProxyCommand=evil' "$PEER_ROOT" 7 \
     fail_test 'peer guard accepted an option-like SSH destination'
 fi
 PEER_RSYNC_ARGS=()
+PEER_FAST_PROBE=0
+ssh() {
+    case "${4:-}" in
+        *rsync*--protect-args*--version*)
+            PEER_FAST_PROBE=$((PEER_FAST_PROBE + 1))
+            return 0
+            ;;
+        *) return 93 ;;
+    esac
+}
 rsync() {
     PEER_RSYNC_ARGS=("$@")
     return 0
 }
 adk_rsync_peer_asset_surface "$VALID_ROOT/routines" 'operator@peer.local' \
     "$PEER_ROOT" 'routines' 7
-unset -f rsync
+unset -f rsync ssh
+[ "$PEER_FAST_PROBE" -eq 1 ] \
+    || fail_test 'peer rsync fast path did not handshake remote protect-args support'
 printf '%s\n' "${PEER_RSYNC_ARGS[@]}" | grep -Fxq -- '--protect-args' \
     || fail_test 'peer rsync omitted --protect-args'
 [ "${PEER_RSYNC_ARGS[${#PEER_RSYNC_ARGS[@]}-1]}" = \
     "operator@peer.local:$PEER_ROOT/routines/" ] \
     || fail_test 'peer rsync split or rewrote the remote metacharacter path'
+
+# A modern local rsync is insufficient when the remote stock macOS rsync
+# rejects protect-args. The capability matrix must choose the quoted tar path
+# without ever attempting an unsafe/unprotected rsync transfer.
+REMOTE_LEGACY_ROOT="$TMP_ROOT/remote legacy/ADK Root;[\$HOME]"
+REMOTE_LEGACY_PROBE_MARKER="$TMP_ROOT/remote-legacy.probe"
+REMOTE_LEGACY_TAR_MARKER="$TMP_ROOT/remote-legacy.tar"
+REMOTE_LEGACY_LOCAL_PROBES=0
+REMOTE_LEGACY_RSYNC_TRANSFERS=0
+rsync() {
+    if [ "${1:-}" = '--protect-args' ] && [ "${2:-}" = '--version' ]; then
+        REMOTE_LEGACY_LOCAL_PROBES=$((REMOTE_LEGACY_LOCAL_PROBES + 1))
+        return 0
+    fi
+    REMOTE_LEGACY_RSYNC_TRANSFERS=$((REMOTE_LEGACY_RSYNC_TRANSFERS + 1))
+    return 94
+}
+ssh() {
+    case "${4:-}" in
+        *rsync*--protect-args*--version*)
+            : > "$REMOTE_LEGACY_PROBE_MARKER"
+            return 1
+            ;;
+        *)
+            : > "$REMOTE_LEGACY_TAR_MARKER"
+            command bash -c "${4:?missing remote-legacy fake-ssh command}"
+            ;;
+    esac
+}
+adk_rsync_peer_asset_surface "$VALID_ROOT/routines" 'operator@peer.local' \
+    "$REMOTE_LEGACY_ROOT" 'routines' 7
+unset -f ssh rsync
+if [ "$REMOTE_LEGACY_LOCAL_PROBES" -ne 1 ] \
+  || [ "$REMOTE_LEGACY_RSYNC_TRANSFERS" -ne 0 ] \
+  || [ ! -f "$REMOTE_LEGACY_PROBE_MARKER" ] \
+  || [ ! -f "$REMOTE_LEGACY_TAR_MARKER" ] \
+  || ! cmp "$VALID_ROOT/routines/valid.js" \
+      "$REMOTE_LEGACY_ROOT/routines/valid.js" >/dev/null; then
+    fail_test 'local-modern remote-legacy matrix bypassed safe tar fallback'
+fi
 
 # Legacy macOS rsync rejects --protect-args. Its fallback must transfer the
 # same metacharacter path through a quoted tar-over-SSH command, never retry an
@@ -597,18 +945,38 @@ if adk_claim_routine_asset_incoming "$INBOX_RUNTIME" "$INBOX_PATH" \
     "$INBOX_RUNTIME/runtime/deploy-release.lock" >/dev/null 2>&1; then
     fail_test 'peer inbox claim succeeded without owning the shared lock'
 fi
-acquire_runtime_lock "$INBOX_RUNTIME"
+CURRENT_LOCK="$INBOX_RUNTIME/runtime/custom-deploy.lock"
+adk_acquire_routine_asset_lock "$CURRENT_LOCK" 0
+ssh() {
+    command bash -c "${4:?missing claimed-inbox fake-ssh command}"
+}
+# Receiver claim is a two-step protocol: lock publication, then .claimed
+# publication. Sender cleanup must refuse the inbox throughout that exact gap,
+# not only after the marker appears.
+if adk_remove_peer_asset_incoming 'operator@peer.local' "$INBOX_RUNTIME" \
+    "$INBOX_TOKEN" 7 "$CURRENT_LOCK" >/dev/null 2>&1; then
+    fail_test 'sender cleanup won the receiver lock-to-claim race'
+fi
+[ -d "$INBOX_PATH" ] && [ ! -e "$INBOX_PATH/.claimed" ] \
+    || fail_test 'sender cleanup damaged the unclaimed inbox of the remote lock owner'
 adk_claim_routine_asset_incoming "$INBOX_RUNTIME" "$INBOX_PATH" "$CURRENT_LOCK"
+if adk_remove_peer_asset_incoming 'operator@peer.local' "$INBOX_RUNTIME" \
+    "$INBOX_TOKEN" 7 "$CURRENT_LOCK" >/dev/null 2>&1; then
+    fail_test 'sender cleanup removed an inbox already claimed by the remote lock owner'
+fi
+unset -f ssh
+[ -d "$INBOX_PATH" ] && [ -f "$INBOX_PATH/.claimed" ] \
+    || fail_test 'failed sender cleanup damaged the remote-owned claimed inbox'
 INBOX_TXN="$(adk_begin_routine_asset_transaction "$INBOX_RUNTIME" "$CURRENT_LOCK")"
 adk_stage_routines "$INBOX_REPO" "$INBOX_RUNTIME" "$INBOX_TXN" \
     "$INBOX_PATH/routines" >/dev/null
 adk_stage_routine_helpers "$INBOX_REPO" "$INBOX_RUNTIME" "$INBOX_TXN" \
     "$INBOX_PATH/routine-helpers" >/dev/null
 [ "$(<"$INBOX_RUNTIME/routines/generation-marker")" = 'v0' ] \
-    && [ "$(<"$INBOX_TXN/staged/routines/generation-marker")" = 'v2' ] \
-    && [ "$(<"$INBOX_TXN/staged/routine-helpers/generation-marker")" = 'v2' ] \
-    && [ -f "$INBOX_TXN/staged/routines/operator-private.js" ] \
-    && [ -f "$INBOX_TXN/staged/routine-helpers/operator-private.py" ] \
+    && [ "$(<"$INBOX_TXN/staged/release-root/routines/generation-marker")" = 'v2' ] \
+    && [ "$(<"$INBOX_TXN/staged/release-root/routine-helpers/generation-marker")" = 'v2' ] \
+    && [ -f "$INBOX_TXN/staged/release-root/routines/operator-private.js" ] \
+    && [ -f "$INBOX_TXN/staged/release-root/routine-helpers/operator-private.py" ] \
     || fail_test 'remote lock-owned inbox staging changed live or lost overlay precedence'
 adk_abort_routine_asset_transaction "$INBOX_RUNTIME" "$INBOX_TXN"
 adk_remove_claimed_routine_asset_incoming "$INBOX_RUNTIME" "$INBOX_PATH" "$CURRENT_LOCK"
@@ -659,12 +1027,24 @@ eval "$(extract_function prepare_install_routine_asset_surfaces)"
 eval "$(extract_function promote_install_routine_asset_surfaces)"
 eval "$(extract_function finalize_install_routine_asset_surfaces)"
 eval "$(extract_function _install_sha256_file)"
+eval "$(extract_function _install_binary_has_immutable_flag)"
+eval "$(extract_function _install_clear_binary_immutable_flag)"
+eval "$(extract_function _install_restore_old_binary_flag)"
+eval "$(extract_function sign_binary_with_fallback)"
 eval "$(extract_function prepare_install_binary_transaction)"
 eval "$(extract_function promote_install_binary_transaction)"
 eval "$(extract_function _install_binary_live_sha256)"
 eval "$(extract_function _install_binary_is_promoted)"
 eval "$(extract_function _restore_install_binary_transaction)"
 eval "$(extract_function _install_cleanup)"
+eval "$(extract_function _install_service_job_is_loaded)"
+eval "$(extract_function _capture_install_service_process)"
+eval "$(extract_function install_service_is_running)"
+eval "$(extract_function wait_for_install_service_stop)"
+eval "$(extract_function stop_install_service_for_promotion)"
+eval "$(extract_function start_install_service)"
+eval "$(extract_function stop_install_service_for_recovery)"
+eval "$(extract_function restart_previous_install_service)"
 warn() { :; }
 
 reset_install_transaction_state() {
@@ -676,10 +1056,22 @@ reset_install_transaction_state() {
     INSTALL_BINARY_NEW_SHA256=""
     INSTALL_BINARY_OLD_SHA256=""
     INSTALL_BINARY_HAD_LIVE=0
+    INSTALL_BINARY_OLD_IMMUTABLE=0
     INSTALL_BINARY_SWAP_ARMED=0
     INSTALL_BINARY_PROMOTED=0
     INSTALL_COMMIT_INTENT=0
     INSTALL_ASSET_FINALIZED=0
+    INSTALL_LOCK_FILE=""
+    INSTALL_LOCK_HELD=0
+    INSTALL_SERVICE_WAS_RUNNING=0
+    INSTALL_SERVICE_STOP_ATTEMPTED=0
+    INSTALL_SERVICE_STOP_CONFIRMED=0
+    INSTALL_SERVICE_START_ATTEMPTED=0
+    INSTALL_SERVICE_START_CONFIRMED=0
+    INSTALL_SERVICE_HEALTHY=0
+    INSTALL_LAUNCHD_DOMAIN=""
+    INSTALL_SERVICE_OLD_PID=""
+    INSTALL_SERVICE_OLD_IDENTITY=""
 
     [ -z "$INSTALL_ROUTINE_ASSET_TXN" ] \
         && [ -z "$INSTALL_ROUTINE_ASSET_RUNTIME" ] \
@@ -714,6 +1106,24 @@ make_install_runtime() {
     chmod +x "$runtime_root/bin/agentdesk"
 }
 
+write_fake_install_candidate() {
+    local path="$1"
+
+    printf '%s\n' \
+        '#!/bin/bash' \
+        'set -euo pipefail' \
+        '[ "${1:-}" = validate-routines ]' \
+        '[ "${2:-}" = --root ]' \
+        'root="${3:-}"' \
+        '[ "${4:-}" = --runtime-root ]' \
+        'runtime_root="${5:-}"' \
+        '[ "$root" = "$runtime_root/routines" ]' \
+        '[ -d "$root" ] && [ -d "$runtime_root/routine-helpers" ]' \
+        '# new-binary' \
+        > "$path"
+    chmod +x "$path"
+}
+
 BAD_ARTIFACT="$TMP_ROOT/old-artifact"
 INSTALL_RUNTIME="$TMP_ROOT/install-release"
 mkdir -p "$BAD_ARTIFACT/scripts" "$BAD_ARTIFACT/routines" \
@@ -738,8 +1148,33 @@ seed_source "$GOOD_ARTIFACT" 'v1'
 mkdir -p "$GOOD_ARTIFACT/scripts"
 cp "$REPO_ROOT/scripts/routine-asset-surface.sh" "$GOOD_ARTIFACT/scripts/"
 cp "$REPO_ROOT/scripts/validate-quickjs-routines.py" "$GOOD_ARTIFACT/scripts/"
-printf 'new-binary\n' > "$GOOD_ARTIFACT/agentdesk"
-chmod +x "$GOOD_ARTIFACT/agentdesk"
+write_fake_install_candidate "$GOOD_ARTIFACT/agentdesk"
+
+# A failed signing operation cannot be laundered by verification of a signature
+# already present on the copied payload. The sign status itself is authoritative.
+SIGN_FAILURE_TARGET="$TMP_ROOT/sign-failure-candidate"
+cp "$GOOD_ARTIFACT/agentdesk" "$SIGN_FAILURE_TARGET"
+SIGN_FAILURE_EVENTS=''
+CODESIGN_IDENTITY='-'
+codesign() {
+    case "${1:-}" in
+        -s)
+            SIGN_FAILURE_EVENTS="${SIGN_FAILURE_EVENTS}sign "
+            return 42
+            ;;
+        -v)
+            SIGN_FAILURE_EVENTS="${SIGN_FAILURE_EVENTS}verify "
+            return 0
+            ;;
+    esac
+}
+set +e
+sign_binary_with_fallback "$SIGN_FAILURE_TARGET" >/dev/null 2>&1
+SIGN_FAILURE_STATUS=$?
+set -e
+unset -f codesign
+[ "$SIGN_FAILURE_STATUS" -ne 0 ] && [ "$SIGN_FAILURE_EVENTS" = 'sign ' ] \
+    || fail_test 'failed codesign operation was accepted through verification'
 
 # A binary copy failure occurs while both live surfaces still carry v0.
 COPY_FAIL_RUNTIME="$TMP_ROOT/install-copy-fail"
@@ -852,18 +1287,170 @@ printf 'operator helper\n' > "$INSTALL_RUNTIME/routine-helpers/operator-private.
     _install_cleanup 0
 )
 [ "$(<"$INSTALL_RUNTIME/routines/generation-marker")" = 'v1' ] \
-    && [ "$(<"$INSTALL_RUNTIME/bin/agentdesk")" = 'new-binary' ] \
+    && grep -Fqx '# new-binary' "$INSTALL_RUNTIME/bin/agentdesk" \
     && [ ! -e "$INSTALL_RUNTIME/routines.old" ] \
     && [ -f "$INSTALL_RUNTIME/routines/operator-private.txt" ] \
     && [ -f "$INSTALL_RUNTIME/routine-helpers/operator-private.txt" ] \
     || fail_test 'installer did not atomically promote and finalize its paired payload'
+
+# Darwin update path: sign the private stage before hashing, clear the previous
+# uchg only at the armed rename boundary, and restore both bytes and uchg after
+# a post-promotion failure.
+IMMUTABLE_RUNTIME="$TMP_ROOT/install-immutable"
+make_install_runtime "$IMMUTABLE_RUNTIME"
+(
+    reset_install_transaction_state
+    OS=darwin
+    LIVE_FLAG='uchg'
+    FLAG_EVENTS=''
+    prepare_install_routine_asset_surfaces "$GOOD_ARTIFACT" "$IMMUTABLE_RUNTIME"
+    sign_binary_with_fallback() {
+        printf '# signed-stage\n' >> "$1"
+    }
+    stat() {
+        if [ "${1:-}" = '-f' ] && [ "${2:-}" = '%Sf' ]; then
+            if [ "${3:-}" = "$IMMUTABLE_RUNTIME/bin/agentdesk" ]; then
+                printf '%s\n' "$LIVE_FLAG"
+            else
+                printf '%s\n' '-'
+            fi
+            return 0
+        fi
+        command stat "$@"
+    }
+    chflags() {
+        local operation="$1" path="$2"
+        FLAG_EVENTS="${FLAG_EVENTS}${operation}:${path} "
+        if [ "$path" = "$IMMUTABLE_RUNTIME/bin/agentdesk" ]; then
+            case "$operation" in
+                nouchg) LIVE_FLAG='-' ;;
+                uchg) LIVE_FLAG='uchg' ;;
+                *) return 1 ;;
+            esac
+        fi
+    }
+    prepare_install_binary_transaction "$GOOD_ARTIFACT/agentdesk" "$IMMUTABLE_RUNTIME"
+    [ "$INSTALL_BINARY_NEW_SHA256" = \
+        "$(_install_sha256_file "$INSTALL_BINARY_STAGE")" ] \
+        && grep -Fq 'signed-stage' "$INSTALL_BINARY_STAGE" \
+        && ! grep -Fq 'signed-stage' "$GOOD_ARTIFACT/agentdesk" \
+        || exit 95
+    promote_install_routine_asset_surfaces
+    promote_install_binary_transaction
+    set +e
+    _install_cleanup 96
+    cleanup_status=$?
+    set -e
+    [ "$cleanup_status" -eq 96 ] \
+        && [ "$LIVE_FLAG" = 'uchg' ] \
+        && [[ "$FLAG_EVENTS" == *"nouchg:$IMMUTABLE_RUNTIME/bin/agentdesk "* ]] \
+        && [[ "$FLAG_EVENTS" == *"uchg:$IMMUTABLE_RUNTIME/bin/agentdesk "* ]]
+) || fail_test 'Darwin staged signing or immutable rollback state diverged'
+assert_install_generation "$IMMUTABLE_RUNTIME" 'v0' 'old-binary' \
+    || fail_test 'immutable update failure did not restore the old generation'
+
+# Bootstrap can side-effect successfully and still return failure. Cleanup must
+# stop that possible new process before restoring the old pair, then restart the
+# service that was running before the installer entered the live boundary.
+BOOTSTRAP_RUNTIME="$TMP_ROOT/install-bootstrap-gap"
+BOOTSTRAP_HOME="$TMP_ROOT/install-bootstrap-home"
+make_install_runtime "$BOOTSTRAP_RUNTIME"
+mkdir -p "$BOOTSTRAP_HOME/Library/LaunchAgents"
+: > "$BOOTSTRAP_HOME/Library/LaunchAgents/com.agentdesk.release.plist"
+(
+    reset_install_transaction_state
+    HOME="$BOOTSTRAP_HOME"
+    LAUNCHD_LABEL='com.agentdesk.release'
+    SERVICE_ACTIVE=1
+    BOOTSTRAP_CALLS=0
+    SERVICE_EVENTS=''
+    launchd_domain() { printf 'gui/test\n'; }
+    launchctl() {
+        case "${1:-}" in
+            print) [ "$SERVICE_ACTIVE" = 1 ] ;;
+            bootout)
+                SERVICE_ACTIVE=0
+                SERVICE_EVENTS="${SERVICE_EVENTS}stop "
+                ;;
+            bootstrap)
+                BOOTSTRAP_CALLS=$((BOOTSTRAP_CALLS + 1))
+                SERVICE_ACTIVE=1
+                if [ "$BOOTSTRAP_CALLS" -eq 1 ]; then
+                    SERVICE_EVENTS="${SERVICE_EVENTS}new-gap "
+                    return 143
+                fi
+                SERVICE_EVENTS="${SERVICE_EVENTS}restart-old "
+                ;;
+        esac
+    }
+    prepare_install_routine_asset_surfaces "$GOOD_ARTIFACT" "$BOOTSTRAP_RUNTIME"
+    prepare_install_binary_transaction "$GOOD_ARTIFACT/agentdesk" "$BOOTSTRAP_RUNTIME"
+    stop_install_service_for_promotion
+    promote_install_routine_asset_surfaces
+    promote_install_binary_transaction
+    set +e
+    start_install_service "$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.plist"
+    start_status=$?
+    _install_cleanup 143
+    cleanup_status=$?
+    set -e
+    [ "$start_status" -ne 0 ] \
+        && [ "$cleanup_status" -eq 143 ] \
+        && [ "$SERVICE_ACTIVE" = 1 ] \
+        && [ "$SERVICE_EVENTS" = 'stop new-gap stop restart-old ' ]
+) || fail_test 'installer bootstrap side-effect failure escaped paired recovery'
+assert_install_generation "$BOOTSTRAP_RUNTIME" 'v0' 'old-binary' \
+    || fail_test 'bootstrap failure did not restore the previous install pair'
+
+# launchctl can unload before the old dcserver PID exits. A TERM in that drain
+# window must make installer cleanup wait for the captured process instance,
+# then restart the untouched old pair.
+(
+    reset_install_transaction_state
+    INSTALL_ROUTINE_ASSET_RUNTIME="$TMP_ROOT/install-drain-runtime"
+    INSTALL_LOCK_FILE="$INSTALL_ROUTINE_ASSET_RUNTIME/runtime/deploy-release.lock"
+    INSTALL_LOCK_HELD=1
+    INSTALL_LAUNCHD_DOMAIN='gui/test'
+    INSTALL_SERVICE_WAS_RUNNING=1
+    INSTALL_SERVICE_STOP_ATTEMPTED=1
+    INSTALL_SERVICE_STOP_CONFIRMED=0
+    INSTALL_SERVICE_OLD_PID=4242
+    INSTALL_SERVICE_OLD_IDENTITY='old-instance'
+    INSTALL_DRAINING=1
+    INSTALL_DRAIN_EVENTS=''
+    LAUNCHD_LABEL='com.agentdesk.release'
+    _install_service_job_is_loaded() { return 1; }
+    adk_process_instance_alive() { [ "$INSTALL_DRAINING" = 1 ]; }
+    sleep() {
+        INSTALL_DRAIN_EVENTS="${INSTALL_DRAIN_EVENTS}drain-wait "
+        INSTALL_DRAINING=0
+    }
+    _adk_active_txn() { return 1; }
+    adk_routine_asset_lock_owned() { return 0; }
+    adk_release_routine_asset_lock() {
+        INSTALL_DRAIN_EVENTS="${INSTALL_DRAIN_EVENTS}release-lock "
+    }
+    restart_previous_install_service() {
+        INSTALL_DRAIN_EVENTS="${INSTALL_DRAIN_EVENTS}restart-old "
+    }
+    set +e
+    _install_cleanup 143
+    cleanup_status=$?
+    set -e
+    [ "$cleanup_status" -eq 143 ] \
+        && [ "$INSTALL_SERVICE_STOP_CONFIRMED" = 1 ] \
+        && [ "$INSTALL_DRAIN_EVENTS" = \
+            'drain-wait restart-old release-lock ' ]
+) || fail_test 'installer TERM during old-PID drain stranded the previous service'
 
 # Exact stale-backup sequence: v0/M100 backup survives a healthy v1/M101
 # cleanup failure, then v2 still embeds M101 and fails health. The rollback
 # guard must read M100 from the digest-bound backup sidecar, never M101 from the
 # now-newer live release manifest.
 eval "$(extract_function _sha256_file "$REPO_ROOT/scripts/deploy-release.sh")"
+eval "$(extract_function _sha256_tree "$REPO_ROOT/scripts/deploy-release.sh")"
 eval "$(extract_function _manifest_latest_migration_name "$REPO_ROOT/scripts/deploy-release.sh")"
+eval "$(extract_function _manifest_source_git_sha "$REPO_ROOT/scripts/deploy-release.sh")"
 eval "$(extract_function _write_rollback_backup_metadata "$REPO_ROOT/scripts/deploy-release.sh")"
 eval "$(extract_function _rollback_backup_latest_migration_name "$REPO_ROOT/scripts/deploy-release.sh")"
 eval "$(extract_function _latest_postgres_migration_path "$REPO_ROOT/scripts/deploy-release.sh")"
@@ -877,21 +1464,30 @@ mkdir -p "$MIGRATION_REPO/migrations/postgres" "$MIGRATION_RUNTIME/bin" \
     "$MIGRATION_RUNTIME/runtime"
 printf '%s\n' '-- M100' > "$MIGRATION_REPO/migrations/postgres/0100_m100.sql"
 printf '%s\n' '-- M101' > "$MIGRATION_REPO/migrations/postgres/0101_m101.sql"
+seed_live "$MIGRATION_RUNTIME" v0
 printf 'v0-binary\n' > "$MIGRATION_RUNTIME/bin/agentdesk.prev"
-printf '%s\n' '{"latest_postgres_migration":"0100_m100.sql"}' \
+printf '%s\n' \
+    '{"repo_head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","latest_postgres_migration":"0100_m100.sql"}' \
     > "$MIGRATION_RUNTIME/runtime/release-source.json"
 REL_BINARY_BACKUP="$MIGRATION_RUNTIME/bin/agentdesk.prev"
 REL_BINARY_BACKUP_META="$REL_BINARY_BACKUP.meta"
+ROUTINE_ASSET_TXN="$MIGRATION_RUNTIME/runtime/routine-assets.txn.V0"
+mkdir -p "$ROUTINE_ASSET_TXN"
 ADK_REL="$MIGRATION_RUNTIME" REPO="$MIGRATION_REPO" \
-    _write_rollback_backup_metadata "$REL_BINARY_BACKUP" "$REL_BINARY_BACKUP_META"
+    _write_rollback_backup_metadata \
+        "$REL_BINARY_BACKUP" "$REL_BINARY_BACKUP_META" "$ROUTINE_ASSET_TXN"
 [ "$(ADK_REL="$MIGRATION_RUNTIME" REPO="$MIGRATION_REPO" \
     _rollback_backup_latest_migration_name)" = '0100_m100.sql' ] \
     || fail_test 'rollback sidecar was not bound to the v0 backup generation'
 
 # v1 became healthy and wrote M101, but its simulated backup cleanup failed.
+seed_live "$MIGRATION_RUNTIME" v1
 printf 'v1-binary\n' > "$MIGRATION_RUNTIME/bin/agentdesk"
-printf '%s\n' '{"latest_postgres_migration":"0101_m101.sql"}' \
+printf '%s\n' \
+    '{"repo_head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","latest_postgres_migration":"0101_m101.sql"}' \
     > "$MIGRATION_RUNTIME/runtime/release-source.json"
+ROUTINE_ASSET_TXN="$MIGRATION_RUNTIME/runtime/routine-assets.txn.V2"
+mkdir -p "$ROUTINE_ASSET_TXN"
 set +e
 ADK_REL="$MIGRATION_RUNTIME" REPO="$MIGRATION_REPO" \
     _rollback_would_brick_on_migration >/dev/null 2>&1
@@ -918,8 +1514,14 @@ set -e
 # confirm start; cleanup must stop that possible new process, restore the old
 # pair, and restart it. A second case covers failure immediately after bootout.
 eval "$(extract_function stop_deploy_service_for_rollback "$REPO_ROOT/scripts/deploy.sh")"
+eval "$(extract_function _deploy_service_job_is_running "$REPO_ROOT/scripts/deploy.sh")"
+eval "$(extract_function _capture_deploy_service_process "$REPO_ROOT/scripts/deploy.sh")"
+eval "$(extract_function deploy_service_is_running "$REPO_ROOT/scripts/deploy.sh")"
+eval "$(extract_function wait_for_deploy_service_stop "$REPO_ROOT/scripts/deploy.sh")"
+eval "$(extract_function stop_deploy_service_for_promotion "$REPO_ROOT/scripts/deploy.sh")"
 eval "$(extract_function cleanup_deploy_transaction "$REPO_ROOT/scripts/deploy.sh")"
 eval "$(extract_function restart_launchd "$REPO_ROOT/scripts/deploy.sh")"
+eval "$(extract_function clear_deploy_immutable_flag "$REPO_ROOT/scripts/deploy.sh")"
 
 (
     HOME="$TMP_ROOT/restart-gap-home"
@@ -934,6 +1536,10 @@ eval "$(extract_function restart_launchd "$REPO_ROOT/scripts/deploy.sh")"
     DEPLOY_SERVICE_STOP_ATTEMPTED=0
     DEPLOY_SERVICE_START_ATTEMPTED=0
     DEPLOY_SERVICE_START_CONFIRMED=0
+    DEPLOY_SERVICE_STOP_CONFIRMED=1
+    DEPLOY_SERVICE_WAS_RUNNING=1
+    DEPLOY_LOCK_HELD=1
+    DEPLOY_LOCK_FILE="$AD_HOME/runtime/deploy-release.lock"
     SERVICE_ACTIVE=0
     RESTART_EVENTS=''
     _launchd_domain() { printf 'gui/test\n'; }
@@ -982,11 +1588,12 @@ eval "$(extract_function restart_launchd "$REPO_ROOT/scripts/deploy.sh")"
         RESTART_EVENTS="${RESTART_EVENTS}rollback-assets "
     }
     adk_commit_routine_asset_transaction_forward() { return 82; }
+    adk_routine_asset_lock_owned() { return 0; }
     adk_release_routine_asset_lock() {
         RESTART_EVENTS="${RESTART_EVENTS}release-lock "
     }
     cleanup_backup() { RESTART_EVENTS="${RESTART_EVENTS}cleanup-backup "; }
-    restart_launchd() {
+    start_previous_deploy_service() {
         SERVICE_ACTIVE=1
         RESTART_EVENTS="${RESTART_EVENTS}restart-old "
     }
@@ -1009,6 +1616,10 @@ eval "$(extract_function restart_launchd "$REPO_ROOT/scripts/deploy.sh")"
     DEPLOY_SERVICE_STOP_ATTEMPTED=1
     DEPLOY_SERVICE_START_ATTEMPTED=0
     DEPLOY_SERVICE_START_CONFIRMED=0
+    DEPLOY_SERVICE_STOP_CONFIRMED=1
+    DEPLOY_SERVICE_WAS_RUNNING=1
+    DEPLOY_LOCK_HELD=1
+    DEPLOY_LOCK_FILE="$AD_HOME/runtime/deploy-release.lock"
     STOP_EVENTS=''
     [ "$OS" = linux ] \
         && [ "$DEPLOY_HEALTH_OK" -eq 0 ] \
@@ -1027,9 +1638,10 @@ eval "$(extract_function restart_launchd "$REPO_ROOT/scripts/deploy.sh")"
     restore_previous_install() { STOP_EVENTS="${STOP_EVENTS}restore-binary "; }
     adk_rollback_routine_asset_transaction() { STOP_EVENTS="${STOP_EVENTS}rollback-assets "; }
     adk_commit_routine_asset_transaction_forward() { return 83; }
+    adk_routine_asset_lock_owned() { return 0; }
     adk_release_routine_asset_lock() { :; }
     cleanup_backup() { :; }
-    restart_systemd() { STOP_EVENTS="${STOP_EVENTS}restart-old "; }
+    start_previous_deploy_service() { STOP_EVENTS="${STOP_EVENTS}restart-old "; }
     set +e
     cleanup_deploy_transaction 75
     cleanup_status=$?
@@ -1038,6 +1650,218 @@ eval "$(extract_function restart_launchd "$REPO_ROOT/scripts/deploy.sh")"
         && [ "$STOP_EVENTS" = \
             'stop-new restore-binary rollback-assets restart-old ' ]
 ) || fail_test 'failure after service stop left the restored release stopped'
+
+# Exact stop-command/trap boundary: stop completed, but TERM arrived before the
+# caller assigned STOP_CONFIRMED. Cleanup must reconcile the inactive service
+# and restart the untouched old release even though no binary rename occurred.
+(
+    OS=linux
+    AD_HOME="$TMP_ROOT/stop-confirm-gap-runtime"
+    DEPLOY_HEALTH_OK=0
+    DEPLOY_BINARY_PROMOTED=0
+    DEPLOY_RESTART_ARMED=1
+    DEPLOY_SERVICE_STOP_ATTEMPTED=1
+    DEPLOY_SERVICE_START_ATTEMPTED=0
+    DEPLOY_SERVICE_START_CONFIRMED=0
+    DEPLOY_SERVICE_STOP_CONFIRMED=0
+    DEPLOY_SERVICE_WAS_RUNNING=1
+    DEPLOY_SERVICE_OLD_PID=4242
+    DEPLOY_SERVICE_OLD_IDENTITY='old-instance'
+    DEPLOY_LOCK_HELD=1
+    DEPLOY_LOCK_FILE="$AD_HOME/runtime/deploy-release.lock"
+    STOP_GAP_EVENTS=''
+    OLD_PROCESS_DRAINING=1
+    systemctl() {
+        case "$*" in
+            *' is-active '*) return 3 ;;
+            *) return 88 ;;
+        esac
+    }
+    _adk_active_txn() { return 1; }
+    adk_process_instance_alive() { [ "$OLD_PROCESS_DRAINING" = 1 ]; }
+    sleep() {
+        STOP_GAP_EVENTS="${STOP_GAP_EVENTS}drain-wait "
+        OLD_PROCESS_DRAINING=0
+    }
+    adk_routine_asset_lock_owned() { return 0; }
+    adk_release_routine_asset_lock() {
+        STOP_GAP_EVENTS="${STOP_GAP_EVENTS}release-lock "
+    }
+    start_previous_deploy_service() {
+        STOP_GAP_EVENTS="${STOP_GAP_EVENTS}restart-old "
+    }
+    cleanup_backup() { STOP_GAP_EVENTS="${STOP_GAP_EVENTS}cleanup-backup "; }
+    error() { :; }
+    set +e
+    cleanup_deploy_transaction 143
+    cleanup_status=$?
+    set -e
+    [ "$cleanup_status" -eq 143 ] \
+        && [ "$DEPLOY_SERVICE_STOP_CONFIRMED" -eq 1 ] \
+        && [ "$STOP_GAP_EVENTS" = \
+            'drain-wait restart-old release-lock cleanup-backup ' ]
+) || fail_test 'TERM after service stop but before confirmation stranded the old release'
+
+# An immutable old binary is cleared only after exact candidate validation and
+# asset promotion. If flag clearing fails, no binary rename is attempted;
+# cleanup rolls the already-promoted assets back and restarts the old service.
+(
+    OS=darwin
+    AD_HOME="$TMP_ROOT/immutable-clear-runtime"
+    DEPLOY_HEALTH_OK=0
+    DEPLOY_BINARY_PROMOTED=0
+    DEPLOY_RESTART_ARMED=1
+    DEPLOY_SERVICE_STOP_ATTEMPTED=1
+    DEPLOY_SERVICE_START_ATTEMPTED=0
+    DEPLOY_SERVICE_START_CONFIRMED=0
+    DEPLOY_SERVICE_STOP_CONFIRMED=1
+    DEPLOY_SERVICE_WAS_RUNNING=1
+    DEPLOY_SERVICE_OLD_PID=''
+    DEPLOY_SERVICE_OLD_IDENTITY=''
+    DEPLOY_LOCK_HELD=1
+    DEPLOY_LOCK_FILE="$AD_HOME/runtime/deploy-release.lock"
+    IMMUTABLE_EVENTS=''
+    mkdir -p "$AD_HOME/libexec"
+    : > "$AD_HOME/libexec/agentdesk"
+    chflags() { return 91; }
+    stat() { printf 'uchg\n'; }
+    set +e
+    clear_deploy_immutable_flag "$AD_HOME/libexec/agentdesk"
+    clear_status=$?
+    set -e
+    [ "$clear_status" -ne 0 ] || exit 92
+    _adk_active_txn() { printf '%s\n' "$AD_HOME/runtime/fake-txn"; }
+    adk_routine_asset_transaction_phase() { printf 'promoted\n'; }
+    adk_rollback_routine_asset_transaction() {
+        IMMUTABLE_EVENTS="${IMMUTABLE_EVENTS}rollback-assets "
+    }
+    adk_commit_routine_asset_transaction_forward() { return 93; }
+    adk_routine_asset_lock_owned() { return 0; }
+    adk_release_routine_asset_lock() {
+        IMMUTABLE_EVENTS="${IMMUTABLE_EVENTS}release-lock "
+    }
+    start_previous_deploy_service() {
+        IMMUTABLE_EVENTS="${IMMUTABLE_EVENTS}restart-old "
+    }
+    cleanup_backup() { IMMUTABLE_EVENTS="${IMMUTABLE_EVENTS}cleanup-backup "; }
+    error() { :; }
+    set +e
+    cleanup_deploy_transaction "$clear_status"
+    cleanup_status=$?
+    set -e
+    [ "$cleanup_status" -eq "$clear_status" ] \
+        && [ "$IMMUTABLE_EVENTS" = \
+            'rollback-assets restart-old release-lock cleanup-backup ' ]
+) || fail_test 'immutable clear failure escaped paired asset/service recovery'
+
+# --skip-build may reuse a candidate only with a manifest binding the binary,
+# repository HEAD, and both exact asset trees. A semantically valid asset edit
+# after the build must still reject the stale generation before any stop/swap.
+eval "$(awk '
+    /^write_local_build_generation_manifest[(][)] [{]$/ { printing = 1 }
+    printing {
+        print
+        if ($0 == "PY") heredoc_closed = 1
+        else if (heredoc_closed && $0 == "}") exit
+    }
+' "$REPO_ROOT/scripts/build-release.sh")"
+eval "$(extract_function validate_local_build_generation_manifest \
+    "$REPO_ROOT/scripts/deploy.sh")"
+(
+    PROJECT_DIR="$TMP_ROOT/local-build-generation"
+    mkdir -p "$PROJECT_DIR/target/release"
+    seed_source "$PROJECT_DIR" 'build-v0'
+    write_fake_install_candidate "$PROJECT_DIR/target/release/agentdesk"
+    git -C "$PROJECT_DIR" init -q
+    git -C "$PROJECT_DIR" -c user.name=AgentDesk -c user.email=agentdesk@example.invalid \
+        add routines routine-helpers
+    git -C "$PROJECT_DIR" -c user.name=AgentDesk -c user.email=agentdesk@example.invalid \
+        commit -qm 'fixture generation'
+    write_local_build_generation_manifest \
+        "$PROJECT_DIR/target/release/agentdesk"
+    error() { :; }
+    validate_local_build_generation_manifest
+    printf '%s\n' '// evaluator-compatible v1 asset edit' \
+        >> "$PROJECT_DIR/routines/monitoring/bundled.js"
+    if validate_local_build_generation_manifest >/dev/null 2>&1; then
+        exit 94
+    fi
+) || fail_test 'stale skip-build binary was accepted with a different asset generation'
+
+# An EXIT/TERM trap installed before lock acquisition must be inert with respect
+# to another owner's transaction. No marker lookup, rollback, or release is
+# authorized until both the local held flag and on-disk token verify.
+(
+    DEPLOY_HEALTH_OK=0
+    DEPLOY_LOCK_HELD=0
+    DEPLOY_LOCK_FILE="$TMP_ROOT/prelock-owner/runtime/deploy-release.lock"
+    PRELOCK_MUTATION=''
+    _adk_active_txn() { PRELOCK_MUTATION="${PRELOCK_MUTATION}inspect "; return 1; }
+    adk_routine_asset_lock_owned() { PRELOCK_MUTATION="${PRELOCK_MUTATION}verify "; return 0; }
+    adk_release_routine_asset_lock() { PRELOCK_MUTATION="${PRELOCK_MUTATION}release "; }
+    cleanup_backup() { :; }
+    error() { :; }
+    set +e
+    cleanup_deploy_transaction 143
+    cleanup_status=$?
+    set -e
+    [ "$cleanup_status" -eq 143 ] && [ -z "$PRELOCK_MUTATION" ]
+) || fail_test 'pre-lock deploy cleanup mutated another owner transaction'
+
+# The old service must be confirmed stopped before the first live binary or
+# routine asset rename in deploy.sh.
+DEPLOY_STOP_LINE="$(awk '/^stop_deploy_service_for_promotion \\/ { print NR; exit }' \
+    "$REPO_ROOT/scripts/deploy.sh")"
+DEPLOY_PREFLIGHT_LINE="$(awk '/^adk_validate_staged_routine_asset_transaction \\/ { print NR; exit }' \
+    "$REPO_ROOT/scripts/deploy.sh")"
+DEPLOY_BINARY_LINE="$(awk '/^mv -f "\$DEPLOY_BINARY_STAGE" "\$REAL_BIN"/ { print NR; exit }' \
+    "$REPO_ROOT/scripts/deploy.sh")"
+DEPLOY_ASSET_LINE="$(awk '/^adk_promote_routine_asset_transaction \\/ { print NR; exit }' \
+    "$REPO_ROOT/scripts/deploy.sh")"
+[ -n "$DEPLOY_PREFLIGHT_LINE" ] \
+    && [ -n "$DEPLOY_STOP_LINE" ] \
+    && [ -n "$DEPLOY_BINARY_LINE" ] \
+    && [ -n "$DEPLOY_ASSET_LINE" ] \
+    && [ "$DEPLOY_PREFLIGHT_LINE" -lt "$DEPLOY_STOP_LINE" ] \
+    && [ "$DEPLOY_STOP_LINE" -lt "$DEPLOY_BINARY_LINE" ] \
+    && [ "$DEPLOY_STOP_LINE" -lt "$DEPLOY_ASSET_LINE" ] \
+    && [ "$DEPLOY_ASSET_LINE" -lt "$DEPLOY_BINARY_LINE" ] \
+    || fail_test 'deploy.sh can mutate a live generation before service stop confirmation'
+
+DEPLOY_GENERATION_LINE="$(awk '/^validate_local_build_generation_manifest \\/ { print NR; exit }' \
+    "$REPO_ROOT/scripts/deploy.sh")"
+DEPLOY_TXN_LINE="$(awk '/^[[:space:]]*adk_begin_routine_asset_transaction "\$AD_HOME"/ { print NR; exit }' \
+    "$REPO_ROOT/scripts/deploy.sh")"
+[ -n "$DEPLOY_GENERATION_LINE" ] \
+    && [ -n "$DEPLOY_TXN_LINE" ] \
+    && [ "$DEPLOY_GENERATION_LINE" -lt "$DEPLOY_TXN_LINE" ] \
+    && [ "$DEPLOY_GENERATION_LINE" -lt "$DEPLOY_STOP_LINE" ] \
+    || fail_test 'local build generation binding occurs after transaction/service stop'
+
+RELEASE_PREFLIGHT_LINE="$(awk '/^if ! adk_validate_staged_routine_asset_transaction \\/ { print NR; exit }' \
+    "$REPO_ROOT/scripts/deploy-release.sh")"
+RELEASE_MIGRATION_LINE="$(awk '/^_migrate_pg_tunnel_before_release_stop$/ { print NR; exit }' \
+    "$REPO_ROOT/scripts/deploy-release.sh")"
+RELEASE_STOP_LINE="$(awk '/^if ! _stop_release_for_promotion; then/ { print NR; exit }' \
+    "$REPO_ROOT/scripts/deploy-release.sh")"
+RELEASE_PROMOTE_LINE="$(awk '/^if ! adk_promote_routine_asset_transaction \\/ { print NR; exit }' \
+    "$REPO_ROOT/scripts/deploy-release.sh")"
+[ -n "$RELEASE_PREFLIGHT_LINE" ] \
+    && [ "$RELEASE_PREFLIGHT_LINE" -lt "$RELEASE_MIGRATION_LINE" ] \
+    && [ "$RELEASE_PREFLIGHT_LINE" -lt "$RELEASE_STOP_LINE" ] \
+    && [ "$RELEASE_PREFLIGHT_LINE" -lt "$RELEASE_PROMOTE_LINE" ] \
+    || fail_test 'deploy-release exact validation occurs after migration/stop/promotion'
+
+INSTALL_PREFLIGHT_LINE="$(awk '/^adk_validate_staged_routine_asset_transaction \\/ { print NR; exit }' \
+    "$REPO_ROOT/scripts/install.sh")"
+INSTALL_STOP_LINE="$(awk '/^stop_install_service_for_promotion \\/ { print NR; exit }' \
+    "$REPO_ROOT/scripts/install.sh")"
+INSTALL_PROMOTE_LINE="$(awk '/^promote_install_routine_asset_surfaces \\/ { print NR; exit }' \
+    "$REPO_ROOT/scripts/install.sh")"
+[ -n "$INSTALL_PREFLIGHT_LINE" ] \
+    && [ "$INSTALL_PREFLIGHT_LINE" -lt "$INSTALL_STOP_LINE" ] \
+    && [ "$INSTALL_PREFLIGHT_LINE" -lt "$INSTALL_PROMOTE_LINE" ] \
+    || fail_test 'installer exact validation occurs after service stop/promotion'
 
 # Gitignore keeps operator helpers private while the four bundled files remain
 # explicitly trackable.
@@ -1057,11 +1881,11 @@ shell_command_count() {
     local required_fragment="${3:-$2}"
 
     awk -v command_name="$command_name" -v fragment="$required_fragment" '
-        {
-            line = $0
+        function inspect(line, first) {
             sub(/^[[:space:]]+/, "", line)
-            if (line == "" || line ~ /^#/) next
-            if (line ~ /^[A-Za-z_][A-Za-z0-9_]*[(][)][[:space:]]*[{]/) next
+            gsub(/[[:space:]]+/, " ", line)
+            if (line == "" || line ~ /^#/) return
+            if (line ~ /^[A-Za-z_][A-Za-z0-9_]*[(][)][[:space:]]*[{]/) return
             if (line ~ /^(if|elif|while|until)[[:space:]]+/) {
                 sub(/^(if|elif|while|until)[[:space:]]+/, "", line)
             }
@@ -1070,7 +1894,27 @@ shell_command_count() {
             sub(/[[:space:];(].*$/, "", first)
             if (first == command_name && index(line, fragment) > 0) count += 1
         }
-        END { print count + 0 }
+        {
+            if (continued) {
+                piece = $0
+                sub(/^[[:space:]]+/, "", piece)
+                logical = logical " " piece
+            } else {
+                logical = $0
+            }
+            if (logical ~ /\\[[:space:]]*$/) {
+                sub(/\\[[:space:]]*$/, "", logical)
+                continued = 1
+                next
+            }
+            inspect(logical)
+            logical = ""
+            continued = 0
+        }
+        END {
+            if (logical != "") inspect(logical)
+            print count + 0
+        }
     ' "$source_file"
 }
 
@@ -1085,6 +1929,10 @@ assert_asset_wiring() {
     shell_has_command "$root/scripts/routine-asset-surface.sh" \
         '"$python_bin"' \
         '"$python_bin" "$ADK_QUICKJS_VALIDATOR" "$root"' || return 1
+    shell_has_command "$root/scripts/routine-asset-surface.sh" \
+        '"$candidate_binary"' \
+        '"$candidate_binary" validate-routines --root "$staged_release_root/routines" --runtime-root "$staged_release_root"' \
+        || return 1
     shell_has_command "$root/scripts/deploy-release.sh" \
         'adk_acquire_routine_asset_lock' \
         'adk_acquire_routine_asset_lock "$DEPLOY_LOCK_FILE"' || return 1
@@ -1093,7 +1941,15 @@ assert_asset_wiring() {
         || return 1
     shell_has_command "$root/scripts/deploy-release.sh" \
         'adk_promote_routine_asset_transaction' \
-        'adk_promote_routine_asset_transaction "$ADK_REL" "$ROUTINE_ASSET_TXN"' \
+        'adk_promote_routine_asset_transaction "$ADK_REL" "$ROUTINE_ASSET_TXN" "$STAGED_BINARY"' \
+        || return 1
+    shell_has_command "$root/scripts/deploy.sh" \
+        'adk_promote_routine_asset_transaction' \
+        'adk_promote_routine_asset_transaction "$AD_HOME" "$ROUTINE_ASSET_TXN" "$DEPLOY_BINARY_STAGE"' \
+        || return 1
+    shell_has_command "$root/scripts/install.sh" \
+        'adk_promote_routine_asset_transaction' \
+        'adk_promote_routine_asset_transaction "$INSTALL_ROUTINE_ASSET_RUNTIME" "$INSTALL_ROUTINE_ASSET_TXN" "$INSTALL_BINARY_STAGE"' \
         || return 1
     shell_has_command "$root/scripts/deploy-release.sh" \
         'adk_commit_routine_asset_transaction' \
@@ -1108,10 +1964,13 @@ assert_asset_wiring() {
     shell_has_command "$root/scripts/build-release.sh" 'cp' \
         'cp "scripts/validate-quickjs-routines.py" "$STAGING/scripts/validate-quickjs-routines.py"' \
         || return 1
+    shell_has_command "$root/scripts/build-release.sh" \
+        'write_local_build_generation_manifest' \
+        'write_local_build_generation_manifest "$BINARY"' || return 1
     prepare_calls="$(shell_command_count "$root/scripts/install.sh" \
         'prepare_install_routine_asset_surfaces' \
         'prepare_install_routine_asset_surfaces')"
-    [ "$prepare_calls" -eq 2 ] || return 1
+    [ "$prepare_calls" -eq 1 ] || return 1
     if [ "$(shell_command_count "$root/scripts/deploy-release.sh" 'rsync' \
         '--delete "$REPO/routines/"')" -gt 0 ]; then
         return 1
@@ -1159,11 +2018,13 @@ comment_first_executable_fragment() {
 # Regression for the exact weak-ratchet defect: leaving the full call text in
 # a comment must not satisfy deploy-release, deploy.sh, or artifact packaging.
 WIRING_MUTANT_FILES=(
+    'routine-asset-surface.sh'
     'deploy-release.sh'
     'deploy.sh'
     'build-release.sh'
 )
 WIRING_MUTANT_FRAGMENTS=(
+    '"$candidate_binary" validate-routines'
     'adk_commit_routine_asset_transaction "$ADK_REL" "$ROUTINE_ASSET_TXN"'
     'adk_commit_routine_asset_transaction "$AD_HOME" "$ROUTINE_ASSET_TXN"'
     'cp "scripts/validate-quickjs-routines.py" "$STAGING/scripts/validate-quickjs-routines.py"'

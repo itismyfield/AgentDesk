@@ -65,10 +65,22 @@ INSTALL_BINARY_BACKUP=""
 INSTALL_BINARY_NEW_SHA256=""
 INSTALL_BINARY_OLD_SHA256=""
 INSTALL_BINARY_HAD_LIVE=0
+INSTALL_BINARY_OLD_IMMUTABLE=0
 INSTALL_BINARY_SWAP_ARMED=0
 INSTALL_BINARY_PROMOTED=0
 INSTALL_COMMIT_INTENT=0
 INSTALL_ASSET_FINALIZED=0
+INSTALL_LOCK_FILE=""
+INSTALL_LOCK_HELD=0
+INSTALL_SERVICE_WAS_RUNNING=0
+INSTALL_SERVICE_STOP_ATTEMPTED=0
+INSTALL_SERVICE_STOP_CONFIRMED=0
+INSTALL_SERVICE_START_ATTEMPTED=0
+INSTALL_SERVICE_START_CONFIRMED=0
+INSTALL_SERVICE_HEALTHY=0
+INSTALL_LAUNCHD_DOMAIN=""
+INSTALL_SERVICE_OLD_PID=""
+INSTALL_SERVICE_OLD_IDENTITY=""
 
 _install_sha256_file() {
   local path="$1"
@@ -80,6 +92,34 @@ _install_sha256_file() {
     echo "A SHA-256 tool is required for atomic binary installation" >&2
     return 1
   fi
+}
+
+_install_binary_has_immutable_flag() {
+  local path="$1"
+  local flags
+
+  [ "${OS:-}" = "darwin" ] || return 1
+  flags="$(stat -f '%Sf' "$path" 2>/dev/null)" || return 1
+  case ",$flags," in
+    *,uchg,*|*,uimmutable,*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_install_clear_binary_immutable_flag() {
+  local path="$1"
+
+  [ "${OS:-}" = "darwin" ] || return 0
+  [ -e "$path" ] || return 0
+  chflags nouchg "$path" || return 1
+  ! _install_binary_has_immutable_flag "$path"
+}
+
+_install_restore_old_binary_flag() {
+  [ "$INSTALL_BINARY_OLD_IMMUTABLE" = 1 ] || return 0
+  [ "${OS:-}" = "darwin" ] || return 0
+  [ -f "$INSTALL_BINARY_LIVE" ] || return 1
+  chflags uchg "$INSTALL_BINARY_LIVE" || return 1
 }
 
 prepare_install_binary_transaction() {
@@ -121,9 +161,20 @@ prepare_install_binary_transaction() {
     echo "Could not stage a validated install binary" >&2
     return 1
   fi
+  if [ "${OS:-}" = "darwin" ]; then
+    sign_binary_with_fallback "$stage" || {
+      echo "Could not sign the staged install binary" >&2
+      return 1
+    }
+  fi
   INSTALL_BINARY_NEW_SHA256="$(_install_sha256_file "$stage")" || return 1
 
   if [ -f "$INSTALL_BINARY_LIVE" ]; then
+    if _install_binary_has_immutable_flag "$INSTALL_BINARY_LIVE"; then
+      INSTALL_BINARY_OLD_IMMUTABLE=1
+    else
+      INSTALL_BINARY_OLD_IMMUTABLE=0
+    fi
     backup="$(mktemp "$bin_dir/.agentdesk.rollback.XXXXXXXX")" || return 1
     INSTALL_BINARY_BACKUP="$backup"
     if ! cp -p "$INSTALL_BINARY_LIVE" "$backup" \
@@ -133,6 +184,7 @@ prepare_install_binary_transaction() {
       echo "Could not preserve the installed binary for rollback" >&2
       return 1
     fi
+    _install_clear_binary_immutable_flag "$backup" || return 1
     INSTALL_BINARY_OLD_SHA256="$(_install_sha256_file "$backup")" || return 1
     INSTALL_BINARY_HAD_LIVE=1
   else
@@ -160,6 +212,9 @@ promote_install_binary_transaction() {
   # before the success assignment, cleanup infers promotion from the missing
   # stage plus the exact staged digest and rolls both binary and assets back.
   INSTALL_BINARY_SWAP_ARMED=1
+  if [ "$INSTALL_BINARY_HAD_LIVE" = 1 ]; then
+    _install_clear_binary_immutable_flag "$INSTALL_BINARY_LIVE" || return 1
+  fi
   mv -f "$INSTALL_BINARY_STAGE" "$INSTALL_BINARY_LIVE" || return 1
   INSTALL_BINARY_PROMOTED=1
   INSTALL_BINARY_SWAP_ARMED=0
@@ -187,7 +242,10 @@ _restore_install_binary_transaction() {
   local restore_stage=""
   local live_sha=""
 
-  _install_binary_is_promoted || return 0
+  if ! _install_binary_is_promoted; then
+    _install_restore_old_binary_flag
+    return
+  fi
   if [ "$INSTALL_BINARY_HAD_LIVE" = 1 ]; then
     [ -f "$INSTALL_BINARY_BACKUP" ] \
       && [ ! -L "$INSTALL_BINARY_BACKUP" ] \
@@ -198,6 +256,8 @@ _restore_install_binary_transaction() {
       rm -f "$restore_stage" 2>/dev/null || true
       return 1
     fi
+    _install_clear_binary_immutable_flag "$restore_stage" || return 1
+    _install_clear_binary_immutable_flag "$INSTALL_BINARY_LIVE" || return 1
     if ! mv -f "$restore_stage" "$INSTALL_BINARY_LIVE"; then
       # A signal/failure injector can report failure after the atomic rename.
       # Accept that boundary only when the live bytes prove restoration won.
@@ -205,12 +265,14 @@ _restore_install_binary_transaction() {
       [ "$live_sha" = "$INSTALL_BINARY_OLD_SHA256" ] || return 1
     fi
   else
+    _install_clear_binary_immutable_flag "$INSTALL_BINARY_LIVE" || return 1
     rm -f "$INSTALL_BINARY_LIVE" || {
       [ ! -e "$INSTALL_BINARY_LIVE" ] || return 1
     }
   fi
   INSTALL_BINARY_PROMOTED=0
   INSTALL_BINARY_SWAP_ARMED=0
+  _install_restore_old_binary_flag || return 1
 }
 
 prepare_install_routine_asset_surfaces() {
@@ -239,10 +301,14 @@ prepare_install_routine_asset_surfaces() {
 
   for required_function in \
     adk_validate_repo_routine_assets \
+    adk_process_identity \
+    adk_process_instance_alive \
     adk_acquire_routine_asset_lock \
+    adk_routine_asset_lock_owned \
     adk_begin_routine_asset_transaction \
     adk_stage_routines \
     adk_stage_routine_helpers \
+    adk_validate_staged_routine_asset_transaction \
     adk_promote_routine_asset_transaction \
     adk_routine_asset_transaction_phase \
     adk_mark_routine_asset_transaction_committing \
@@ -261,6 +327,9 @@ prepare_install_routine_asset_surfaces() {
   # installed binary byte-for-byte untouched.
   adk_validate_repo_routine_assets "$source_root" || return 1
   adk_acquire_routine_asset_lock "$lock_file" "$lock_timeout" || return 1
+  adk_routine_asset_lock_owned "$lock_file" || return 1
+  INSTALL_LOCK_FILE="$lock_file"
+  INSTALL_LOCK_HELD=1
   INSTALL_ROUTINE_ASSET_RUNTIME="$runtime_root"
   INSTALL_ROUTINE_ASSET_TXN="$(
     adk_begin_routine_asset_transaction "$runtime_root" "$lock_file"
@@ -273,7 +342,8 @@ prepare_install_routine_asset_surfaces() {
 
 promote_install_routine_asset_surfaces() {
   adk_promote_routine_asset_transaction \
-    "$INSTALL_ROUTINE_ASSET_RUNTIME" "$INSTALL_ROUTINE_ASSET_TXN"
+    "$INSTALL_ROUTINE_ASSET_RUNTIME" "$INSTALL_ROUTINE_ASSET_TXN" \
+    "$INSTALL_BINARY_STAGE"
 }
 
 finalize_install_routine_asset_surfaces() {
@@ -284,8 +354,8 @@ finalize_install_routine_asset_surfaces() {
   INSTALL_COMMIT_INTENT=1
   if ! adk_commit_routine_asset_transaction \
       "$INSTALL_ROUTINE_ASSET_RUNTIME" "$INSTALL_ROUTINE_ASSET_TXN"; then
-    warn "Installed assets are live; durable commit cleanup will resume next run"
-    return 0
+    echo "Installed assets are live but commit cleanup did not finish" >&2
+    return 1
   fi
   INSTALL_ASSET_FINALIZED=1
 }
@@ -298,9 +368,17 @@ _install_cleanup() {
   local asset_action="none"
   local pair_resolved=0
   local live_sha=""
+  local lock_owned=0
+  local service_safe=1
 
   trap - EXIT INT TERM
-  if command -v _adk_active_txn >/dev/null 2>&1 \
+  if [ "$INSTALL_LOCK_HELD" = 1 ] \
+    && command -v adk_routine_asset_lock_owned >/dev/null 2>&1 \
+    && adk_routine_asset_lock_owned "$INSTALL_LOCK_FILE"; then
+    lock_owned=1
+  fi
+  if [ "$lock_owned" = 1 ] \
+    && command -v _adk_active_txn >/dev/null 2>&1 \
     && [ -n "$INSTALL_ROUTINE_ASSET_RUNTIME" ]; then
     if active_txn="$(_adk_active_txn "$INSTALL_ROUTINE_ASSET_RUNTIME")"; then
       active_status=0
@@ -321,14 +399,34 @@ _install_cleanup() {
     fi
   fi
 
+  if [ "$lock_owned" != 1 ]; then
+    return "$status"
+  fi
+  if [ "$INSTALL_SERVICE_STOP_ATTEMPTED" = 1 ] \
+    && [ "$INSTALL_SERVICE_STOP_CONFIRMED" != 1 ] \
+    && [ -n "$INSTALL_LAUNCHD_DOMAIN" ] \
+    && wait_for_install_service_stop; then
+    INSTALL_SERVICE_STOP_CONFIRMED=1
+  fi
+
   if [ "$INSTALL_ASSET_FINALIZED" = 1 ]; then
     pair_resolved=1
   elif [ "$active_status" -eq 0 ]; then
     case "$active_phase" in
       committing|committed) asset_action="commit" ;;
       staging|armed|promoted|rolling-back)
+        if [ "$INSTALL_SERVICE_START_ATTEMPTED" = 1 ] \
+          || [ "$INSTALL_SERVICE_START_CONFIRMED" = 1 ]; then
+          if ! stop_install_service_for_recovery; then
+            echo "New AgentDesk service could not be stopped; retaining the matching new pair" >&2
+            service_safe=0
+            status=1
+          fi
+        fi
         if _install_binary_is_promoted; then
-          if _restore_install_binary_transaction; then
+          if [ "$service_safe" != 1 ]; then
+            asset_action="commit"
+          elif _restore_install_binary_transaction; then
             asset_action="rollback"
           else
             live_sha="$(_install_binary_live_sha256 2>/dev/null || true)"
@@ -348,6 +446,8 @@ _install_cleanup() {
             fi
           fi
         else
+          _install_restore_old_binary_flag \
+            || { echo "Could not restore the previous binary flags" >&2; status=1; }
           asset_action="rollback"
         fi
         ;;
@@ -387,6 +487,15 @@ _install_cleanup() {
     fi
   fi
 
+  if [ "$pair_resolved" = 1 ] \
+    && [ "$asset_action" != "commit" ] \
+    && [ "$INSTALL_SERVICE_HEALTHY" != 1 ] \
+    && [ "$INSTALL_SERVICE_STOP_CONFIRMED" = 1 ] \
+    && [ "$INSTALL_SERVICE_WAS_RUNNING" = 1 ]; then
+    restart_previous_install_service \
+      || { echo "Could not restart the previous AgentDesk service" >&2; status=1; }
+  fi
+
   if [ "$pair_resolved" = 1 ]; then
     [ -z "$INSTALL_BINARY_STAGE" ] || [ ! -e "$INSTALL_BINARY_STAGE" ] \
       || rm -f "$INSTALL_BINARY_STAGE" \
@@ -398,6 +507,7 @@ _install_cleanup() {
   if command -v adk_release_routine_asset_lock >/dev/null 2>&1; then
     adk_release_routine_asset_lock \
       || { echo "Install could not release the shared deploy lock" >&2; status=1; }
+    INSTALL_LOCK_HELD=0
   fi
   return "$status"
 }
@@ -408,7 +518,7 @@ _install_cleanup_signal() {
   exit "$status"
 }
 
-trap _install_cleanup EXIT
+trap '_install_cleanup "$?"' EXIT
 trap '_install_cleanup_signal 130' INT
 trap '_install_cleanup_signal 143' TERM
 
@@ -422,6 +532,81 @@ launchd_domain() {
     fi
   done
   printf 'gui/%s\n' "$uid"
+}
+
+_install_service_job_is_loaded() {
+  [ -n "$INSTALL_LAUNCHD_DOMAIN" ] || return 1
+  launchctl print "$INSTALL_LAUNCHD_DOMAIN/$LAUNCHD_LABEL" \
+    >/dev/null 2>&1
+}
+
+_capture_install_service_process() {
+  INSTALL_SERVICE_OLD_PID="$(
+    launchctl print "$INSTALL_LAUNCHD_DOMAIN/$LAUNCHD_LABEL" 2>/dev/null \
+      | awk '$1 == "pid" && $2 == "=" { print $3; exit }'
+  )"
+  INSTALL_SERVICE_OLD_IDENTITY="$(
+    adk_process_identity "$INSTALL_SERVICE_OLD_PID" 2>/dev/null || true
+  )"
+}
+
+install_service_is_running() {
+  _install_service_job_is_loaded && return 0
+  adk_process_instance_alive \
+    "${INSTALL_SERVICE_OLD_PID:-}" "${INSTALL_SERVICE_OLD_IDENTITY:-}"
+}
+
+wait_for_install_service_stop() {
+  local attempt=0
+  local max_attempts="${1:-15}"
+
+  while install_service_is_running; do
+    [ "$attempt" -lt "$max_attempts" ] || return 1
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+}
+
+stop_install_service_for_promotion() {
+  INSTALL_LAUNCHD_DOMAIN="$(launchd_domain)" || return 1
+  if _install_service_job_is_loaded; then
+    INSTALL_SERVICE_WAS_RUNNING=1
+    _capture_install_service_process
+  fi
+  INSTALL_SERVICE_STOP_ATTEMPTED=1
+  launchctl bootout "$INSTALL_LAUNCHD_DOMAIN/$LAUNCHD_LABEL" \
+    >/dev/null 2>&1 || true
+  if ! wait_for_install_service_stop; then
+    echo "Existing AgentDesk service is still running; refusing live promotion" >&2
+    return 1
+  fi
+  INSTALL_SERVICE_STOP_CONFIRMED=1
+}
+
+start_install_service() {
+  local plist_path="$1"
+
+  [ -n "$INSTALL_LAUNCHD_DOMAIN" ] || return 1
+  INSTALL_SERVICE_START_ATTEMPTED=1
+  launchctl bootstrap "$INSTALL_LAUNCHD_DOMAIN" "$plist_path" \
+    >/dev/null 2>&1 || return 1
+  launchctl print "$INSTALL_LAUNCHD_DOMAIN/$LAUNCHD_LABEL" \
+    >/dev/null 2>&1 || return 1
+  INSTALL_SERVICE_START_CONFIRMED=1
+}
+
+stop_install_service_for_recovery() {
+  [ -n "$INSTALL_LAUNCHD_DOMAIN" ] || return 1
+  launchctl bootout "$INSTALL_LAUNCHD_DOMAIN/$LAUNCHD_LABEL" \
+    >/dev/null 2>&1 || true
+  wait_for_install_service_stop
+}
+
+restart_previous_install_service() {
+  local plist_path="$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.plist"
+
+  [ "$INSTALL_SERVICE_WAS_RUNNING" = 1 ] || return 0
+  start_install_service "$plist_path"
 }
 
 normalize_install_dir() {
@@ -531,13 +716,22 @@ sign_binary_with_fallback() {
   fi
 
   if [ "$identity" = "-" ]; then
-    codesign -s "$identity" --identifier "com.itismyfield.agentdesk" --force "$target"
+    if ! codesign -s "$identity" --identifier "com.itismyfield.agentdesk" \
+      --force "$target"; then
+      echo "Codesign operation failed: $target" >&2
+      return 1
+    fi
   else
-    codesign -s "$identity" --options runtime --identifier "com.itismyfield.agentdesk" --force "$target"
+    if ! codesign -s "$identity" --options runtime \
+      --identifier "com.itismyfield.agentdesk" --force "$target"; then
+      echo "Codesign operation failed: $target" >&2
+      return 1
+    fi
   fi
 
   if ! codesign -v "$target" 2>/dev/null; then
-    fail "Codesign verification failed"
+    echo "Codesign verification failed: $target" >&2
+    return 1
   fi
 }
 
@@ -617,6 +811,10 @@ fi
 
 # ── Download latest release ───────────────────────────────────────────────────
 ARTIFACT="agentdesk-${OS}-${ARCH}"
+INSTALL_PAYLOAD_ROOT=""
+INSTALL_PAYLOAD_BINARY=""
+INSTALL_PAYLOAD_KIND=""
+INSTALL_PAYLOAD_TEMP=""
 
 info "Checking latest release..."
 LATEST_TAG=$(
@@ -671,37 +869,10 @@ if [ -z "$LATEST_TAG" ]; then
     (cd dashboard && npm ci --silent 2>/dev/null && npm run build 2>&1 | tail -1) || true
   fi
 
-  info "Validating and staging routine asset payload..."
-  prepare_install_routine_asset_surfaces "$TMPDIR_BUILD" "$INSTALL_DIR" \
-    || fail "Routine asset preflight failed before binary installation"
-  prepare_install_binary_transaction \
-    "$TMPDIR_BUILD/target/release/agentdesk" "$INSTALL_DIR" \
-    || fail "Binary staging failed before live installation"
-
-  # Install
-  mkdir -p "$INSTALL_DIR"/{bin,config,data,logs,policies,dashboard,skills}
-
-  if [ -d "dashboard/dist" ]; then
-    cp -r dashboard/dist "$INSTALL_DIR/dashboard/dist"
-  fi
-
-  if [ -d "policies" ]; then
-    cp policies/*.js "$INSTALL_DIR/policies/"
-  fi
-
-  if [ -d "skills" ]; then
-    rsync -a --delete "skills/" "$INSTALL_DIR/skills/"
-  fi
-
-  info "Promoting routine entrypoints and helper assets..."
-  promote_install_routine_asset_surfaces \
-    || fail "Routine asset installation failed"
-  promote_install_binary_transaction \
-    || fail "Binary installation failed after asset promotion"
-
-  cd /
-  rm -rf "$TMPDIR_BUILD"
-  ok "Built and installed from source"
+  INSTALL_PAYLOAD_ROOT="$TMPDIR_BUILD"
+  INSTALL_PAYLOAD_BINARY="$TMPDIR_BUILD/target/release/agentdesk"
+  INSTALL_PAYLOAD_KIND="source"
+  INSTALL_PAYLOAD_TEMP="$TMPDIR_BUILD"
 else
   DOWNLOAD_URL="https://github.com/$REPO/releases/download/$LATEST_TAG/${ARTIFACT}.tar.gz"
   info "Downloading $LATEST_TAG..."
@@ -717,46 +888,62 @@ else
   cd "$TMPDIR_DL"
   tar xzf "${ARTIFACT}.tar.gz"
 
-  info "Validating and staging routine asset payload..."
-  prepare_install_routine_asset_surfaces "$TMPDIR_DL/${ARTIFACT}" "$INSTALL_DIR" \
-    || fail "Routine asset preflight failed before binary installation"
-  prepare_install_binary_transaction \
-    "$TMPDIR_DL/${ARTIFACT}/agentdesk" "$INSTALL_DIR" \
-    || fail "Binary staging failed before live installation"
+  INSTALL_PAYLOAD_ROOT="$TMPDIR_DL/${ARTIFACT}"
+  INSTALL_PAYLOAD_BINARY="$TMPDIR_DL/${ARTIFACT}/agentdesk"
+  INSTALL_PAYLOAD_KIND="release"
+  INSTALL_PAYLOAD_TEMP="$TMPDIR_DL"
+fi
 
-  # Install
-  mkdir -p "$INSTALL_DIR"/{bin,config,data,logs,skills}
+info "Validating and staging routine asset payload..."
+prepare_install_routine_asset_surfaces "$INSTALL_PAYLOAD_ROOT" "$INSTALL_DIR" \
+  || fail "Routine asset preflight failed before binary installation"
+prepare_install_binary_transaction "$INSTALL_PAYLOAD_BINARY" "$INSTALL_DIR" \
+  || fail "Binary staging failed before live installation"
+adk_validate_staged_routine_asset_transaction \
+  "$INSTALL_ROUTINE_ASSET_RUNTIME" "$INSTALL_ROUTINE_ASSET_TXN" \
+  "$INSTALL_BINARY_STAGE" \
+  || fail "Candidate runtime rejected staged routines before service stop"
 
-  if [ -d "${ARTIFACT}/dashboard" ]; then
+# Stop before any live installation path changes. Cleanup has already recorded
+# whether the prior service must be restored if a later step fails.
+stop_install_service_for_promotion \
+  || fail "Could not stop the existing AgentDesk service before promotion"
+
+mkdir -p "$INSTALL_DIR"/{bin,config,data,logs,policies,dashboard,skills}
+if [ "$INSTALL_PAYLOAD_KIND" = "source" ]; then
+  if [ -d "$INSTALL_PAYLOAD_ROOT/dashboard/dist" ]; then
+    rm -rf "$INSTALL_DIR/dashboard/dist"
+    cp -r "$INSTALL_PAYLOAD_ROOT/dashboard/dist" "$INSTALL_DIR/dashboard/dist"
+  fi
+else
+  if [ -d "$INSTALL_PAYLOAD_ROOT/dashboard" ]; then
     rm -rf "$INSTALL_DIR/dashboard"
-    cp -r "${ARTIFACT}/dashboard" "$INSTALL_DIR/dashboard"
+    cp -r "$INSTALL_PAYLOAD_ROOT/dashboard" "$INSTALL_DIR/dashboard"
   fi
+fi
+if [ -d "$INSTALL_PAYLOAD_ROOT/policies" ]; then
+  cp "$INSTALL_PAYLOAD_ROOT/policies/"*.js "$INSTALL_DIR/policies/"
+fi
+if [ -d "$INSTALL_PAYLOAD_ROOT/skills" ]; then
+  rsync -a --delete "$INSTALL_PAYLOAD_ROOT/skills/" "$INSTALL_DIR/skills/"
+fi
 
-  if [ -d "${ARTIFACT}/policies" ]; then
-    mkdir -p "$INSTALL_DIR/policies"
-    cp "${ARTIFACT}/policies/"*.js "$INSTALL_DIR/policies/"
-  fi
+info "Promoting routine entrypoints and helper assets..."
+promote_install_routine_asset_surfaces \
+  || fail "Routine asset installation failed"
+promote_install_binary_transaction \
+  || fail "Binary installation failed after asset promotion"
 
-  if [ -d "${ARTIFACT}/skills" ]; then
-    rsync -a --delete "${ARTIFACT}/skills/" "$INSTALL_DIR/skills/"
-  fi
-
-  info "Promoting routine entrypoints and helper assets..."
-  promote_install_routine_asset_surfaces \
-    || fail "Routine asset installation failed"
-  promote_install_binary_transaction \
-    || fail "Binary installation failed after asset promotion"
-
-  cd /
-  rm -rf "$TMPDIR_DL"
+cd /
+rm -rf "$INSTALL_PAYLOAD_TEMP"
+if [ "$INSTALL_PAYLOAD_KIND" = "source" ]; then
+  ok "Built and installed from source"
+else
   ok "Installed $LATEST_TAG"
 fi
 
-# ── Code signing (macOS) ──────────────────────────────────────────────────────
+# The staged binary was signed and verified before its final digest and rename.
 if [ "$OS" = "darwin" ]; then
-  chflags nouchg "$INSTALL_DIR/bin/agentdesk" 2>/dev/null || true
-  sign_binary_with_fallback "$INSTALL_DIR/bin/agentdesk"
-  chflags uchg "$INSTALL_DIR/bin/agentdesk"
 
   # Register with firewall
   FW=/usr/libexec/ApplicationFirewall/socketfilterfw
@@ -813,34 +1000,39 @@ ok "Launchd plist: $PLIST_PATH"
 
 # ── Start dcserver ────────────────────────────────────────────────────────────
 info "Starting AgentDesk..."
-LAUNCHD_DOMAIN="$(launchd_domain)"
-
-# Stop existing instance if running
-launchctl bootout "$LAUNCHD_DOMAIN/$LAUNCHD_LABEL" 2>/dev/null || true
-sleep 1
+LAUNCHD_DOMAIN="$INSTALL_LAUNCHD_DOMAIN"
+[ -n "$LAUNCHD_DOMAIN" ] || fail "Launchd domain disappeared before service start"
 
 # Remove quarantine flag if present
 xattr -d com.apple.quarantine "$PLIST_PATH" 2>/dev/null || true
 
-# Start
-if launchctl bootstrap "$LAUNCHD_DOMAIN" "$PLIST_PATH" 2>/dev/null; then
-  sleep 3
+start_install_service "$PLIST_PATH" \
+  || fail "launchd bootstrap did not produce a running AgentDesk service"
 
-  # Health check
-  if curl -sf --max-time 5 "http://${DEFAULT_LOOPBACK}:$INSTALL_PORT/api/health" | grep -q '"status":"healthy"'; then
-    ok "AgentDesk is running on port $INSTALL_PORT"
-  else
-    warn "Service started but health check pending. Check logs: $INSTALL_DIR/logs/"
+INSTALL_HEALTH_ATTEMPT=1
+INSTALL_HEALTH_OK=0
+while [ "$INSTALL_HEALTH_ATTEMPT" -le 10 ]; do
+  if curl -sf --max-time 5 \
+      "http://${DEFAULT_LOOPBACK}:$INSTALL_PORT/api/health" \
+      | grep -Eq '"status"[[:space:]]*:[[:space:]]*"healthy"'; then
+    INSTALL_HEALTH_OK=1
+    break
   fi
-else
-  warn "launchd bootstrap failed. Try manually:"
-  echo "  launchctl bootstrap $LAUNCHD_DOMAIN $PLIST_PATH"
-fi
+  sleep 2
+  INSTALL_HEALTH_ATTEMPT=$((INSTALL_HEALTH_ATTEMPT + 1))
+done
+[ "$INSTALL_HEALTH_OK" = 1 ] \
+  || fail "AgentDesk health check failed after launchd bootstrap"
+INSTALL_SERVICE_HEALTHY=1
+ok "AgentDesk is running on port $INSTALL_PORT"
 
-# The installer does not roll back its binary on a deferred launchd readiness
-# warning, so commit the exactly matching asset generation before releasing the
-# shared lock. A cleanup failure remains resumable via the `committing` marker.
-finalize_install_routine_asset_surfaces
+finalize_install_routine_asset_surfaces \
+  || fail "Could not commit the healthy binary and routine asset generation"
+
+# Immutable protection belongs to the committed generation, never to a staged
+# or rollback candidate. Applying it here cannot block transaction recovery.
+chflags uchg "$INSTALL_BINARY_LIVE" \
+  || fail "Could not protect the committed AgentDesk binary"
 
 # ── Open browser ──────────────────────────────────────────────────────────────
 DASHBOARD_URL="http://${DEFAULT_LOOPBACK}:$INSTALL_PORT"

@@ -242,19 +242,20 @@ codesign_binary() {
 
 preserve_previous_signature_state_if_needed() {
   local previous_binary="$1"
+  local target="${2:-$REAL_BIN}"
   local previous_mode
 
   if [ "$OS" != "darwin" ]; then
     return 0
   fi
 
-  if binary_has_valid_codesign "$REAL_BIN"; then
+  if binary_has_valid_codesign "$target"; then
     info "Copied binary already has a valid code signature; leaving it unchanged"
     return 0
   fi
 
   if [ -z "$previous_binary" ] || [ ! -f "$previous_binary" ]; then
-    info "No previous signature state found; leaving $REAL_BIN unsigned"
+    info "No previous signature state found; leaving $target unsigned"
     return 0
   fi
 
@@ -262,12 +263,12 @@ preserve_previous_signature_state_if_needed() {
   case "$previous_mode" in
     adhoc)
       info "Previous install used ad-hoc signing; preserving that mode"
-      codesign_binary adhoc "$REAL_BIN"
+      codesign_binary adhoc "$target"
       ;;
     developer-id)
       if RESOLVED_CODESIGN_IDENTITY="$(resolve_developer_id_identity 2>/dev/null)"; then
         info "Previous install used Developer ID signing; preserving that mode"
-        codesign_binary developer-id "$REAL_BIN"
+        codesign_binary developer-id "$target"
       else
         error "Previous install used Developer ID signing, but no usable Developer ID identity is available to preserve it. Provide --codesign-identity or use --codesign-mode=adhoc."
         return 1
@@ -278,13 +279,14 @@ preserve_previous_signature_state_if_needed() {
       return 1
       ;;
     unsigned)
-      info "Previous install was unsigned; leaving $REAL_BIN unsigned"
+      info "Previous install was unsigned; leaving $target unsigned"
       ;;
   esac
 }
 
 codesign_real_binary_if_needed() {
   local resolved_mode="$1"
+  local target="${2:-$REAL_BIN}"
 
   if [ "$OS" != "darwin" ]; then
     return 0
@@ -292,13 +294,13 @@ codesign_real_binary_if_needed() {
 
   case "$resolved_mode" in
     developer-id)
-      codesign_binary developer-id "$REAL_BIN"
+      codesign_binary developer-id "$target"
       ;;
     adhoc)
-      codesign_binary adhoc "$REAL_BIN"
+      codesign_binary adhoc "$target"
       ;;
     skip)
-      preserve_previous_signature_state_if_needed "${BACKUP_REAL:-}"
+      preserve_previous_signature_state_if_needed "${REAL_BIN:-}" "$target"
       ;;
     *)
       error "Unsupported resolved codesign mode: $resolved_mode"
@@ -317,23 +319,201 @@ fi
 
 BACKUP_WRAPPER=""
 BACKUP_REAL=""
+DEPLOY_BINARY_STAGE=""
 ROUTINE_ASSET_TXN=""
 DEPLOY_BINARY_PROMOTED=0
 DEPLOY_RESTART_ARMED=0
 DEPLOY_SERVICE_STOP_ATTEMPTED=0
 DEPLOY_SERVICE_START_ATTEMPTED=0
 DEPLOY_SERVICE_START_CONFIRMED=0
+DEPLOY_SERVICE_STOP_CONFIRMED=0
+DEPLOY_SERVICE_WAS_RUNNING=0
+DEPLOY_SERVICE_OLD_PID=""
+DEPLOY_SERVICE_OLD_IDENTITY=""
 DEPLOY_HEALTH_OK=0
+DEPLOY_LOCK_HELD=0
 DEPLOY_LOCK_FILE="${AGENTDESK_DEPLOY_LOCK_FILE:-$AD_HOME/runtime/deploy-release.lock}"
 DEPLOY_LOCK_TIMEOUT_SECS="${AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS:-1800}"
 
 cleanup_backup() {
+  if [ -n "${DEPLOY_BINARY_STAGE:-}" ] && [ -f "$DEPLOY_BINARY_STAGE" ]; then
+    rm -f "$DEPLOY_BINARY_STAGE"
+  fi
   if [ -n "${BACKUP_WRAPPER:-}" ] && [ -f "$BACKUP_WRAPPER" ]; then
     rm -f "$BACKUP_WRAPPER"
   fi
   if [ -n "${BACKUP_REAL:-}" ] && [ -f "$BACKUP_REAL" ]; then
     rm -f "$BACKUP_REAL"
   fi
+}
+
+validate_local_build_generation_manifest() {
+  local binary="$PROJECT_DIR/target/release/agentdesk"
+  local manifest="$PROJECT_DIR/target/release/agentdesk-generation.json"
+  local source_sha binary_sha routines_sha helpers_sha
+
+  [ -f "$manifest" ] && [ ! -L "$manifest" ] \
+    && [ -f "$binary" ] && [ ! -L "$binary" ] || {
+    error "Local build generation manifest is missing or unsafe: $manifest"
+    return 1
+  }
+  source_sha="$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null)" || return 1
+  binary_sha="$(adk_sha256_file "$binary")" || return 1
+  routines_sha="$(adk_sha256_tree "$PROJECT_DIR/routines")" || return 1
+  helpers_sha="$(adk_sha256_tree "$PROJECT_DIR/routine-helpers")" || return 1
+  AGENTDESK_BUILD_SOURCE_SHA="$source_sha" \
+  AGENTDESK_BUILD_BINARY_SHA="$binary_sha" \
+  AGENTDESK_BUILD_ROUTINES_SHA="$routines_sha" \
+  AGENTDESK_BUILD_HELPERS_SHA="$helpers_sha" \
+  python3 - "$manifest" <<'PY'
+import json
+import os
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception as exc:
+    print(f"Invalid local build generation manifest: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+expected = {
+    "source_git_sha": os.environ["AGENTDESK_BUILD_SOURCE_SHA"],
+    "binary_sha256": os.environ["AGENTDESK_BUILD_BINARY_SHA"],
+    "routines_sha256": os.environ["AGENTDESK_BUILD_ROUTINES_SHA"],
+    "routine_helpers_sha256": os.environ["AGENTDESK_BUILD_HELPERS_SHA"],
+}
+if data.get("format") != "agentdesk-local-build-v1":
+    raise SystemExit(1)
+for key, value in expected.items():
+    recorded = data.get(key)
+    if not isinstance(recorded, str) or not re.fullmatch(r"[0-9a-f]+", recorded):
+        raise SystemExit(1)
+    if recorded != value:
+        print(f"Local build generation mismatch: {key}", file=sys.stderr)
+        raise SystemExit(1)
+PY
+}
+
+clear_deploy_immutable_flag() {
+  local path="$1"
+  local flags
+
+  [ "$OS" = darwin ] || return 0
+  [ -e "$path" ] || return 0
+  chflags nouchg "$path" || return 1
+  flags="$(stat -f '%Sf' "$path" 2>/dev/null)" || return 1
+  case ",$flags," in
+    *,uchg,*|*,uimmutable,*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+_deploy_service_job_is_running() {
+  case "$OS" in
+    darwin)
+      launchctl print "$(_launchd_domain)/$LABEL" >/dev/null 2>&1
+      ;;
+    linux)
+      systemctl --user is-active --quiet agentdesk-dcserver.service \
+        >/dev/null 2>&1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+_capture_deploy_service_process() {
+  case "$OS" in
+    darwin)
+      DEPLOY_SERVICE_OLD_PID="$(
+        launchctl print "$(_launchd_domain)/$LABEL" 2>/dev/null \
+          | awk '$1 == "pid" && $2 == "=" { print $3; exit }'
+      )"
+      ;;
+    linux)
+      DEPLOY_SERVICE_OLD_PID="$(
+        systemctl --user show agentdesk-dcserver.service \
+          --property MainPID --value 2>/dev/null || true
+      )"
+      ;;
+  esac
+  DEPLOY_SERVICE_OLD_IDENTITY="$(
+    adk_process_identity "$DEPLOY_SERVICE_OLD_PID" 2>/dev/null || true
+  )"
+}
+
+deploy_service_is_running() {
+  _deploy_service_job_is_running && return 0
+  adk_process_instance_alive \
+    "${DEPLOY_SERVICE_OLD_PID:-}" "${DEPLOY_SERVICE_OLD_IDENTITY:-}"
+}
+
+wait_for_deploy_service_stop() {
+  local attempt=0
+  local max_attempts="${1:-15}"
+
+  while deploy_service_is_running; do
+    [ "$attempt" -lt "$max_attempts" ] || return 1
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+}
+
+stop_deploy_service_for_promotion() {
+  DEPLOY_RESTART_ARMED=1
+  case "$OS" in
+    darwin)
+      if _deploy_service_job_is_running; then
+        DEPLOY_SERVICE_WAS_RUNNING=1
+        _capture_deploy_service_process
+      fi
+      DEPLOY_SERVICE_STOP_ATTEMPTED=1
+      launchctl bootout "$(_launchd_domain)/$LABEL" 2>/dev/null || true
+      if ! wait_for_deploy_service_stop; then
+        error "Existing launchd process is still loaded; refusing live promotion"
+        return 1
+      fi
+      DEPLOY_SERVICE_STOP_CONFIRMED=1
+      ;;
+    linux)
+      if _deploy_service_job_is_running; then
+        DEPLOY_SERVICE_WAS_RUNNING=1
+        _capture_deploy_service_process
+      fi
+      DEPLOY_SERVICE_STOP_ATTEMPTED=1
+      systemctl --user stop agentdesk-dcserver.service || return 1
+      if ! wait_for_deploy_service_stop; then
+        error "Existing systemd process is still active; refusing live promotion"
+        return 1
+      fi
+      DEPLOY_SERVICE_STOP_CONFIRMED=1
+      ;;
+  esac
+}
+
+start_previous_deploy_service() {
+  local plist="$HOME/Library/LaunchAgents/com.agentdesk.release.plist"
+
+  DEPLOY_SERVICE_START_ATTEMPTED=1
+  case "$OS" in
+    darwin)
+      [ -f "$plist" ] || return 1
+      launchctl bootstrap "$(_launchd_domain)" "$plist" >/dev/null 2>&1 \
+        || return 1
+      _kickstart_launchd_job_if_needed "$LABEL" || true
+      launchctl print "$(_launchd_domain)/$LABEL" >/dev/null 2>&1 \
+        || return 1
+      ;;
+    linux)
+      systemctl --user start agentdesk-dcserver.service || return 1
+      systemctl --user is-active --quiet agentdesk-dcserver.service \
+        >/dev/null 2>&1 || return 1
+      ;;
+    *) return 0 ;;
+  esac
+  DEPLOY_SERVICE_START_CONFIRMED=1
 }
 
 stop_deploy_service_for_rollback() {
@@ -365,9 +545,14 @@ cleanup_deploy_transaction() {
   local assets_ok=1
   local asset_action="rollback"
   local service_stopped=0
+  local lock_owned=0
 
   trap - EXIT INT TERM
-  if [ "$DEPLOY_HEALTH_OK" != 1 ]; then
+  if [ "$DEPLOY_LOCK_HELD" = 1 ] \
+    && adk_routine_asset_lock_owned "$DEPLOY_LOCK_FILE"; then
+    lock_owned=1
+  fi
+  if [ "$DEPLOY_HEALTH_OK" != 1 ] && [ "$lock_owned" = 1 ]; then
     if active_txn="$(_adk_active_txn "$AD_HOME")"; then
       active_status=0
       if ! active_phase="$(
@@ -422,17 +607,28 @@ cleanup_deploy_transaction() {
           || { error "Routine asset rollback failed: $active_txn"; assets_ok=0; status=1; }
       fi
     fi
-    if [ "$service_stopped" = 1 ]; then
+    if [ "$DEPLOY_SERVICE_STOP_CONFIRMED" = 1 ]; then
+      service_stopped=1
+    elif [ "$DEPLOY_SERVICE_STOP_ATTEMPTED" = 1 ] \
+      && [ "$DEPLOY_SERVICE_WAS_RUNNING" = 1 ] \
+      && wait_for_deploy_service_stop; then
+      # A signal can be delivered after bootout/stop returns but before the
+      # caller records STOP_CONFIRMED. Reconcile the durable service state in
+      # the trap so that exact boundary cannot strand the previous release.
+      DEPLOY_SERVICE_STOP_CONFIRMED=1
+      service_stopped=1
+    fi
+    if [ "$service_stopped" = 1 ] && [ "$DEPLOY_SERVICE_WAS_RUNNING" = 1 ]; then
       if [ "$restore_ok" = 1 ] && [ "$assets_ok" = 1 ]; then
-        case "$OS" in
-          darwin) restart_launchd >/dev/null 2>&1 || status=1 ;;
-          linux) restart_systemd >/dev/null 2>&1 || status=1 ;;
-        esac
+        start_previous_deploy_service >/dev/null 2>&1 || status=1
       fi
     fi
   fi
-  adk_release_routine_asset_lock \
-    || { error "Failed to release shared routine asset deploy lock"; status=1; }
+  if [ "$lock_owned" = 1 ]; then
+    adk_release_routine_asset_lock \
+      || { error "Failed to release shared routine asset deploy lock"; status=1; }
+    DEPLOY_LOCK_HELD=0
+  fi
   cleanup_backup
   return "$status"
 }
@@ -443,12 +639,15 @@ _deploy_cleanup_signal() {
   exit "$status"
 }
 
-trap cleanup_deploy_transaction EXIT
+trap 'cleanup_deploy_transaction "$?"' EXIT
 trap '_deploy_cleanup_signal 130' INT
 trap '_deploy_cleanup_signal 143' TERM
 
 adk_acquire_routine_asset_lock "$DEPLOY_LOCK_FILE" "$DEPLOY_LOCK_TIMEOUT_SECS" \
   || fail "Could not acquire shared routine asset deploy lock"
+adk_routine_asset_lock_owned "$DEPLOY_LOCK_FILE" \
+  || fail "Shared routine asset deploy lock ownership verification failed"
+DEPLOY_LOCK_HELD=1
 
 print_recent_macos_binary_logs() {
   if [ "$OS" != "darwin" ]; then
@@ -575,6 +774,9 @@ else
   fi
 fi
 
+validate_local_build_generation_manifest \
+  || fail "Local binary is not bound to the current source/assets generation"
+
 # Validate and stage both asset surfaces before the binary is touched. Stages
 # live under this transaction's unique directory, so no concurrent entrypoint
 # can promote a payload prepared by another process.
@@ -586,14 +788,62 @@ adk_stage_routines "$PROJECT_DIR" "$AD_HOME" "$ROUTINE_ASSET_TXN" >/dev/null \
 adk_stage_routine_helpers "$PROJECT_DIR" "$AD_HOME" "$ROUTINE_ASSET_TXN" >/dev/null \
   || fail "Routine helper staging failed; refusing to install the binary"
 
+# Prepare the exact bytes that will become live, including their final
+# signature, before any live binary or asset path changes. The candidate CLI
+# evaluates the transaction's staged release-root without config/DB input.
+info "Staging candidate binary..."
+mkdir -p "$LIBEXEC_DIR"
+DEPLOY_BINARY_STAGE="$(mktemp "$LIBEXEC_DIR/.agentdesk.deploy.XXXXXXXX")" \
+  || fail "Could not create private binary stage"
+if ! cp "$PROJECT_DIR/target/release/agentdesk" "$DEPLOY_BINARY_STAGE" \
+  || ! chmod 755 "$DEPLOY_BINARY_STAGE" \
+  || [ ! -f "$DEPLOY_BINARY_STAGE" ] \
+  || [ -L "$DEPLOY_BINARY_STAGE" ] \
+  || [ ! -s "$DEPLOY_BINARY_STAGE" ] \
+  || [ ! -x "$DEPLOY_BINARY_STAGE" ]; then
+  fail "Could not stage the candidate binary"
+fi
+if [ "$OS" = "darwin" ]; then
+  resolve_macos_codesign_mode \
+    || fail "Could not resolve macOS codesign mode from: $CODESIGN_MODE"
+  info "Resolved macOS codesign mode: $RESOLVED_CODESIGN_MODE"
+  if [ "$RESOLVED_CODESIGN_MODE" = "developer-id" ] \
+    && [ -n "$RESOLVED_CODESIGN_IDENTITY" ]; then
+    info "Resolved Developer ID identity: $RESOLVED_CODESIGN_IDENTITY"
+  fi
+  codesign_real_binary_if_needed "$RESOLVED_CODESIGN_MODE" "$DEPLOY_BINARY_STAGE" \
+    || fail "Failed to sign the staged candidate using mode: $RESOLVED_CODESIGN_MODE"
+fi
+adk_validate_staged_routine_asset_transaction \
+  "$AD_HOME" "$ROUTINE_ASSET_TXN" "$DEPLOY_BINARY_STAGE" \
+  || fail "Candidate runtime rejected the staged routine generation"
+
+# No live binary or asset path may change while the old process can still load
+# from it. Arm recovery before the first control-plane command so a signal at
+# either boundary restores and restarts the previous generation.
+stop_deploy_service_for_promotion \
+  || fail "Could not stop the existing service before live promotion"
+
+# Exact validation is repeated under the same transaction lock at the live
+# asset boundary, then the fully validated asset pair is promoted while the old
+# service is confirmed quiescent. The staged binary remains private until both
+# surfaces are in place.
+adk_promote_routine_asset_transaction \
+  "$AD_HOME" "$ROUTINE_ASSET_TXN" "$DEPLOY_BINARY_STAGE" \
+  || fail "Routine asset transaction promotion failed"
+ok "Routines: $AD_HOME/routines/"
+ok "Routine helpers: $AD_HOME/routine-helpers/"
+
 # ── Step 2: Copy binary ──────────────────────────────────────────────────────
 info "Installing binary..."
 mkdir -p "$BIN_DIR"
 if [ "$OS" = "darwin" ]; then
   # Previous installs may have been immutable; unlock before backup/replace.
-  chflags nouchg "$WRAPPER_BIN" "$REAL_BIN" 2>/dev/null || true
+  clear_deploy_immutable_flag "$WRAPPER_BIN" \
+    || fail "Could not clear immutable flag from existing wrapper"
+  clear_deploy_immutable_flag "$REAL_BIN" \
+    || fail "Could not clear immutable flag from existing binary"
 fi
-mkdir -p "$LIBEXEC_DIR"
 if [ -e "$WRAPPER_BIN" ]; then
   BACKUP_WRAPPER="$(mktemp "$BIN_DIR/agentdesk.wrapper.backup.XXXXXX")"
   cp "$WRAPPER_BIN" "$BACKUP_WRAPPER"
@@ -603,21 +853,8 @@ if [ -e "$REAL_BIN" ]; then
   cp "$REAL_BIN" "$BACKUP_REAL"
 fi
 DEPLOY_BINARY_PROMOTED=1
-install_file_atomically "$PROJECT_DIR/target/release/agentdesk" "$REAL_BIN" 755
-if [ "$OS" = "darwin" ]; then
-  resolve_macos_codesign_mode \
-    || restore_previous_install_and_fail \
-      "Could not resolve macOS codesign mode from: $CODESIGN_MODE" \
-      "Restored previous install after failed codesign resolution"
-  info "Resolved macOS codesign mode: $RESOLVED_CODESIGN_MODE"
-  if [ "$RESOLVED_CODESIGN_MODE" = "developer-id" ] && [ -n "$RESOLVED_CODESIGN_IDENTITY" ]; then
-    info "Resolved Developer ID identity: $RESOLVED_CODESIGN_IDENTITY"
-  fi
-  codesign_real_binary_if_needed "$RESOLVED_CODESIGN_MODE" \
-    || restore_previous_install_and_fail \
-      "Failed to apply macOS code signature using mode: $RESOLVED_CODESIGN_MODE" \
-      "Restored previous install after failed codesign step"
-fi
+mv -f "$DEPLOY_BINARY_STAGE" "$REAL_BIN"
+DEPLOY_BINARY_STAGE=""
 write_wrapper_script \
   || restore_previous_install_and_fail \
     "Failed to update binary wrapper at $WRAPPER_BIN" \
@@ -642,11 +879,6 @@ if [ -d "$PROJECT_DIR/policies" ]; then
   rsync -a --delete "$PROJECT_DIR/policies/" "$AD_HOME/policies/"
   ok "Policies: $AD_HOME/policies/"
 fi
-
-adk_promote_routine_asset_transaction "$AD_HOME" "$ROUTINE_ASSET_TXN" \
-  || fail "Routine asset transaction promotion failed"
-ok "Routines: $AD_HOME/routines/"
-ok "Routine helpers: $AD_HOME/routine-helpers/"
 
 if [ -d "$PROJECT_DIR/skills" ]; then
   mkdir -p "$AD_HOME/skills"
