@@ -379,9 +379,10 @@ pub(super) fn on_idle_relay_drift(
 ) {
 }
 
-/// Entry point invoked from the owner-resolution chokepoint's drift (drop)
-/// branch. The resolver owns the single rate-limited drift WARN; this path only
-/// fires the Claude one-shot async repair (cooldown + single-flight gated).
+/// Entry point invoked from the owner-resolution chokepoint's drift branch.
+/// The resolver owns the single rate-limited WARN; this path tracks only actual
+/// observed-prompt emissions (poll misses pass zero) and runs one bounded repair
+/// or permanent-loss classification for both Claude and Codex.
 #[cfg(unix)]
 pub(super) fn on_idle_relay_drift(
     shared: &Arc<SharedData>,

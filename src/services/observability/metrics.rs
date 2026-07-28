@@ -69,8 +69,12 @@ pub struct AtomicCounters {
     /// cleanly assigned across the three relay-launch paths, root cause #3). A
     /// phantom/unknown owner can make the bridge skip its own delivery.
     pub relay_owner_unknown: AtomicU64,
-    /// #4794: relay emissions that became permanently unrecoverable after an
-    /// authoritative tmux-owner registry miss and confirmed pane death.
+    /// #4794: observed prompt-notification emissions that hit an authoritative
+    /// tmux-owner registry miss and were still pending when bounded three-state
+    /// probing definitively reported `DeadOrAbsent`. Poll misses are excluded;
+    /// `ProbeError` preserves the pending count; successful/already-effective
+    /// promotion drains it as delayed rather than lost. This is process-local and
+    /// cumulative per `(channel_id, provider)`.
     pub relay_permanent_loss: AtomicU64,
     /// #4913: canonical Discord identity writes rejected with a typed conflict.
     pub session_identity_conflicts: AtomicU64,
@@ -137,7 +141,8 @@ pub struct AtomicCountersSnapshot {
     pub relay_uncommitted_inflight_cleared: u64,
     /// #2838: see [`AtomicCounters::relay_owner_unknown`].
     pub relay_owner_unknown: u64,
-    /// #4794: see [`AtomicCounters::relay_permanent_loss`].
+    /// #4794: confirmed lost observed-prompt emissions; see
+    /// [`AtomicCounters::relay_permanent_loss`] for exact inclusion rules.
     pub relay_permanent_loss: u64,
     /// #4913: see [`AtomicCounters::session_identity_conflicts`].
     pub session_identity_conflicts: u64,
@@ -177,7 +182,8 @@ pub struct CounterSnapshotRow {
     /// #2838: turns that began relay with an Unknown owner kind. See
     /// [`AtomicCounters::relay_owner_unknown`].
     pub relay_owner_unknown: u64,
-    /// #4794: see [`AtomicCounters::relay_permanent_loss`].
+    /// #4794: confirmed lost observed-prompt emissions; see
+    /// [`AtomicCounters::relay_permanent_loss`] for exact inclusion rules.
     pub relay_permanent_loss: u64,
     /// #4913: canonical identity writes rejected with a typed conflict.
     pub session_identity_conflicts: u64,
