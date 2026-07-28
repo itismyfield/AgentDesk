@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { aggregateText, run } from "../timeout-shadow-gate.mjs";
+import { aggregateFile, aggregateText, parseArgs, run } from "../timeout-shadow-gate.mjs";
 
 function record(section, overrides = {}) {
   return JSON.stringify({
@@ -42,15 +43,15 @@ test("aggregates current and rotated logs in deterministic section order", () =>
   }
 });
 
-test("reads stdin and filters only records carrying an out-of-range timestamp", () => {
+test("time windows exclude both out-of-range and timestamp-less records", () => {
   const input = [
     `2026-07-26T00:00:00Z INFO ${shadow("_section_A")}`,
     shadow("_section_A")
   ].join("\n");
-  const result = run(["--stdin", "--since", "2026-07-27T00:00:00Z"], input);
+  const result = run(["--stdin", "--since", "2026-07-27T00:00:00Z", "--min-a-samples", "0", "--min-j-samples", "0"], input);
   assert.equal(result.exitCode, 0);
   assert.deepEqual(JSON.parse(result.output)._section_A, {
-    total: 1, comparable: 1, agreement: 1, divergence: 0, error: 0
+    total: 0, comparable: 0, agreement: 0, divergence: 0, error: 0
   });
 });
 
@@ -84,11 +85,52 @@ test("reports J incomparable ratio and preserves zero-sample null ratio", () => 
   assert.equal(aggregateText([])._section_J.ratio, null);
 });
 
-test("positive sample thresholds fail on zero samples instead of passing as clean", () => {
-  const result = run(["--min-a-samples", "1", "--min-j-samples", "1"], "");
+test("default positive sample thresholds fail on zero samples instead of passing as clean", () => {
+  const result = run([], "");
   assert.equal(result.exitCode, 1);
   assert.match(result.failures.join(" "), /_section_A comparable samples 0 < 1/);
   assert.match(result.failures.join(" "), /_section_J samples 0 < 1/);
+});
+
+test("rejects decimal counts and invalid ISO-8601 calendar timestamps", () => {
+  assert.throws(() => parseArgs(["--min-a-samples", "1.5"]), /non-negative integer/);
+  assert.throws(() => parseArgs(["--max-errors", "01"]), /non-negative integer/);
+  assert.throws(() => parseArgs(["--since", "2026-02-30T00:00:00Z"]), /valid ISO-8601/);
+  assert.throws(() => parseArgs(["--until", "2026-07-28T24:00:00Z"]), /valid ISO-8601/);
+  assert.throws(() => parseArgs(["--since", "2026-07-28 00:00:00Z"]), /ISO-8601 calendar/);
+});
+
+test("streams a stable rotated file and retries a changed snapshot without double counting", () => {
+  const directory = mkdtempSync(join(tmpdir(), "timeout-shadow-gate-"));
+  try {
+    const log = join(directory, "dcserver.stdout.log.1");
+    writeFileSync(log, `${shadow("_section_A")}\n`);
+    const signatureMtimes = [1, 2, 3, 3];
+    let stats = 0;
+    const io = {
+      ...fs,
+      statSync(path) {
+        const stat = fs.statSync(path);
+        return { ...stat, mtimeMs: signatureMtimes[stats++] };
+      }
+    };
+    const report = aggregateFile(log, {}, io);
+    assert.equal(report._section_A.total, 1);
+    assert.equal(stats, 4);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("rejects duplicate canonical log inputs", () => {
+  const directory = mkdtempSync(join(tmpdir(), "timeout-shadow-gate-"));
+  try {
+    const log = join(directory, "dcserver.stdout.log");
+    writeFileSync(log, `${shadow("_section_A")}\n`);
+    assert.throws(() => run([log, log], ""), /duplicate log input/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("enforces pass and fail threshold combinations", () => {
