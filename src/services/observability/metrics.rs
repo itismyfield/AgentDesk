@@ -213,6 +213,8 @@ pub struct CounterSnapshotRow {
     /// #4794: confirmed lost observed-prompt emissions; see
     /// [`AtomicCounters::relay_permanent_loss`] for exact inclusion rules.
     pub relay_permanent_loss: u64,
+    pub relay_permanent_loss_drift_state_ttl_expired: u64,
+    pub relay_permanent_loss_dead_pane: u64,
     /// #4913: canonical identity writes rejected with a typed conflict.
     pub session_identity_conflicts: u64,
     pub session_identity_conflict_ambiguous_canonical: u64,
@@ -546,12 +548,7 @@ mod tests {
             RelayPermanentLossReason::DriftStateTtlExpired,
             9,
         );
-        counters.record_relay_permanent_loss(
-            4794,
-            "claude",
-            RelayPermanentLossReason::DeadPane,
-            2,
-        );
+        counters.record_relay_permanent_loss(4794, "claude", RelayPermanentLossReason::DeadPane, 2);
 
         let rows = counters.snapshot();
         assert_eq!(rows.len(), 1);
