@@ -1,5 +1,6 @@
 pub(crate) mod cancel_run;
 pub(crate) mod route;
+pub(crate) mod thread_group_contract;
 pub mod runtime;
 
 use serde::Serialize;
