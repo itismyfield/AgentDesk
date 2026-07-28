@@ -2931,6 +2931,11 @@ class TickChannelTests(unittest.TestCase):
         state = {
             "coverage_uncovered_ticks": COVERAGE_CONFIRM_TICKS - 1,
             "coverage_desync_since": self.now,
+            # #4961: transcript loss no longer corroborates a desync on its own.
+            # Corroboration is delegated to `gap_since`, the delivery-gap
+            # watermark that `evaluate()` already maintains monotonically, so
+            # this fixture carries the sustained-loss evidence in that key.
+            "gap_since": tick_at - rt.cfg.gap_alert_secs,
         }
 
         tick_coverage(
@@ -2943,6 +2948,73 @@ class TickChannelTests(unittest.TestCase):
 
         self.assertEqual(len(rt.alerts), 1)
         self.assertIn("attached_but_desynced", rt.alerts[0][0])
+
+    def _loss_corroboration_probe(self, tick_at):
+        return self.active_foreground_probe(
+            queue_depth=1,
+            last_outbound_activity_ms=None,
+            last_relay_ts_ms=int(tick_at * 1000) - 1,
+        )
+
+    def test_isolated_transcript_loss_without_gap_since_does_not_corroborate(self):
+        # #4961 regression: two real false positives (ticks=83 gap=678s and
+        # ticks=4 gap=799s, same channel) fired off a single lost>0 tick whose
+        # neighbours both reported lost=0 — relay batching, not a dead relay.
+        # A momentary `lost > 0` carries no duration evidence, so on its own it
+        # must not corroborate the desync. Sustained loss is expressed by
+        # `gap_since`, which is absent here.
+        rt = self.make_rt()
+        tick_at = self.now + 600
+        self.arm_coverage(rt, self._loss_corroboration_probe(tick_at))
+        state = {
+            "coverage_uncovered_ticks": COVERAGE_CONFIRM_TICKS - 1,
+            "coverage_desync_since": self.now,
+        }
+
+        tick_coverage(
+            rt,
+            TICK_CHANNEL,
+            state,
+            tick_at,
+            CoverageTranscriptProbe(growing=True, blocks=723, lost=1),
+        )
+
+        self.assertEqual(rt.alerts, [])
+        self.assertNotIn("last_coverage_alert", state)
+        # tick_coverage observes only; it must not invent a corroboration key.
+        self.assertNotIn("gap_since", state)
+        self.assertTrue(
+            any(
+                "coverage desync uncorroborated" in line for line in rt.log_lines
+            )
+        )
+
+    def test_transcript_loss_with_gap_since_corroborates_desync_coverage_alarm(self):
+        # The real signal is preserved: once `evaluate()` has opened a delivery
+        # gap (STATE_GAP -> `gap_since`), transcript loss corroborates the
+        # desync and the alarm fires. `gap_since` is owned by the gap path, so
+        # tick_coverage must read it without rewriting it.
+        rt = self.make_rt()
+        tick_at = self.now + 600
+        self.arm_coverage(rt, self._loss_corroboration_probe(tick_at))
+        gap_since = tick_at - rt.cfg.gap_alert_secs
+        state = {
+            "coverage_uncovered_ticks": COVERAGE_CONFIRM_TICKS - 1,
+            "coverage_desync_since": self.now,
+            "gap_since": gap_since,
+        }
+
+        tick_coverage(
+            rt,
+            TICK_CHANNEL,
+            state,
+            tick_at,
+            CoverageTranscriptProbe(growing=True, blocks=723, lost=1),
+        )
+
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertIn("attached_but_desynced", rt.alerts[0][0])
+        self.assertEqual(state["gap_since"], gap_since)
 
     def test_growth_with_stale_relay_and_advanced_inflight_update_is_suppressed(self):
         rt = self.make_rt()

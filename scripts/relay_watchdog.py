@@ -3180,9 +3180,6 @@ def tick_coverage(
         growing_without_loss = bool(
             zero_loss_observed and transcript_probe is not None and transcript_probe.growing
         )
-        transcript_loss_active = bool(
-            transcript_probe is not None and transcript_probe.lost > 0
-        )
         inflight_progress_alive = bool(
             inflight_update_advanced or inflight_update_recent
         )
@@ -3192,7 +3189,6 @@ def tick_coverage(
         delivery_gap_active = bool(
             chs.get("gap_since")
             or chs.get("alerting")
-            or transcript_loss_active
             or growing_relay_stall
         )
         if (
