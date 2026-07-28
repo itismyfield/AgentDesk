@@ -143,6 +143,7 @@ LOSS_OBSERVATIONS_KEY = "permanent_loss_observations"
 LOSS_SCAN_SEQUENCE_KEY = "permanent_loss_scan_sequence"
 PERMANENT_LOSS_TOMBSTONES_KEY = "permanent_loss_tombstones"
 PERMANENT_LOSS_TOTAL_KEY = "permanent_loss_total"
+LAST_ACTUAL_DELIVERY_AT_KEY = "last_actual_delivery_at"
 # A source block becomes unrecoverable only after two independent ordering
 # observations: it stays unmatched in consecutive successful Discord reads while
 # a later source block is actually matched on both reads. A wall-clock threshold
@@ -3883,6 +3884,11 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     evaluated: list[tuple[TranscriptCandidate, Verdict]] = []
     fresh_undelivered_by_path: dict[str, int] = {}
     new_permanent_losses = 0
+    last_actual_delivery_at = (
+        float(chs.get(LAST_ACTUAL_DELIVERY_AT_KEY))
+        if _is_finite_nonnegative_number(chs.get(LAST_ACTUAL_DELIVERY_AT_KEY))
+        else 0.0
+    )
     loss_scan_sequence = next_permanent_loss_scan(chs)
     unreadable_paths: list[str] = []
     escalated_pending_paths: list[str] = []
@@ -3940,6 +3946,8 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             advance_delivered_watermark(
                 chs, candidate.path, observed_verdict.delivered_ts, now
             )
+            last_actual_delivery_at = max(last_actual_delivery_at, now)
+            chs[LAST_ACTUAL_DELIVERY_AT_KEY] = last_actual_delivery_at
         tombstone_update = update_permanent_loss_tombstones(
             chs,
             candidate.path,
@@ -4268,7 +4276,11 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             )
             return
         issue_filing_stable = _issue_filing_stable(chs, selected_probe, now)
-        gap_min = int(v.gap_secs // 60) if v.delivered_ts else 999
+        gap_min = (
+            int(max(0.0, now - last_actual_delivery_at) // 60)
+            if last_actual_delivery_at
+            else (int(v.gap_secs // 60) if v.delivered_ts else 999)
+        )
         if not chs.get("gap_since"):
             chs["gap_since"] = now
         issue_due = (

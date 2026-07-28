@@ -6163,6 +6163,10 @@ class TickChannelTests(unittest.TestCase):
         self.assertEqual(len(rt.alerts), 1)
         self.assertIn("마지막 정상 도달 이후 **51분**", rt.alerts[0][0])
         self.assertNotIn("92분", rt.alerts[0][0])
+        self.assertEqual(
+            state["999"][relay_watchdog.LAST_ACTUAL_DELIVERY_AT_KEY],
+            last_actual_delivery,
+        )
 
     def test_new_permanent_loss_after_prior_tombstone_alerts_again(self):
         first_missing = (self.now - 4000, "first skipped response")
