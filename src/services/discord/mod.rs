@@ -2391,8 +2391,6 @@ impl SharedData {
         &self,
         channel_id: ChannelId,
     ) -> Arc<tokio::sync::Mutex<()>> {
-        self.session_transition_locks
-            .retain(|_, lock| lock.strong_count() > 0);
         if let Some(lock) = self
             .session_transition_locks
             .get(&channel_id)
@@ -2412,6 +2410,11 @@ impl SharedData {
             }
             dashmap::mapref::entry::Entry::Vacant(entry) => {
                 entry.insert(Arc::downgrade(&lock));
+                // Prune only on registry growth. The common existing-channel path
+                // above remains O(1), while dead Weak entries are still bounded by
+                // subsequent vacant insertions.
+                self.session_transition_locks
+                    .retain(|_, candidate| candidate.strong_count() > 0);
                 lock
             }
         }
@@ -2597,17 +2600,26 @@ mod session_transition_lock_tests {
     use super::*;
 
     #[test]
-    fn inactive_channel_locks_are_pruned_on_next_lookup() {
+    fn inactive_channel_locks_are_pruned_only_on_vacant_insertion() {
         let shared = make_shared_data_for_tests();
         let old_channel = ChannelId::new(4_794_900);
-        let new_channel = ChannelId::new(4_794_901);
+        let live_channel = ChannelId::new(4_794_901);
+        let new_channel = ChannelId::new(4_794_902);
 
         let old = shared.session_transition_lock(old_channel);
-        assert_eq!(shared.session_transition_locks.len(), 1);
+        let live = shared.session_transition_lock(live_channel);
         drop(old);
+
+        let same_live = shared.session_transition_lock(live_channel);
+        assert!(Arc::ptr_eq(&live, &same_live));
+        assert!(
+            shared.session_transition_locks.contains_key(&old_channel),
+            "the O(1) existing-channel path must not scan and prune the registry"
+        );
 
         let _new = shared.session_transition_lock(new_channel);
         assert!(!shared.session_transition_locks.contains_key(&old_channel));
+        assert!(shared.session_transition_locks.contains_key(&live_channel));
         assert!(shared.session_transition_locks.contains_key(&new_channel));
     }
 }
