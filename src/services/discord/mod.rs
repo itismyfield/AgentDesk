@@ -794,6 +794,39 @@ pub(crate) use router::intake_runtime_transition_after_redirect;
 pub(crate) use session_runtime::resume_launch_state_for_tests;
 
 #[cfg(test)]
+pub(crate) fn register_resume_watcher_for_tests(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+) {
+    shared.tmux_watchers.insert(
+        channel_id,
+        TmuxWatcherHandle {
+            tmux_session_name: tmux_session_name.to_string(),
+            output_path: format!("/runtime/{tmux_session_name}.jsonl"),
+            paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_heartbeat_ts_ms: Arc::new(
+                std::sync::atomic::AtomicI64::new(tmux_watcher_now_ms()),
+            ),
+        },
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn resume_owner_channel_for_tests(
+    shared: &SharedData,
+    tmux_session_name: &str,
+) -> Option<ChannelId> {
+    shared
+        .tmux_watchers
+        .owner_channel_for_tmux_session(tmux_session_name)
+}
+
+#[cfg(test)]
 mod global_active_counter_tests {
     use super::{increment_counter, saturating_decrement_counter};
     use std::sync::atomic::{AtomicUsize, Ordering};
