@@ -228,12 +228,13 @@ pub(super) fn validate_routine_roots(
         });
     };
     let helper_surface = primary_parent.join(ROUTINE_HELPERS_DIR_NAME);
-    let canonical_helper_surface = canonical_identity_or_missing(&helper_surface).map_err(|source| {
-        RoutineRootValidationError::HelperSurfaceCanonicalization {
-            helper_surface: helper_surface.clone(),
-            source,
-        }
-    })?;
+    let canonical_helper_surface =
+        canonical_identity_or_missing(&helper_surface).map_err(|source| {
+            RoutineRootValidationError::HelperSurfaceCanonicalization {
+                helper_surface: helper_surface.clone(),
+                source,
+            }
+        })?;
 
     for root in &identities {
         if paths_overlap(&root.canonical, &canonical_helper_surface) {

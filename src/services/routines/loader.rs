@@ -994,8 +994,11 @@ mod tests {
 
     const PREFLIGHT_EVALUATION_SENTINEL: usize = 7;
 
-    fn preflight_observed_loader(
-    ) -> (RoutineScriptLoader, Arc<std::sync::atomic::AtomicUsize>, PathBuf) {
+    fn preflight_observed_loader() -> (
+        RoutineScriptLoader,
+        Arc<std::sync::atomic::AtomicUsize>,
+        PathBuf,
+    ) {
         let loader = RoutineScriptLoader::new().unwrap();
         loader.state.evaluation_attempts.store(
             PREFLIGHT_EVALUATION_SENTINEL,
@@ -1032,10 +1035,7 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             PREFLIGHT_EVALUATION_SENTINEL
         );
-        assert_eq!(
-            source_reads.load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
+        assert_eq!(source_reads.load(std::sync::atomic::Ordering::Relaxed), 0);
         let failed_scripts = loader.state.failed_scripts.lock().unwrap();
         assert_eq!(failed_scripts.len(), 1);
         assert!(failed_scripts.contains_key(failure_sentinel));
@@ -1340,11 +1340,7 @@ mod tests {
                 ..
             })
         ));
-        assert!(
-            error
-                .to_string()
-                .contains("overlap after canonicalization")
-        );
+        assert!(error.to_string().contains("overlap after canonicalization"));
         assert_preflight_rejection_has_no_load_side_effects(
             &loader,
             source_reads.as_ref(),
@@ -1370,11 +1366,7 @@ mod tests {
                 ..
             })
         ));
-        assert!(
-            error
-                .to_string()
-                .contains("same canonical directory")
-        );
+        assert!(error.to_string().contains("same canonical directory"));
         assert_preflight_rejection_has_no_load_side_effects(
             &loader,
             source_reads.as_ref(),
