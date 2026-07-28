@@ -11,10 +11,9 @@ use crate::engine::loader::compute_policy_version;
 
 mod discovery;
 use discovery::{
-    DiscoveredRoutineScript, RoutineDiscoveryHooks, ValidatedHelperSurface,
-    ValidatedRoutineRoot, ValidatedRuntimeRoot, add_cached_candidates_for_root,
-    bind_routine_root_authority, collect_routine_script_paths, routine_roots_identity, script_ref,
-    validate_routine_authority,
+    DiscoveredRoutineScript, RoutineDiscoveryHooks, ValidatedHelperSurface, ValidatedRoutineRoot,
+    ValidatedRuntimeRoot, add_cached_candidates_for_root, bind_routine_root_authority,
+    collect_routine_script_paths, routine_roots_identity, script_ref, validate_routine_authority,
 };
 #[cfg(test)]
 use discovery::{bind_routine_root_authority_with_hook, candidate_failure_key};
@@ -221,11 +220,7 @@ impl RoutineScriptLoader {
     pub fn new_shared(roots: &[PathBuf], runtime_root: &Path) -> Result<Self> {
         let (runtime_authority, validated_roots, helper_authority) =
             bind_routine_root_authority(roots, runtime_root)?;
-        let key = routine_roots_identity(
-            &runtime_authority,
-            &validated_roots,
-            &helper_authority,
-        );
+        let key = routine_roots_identity(&runtime_authority, &validated_roots, &helper_authority);
         let runtime_root = runtime_authority.canonical().to_path_buf();
         let mut states = SHARED_LOADER_STATES
             .lock()
@@ -314,8 +309,7 @@ impl RoutineScriptLoader {
         let Some(helper_authority) = &self.bound_helper_surface else {
             return Ok(());
         };
-        let (_, observed) =
-            validate_routine_authority(&[], runtime_root, current_dir_override)?;
+        let (_, observed) = validate_routine_authority(&[], runtime_root, current_dir_override)?;
         helper_authority.verify_observed(&observed)?;
         if let Some(runtime_authority) = &self.bound_runtime_root {
             runtime_authority.verify_current()?;
@@ -347,31 +341,32 @@ impl RoutineScriptLoader {
         #[cfg(not(test))]
         let current_dir_override: Option<PathBuf> = None;
         self.verify_bound_authority(&runtime_root, current_dir_override.as_deref())?;
-        let (validated_roots, observed_helper_surface) = validate_routine_authority(
-            roots,
-            &runtime_root,
-            current_dir_override.as_deref(),
-        )?;
+        let (validated_roots, observed_helper_surface) =
+            validate_routine_authority(roots, &runtime_root, current_dir_override.as_deref())?;
         if let Some(expected) = &self.bound_helper_surface {
             expected.verify_observed(&observed_helper_surface)?;
         }
         if let Some(bound_roots) = &self.bound_roots {
             if bound_roots.len() != validated_roots.len() {
-                return Err(discovery::RoutineRootValidationError::ConfiguredRootCountChanged {
-                    expected: bound_roots.len(),
-                    observed: validated_roots.len(),
-                }
-                .into());
+                return Err(
+                    discovery::RoutineRootValidationError::ConfiguredRootCountChanged {
+                        expected: bound_roots.len(),
+                        observed: validated_roots.len(),
+                    }
+                    .into(),
+                );
             }
             for (root, expected) in validated_roots.iter().zip(bound_roots) {
                 if root.canonical != expected.canonical {
-                    return Err(discovery::RoutineRootValidationError::RootAuthorityChanged {
-                        root_index: root.index,
-                        root: root.configured.clone(),
-                        expected_canonical_root: expected.canonical.clone(),
-                        observed_canonical_root: root.canonical.clone(),
-                    }
-                    .into());
+                    return Err(
+                        discovery::RoutineRootValidationError::RootAuthorityChanged {
+                            root_index: root.index,
+                            root: root.configured.clone(),
+                            expected_canonical_root: expected.canonical.clone(),
+                            observed_canonical_root: root.canonical.clone(),
+                        }
+                        .into(),
+                    );
                 }
                 if !expected.retains_bound_identity(root) {
                     return Err(discovery::RoutineRootValidationError::RootIdentityChanged {
@@ -392,10 +387,7 @@ impl RoutineScriptLoader {
         {
             hook();
         }
-        self.verify_bound_authority(
-            &runtime_root,
-            current_dir_override.as_deref(),
-        )?;
+        self.verify_bound_authority(&runtime_root, current_dir_override.as_deref())?;
         let mut seen_refs = HashSet::new();
         let mut candidates_by_ref: BTreeMap<String, Vec<RoutineScriptCandidate>> = BTreeMap::new();
         let existing_scripts: HashMap<String, LoadedRoutineScript> = self
@@ -446,11 +438,8 @@ impl RoutineScriptLoader {
                 .unwrap_or_else(recover_poisoned_lock)
                 .clone();
             let authority_check = || {
-                self.verify_bound_authority(
-                    &runtime_root,
-                    current_dir_override.as_deref(),
-                )
-                .map_err(|error| std::io::Error::other(error.to_string()))
+                self.verify_bound_authority(&runtime_root, current_dir_override.as_deref())
+                    .map_err(|error| std::io::Error::other(error.to_string()))
             };
             #[cfg(test)]
             let discovery_hooks = RoutineDiscoveryHooks {
@@ -467,10 +456,7 @@ impl RoutineScriptLoader {
                 authority_check: Some(&authority_check),
             };
             let entries_result = collect_routine_script_paths(root, discovery_hooks);
-            self.verify_bound_authority(
-                &runtime_root,
-                current_dir_override.as_deref(),
-            )?;
+            self.verify_bound_authority(&runtime_root, current_dir_override.as_deref())?;
             let entries = match entries_result {
                 Ok(entries) => entries,
                 Err(e) => {
@@ -509,10 +495,7 @@ impl RoutineScriptLoader {
             }
         }
 
-        self.verify_bound_authority(
-            &runtime_root,
-            current_dir_override.as_deref(),
-        )?;
+        self.verify_bound_authority(&runtime_root, current_dir_override.as_deref())?;
 
         let existing_refs: HashSet<String> = existing_scripts.keys().cloned().collect();
         let candidate_paths: HashSet<PathBuf> = candidates_by_ref
@@ -595,10 +578,7 @@ impl RoutineScriptLoader {
                 {
                     hook(&candidate.path);
                 }
-                self.verify_bound_authority(
-                    &runtime_root,
-                    current_dir_override.as_deref(),
-                )?;
+                self.verify_bound_authority(&runtime_root, current_dir_override.as_deref())?;
                 let now = Instant::now();
                 if !Self::should_retry_candidate_in(
                     &mut staged_failures,
@@ -613,10 +593,7 @@ impl RoutineScriptLoader {
                     continue;
                 }
 
-                self.verify_bound_authority(
-                    &runtime_root,
-                    current_dir_override.as_deref(),
-                )?;
+                self.verify_bound_authority(&runtime_root, current_dir_override.as_deref())?;
                 #[cfg(test)]
                 self.state
                     .evaluation_attempts
@@ -626,10 +603,7 @@ impl RoutineScriptLoader {
                     &candidate.path,
                     source,
                 );
-                self.verify_bound_authority(
-                    &runtime_root,
-                    current_dir_override.as_deref(),
-                )?;
+                self.verify_bound_authority(&runtime_root, current_dir_override.as_deref())?;
                 match evaluation {
                     Ok(script) => {
                         staged_failures.remove(&candidate_key);
@@ -682,10 +656,7 @@ impl RoutineScriptLoader {
         }
 
         staged_failures.retain(|path, _| candidate_paths.contains(path));
-        self.verify_bound_authority(
-            &runtime_root,
-            current_dir_override.as_deref(),
-        )?;
+        self.verify_bound_authority(&runtime_root, current_dir_override.as_deref())?;
         let pruned = self.apply_dir_reload(loaded_scripts, &seen_refs)?;
         *self
             .state
@@ -1613,14 +1584,14 @@ mod tests {
 
         assert_eq!(
             loader
-                .load_dirs(&[
-                    PathBuf::from("routines"),
-                    PathBuf::from("routine-helpers"),
-                ])
+                .load_dirs(&[PathBuf::from("routines"), PathBuf::from("routine-helpers"),])
                 .unwrap(),
             2
         );
-        assert_eq!(loader.script_refs().unwrap(), vec!["operator.js", "primary.js"]);
+        assert_eq!(
+            loader.script_refs().unwrap(),
+            vec!["operator.js", "primary.js"]
+        );
     }
 
     #[test]
@@ -1751,10 +1722,7 @@ mod tests {
         assert_eq!(loader.load_dirs(&[root_alias]).unwrap(), 1);
         assert_eq!(loader.script_refs().unwrap(), vec!["tracked.js"]);
         let expected_source = routines.canonicalize().unwrap().join("tracked.js");
-        assert_eq!(
-            source_reads.lock().unwrap().as_slice(),
-            &[expected_source]
-        );
+        assert_eq!(source_reads.lock().unwrap().as_slice(), &[expected_source]);
         assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
     }
 
@@ -1781,10 +1749,7 @@ mod tests {
         }));
 
         assert_eq!(loader.load_dirs(&[routines]).unwrap(), 0);
-        assert_eq!(
-            source_reads.load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
+        assert_eq!(source_reads.load(std::sync::atomic::Ordering::Relaxed), 0);
         assert_eq!(
             loader
                 .state
@@ -1837,10 +1802,7 @@ mod tests {
             error.downcast_ref::<RoutineRootValidationError>(),
             Some(RoutineRootValidationError::RuntimeRootAuthorityChanged { .. })
         ));
-        assert_eq!(
-            source_reads.load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
+        assert_eq!(source_reads.load(std::sync::atomic::Ordering::Relaxed), 0);
         assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
     }
 
@@ -1886,10 +1848,7 @@ mod tests {
             error.downcast_ref::<RoutineRootValidationError>(),
             Some(RoutineRootValidationError::RuntimeRootAuthorityChanged { .. })
         ));
-        assert_eq!(
-            source_reads.load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
+        assert_eq!(source_reads.load(std::sync::atomic::Ordering::Relaxed), 0);
         assert_eq!(
             loader
                 .state
@@ -1957,14 +1916,10 @@ mod tests {
         let alias_to_retarget = runtime_alias.clone();
         let second_target = second_runtime.clone();
 
-        let error = bind_routine_root_authority_with_hook(
-            &roots,
-            &runtime_alias,
-            move || {
-                std::fs::remove_file(&alias_to_retarget).unwrap();
-                symlink(&second_target, &alias_to_retarget).unwrap();
-            },
-        )
+        let error = bind_routine_root_authority_with_hook(&roots, &runtime_alias, move || {
+            std::fs::remove_file(&alias_to_retarget).unwrap();
+            symlink(&second_target, &alias_to_retarget).unwrap();
+        })
         .unwrap_err();
 
         assert!(matches!(
@@ -2010,10 +1965,7 @@ mod tests {
             error.downcast_ref::<RoutineRootValidationError>(),
             Some(RoutineRootValidationError::RootIdentityChanged { root_index: 0, .. })
         ));
-        assert_eq!(
-            source_reads.load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
+        assert_eq!(source_reads.load(std::sync::atomic::Ordering::Relaxed), 0);
         assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
     }
 
@@ -2058,10 +2010,12 @@ mod tests {
             1
         );
         assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
-        assert!(std::fs::symlink_metadata(&candidate)
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&candidate)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[cfg(unix)]
@@ -2096,10 +2050,7 @@ mod tests {
         }));
 
         assert_eq!(loader.load_dirs(&[routines]).unwrap(), 0);
-        assert_eq!(
-            source_reads.load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
+        assert_eq!(source_reads.load(std::sync::atomic::Ordering::Relaxed), 0);
         assert_eq!(
             loader
                 .state
@@ -2128,7 +2079,11 @@ mod tests {
 
         assert_eq!(
             validated[0].canonical,
-            outside.path().canonicalize().unwrap().join("future-routines")
+            outside
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("future-routines")
         );
         assert!(!validated[0].exists);
     }
@@ -2158,21 +2113,14 @@ mod tests {
 
         assert!(matches!(
             error,
-            RoutineRootValidationError::RootAuthorityChangedDuringValidation {
-                root_index: 0,
-                ..
-            }
+            RoutineRootValidationError::RootAuthorityChangedDuringValidation { root_index: 0, .. }
         ));
     }
 
     #[test]
     fn preflight_rejects_parent_after_missing_component_as_ambiguous() {
         let release = tempfile::tempdir().unwrap();
-        let configured = release
-            .path()
-            .join("missing")
-            .join("..")
-            .join("routines");
+        let configured = release.path().join("missing").join("..").join("routines");
         let loader = RoutineScriptLoader::new().unwrap();
         *loader.runtime_root_override.lock().unwrap() = Some(release.path().to_path_buf());
 
@@ -2443,9 +2391,7 @@ mod tests {
         std::fs::write(&path, "throw new Error('singleflight failure');").unwrap();
 
         let loaders = (0..8)
-            .map(|_| {
-                Arc::new(RoutineScriptLoader::new_shared(&roots, &runtime_root).unwrap())
-            })
+            .map(|_| Arc::new(RoutineScriptLoader::new_shared(&roots, &runtime_root).unwrap()))
             .collect::<Vec<_>>();
         let state = Arc::clone(&loaders[0].state);
         let barrier = Arc::new(Barrier::new(loaders.len()));
@@ -2585,10 +2531,7 @@ mod tests {
             error.downcast_ref::<RoutineRootValidationError>(),
             Some(RoutineRootValidationError::HelperSurfaceAuthorityChanged { .. })
         ));
-        assert_eq!(
-            source_reads.load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
+        assert_eq!(source_reads.load(std::sync::atomic::Ordering::Relaxed), 0);
         assert_eq!(
             loader
                 .state
@@ -2631,8 +2574,7 @@ mod tests {
             "agentdesk.routines.register({ name: 'Created Later', tick() { return { action: 'skip' }; } });",
         )
         .unwrap();
-        let after =
-            RoutineScriptLoader::new_shared(&[absolute.clone()], &runtime_root).unwrap();
+        let after = RoutineScriptLoader::new_shared(&[absolute.clone()], &runtime_root).unwrap();
 
         assert!(!Arc::ptr_eq(&before.state, &after.state));
         assert_eq!(after.load_dirs(&[absolute.clone()]).unwrap(), 1);

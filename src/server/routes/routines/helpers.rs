@@ -296,9 +296,8 @@ mod tests {
 
     #[test]
     fn run_now_guard_rejects_invalid_runtime_worker_config() {
-        let mut config = Config::default().resolve_runtime_relative_paths(Some(
-            std::path::Path::new("/runtime-root"),
-        ));
+        let mut config = Config::default()
+            .resolve_runtime_relative_paths(Some(std::path::Path::new("/runtime-root")));
         config.routines.enabled = true;
         config.routines.max_agent_polls_per_tick = 0;
 
@@ -328,9 +327,8 @@ mod tests {
 
     #[test]
     fn http_loader_uses_config_derived_runtime_root_authority() {
-        let config = Config::default().resolve_runtime_relative_paths(Some(
-            std::path::Path::new("/custom/runtime"),
-        ));
+        let config = Config::default()
+            .resolve_runtime_relative_paths(Some(std::path::Path::new("/custom/runtime")));
 
         assert_eq!(
             routine_runtime_root(&config).unwrap(),

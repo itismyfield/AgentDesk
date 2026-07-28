@@ -21,16 +21,9 @@ const ROUTINE_HELPERS_DIR_NAME: &str = "routine-helpers";
 
 #[derive(Debug)]
 pub(super) enum PathResolutionError {
-    Io {
-        path: PathBuf,
-        source: io::Error,
-    },
-    DanglingSymlink {
-        path: PathBuf,
-    },
-    AmbiguousMissingPath {
-        path: PathBuf,
-    },
+    Io { path: PathBuf, source: io::Error },
+    DanglingSymlink { path: PathBuf },
+    AmbiguousMissingPath { path: PathBuf },
 }
 
 impl fmt::Display for PathResolutionError {
@@ -415,9 +408,7 @@ impl ValidatedRuntimeRoot {
         })
     }
 
-    pub(super) fn verify_current(
-        &self,
-    ) -> std::result::Result<(), RoutineRootValidationError> {
+    pub(super) fn verify_current(&self) -> std::result::Result<(), RoutineRootValidationError> {
         let observed = validate_absolute_runtime_root_authority(&self.configured)?;
         self.verify_observed(&observed)
     }
@@ -679,18 +670,22 @@ fn validate_absolute_runtime_root_authority(
         absolute_runtime_root,
         current_dir_is_unused_for_absolute_path,
     )
-    .map_err(|source| RoutineRootValidationError::RuntimeRootCanonicalization {
-        runtime_root: absolute_runtime_root.to_path_buf(),
-        source,
-    })?;
+    .map_err(
+        |source| RoutineRootValidationError::RuntimeRootCanonicalization {
+            runtime_root: absolute_runtime_root.to_path_buf(),
+            source,
+        },
+    )?;
     let observed = resolve_path_authority(
         absolute_runtime_root,
         current_dir_is_unused_for_absolute_path,
     )
-    .map_err(|source| RoutineRootValidationError::RuntimeRootCanonicalization {
-        runtime_root: absolute_runtime_root.to_path_buf(),
-        source,
-    })?;
+    .map_err(
+        |source| RoutineRootValidationError::RuntimeRootCanonicalization {
+            runtime_root: absolute_runtime_root.to_path_buf(),
+            source,
+        },
+    )?;
     if expected != observed {
         return Err(RoutineRootValidationError::RuntimeRootAuthorityChanged {
             runtime_root: absolute_runtime_root.to_path_buf(),
@@ -722,9 +717,8 @@ where
 {
     let current_dir = match current_dir_override {
         Some(current_dir) => current_dir.to_path_buf(),
-        None => std::env::current_dir().map_err(|source| {
-            RoutineRootValidationError::CurrentDirectoryUnavailable { source }
-        })?,
+        None => std::env::current_dir()
+            .map_err(|source| RoutineRootValidationError::CurrentDirectoryUnavailable { source })?,
     };
     let mut identities = Vec::with_capacity(roots.len());
     for (index, root) in roots.iter().enumerate() {
@@ -765,12 +759,13 @@ where
     }
 
     let helper_surface = runtime_root.join(ROUTINE_HELPERS_DIR_NAME);
-    let expected_helper = resolve_path_authority(&helper_surface, &current_dir).map_err(|source| {
-        RoutineRootValidationError::HelperSurfaceCanonicalization {
-            helper_surface: helper_surface.clone(),
-            source,
-        }
-    })?;
+    let expected_helper =
+        resolve_path_authority(&helper_surface, &current_dir).map_err(|source| {
+            RoutineRootValidationError::HelperSurfaceCanonicalization {
+                helper_surface: helper_surface.clone(),
+                source,
+            }
+        })?;
     let observed_helper =
         resolve_path_authority(&helper_surface, &current_dir).map_err(|source| {
             RoutineRootValidationError::HelperSurfaceCanonicalization {
@@ -805,9 +800,7 @@ where
                 false
             }
         };
-        if paths_overlap(&root.canonical, &canonical_helper_surface)
-            || aliases_helper_identity
-        {
+        if paths_overlap(&root.canonical, &canonical_helper_surface) || aliases_helper_identity {
             return Err(RoutineRootValidationError::HelperSurfaceOverlap {
                 root_index: root.index,
                 root: root.configured.clone(),
@@ -904,9 +897,8 @@ where
 {
     let current_dir = match current_dir_override {
         Some(current_dir) => current_dir.to_path_buf(),
-        None => std::env::current_dir().map_err(|source| {
-            RoutineRootValidationError::CurrentDirectoryUnavailable { source }
-        })?,
+        None => std::env::current_dir()
+            .map_err(|source| RoutineRootValidationError::CurrentDirectoryUnavailable { source })?,
     };
     let absolute_runtime_root = raw_absolute_path(runtime_root, &current_dir);
     let initial_runtime_authority =
@@ -947,8 +939,7 @@ where
     let (_, final_helper_authority) =
         validate_routine_authority(&[], &canonical_runtime_root, Some(&current_dir))?;
     initial_helper_authority.verify_observed(&final_helper_authority)?;
-    let final_runtime_authority =
-        validate_absolute_runtime_root_authority(&absolute_runtime_root)?;
+    let final_runtime_authority = validate_absolute_runtime_root_authority(&absolute_runtime_root)?;
     initial_runtime_authority.verify_observed(&final_runtime_authority)?;
 
     Ok((
@@ -988,12 +979,7 @@ pub(super) fn bind_routine_root_authority_with_hook<F>(
 where
     F: FnOnce(),
 {
-    bind_routine_root_authority_inner(
-        roots,
-        runtime_root,
-        None,
-        after_runtime_root_resolve,
-    )
+    bind_routine_root_authority_inner(roots, runtime_root, None, after_runtime_root_resolve)
 }
 
 #[cfg(test)]
@@ -1204,20 +1190,12 @@ fn clear_readdir_errno() {
     unsafe {
         *libc::__errno_location() = 0;
     }
-    #[cfg(any(
-        target_os = "android",
-        target_os = "netbsd",
-        target_os = "openbsd"
-    ))]
+    #[cfg(any(target_os = "android", target_os = "netbsd", target_os = "openbsd"))]
     // SAFETY: libc exposes the calling thread's errno slot through this pointer.
     unsafe {
         *libc::__errno() = 0;
     }
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd"
-    ))]
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
     // SAFETY: libc exposes the calling thread's errno slot through this pointer.
     unsafe {
         *libc::__error() = 0;
@@ -1306,9 +1284,9 @@ fn openat(parent: &File, name: &OsStr, flags: libc::c_int) -> io::Result<File> {
 #[cfg(unix)]
 fn open_root(root: &ValidatedRoutineRoot) -> io::Result<File> {
     let mut options = std::fs::OpenOptions::new();
-    options.read(true).custom_flags(
-        libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
-    );
+    options
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
     let directory = options.open(&root.canonical)?;
     let metadata = directory.metadata()?;
     let observed_identity =
@@ -1395,8 +1373,8 @@ fn collect_routine_scripts_inner(
                     observer(&path);
                 }
                 verify_discovery_authority(hooks)?;
-                let source = read_opened_routine_source(&file, &path)
-                    .map_err(RoutineSourceReadError::from);
+                let source =
+                    read_opened_routine_source(&file, &path).map_err(RoutineSourceReadError::from);
                 verify_discovery_authority(hooks)?;
                 out.push(DiscoveredRoutineScript { path, source });
             }
@@ -1448,8 +1426,7 @@ fn collect_routine_scripts_inner(
             observer(&path);
         }
         verify_discovery_authority(hooks)?;
-        let source =
-            read_opened_routine_source(&file, &path).map_err(RoutineSourceReadError::from);
+        let source = read_opened_routine_source(&file, &path).map_err(RoutineSourceReadError::from);
         verify_discovery_authority(hooks)?;
         out.push(DiscoveredRoutineScript { path, source });
     }

@@ -197,10 +197,7 @@ mod runtime_config_tests {
             loaded.config.runtime_root_authority().unwrap(),
             runtime.path()
         );
-        assert_eq!(
-            loaded.config.routines.dir,
-            runtime.path().join("routines")
-        );
+        assert_eq!(loaded.config.routines.dir, runtime.path().join("routines"));
     }
 
     #[test]

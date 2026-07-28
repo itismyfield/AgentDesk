@@ -2558,10 +2558,7 @@ mod routine_config_unit_tests {
 
         let loaded = load_from_path_at_runtime_root(&config_path, runtime.path()).unwrap();
 
-        assert_eq!(
-            loaded.runtime_root_authority().unwrap(),
-            runtime.path()
-        );
+        assert_eq!(loaded.runtime_root_authority().unwrap(), runtime.path());
         assert_eq!(loaded.routines.dir, runtime.path().join("."));
     }
 
@@ -2612,10 +2609,7 @@ mod routine_config_unit_tests {
 
         let loaded = load_graceful();
 
-        assert_eq!(
-            loaded.runtime_root_authority().unwrap(),
-            runtime.path()
-        );
+        assert_eq!(loaded.runtime_root_authority().unwrap(), runtime.path());
         assert_eq!(loaded.routines.dir, runtime.path().join("routines"));
     }
 
@@ -2631,10 +2625,7 @@ mod routine_config_unit_tests {
 
         let loaded = load_graceful();
 
-        assert_eq!(
-            loaded.runtime_root_authority().unwrap(),
-            runtime.path()
-        );
+        assert_eq!(loaded.runtime_root_authority().unwrap(), runtime.path());
         assert_eq!(loaded.routines.dir, runtime.path().join("routines"));
     }
 
@@ -2938,10 +2929,7 @@ pub fn resolved_config_path() -> PathBuf {
     )
 }
 
-fn load_from_path_with_runtime_root(
-    path: &Path,
-    runtime_root: Option<&Path>,
-) -> Result<Config> {
+fn load_from_path_with_runtime_root(path: &Path, runtime_root: Option<&Path>) -> Result<Config> {
     crate::utils::redact::register_common_env_secrets();
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read config {}", path.display()))?;
