@@ -4208,10 +4208,14 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             corruption_fingerprint = hashlib.sha256(
                 json.dumps(
                     {
-                        LOSS_OBSERVATIONS_KEY: chs.get(LOSS_OBSERVATIONS_KEY),
-                        PERMANENT_LOSS_TOMBSTONES_KEY: chs.get(
-                            PERMANENT_LOSS_TOMBSTONES_KEY
-                        ),
+                        LOSS_OBSERVATIONS_KEY: {
+                            "present": LOSS_OBSERVATIONS_KEY in chs,
+                            "value": chs.get(LOSS_OBSERVATIONS_KEY),
+                        },
+                        PERMANENT_LOSS_TOMBSTONES_KEY: {
+                            "present": PERMANENT_LOSS_TOMBSTONES_KEY in chs,
+                            "value": chs.get(PERMANENT_LOSS_TOMBSTONES_KEY),
+                        },
                     },
                     sort_keys=True,
                     separators=(",", ":"),

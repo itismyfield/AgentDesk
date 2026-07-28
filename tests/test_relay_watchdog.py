@@ -6541,6 +6541,28 @@ class TickChannelTests(unittest.TestCase):
         ]
         self.assertEqual(len(warnings), 2)
 
+    def test_corruption_warning_refires_between_absent_and_null(self):
+        chs = {
+            relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY: {"bad": "shape"},
+            relay_watchdog.PERMANENT_LOSS_TOTAL_KEY: 9,
+        }
+        state = {"999": chs}
+        self.write_transcript([(self.now - 2000, "absent null warning candidate")])
+        rt = self.make_rt()
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        chs[relay_watchdog.LOSS_OBSERVATIONS_KEY] = None
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+        chs.pop(relay_watchdog.LOSS_OBSERVATIONS_KEY)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+
+        warnings = [
+            line
+            for line in rt.log_lines
+            if "permanent-loss-state-corrupt" in line
+        ]
+        self.assertEqual(len(warnings), 3)
+
     def test_corrupt_tick_does_not_increment_overflow_projection(self):
         path = str(self.proj_dir / "s.jsonl")
         observations = {
