@@ -76,12 +76,36 @@ pub(super) async fn finalize_and_drain_queued_turns(
                 // The caller's queue flag predates terminal disposition. Select
                 // from the current mailbox under the automatic-progression cap
                 // policy so a capped retry stays parked while later work can run.
-                let next_intervention = super::super::mailbox_take_next_automatic_intervention(
-                    &shared_owned,
-                    &bot_owner_provider,
-                    channel_id,
-                )
-                .await;
+                let next_intervention = match shared_owned
+                    .session_transition_lock(channel_id)
+                    .try_lock_owned()
+                {
+                    Ok(transition_guard) => {
+                        let outcome = super::super::mailbox_take_next_automatic_intervention(
+                            &shared_owned,
+                            &bot_owner_provider,
+                            channel_id,
+                        )
+                        .await;
+                        drop(transition_guard);
+                        outcome
+                    }
+                    Err(_) => {
+                        tracing::debug!(
+                            provider = bot_owner_provider.as_str(),
+                            channel_id = channel_id.get(),
+                            "QUEUE-GUARD: session transition owns channel; preserving queued head"
+                        );
+                        super::super::arm_slow_idle_queue_backstop_if_queue_nonempty(
+                            &shared_owned,
+                            &bot_owner_provider,
+                            channel_id,
+                            "finalize epilogue transition fence",
+                        )
+                        .await;
+                        MailboxTakeNextSoftOutcome::default()
+                    }
+                };
 
                 if let Some(error) = next_intervention.persistence_error.as_ref() {
                     tracing::error!(
@@ -280,6 +304,86 @@ mod tests {
             pending_uploads: Vec::new(),
             voice_announcement: None,
         }
+    }
+
+    #[test]
+    fn session_transition_fences_finalizer_dequeue_and_preserves_fifo_4794() {
+        let tmp = tempfile::tempdir().expect("runtime root");
+        let _root_guard = crate::config::set_agentdesk_root_for_test(tmp.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                shared.restart.finalizing_turns.store(2, Ordering::Relaxed);
+                shared.restart.global_finalizing.store(2, Ordering::Relaxed);
+                let provider = ProviderKind::Claude;
+                let channel_id = ChannelId::new(4_794_300);
+                let first = queued_intervention(4_794_301);
+                let second = queued_intervention(4_794_302);
+                shared
+                    .mailbox(channel_id)
+                    .replace_queue(
+                        vec![first.clone(), second.clone()],
+                        super::super::queue_persistence_context(&shared, &provider, channel_id),
+                    )
+                    .await;
+
+                let transition_guard = shared
+                    .session_transition_lock(channel_id)
+                    .lock_owned()
+                    .await;
+                finalize_and_drain_queued_turns(
+                    shared.clone(),
+                    true,
+                    false,
+                    Arc::new(FailingQueuedDispatchGateway),
+                    channel_id,
+                    provider.clone(),
+                    "requester".to_string(),
+                    None,
+                    channel_id,
+                )
+                .await;
+                let blocked_snapshot = super::super::mailbox_snapshot(&shared, channel_id).await;
+                assert_eq!(
+                    blocked_snapshot
+                        .intervention_queue
+                        .iter()
+                        .map(|item| item.message_id)
+                        .collect::<Vec<_>>(),
+                    vec![first.message_id, second.message_id],
+                    "a finalizer running under /resume transition ownership must not dequeue the queued head"
+                );
+                assert_eq!(blocked_snapshot.pending_user_dispatch, None);
+
+                drop(transition_guard);
+                finalize_and_drain_queued_turns(
+                    shared.clone(),
+                    true,
+                    false,
+                    Arc::new(FailingQueuedDispatchGateway),
+                    channel_id,
+                    provider,
+                    "requester".to_string(),
+                    None,
+                    channel_id,
+                )
+                .await;
+                let released_snapshot = super::super::mailbox_snapshot(&shared, channel_id).await;
+                assert_eq!(
+                    released_snapshot
+                        .intervention_queue
+                        .iter()
+                        .map(|item| item.message_id)
+                        .collect::<Vec<_>>(),
+                    vec![first.message_id, second.message_id],
+                    "after transition release the original head A must dequeue first; forced dispatch failure restores A ahead of B"
+                );
+                assert_eq!(released_snapshot.pending_user_dispatch, None);
+            });
     }
 
     #[test]
