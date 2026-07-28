@@ -557,6 +557,70 @@ fn emit_dispatch_failure_post_commit(effect: DispatchFailurePostCommit) {
     );
 }
 
+async fn fail_runtime_dispatch_with_pool(
+    pool: &sqlx::PgPool,
+    dispatch_id: &str,
+    failure_result: &str,
+    retryable: bool,
+    transition_source: &str,
+) -> Result<
+    (
+        DispatchFailureWriteOutcome,
+        Option<DispatchFailurePostCommit>,
+    ),
+    String,
+> {
+    let mut tx = pool.begin().await.map_err(|error| {
+        format!("begin postgres failure transaction for {dispatch_id}: {error}")
+    })?;
+    let (outcome, post_commit) = fail_runtime_dispatch_on_pg_tx(
+        &mut tx,
+        dispatch_id,
+        failure_result,
+        retryable,
+        transition_source,
+    )
+    .await?;
+    tx.commit().await.map_err(|error| {
+        format!("commit postgres failure transaction for {dispatch_id}: {error}")
+    })?;
+    if outcome == DispatchFailureWriteOutcome::Updated
+        && let Err(error) =
+            crate::services::dispatches::wait_queue::wake_cached_constraint_release_pg(
+                pool,
+                "constraint_release",
+            )
+            .await
+    {
+        tracing::warn!(
+            dispatch_id,
+            error,
+            "post-commit constraint wait-queue wake failed"
+        );
+    }
+    Ok((outcome, post_commit))
+}
+
+fn finish_dispatch_failure_write(
+    result: Result<
+        (
+            DispatchFailureWriteOutcome,
+            Option<DispatchFailurePostCommit>,
+        ),
+        String,
+    >,
+) -> DispatchFailureWriteOutcome {
+    match result {
+        Ok((outcome, post_commit)) => {
+            if let Some(effect) = post_commit {
+                emit_dispatch_failure_post_commit(effect);
+            }
+            outcome
+        }
+        Err(error) => DispatchFailureWriteOutcome::HardError(error),
+    }
+}
+
 fn runtime_pg_fail_dispatch_with_result_source(
     dispatch_id: &str,
     error_msg: &str,
@@ -572,41 +636,18 @@ fn runtime_pg_fail_dispatch_with_result_source(
     }
     let failure_result = failure_result.to_string();
     let transition_source = transition_source.to_string();
-    match with_runtime_postgres_result(move |pool| {
+    finish_dispatch_failure_write(with_runtime_postgres_result(move |pool| {
         Box::pin(async move {
-            let mut tx = pool.begin().await.map_err(|error| {
-                format!("begin postgres failure transaction for {dispatch_id}: {error}")
-            })?;
-            let (outcome, post_commit) = fail_runtime_dispatch_on_pg_tx(
-                &mut tx,
+            fail_runtime_dispatch_with_pool(
+                &pool,
                 &dispatch_id,
                 &failure_result,
                 retryable,
                 &transition_source,
             )
-            .await?;
-            tx.commit().await.map_err(|error| {
-                format!("commit postgres failure transaction for {dispatch_id}: {error}")
-            })?;
-            if outcome == DispatchFailureWriteOutcome::Updated {
-                crate::services::dispatches::wait_queue::spawn_cached_constraint_release_wake(
-                    pool,
-                    "constraint_release",
-                    dispatch_id,
-                    "dispatch_failure_terminal_status",
-                );
-            }
-            Ok((outcome, post_commit))
+            .await
         })
-    }) {
-        Ok((outcome, post_commit)) => {
-            if let Some(effect) = post_commit {
-                emit_dispatch_failure_post_commit(effect);
-            }
-            outcome
-        }
-        Err(error) => DispatchFailureWriteOutcome::HardError(error),
-    }
+    }))
 }
 
 pub(super) fn runtime_pg_fail_dispatch_with_result(
@@ -797,6 +838,201 @@ mod dispatch_failure_pg_tests {
                 1,
             )
         );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn restoring_retry_failure_terminalizes_dispatch_and_requeues_entry_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let (run_id, entry_id, dispatch_id) =
+            seed_failure_fixture(&pool, "restoring-retry", "dispatched", 3).await;
+        sqlx::query("UPDATE auto_queue_runs SET status = 'restoring' WHERE id = $1")
+            .bind(&run_id)
+            .execute(&pool)
+            .await
+            .expect("move run into restore window");
+
+        let result_json = dispatch_failure_result("restore-window failure", None).to_string();
+        let mut tx = pool.begin().await.expect("begin restoring retry tx");
+        let (outcome, _) = fail_runtime_dispatch_on_pg_tx(
+            &mut tx,
+            &dispatch_id,
+            &result_json,
+            true,
+            "test_restoring_retry_dispatch",
+        )
+        .await
+        .expect("reduce restoring dispatch failure");
+        tx.commit().await.expect("commit restoring retry tx");
+
+        let state = sqlx::query_as::<_, (String, String, i64, String, i64, i64)>(
+            "SELECT d.status, e.status, e.retry_count, r.status,
+                    (SELECT COUNT(*) FROM dispatch_events WHERE dispatch_id = d.id),
+                    (SELECT COUNT(*) FROM auto_queue_entry_transitions WHERE entry_id = e.id)
+             FROM task_dispatches d
+             JOIN auto_queue_entries e ON e.id = $2
+             JOIN auto_queue_runs r ON r.id = $3
+             WHERE d.id = $1",
+        )
+        .bind(&dispatch_id)
+        .bind(&entry_id)
+        .bind(&run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load restoring dispatch failure state");
+        assert_eq!(outcome, DispatchFailureWriteOutcome::Updated);
+        assert_eq!(
+            state,
+            (
+                "failed".to_string(),
+                "pending".to_string(),
+                1,
+                "restoring".to_string(),
+                1,
+                1,
+            )
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn terminal_failure_reconciles_phase_gate_and_releases_semaphore_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let (run_id, _entry_id, dispatch_id) =
+            seed_failure_fixture(&pool, "side-effects", "dispatched", 1).await;
+        let context = serde_json::json!({
+            "phase_gate": {
+                "run_id": run_id,
+                "phase": 1,
+                "pass_verdict": "pass",
+                "final_phase": false
+            }
+        });
+        sqlx::query("UPDATE task_dispatches SET context = $1 WHERE id = $2")
+            .bind(context.to_string())
+            .bind(&dispatch_id)
+            .execute(&pool)
+            .await
+            .expect("seed phase-gate context");
+        sqlx::query(
+            "INSERT INTO auto_queue_phase_gates (
+                 run_id, phase, dispatch_id, status, pass_verdict, final_phase
+             ) VALUES ($1, 1, $2, 'pending', 'pass', FALSE)",
+        )
+        .bind(&run_id)
+        .bind(&dispatch_id)
+        .execute(&pool)
+        .await
+        .expect("seed phase-gate row");
+        sqlx::query(
+            "INSERT INTO dispatch_semaphore_holdings (
+                 semaphore_name, scope, scope_key, slot_index,
+                 holder_instance_id, dispatch_id, expires_at
+             ) VALUES ('gpu', 'per-cluster', 'global', 0, 'worker-1', $1, NOW() + INTERVAL '1 hour')",
+        )
+        .bind(&dispatch_id)
+        .execute(&pool)
+        .await
+        .expect("seed semaphore holding");
+
+        let result_json = dispatch_failure_result("phase gate failed", None).to_string();
+        let mut tx = pool.begin().await.expect("begin side-effect tx");
+        let (outcome, _) = fail_runtime_dispatch_on_pg_tx(
+            &mut tx,
+            &dispatch_id,
+            &result_json,
+            false,
+            "test_terminal_side_effects",
+        )
+        .await
+        .expect("reduce terminal side effects");
+        tx.commit().await.expect("commit terminal side effects");
+
+        let state = sqlx::query_as::<_, (String, String, i64)>(
+            "SELECT pg.status, r.status,
+                    (SELECT COUNT(*) FROM dispatch_semaphore_holdings WHERE dispatch_id = $2)
+             FROM auto_queue_phase_gates pg
+             JOIN auto_queue_runs r ON r.id = pg.run_id
+             WHERE pg.run_id = $1 AND pg.dispatch_id = $2",
+        )
+        .bind(&run_id)
+        .bind(&dispatch_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load phase-gate and semaphore state");
+        assert_eq!(outcome, DispatchFailureWriteOutcome::Updated);
+        assert_eq!(state, ("failed".to_string(), "paused".to_string(), 0));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[test]
+    fn runtime_writer_preserves_hard_error_outcome() {
+        let outcome = finish_dispatch_failure_write(Err("forced writer failure".to_string()));
+        assert_eq!(
+            outcome,
+            DispatchFailureWriteOutcome::HardError("forced writer failure".to_string())
+        );
+        assert_ne!(outcome, DispatchFailureWriteOutcome::Missing);
+    }
+
+    #[tokio::test]
+    async fn committed_failure_wakes_waiting_dispatch_outbox_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let (_run_id, _entry_id, dispatch_id) =
+            seed_failure_fixture(&pool, "wait-wake", "dispatched", 1).await;
+        sqlx::query(
+            "INSERT INTO worker_nodes (
+                 instance_id, hostname, process_id, role, effective_role, status,
+                 labels, capabilities, last_heartbeat_at, started_at, updated_at
+             ) VALUES (
+                 'worker-wake', 'worker', 100, 'auto', 'leader', 'online',
+                 '[]'::jsonb, '{}'::jsonb, NOW(), NOW(), NOW()
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed wake worker");
+        sqlx::query(
+            "INSERT INTO dispatch_outbox (
+                 dispatch_id, action, status, wait_reason, wait_started_at, created_at
+             ) VALUES (
+                 'waiting-dispatch', 'notify', 'pending', 'no worker before release', NOW(), NOW()
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed waiting dispatch");
+
+        let result_json = dispatch_failure_result("release constraints", None).to_string();
+        let (outcome, post_commit) = fail_runtime_dispatch_with_pool(
+            &pool,
+            &dispatch_id,
+            &result_json,
+            false,
+            "test_wait_wake",
+        )
+        .await
+        .expect("commit failure and wake wait queue");
+        assert_eq!(outcome, DispatchFailureWriteOutcome::Updated);
+        assert!(post_commit.is_some());
+        let wait_state = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT claim_owner, wait_reason FROM dispatch_outbox
+             WHERE dispatch_id = 'waiting-dispatch'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load woken wait row");
+        assert_eq!(wait_state.0.as_deref(), Some("worker-wake"));
+        assert!(wait_state.1.is_none());
 
         pool.close().await;
         pg_db.drop().await;

@@ -492,6 +492,26 @@ async fn fail_dispatch_with_policy(
     ) {
         DispatchFailureWriteOutcome::Updated => {
             tracing::warn!(dispatch_id = %dispatch_id, "marked dispatch as failed");
+            // The reducer commits before entering the HTTP/UI plane. A result-only
+            // PATCH then reuses the canonical route's task_dispatch_updated
+            // broadcast without re-running the terminal transition or entry policy.
+            let broadcast_payload = crate::services::dispatches::UpdateDispatchBody {
+                status: None,
+                result: Some(dispatch_failure_result(error_msg, error_code)),
+                allowed_from: None,
+            };
+            if let Err(error) = crate::services::discord::internal_api::update_dispatch(
+                dispatch_id,
+                broadcast_payload,
+            )
+            .await
+            {
+                tracing::warn!(
+                    dispatch_id = %dispatch_id,
+                    error = %error,
+                    "failed to publish post-commit dispatch failure update"
+                );
+            }
         }
         DispatchFailureWriteOutcome::AlreadyTerminal => {
             tracing::info!(

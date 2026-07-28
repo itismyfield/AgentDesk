@@ -413,6 +413,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restoring_run_accepts_retry_without_orphaning_entry_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_failure_entry(
+            &pool,
+            "run-restoring-retry",
+            "entry-restoring-retry",
+            "restoring",
+            0,
+        )
+        .await;
+
+        let result = record_entry_dispatch_failure_on_pg(
+            &pool,
+            "entry-restoring-retry",
+            3,
+            "test_restoring_retry",
+        )
+        .await
+        .expect("restore-window failure remains reducible");
+        assert!(result.changed);
+        assert_eq!(result.to_status, ENTRY_STATUS_PENDING);
+        let state = sqlx::query_as::<_, (String, i64, String, i64)>(
+            "SELECT e.status, e.retry_count, r.status,
+                    (SELECT COUNT(*) FROM auto_queue_entry_transitions
+                     WHERE entry_id = e.id AND to_status = 'pending')
+             FROM auto_queue_entries e
+             JOIN auto_queue_runs r ON r.id = e.run_id
+             WHERE e.id = 'entry-restoring-retry'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load restoring retry state");
+        assert_eq!(
+            state,
+            ("pending".to_string(), 1, "restoring".to_string(), 1)
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn restoring_terminal_failure_retains_run_slot_ownership_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_failure_entry(
+            &pool,
+            "run-restoring-terminal",
+            "entry-restoring-terminal",
+            "restoring",
+            0,
+        )
+        .await;
+        sqlx::query(
+            "INSERT INTO auto_queue_slots (
+                 agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map
+             ) VALUES ('agent-1', 0, 'run-restoring-terminal', 0, '{}'::jsonb)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed restoring slot");
+
+        let result = record_entry_dispatch_failure_on_pg(
+            &pool,
+            "entry-restoring-terminal",
+            1,
+            "test_restoring_terminal",
+        )
+        .await
+        .expect("terminal failure during restore");
+        assert_eq!(result.to_status, ENTRY_STATUS_FAILED);
+        let state = sqlx::query_as::<_, (String, String, Option<String>)>(
+            "SELECT e.status, r.status, s.assigned_run_id
+             FROM auto_queue_entries e
+             JOIN auto_queue_runs r ON r.id = e.run_id
+             JOIN auto_queue_slots s ON s.agent_id = e.agent_id AND s.slot_index = 0
+             WHERE e.id = 'entry-restoring-terminal'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load restoring terminal state");
+        assert_eq!(
+            state,
+            (
+                "failed".to_string(),
+                "restoring".to_string(),
+                Some("run-restoring-terminal".to_string())
+            )
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
     async fn completed_run_rejects_retry_without_split_brain_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
