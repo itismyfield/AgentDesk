@@ -341,7 +341,7 @@ pub(super) async fn reanchor_bridge_two_message_status_panel_below_answer<
             updated.status_panel_generation = next_generation;
             let save_outcome =
                 crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
-                    &updated,
+                    &mut updated,
                     "turn_bridge::two_message_panel::reanchor",
                 );
             if save_outcome != crate::services::discord::inflight::GuardedSaveOutcome::Saved {
@@ -879,6 +879,9 @@ mod tests {
         // the durable row must exist or the guarded save skips as Missing.
         crate::services::discord::inflight::save_inflight_state(&inflight)
             .expect("persist inflight row for guarded reanchor save");
+        inflight =
+            crate::services::discord::inflight::load_inflight_state(&ProviderKind::Claude, 777)
+                .expect("adopt persisted generation after seeding guarded reanchor row");
 
         let reanchored = reanchor_bridge_two_message_status_panel_below_answer(
             &gateway,
@@ -904,6 +907,13 @@ mod tests {
         assert_eq!(inflight.status_panel_generation, 2);
         assert_eq!(generation, 2);
         assert_eq!(last_status_panel_text, "⠸ re-anchored panel");
+        let persisted =
+            crate::services::discord::inflight::load_inflight_state(&ProviderKind::Claude, 777)
+                .expect("re-anchored inflight row remains durable");
+        assert_eq!(
+            inflight.save_generation, persisted.save_generation,
+            "live inflight state must adopt the exact persisted save generation"
+        );
         assert_eq!(
             crate::services::discord::status_panel_singleton_store::load(
                 &ProviderKind::Claude,

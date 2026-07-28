@@ -21,7 +21,7 @@ use content_arms::{
 };
 use tool_arms::{
     StreamToolArmContext, StreamToolArmMessage, StreamToolArmOutcome, StreamToolArmState,
-    handle_stream_tool_message, retain_exact_stream_frame_on_tool_retry,
+    handle_stream_tool_message, reconcile_exact_stream_frame_after_tool_outcome,
 };
 
 mod content_arms;
@@ -40,10 +40,12 @@ fn stream_loop_should_continue(
     done: bool,
     terminal_control_drain_until: Option<std::time::Instant>,
     runtime_handoff_retry_retained: bool,
+    guarded_tool_frame_retry_retained: bool,
     now: std::time::Instant,
 ) -> bool {
     !done
         || runtime_handoff_retry_retained
+        || guarded_tool_frame_retry_retained
         || terminal_control_drain_until.is_some_and(|deadline| now < deadline)
 }
 
@@ -310,11 +312,13 @@ pub(super) async fn run_stream_loop(
     let mut state_dirty = false;
     let mut loop_outcome = StreamLoopOutcome::Completed;
     let mut runtime_handoff_retry_retained = false;
+    let mut guarded_tool_frame_retry_retained = false;
 
     'outer: while stream_loop_should_continue(
         done,
         terminal_control_drain_until,
         runtime_handoff_retry_retained,
+        guarded_tool_frame_retry_retained,
         std::time::Instant::now(),
     ) {
         // #2172: Done wins over a later cancel during residual-control drain;
@@ -624,10 +628,11 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            if retain_exact_stream_frame_on_tool_retry(
+                            if reconcile_exact_stream_frame_after_tool_outcome(
                                 &mut pending_stream_messages,
                                 retry_frame,
                                 outcome,
+                                &mut guarded_tool_frame_retry_retained,
                             ) {
                                 guarded_tool_frame_retry_pending = true;
                                 break;

@@ -1,4 +1,6 @@
+use super::tool_arms::{StreamToolArmOutcome, reconcile_exact_stream_frame_after_tool_outcome};
 use super::{refresh_stream_tick_expected_identity_after_handoff, stream_loop_should_continue};
+use crate::services::agent_protocol::StreamMessage;
 use crate::services::discord::inflight::{
     GuardedSaveOutcome, InflightTurnIdentity, InflightTurnState, load_inflight_state,
     save_inflight_state, stamp_runtime_handoff_if_matches_identity,
@@ -42,17 +44,72 @@ fn with_runtime_root(test: impl FnOnce()) {
 #[test]
 fn done_runtime_handoff_retry_survives_expired_terminal_drain() {
     let now = std::time::Instant::now();
-    assert!(stream_loop_should_continue(true, None, true, now));
+    assert!(stream_loop_should_continue(true, None, true, false, now));
     assert!(stream_loop_should_continue(
         true,
         Some(now - std::time::Duration::from_millis(1)),
         true,
+        false,
         now,
     ));
     assert!(
-        !stream_loop_should_continue(true, None, false, now),
+        !stream_loop_should_continue(true, None, false, false, now),
         "a completed turn without an exact retained handoff may exit normally",
     );
+}
+
+#[test]
+fn done_terminal_tool_result_io_retry_survives_and_replays_exactly_once() {
+    let now = std::time::Instant::now();
+    let mut pending = std::collections::VecDeque::new();
+    let mut tool_retry_retained = false;
+    let exact_frame = StreamMessage::ToolResult {
+        content: "terminal retry payload".to_string(),
+        is_error: true,
+        tool_use_id: Some("tool-4259-r10".to_string()),
+    };
+
+    assert!(reconcile_exact_stream_frame_after_tool_outcome(
+        &mut pending,
+        exact_frame,
+        StreamToolArmOutcome::RetryExactFrame,
+        &mut tool_retry_retained,
+    ));
+    assert!(stream_loop_should_continue(
+        true,
+        None,
+        false,
+        tool_retry_retained,
+        now,
+    ));
+
+    let replay = pending.pop_front().expect("retained exact ToolResult");
+    assert!(matches!(
+        &replay,
+        StreamMessage::ToolResult {
+            content,
+            is_error: true,
+            tool_use_id: Some(tool_use_id),
+        } if content == "terminal retry payload" && tool_use_id == "tool-4259-r10"
+    ));
+    assert!(!reconcile_exact_stream_frame_after_tool_outcome(
+        &mut pending,
+        replay,
+        StreamToolArmOutcome::Continue,
+        &mut tool_retry_retained,
+    ));
+    assert!(!tool_retry_retained);
+    assert!(
+        pending.is_empty(),
+        "the successful replay must not be duplicated"
+    );
+    assert!(!stream_loop_should_continue(
+        true,
+        None,
+        false,
+        tool_retry_retained,
+        now,
+    ));
 }
 
 #[test]

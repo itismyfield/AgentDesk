@@ -57,15 +57,18 @@ fn terminal_tool_result_transition_permission(
     }
 }
 
-pub(super) fn retain_exact_stream_frame_on_tool_retry(
+pub(super) fn reconcile_exact_stream_frame_after_tool_outcome(
     pending: &mut std::collections::VecDeque<StreamMessage>,
     frame: StreamMessage,
     outcome: StreamToolArmOutcome,
+    retry_retained: &mut bool,
 ) -> bool {
     if outcome != StreamToolArmOutcome::RetryExactFrame {
+        *retry_retained = false;
         return false;
     }
     pending.push_front(frame);
+    *retry_retained = true;
     true
 }
 
@@ -932,11 +935,14 @@ mod authority_tests {
             is_error: true,
             tool_use_id: Some("tool-4259-r9".to_string()),
         };
-        assert!(retain_exact_stream_frame_on_tool_retry(
+        let mut retry_retained = false;
+        assert!(reconcile_exact_stream_frame_after_tool_outcome(
             &mut pending,
             frame,
             StreamToolArmOutcome::RetryExactFrame,
+            &mut retry_retained,
         ));
+        assert!(retry_retained);
         let Some(StreamMessage::ToolResult {
             content,
             is_error,

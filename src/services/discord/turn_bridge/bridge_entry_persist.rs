@@ -448,8 +448,9 @@ mod tests {
 
     #[test]
     fn bridge_entry_failure_gate_precedes_emit_stream_and_finalize() {
-        let caller = include_str!("mod.rs");
-        let helper = include_str!("bridge_entry_persist.rs");
+        let normalize_ws = |source: &str| source.split_whitespace().collect::<Vec<_>>().join(" ");
+        let caller = normalize_ws(include_str!("mod.rs"));
+        let helper = normalize_ws(include_str!("bridge_entry_persist.rs"));
         let spawn = caller
             .find("pub(super) fn spawn_turn_bridge")
             .expect("production bridge entry remains present");
