@@ -1867,8 +1867,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 current_offset,
                 watcher_lease_start,
             );
-        // #3610 PR-1d: capture the legacy long-chunk anchor here; record it only
-        // after the post-advance M4 commit below.
+        let watcher_long_chunk_identity = terminal_long_chunks::watcher_long_chunk_identity(
+            &tmux_session_name,
+            &watcher_lease_key,
+        );
         let mut watcher_long_chunk_anchor_msg_id: Option<MessageId> = None;
         let mut watcher_long_chunk_delivered_body: Option<String> = None;
         let mut watcher_task_response_claim = None;
@@ -2756,16 +2758,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     "src/services/discord/tmux_watcher.rs:watcher_lease_commit_advance",
                 );
                 watcher_response_frontier_committed = true;
-                // #3610 PR-1d: record the durable terminal anchor for the legacy
-                // long-chunk fallback arm ONLY here, gated on successful commit+advance
-                // (M4) and `Some` anchor (the long-chunk arm fully committed, A).
                 if let Some(anchor) = watcher_long_chunk_anchor_msg_id {
                     if let Some(body) = watcher_long_chunk_delivered_body.as_deref() {
-                        terminal_send::record_watcher_long_chunk_terminal_delivery(
+                        terminal_long_chunks::record_watcher_long_chunk_terminal_delivery(
                             &shared,
                             &watcher_provider,
                             channel_id,
                             &tmux_session_name,
+                            watcher_long_chunk_identity,
                             (watcher_lease_start, watcher_lease_end),
                             Some(anchor.get()),
                             body,

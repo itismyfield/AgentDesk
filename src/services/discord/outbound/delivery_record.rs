@@ -458,12 +458,47 @@ enum EqualRangeAnchorPolicy {
     },
 }
 
+#[derive(Clone, Copy)]
+struct WatcherFrontierLockAuthority<'a> {
+    shared: &'a crate::services::discord::SharedData,
+    channel: ChannelId,
+    frontier_token: crate::services::discord::RelayFrontierToken,
+    generation_mtime_ns: i64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(in crate::services::discord) struct WatcherLongChunkRecordAuthority {
+    pub(in crate::services::discord) frontier_token: crate::services::discord::RelayFrontierToken,
+    pub(in crate::services::discord) generation_mtime_ns: i64,
+    pub(in crate::services::discord) ledger_user_msg_id: Option<u64>,
+}
+
 fn write_confirmed_frontier_guarded_at_with_before_lock(
     path: &Path,
     tmux_session_name: &str,
     frontier: DeliveredCommit,
     receipt: Option<ConfirmedDeliveryReceipt>,
     equal_range_anchor_policy: EqualRangeAnchorPolicy,
+    before_lock: impl FnOnce(),
+) -> Result<(), String> {
+    write_confirmed_frontier_guarded_at_with_lock_authority(
+        path,
+        tmux_session_name,
+        frontier,
+        receipt,
+        equal_range_anchor_policy,
+        None,
+        before_lock,
+    )
+}
+
+fn write_confirmed_frontier_guarded_at_with_lock_authority(
+    path: &Path,
+    tmux_session_name: &str,
+    frontier: DeliveredCommit,
+    receipt: Option<ConfirmedDeliveryReceipt>,
+    equal_range_anchor_policy: EqualRangeAnchorPolicy,
+    lock_authority: Option<WatcherFrontierLockAuthority<'_>>,
     before_lock: impl FnOnce(),
 ) -> Result<(), String> {
     if tmux_session_name.is_empty()
@@ -485,6 +520,22 @@ fn write_confirmed_frontier_guarded_at_with_before_lock(
     let current_generation = current_generation_mtime_ns(tmux_session_name);
     if current_generation == 0 || current_generation != frontier.generation_mtime_ns {
         return Err("delivery_record: refusing frontier from a stale JSONL incarnation".into());
+    }
+    if let Some(authority) = lock_authority {
+        let coord = authority.shared.tmux_relay_coord(authority.channel);
+        let current_token = coord.frontier_token();
+        let current_coord_generation = coord
+            .confirmed_end_generation_mtime_ns
+            .load(Ordering::Acquire);
+        if current_token != authority.frontier_token
+            || current_coord_generation != authority.generation_mtime_ns
+            || current_generation != authority.generation_mtime_ns
+        {
+            return Err(
+                "delivery_record: watcher frontier mutation authority changed before record lock"
+                    .into(),
+            );
+        }
     }
 
     let mut record = read_record_at(path).unwrap_or_default();
@@ -638,6 +689,15 @@ fn write_confirmed_delivery_at(
     frontier: DeliveredCommit,
     receipt: ConfirmedDeliveryReceipt,
 ) -> Result<(), String> {
+    write_confirmed_delivery_at_with_lock_authority(path, frontier, receipt, None)
+}
+
+fn write_confirmed_delivery_at_with_lock_authority(
+    path: &Path,
+    frontier: DeliveredCommit,
+    receipt: ConfirmedDeliveryReceipt,
+    lock_authority: Option<WatcherFrontierLockAuthority<'_>>,
+) -> Result<(), String> {
     if !receipt.is_authoritative()
         || receipt.source.range != frontier.range
         || receipt.source.generation_mtime_ns != frontier.generation_mtime_ns
@@ -647,7 +707,15 @@ fn write_confirmed_delivery_at(
         return Err("delivery_record: refusing incomplete or frontier-mismatched receipt".into());
     }
     let tmux_session_name = receipt.source.tmux_session_name.clone();
-    write_confirmed_frontier_guarded_at(path, &tmux_session_name, frontier, Some(receipt))
+    write_confirmed_frontier_guarded_at_with_lock_authority(
+        path,
+        &tmux_session_name,
+        frontier,
+        Some(receipt),
+        EqualRangeAnchorPolicy::PreserveExisting,
+        lock_authority,
+        || {},
+    )
 }
 
 /// Atomically persist the monotonic frontier and the exact Discord receipt.
@@ -1856,10 +1924,22 @@ fn persist_confirmed_frontier_and_receipt(
     tmux_session_name: Option<&str>,
     frontier: DeliveredCommit,
     receipt: Option<ConfirmedDeliveryReceipt>,
+    lock_authority: Option<WatcherFrontierLockAuthority<'_>>,
 ) -> Result<(), String> {
     match receipt {
         Some(receipt) => {
-            write_confirmed_delivery(provider, offset_authority_channel.get(), frontier, receipt)
+            if receipt.source.offset_authority_channel_id != offset_authority_channel.get() {
+                return Err("delivery_record: receipt owner does not match record key".into());
+            }
+            if receipt.source.provider != provider.as_str() {
+                return Err("delivery_record: receipt provider does not match record key".into());
+            }
+            write_confirmed_delivery_at_with_lock_authority(
+                &record_path_or_err(provider, offset_authority_channel.get())?,
+                frontier,
+                receipt,
+                lock_authority,
+            )
         }
         None => {
             let tmux_session_name = tmux_session_name
@@ -1868,11 +1948,14 @@ fn persist_confirmed_frontier_and_receipt(
                     "delivery_record: receipt-less frontier lacks tmux incarnation identity"
                         .to_string()
                 })?;
-            write_confirmed_frontier_guarded_at(
+            write_confirmed_frontier_guarded_at_with_lock_authority(
                 &record_path_or_err(provider, offset_authority_channel.get())?,
                 tmux_session_name,
                 frontier,
                 None,
+                EqualRangeAnchorPolicy::PreserveExisting,
+                lock_authority,
+                || {},
             )
         }
     }
@@ -1918,50 +2001,44 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
     delivered_body: Option<&str>,
     ledger_user_msg_id: Option<u64>,
 ) {
+    shadow_mirror_delivered_frontier_inner(
+        shared,
+        provider,
+        channel,
+        authoritative_tmux_session_name,
+        range,
+        is_delivered,
+        terminal_anchor_msg_id,
+        terminal_anchor_channel_id,
+        delivered_body,
+        ledger_user_msg_id,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn shadow_mirror_delivered_frontier_inner(
+    shared: &crate::services::discord::SharedData,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    authoritative_tmux_session_name: Option<&str>,
+    range: (u64, u64),
+    is_delivered: bool,
+    terminal_anchor_msg_id: Option<u64>,
+    terminal_anchor_channel_id: Option<u64>,
+    delivered_body: Option<&str>,
+    ledger_user_msg_id: Option<u64>,
+    watcher_authority: Option<WatcherLongChunkRecordAuthority>,
+) {
     let channel_id = channel.get();
     let coord = shared.tmux_relay_coord(channel);
-    let generation_mtime_ns = coord
-        .confirmed_end_generation_mtime_ns
-        .load(Ordering::Acquire);
-    if is_delivered && let Some(body) = delivered_body {
-        record_delivered_content_fingerprint_for_generation(
-            provider,
-            channel_id,
-            body,
-            generation_mtime_ns,
-        );
-    }
-    // #4564: a confirmed terminal delivery is the ONLY event that appends the
-    // durable completed-turn ledger — the authority the catch-up TooOld gate
-    // consults so an already-answered inbound user message is never re-flagged
-    // "unprocessed" after a restart. Gated on `is_delivered` (the DeliveredCommit
-    // gate), NOT on the shadow flag: the ledger is the #4564 fix, not shadow
-    // telemetry, and NEVER a checkpoint/frontier cursor (#4600 P1).
-    //
-    // #4564 channel-split fix: keyed by the DELIVERY/inbound channel
-    // (`terminal_anchor_channel_id`, where the answered user message lives and
-    // catch-up scans) — NEVER the offset-authority `channel`, which on a
-    // recovered/reused-watcher bridge is `watcher_owner_channel_id`, a DIFFERENT
-    // channel whose preserved inflight row is an UNANSWERED turn. The delivered
-    // turn's `user_msg_id` is passed EXPLICITLY (`Some`) by the bridge/commit call
-    // site from the turn snapshot; it is NEVER re-derived by a commit-time inflight
-    // reload keyed by `channel` (that reload was the channel-split silent-loss
-    // vector — it appended the wrong channel's unanswered id, false-Settling it).
-    // `None` is the same-channel sink/watcher path where `channel` IS the inbound
-    // channel and a reload of it is race-safe (identity-gated advance guarantees
-    // the fresh row is the delivered turn). A `0` sentinel is dropped by append.
-    if is_delivered {
-        let ledger_channel_id = terminal_anchor_channel_id.unwrap_or(channel_id);
-        let user_msg_id = match ledger_user_msg_id {
-            Some(user_msg_id) => user_msg_id,
-            None => {
-                crate::services::discord::inflight::load_inflight_state(provider, ledger_channel_id)
-                    .map(|fresh| fresh.user_msg_id)
-                    .unwrap_or(0)
-            }
-        };
-        completed_turn_ledger::append_completed_turn(provider, ledger_channel_id, user_msg_id);
-    }
+    let generation_mtime_ns = watcher_authority
+        .map(|authority| authority.generation_mtime_ns)
+        .unwrap_or_else(|| {
+            coord
+                .confirmed_end_generation_mtime_ns
+                .load(Ordering::Acquire)
+        });
     if !is_delivered {
         return;
     }
@@ -2017,12 +2094,32 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
         range,
         generation_mtime_ns,
     );
+    // A ledger id is safe only when the caller pinned it to this delivery or
+    // the same fresh row produced the exact receipt above. Never guess from an
+    // unqualified current row: a delayed A could otherwise settle newer B.
+    let safe_ledger_user_msg_id = watcher_authority
+        .and_then(|authority| authority.ledger_user_msg_id)
+        .or(ledger_user_msg_id)
+        .filter(|user_msg_id| *user_msg_id != 0)
+        .or_else(|| {
+            receipt
+                .as_ref()
+                .and_then(|_| fresh.as_ref().map(|state| state.user_msg_id))
+                .filter(|user_msg_id| *user_msg_id != 0)
+        });
+    let lock_authority = watcher_authority.map(|authority| WatcherFrontierLockAuthority {
+        shared,
+        channel,
+        frontier_token: authority.frontier_token,
+        generation_mtime_ns: authority.generation_mtime_ns,
+    });
     if let Err(error) = persist_confirmed_frontier_and_receipt(
         provider,
         channel,
         tmux_session_name,
         frontier,
         receipt,
+        lock_authority,
     ) {
         tracing::error!(
             provider = provider.as_str(),
@@ -2031,6 +2128,20 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
             "confirmed delivery frontier/receipt write failed"
         );
         return;
+    }
+
+    // Retry evidence and completed-turn settlement become visible only after
+    // the guarded frontier/receipt mutation succeeds.
+    if let Some(body) = delivered_body {
+        record_delivered_content_fingerprint_for_generation(
+            provider,
+            channel_id,
+            body,
+            generation_mtime_ns,
+        );
+    }
+    if let Some(user_msg_id) = safe_ledger_user_msg_id {
+        completed_turn_ledger::append_completed_turn(provider, delivery_channel_id, user_msg_id);
     }
 
     // The flag controls only divergence telemetry. The confirmed frontier and
@@ -2084,9 +2195,8 @@ pub(in crate::services::discord) fn shadow_mirror_same_channel_frontier_with_bod
     terminal_anchor_msg_id: u64,
     body: &str,
 ) {
-    // Same-channel (sink) path: `channel` IS the inbound channel, so `None` lets
-    // the funnel reload it for `user_msg_id` (race-safe under identity-gated
-    // advance). The caller-held session remains available if that row clears.
+    // Same-channel (sink) path: no caller-pinned ledger id is available here.
+    // Settlement is skipped unless the exact receipt identity remains provable.
     shadow_mirror_delivered_frontier(
         shared,
         provider,
@@ -2155,6 +2265,34 @@ pub(in crate::services::discord) fn record_long_chunk_terminal_delivery(
         Some(delivery_channel_id.get()),
         Some(delivered_body),
         ledger_user_msg_id,
+    );
+}
+
+/// Watcher-only long-chunk funnel. The caller captures generation and turn
+/// identity with its delivery lease, while the wrapper holds the matching relay
+/// frontier mutation guard through this durable mutation.
+pub(in crate::services::discord) fn record_watcher_long_chunk_terminal_delivery(
+    shared: &crate::services::discord::SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    authority: WatcherLongChunkRecordAuthority,
+    range: (u64, u64),
+    last_chunk_anchor_msg_id: Option<u64>,
+    delivered_body: &str,
+) {
+    shadow_mirror_delivered_frontier_inner(
+        shared,
+        provider,
+        channel_id,
+        Some(tmux_session_name),
+        range,
+        true,
+        last_chunk_anchor_msg_id,
+        Some(channel_id.get()),
+        Some(delivered_body),
+        None,
+        Some(authority),
     );
 }
 
@@ -4377,13 +4515,20 @@ mod tests {
         );
         x_state.turn_start_offset = Some(0);
         crate::services::discord::inflight::save_inflight_state(&x_state).expect("save X inflight");
+        let tmux_session_name = x_state.tmux_session_name.as_deref().expect("tmux session");
+        let generation_mtime_ns = set_phase_a_generation(tmux_session_name, 1_700_456_400);
+        let coord = shared.tmux_relay_coord(watcher_owner_x);
+        coord
+            .confirmed_end_generation_mtime_ns
+            .store(generation_mtime_ns, Ordering::Release);
+        coord.confirmed_end_offset.store(128, Ordering::Release);
 
         // Y's answered turn commits terminally while reusing X's session.
         shadow_mirror_delivered_frontier(
             &shared,
             &provider,
             watcher_owner_x, // funnel `channel` = offset-authority X
-            x_state.tmux_session_name.as_deref(),
+            Some(tmux_session_name),
             (0, 128),
             true, // is_delivered
             Some(77_001),
@@ -4416,7 +4561,7 @@ mod tests {
     // The watcher long-chunk fallback arm (tmux_watcher.rs — the
     // `watcher_should_send_ordered_new_chunks_for_terminal_fallback` branch) is the
     // watcher-owned counterpart of the bridge arm above. Its sibling helper
-    // `terminal_send::record_watcher_long_chunk_terminal_delivery` is SAME-CHANNEL:
+    // `terminal_long_chunks::record_watcher_long_chunk_terminal_delivery` is SAME-CHANNEL:
     // it forwards `watcher_owner_channel_id == delivery_channel_id == channel_id`
     // into `record_long_chunk_terminal_delivery`. So the frontier key (record path)
     // and the recorded `panel_channel_id` are the SAME channel — UNLIKE the bridge's

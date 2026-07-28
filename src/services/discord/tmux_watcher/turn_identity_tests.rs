@@ -549,6 +549,22 @@ fn long_chunk_delivery_fingerprint_refuses_phantom_rerelay_4081() {
     );
 }
 
+fn watcher_long_chunk_identity(
+    channel: poise::serenity_prelude::ChannelId,
+    tmux_session_name: &str,
+    user_msg_id: u64,
+) -> super::super::terminal_long_chunks::WatcherLongChunkIdentity {
+    let lease_key = crate::services::discord::DeliveryLeaseKey::new_for_site(
+        channel,
+        33,
+        user_msg_id,
+        None,
+        None,
+        "turn_identity_tests.watcher_long_chunk",
+    );
+    super::super::terminal_long_chunks::watcher_long_chunk_identity(tmux_session_name, &lease_key)
+}
+
 #[test]
 fn watcher_long_chunk_wrapper_uses_caller_identity_without_registry_4911() {
     let temp = tempfile::TempDir::new().expect("temp runtime root");
@@ -557,6 +573,7 @@ fn watcher_long_chunk_wrapper_uses_caller_identity_without_registry_4911() {
     let provider = ProviderKind::Codex;
     let channel = poise::serenity_prelude::ChannelId::new(7_491_101);
     let tmux = "AgentDesk-codex-phase-a-r6-caller-identity";
+    let pinned_user_msg_id = 7_491_100;
     assert!(shared.tmux_watchers.channel_binding(&channel).is_none());
 
     let generation_path = crate::services::tmux_common::session_temp_path(tmux, "generation");
@@ -569,6 +586,7 @@ fn watcher_long_chunk_wrapper_uses_caller_identity_without_registry_4911() {
     .unwrap();
     let generation =
         crate::services::discord::outbound::delivery_record::current_generation_mtime_ns(tmux);
+    let identity = watcher_long_chunk_identity(channel, tmux, pinned_user_msg_id);
     let coord = shared.tmux_relay_coord(channel);
     coord
         .confirmed_end_generation_mtime_ns
@@ -579,11 +597,12 @@ fn watcher_long_chunk_wrapper_uses_caller_identity_without_registry_4911() {
 
     // The send has committed, but both the inflight row and registry binding are
     // gone. The immutable caller identity still supplies the receipt-less guard.
-    super::super::terminal_send::record_watcher_long_chunk_terminal_delivery(
+    super::super::terminal_long_chunks::record_watcher_long_chunk_terminal_delivery(
         &shared,
         &provider,
         channel,
         tmux,
+        identity,
         (0, 128),
         Some(7_491_102),
         "confirmed long response",
@@ -595,6 +614,18 @@ fn watcher_long_chunk_wrapper_uses_caller_identity_without_registry_4911() {
     assert_eq!(frontier.range, (0, 128));
     assert_eq!(frontier.generation_mtime_ns, generation);
     assert!(record.confirmed_deliveries.is_empty());
+    assert_eq!(record.recent_delivered_contents.len(), 1);
+    assert_eq!(
+        record.recent_delivered_contents[0].generation_mtime_ns,
+        generation
+    );
+    assert!(
+        crate::services::discord::outbound::completed_turn_ledger::settled_user_msg_ids(
+            &provider,
+            channel.get(),
+        )
+        .contains(&pinned_user_msg_id)
+    );
     assert!(shared.tmux_watchers.channel_binding(&channel).is_none());
 }
 
@@ -605,20 +636,22 @@ fn watcher_long_chunk_a_range_is_not_stamped_as_replacement_b_4911() {
     let shared = crate::services::discord::make_shared_data_for_tests();
     let provider = ProviderKind::Codex;
     let channel = poise::serenity_prelude::ChannelId::new(7_491_201);
-    let tmux_a = "AgentDesk-codex-phase-a-r6-outgoing-a";
-    let tmux_b = "AgentDesk-codex-phase-a-r6-replacement-b";
-    crate::services::discord::register_resume_watcher_for_tests(&shared, channel, tmux_a);
+    let tmux = "AgentDesk-codex-phase-a-r7-same-name";
+    let a_user_msg_id = 7_491_210;
+    let b_user_msg_id = 7_491_220;
+    let a_body = "byte-identical long response";
 
-    let generation_a_path = crate::services::tmux_common::session_temp_path(tmux_a, "generation");
-    std::fs::create_dir_all(std::path::Path::new(&generation_a_path).parent().unwrap()).unwrap();
-    std::fs::write(&generation_a_path, "outgoing-a").unwrap();
+    let generation_path = crate::services::tmux_common::session_temp_path(tmux, "generation");
+    std::fs::create_dir_all(std::path::Path::new(&generation_path).parent().unwrap()).unwrap();
+    std::fs::write(&generation_path, "outgoing-a-g1").unwrap();
     filetime::set_file_mtime(
-        &generation_a_path,
+        &generation_path,
         filetime::FileTime::from_unix_time(1_700_491_201, 123),
     )
     .unwrap();
     let generation_a =
-        crate::services::discord::outbound::delivery_record::current_generation_mtime_ns(tmux_a);
+        crate::services::discord::outbound::delivery_record::current_generation_mtime_ns(tmux);
+    let identity_a = watcher_long_chunk_identity(channel, tmux, a_user_msg_id);
     let coord = shared.tmux_relay_coord(channel);
     coord
         .confirmed_end_generation_mtime_ns
@@ -627,51 +660,76 @@ fn watcher_long_chunk_a_range_is_not_stamped_as_replacement_b_4911() {
         .confirmed_end_offset
         .store(128, std::sync::atomic::Ordering::Release);
 
-    // Replacement B takes the registry and resets the shared generation between
-    // A's advance and A's durable-record call.
-    crate::services::discord::register_resume_watcher_for_tests(&shared, channel, tmux_b);
-    let generation_b_path = crate::services::tmux_common::session_temp_path(tmux_b, "generation");
-    std::fs::write(&generation_b_path, "replacement-b").unwrap();
+    // Same-name replacement B resets the shared frontier after A captured G1,
+    // but before A enters the durable record lock.
+    std::fs::write(&generation_path, "replacement-b-g2").unwrap();
     filetime::set_file_mtime(
-        &generation_b_path,
+        &generation_path,
         filetime::FileTime::from_unix_time(1_700_491_202, 123),
     )
     .unwrap();
     let generation_b =
-        crate::services::discord::outbound::delivery_record::current_generation_mtime_ns(tmux_b);
+        crate::services::discord::outbound::delivery_record::current_generation_mtime_ns(tmux);
     assert_ne!(generation_a, generation_b);
-    coord
-        .confirmed_end_generation_mtime_ns
-        .store(generation_b, std::sync::atomic::Ordering::Release);
-    coord
-        .confirmed_end_offset
-        .store(0, std::sync::atomic::Ordering::Release);
-    assert_eq!(
-        shared
-            .tmux_watchers
-            .channel_binding(&channel)
-            .unwrap()
-            .tmux_session_name,
-        tmux_b
-    );
-
-    super::super::terminal_send::record_watcher_long_chunk_terminal_delivery(
+    assert!(coord.reset_confirmed_frontier(128, 0));
+    crate::services::discord::tmux::advance_watcher_confirmed_end(
         &shared,
         &provider,
         channel,
-        tmux_a,
+        tmux,
+        256,
+        "turn_identity_tests:same_name_replacement_b",
+    );
+    let b_frontier = crate::services::discord::outbound::delivery_record::DeliveredCommit {
+        range: (128, 256),
+        generation_mtime_ns: generation_b,
+        attempts: 2,
+        panel_msg_id: Some(7_491_222),
+        panel_channel_id: Some(channel.get()),
+    };
+    crate::services::discord::outbound::delivery_record::write_delivered_frontier(
+        &provider,
+        channel.get(),
+        tmux,
+        b_frontier.clone(),
+    )
+    .expect("seed replacement B whole frontier");
+    let mut inflight_b = state_with_offsets(b_user_msg_id, tmux, Some(128), 256);
+    inflight_b.channel_id = channel.get();
+    inflight_b.watcher_owner_channel_id = Some(channel.get());
+    inflight_b.logical_channel_id = Some(channel.get());
+    inflight_b.current_msg_id = 7_491_222;
+    crate::services::discord::inflight::save_inflight_state(&inflight_b)
+        .expect("seed replacement B inflight");
+
+    super::super::terminal_long_chunks::record_watcher_long_chunk_terminal_delivery(
+        &shared,
+        &provider,
+        channel,
+        tmux,
+        identity_a,
         (0, 128),
         Some(7_491_202),
-        "outgoing A response",
+        a_body,
     );
     let record =
         crate::services::discord::outbound::delivery_record::read_record(&provider, channel.get())
-            .expect("body fingerprint may create an otherwise empty record");
-    assert!(
-        record.delivered_frontier.is_none(),
-        "A's range must not be stamped with B's reset generation"
-    );
+            .expect("replacement B record survives delayed A");
+    assert_eq!(record.delivered_frontier, Some(b_frontier));
     assert!(record.confirmed_deliveries.is_empty());
+    assert!(record.recent_delivered_contents.is_empty());
+    let settled = crate::services::discord::outbound::completed_turn_ledger::settled_user_msg_ids(
+        &provider,
+        channel.get(),
+    );
+    assert!(!settled.contains(&a_user_msg_id));
+    assert!(!settled.contains(&b_user_msg_id));
+    assert!(
+        !crate::services::discord::outbound::delivery_record::recent_delivered_content_matches(
+            &provider, channel, tmux, a_body,
+        ),
+        "rejected A must not leave a G2 fingerprint that suppresses byte-identical B"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
