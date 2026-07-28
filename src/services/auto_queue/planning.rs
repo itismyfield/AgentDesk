@@ -395,8 +395,10 @@ mod failed_entry_alert_tests {
             "seed restoring slot",
         );
         let config = crate::config::Config::default();
-        let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
-            .expect("test policy engine");
+        let engine = must_ok(
+            crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone())),
+            "create test policy engine",
+        );
         let deps = AutoQueueActivateDeps {
             pg_pool: Some(pool.clone()),
             engine,
@@ -405,31 +407,35 @@ mod failed_entry_alert_tests {
             guild_id: None,
         };
 
-        let result = record_entry_dispatch_failure(
-            &deps,
-            "run-restore-wrapper",
-            "entry-restore-wrapper",
-            "card-restore-wrapper",
-            "agent-1",
-            0,
-            "restore_run_create_dispatch_failed",
-            "forced create failure",
-        )
-        .expect("production failure wrapper");
+        let result = must_ok(
+            record_entry_dispatch_failure(
+                &deps,
+                "run-restore-wrapper",
+                "entry-restore-wrapper",
+                "card-restore-wrapper",
+                "agent-1",
+                0,
+                "restore_run_create_dispatch_failed",
+                "forced create failure",
+            ),
+            "production failure wrapper",
+        );
         assert_eq!(
             result.to_status,
             crate::db::auto_queue::ENTRY_STATUS_PENDING
         );
-        let state = sqlx::query_as::<_, (String, String, Option<String>)>(
-            "SELECT e.status, r.status, s.assigned_run_id
-             FROM auto_queue_entries e
-             JOIN auto_queue_runs r ON r.id = e.run_id
-             JOIN auto_queue_slots s ON s.agent_id = e.agent_id AND s.slot_index = 0
-             WHERE e.id = 'entry-restore-wrapper'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("load production-wrapper state");
+        let state = must_ok(
+            sqlx::query_as::<_, (String, String, Option<String>)>(
+                "SELECT e.status, r.status, s.assigned_run_id
+                 FROM auto_queue_entries e
+                 JOIN auto_queue_runs r ON r.id = e.run_id
+                 JOIN auto_queue_slots s ON s.agent_id = e.agent_id AND s.slot_index = 0
+                 WHERE e.id = 'entry-restore-wrapper'",
+            )
+            .fetch_one(&pool)
+            .await,
+            "load production-wrapper state",
+        );
         assert_eq!(
             state,
             (
