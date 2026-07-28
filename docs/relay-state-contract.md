@@ -478,8 +478,9 @@ plan.
   permanently.
 - Violation surface: a frozen frontier is enqueued on every health pass, or a
   capped stalled episode is never reconsidered after its bounded backoff.
-- Invariant keys/events: `watcher_redrive_frontier_regression_rejected`,
-  `redrive_frontier_no_progress`, and `redrive_no_progress_capped`.
+- Tracing events: `redrive_frontier_no_progress` and
+  `redrive_no_progress_capped`. This recovery path currently emits tracing logs
+  rather than `record_invariant_check` observability rows.
 
 ## How to add a new invariant
 
