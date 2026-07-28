@@ -143,6 +143,9 @@ LOSS_OBSERVATIONS_KEY = "permanent_loss_observations"
 PERMANENT_LOSS_TOMBSTONES_KEY = "permanent_loss_tombstones"
 PERMANENT_LOSS_UNANNOUNCED_KEY = "permanent_loss_unannounced"
 PERMANENT_LOSS_TOTAL_KEY = "permanent_loss_total"
+PERMANENT_LOSS_SUSPECTED_KEY = "permanent_loss_suspected"
+PERMANENT_LOSS_OVERFLOW_TOTAL_KEY = "permanent_loss_overflow_total"
+LAST_ACTUAL_DELIVERY_AT_KEY = "last_actual_delivery_at"
 LAST_ACTUAL_DELIVERY_BY_PATH_KEY = "last_actual_delivery_by_path"
 # Permanent loss requires two different delivered-frontier advances beyond the
 # candidate. Re-reading the same bounded Discord window never adds evidence.
@@ -583,6 +586,7 @@ class TranscriptReadResult:
     incomplete_tail: bool = False
     semantic_end_offset: int = 0
     observed_size: int = 0
+    block_offsets: list[int] = field(default_factory=list)
 
 
 def transcript_candidates(dirs: list[Path]) -> list[TranscriptCandidate]:
@@ -1357,11 +1361,16 @@ def assistant_blocks(
                 except (json.JSONDecodeError, TypeError):
                     incomplete_tail = True
             blocks: list[tuple[float, str]] = []
+            block_offsets: list[int] = []
             semantic_end_offset = 0
             byte_offset = 0
             for raw_line, line in zip(raw_lines, lines):
+                line_start_offset = byte_offset
                 line_blocks = assistant_blocks_from_lines([line])
                 blocks.extend(line_blocks)
+                block_offsets.extend(
+                    line_start_offset + index for index in range(len(line_blocks))
+                )
                 byte_offset += len(raw_line)
                 if line_blocks:
                     semantic_end_offset = byte_offset
@@ -1370,6 +1379,7 @@ def assistant_blocks(
                 incomplete_tail=incomplete_tail,
                 semantic_end_offset=semantic_end_offset,
                 observed_size=byte_offset,
+                block_offsets=block_offsets,
             )
     except (OSError, UnicodeError, ValueError) as exc:
         return TranscriptReadResult([], type(exc).__name__)
@@ -1443,12 +1453,17 @@ class PermanentLossUpdate:
     active_blocks: list[tuple[float, str]]
     newly_tombstoned: tuple[str, ...]
     retracted: tuple[str, ...]
+    suspected: int = 0
+    overflowed: int = 0
+    corrupted: bool = False
 
 
-def _assistant_block_id(transcript: str | Path, epoch: float, text: str) -> str:
-    """Stable content identity; independent of compacted occurrence numbering."""
+def _assistant_block_id(
+    transcript: str | Path, epoch: float, text: str, source_offset: int
+) -> str:
+    """Stable source identity based on the transcript byte position."""
     digest = hashlib.sha256(norm(text).encode("utf-8")).hexdigest()
-    identity = f"{transcript}\0{epoch:.6f}\0{digest}"
+    identity = f"{transcript}\0{source_offset}\0{epoch:.6f}\0{digest}"
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
@@ -1465,13 +1480,14 @@ def _bounded_loss_entries(
     return dict(ordered[:limit])
 
 
-def _validated_loss_observations(
+def _validated_loss_observations_with_status(
     channel_state: Mapping[str, Any], now: float | None = None
-) -> dict[str, dict[str, Any]]:
+) -> tuple[dict[str, dict[str, Any]], bool]:
     raw = channel_state.get(LOSS_OBSERVATIONS_KEY, {})
     if not isinstance(raw, dict):
-        return {}
+        return {}, LOSS_OBSERVATIONS_KEY in channel_state
     valid: dict[str, dict[str, Any]] = {}
+    corrupted = False
     for block_id, entry in raw.items():
         advances = entry.get("evidence_frontiers") if isinstance(entry, dict) else None
         if not (
@@ -1485,12 +1501,14 @@ def _validated_loss_observations(
             and isinstance(advances, list)
             and all(_is_finite_nonnegative_number(value) for value in advances)
         ):
+            corrupted = True
             continue
         last_observed_at = float(entry["last_observed_at"])
         if now is not None and now - last_observed_at > TRANSCRIPT_HISTORY_TTL_SECS:
             continue
         distinct = sorted({float(value) for value in advances})[-PERMANENT_LOSS_CONFIRM_ADVANCES:]
         if not distinct:
+            corrupted = True
             continue
         valid[block_id] = {
             "path": entry["path"],
@@ -1498,17 +1516,23 @@ def _validated_loss_observations(
             "evidence_frontiers": distinct,
             "last_observed_at": last_observed_at,
         }
-    return _bounded_loss_entries(valid, MAX_LOSS_OBSERVATIONS)
+    return _bounded_loss_entries(valid, MAX_LOSS_OBSERVATIONS), corrupted
 
 
-def permanent_loss_tombstones(
+def _validated_loss_observations(
     channel_state: Mapping[str, Any], now: float | None = None
 ) -> dict[str, dict[str, Any]]:
-    """Return bounded durable loss identities; malformed state fails open."""
+    return _validated_loss_observations_with_status(channel_state, now)[0]
+
+
+def _permanent_loss_tombstones_with_status(
+    channel_state: Mapping[str, Any], now: float | None = None
+) -> tuple[dict[str, dict[str, Any]], bool]:
     raw = channel_state.get(PERMANENT_LOSS_TOMBSTONES_KEY, {})
     if not isinstance(raw, dict):
-        return {}
+        return {}, PERMANENT_LOSS_TOMBSTONES_KEY in channel_state
     valid: dict[str, dict[str, Any]] = {}
+    corrupted = False
     for block_id, entry in raw.items():
         if not (
             isinstance(block_id, str)
@@ -1519,6 +1543,7 @@ def permanent_loss_tombstones(
             and _is_finite_nonnegative_number(entry.get("epoch"))
             and _is_finite_nonnegative_number(entry.get("confirmed_at"))
         ):
+            corrupted = True
             continue
         confirmed_at = float(entry["confirmed_at"])
         if now is not None and now - confirmed_at > TRANSCRIPT_HISTORY_TTL_SECS:
@@ -1532,12 +1557,24 @@ def permanent_loss_tombstones(
     bounded = _bounded_loss_entries(valid, MAX_PERMANENT_LOSS_TOMBSTONES)
     for entry in bounded.values():
         entry.pop("last_observed_at", None)
-    return bounded
+    return bounded, corrupted
+
+
+def permanent_loss_tombstones(
+    channel_state: Mapping[str, Any], now: float | None = None
+) -> dict[str, dict[str, Any]]:
+    """Return bounded durable loss identities; malformed state fails open."""
+    return _permanent_loss_tombstones_with_status(channel_state, now)[0]
 
 
 def permanent_loss_total(channel_state: Mapping[str, Any]) -> int:
-    """Current retained permanent losses; derived map prevents split-key drift."""
-    return len(permanent_loss_tombstones(channel_state))
+    """Current retained losses, retaining the last projection on corruption."""
+    tombstones, corrupted = _permanent_loss_tombstones_with_status(channel_state)
+    if corrupted:
+        projected = channel_state.get(PERMANENT_LOSS_TOTAL_KEY, 0)
+        if isinstance(projected, int) and not isinstance(projected, bool) and projected >= 0:
+            return projected
+    return len(tombstones)
 
 
 def _store_loss_state(
@@ -1559,6 +1596,7 @@ def update_permanent_loss_tombstones(
     channel_state: dict[str, Any],
     transcript: str | Path,
     blocks: list[tuple[float, str]],
+    block_offsets: list[int],
     hay: str,
     now: float,
     grace_secs: int,
@@ -1573,25 +1611,31 @@ def update_permanent_loss_tombstones(
     match retracts a tombstone and decrements the cumulative total.
     """
     path = str(transcript)
-    tombstones = permanent_loss_tombstones(channel_state, now)
-    observations = _validated_loss_observations(channel_state, now)
-    total = len(tombstones)
-    block_ids = [_assistant_block_id(path, epoch, text) for epoch, text in blocks]
+    tombstones, tombstones_corrupted = _permanent_loss_tombstones_with_status(
+        channel_state, now
+    )
+    observations, observations_corrupted = _validated_loss_observations_with_status(
+        channel_state, now
+    )
+    corrupted = tombstones_corrupted or observations_corrupted
+    if len(block_offsets) != len(blocks):
+        raise ValueError("block_offsets must identify every source block")
+    block_ids = [
+        _assistant_block_id(path, epoch, text, source_offset)
+        for (epoch, text), source_offset in zip(blocks, block_offsets)
+    ]
     matched = delivered_flags(blocks, hay)
 
     retracted: list[str] = []
-    active_blocks: list[tuple[float, str]] = []
-    for (epoch, text), block_id, is_matched in zip(blocks, block_ids, matched):
+    for block_id, is_matched in zip(block_ids, matched):
         if block_id in tombstones and is_matched:
             tombstones.pop(block_id, None)
             observations.pop(block_id, None)
             retracted.append(block_id)
-            total = len(tombstones)
-        if block_id not in tombstones:
-            active_blocks.append((epoch, text))
 
     frontier_advanced = current_delivered_ts > prior_delivered_ts
     newly_tombstoned: list[str] = []
+    suspected = 0
     for index, ((epoch, _), block_id) in enumerate(zip(blocks, block_ids)):
         if block_id in tombstones or matched[index]:
             observations.pop(block_id, None)
@@ -1602,6 +1646,8 @@ def update_permanent_loss_tombstones(
         )
         later_advance = frontier_advanced and current_delivered_ts > epoch
         if not (eligible and later_advance):
+            if prior is not None and now - epoch > grace_secs:
+                suspected += 1
             continue
         frontiers = set(prior.get("evidence_frontiers", [])) if prior else set()
         frontiers.add(current_delivered_ts)
@@ -1614,10 +1660,6 @@ def update_permanent_loss_tombstones(
             }
             observations.pop(block_id, None)
             newly_tombstoned.append(block_id)
-            total = len(tombstones)
-            active_blocks = [
-                block for block, identity in zip(blocks, block_ids) if identity != block_id
-            ]
         else:
             observations[block_id] = {
                 "path": path,
@@ -1625,16 +1667,31 @@ def update_permanent_loss_tombstones(
                 "evidence_frontiers": evidence,
                 "last_observed_at": now,
             }
+            suspected += 1
 
+    observation_overflow = max(0, len(observations) - MAX_LOSS_OBSERVATIONS)
+    tombstone_overflow = max(0, len(tombstones) - MAX_PERMANENT_LOSS_TOMBSTONES)
+    overflowed = observation_overflow + tombstone_overflow
     observations = _bounded_loss_entries(observations, MAX_LOSS_OBSERVATIONS)
     tombstones = _bounded_loss_entries(tombstones, MAX_PERMANENT_LOSS_TOMBSTONES)
-    total = len(tombstones)
-    _store_loss_state(channel_state, observations, tombstones)
-    channel_state[PERMANENT_LOSS_TOTAL_KEY] = total
+    active_blocks = [
+        block for block, identity in zip(blocks, block_ids) if identity not in tombstones
+    ]
+    if not corrupted:
+        _store_loss_state(channel_state, observations, tombstones)
+        channel_state[PERMANENT_LOSS_TOTAL_KEY] = len(tombstones)
+    if overflowed:
+        previous_overflow = channel_state.get(PERMANENT_LOSS_OVERFLOW_TOTAL_KEY, 0)
+        if not isinstance(previous_overflow, int) or isinstance(previous_overflow, bool):
+            previous_overflow = 0
+        channel_state[PERMANENT_LOSS_OVERFLOW_TOTAL_KEY] = previous_overflow + overflowed
     return PermanentLossUpdate(
         active_blocks=active_blocks,
         newly_tombstoned=tuple(newly_tombstoned),
         retracted=tuple(retracted),
+        suspected=suspected,
+        overflowed=overflowed,
+        corrupted=corrupted,
     )
 
 
@@ -3955,6 +4012,7 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
 
     evaluated: list[tuple[TranscriptCandidate, Verdict]] = []
     fresh_undelivered_by_path: dict[str, int] = {}
+    suspected_permanent_losses = 0
     new_permanent_losses = 0
     raw_delivery_by_path = chs.get(LAST_ACTUAL_DELIVERY_BY_PATH_KEY, {})
     last_actual_delivery_by_path = (
@@ -3968,6 +4026,20 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         if isinstance(raw_delivery_by_path, dict)
         else {}
     )
+    legacy_actual_delivery = chs.get(LAST_ACTUAL_DELIVERY_AT_KEY)
+    if not last_actual_delivery_by_path:
+        if _is_finite_nonnegative_number(legacy_actual_delivery):
+            migrated_at = min(float(legacy_actual_delivery), now)
+        else:
+            migrated_at = now
+        for candidate in active_candidates:
+            last_actual_delivery_by_path[str(candidate.path)] = migrated_at
+        rt.log(
+            f"[{cid}] initialized last actual delivery timestamps "
+            f"paths={len(active_candidates)} source="
+            f"{'legacy' if _is_finite_nonnegative_number(legacy_actual_delivery) else 'now'}"
+        )
+    chs.pop(LAST_ACTUAL_DELIVERY_AT_KEY, None)
     unreadable_paths: list[str] = []
     escalated_pending_paths: list[str] = []
     remaining_pending = list(pending_paths)
@@ -4029,13 +4101,26 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             chs,
             candidate.path,
             read_result.blocks,
+            read_result.block_offsets,
             hay,
             now,
             cfg.grace_secs,
             prior_delivered_ts,
             observed_verdict.delivered_ts,
         )
+        suspected_permanent_losses += tombstone_update.suspected
         new_permanent_losses += len(tombstone_update.newly_tombstoned)
+        if tombstone_update.corrupted:
+            rt.log(
+                f"[{cid}] permanent-loss-state-corrupt path={path}; "
+                "preserving raw state"
+            )
+        if tombstone_update.overflowed:
+            rt.log(
+                f"[{cid}] permanent-loss-state-overflow path={path} "
+                f"dropped={tombstone_update.overflowed} "
+                f"total={chs[PERMANENT_LOSS_OVERFLOW_TOTAL_KEY]}"
+            )
         verdict = evaluate(
             tombstone_update.active_blocks,
             hay,
@@ -4281,9 +4366,16 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             f"[{cid}] PERMANENT LOSS ALERT new={unannounced} "
             f"cumulative={cumulative_losses} delivered={delivered_notice}"
         )
+    if suspected_permanent_losses:
+        chs[PERMANENT_LOSS_SUSPECTED_KEY] = suspected_permanent_losses
+        rt.log(
+            f"[{cid}] permanent-loss-suspected count={suspected_permanent_losses} "
+            "awaiting independent frontier evidence"
+        )
+    else:
+        chs.pop(PERMANENT_LOSS_SUSPECTED_KEY, None)
     preserve_gap_incident = (
         selected_probe.status is None
-        and new_permanent_losses > 0
         and chs.get(ISSUE_FILING_SUPPRESSION_REASON_KEY)
         == ISSUE_FILING_DC_UNREACHABLE_REASON
         and bool(

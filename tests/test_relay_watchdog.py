@@ -5687,6 +5687,7 @@ class TickChannelTests(unittest.TestCase):
         self.assertTrue(chs.get("alerting"))
 
         rt.haystack = norm("new missing B")
+        rt.watcher_probe = WatcherStateProbe(200, True, False)
         tick_channel(rt, TICK_CHANNEL, state, stale_tick + 1)
         chs = state["999"]
         self.assertFalse(chs.get("alerting", False))
@@ -6154,7 +6155,7 @@ class TickChannelTests(unittest.TestCase):
         self.assertNotIn(relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY, chs)
         self.assertEqual(rt.alerts, [])
 
-    def test_same_delivery_snapshot_twice_does_not_confirm_loss(self):
+    def test_single_frontier_skip_surfaces_suspected_loss_without_confirming(self):
         missing = (self.now - 3000, "missing response needs new evidence")
         successor = (self.now - 2000, "only delivered successor")
         self.write_transcript([missing, successor])
@@ -6168,11 +6169,34 @@ class TickChannelTests(unittest.TestCase):
 
         chs = state["999"]
         self.assertEqual(permanent_loss_total(chs), 0)
+        self.assertEqual(chs[relay_watchdog.PERMANENT_LOSS_SUSPECTED_KEY], 1)
+        self.assertTrue(
+            any("permanent-loss-suspected count=1" in line for line in rt.log_lines)
+        )
         observations = relay_watchdog._validated_loss_observations(chs)
         self.assertEqual(len(observations), 1)
         self.assertEqual(
             next(iter(observations.values()))["evidence_frontiers"],
             [float(int(successor[0]))],
+        )
+
+    def test_bounded_rolloff_does_not_surface_suspected_loss(self):
+        old = (self.now - 3000, "delivered response rolled out of limit 100")
+        newer = (self.now - 2000, "newer delivered response still in window")
+        self.write_transcript([old, newer])
+        rt = self.make_rt()
+        state: dict = {}
+
+        rt.haystack = norm(f"{old[1]} {newer[1]}")
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        rt.haystack = norm(newer[1])
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+
+        self.assertNotIn(
+            relay_watchdog.PERMANENT_LOSS_SUSPECTED_KEY, state["999"]
+        )
+        self.assertFalse(
+            any("permanent-loss-suspected" in line for line in rt.log_lines)
         )
 
     def test_permanent_loss_requires_two_distinct_frontier_advances(self):
@@ -6328,12 +6352,115 @@ class TickChannelTests(unittest.TestCase):
             relay_watchdog.ISSUE_FILING_DC_UNREACHABLE_REASON,
         )
 
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+        chs = state["999"]
+        self.assertTrue(chs["alerting"])
+        self.assertEqual(chs["gap_since"], self.now - 3600)
+        self.assertEqual(
+            chs[relay_watchdog.ISSUE_FILING_SUPPRESSION_REASON_KEY],
+            relay_watchdog.ISSUE_FILING_DC_UNREACHABLE_REASON,
+        )
+
+    def test_duplicate_same_timestamp_text_uses_stable_source_offsets(self):
+        duplicate = (self.now - 4000, "same duplicate obligation")
+        first = (self.now - 3000, "duplicate first successor")
+        second = (self.now - 2000, "duplicate second successor")
+        self.write_transcript([duplicate, duplicate, first])
+        rt = self.make_rt()
+        state: dict = {}
+        rt.haystack = norm(f"{duplicate[1]} {first[1]}")
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.append_transcript_block(*second)
+        rt.haystack = norm(f"{duplicate[1]} {first[1]} {second[1]}")
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+
+        tombstones = permanent_loss_tombstones(state["999"])
+        self.assertEqual(len(tombstones), 1)
+        self.assertEqual(permanent_loss_total(state["999"]), 1)
+
+    def test_legacy_actual_delivery_scalar_migrates_to_selected_path(self):
+        missing = (self.now - 4000, "legacy migration missing response")
+        successor = (self.now - 3000, "legacy migration delivered successor")
+        self.write_transcript([missing, successor])
+        rt = self.make_rt(realert_secs=1)
+        rt.haystack = norm(successor[1])
+        legacy_observed_at = self.now - 120
+        state = {
+            "999": {
+                relay_watchdog.LAST_ACTUAL_DELIVERY_AT_KEY: legacy_observed_at,
+                DELIVERED_WATERMARKS_KEY: {
+                    str(self.proj_dir / "s.jsonl"): {
+                        "delivered_ts": successor[0],
+                        "updated_at": self.now - 3000,
+                    }
+                },
+            }
+        }
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        chs = state["999"]
+        self.assertNotIn(relay_watchdog.LAST_ACTUAL_DELIVERY_AT_KEY, chs)
+        self.assertEqual(
+            chs[relay_watchdog.LAST_ACTUAL_DELIVERY_BY_PATH_KEY][
+                str(self.proj_dir / "s.jsonl")
+            ],
+            legacy_observed_at,
+        )
+
+    def test_loss_state_overflow_is_logged_and_counted(self):
+        path = str(self.proj_dir / "s.jsonl")
+        state = {
+            relay_watchdog.LOSS_OBSERVATIONS_KEY: {
+                f"{index:064x}": {
+                    "path": path,
+                    "epoch": self.now - 4000,
+                    "evidence_frontiers": [self.now - 3000],
+                    "last_observed_at": self.now - index,
+                }
+                for index in range(relay_watchdog.MAX_LOSS_OBSERVATIONS)
+            }
+        }
+        missing = (self.now - 2000, "overflow missing response")
+        successor = (self.now - 1000, "overflow delivered successor")
+        self.write_transcript([missing, successor])
+        rt = self.make_rt()
+        rt.haystack = norm(successor[1])
+
+        tick_channel(rt, TICK_CHANNEL, {"999": state}, self.now)
+
+        self.assertEqual(state[relay_watchdog.PERMANENT_LOSS_OVERFLOW_TOTAL_KEY], 1)
+        self.assertTrue(
+            any("permanent-loss-state-overflow" in line for line in rt.log_lines)
+        )
+
+    def test_corrupt_loss_state_logs_and_preserves_raw_evidence(self):
+        path = str(self.proj_dir / "s.jsonl")
+        corrupt = {"bad": "shape"}
+        state = {
+            "999": {
+                relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY: corrupt.copy(),
+                relay_watchdog.PERMANENT_LOSS_TOTAL_KEY: 9,
+            }
+        }
+        self.write_transcript([(self.now - 2000, "corrupt state candidate")])
+        rt = self.make_rt()
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        chs = state["999"]
+        self.assertEqual(chs[relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY], corrupt)
+        self.assertEqual(permanent_loss_total(chs), 9)
+        self.assertTrue(
+            any("permanent-loss-state-corrupt" in line for line in rt.log_lines)
+        )
+
     def test_corrupt_tombstone_map_cannot_double_count_total(self):
         state = {
             relay_watchdog.PERMANENT_LOSS_TOTAL_KEY: 9,
             relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY: {"bad": "shape"},
         }
-        self.assertEqual(permanent_loss_total(state), 0)
+        self.assertEqual(permanent_loss_total(state), 9)
 
     def test_loss_state_is_bounded_ttl_pruned_and_lifecycle_cleaned(self):
         path = str(self.proj_dir / "s.jsonl")
