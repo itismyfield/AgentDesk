@@ -644,6 +644,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                                             shared_owned.as_ref(),
                                             &provider,
                                             watcher_owner_channel_id,
+                                            inflight_state.tmux_session_name.as_deref(),
                                             lease_range,
                                             current_msg_id.get(),
                                             channel_id.get(),

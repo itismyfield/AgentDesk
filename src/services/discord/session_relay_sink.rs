@@ -575,6 +575,7 @@ impl SessionBoundDiscordRelaySink {
             dr::commit_ordered_jsonl_range(
                 provider,
                 ChannelId::new(channel_id),
+                session_name,
                 (start, end),
                 frame_generation,
             ),
@@ -832,12 +833,11 @@ impl SessionBoundDiscordRelaySink {
         )
         .await;
 
-        // #3089 B1: shadow-mirror durable delivered frontier — flag-gated, observe-only, Delivered-only (I2), OFF=no-op.
-        // #3610 PR-1: anchor msg = `msg_id` (current_msg_id — true terminal anchor, not status_message_id). PR-1b: anchor channel = `channel` (same-channel path).
         dr::shadow_mirror_same_channel_frontier_with_body(
             shared,
             provider,
             channel,
+            &delivery.session_name,
             (start, end),
             dr::outcome_is_shadow_delivered(&outcome),
             msg_id.get(),

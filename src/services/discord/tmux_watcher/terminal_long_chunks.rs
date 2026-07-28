@@ -83,13 +83,16 @@ pub(in crate::services::discord) async fn deliver_long_chunks_via_controller<
         ..
     } = &outcome
     {
-        super::terminal_send::record_watcher_long_chunk_terminal_delivery(
+        dr::record_long_chunk_terminal_delivery(
             shared,
             provider,
             channel_id,
+            channel_id,
+            Some(tmux_session_name),
             (start, end),
             chunks.tail_message_id.map(|m| m.get()),
             delivered_body,
+            None,
         );
     }
     outcome

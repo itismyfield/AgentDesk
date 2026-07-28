@@ -1967,14 +1967,24 @@ fn delivery_frontier_without_ledger_append_is_not_settled() {
     let provider = ProviderKind::Claude;
     let channel_id = ChannelId::new(4_564_005);
     let message = view(HUMAN_ID, false, 3600, "크래시 직전에 배달된 답변");
+    let tmux_session_name = "AgentDesk-claude-ledger-frontier-only";
+    let generation_path =
+        crate::services::tmux_common::session_temp_path(tmux_session_name, "generation");
+    std::fs::create_dir_all(std::path::Path::new(&generation_path).parent().unwrap()).unwrap();
+    std::fs::write(&generation_path, "test-generation").unwrap();
+    let generation_mtime_ns =
+        crate::services::discord::outbound::delivery_record::current_generation_mtime_ns(
+            tmux_session_name,
+        );
 
     // The delivery committed (frontier written)...
     crate::services::discord::outbound::delivery_record::write_delivered_frontier(
         &provider,
         channel_id.get(),
+        tmux_session_name,
         crate::services::discord::outbound::delivery_record::DeliveredCommit {
             range: (0, 128),
-            generation_mtime_ns: 1,
+            generation_mtime_ns,
             attempts: 1,
             panel_msg_id: Some(message.message_id),
             panel_channel_id: Some(channel_id.get()),

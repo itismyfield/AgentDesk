@@ -282,8 +282,7 @@ pub(super) async fn handle_cancel_prompt_replace(
                 status_panel_terminal_committed = true;
             }
             // B6: the ONLY confirmed_end advance is via a successful lease
-            // commit. `Held` → commit (Delivered advances, NotDelivered not).
-            // `NoRange` has NO new bytes → no advance outside a lease (codex
+            // `Held` commits; `NoRange` has no new bytes and never advances (codex
             // P1-b: a degenerate equal-nonzero range must not advance).
             if let Some(lease) = stop_lease {
                 let lease_range = lease.range();
@@ -303,6 +302,7 @@ pub(super) async fn handle_cancel_prompt_replace(
                         shared_owned.as_ref(),
                         &provider,
                         watcher_owner_channel_id,
+                        inflight_state.tmux_session_name.as_deref(),
                         lease_range,
                         current_msg_id,
                         channel_id,
@@ -383,8 +383,7 @@ pub(super) async fn handle_cancel_prompt_replace(
             if replace_committed {
                 status_panel_terminal_committed = true;
             }
-            // B6 (codex P1-b): advance ONLY via a successful lease commit.
-            // NoRange has no new bytes → no advance outside the lease.
+            // B6: advance only through a successful lease; NoRange never advances.
             if let Some(lease) = plt_lease {
                 let lease_range = lease.range();
                 let outcome = if replace_committed {
@@ -403,6 +402,7 @@ pub(super) async fn handle_cancel_prompt_replace(
                         shared_owned.as_ref(),
                         &provider,
                         watcher_owner_channel_id,
+                        inflight_state.tmux_session_name.as_deref(),
                         lease_range,
                         current_msg_id.get(),
                         channel_id.get(),

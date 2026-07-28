@@ -423,19 +423,12 @@ pub(in crate::services::discord) fn upsert_lease(
     upsert_lease_at(&record_path_or_err(provider, channel_id)?, lease)
 }
 
-/// Advance the delivered frontier. The ONLY writer of `delivered_frontier`
-/// (I2 — only a `Delivered` outcome calls this). Preserves the current lease.
+/// Raw path writer retained for record-shape tests and narrowly-scoped repair
+/// helpers. Production confirmed-delivery entry points must use the
+/// generation-guarded writers below.
+#[cfg(test)]
 fn write_delivered_frontier_at(path: &Path, frontier: DeliveredCommit) -> Result<(), String> {
     mutate_record_at(path, |record| record.delivered_frontier = Some(frontier))
-}
-
-#[allow(dead_code)] // #3089 B1 uses the `_at` core directly; the provider/channel form is wired in B2.
-pub(in crate::services::discord) fn write_delivered_frontier(
-    provider: &ProviderKind,
-    channel_id: u64,
-    frontier: DeliveredCommit,
-) -> Result<(), String> {
-    write_delivered_frontier_at(&record_path_or_err(provider, channel_id)?, frontier)
 }
 
 fn merge_confirmed_frontier(
@@ -456,11 +449,18 @@ fn merge_confirmed_frontier(
     }
 }
 
+#[derive(Clone, Copy)]
+enum EqualRangeAnchorPolicy {
+    PreserveExisting,
+    ReplaceProvenGone,
+}
+
 fn write_confirmed_frontier_guarded_at_with_before_lock(
     path: &Path,
     tmux_session_name: &str,
     frontier: DeliveredCommit,
     receipt: Option<ConfirmedDeliveryReceipt>,
+    equal_range_anchor_policy: EqualRangeAnchorPolicy,
     before_lock: impl FnOnce(),
 ) -> Result<(), String> {
     if tmux_session_name.is_empty()
@@ -485,10 +485,23 @@ fn write_confirmed_frontier_guarded_at_with_before_lock(
     }
 
     let mut record = read_record_at(path).unwrap_or_default();
-    record.delivered_frontier = Some(merge_confirmed_frontier(
-        record.delivered_frontier.as_ref(),
-        frontier,
-    ));
+    let replace_equal_range_anchor = matches!(
+        equal_range_anchor_policy,
+        EqualRangeAnchorPolicy::ReplaceProvenGone
+    ) && frontier.panel_msg_id.is_some()
+        && frontier.panel_channel_id.is_some()
+        && record.delivered_frontier.as_ref().is_some_and(|existing| {
+            existing.generation_mtime_ns == frontier.generation_mtime_ns
+                && existing.range == frontier.range
+        });
+    record.delivered_frontier = Some(if replace_equal_range_anchor {
+        // The caller has already proved this exact recorded anchor gone. This is
+        // the sole equal-END replacement exception; a different range still goes
+        // through the ordinary highest-END whole-commit merge below.
+        frontier
+    } else {
+        merge_confirmed_frontier(record.delivered_frontier.as_ref(), frontier)
+    });
 
     if let Some(receipt) = receipt {
         // A delayed, lower-range receipt remains exact proof for its own restored
@@ -519,6 +532,57 @@ fn write_confirmed_frontier_guarded_at(
         tmux_session_name,
         frontier,
         receipt,
+        EqualRangeAnchorPolicy::PreserveExisting,
+        || {},
+    )
+}
+
+fn write_delivered_frontier_guarded_at_with_before_lock(
+    path: &Path,
+    tmux_session_name: &str,
+    frontier: DeliveredCommit,
+    before_lock: impl FnOnce(),
+) -> Result<(), String> {
+    write_confirmed_frontier_guarded_at_with_before_lock(
+        path,
+        tmux_session_name,
+        frontier,
+        None,
+        EqualRangeAnchorPolicy::PreserveExisting,
+        before_lock,
+    )
+}
+
+/// Persist a confirmed frontier through the current tmux incarnation guard.
+/// Delayed lower/equal-END writers preserve the existing winning commit whole.
+pub(in crate::services::discord) fn write_delivered_frontier(
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_session_name: &str,
+    frontier: DeliveredCommit,
+) -> Result<(), String> {
+    write_delivered_frontier_guarded_at_with_before_lock(
+        &record_path_or_err(provider, channel_id)?,
+        tmux_session_name,
+        frontier,
+        || {},
+    )
+}
+
+/// Recovery-only equal-range replacement after Discord has proved the recorded
+/// anchor gone. All other range relationships retain the normal monotonic merge.
+pub(in crate::services::discord) fn write_proven_gone_equal_range_frontier(
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_session_name: &str,
+    frontier: DeliveredCommit,
+) -> Result<(), String> {
+    write_confirmed_frontier_guarded_at_with_before_lock(
+        &record_path_or_err(provider, channel_id)?,
+        tmux_session_name,
+        frontier,
+        None,
+        EqualRangeAnchorPolicy::ReplaceProvenGone,
         || {},
     )
 }
@@ -564,43 +628,41 @@ pub(in crate::services::discord) fn write_confirmed_delivery(
 
 fn commit_ordered_jsonl_range_at(
     path: &Path,
+    tmux_session_name: &str,
     range: (u64, u64),
     generation_mtime_ns: i64,
+) -> Result<bool, String> {
+    commit_ordered_jsonl_range_at_with_before_lock(
+        path,
+        tmux_session_name,
+        range,
+        generation_mtime_ns,
+        || {},
+    )
+}
+
+fn commit_ordered_jsonl_range_at_with_before_lock(
+    path: &Path,
+    tmux_session_name: &str,
+    range: (u64, u64),
+    generation_mtime_ns: i64,
+    before_lock: impl FnOnce(),
 ) -> Result<bool, String> {
     if generation_mtime_ns == 0 || range.1 <= range.0 {
         return Ok(false);
     }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let _lock = lock_record_path(path)?;
-    let mut record = read_record_at(path).unwrap_or_default();
-    if let Some(frontier) = record.delivered_frontier.as_ref()
-        && frontier.generation_mtime_ns == generation_mtime_ns
-        && frontier.range.1 >= range.1
-    {
-        return Ok(true);
-    }
-    let previous_attempts = record
-        .delivered_frontier
-        .as_ref()
-        .filter(|frontier| frontier.generation_mtime_ns == generation_mtime_ns)
-        .map(|frontier| frontier.attempts)
-        .unwrap_or(0);
-    let committed_range = record
-        .delivered_frontier
-        .as_ref()
-        .filter(|frontier| frontier.generation_mtime_ns == generation_mtime_ns)
-        .map(|frontier| (frontier.range.0.min(range.0), frontier.range.1.max(range.1)))
-        .unwrap_or(range);
-    record.delivered_frontier = Some(DeliveredCommit {
-        range: committed_range,
-        generation_mtime_ns,
-        attempts: previous_attempts.saturating_add(1),
-        panel_msg_id: None,
-        panel_channel_id: None,
-    });
-    write_record_at(path, &record)?;
+    write_delivered_frontier_guarded_at_with_before_lock(
+        path,
+        tmux_session_name,
+        DeliveredCommit {
+            range,
+            generation_mtime_ns,
+            attempts: 1,
+            panel_msg_id: None,
+            panel_channel_id: None,
+        },
+        before_lock,
+    )?;
     Ok(true)
 }
 
@@ -609,11 +671,13 @@ fn commit_ordered_jsonl_range_at(
 pub(in crate::services::discord) fn commit_ordered_jsonl_range(
     provider: &ProviderKind,
     channel: ChannelId,
+    tmux_session_name: &str,
     range: (u64, u64),
     generation_mtime_ns: i64,
 ) -> Result<bool, String> {
     commit_ordered_jsonl_range_at(
         &record_path_or_err(provider, channel.get())?,
+        tmux_session_name,
         range,
         generation_mtime_ns,
     )
@@ -1669,6 +1733,7 @@ fn delivered_frontier_end_diverged(durable_end: u64, in_memory_confirmed_end: u6
 /// diverged from the in-memory authority. `Err` only when the durable write
 /// itself failed. Caller invokes this ONLY for a confirmed `Delivered` (I2).
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn record_delivered_frontier_shadow_at(
     path: &Path,
     range: (u64, u64),
@@ -1799,6 +1864,7 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
     shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,
     channel: ChannelId,
+    authoritative_tmux_session_name: Option<&str>,
     range: (u64, u64),
     is_delivered: bool,
     terminal_anchor_msg_id: Option<u64>,
@@ -1876,10 +1942,19 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
         .as_ref()
         .map(|f| f.recovery_relay_attempts)
         .unwrap_or(0);
-    let tmux_session_name = fresh
-        .as_ref()
-        .and_then(|state| state.tmux_session_name.as_deref())
-        .filter(|name| !name.is_empty());
+    // The caller already owns the delivery incarnation while committing its
+    // lease. Keep that identity independent of the inflight row: the row may be
+    // cleared immediately after the confirmed POST. A fresh exact row remains
+    // mandatory for receipt construction below; caller authority only supplies
+    // the receipt-less frontier fallback and can never synthesize a receipt.
+    let tmux_session_name = authoritative_tmux_session_name
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            fresh
+                .as_ref()
+                .and_then(|state| state.tmux_session_name.as_deref())
+                .filter(|name| !name.is_empty())
+        });
     let frontier = DeliveredCommit {
         range,
         generation_mtime_ns,
@@ -1932,6 +2007,7 @@ pub(in crate::services::discord) fn record_delivered_frontier_with_body(
     shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,
     channel: ChannelId,
+    tmux_session_name: Option<&str>,
     range: (u64, u64),
     terminal_anchor_msg_id: u64,
     terminal_anchor_channel_id: u64,
@@ -1942,6 +2018,7 @@ pub(in crate::services::discord) fn record_delivered_frontier_with_body(
         shared,
         provider,
         channel,
+        tmux_session_name,
         range,
         true,
         Some(terminal_anchor_msg_id),
@@ -1955,6 +2032,7 @@ pub(in crate::services::discord) fn shadow_mirror_same_channel_frontier_with_bod
     shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,
     channel: ChannelId,
+    tmux_session_name: &str,
     range: (u64, u64),
     is_delivered: bool,
     terminal_anchor_msg_id: u64,
@@ -1962,11 +2040,12 @@ pub(in crate::services::discord) fn shadow_mirror_same_channel_frontier_with_bod
 ) {
     // Same-channel (sink) path: `channel` IS the inbound channel, so `None` lets
     // the funnel reload it for `user_msg_id` (race-safe under identity-gated
-    // advance). #3016 hotfile `session_relay_sink.rs` therefore needs no change.
+    // advance). The caller-held session remains available if that row clears.
     shadow_mirror_delivered_frontier(
         shared,
         provider,
         channel,
+        Some(tmux_session_name),
         range,
         is_delivered,
         Some(terminal_anchor_msg_id),
@@ -2013,6 +2092,7 @@ pub(in crate::services::discord) fn record_long_chunk_terminal_delivery(
     provider: &ProviderKind,
     watcher_owner_channel_id: ChannelId,
     delivery_channel_id: ChannelId,
+    tmux_session_name: Option<&str>,
     range: (u64, u64),
     last_chunk_anchor_msg_id: Option<u64>,
     delivered_body: &str,
@@ -2022,6 +2102,7 @@ pub(in crate::services::discord) fn record_long_chunk_terminal_delivery(
         shared,
         provider,
         watcher_owner_channel_id,
+        tmux_session_name,
         range,
         true,
         last_chunk_anchor_msg_id,
@@ -2113,23 +2194,27 @@ mod tests {
 
     #[test]
     fn ordered_jsonl_commit_is_generation_scoped_and_monotonic() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("record.json");
+        let _root = IsolatedRoot::new();
+        let path = record_path_or_err(&ProviderKind::Claude, 2_115).expect("record path");
+        let tmux = "AgentDesk-claude-ordered-monotonic";
+        let generation_1 = set_phase_a_generation(tmux, 1_700_002_115);
 
-        assert!(commit_ordered_jsonl_range_at(&path, (100, 200), 7).unwrap());
-        assert!(commit_ordered_jsonl_range_at(&path, (150, 180), 7).unwrap());
+        assert!(commit_ordered_jsonl_range_at(&path, tmux, (100, 200), generation_1).unwrap());
+        assert!(commit_ordered_jsonl_range_at(&path, tmux, (150, 180), generation_1).unwrap());
         assert_eq!(
             read_record_at(&path).unwrap().delivered_frontier.unwrap(),
             DeliveredCommit {
                 range: (100, 200),
-                generation_mtime_ns: 7,
+                generation_mtime_ns: generation_1,
                 attempts: 1,
                 panel_msg_id: None,
                 panel_channel_id: None,
             }
         );
 
-        assert!(commit_ordered_jsonl_range_at(&path, (0, 50), 8).unwrap());
+        let generation_2 = set_phase_a_generation(tmux, 1_700_002_116);
+        assert_ne!(generation_1, generation_2);
+        assert!(commit_ordered_jsonl_range_at(&path, tmux, (0, 50), generation_2).unwrap());
         assert_eq!(
             read_record_at(&path)
                 .unwrap()
@@ -2139,8 +2224,8 @@ mod tests {
             (0, 50),
             "a replacement wrapper starts a new coordinate space"
         );
-        assert!(!commit_ordered_jsonl_range_at(&path, (50, 50), 8).unwrap());
-        assert!(!commit_ordered_jsonl_range_at(&path, (50, 60), 0).unwrap());
+        assert!(!commit_ordered_jsonl_range_at(&path, tmux, (50, 50), generation_2).unwrap());
+        assert!(!commit_ordered_jsonl_range_at(&path, tmux, (50, 60), 0).unwrap());
     }
 
     #[test]
@@ -3410,6 +3495,7 @@ mod tests {
             &shared,
             &provider,
             owner,
+            Some(tmux),
             (100, 200),
             true,
             Some(message_id),
@@ -3536,6 +3622,7 @@ mod tests {
             &shared,
             &provider,
             owner,
+            Some(tmux),
             newer.range,
             true,
             newer.panel_msg_id,
@@ -3549,6 +3636,7 @@ mod tests {
                 &shared,
                 &provider,
                 owner,
+                Some(tmux),
                 range,
                 true,
                 Some(message_id),
@@ -3561,6 +3649,265 @@ mod tests {
         let record = read_record(&provider, owner.get()).expect("receipt-less record");
         assert_eq!(record.delivered_frontier, Some(newer));
         assert!(record.confirmed_deliveries.is_empty());
+    }
+
+    #[test]
+    fn cleared_inflight_current_generation_persists_frontier_without_receipt_4911() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Claude;
+        let owner = ChannelId::new(4_911_601);
+        let delivery = ChannelId::new(4_911_602);
+        let tmux = "AgentDesk-claude-phase-a-r4-cleared-current";
+        let generation = set_phase_a_generation(tmux, 1_700_491_601);
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let coord = shared.tmux_relay_coord(owner);
+        coord.confirmed_end_offset.store(240, Ordering::Release);
+        coord
+            .confirmed_end_generation_mtime_ns
+            .store(generation, Ordering::Release);
+
+        // No inflight row exists: the caller-held incarnation is sufficient for
+        // the frontier, but cannot manufacture exact turn/nonce receipt proof.
+        shadow_mirror_delivered_frontier(
+            &shared,
+            &provider,
+            owner,
+            Some(tmux),
+            (120, 240),
+            true,
+            Some(4_911_603),
+            Some(delivery.get()),
+            Some("confirmed after inflight clear"),
+            Some(49_116),
+        );
+
+        let record = read_record(&provider, owner.get()).expect("receipt-less frontier record");
+        assert_eq!(
+            record.delivered_frontier,
+            Some(DeliveredCommit {
+                range: (120, 240),
+                generation_mtime_ns: generation,
+                attempts: 0,
+                panel_msg_id: Some(4_911_603),
+                panel_channel_id: Some(delivery.get()),
+            })
+        );
+        assert!(
+            record.confirmed_deliveries.is_empty(),
+            "caller-held session identity must not synthesize an exact receipt"
+        );
+    }
+
+    #[test]
+    fn cleared_inflight_stale_caller_generation_rejects_frontier_4911() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Codex;
+        let owner = ChannelId::new(4_911_611);
+        let tmux = "AgentDesk-codex-phase-a-r4-cleared-stale";
+        let stale_generation = set_phase_a_generation(tmux, 1_700_491_611);
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let coord = shared.tmux_relay_coord(owner);
+        coord.confirmed_end_offset.store(200, Ordering::Release);
+        coord
+            .confirmed_end_generation_mtime_ns
+            .store(stale_generation, Ordering::Release);
+        let current_generation = set_phase_a_generation(tmux, 1_700_491_612);
+        assert_ne!(stale_generation, current_generation);
+
+        shadow_mirror_delivered_frontier(
+            &shared,
+            &provider,
+            owner,
+            Some(tmux),
+            (0, 200),
+            true,
+            Some(4_911_612),
+            Some(owner.get()),
+            None,
+            Some(49_117),
+        );
+
+        assert!(
+            read_record(&provider, owner.get()).is_none(),
+            "post-lock generation validation must reject stale caller authority"
+        );
+    }
+
+    #[test]
+    fn legacy_frontier_reverse_order_split_channel_keeps_winner_whole_4911() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Claude;
+        let owner = 4_911_621;
+        let tmux = "AgentDesk-claude-phase-a-r4-legacy-reverse";
+        let generation = set_phase_a_generation(tmux, 1_700_491_621);
+        let winner = DeliveredCommit {
+            range: (100, 300),
+            generation_mtime_ns: generation,
+            attempts: 9,
+            panel_msg_id: Some(4_911_622),
+            panel_channel_id: Some(4_911_623),
+        };
+        write_delivered_frontier(&provider, owner, tmux, winner.clone())
+            .expect("write winning split-channel frontier");
+
+        for frontier in [
+            DeliveredCommit {
+                range: (0, 200),
+                generation_mtime_ns: generation,
+                attempts: 2,
+                panel_msg_id: Some(4_911_624),
+                panel_channel_id: Some(4_911_625),
+            },
+            DeliveredCommit {
+                range: (50, 300),
+                generation_mtime_ns: generation,
+                attempts: 3,
+                panel_msg_id: Some(4_911_626),
+                panel_channel_id: Some(4_911_627),
+            },
+        ] {
+            write_delivered_frontier(&provider, owner, tmux, frontier)
+                .expect("merge delayed legacy frontier");
+        }
+
+        assert_eq!(
+            read_record(&provider, owner)
+                .expect("legacy record")
+                .delivered_frontier,
+            Some(winner),
+            "lower/equal legacy writes must not union START or replace split-channel anchor"
+        );
+    }
+
+    #[test]
+    fn ordered_jsonl_reverse_order_preserves_split_channel_anchor_4911() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Codex;
+        let owner = ChannelId::new(4_911_631);
+        let tmux = "AgentDesk-codex-phase-a-r4-ordered-reverse";
+        let generation = set_phase_a_generation(tmux, 1_700_491_631);
+        let winner = DeliveredCommit {
+            range: (100, 300),
+            generation_mtime_ns: generation,
+            attempts: 7,
+            panel_msg_id: Some(4_911_632),
+            panel_channel_id: Some(4_911_633),
+        };
+        write_delivered_frontier(&provider, owner.get(), tmux, winner.clone())
+            .expect("seed split-channel winner");
+
+        for range in [(0, 200), (50, 300)] {
+            assert!(
+                commit_ordered_jsonl_range(&provider, owner, tmux, range, generation)
+                    .expect("merge delayed ordered range")
+            );
+        }
+
+        assert_eq!(
+            read_record(&provider, owner.get())
+                .expect("ordered record")
+                .delivered_frontier,
+            Some(winner),
+            "ordered commits must not union ranges or clear an existing anchor"
+        );
+    }
+
+    #[test]
+    fn legacy_frontier_blocked_writer_revalidates_after_rotation_4911() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Claude;
+        let owner = 4_911_641;
+        let tmux = "AgentDesk-claude-phase-a-r4-legacy-race";
+        let stale_generation = set_phase_a_generation(tmux, 1_700_491_641);
+        let path = record_path_or_err(&provider, owner).expect("record path");
+        let held_lock = lock_record_path(&path).expect("hold record lock");
+        let stale_path = path.clone();
+        let stale_tmux = tmux.to_string();
+        let (about_to_lock_tx, about_to_lock_rx) = std::sync::mpsc::channel();
+        let stale_writer = std::thread::spawn(move || {
+            write_delivered_frontier_guarded_at_with_before_lock(
+                &stale_path,
+                &stale_tmux,
+                DeliveredCommit {
+                    range: (0, 900),
+                    generation_mtime_ns: stale_generation,
+                    attempts: 5,
+                    panel_msg_id: Some(4_911_642),
+                    panel_channel_id: Some(4_911_643),
+                },
+                || about_to_lock_tx.send(()).expect("signal lock attempt"),
+            )
+        });
+        about_to_lock_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("legacy writer reached record lock");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!stale_writer.is_finished(), "legacy writer must be blocked");
+
+        let current_generation = set_phase_a_generation(tmux, 1_700_491_642);
+        let current_record = DeliveryRecord {
+            delivered_frontier: Some(DeliveredCommit {
+                range: (100, 200),
+                generation_mtime_ns: current_generation,
+                attempts: 1,
+                panel_msg_id: Some(4_911_644),
+                panel_channel_id: Some(4_911_645),
+            }),
+            ..DeliveryRecord::default()
+        };
+        write_record_at(&path, &current_record).expect("install rotated record");
+        drop(held_lock);
+
+        assert!(stale_writer.join().expect("join legacy writer").is_err());
+        assert_eq!(read_record_at(&path), Some(current_record));
+    }
+
+    #[test]
+    fn ordered_jsonl_blocked_writer_revalidates_after_rotation_4911() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Codex;
+        let owner = 4_911_651;
+        let tmux = "AgentDesk-codex-phase-a-r4-ordered-race";
+        let stale_generation = set_phase_a_generation(tmux, 1_700_491_651);
+        let path = record_path_or_err(&provider, owner).expect("record path");
+        let held_lock = lock_record_path(&path).expect("hold record lock");
+        let stale_path = path.clone();
+        let stale_tmux = tmux.to_string();
+        let (about_to_lock_tx, about_to_lock_rx) = std::sync::mpsc::channel();
+        let stale_writer = std::thread::spawn(move || {
+            commit_ordered_jsonl_range_at_with_before_lock(
+                &stale_path,
+                &stale_tmux,
+                (0, 900),
+                stale_generation,
+                || about_to_lock_tx.send(()).expect("signal lock attempt"),
+            )
+        });
+        about_to_lock_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("ordered writer reached record lock");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !stale_writer.is_finished(),
+            "ordered writer must be blocked"
+        );
+
+        let current_generation = set_phase_a_generation(tmux, 1_700_491_652);
+        let current_record = DeliveryRecord {
+            delivered_frontier: Some(DeliveredCommit {
+                range: (100, 200),
+                generation_mtime_ns: current_generation,
+                attempts: 1,
+                panel_msg_id: Some(4_911_652),
+                panel_channel_id: Some(4_911_653),
+            }),
+            ..DeliveryRecord::default()
+        };
+        write_record_at(&path, &current_record).expect("install rotated record");
+        drop(held_lock);
+
+        assert!(stale_writer.join().expect("join ordered writer").is_err());
+        assert_eq!(read_record_at(&path), Some(current_record));
     }
 
     #[test]
@@ -3589,6 +3936,7 @@ mod tests {
                 &stale_tmux,
                 stale_frontier,
                 None,
+                EqualRangeAnchorPolicy::PreserveExisting,
                 || about_to_lock_tx.send(()).expect("signal lock attempt"),
             )
         });
@@ -3825,6 +4173,7 @@ mod tests {
             &ProviderKind::Claude,
             ChannelId::new(100_200_300), // owner (frontier key)
             ChannelId::new(900_800_700), // delivery (anchor home)
+            None,
             (0, 4096),
             Some(912_345_678),
             "",
@@ -3886,6 +4235,7 @@ mod tests {
             &shared,
             &provider,
             watcher_owner_x, // funnel `channel` = offset-authority X
+            x_state.tmux_session_name.as_deref(),
             (0, 128),
             true, // is_delivered
             Some(77_001),

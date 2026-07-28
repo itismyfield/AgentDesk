@@ -267,10 +267,7 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
         }
     };
 
-    // #3089 B2a: shadow-mirror durable delivered frontier — flag-gated,
-    // observe-only, Delivered-only (I2). #4081 still records confirmed body
-    // fingerprints when the frontier mirror is OFF. Extends B1's sink coverage to
-    // the watcher (A4) before B2b's authority flip.
+    // #4081 fingerprints remain retry evidence alongside durable authority.
     // #3610 PR-1: anchor = `msg_id` — the controller active-slot `current_msg_id`
     // (the assistant response message terminal-replace edits in place), NOT
     // `status_message_id`. Records the true terminal anchor for PR-2.
@@ -280,6 +277,7 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
         shared,
         provider,
         channel_id,
+        Some(tmux_session_name),
         (start, end),
         dr::outcome_is_shadow_delivered(&outcome),
         Some(msg_id.get()),
@@ -618,6 +616,7 @@ pub(in crate::services::discord) fn record_watcher_long_chunk_terminal_delivery(
         provider,
         channel_id,
         channel_id,
+        None,
         range,
         last_chunk_anchor_msg_id,
         delivered_body,

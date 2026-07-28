@@ -195,6 +195,7 @@ fn record_success(
             delivery_record::write_delivered_frontier(
                 &record.provider,
                 record.record_channel_id.get(),
+                &record.tmux_session_name,
                 commit,
             )
         }

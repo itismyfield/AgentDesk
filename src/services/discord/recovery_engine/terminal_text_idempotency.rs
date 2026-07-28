@@ -295,11 +295,24 @@ impl RecoveryDeliveryContext {
             panel_msg_id: Some(anchor.get()),
             panel_channel_id: Some(self.channel_id.get()),
         };
-        if let Err(error) = delivery_record::write_delivered_frontier(
-            &self.provider,
-            self.record_channel_id.get(),
-            commit,
-        ) {
+        let write_result = if self.reuse_recorded_anchor {
+            delivery_record::write_delivered_frontier(
+                &self.provider,
+                self.record_channel_id.get(),
+                tmux_session_name,
+                commit,
+            )
+        } else {
+            // This context is created only after Discord proved the exact durable
+            // anchor gone. It is the one permitted equal-range re-anchor path.
+            delivery_record::write_proven_gone_equal_range_frontier(
+                &self.provider,
+                self.record_channel_id.get(),
+                tmux_session_name,
+                commit,
+            )
+        };
+        if let Err(error) = write_result {
             tracing::warn!(
                 provider = %self.provider.as_str(),
                 channel_id = self.channel_id.get(),
@@ -791,6 +804,7 @@ mod tests {
         delivery_record::write_delivered_frontier(
             &provider,
             matched_record_channel.get(),
+            tmux,
             delivery_record::DeliveredCommit {
                 range: (128, 256),
                 generation_mtime_ns,
@@ -854,6 +868,7 @@ mod tests {
         delivery_record::write_delivered_frontier(
             &provider,
             state.delivery_record_owner_channel_id(),
+            tmux,
             delivery_record::DeliveredCommit {
                 range: (128, 256),
                 generation_mtime_ns,

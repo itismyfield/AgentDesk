@@ -673,6 +673,7 @@ mod restored_seed_discard_tests {
         delivery_record::write_delivered_frontier(
             &provider,
             channel.get(),
+            tmux_session_name,
             DeliveredCommit {
                 range: source.range,
                 generation_mtime_ns: source.generation_mtime_ns,

@@ -998,6 +998,7 @@ mod tests {
         delivery_record::write_delivered_frontier(
             provider,
             channel_id,
+            tmux_session_name,
             delivery_record::DeliveredCommit {
                 range,
                 generation_mtime_ns,
