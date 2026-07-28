@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { linkSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
-import { aggregateFile, aggregateText, parseArgs, run } from "../timeout-shadow-gate.mjs";
+import { aggregateFile, aggregateFiles, aggregateText, parseArgs, run } from "../timeout-shadow-gate.mjs";
 
 function record(section, overrides = {}) {
   return JSON.stringify({
@@ -55,6 +57,24 @@ test("time windows exclude both out-of-range and timestamp-less records", () => 
   });
 });
 
+test("time windows preserve microsecond boundaries and support zoned space timestamps", () => {
+  const precise = run([
+    "--stdin", "--since", "2026-07-28T00:00:00.000002Z", "--min-a-samples", "0", "--min-j-samples", "0"
+  ], [
+    `2026-07-28T00:00:00.000001Z INFO ${shadow("_section_A")}`,
+    `2026-07-28T00:00:00.000002Z INFO ${shadow("_section_A")}`
+  ].join("\n"));
+  assert.equal(JSON.parse(precise.output)._section_A.total, 1);
+
+  const zoned = run([
+    "--stdin", "--since", "2026-07-28T00:00:00Z", "--min-a-samples", "0", "--min-j-samples", "0"
+  ], [
+    `2026-07-28 00:00:00Z INFO ${shadow("_section_A")}`,
+    `2026-07-28 09:00:00+09:00 INFO ${shadow("_section_A")}`
+  ].join("\n"));
+  assert.equal(JSON.parse(zoned.output)._section_A.total, 2);
+});
+
 test("counts malformed shadow records but ignores unrelated log noise", () => {
   const report = aggregateText([
     "INFO ordinary log with { bad json",
@@ -100,7 +120,7 @@ test("rejects decimal counts and invalid ISO-8601 calendar timestamps", () => {
   assert.throws(() => parseArgs(["--since", "2026-07-28 00:00:00Z"]), /ISO-8601 calendar/);
 });
 
-test("streams a stable rotated file and retries a changed snapshot without double counting", () => {
+test("retries a changed opened-file snapshot without double counting", () => {
   const directory = mkdtempSync(join(tmpdir(), "timeout-shadow-gate-"));
   try {
     const log = join(directory, "dcserver.stdout.log.1");
@@ -109,14 +129,44 @@ test("streams a stable rotated file and retries a changed snapshot without doubl
     let stats = 0;
     const io = {
       ...fs,
-      statSync(path) {
-        const stat = fs.statSync(path);
+      fstatSync(descriptor) {
+        const stat = fs.fstatSync(descriptor);
         return { ...stat, mtimeMs: signatureMtimes[stats++] };
       }
     };
     const report = aggregateFile(log, {}, io);
     assert.equal(report._section_A.total, 1);
     assert.equal(stats, 4);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("opens all rotated inputs before reading so a mid-scan rotation cannot drop or duplicate records", () => {
+  const directory = mkdtempSync(join(tmpdir(), "timeout-shadow-gate-"));
+  try {
+    const current = join(directory, "dcserver.stdout.log");
+    const rotated = join(directory, "dcserver.stdout.log.1");
+    const archived = join(directory, "dcserver.stdout.log.2");
+    writeFileSync(current, `${shadow("_section_A")}\n`);
+    writeFileSync(rotated, `${shadow("_section_J", { reducer_decision: "incomparable", agree: false, incomparable: true })}\n`);
+    let rotatedDuringRead = false;
+    const io = {
+      ...fs,
+      readSync(...args) {
+        const bytes = fs.readSync(...args);
+        if (!rotatedDuringRead) {
+          rotatedDuringRead = true;
+          renameSync(rotated, archived);
+          renameSync(current, rotated);
+          writeFileSync(current, `${shadow("_section_A", { card_id: "new-current" })}\n`);
+        }
+        return bytes;
+      }
+    };
+    const report = aggregateFiles([current, rotated], {}, io);
+    assert.deepEqual(report._section_A, { total: 1, comparable: 1, agreement: 1, divergence: 0, error: 0 });
+    assert.deepEqual(report._section_J, { total: 1, incomparable: 1, ratio: 1, error: 0 });
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -131,6 +181,43 @@ test("rejects duplicate canonical log inputs", () => {
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("rejects duplicate opened inode inputs through hard links", () => {
+  const directory = mkdtempSync(join(tmpdir(), "timeout-shadow-gate-"));
+  try {
+    const log = join(directory, "dcserver.stdout.log");
+    const alias = join(directory, "same-inode.log");
+    writeFileSync(log, `${shadow("_section_A")}\n`);
+    linkSync(log, alias);
+    assert.throws(() => run([log, alias], ""), /duplicate log input/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("main guard executes invalid CLI through a symlink alias", () => {
+  const directory = mkdtempSync(join(tmpdir(), "timeout-shadow-gate-"));
+  try {
+    const script = fileURLToPath(new URL("../timeout-shadow-gate.mjs", import.meta.url));
+    const alias = join(directory, "timeout-shadow-gate-alias.mjs");
+    symlinkSync(script, alias);
+    const result = spawnSync(process.execPath, [alias, "--not-an-option"], { encoding: "utf8" });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /unknown option/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("streamed stdin rejects an unterminated line over the documented record cap", () => {
+  const script = fileURLToPath(new URL("../timeout-shadow-gate.mjs", import.meta.url));
+  const result = spawnSync(process.execPath, [script, "--min-a-samples", "0", "--min-j-samples", "0"], {
+    encoding: "utf8",
+    input: "x".repeat(1024 * 1024 + 1)
+  });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /log line exceeds 1048576 bytes/);
 });
 
 test("enforces pass and fail threshold combinations", () => {

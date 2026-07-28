@@ -10,12 +10,16 @@
 import fs from "node:fs";
 import process from "node:process";
 import { StringDecoder } from "node:string_decoder";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SHADOW_PREFIX = "[timeout_shadow] ";
 const SHADOW_TARGET = "agentdesk::timeout_shadow";
 const SECTIONS = new Set(["_section_A", "_section_J"]);
 const FILE_READ_CHUNK_BYTES = 64 * 1024;
 const STABLE_READ_ATTEMPTS = 2;
+// A shadow record is one log line.  This cap prevents a malformed stdin/log
+// stream from growing an unterminated line without bound.
+export const MAX_RECORD_LINE_BYTES = 1024 * 1024;
 
 function emptySection() {
   return { total: 0, comparable: 0, agreement: 0, divergence: 0, error: 0 };
@@ -56,9 +60,17 @@ function parseTimestamp(value, optionName) {
   if (month < 1 || month > 12 || day < 1 || day > daysInMonth || hour > 23 || minute > 59 || second > 59 || !zoneValid) {
     throw new Error(`${optionName} requires a valid ISO-8601 calendar timestamp`);
   }
-  const parsed = Date.parse(value);
-  if (Number.isNaN(parsed)) throw new Error(`${optionName} requires a valid ISO-8601 calendar timestamp`);
-  return parsed;
+  const fraction = (match[7] || "").padEnd(9, "0");
+  const monthForMarch = month + (month > 2 ? -3 : 9);
+  const adjustedYear = year - (month <= 2 ? 1 : 0);
+  const era = Math.floor(adjustedYear / 400);
+  const yearOfEra = adjustedYear - era * 400;
+  const dayOfYear = Math.floor((153 * monthForMarch + 2) / 5) + day - 1;
+  const dayOfEra = yearOfEra * 365 + Math.floor(yearOfEra / 4) - Math.floor(yearOfEra / 100) + dayOfYear;
+  const daysSinceEpoch = era * 146097 + dayOfEra - 719468;
+  const offsetSeconds = zone === "Z" ? 0 :
+    (Number(zone.slice(1, 3)) * 60 + Number(zone.slice(4, 6))) * 60 * (zone.startsWith("+") ? 1 : -1);
+  return (BigInt(daysSinceEpoch) * 86400n + BigInt(hour * 3600 + minute * 60 + second - offsetSeconds)) * 1000000000n + BigInt(fraction || "0");
 }
 
 export function parseArgs(argv) {
@@ -122,9 +134,10 @@ function timestampFromPrefix(prefix) {
   const matches = prefix.match(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g);
   if (!matches || matches.length === 0) return null;
   const raw = matches[matches.length - 1];
-  const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/.test(raw)
-    ? raw.replace(/([+-]\d{2})(\d{2})$/, "$1:$2")
-    : raw.replace(" ", "T") + "Z";
+  const normalizedBase = raw.replace(" ", "T");
+  const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/.test(normalizedBase)
+    ? normalizedBase.replace(/([+-]\d{2})(\d{2})$/, "$1:$2")
+    : normalizedBase + "Z";
   try {
     return parseTimestamp(normalized, "log timestamp");
   } catch {
@@ -228,25 +241,67 @@ function statSignature(stat) {
   return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
 }
 
-function forEachFileLine(file, onLine, io) {
-  const descriptor = io.openSync(file, "r");
+function createLineScanner(onLine) {
   let remainder = "";
-  const buffer = Buffer.allocUnsafe(FILE_READ_CHUNK_BYTES);
+  let remainderBytes = 0;
   const decoder = new StringDecoder("utf8");
-  try {
-    for (;;) {
-      const bytesRead = io.readSync(descriptor, buffer, 0, buffer.length, null);
-      if (bytesRead === 0) break;
-      const combined = remainder + decoder.write(buffer.subarray(0, bytesRead));
-      const lines = combined.split("\n");
-      remainder = lines.pop();
-      for (const line of lines) onLine(line.endsWith("\r") ? line.slice(0, -1) : line);
+
+  function appendPart(part, complete) {
+    const partBytes = Buffer.byteLength(part);
+    if (remainderBytes + partBytes > MAX_RECORD_LINE_BYTES) {
+      throw new Error(`log line exceeds ${MAX_RECORD_LINE_BYTES} bytes`);
     }
-    remainder += decoder.end();
-    if (remainder.length > 0) onLine(remainder.endsWith("\r") ? remainder.slice(0, -1) : remainder);
-  } finally {
-    io.closeSync(descriptor);
+    remainder += part;
+    remainderBytes += partBytes;
+    if (complete) {
+      onLine(remainder.endsWith("\r") ? remainder.slice(0, -1) : remainder);
+      remainder = "";
+      remainderBytes = 0;
+    }
   }
+
+  function consume(text) {
+    let cursor = 0;
+    for (;;) {
+      const newline = text.indexOf("\n", cursor);
+      if (newline === -1) {
+        appendPart(text.slice(cursor), false);
+        return;
+      }
+      appendPart(text.slice(cursor, newline), true);
+      cursor = newline + 1;
+    }
+  }
+
+  return {
+    write(buffer) { consume(decoder.write(buffer)); },
+    end() {
+      consume(decoder.end());
+      if (remainderBytes > 0) appendPart("", true);
+    }
+  };
+}
+
+function forEachDescriptorLine(descriptor, byteLimit, onLine, io) {
+  const buffer = Buffer.allocUnsafe(FILE_READ_CHUNK_BYTES);
+  const scanner = createLineScanner(onLine);
+  let remaining = byteLimit;
+  let position = 0;
+  for (;;) {
+    const length = remaining === null ? buffer.length : Math.min(buffer.length, remaining);
+    if (length === 0) break;
+    const bytesRead = io.readSync(descriptor, buffer, 0, length, remaining === null ? null : position);
+    if (bytesRead === 0) {
+      if (remaining !== null) throw new Error("log shrank while reading snapshot");
+      break;
+    }
+    scanner.write(buffer.subarray(0, bytesRead));
+    if (remaining !== null) {
+      remaining -= bytesRead;
+      position += bytesRead;
+    }
+  }
+  scanner.end();
 }
 
 function mergeReport(target, source) {
@@ -261,37 +316,66 @@ function mergeReport(target, source) {
   target._unclassified.malformed += source._unclassified.malformed;
 }
 
-/**
- * Read a regular/rotated log with bounded memory.  A changed stat signature
- * means the file may have been renamed or appended during the scan; retry the
- * whole file once and otherwise reject it instead of mixing two snapshots.
- */
-export function aggregateFile(file, options = {}, io = fs) {
-  const effectiveOptions = { since: null, until: null, ...options };
-  for (let attempt = 0; attempt < STABLE_READ_ATTEMPTS; attempt += 1) {
-    const before = io.statSync(file);
-    const report = emptyReport();
-    forEachFileLine(file, (line) => processLine(report, line, effectiveOptions), io);
-    const after = io.statSync(file);
-    if (statSignature(before) === statSignature(after)) return finalizeReport(report);
+function openFileSnapshots(files, io) {
+  const snapshots = [];
+  const canonicalPaths = new Set();
+  const identities = new Set();
+  try {
+    for (const file of files) {
+      const descriptor = io.openSync(file, "r");
+      const stat = io.fstatSync(descriptor);
+      const canonical = io.realpathSync(file);
+      const identity = `${stat.dev}:${stat.ino}`;
+      if (canonicalPaths.has(canonical) || identities.has(identity)) {
+        io.closeSync(descriptor);
+        throw new Error(`duplicate log input: ${file}`);
+      }
+      canonicalPaths.add(canonical);
+      identities.add(identity);
+      snapshots.push({ descriptor, file, stat, signature: statSignature(stat) });
+    }
+    return snapshots;
+  } catch (error) {
+    for (const snapshot of snapshots) io.closeSync(snapshot.descriptor);
+    throw error;
   }
-  throw new Error(`log changed while reading: ${file}`);
 }
 
-function uniqueFiles(files, io = fs) {
-  const seenCanonical = new Set();
-  const seenInodes = new Set();
-  return files.map((file) => {
-    const canonical = io.realpathSync(file);
-    const stat = io.statSync(canonical);
-    const inode = `${stat.dev}:${stat.ino}`;
-    if (seenCanonical.has(canonical) || seenInodes.has(inode)) {
-      throw new Error(`duplicate log input: ${file}`);
+function closeSnapshots(snapshots, io) {
+  for (const snapshot of snapshots) io.closeSync(snapshot.descriptor);
+}
+
+/**
+ * Open every input before reading any input.  Each descriptor is then read at
+ * its captured size, so a rotation between reads cannot mix old and new path
+ * contents.  Mutated opened files are retried once and then fail closed.
+ */
+export function aggregateFiles(files, options = {}, io = fs) {
+  const effectiveOptions = { since: null, until: null, ...options };
+  for (let attempt = 0; attempt < STABLE_READ_ATTEMPTS; attempt += 1) {
+    const snapshots = openFileSnapshots(files, io);
+    const report = emptyReport();
+    try {
+      for (const snapshot of snapshots) {
+        forEachDescriptorLine(snapshot.descriptor, snapshot.stat.size, (line) => processLine(report, line, effectiveOptions), io);
+      }
+      const stable = snapshots.every((snapshot) => statSignature(io.fstatSync(snapshot.descriptor)) === snapshot.signature);
+      if (stable) return finalizeReport(report);
+    } finally {
+      closeSnapshots(snapshots, io);
     }
-    seenCanonical.add(canonical);
-    seenInodes.add(inode);
-    return canonical;
-  });
+  }
+  throw new Error("log changed while reading snapshot");
+}
+
+export function aggregateFile(file, options = {}, io = fs) {
+  return aggregateFiles([file], options, io);
+}
+
+function aggregateDescriptor(descriptor, options, io = fs) {
+  const report = emptyReport();
+  forEachDescriptorLine(descriptor, null, (line) => processLine(report, line, options), io);
+  return finalizeReport(report);
 }
 
 export function thresholdFailures(report, options) {
@@ -322,14 +406,14 @@ export function helpText() {
     `  --min-a-samples <count>    Minimum comparable _section_A records (default: 1)\n` +
     `  --min-j-samples <count>    Minimum _section_J records (default: 1)\n` +
     `  --max-divergence <count>   Maximum comparable _section_A disagreements\n` +
-    `  --max-errors <count>       Maximum malformed/reducer-error records\n`;
+    `  --max-errors <count>       Maximum malformed/reducer-error records\n\n` +
+    `Input records are streamed; each log line is limited to ${MAX_RECORD_LINE_BYTES} bytes.\n`;
 }
 
 export function run(argv, stdinText) {
   const options = parseArgs(argv);
   if (options.help) return { help: true, output: helpText(), exitCode: 0 };
-  const report = emptyReport();
-  for (const file of uniqueFiles(options.files)) mergeReport(report, aggregateFile(file, options));
+  const report = aggregateFiles(options.files, options);
   if (options.readStdin) {
     const stdinReport = aggregateText([stdinText], options);
     mergeReport(report, stdinReport);
@@ -339,15 +423,29 @@ export function run(argv, stdinText) {
   return { help: false, output: JSON.stringify(report), failures, exitCode: failures.length === 0 ? 0 : 1 };
 }
 
-if (import.meta.url === new URL(process.argv[1], "file:").href) {
+export function runFromStdin(argv, io = fs) {
+  const options = parseArgs(argv);
+  if (options.help) return { help: true, output: helpText(), exitCode: 0 };
+  const report = aggregateFiles(options.files, options, io);
+  if (options.readStdin) mergeReport(report, aggregateDescriptor(0, options, io));
+  finalizeReport(report);
+  const failures = thresholdFailures(report, options);
+  return { help: false, output: JSON.stringify(report), failures, exitCode: failures.length === 0 ? 0 : 1 };
+}
+
+export function isMainModule(entry = process.argv[1], io = fs) {
+  if (!entry) return false;
   try {
-    // Do not consume a terminal's stdin merely because file paths were
-    // supplied.  Besides being surprising, that would make the gate hang in
-    // an operator shell.  stdin is consumed only for the explicit/default
-    // stdin modes parsed above.
-    const cliOptions = parseArgs(process.argv.slice(2));
-    const stdinText = !cliOptions.help && cliOptions.readStdin ? fs.readFileSync(0, "utf8") : "";
-    const result = run(process.argv.slice(2), stdinText);
+    return pathToFileURL(io.realpathSync(entry)).href ===
+      pathToFileURL(io.realpathSync(fileURLToPath(import.meta.url))).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
+  try {
+    const result = runFromStdin(process.argv.slice(2));
     if (result.help) process.stdout.write(result.output);
     else process.stdout.write(`${result.output}\n`);
     if (result.failures && result.failures.length > 0) process.stderr.write(`${result.failures.join("; ")}\n`);
