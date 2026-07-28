@@ -171,6 +171,11 @@ pub(super) struct RestoredWatcherTurn {
     /// restart-restored seed, this is the current turn and must not be discarded by
     /// idle direct-prompt stale-seed cleanup.
     same_turn_rewind: bool,
+    /// Immutable source identity captured with the restored clone at watcher
+    /// handoff. The clone can predate the bridge's terminal commit, so this is
+    /// only a lookup key: seed consumption must re-read the durable receipt.
+    /// Missing legacy components preserve the seed.
+    delivery_source: Option<super::outbound::delivery_record::ExactJsonlSourceIdentity>,
 }
 
 #[derive(Debug)]
@@ -237,6 +242,25 @@ pub(super) fn restored_watcher_turn_from_inflight(
     let current_msg_id = super::inflight::opt_message_id(state.current_msg_id)?;
     let response_sent_offset =
         normalize_response_sent_offset(&state.full_response, state.response_sent_offset);
+    let delivery_source = state
+        .turn_start_offset
+        .zip(state.turn_nonce.as_deref())
+        .filter(|(start, nonce)| state.last_offset > *start && !nonce.is_empty())
+        .and_then(|(start, nonce)| {
+            let generation_mtime_ns =
+                super::outbound::delivery_record::current_generation_mtime_ns(tmux_session_name);
+            (generation_mtime_ns != 0).then(|| {
+                super::outbound::delivery_record::ExactJsonlSourceIdentity {
+                    provider: provider.as_str().to_string(),
+                    tmux_session_name: tmux_session_name.to_string(),
+                    turn_nonce: nonce.to_string(),
+                    range: (start, state.last_offset),
+                    generation_mtime_ns,
+                    offset_authority_channel_id: state.delivery_record_owner_channel_id(),
+                    delivery_channel_id: state.channel_id,
+                }
+            })
+        });
     Some(RestoredWatcherTurn {
         current_msg_id,
         status_message_id: state
@@ -256,6 +280,7 @@ pub(super) fn restored_watcher_turn_from_inflight(
             .filter_map(super::inflight::opt_message_id)
             .collect(),
         same_turn_rewind: false,
+        delivery_source,
     })
 }
 
@@ -308,6 +333,24 @@ fn restored_seed_reassigned_to_different_turn(
     if restored.same_turn_rewind {
         return false;
     }
+    // The restored clone may have been taken before the bridge committed and
+    // cleared its inflight row. Re-read the receipt now, at seed consumption;
+    // only an exact session+generation+nonce+range+owner+destination proof can
+    // turn that stale clone into a discard. Body fingerprints are intentionally
+    // absent from this authority decision.
+    if restored.delivery_source.as_ref().is_some_and(|source| {
+        let Some(provider) = ProviderKind::from_str(&source.provider) else {
+            return false;
+        };
+        super::outbound::delivery_record::confirmed_delivery_receipt_exists(
+            &provider,
+            ChannelId::new(source.delivery_channel_id),
+            restored.current_msg_id.get(),
+            source,
+        )
+    }) {
+        return true;
+    }
     if let (Some(seed_anchor), Some(current_anchor)) = (
         restored.injected_prompt_message_id,
         prompt_anchor_message_id,
@@ -326,10 +369,84 @@ fn restored_seed_reassigned_to_different_turn(
 mod restored_seed_discard_tests {
     use super::{
         RestoredWatcherTurn, restored_seed_reassigned_to_different_turn,
-        should_discard_restored_seed_for_idle_direct_prompt, watcher_stream_seed,
+        restored_watcher_turn_from_inflight, should_discard_restored_seed_for_idle_direct_prompt,
+        watcher_stream_seed,
     };
-    use crate::services::discord::inflight::InflightTurnIdentity;
-    use poise::serenity_prelude::MessageId;
+    use crate::services::discord::inflight::{InflightTurnIdentity, InflightTurnState};
+    use crate::services::discord::outbound::delivery_record::{
+        self, ConfirmedDeliveryReceipt, DeliveredCommit,
+    };
+    use crate::services::provider::ProviderKind;
+    use poise::serenity_prelude::{ChannelId, MessageId};
+
+    fn touch_generation_marker(tmux_session_name: &str) -> i64 {
+        let path = crate::services::tmux_common::session_temp_path(tmux_session_name, "generation");
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            std::fs::create_dir_all(parent).expect("create generation parent");
+        }
+        std::fs::write(&path, "phase-a-generation").expect("write generation marker");
+        delivery_record::current_generation_mtime_ns(tmux_session_name)
+    }
+
+    fn restored_seed_fixture(
+        provider: ProviderKind,
+        delivery_channel: ChannelId,
+        owner_channel: ChannelId,
+        tmux_session_name: &str,
+    ) -> RestoredWatcherTurn {
+        let mut state = InflightTurnState::new(
+            provider,
+            delivery_channel.get(),
+            Some("phase-a".into()),
+            7,
+            49_110,
+            49_111,
+            "turn N".into(),
+            Some("session-4911".into()),
+            Some(tmux_session_name.into()),
+            Some("/tmp/phase-a-4911.jsonl".into()),
+            None,
+            100,
+        );
+        state.last_offset = 200;
+        state.full_response = "N delivered body".into();
+        state.response_sent_offset = 0;
+        state.streaming_rollover_frozen_msg_ids = vec![49_112];
+        state.turn_nonce = Some("turn-nonce-N".into());
+        state.set_watcher_owner_channel_id(owner_channel.get());
+        crate::services::discord::inflight::save_inflight_state(&state)
+            .expect("persist receipt source row");
+        let mut restored = restored_watcher_turn_from_inflight(&state, tmux_session_name, false)
+            .expect("restorable turn");
+        restored.last_edit_text = "stale placeholder body".into();
+        restored
+    }
+
+    fn write_receipt(
+        provider: &ProviderKind,
+        source: delivery_record::ExactJsonlSourceIdentity,
+        message_id: u64,
+    ) {
+        let owner = source.offset_authority_channel_id;
+        let delivery = source.delivery_channel_id;
+        delivery_record::write_confirmed_delivery(
+            provider,
+            owner,
+            DeliveredCommit {
+                range: source.range,
+                generation_mtime_ns: source.generation_mtime_ns,
+                attempts: 1,
+                panel_msg_id: Some(message_id),
+                panel_channel_id: Some(delivery),
+            },
+            ConfirmedDeliveryReceipt {
+                source,
+                delivery_channel_id: delivery,
+                message_id,
+            },
+        )
+        .expect("write exact confirmed receipt");
+    }
 
     #[test]
     fn idle_direct_prompt_preserves_restored_seed_with_undelivered_body() {
@@ -393,6 +510,7 @@ mod restored_seed_discard_tests {
             turn_identity: Some(seed_identity),
             streaming_rollover_frozen_msg_ids: Vec::new(),
             same_turn_rewind: false,
+            delivery_source: None,
         };
 
         let seed_reassigned_to_different_turn = restored_seed_reassigned_to_different_turn(
@@ -412,6 +530,145 @@ mod restored_seed_discard_tests {
         let stream_seed = watcher_stream_seed(None);
         assert!(stream_seed.full_response.is_empty());
         assert_eq!(stream_seed.response_sent_offset, 0);
+    }
+
+    #[test]
+    fn stale_clone_then_bridge_receipt_then_inflight_clear_discards_all_seed_state_4911() {
+        let root = tempfile::tempdir().expect("isolated root");
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        let provider = ProviderKind::Claude;
+        let delivery_channel = ChannelId::new(49_110);
+        let owner_channel = ChannelId::new(49_161);
+        let tmux_session_name = "AgentDesk-claude-phase-a-4911";
+        assert_ne!(touch_generation_marker(tmux_session_name), 0);
+
+        // Clone happens first with N present and response_sent_offset still 0.
+        let restored = restored_seed_fixture(
+            provider.clone(),
+            delivery_channel,
+            owner_channel,
+            tmux_session_name,
+        );
+        assert_eq!(restored.response_sent_offset, 0);
+        assert_eq!(restored.full_response, "N delivered body");
+        let source = restored.delivery_source.clone().expect("captured source");
+
+        // The bridge then commits the exact split-channel receipt and clears the
+        // inflight before the watcher consumes its stale clone.
+        write_receipt(&provider, source, restored.current_msg_id.get());
+        crate::services::discord::inflight::delete_inflight_state_file(
+            &provider,
+            delivery_channel.get(),
+        );
+        assert!(restored_seed_reassigned_to_different_turn(
+            Some(&restored),
+            None,
+            None,
+        ));
+
+        let mut next_payload = watcher_stream_seed(None);
+        assert!(next_payload.full_response.is_empty());
+        assert_eq!(next_payload.response_sent_offset, 0);
+        assert!(next_payload.placeholder_msg_id.is_none());
+        assert!(next_payload.status_panel_msg_id.is_none());
+        assert!(next_payload.last_edit_text.is_empty());
+        assert!(next_payload.streaming_rollover_frozen_msg_ids.is_empty());
+        next_payload.full_response.push_str("N+1 after edit 404");
+        assert_eq!(next_payload.full_response, "N+1 after edit 404");
+        assert!(!next_payload.full_response.contains("N delivered body"));
+    }
+
+    #[test]
+    fn same_body_with_different_nonce_or_range_preserves_restored_seed_4911() {
+        let root = tempfile::tempdir().expect("isolated root");
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(49_120);
+        let tmux_session_name = "AgentDesk-claude-phase-a-nonce-range";
+        touch_generation_marker(tmux_session_name);
+        let restored = restored_seed_fixture(provider.clone(), channel, channel, tmux_session_name);
+        let source = restored.delivery_source.clone().expect("captured source");
+
+        write_receipt(&provider, source.clone(), restored.current_msg_id.get() + 1);
+        assert!(!restored_seed_reassigned_to_different_turn(
+            Some(&restored),
+            None,
+            None,
+        ));
+
+        let mut wrong_nonce = source.clone();
+        wrong_nonce.turn_nonce = "different-turn-same-body".into();
+        write_receipt(&provider, wrong_nonce, restored.current_msg_id.get());
+        assert!(!restored_seed_reassigned_to_different_turn(
+            Some(&restored),
+            None,
+            None,
+        ));
+
+        let mut wrong_range = source;
+        wrong_range.range = (100, 201);
+        write_receipt(&provider, wrong_range, restored.current_msg_id.get());
+        assert!(!restored_seed_reassigned_to_different_turn(
+            Some(&restored),
+            None,
+            None,
+        ));
+        assert_eq!(
+            watcher_stream_seed(Some(restored)).full_response,
+            "N delivered body"
+        );
+    }
+
+    #[test]
+    fn stale_generation_and_legacy_frontier_preserve_restored_seed_4911() {
+        let root = tempfile::tempdir().expect("isolated root");
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        let provider = ProviderKind::Codex;
+        let channel = ChannelId::new(49_130);
+        let tmux_session_name = "AgentDesk-codex-phase-a-generation";
+        touch_generation_marker(tmux_session_name);
+        let mut restored =
+            restored_seed_fixture(provider.clone(), channel, channel, tmux_session_name);
+        let source = restored.delivery_source.clone().expect("captured source");
+
+        // A legacy frontier with no exact receipt is never seed-removal proof.
+        delivery_record::write_delivered_frontier(
+            &provider,
+            channel.get(),
+            DeliveredCommit {
+                range: source.range,
+                generation_mtime_ns: source.generation_mtime_ns,
+                attempts: 1,
+                panel_msg_id: Some(restored.current_msg_id.get()),
+                panel_channel_id: Some(channel.get()),
+            },
+        )
+        .expect("write legacy frontier");
+        assert!(!restored_seed_reassigned_to_different_turn(
+            Some(&restored),
+            None,
+            None,
+        ));
+
+        // Even a receipt-shaped record from another transcript incarnation is
+        // rejected against the current generation marker.
+        let mut stale_source = source;
+        stale_source.generation_mtime_ns = stale_source.generation_mtime_ns.saturating_add(1);
+        write_receipt(
+            &provider,
+            stale_source.clone(),
+            restored.current_msg_id.get(),
+        );
+        restored.delivery_source = Some(stale_source);
+        assert!(!restored_seed_reassigned_to_different_turn(
+            Some(&restored),
+            None,
+            None,
+        ));
+        assert_eq!(
+            watcher_stream_seed(Some(restored)).full_response,
+            "N delivered body"
+        );
     }
 }
 

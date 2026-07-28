@@ -78,6 +78,7 @@ const FRESH_SEND_RECORDS_DIR: &str = "discord_fresh_send_records";
 const DELIVERY_OWNER_CONTEXT_DIR: &str = "discord_delivery_owner_context";
 const RECENT_DELIVERED_CONTENT_LIMIT: usize = 16;
 const RECENT_DELIVERED_CONTENT_WINDOW_MS: u64 = 15 * 60 * 1000;
+const CONFIRMED_DELIVERY_RECEIPT_LIMIT: usize = 32;
 
 /// Durable per-turn delivery record (design §4.3). Two **independent** durable
 /// fields, deliberately not folded into one state machine: the lease is the
@@ -97,6 +98,78 @@ pub(in crate::services::discord) struct DeliveryRecord {
     /// Bounded byte-content fingerprints for degenerate lease fallback dedup.
     #[serde(default)]
     pub recent_delivered_contents: Vec<DeliveredContentFingerprint>,
+    /// Exact confirmed-delivery proofs. Unlike the monotonic frontier, these
+    /// retain individual turn/range identity so a later turn advancing the
+    /// frontier cannot erase the proof needed by a stale restored watcher seed.
+    ///
+    /// `#[serde(default)]` is deliberately fail-safe for mixed binaries: a
+    /// legacy record has no receipts and therefore can never authorize seed
+    /// removal. Older binaries may drop this unknown field when rewriting the
+    /// sidecar; that loses dedup authority (and preserves the seed) rather than
+    /// creating false delivery authority.
+    #[serde(default)]
+    pub confirmed_deliveries: Vec<ConfirmedDeliveryReceipt>,
+}
+
+/// Immutable JSONL coordinates shared by confirmed terminal receipts and the
+/// restored-watcher seed adapter. Phase B can reuse this exact source identity
+/// for subordinate assistant-text segment receipts without inventing another
+/// turn/incarnation coordinate system.
+///
+/// Every field is serde-defaulted so partially populated newer records remain
+/// readable by mixed binaries. [`ExactJsonlSourceIdentity::is_authoritative`]
+/// rejects every default/missing component; compatibility must never become a
+/// false delivered proof.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(in crate::services::discord) struct ExactJsonlSourceIdentity {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub tmux_session_name: String,
+    #[serde(default)]
+    pub turn_nonce: String,
+    #[serde(default)]
+    pub range: (u64, u64),
+    #[serde(default)]
+    pub generation_mtime_ns: i64,
+    #[serde(default)]
+    pub offset_authority_channel_id: u64,
+    #[serde(default)]
+    pub delivery_channel_id: u64,
+}
+
+impl ExactJsonlSourceIdentity {
+    fn is_authoritative(&self) -> bool {
+        ProviderKind::from_str(&self.provider).is_some()
+            && !self.tmux_session_name.is_empty()
+            && !self.turn_nonce.is_empty()
+            && self.range.1 > self.range.0
+            && self.generation_mtime_ns != 0
+            && self.offset_authority_channel_id != 0
+            && self.delivery_channel_id != 0
+    }
+}
+
+/// A confirmed Discord delivery bound to an exact immutable JSONL source.
+/// `delivery_channel_id` and `message_id` identify what the user actually saw;
+/// the source's `offset_authority_channel_id` identifies the record key. Those
+/// channels intentionally differ for reused-watcher bridge handoffs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(in crate::services::discord) struct ConfirmedDeliveryReceipt {
+    #[serde(default)]
+    pub source: ExactJsonlSourceIdentity,
+    #[serde(default)]
+    pub delivery_channel_id: u64,
+    #[serde(default)]
+    pub message_id: u64,
+}
+
+impl ConfirmedDeliveryReceipt {
+    fn is_authoritative(&self) -> bool {
+        self.source.is_authoritative()
+            && self.delivery_channel_id == self.source.delivery_channel_id
+            && self.message_id != 0
+    }
 }
 
 /// The offset-authority channel for a delivery channel and tmux generation.
@@ -365,6 +438,57 @@ pub(in crate::services::discord) fn write_delivered_frontier(
     write_delivered_frontier_at(&record_path_or_err(provider, channel_id)?, frontier)
 }
 
+fn write_confirmed_delivery_at(
+    path: &Path,
+    frontier: DeliveredCommit,
+    receipt: ConfirmedDeliveryReceipt,
+) -> Result<(), String> {
+    if !receipt.is_authoritative()
+        || receipt.source.range != frontier.range
+        || receipt.source.generation_mtime_ns != frontier.generation_mtime_ns
+        || frontier.panel_msg_id != Some(receipt.message_id)
+        || frontier.panel_channel_id != Some(receipt.delivery_channel_id)
+    {
+        return Err("delivery_record: refusing incomplete or frontier-mismatched receipt".into());
+    }
+    mutate_record_at(path, |record| {
+        record.delivered_frontier = Some(frontier);
+        record
+            .confirmed_deliveries
+            .retain(|existing| existing != &receipt);
+        record.confirmed_deliveries.push(receipt);
+        let excess = record
+            .confirmed_deliveries
+            .len()
+            .saturating_sub(CONFIRMED_DELIVERY_RECEIPT_LIMIT);
+        if excess > 0 {
+            record.confirmed_deliveries.drain(..excess);
+        }
+    })
+}
+
+/// Atomically persist the monotonic frontier and the exact Discord receipt.
+/// This is delivery authority, never rollout telemetry, so callers must invoke
+/// it after a confirmed POST regardless of the shadow flag.
+pub(in crate::services::discord) fn write_confirmed_delivery(
+    provider: &ProviderKind,
+    offset_authority_channel_id: u64,
+    frontier: DeliveredCommit,
+    receipt: ConfirmedDeliveryReceipt,
+) -> Result<(), String> {
+    if receipt.source.offset_authority_channel_id != offset_authority_channel_id {
+        return Err("delivery_record: receipt owner does not match record key".into());
+    }
+    if receipt.source.provider != provider.as_str() {
+        return Err("delivery_record: receipt provider does not match record key".into());
+    }
+    write_confirmed_delivery_at(
+        &record_path_or_err(provider, offset_authority_channel_id)?,
+        frontier,
+        receipt,
+    )
+}
+
 fn commit_ordered_jsonl_range_at(
     path: &Path,
     range: (u64, u64),
@@ -504,6 +628,58 @@ pub(in crate::services::discord) fn watcher_owner_channel_for_delivery_channel(
     .map(ChannelId::new)
 }
 
+fn resolved_receipt_owner_channel(
+    provider: &ProviderKind,
+    delivery_channel: ChannelId,
+    source: &ExactJsonlSourceIdentity,
+) -> Option<ChannelId> {
+    if !source.is_authoritative()
+        || current_generation_mtime_ns(&source.tmux_session_name) != source.generation_mtime_ns
+    {
+        return None;
+    }
+
+    let captured_owner = ChannelId::new(source.offset_authority_channel_id);
+    match watcher_owner_channel_for_delivery_channel(
+        provider,
+        delivery_channel,
+        &source.tmux_session_name,
+    ) {
+        Some(resolved) if resolved == captured_owner => Some(resolved),
+        // Same-channel delivery is the deterministic default and predates the
+        // split-channel owner-context sidecar. A split receipt, however, is
+        // never trusted without the exact current context mapping.
+        None if captured_owner == delivery_channel => Some(delivery_channel),
+        _ => None,
+    }
+}
+
+/// Re-read the durable receipt at restored-seed consumption time and require an
+/// exact match on both JSONL source identity and Discord destination identity.
+/// Missing/legacy/partially populated records fail closed (seed is preserved).
+pub(in crate::services::discord) fn confirmed_delivery_receipt_exists(
+    provider: &ProviderKind,
+    delivery_channel: ChannelId,
+    message_id: u64,
+    source: &ExactJsonlSourceIdentity,
+) -> bool {
+    if message_id == 0 {
+        return false;
+    }
+    let Some(owner_channel) = resolved_receipt_owner_channel(provider, delivery_channel, source)
+    else {
+        return false;
+    };
+    read_record(provider, owner_channel.get()).is_some_and(|record| {
+        record.confirmed_deliveries.iter().any(|receipt| {
+            receipt.is_authoritative()
+                && receipt.source == *source
+                && receipt.delivery_channel_id == delivery_channel.get()
+                && receipt.message_id == message_id
+        })
+    })
+}
+
 /// Release: clear the lease ONLY. `delivered_frontier` survives (design §4.3).
 fn clear_lease_at(path: &Path) -> Result<(), String> {
     mutate_record_at(path, |record| record.delivery_lease = None)
@@ -534,18 +710,17 @@ pub(in crate::services::discord) fn delete_record(
 }
 
 // ---------------------------------------------------------------------------
-// #3089 B1 — shadow-write the delivered frontier (observe-only, default OFF).
+// #3089 B1 / #4911 Phase A — persist confirmed delivery authority.
 //
-// B1 mirrors the in-memory `confirmed_end_offset` authority into the durable
-// sidecar AFTER a confirmed `Delivered` commit, and asserts the durable END
-// tracks it (design §5 / M4 — END is the risky datum). Read-authority STAYS the
-// legacy markers; this is a parallel "shadow" so B2 can later flip to it with
-// confidence. OFF (default) → zero extraction, zero write → behavioral no-op.
+// A confirmed `Delivered` commit always persists the generation-scoped frontier
+// and, when complete turn/destination identity is available, an exact receipt.
+// The legacy shadow flag now controls only the durable-END divergence signal;
+// read-authority rollout remains separately gated below.
 // ---------------------------------------------------------------------------
 
 /// #3089 B1 shadow-write flag (`AGENTDESK_DELIVERY_RECORD_SHADOW`, OnceLock,
-/// default OFF). Telemetry ONLY when enabled (the default-OFF first eval has no
-/// observable side effect — deploy no-op), mirroring the A-phase flag idiom.
+/// default OFF). Divergence telemetry only; confirmed persistence never consults
+/// this flag.
 pub(in crate::services::discord) fn delivery_record_shadow_enabled() -> bool {
     #[cfg(test)]
     if let Some(forced) = shadow_test_seam::current_override() {
@@ -1392,8 +1567,9 @@ pub(in crate::services::discord) fn recent_delivered_content_matches(
     )
 }
 
-/// I2 outcome map (pure, testable): the shadow-write fires ONLY for a confirmed
-/// `Delivered`. Every other outcome means the controller did NOT advance the
+/// I2 outcome map (pure, testable): the confirmed-delivery funnel fires ONLY for
+/// `Delivered`. The historical function name is retained for hotfile callers.
+/// Every other outcome means the controller did NOT advance the
 /// offset — `NotDelivered` (identity gate refused), `Transient`/`Unknown`
 /// (ambiguous), `Skipped` (no-op) — so the durable frontier must NOT advance
 /// (I2, the #3143/#3416 class). This pins the owner call-site's outcome decision
@@ -1403,10 +1579,8 @@ pub(in crate::services::discord) fn outcome_is_shadow_delivered(outcome: &Delive
     matches!(outcome, DeliveryOutcome::Delivered { .. })
 }
 
-/// I2 gate (pure, testable): shadow-mirror ONLY for a confirmed `Delivered`
-/// outcome AND only when the flag is enabled. Dropping the `is_delivered`
-/// conjunct would let an ambiguous outcome advance the durable frontier — the
-/// exact #3143/#3416 class — so the test pins this conjunction.
+/// Divergence-telemetry gate. Confirmed frontier/receipt persistence does not
+/// consult this flag; only the observe-only comparison does.
 fn should_shadow_mirror(is_delivered: bool, enabled: bool) -> bool {
     is_delivered && enabled
 }
@@ -1446,65 +1620,70 @@ fn record_delivered_frontier_shadow_at(
     ))
 }
 
-/// provider/channel core: resolve the sidecar path, shadow-write, and emit the
-/// observe-only signals. NEVER panics, NEVER changes delivery (the relay had
-/// incidents; B1 only observes). Caller invokes this ONLY for `Delivered` (I2).
-#[allow(clippy::too_many_arguments)]
-fn record_delivered_frontier_shadow(
+fn exact_receipt_from_inflight(
     provider: &ProviderKind,
-    channel_id: u64,
+    fresh: Option<&crate::services::discord::inflight::InflightTurnState>,
+    offset_authority_channel: ChannelId,
+    delivery_channel: ChannelId,
+    message_id: Option<u64>,
     range: (u64, u64),
     generation_mtime_ns: i64,
-    attempts: u32,
-    panel_msg_id: Option<u64>,
-    panel_channel_id: Option<u64>,
-    in_memory_confirmed_end: u64,
-) {
-    let path = match record_path_or_err(provider, channel_id) {
-        Ok(path) => path,
-        Err(error) => {
-            tracing::error!(
-                provider = provider.as_str(),
-                channel_id,
-                error = %error,
-                "#3089 B1: shadow delivery-record path unavailable (observe-only)"
-            );
-            return;
-        }
-    };
-    match record_delivered_frontier_shadow_at(
-        &path,
-        range,
-        generation_mtime_ns,
-        attempts,
-        panel_msg_id,
-        panel_channel_id,
-        in_memory_confirmed_end,
-    ) {
-        Ok(false) => {}
-        Ok(true) => tracing::error!(
-            provider = provider.as_str(),
-            channel_id,
-            durable_end = range.1,
-            in_memory_confirmed_end,
+) -> Option<ConfirmedDeliveryReceipt> {
+    let fresh = fresh?;
+    let message_id = message_id.filter(|id| *id != 0)?;
+    let tmux_session_name = fresh
+        .tmux_session_name
+        .as_deref()
+        .filter(|name| !name.is_empty())?;
+    let turn_nonce = fresh
+        .turn_nonce
+        .as_deref()
+        .filter(|nonce| !nonce.is_empty())?;
+    if fresh.provider_kind().as_ref() != Some(provider)
+        || fresh.channel_id != delivery_channel.get()
+        || fresh.delivery_record_owner_channel_id() != offset_authority_channel.get()
+        || fresh.turn_start_offset != Some(range.0)
+        || fresh.last_offset != range.1
+        || range.1 <= range.0
+        || generation_mtime_ns == 0
+        || current_generation_mtime_ns(tmux_session_name) != generation_mtime_ns
+    {
+        return None;
+    }
+    Some(ConfirmedDeliveryReceipt {
+        source: ExactJsonlSourceIdentity {
+            provider: provider.as_str().to_string(),
+            tmux_session_name: tmux_session_name.to_string(),
+            turn_nonce: turn_nonce.to_string(),
+            range,
             generation_mtime_ns,
-            "#3089 B1: shadow delivered_frontier END diverged from in-memory confirmed_end_offset (observe-only)"
-        ),
-        Err(error) => tracing::error!(
-            provider = provider.as_str(),
-            channel_id,
-            error = %error,
-            "#3089 B1: shadow delivery-record write failed (observe-only)"
-        ),
+            offset_authority_channel_id: offset_authority_channel.get(),
+            delivery_channel_id: delivery_channel.get(),
+        },
+        delivery_channel_id: delivery_channel.get(),
+        message_id,
+    })
+}
+
+fn persist_confirmed_frontier_and_receipt(
+    provider: &ProviderKind,
+    offset_authority_channel: ChannelId,
+    frontier: DeliveredCommit,
+    receipt: Option<ConfirmedDeliveryReceipt>,
+) -> Result<(), String> {
+    match receipt {
+        Some(receipt) => {
+            write_confirmed_delivery(provider, offset_authority_channel.get(), frontier, receipt)
+        }
+        None => write_delivered_frontier(provider, offset_authority_channel.get(), frontier),
     }
 }
 
-/// Integration wrapper for owner `Delivered` arms. Gated by [`should_shadow_mirror`]
-/// (flag ON AND `is_delivered`, I2). When it fires it extracts the in-memory
-/// authority (`confirmed_end_offset` + `confirmed_end_generation_mtime_ns`) from
-/// the relay coord and the `attempts` mirror from the fresh inflight, then
-/// shadow-writes. OFF or non-`Delivered` → returns immediately (no coord/inflight
-/// access, no write) → behavioral no-op.
+/// Integration wrapper for owner `Delivered` arms. A confirmed outcome always
+/// persists the frontier, and atomically appends an exact receipt when the
+/// delivery-channel inflight still exposes a complete turn identity. The
+/// rollout flag controls only post-write divergence telemetry. Non-`Delivered`
+/// outcomes never write delivery authority (I2).
 ///
 /// #3610 (Phase B PR-1): `terminal_anchor_msg_id` is the durable TERMINAL ANCHOR
 /// the caller resolved — the Discord message id terminal-replace edits in place
@@ -1525,7 +1704,8 @@ fn record_delivered_frontier_shadow(
 /// Same-channel callers (sink, watcher) pass `Some(channel.get())`; the bridge
 /// cutover passes the edit-target `channel_id` it actually edits. `None`/`None`
 /// writes a null anchor pair (unchanged from the absent-status-panel case), so
-/// OFF/None paths stay behaviorally identical.
+/// A missing anchor cannot produce an exact receipt, but the generation-scoped
+/// frontier remains durable.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
     shared: &crate::services::discord::SharedData,
@@ -1582,25 +1762,73 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
         };
         completed_turn_ledger::append_completed_turn(provider, ledger_channel_id, user_msg_id);
     }
-    if !should_shadow_mirror(is_delivered, delivery_record_shadow_enabled()) {
+    if !is_delivered {
+        return;
+    }
+    if generation_mtime_ns == 0 || range.1 <= range.0 {
+        tracing::warn!(
+            provider = provider.as_str(),
+            channel_id,
+            range = ?range,
+            generation_mtime_ns,
+            "confirmed delivery lacks an authoritative JSONL incarnation/range; preserving prior durable frontier"
+        );
         return;
     }
     let in_memory_confirmed_end = coord.confirmed_end_offset.load(Ordering::Acquire);
-    let fresh = crate::services::discord::inflight::load_inflight_state(provider, channel_id);
+    let delivery_channel_id = terminal_anchor_channel_id.unwrap_or(channel_id);
+    let delivery_channel = ChannelId::new(delivery_channel_id);
+    // Capture the delivered turn's nonce/session from its DELIVERY-channel row,
+    // never from the offset-authority row. In a channel split the latter can be
+    // a different, unanswered turn. This synchronous read+write happens before
+    // the caller's inflight clear and closes the clear-before-seed-consume race.
+    let fresh =
+        crate::services::discord::inflight::load_inflight_state(provider, delivery_channel_id);
     let attempts = fresh
         .as_ref()
         .map(|f| f.recovery_relay_attempts)
         .unwrap_or(0);
-    record_delivered_frontier_shadow(
-        provider,
-        channel_id,
+    let frontier = DeliveredCommit {
         range,
         generation_mtime_ns,
         attempts,
+        panel_msg_id: terminal_anchor_msg_id,
+        panel_channel_id: terminal_anchor_channel_id,
+    };
+    let receipt = exact_receipt_from_inflight(
+        provider,
+        fresh.as_ref(),
+        channel,
+        delivery_channel,
         terminal_anchor_msg_id,
-        terminal_anchor_channel_id,
-        in_memory_confirmed_end,
+        range,
+        generation_mtime_ns,
     );
+    if let Err(error) = persist_confirmed_frontier_and_receipt(provider, channel, frontier, receipt)
+    {
+        tracing::error!(
+            provider = provider.as_str(),
+            channel_id,
+            error = %error,
+            "confirmed delivery frontier/receipt write failed"
+        );
+        return;
+    }
+
+    // The flag controls only divergence telemetry. The confirmed frontier and
+    // exact receipt above are delivery authority and are always persisted.
+    if should_shadow_mirror(true, delivery_record_shadow_enabled())
+        && delivered_frontier_end_diverged(range.1, in_memory_confirmed_end)
+    {
+        tracing::error!(
+            provider = provider.as_str(),
+            channel_id,
+            durable_end = range.1,
+            in_memory_confirmed_end,
+            generation_mtime_ns,
+            "#3089 B1: delivered_frontier END diverged from in-memory confirmed_end_offset (observe-only)"
+        );
+    }
 }
 
 pub(in crate::services::discord) fn record_delivered_frontier_with_body(
@@ -1679,10 +1907,10 @@ pub(in crate::services::discord) fn shadow_mirror_same_channel_frontier_with_bod
 /// delivery lease acquired/committed (offset-space consistent — never mix spaces).
 /// `last_chunk_anchor_msg_id = None` (empty chunk Vec — impossible on the `Ok`
 /// path, but type-honest) records the range with a null anchor, identical to the
-/// absent-status-panel case. The delivered-frontier mirror still obeys the shadow
-/// flag, while the #4081 recent-content fingerprint is recorded for confirmed
-/// deliveries so degenerate-key phantom re-relays can be refused even before the
-/// durable frontier authority is enabled.
+/// absent-status-panel case. The delivered frontier is flag-independent; an
+/// exact receipt additionally requires a real tail anchor and complete inflight
+/// identity. The #4081 recent-content fingerprint remains non-authoritative
+/// retry metadata and is never used for restored-seed removal.
 pub(in crate::services::discord) fn record_long_chunk_terminal_delivery(
     shared: &crate::services::discord::SharedData,
     provider: &ProviderKind,
@@ -1779,6 +2007,7 @@ mod tests {
             delivery_lease: Some(sample_lease()),
             delivered_frontier: Some(sample_frontier()),
             recent_delivered_contents: Vec::new(),
+            confirmed_deliveries: Vec::new(),
         };
         let json = serde_json::to_string_pretty(&record).unwrap();
         let back: DeliveryRecord = serde_json::from_str(&json).unwrap();
@@ -1801,6 +2030,7 @@ mod tests {
             delivery_lease: Some(sample_lease()),
             delivered_frontier: Some(sample_frontier()),
             recent_delivered_contents: Vec::new(),
+            confirmed_deliveries: Vec::new(),
         };
         write_record_at(&path, &record).unwrap();
         assert_eq!(read_record_at(&path), Some(record));
@@ -2101,11 +2331,11 @@ mod tests {
 
     #[test]
     fn should_shadow_mirror_requires_delivered_and_enabled() {
-        // I2: a non-Delivered outcome must NEVER advance the durable frontier,
-        // and OFF is a no-op. Pins the AND of both conjuncts.
+        // The legacy flag gates only divergence telemetry. Confirmed authority
+        // persistence is pinned independently by the Phase A test below.
         assert!(should_shadow_mirror(true, true));
-        assert!(!should_shadow_mirror(false, true)); // not delivered → no write (I2)
-        assert!(!should_shadow_mirror(true, false)); // flag OFF → no write
+        assert!(!should_shadow_mirror(false, true));
+        assert!(!should_shadow_mirror(true, false));
         assert!(!should_shadow_mirror(false, false));
     }
 
@@ -2984,12 +3214,82 @@ mod tests {
 
     #[test]
     fn shadow_off_is_anchor_noop_3610() {
-        // SHADOW OFF → no write at all, so the anchor (whatever the caller resolves)
-        // is never recorded. `shadow_mirror_delivered_frontier`'s first gate is
-        // `should_shadow_mirror(is_delivered, enabled)`; OFF short-circuits before
-        // any coord/inflight access or write. Pinned here at the gate level.
-        assert!(!should_shadow_mirror(true, false)); // flag OFF → no anchor write
+        // Phase A: the old gate now controls divergence telemetry only. It must
+        // remain false under OFF, but confirmed delivery authority is written by
+        // the flag-independent funnel tested below.
+        assert!(!should_shadow_mirror(true, false)); // no divergence telemetry
         assert!(!should_shadow_mirror(false, true)); // not delivered → no anchor write (I2)
+    }
+
+    #[test]
+    fn shadow_off_confirmed_delivery_writes_exact_split_channel_authority_4911() {
+        let root = IsolatedRoot::new();
+        let _shadow_off = shadow_test_seam::force(false);
+        let provider = ProviderKind::Claude;
+        let owner = ChannelId::new(4_911_001);
+        let delivery = ChannelId::new(4_911_002);
+        let message_id = 4_911_003;
+        let tmux = "AgentDesk-claude-phase-a-flag-off";
+        let gen_path = crate::services::tmux_common::session_temp_path(tmux, "generation");
+        if let Some(parent) = Path::new(&gen_path).parent() {
+            fs::create_dir_all(parent).expect("create generation parent");
+        }
+        fs::write(&gen_path, "phase-a").expect("write generation marker");
+        let generation = current_generation_mtime_ns(tmux);
+        assert_ne!(generation, 0);
+
+        let mut state = crate::services::discord::inflight::InflightTurnState::new(
+            provider.clone(),
+            delivery.get(),
+            Some("phase-a".into()),
+            7,
+            49_110,
+            message_id,
+            "flag independent".into(),
+            Some("session-4911".into()),
+            Some(tmux.into()),
+            Some("/tmp/phase-a-flag-off.jsonl".into()),
+            None,
+            100,
+        );
+        state.last_offset = 200;
+        state.turn_nonce = Some("flag-off-turn-nonce".into());
+        state.set_watcher_owner_channel_id(owner.get());
+        crate::services::discord::inflight::save_inflight_state(&state)
+            .expect("save delivered turn identity");
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let coord = shared.tmux_relay_coord(owner);
+        coord.confirmed_end_offset.store(200, Ordering::Release);
+        coord
+            .confirmed_end_generation_mtime_ns
+            .store(generation, Ordering::Release);
+        shadow_mirror_delivered_frontier(
+            &shared,
+            &provider,
+            owner,
+            (100, 200),
+            true,
+            Some(message_id),
+            Some(delivery.get()),
+            Some("same body is not authority"),
+            Some(49_110),
+        );
+
+        let record = read_record(&provider, owner.get()).expect("flag-off record");
+        assert_eq!(record.delivered_frontier.unwrap().range, (100, 200));
+        assert_eq!(record.confirmed_deliveries.len(), 1);
+        let source = &record.confirmed_deliveries[0].source;
+        assert_eq!(source.offset_authority_channel_id, owner.get());
+        assert_eq!(source.delivery_channel_id, delivery.get());
+        assert!(confirmed_delivery_receipt_exists(
+            &provider, delivery, message_id, source,
+        ));
+        assert!(
+            delivery_record_path(&provider, owner.get())
+                .expect("owner record path")
+                .starts_with(root.path())
+        );
     }
 
     // ---- #3610 PR-1c: long-chunk terminal arm anchor recording -----------------
@@ -3090,24 +3390,23 @@ mod tests {
         // call site lives ONLY inside the full-commit `Ok` arm — the long-chunk send
         // (`send_long_message_with_rollback`) rolls back and returns `Err` on ANY
         // chunk failure, so a partial delivery NEVER reaches the helper. The shadow
-        // gate then still requires the flag ON. This pins that an ambiguous/failed
-        // outcome (modelled here as `is_delivered = false`) can never advance the
-        // durable frontier, and that OFF is a full no-op.
-        assert!(!should_shadow_mirror(false, true)); // not-delivered → no anchor (I2)
-        assert!(!should_shadow_mirror(true, false)); // flag OFF → no anchor (deploy no-op)
+        // outcome (modelled here as `is_delivered = false`) can never reach either
+        // persistence or divergence telemetry.
+        assert!(!should_shadow_mirror(false, true));
     }
 
     #[test]
     fn record_long_chunk_terminal_delivery_off_is_noop_3610c() {
-        // The REAL helper end-to-end under the forced-OFF shadow flag: it must be a
-        // complete no-op (no panic, no write) regardless of the resolved anchor.
+        // Legacy test name retained: the synthetic coord has no generation, so
+        // Phase A must fail closed without overwriting a prior authoritative
+        // frontier. The shadow flag itself controls only telemetry.
         // The scoped root holds the crate-wide test-env lock, so both the helper and
         // the assertions stay inside one throw-away tree and can never inspect the
         // operator's runtime.
         let root = IsolatedRoot::new();
         let _shadow_off = shadow_test_seam::force(false);
         let shared = crate::services::discord::make_shared_data_for_tests();
-        // Does not panic; OFF → writes nothing.
+        // Does not panic; missing generation → writes nothing.
         super::record_long_chunk_terminal_delivery(
             &shared,
             &ProviderKind::Claude,
@@ -3249,10 +3548,8 @@ mod tests {
         // only when the anchor is `Some` (the full-commit `Ok` arm of
         // `send_long_message_raw_with_rollback`, which is all-or-nothing — a partial
         // chunk failure rolls back and returns `Err`). So a non-advanced commit
-        // (modelled as `is_delivered = false`) NEVER reaches the durable write, and
-        // OFF is a full no-op. Same gate the shared helper enforces.
-        assert!(!should_shadow_mirror(false, true)); // not-advanced/partial → no record (M4/I2)
-        assert!(!should_shadow_mirror(true, false)); // flag OFF → no record (deploy no-op)
+        // (modelled as `is_delivered = false`) NEVER reaches the durable write.
+        assert!(!should_shadow_mirror(false, true));
     }
 
     // ---- #3933 item 1: read-authority (authority-ON) end-to-end wiring --------
@@ -3634,6 +3931,7 @@ mod tests {
                             panel_channel_id: None,
                         }),
                         recent_delivered_contents: Vec::new(),
+                        confirmed_deliveries: Vec::new(),
                     },
                 )
                 .expect("seed unrelated new frontier");

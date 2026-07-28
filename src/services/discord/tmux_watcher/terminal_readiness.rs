@@ -134,6 +134,7 @@ pub(super) fn watcher_terminal_rewind_seed(
             turn_identity: None,
             streaming_rollover_frozen_msg_ids: input.streaming_rollover_frozen_msg_ids.to_vec(),
             same_turn_rewind: true,
+            delivery_source: None,
         })
 }
 
