@@ -24,8 +24,9 @@ use super::turn_start::{
     load_session_runtime_state, log_session_strategy_diagnostic, put_back_session_retry_context,
     put_back_turn_end_wip_warning, put_back_voluntary_feedback_reminder,
     refresh_session_strategy_after_pending_reset, release_mailbox_after_hosted_tui_busy_pre_submit,
-    release_mailbox_after_placeholder_post_failure, session_runtime_state_after_redirect,
-    take_and_merge_feedback_reminder, take_and_merge_wip_warning, take_session_retry_context,
+    release_mailbox_after_placeholder_post_failure, take_and_merge_feedback_reminder,
+    take_and_merge_wip_warning, take_session_retry_context,
+    try_intake_runtime_transition_after_redirect,
 };
 #[cfg(test)]
 use super::turn_start::{session_strategy_lifecycle_event, should_emit_session_strategy_lifecycle};

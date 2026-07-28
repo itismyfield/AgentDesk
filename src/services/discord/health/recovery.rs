@@ -84,38 +84,63 @@ async fn shared_for_provider(
         .await
 }
 
-/// #4790 `/resume` rebind (HTTP-side bridge): repoint the in-memory session for
-/// `channel_id` at a previous provider session, resolving the owning runtime via
-/// the registry. Returns `true` when a runtime owned the channel and the rebind
-/// was applied in memory (the DB rebind is done by the caller regardless, so a
-/// `false` here only means no live runtime mirror was updated — e.g. the channel
-/// is owned by another node). No-op safe when no runtime is registered.
-pub(crate) async fn rebind_channel_provider_session(
+pub(crate) async fn resume_runtime_for_channel(
     registry: &HealthRegistry,
-    provider_name: &str,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) -> Option<Arc<SharedData>> {
+    shared_for_provider(registry, provider, channel_id).await
+}
+
+pub(crate) fn retain_resume_runtime_owner_before_teardown(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+) -> bool {
+    shared
+        .tmux_watchers
+        .retain_owner_during_session_rebind(tmux_session_name, channel_id)
+}
+
+pub(crate) fn clear_resume_runtime_owner_after_death(shared: &SharedData, tmux_session_name: &str) {
+    shared
+        .tmux_watchers
+        .clear_restored_owner_for_tmux_session(tmux_session_name);
+}
+
+/// Mirror a successful durable `/resume` target into the owning Discord runtime.
+///
+/// `retain_runtime_owner` means teardown left the tmux pane alive. In that case
+/// the authoritative owner-only registry entry is re-established before the
+/// channel session is changed, so direct-pane output remains delayed/routable
+/// without promoting the diagnostic dedupe mirror to routing authority.
+pub(crate) async fn rebind_channel_provider_session(
+    shared: &SharedData,
+    provider: &ProviderKind,
     channel_id: ChannelId,
     cwd: &str,
     session_id: &str,
-) -> bool {
-    let Some(provider) = ProviderKind::from_str(provider_name) else {
-        return false;
-    };
-    let Some(shared) = shared_for_provider(registry, &provider, channel_id).await else {
-        return false;
-    };
+    tmux_session_name: &str,
+    retain_runtime_owner: bool,
+) {
+    let retained_runtime_owner = retain_runtime_owner
+        && shared
+            .tmux_watchers
+            .retain_owner_during_session_rebind(tmux_session_name, channel_id);
     let (previous_path, previous_session_id) =
-        discord::rebind_channel_session(&shared, &provider, channel_id, cwd, session_id).await;
+        discord::rebind_channel_session(shared, provider, channel_id, cwd, session_id).await;
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
         provider = provider.as_str(),
         channel_id = channel_id.get(),
+        tmux_session_name,
+        retained_runtime_owner,
         previous_path = previous_path.as_deref().unwrap_or("<none>"),
         previous_session_id = previous_session_id.as_deref().unwrap_or("<none>"),
         target_cwd = cwd,
         target_session_id = session_id,
         "  [{ts}] ↻ /resume: rebound in-memory session to previous provider session",
     );
-    true
 }
 
 /// #4790 `/resume` guard: report whether `channel_id` has an active or

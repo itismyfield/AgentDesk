@@ -88,6 +88,7 @@ pub(crate) mod session_canonical_identity;
 pub(crate) mod session_identity;
 mod session_runtime;
 mod session_status_hook;
+mod session_transition;
 pub(crate) mod settings;
 pub(crate) mod shared_memory;
 // #3038 S1/S2: extracted SharedData field clusters (named sub-structs + their
@@ -789,6 +790,44 @@ fn increment_counter(counter: &AtomicUsize, reason: &str) -> usize {
 }
 
 #[cfg(test)]
+pub(crate) use router::try_intake_runtime_transition_after_redirect;
+#[cfg(test)]
+pub(crate) use session_runtime::resume_launch_state_for_tests;
+
+#[cfg(test)]
+pub(crate) fn register_resume_watcher_for_tests(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+) {
+    shared.tmux_watchers.insert(
+        channel_id,
+        TmuxWatcherHandle {
+            tmux_session_name: tmux_session_name.to_string(),
+            output_path: format!("/runtime/{tmux_session_name}.jsonl"),
+            paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_heartbeat_ts_ms: Arc::new(
+                std::sync::atomic::AtomicI64::new(tmux_watcher_now_ms()),
+            ),
+        },
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn resume_owner_channel_for_tests(
+    shared: &SharedData,
+    tmux_session_name: &str,
+) -> Option<ChannelId> {
+    shared
+        .tmux_watchers
+        .owner_channel_for_tmux_session(tmux_session_name)
+}
+
+#[cfg(test)]
 mod global_active_counter_tests {
     use super::{increment_counter, saturating_decrement_counter};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1242,6 +1281,29 @@ impl TmuxWatcherRegistry {
             .remove(tmux_session_name);
     }
 
+    /// Preserve authoritative routing for a live tmux pane after the channel's
+    /// provider session is rebound. Existing watcher ownership already wins; an
+    /// owner-only entry covers watcher teardown until pane death is confirmed.
+    pub(super) fn retain_owner_during_session_rebind(
+        &self,
+        tmux_session_name: &str,
+        channel_id: ChannelId,
+    ) -> bool {
+        let _guard = lock_tmux_watcher_registry();
+        let tmux_session_name = tmux_session_name.trim();
+        if tmux_session_name.is_empty() {
+            return false;
+        }
+        if let Some(current_owner) = self.owner_channel_by_tmux_session.get(tmux_session_name)
+            && *current_owner.value() != channel_id
+        {
+            return false;
+        }
+        self.restored_owner_by_tmux_session
+            .insert(tmux_session_name.to_string(), channel_id);
+        true
+    }
+
     /// #3105 (codex P1 sub-case B): true when a LIVE watcher handle currently
     /// owns this tmux session. Used to distinguish a genuinely dead/orphaned
     /// session (no live watcher) from a live session whose authoritative owner
@@ -1324,6 +1386,26 @@ mod tmux_watcher_registry_restore_tests {
         assert!(
             !registry.restore_owner_channel_for_tmux_session(tmux, channel),
             "unchanged restore must not re-report a change"
+        );
+    }
+
+    #[test]
+    fn session_rebind_retains_owner_when_called_after_watcher_teardown() {
+        let registry = TmuxWatcherRegistry::new();
+        let tmux = "AgentDesk-claude-adk-cc";
+        let channel = ChannelId::new(4794);
+
+        let handle = live_watcher_handle(tmux);
+        let cancel = handle.cancel.clone();
+        registry.insert(channel, handle);
+        registry.remove_tmux_session_if_current(tmux, &cancel);
+        assert_eq!(registry.owner_channel_for_tmux_session(tmux), None);
+
+        assert!(registry.retain_owner_during_session_rebind(tmux, channel));
+        assert_eq!(
+            registry.owner_channel_for_tmux_session(tmux),
+            Some(channel),
+            "the owner-only binding must be restorable after teardown until pane death"
         );
     }
 
@@ -2164,6 +2246,11 @@ pub(crate) struct SharedData {
     pub(super) core: Mutex<CoreState>,
     /// Per-channel request lifecycle actor registry.
     mailboxes: ChannelMailboxRegistry,
+    /// Serializes `/resume` rebinds with intake session selection for each channel.
+    /// Weak entries let inactive channels disappear once the final intake/resume
+    /// guard drops; the map is opportunistically pruned on each lookup, so channel
+    /// churn cannot retain one mutex per historical channel for process lifetime.
+    session_transition_locks: dashmap::DashMap<ChannelId, std::sync::Weak<tokio::sync::Mutex<()>>>,
     /// Bot settings — mostly reads, rare writes
     pub(super) settings: tokio::sync::RwLock<DiscordBotSettings>,
     /// Per-channel timestamps of the last Discord API call (for rate limiting)
@@ -2291,6 +2378,8 @@ pub(crate) struct SharedData {
     pub(in crate::services::discord) turn_view_reconciler: turn_view_reconciler::TurnViewReconciler,
     readopted_mailbox_ledger: readopted_mailbox_ledger::ReadoptedMailboxLedger, // #4370
 }
+
+pub(crate) use session_transition::{SESSION_TRANSITION_LOCK_WAIT_TIMEOUT, SessionTransitionBusy};
 
 impl SharedData {
     pub(super) fn has_runtime_storage(&self) -> bool {
@@ -2491,6 +2580,7 @@ pub(super) fn make_shared_data_for_tests_with_storage(
             active_meetings: std::collections::HashMap::new(),
         }),
         mailboxes: ChannelMailboxRegistry::default(),
+        session_transition_locks: dashmap::DashMap::new(),
         settings: tokio::sync::RwLock::new(DiscordBotSettings::default()),
         api_timestamps: dashmap::DashMap::new(),
         skills_cache: tokio::sync::RwLock::new(Vec::new()),
@@ -3503,6 +3593,18 @@ async fn idle_queue_take_next_soft_if_ready(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> MailboxTakeNextSoftOutcome {
+    let _transition_guard = match shared.session_transition_lock(channel_id).try_lock_owned() {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::debug!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                "KICKOFF: session transition owns channel; preserving queued head"
+            );
+            return MailboxTakeNextSoftOutcome::default();
+        }
+    };
+
     // #3167 — only a real (non-background) active turn blocks the dequeue. The
     // cleanup-retry guard remains a correctness guard; the hosted-TUI busy-pane
     // re-scrape gate was removed in #4048 S3 because finalize completion is now
@@ -3593,14 +3695,14 @@ pub(in crate::services::discord) async fn mailbox_abandon_pending_dispatch(
     provider: &ProviderKind,
     channel_id: ChannelId,
     user_message_id: MessageId,
-) {
+) -> bool {
     shared
         .mailbox(channel_id)
         .abandon_pending_dispatch(
             user_message_id,
             queue_persistence_context(shared, provider, channel_id),
         )
-        .await;
+        .await
 }
 
 async fn mailbox_clear_pending_dispatch_reservation(
@@ -3608,14 +3710,14 @@ async fn mailbox_clear_pending_dispatch_reservation(
     provider: &ProviderKind,
     channel_id: ChannelId,
     user_message_id: MessageId,
-) {
+) -> bool {
     shared
         .mailbox(channel_id)
         .clear_pending_dispatch_reservation(
             user_message_id,
             queue_persistence_context(shared, provider, channel_id),
         )
-        .await;
+        .await
 }
 
 pub(in crate::services::discord) use busy_followup_retry_store::requeue_inflight_for_followup_retry as mailbox_requeue_inflight_for_followup_retry;
@@ -4959,6 +5061,63 @@ mod idle_queue_background_supersede_tests {
             pending_uploads: Vec::new(),
             voice_announcement: None,
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_transition_preserves_queued_head_order_until_release() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env_guard = crate::config::set_agentdesk_root_for_test(tmp.path());
+
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_794_200);
+        let first = user_intervention(4_794_201, "first");
+        let second = user_intervention(4_794_202, "second");
+        shared
+            .mailbox(channel_id)
+            .replace_queue(
+                vec![first.clone(), second.clone()],
+                queue_persistence_context(&shared, &provider, channel_id),
+            )
+            .await;
+
+        let transition_guard = shared
+            .session_transition_lock(channel_id)
+            .lock_owned()
+            .await;
+        let blocked = idle_queue_take_next_soft_if_ready(&shared, &provider, channel_id).await;
+        assert!(
+            blocked.intervention.is_none(),
+            "transition ownership must defer kickoff before dequeue"
+        );
+        let blocked_snapshot = mailbox_snapshot(&shared, channel_id).await;
+        assert_eq!(
+            blocked_snapshot
+                .intervention_queue
+                .iter()
+                .map(|item| item.message_id)
+                .collect::<Vec<_>>(),
+            vec![first.message_id, second.message_id],
+            "deferred kickoff must preserve FIFO without tail requeue"
+        );
+        assert_eq!(blocked_snapshot.pending_user_dispatch, None);
+
+        drop(transition_guard);
+        let released = idle_queue_take_next_soft_if_ready(&shared, &provider, channel_id).await;
+        assert_eq!(
+            released.intervention.as_ref().map(|item| item.message_id),
+            Some(first.message_id),
+            "the original head must dequeue first after transition release"
+        );
+        assert_eq!(
+            mailbox_snapshot(&shared, channel_id)
+                .await
+                .intervention_queue
+                .iter()
+                .map(|item| item.message_id)
+                .collect::<Vec<_>>(),
+            vec![second.message_id]
+        );
     }
 
     // SAFETY (await_holding_lock): the test-env Mutex is held across awaits to

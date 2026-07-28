@@ -102,17 +102,7 @@ pub(crate) enum SessionPresence {
 /// Transport, socket, permission, timeout, and unexpected tmux errors remain
 /// distinguishable from a confirmed missing session so destructive callers can
 /// fail closed.
-pub(crate) fn session_presence(session_name: &str) -> SessionPresence {
-    if is_blank_session_name(session_name) {
-        return SessionPresence::ProbeFailed;
-    }
-
-    let mut command = tmux_command();
-    command.args(["has-session", "-t", &exact_target(session_name)]);
-    let Ok(output) = wait_for_tmux_output(command, Duration::from_secs(3), "tmux has-session")
-    else {
-        return SessionPresence::ProbeFailed;
-    };
+fn classify_has_session_output(output: &Output) -> SessionPresence {
     if output.status.success() {
         return SessionPresence::Present;
     }
@@ -126,6 +116,20 @@ pub(crate) fn session_presence(session_name: &str) -> SessionPresence {
     } else {
         SessionPresence::ProbeFailed
     }
+}
+
+pub(crate) fn session_presence(session_name: &str) -> SessionPresence {
+    if is_blank_session_name(session_name) {
+        return SessionPresence::ProbeFailed;
+    }
+
+    let mut command = tmux_command();
+    command.args(["has-session", "-t", &exact_target(session_name)]);
+    let Ok(output) = wait_for_tmux_output(command, Duration::from_secs(3), "tmux has-session")
+    else {
+        return SessionPresence::ProbeFailed;
+    };
+    classify_has_session_output(&output)
 }
 
 /// Compatibility boolean for non-destructive callers. Probe failures continue
@@ -891,12 +895,12 @@ pub fn has_live_pane(session_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// #3635: three-state liveness of a tmux session's panes. Unlike [`has_live_pane`]
-/// (which collapses both "session absent" and "probe failed" to `false`), this
-/// distinguishes a *definitive* negative (`DeadOrAbsent`) from a *probe failure*
-/// (`ProbeError`). Callers deciding to destroy state on death MUST treat
-/// `ProbeError` as "unknown ⇒ preserve" — a transient tmux hiccup is not proof
-/// the owner died.
+/// #4489 introduced three-state liveness of a tmux session's panes and the
+/// per-command two-second probe bound. Unlike [`has_live_pane`] (which collapses
+/// both "session absent" and "probe failed" to `false`), this distinguishes a
+/// *definitive* negative (`DeadOrAbsent`) from a *probe failure* (`ProbeError`).
+/// Callers deciding to destroy state on death MUST treat `ProbeError` as
+/// "unknown ⇒ preserve" — a transient tmux hiccup is not proof the owner died.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneLiveness {
     /// Session exists and has at least one non-dead pane.
@@ -922,10 +926,11 @@ pub fn pane_liveness(session_name: &str) -> PaneLiveness {
     match wait_for_tmux_output(has_session, PANE_LIVENESS_PROBE_TIMEOUT, "tmux has-session") {
         // Spawn/exec failure ⇒ we never reached tmux: unknown, not dead.
         Err(_) => return PaneLiveness::ProbeError,
-        // Clean non-zero exit ⇒ no such session (or no server running): the
-        // session — and the process that lived in it — is gone.
-        Ok(output) if !output.status.success() => return PaneLiveness::DeadOrAbsent,
-        Ok(_) => {}
+        Ok(output) => match classify_has_session_output(&output) {
+            SessionPresence::Present => {}
+            SessionPresence::Missing => return PaneLiveness::DeadOrAbsent,
+            SessionPresence::ProbeFailed => return PaneLiveness::ProbeError,
+        },
     }
     let mut list_panes = tmux_command();
     list_panes.args([
@@ -1267,6 +1272,28 @@ mod timeout_tests {
         );
         unsafe { std::env::set_var("FAKE_TMUX_MODE", "present") };
         assert_eq!(session_presence("agentdesk-test"), SessionPresence::Present);
+        unsafe { std::env::remove_var("FAKE_TMUX_MODE") };
+    }
+
+    #[test]
+    fn pane_liveness_does_not_classify_probe_failure_as_dead() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        write_fake_tmux(
+            temp.path(),
+            "case \"$FAKE_TMUX_MODE\" in missing) echo \"can't find session: test\" >&2; exit 1;; failed) echo 'permission denied' >&2; exit 1;; *) if [ \"$1\" = \"list-panes\" ]; then echo 0; fi; exit 0;; esac",
+        );
+        let _path = PathOverride::prepend(temp.path());
+
+        unsafe { std::env::set_var("FAKE_TMUX_MODE", "failed") };
+        assert_eq!(
+            pane_liveness("agentdesk-test"),
+            PaneLiveness::ProbeError,
+            "an unexpected has-session failure is unknown, not confirmed death"
+        );
+        unsafe { std::env::set_var("FAKE_TMUX_MODE", "missing") };
+        assert_eq!(pane_liveness("agentdesk-test"), PaneLiveness::DeadOrAbsent);
+        unsafe { std::env::set_var("FAKE_TMUX_MODE", "present") };
+        assert_eq!(pane_liveness("agentdesk-test"), PaneLiveness::Live);
         unsafe { std::env::remove_var("FAKE_TMUX_MODE") };
     }
 

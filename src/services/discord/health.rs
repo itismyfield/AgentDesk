@@ -74,8 +74,9 @@ pub use recovery::{
     stop_runtime_turn_preserving_watcher,
 };
 pub(crate) use recovery::{
-    channel_has_active_turn, rebind_channel_provider_session,
-    stop_provider_channel_runtime_with_policy,
+    channel_has_active_turn, clear_resume_runtime_owner_after_death,
+    rebind_channel_provider_session, resume_runtime_for_channel,
+    retain_resume_runtime_owner_before_teardown, stop_provider_channel_runtime_with_policy,
 };
 pub(crate) use runtime_resolve::resolve_utility_bot_http;
 pub use runtime_resolve::{fetch_channel_name, resolve_bot_http};
@@ -311,11 +312,7 @@ impl HealthRegistry {
             .collect()
     }
 
-    pub(in crate::services::discord) async fn register(
-        &self,
-        name: String,
-        shared: Arc<SharedData>,
-    ) {
+    pub(crate) async fn register(&self, name: String, shared: Arc<SharedData>) {
         self.register_with_role(name, shared, ProviderRuntimeRole::Gateway)
             .await;
     }

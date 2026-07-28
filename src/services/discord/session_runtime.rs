@@ -154,6 +154,19 @@ pub(in crate::services::discord) async fn rebind_channel_session(
 }
 
 #[cfg(test)]
+pub(crate) async fn resume_launch_state_for_tests(
+    shared: &SharedData,
+    channel_id: ChannelId,
+) -> Option<(Option<String>, String)> {
+    let mut data = shared.core.lock().await;
+    let (session_id, _, cwd) = crate::services::discord::router::load_session_runtime_state(
+        &mut data.sessions,
+        channel_id,
+    )?;
+    Some((session_id, cwd))
+}
+
+#[cfg(test)]
 mod resume_launch_binding_tests {
     use super::*;
 

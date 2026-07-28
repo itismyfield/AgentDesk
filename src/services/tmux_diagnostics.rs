@@ -34,12 +34,25 @@ pub fn tmux_session_has_live_pane(tmux_session_name: &str) -> bool {
     crate::services::platform::tmux::has_live_pane(tmux_session_name)
 }
 
-/// #3635: three-state pane liveness (`Live` / `DeadOrAbsent` / `ProbeError`).
-/// Use when a transient tmux probe failure must NOT be mistaken for death.
+/// #4489: three-state pane liveness (`Live` / `DeadOrAbsent` / `ProbeError`)
+/// with the platform probe's existing two-second subprocess bound. Use when a
+/// transient tmux probe failure must NOT be mistaken for death.
 pub fn tmux_session_pane_liveness(
     tmux_session_name: &str,
 ) -> crate::services::platform::tmux::PaneLiveness {
     crate::services::platform::tmux::pane_liveness(tmux_session_name)
+}
+
+/// Async adapter for the pre-existing #4489 pane probe. #4794 adopts the
+/// three-state answer off the Tokio worker and maps a blocking-task JoinError to
+/// `ProbeError`; it does not introduce the liveness states or two-second bound.
+pub async fn probe_tmux_session_pane_liveness(
+    tmux_session_name: &str,
+) -> crate::services::platform::tmux::PaneLiveness {
+    let name = tmux_session_name.to_string();
+    tokio::task::spawn_blocking(move || tmux_session_pane_liveness(&name))
+        .await
+        .unwrap_or(crate::services::platform::tmux::PaneLiveness::ProbeError)
 }
 
 /// #3208: the current working directory of the live pane for a tmux session.

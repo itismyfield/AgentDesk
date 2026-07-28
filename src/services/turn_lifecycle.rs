@@ -7,6 +7,31 @@ use crate::services::tmux_diagnostics::record_tmux_exit_reason;
 
 const DIRECT_FALLBACK_PATH: &str = "direct-fallback";
 
+#[cfg(test)]
+static FORCE_KILL_PRESERVE_TMUX_FOR_TESTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+#[cfg(test)]
+pub(crate) fn set_force_kill_preserve_tmux_for_test(tmux_session_name: &str, preserve: bool) {
+    let mut sessions = FORCE_KILL_PRESERVE_TMUX_FOR_TESTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if preserve {
+        sessions.insert(tmux_session_name.to_string());
+    } else {
+        sessions.remove(tmux_session_name);
+    }
+}
+
+#[cfg(test)]
+fn force_kill_preserves_tmux_for_test(tmux_session_name: &str) -> bool {
+    FORCE_KILL_PRESERVE_TMUX_FOR_TESTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains(tmux_session_name)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct TurnLifecycleTarget {
     pub provider: Option<ProviderKind>,
@@ -251,7 +276,13 @@ async fn stop_turn_with_policy(
             record_tmux_exit_reason(kill_target, &format!("explicit cleanup via {reason}"));
         }
 
-        let killed_now = if crate::services::platform::tmux::has_session(kill_target) {
+        #[cfg(test)]
+        let preserve_for_test = force_kill_preserves_tmux_for_test(kill_target);
+        #[cfg(not(test))]
+        let preserve_for_test = false;
+        let killed_now = if preserve_for_test {
+            false
+        } else if crate::services::platform::tmux::has_session(kill_target) {
             crate::services::platform::tmux::kill_session(
                 kill_target,
                 &format!("explicit cleanup via {reason}"),

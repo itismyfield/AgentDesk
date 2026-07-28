@@ -35,12 +35,45 @@ use crate::db::dispatched_sessions::{
     load_session_rebind_context_pg, rebind_session_provider_by_id_pg,
 };
 use crate::services::discord::health::{
-    HealthRegistry, channel_has_active_turn, rebind_channel_provider_session,
+    HealthRegistry, channel_has_active_turn, clear_resume_runtime_owner_after_death,
+    rebind_channel_provider_session, resume_runtime_for_channel,
+    retain_resume_runtime_owner_before_teardown,
 };
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
 use poise::serenity_prelude::ChannelId;
+
+const RESUME_CRITICAL_SECTION_WARN_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+
+struct ResumeCriticalSectionWatchdog(tokio::task::JoinHandle<()>);
+
+impl Drop for ResumeCriticalSectionWatchdog {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn start_resume_critical_section_watchdog(
+    channel_id: ChannelId,
+    provider: &ProviderKind,
+    warn_after: std::time::Duration,
+) -> ResumeCriticalSectionWatchdog {
+    let provider = provider.as_str().to_string();
+    ResumeCriticalSectionWatchdog(tokio::spawn(async move {
+        tokio::time::sleep(warn_after).await;
+        crate::services::observability::metrics::record_resume_critical_section_overrun(
+            channel_id.get(),
+            &provider,
+        );
+        tracing::warn!(
+            channel_id = channel_id.get(),
+            provider,
+            threshold_secs = warn_after.as_secs(),
+            "resume channel transition critical section exceeded its observation threshold"
+        );
+    }))
+}
 
 /// Request body for `POST /api/sessions/{session_key}/resume-previous`.
 ///
@@ -61,6 +94,31 @@ pub struct ResumePreviousOptions {
 
 /// Successful rebind result — returned to the HTTP caller and rendered into the
 /// slash-command reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResumeRuntimeBindingClearOutcome {
+    Cleared { tmux_session: String },
+    AlreadyAbsent { tmux_session: String },
+    RetainedLive { tmux_session: String },
+}
+
+impl ResumeRuntimeBindingClearOutcome {
+    fn status(&self) -> &'static str {
+        match self {
+            Self::Cleared { .. } => "cleared",
+            Self::AlreadyAbsent { .. } => "already_absent",
+            Self::RetainedLive { .. } => "retained_live",
+        }
+    }
+
+    fn tmux_session(&self) -> &str {
+        match self {
+            Self::Cleared { tmux_session }
+            | Self::AlreadyAbsent { tmux_session }
+            | Self::RetainedLive { tmux_session } => tmux_session,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ResumeRebindOutcome {
     pub(crate) target_session_id: String,
@@ -69,6 +127,7 @@ pub(crate) struct ResumeRebindOutcome {
     pub(crate) previous_cwd: Option<String>,
     pub(crate) tmux_killed: bool,
     pub(crate) lifecycle_path: &'static str,
+    pub(crate) runtime_binding_clear: ResumeRuntimeBindingClearOutcome,
     pub(crate) in_memory_rebound: bool,
     /// `true` when the target was auto-selected (no explicit `session_id`).
     pub(crate) auto_selected: bool,
@@ -82,6 +141,9 @@ pub(crate) enum ResumeRebindError {
     /// The channel has an in-flight dispatch or active turn; rebinding now would
     /// leave the running process writing to the old transcript.
     ActiveTurn,
+    /// Another intake/resume transition held the channel lock beyond the bounded
+    /// acquisition window. The caller may retry without partial mutation.
+    TransitionBusy,
     /// Auto mode found no prior provider session to resume.
     NoPreviousSession,
     /// Explicit `session_id` given but no `cwd` is known (row has no `cwd` and
@@ -106,6 +168,15 @@ impl ResumeRebindError {
                 StatusCode::CONFLICT,
                 Json(json!({
                     "error": "channel has an active turn or dispatch; stop it before resuming a previous session"
+                })),
+            ),
+            ResumeRebindError::TransitionBusy => (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": format!(
+                        "채널 세션 전환이 {}초 동안 계속 사용 중입니다. 잠시 후 /resume을 다시 시도해 주세요.",
+                        crate::services::discord::SESSION_TRANSITION_LOCK_WAIT_TIMEOUT.as_secs()
+                    )
                 })),
             ),
             ResumeRebindError::NoPreviousSession => (
@@ -153,6 +224,10 @@ impl ResumeRebindOutcome {
                 "previous_cwd": self.previous_cwd,
                 "tmux_killed": self.tmux_killed,
                 "lifecycle_path": self.lifecycle_path,
+                "runtime_binding_clear": {
+                    "status": self.runtime_binding_clear.status(),
+                    "tmux_session": self.runtime_binding_clear.tmux_session(),
+                },
                 "in_memory_rebound": self.in_memory_rebound,
                 "auto_selected": self.auto_selected,
             })),
@@ -315,6 +390,40 @@ pub(crate) async fn perform_resume_rebind(
     tmux_name: &str,
     opts: &ResumePreviousOptions,
 ) -> Result<ResumeRebindOutcome, ResumeRebindError> {
+    let resume_runtime = if let (Some(registry), Some(provider), Some(channel_id)) =
+        (registry, provider.as_ref(), channel_id)
+    {
+        resume_runtime_for_channel(registry, provider, channel_id).await
+    } else {
+        None
+    };
+    let _transition_guard = match resume_runtime.as_ref().zip(channel_id) {
+        Some((shared, channel_id)) => Some(
+            shared
+                .acquire_session_transition(channel_id)
+                .await
+                .map_err(|_| ResumeRebindError::TransitionBusy)?,
+        ),
+        None => None,
+    };
+    // Keep the guard through the conservatively-biased pane probe below. Releasing
+    // it earlier would let intake claim the channel from the old runtime snapshot
+    // while `/resume` is still deciding whether that runtime must be kept. The
+    // critical section deliberately has no cancelling timeout: after the durable
+    // DB rebind commits, cancelling before teardown, the pane decision, and the
+    // in-memory mirror complete would expose a mixed binding. Observe overruns
+    // instead, while preserving the transition atomically through completion.
+    let _critical_section_watchdog = match channel_id.zip(provider.as_ref()) {
+        Some((channel_id, provider)) if _transition_guard.is_some() => {
+            Some(start_resume_critical_section_watchdog(
+                channel_id,
+                provider,
+                RESUME_CRITICAL_SECTION_WARN_AFTER,
+            ))
+        }
+        _ => None,
+    };
+
     let Some(SessionRebindContext {
         resolved_session_key: _,
         session_id,
@@ -401,6 +510,16 @@ pub(crate) async fn perform_resume_rebind(
         return Err(ResumeRebindError::SessionNotFound);
     }
 
+    // Preserve the current authoritative owner before teardown can remove the
+    // watcher slot. If the pane survives, this owner-only entry bridges output
+    // until the resumed turn replaces it; confirmed pane death clears it below.
+    let owner_retained_before_teardown =
+        if let (Some(shared), Some(channel_id)) = (resume_runtime.as_deref(), channel_id) {
+            retain_resume_runtime_owner_before_teardown(shared, channel_id, tmux_name)
+        } else {
+            false
+        };
+
     // Teardown the channel's current tmux/turn via the shared lifecycle path.
     let mut tmux_killed = false;
     let mut lifecycle_path = "skipped-no-runtime";
@@ -422,20 +541,53 @@ pub(crate) async fn perform_resume_rebind(
         lifecycle_path = lifecycle.lifecycle_path;
     }
 
+    // If teardown actually retired the pane, forget its stale transcript/session
+    // mirror. Otherwise keep the live binding and its scan offset so output that
+    // arrives during the rebind remains eligible for delayed delivery.
+    let pane_liveness = if tmux_killed {
+        crate::services::platform::tmux::PaneLiveness::DeadOrAbsent
+    } else {
+        // #4794 adopts #4489's existing three-state/two-second pane probe through
+        // its async adapter; this call site contributes only the conservative
+        // state decision, while JoinError is mapped to ProbeError by the adapter.
+        crate::services::tmux_diagnostics::probe_tmux_session_pane_liveness(tmux_name).await
+    };
+    let runtime_binding_clear = match pane_liveness {
+        crate::services::platform::tmux::PaneLiveness::DeadOrAbsent => {
+            if owner_retained_before_teardown && let Some(shared) = resume_runtime.as_deref() {
+                clear_resume_runtime_owner_after_death(shared, tmux_name);
+            }
+            clear_resume_runtime_binding(tmux_name)
+        }
+        crate::services::platform::tmux::PaneLiveness::Live
+        | crate::services::platform::tmux::PaneLiveness::ProbeError => {
+            ResumeRuntimeBindingClearOutcome::RetainedLive {
+                tmux_session: tmux_name.trim().to_string(),
+            }
+        }
+    };
+
     // In-memory mirror so the next turn resumes without a restart.
-    let mut in_memory_rebound = false;
-    if let (Some(registry), Some(provider), Some(channel_id)) =
-        (registry, provider.as_ref(), channel_id)
+    let in_memory_rebound = if let (Some(shared), Some(provider), Some(channel_id)) =
+        (resume_runtime.as_deref(), provider.as_ref(), channel_id)
     {
-        in_memory_rebound = rebind_channel_provider_session(
-            registry,
-            provider.as_str(),
+        rebind_channel_provider_session(
+            shared,
+            provider,
             channel_id,
             &target_cwd,
             &target_session_id,
+            tmux_name,
+            matches!(
+                runtime_binding_clear,
+                ResumeRuntimeBindingClearOutcome::RetainedLive { .. }
+            ),
         )
         .await;
-    }
+        true
+    } else {
+        false
+    };
 
     Ok(ResumeRebindOutcome {
         target_session_id,
@@ -444,9 +596,19 @@ pub(crate) async fn perform_resume_rebind(
         previous_cwd: current_cwd,
         tmux_killed,
         lifecycle_path,
+        runtime_binding_clear,
         in_memory_rebound,
         auto_selected,
     })
+}
+
+fn clear_resume_runtime_binding(tmux_session: &str) -> ResumeRuntimeBindingClearOutcome {
+    let tmux_session = tmux_session.trim().to_string();
+    if crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&tmux_session) {
+        ResumeRuntimeBindingClearOutcome::Cleared { tmux_session }
+    } else {
+        ResumeRuntimeBindingClearOutcome::AlreadyAbsent { tmux_session }
+    }
 }
 
 /// An auto-selected previous-session candidate: the worktree and provider
@@ -597,8 +759,77 @@ pub(crate) fn discover_previous_claude_session_scoped(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use filetime::{FileTime, set_file_mtime};
+
+    #[test]
+    fn transition_busy_response_exposes_retryable_korean_contract() {
+        let (status, Json(body)) = ResumeRebindError::TransitionBusy.into_response();
+        assert_eq!(status, StatusCode::CONFLICT);
+        let error = body["error"]
+            .as_str()
+            .expect("busy response has error text");
+        assert!(error.contains("3초"));
+        assert!(error.contains("/resume을 다시 시도"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn critical_section_watchdog_records_once_without_cancelling_work() {
+        let channel_id = ChannelId::new(9_479_404);
+        let provider = ProviderKind::Claude;
+        let count = || {
+            crate::services::observability::metrics::snapshot()
+                .into_iter()
+                .find(|row| row.channel_id == channel_id.get() && row.provider == "claude")
+                .map_or(0, |row| row.resume_critical_section_overrun)
+        };
+        let before = count();
+        let watchdog = start_resume_critical_section_watchdog(
+            channel_id,
+            &provider,
+            RESUME_CRITICAL_SECTION_WARN_AFTER,
+        );
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(
+            RESUME_CRITICAL_SECTION_WARN_AFTER - std::time::Duration::from_secs(1),
+        )
+        .await;
+        tokio::task::yield_now().await;
+        assert_eq!(count(), before);
+
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(count(), before + 1);
+        drop(watchdog);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completed_critical_section_cancels_its_watchdog() {
+        let channel_id = ChannelId::new(9_479_405);
+        let provider = ProviderKind::Claude;
+        let before = crate::services::observability::metrics::snapshot()
+            .into_iter()
+            .find(|row| row.channel_id == channel_id.get() && row.provider == "claude")
+            .map_or(0, |row| row.resume_critical_section_overrun);
+        let watchdog = start_resume_critical_section_watchdog(
+            channel_id,
+            &provider,
+            RESUME_CRITICAL_SECTION_WARN_AFTER,
+        );
+        tokio::task::yield_now().await;
+        drop(watchdog);
+        tokio::time::advance(RESUME_CRITICAL_SECTION_WARN_AFTER).await;
+        tokio::task::yield_now().await;
+
+        let after = crate::services::observability::metrics::snapshot()
+            .into_iter()
+            .find(|row| row.channel_id == channel_id.get() && row.provider == "claude")
+            .map_or(0, |row| row.resume_critical_section_overrun);
+        assert_eq!(after, before);
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn off_runtime_discovery_preserves_selection_and_runtime_progress() {
@@ -677,6 +908,407 @@ mod tests {
 
     fn no_live_bound() -> std::collections::HashSet<String> {
         std::collections::HashSet::new()
+    }
+
+    fn runtime_binding(session_id: &str) -> crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            output_path: format!("/runtime/{session_id}.jsonl"),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some(session_id.to_string()),
+            last_offset: 0,
+            relay_last_offset: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_production_path_clears_stale_binding_and_rebinds_runtime() {
+        let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let registry = HealthRegistry::new();
+        registry
+            .register("claude".to_string(), Arc::clone(&shared))
+            .await;
+        let channel_id = ChannelId::new(4_794_101);
+        let tmux = "AgentDesk-claude-resume-production-path";
+        let unrelated = "AgentDesk-claude-resume-unrelated";
+        let session_key = "claude/test/host:AgentDesk-claude-resume-production-path";
+        let old_session_id = "11111111-1111-1111-1111-111111111111";
+        let target_session_id = "22222222-2222-2222-2222-222222222222";
+        let old_cwd = tempfile::tempdir().expect("old cwd");
+        let target_cwd = tempfile::tempdir().expect("target cwd");
+        let old_cwd = old_cwd.path().to_str().expect("utf8 old cwd");
+        let target_cwd = target_cwd.path().to_str().expect("utf8 target cwd");
+
+        sqlx::query(
+            "INSERT INTO sessions
+             (session_key, provider, status, cwd, claude_session_id,
+              raw_provider_session_id, last_heartbeat)
+             VALUES ($1, 'claude', 'idle', $2, $3, $3, NOW())",
+        )
+        .bind(session_key)
+        .bind(old_cwd)
+        .bind(old_session_id)
+        .execute(&pool)
+        .await
+        .expect("seed resume session");
+        rebind_channel_provider_session(
+            &shared,
+            &ProviderKind::Claude,
+            channel_id,
+            old_cwd,
+            old_session_id,
+            tmux,
+            false,
+        )
+        .await;
+        crate::services::tui_prompt_dedupe::register_provider_session(
+            "claude",
+            old_session_id,
+            tmux,
+        );
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            tmux,
+            runtime_binding(old_session_id),
+        );
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            unrelated,
+            runtime_binding("unrelated-sid"),
+        );
+
+        let outcome = perform_resume_rebind(
+            &pool,
+            Some(&registry),
+            session_key,
+            Some(ProviderKind::Claude),
+            Some(channel_id),
+            tmux,
+            &ResumePreviousOptions {
+                session_id: Some(target_session_id.to_string()),
+                cwd: Some(target_cwd.to_string()),
+            },
+        )
+        .await
+        .expect("resume target");
+
+        assert_eq!(outcome.lifecycle_path, "runtime-fallback");
+        assert!(outcome.in_memory_rebound);
+        assert_eq!(
+            outcome.runtime_binding_clear,
+            ResumeRuntimeBindingClearOutcome::Cleared {
+                tmux_session: tmux.to_string(),
+            }
+        );
+        assert!(
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux).is_none(),
+            "the retired runtime must not restore its provider session id"
+        );
+        assert_eq!(
+            crate::services::tui_prompt_dedupe::provider_session_for_tmux("claude", tmux),
+            None
+        );
+        assert!(
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(unrelated)
+                .is_some(),
+            "resume must retain unrelated runtime bindings"
+        );
+        let (selected_session_id, selected_cwd) =
+            crate::services::discord::resume_launch_state_for_tests(&shared, channel_id)
+                .await
+                .expect("target launch state");
+        assert_eq!(selected_session_id.as_deref(), Some(target_session_id));
+        assert_eq!(selected_cwd, target_cwd);
+
+        let durable: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT cwd, claude_session_id, raw_provider_session_id
+             FROM sessions WHERE session_key = $1",
+        )
+        .bind(session_key)
+        .fetch_one(&pool)
+        .await
+        .expect("load durable resume target");
+        assert_eq!(durable.0.as_deref(), Some(target_cwd));
+        assert_eq!(durable.1.as_deref(), Some(target_session_id));
+        assert_eq!(durable.2.as_deref(), Some(target_session_id));
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resume_production_path_retains_live_owner_after_teardown() {
+        let _env_guard = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !crate::services::platform::tmux::is_available() {
+            eprintln!("skipping retained-live resume test: tmux unavailable");
+            return;
+        }
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let registry = HealthRegistry::new();
+        registry
+            .register("claude".to_string(), Arc::clone(&shared))
+            .await;
+        let channel_id = ChannelId::new(4_794_103);
+        let tmux = format!("AgentDesk-resume-retained-live-{}", std::process::id());
+        let session_key = format!("claude/test/host:{tmux}");
+        let old_session_id = "77777777-7777-7777-7777-777777777777";
+        let target_session_id = "88888888-8888-8888-8888-888888888888";
+        let old_cwd = tempfile::tempdir().expect("old cwd");
+        let target_cwd = tempfile::tempdir().expect("target cwd");
+        let old_cwd = old_cwd.path().to_str().expect("utf8 old cwd");
+        let target_cwd = target_cwd.path().to_str().expect("utf8 target cwd");
+
+        let created = crate::services::platform::tmux::create_session(&tmux, None, "sleep 60")
+            .expect("create retained-live tmux session");
+        assert!(created.status.success(), "tmux session must start");
+        sqlx::query(
+            "INSERT INTO sessions
+             (session_key, provider, status, cwd, claude_session_id,
+              raw_provider_session_id, last_heartbeat)
+             VALUES ($1, 'claude', 'idle', $2, $3, $3, NOW())",
+        )
+        .bind(&session_key)
+        .bind(old_cwd)
+        .bind(old_session_id)
+        .execute(&pool)
+        .await
+        .expect("seed retained-live session");
+        rebind_channel_provider_session(
+            &shared,
+            &ProviderKind::Claude,
+            channel_id,
+            old_cwd,
+            old_session_id,
+            &tmux,
+            false,
+        )
+        .await;
+        crate::services::discord::register_resume_watcher_for_tests(&shared, channel_id, &tmux);
+        crate::services::tui_prompt_dedupe::register_provider_session(
+            "claude",
+            old_session_id,
+            &tmux,
+        );
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            &tmux,
+            runtime_binding(old_session_id),
+        );
+        crate::services::turn_lifecycle::set_force_kill_preserve_tmux_for_test(&tmux, true);
+
+        let outcome = perform_resume_rebind(
+            &pool,
+            Some(&registry),
+            &session_key,
+            Some(ProviderKind::Claude),
+            Some(channel_id),
+            &tmux,
+            &ResumePreviousOptions {
+                session_id: Some(target_session_id.to_string()),
+                cwd: Some(target_cwd.to_string()),
+            },
+        )
+        .await
+        .expect("retained-live resume target");
+
+        assert_eq!(
+            outcome.runtime_binding_clear,
+            ResumeRuntimeBindingClearOutcome::RetainedLive {
+                tmux_session: tmux.clone(),
+            }
+        );
+        assert_eq!(
+            crate::services::discord::resume_owner_channel_for_tests(&shared, &tmux),
+            Some(channel_id),
+            "production teardown must leave an authoritative owner-only binding"
+        );
+        assert!(
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&tmux).is_some(),
+            "retained live transcript binding and offset must survive"
+        );
+
+        crate::services::turn_lifecycle::set_force_kill_preserve_tmux_for_test(&tmux, false);
+        let _ = crate::services::platform::tmux::kill_session(&tmux, "retained-live test cleanup");
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[test]
+    fn resume_runtime_binding_clear_absence_is_success() {
+        let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap();
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+
+        assert_eq!(
+            clear_resume_runtime_binding("AgentDesk-claude-already-dead"),
+            ResumeRuntimeBindingClearOutcome::AlreadyAbsent {
+                tmux_session: "AgentDesk-claude-already-dead".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn production_resume_lock_blocks_effective_intake_snapshot_until_rebind_finishes() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let registry = HealthRegistry::new();
+        registry
+            .register("claude".to_string(), Arc::clone(&shared))
+            .await;
+        let channel_id = ChannelId::new(4_794_102);
+        let old_cwd = tempfile::tempdir().expect("old cwd");
+        let target_cwd = tempfile::tempdir().expect("target cwd");
+        let old_cwd = old_cwd.path().to_str().expect("utf8 old cwd").to_string();
+        let target_cwd = target_cwd
+            .path()
+            .to_str()
+            .expect("utf8 target cwd")
+            .to_string();
+        let old_session_id = "44444444-4444-4444-4444-444444444444";
+        let target_session_id = "55555555-5555-5555-5555-555555555555";
+        let tmux = "AgentDesk-claude-resume-intake-lock";
+        let session_key = "claude/test/host:AgentDesk-claude-resume-intake-lock";
+        sqlx::query(
+            "INSERT INTO sessions
+             (session_key, provider, status, cwd, claude_session_id,
+              raw_provider_session_id, last_heartbeat)
+             VALUES ($1, 'claude', 'idle', $2, $3, $3, NOW())",
+        )
+        .bind(session_key)
+        .bind(&old_cwd)
+        .bind(old_session_id)
+        .execute(&pool)
+        .await
+        .expect("seed lock test session");
+        rebind_channel_provider_session(
+            &shared,
+            &ProviderKind::Claude,
+            channel_id,
+            &old_cwd,
+            old_session_id,
+            tmux,
+            false,
+        )
+        .await;
+
+        let held = shared
+            .session_transition_lock(channel_id)
+            .lock_owned()
+            .await;
+        let resume_pool = pool.clone();
+        let resume_registry = registry;
+        let resume_target_cwd = target_cwd.clone();
+        let resume = tokio::spawn(async move {
+            perform_resume_rebind(
+                &resume_pool,
+                Some(&resume_registry),
+                session_key,
+                Some(ProviderKind::Claude),
+                Some(channel_id),
+                tmux,
+                &ResumePreviousOptions {
+                    session_id: Some(target_session_id.to_string()),
+                    cwd: Some(resume_target_cwd),
+                },
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !resume.is_finished(),
+            "production resume must acquire the channel lock"
+        );
+        drop(held);
+
+        let resume_lock = shared.session_transition_lock(channel_id);
+        let resume_guard = resume_lock.lock().await;
+        let busy_transition =
+            crate::services::discord::try_intake_runtime_transition_after_redirect(
+                &shared,
+                channel_id,
+                (None, false, old_cwd.clone()),
+            )
+            .await;
+        assert!(
+            busy_transition.is_err(),
+            "production intake must defer immediately while resume holds the lock"
+        );
+        drop(resume_guard);
+
+        let outcome = resume.await.unwrap().expect("production resume succeeds");
+        assert!(outcome.in_memory_rebound);
+        let transition = crate::services::discord::try_intake_runtime_transition_after_redirect(
+            &shared,
+            channel_id,
+            (None, false, old_cwd.clone()),
+        )
+        .await
+        .expect("production intake acquires the released transition lock");
+        assert_eq!(transition.state.0.as_deref(), Some(target_session_id));
+        assert_eq!(transition.state.2, target_cwd);
+        let blocked_resume_pool = pool.clone();
+        let blocked_resume_registry = HealthRegistry::new();
+        blocked_resume_registry
+            .register("claude".to_string(), Arc::clone(&shared))
+            .await;
+        let blocked_target_cwd = target_cwd.clone();
+        let blocked_resume = tokio::spawn(async move {
+            perform_resume_rebind(
+                &blocked_resume_pool,
+                Some(&blocked_resume_registry),
+                session_key,
+                Some(ProviderKind::Claude),
+                Some(channel_id),
+                tmux,
+                &ResumePreviousOptions {
+                    session_id: Some(target_session_id.to_string()),
+                    cwd: Some(blocked_target_cwd),
+                },
+            )
+            .await
+        });
+        let (claim_started_tx, claim_started_rx) = tokio::sync::oneshot::channel();
+        let (claim_release_tx, claim_release_rx) = tokio::sync::oneshot::channel();
+        let claim = tokio::spawn(async move {
+            transition
+                .complete_mailbox_claim(async move {
+                    let _ = claim_started_tx.send(());
+                    let _ = claim_release_rx.await;
+                })
+                .await;
+        });
+        claim_started_rx
+            .await
+            .expect("intake reaches the production claim span");
+        tokio::task::yield_now().await;
+        assert!(
+            !blocked_resume.is_finished(),
+            "resume must remain excluded until the intake claim completes"
+        );
+        let _ = claim_release_tx.send(());
+        claim.await.expect("claim span completes");
+        blocked_resume
+            .await
+            .expect("blocked resume task joins")
+            .expect("blocked resume succeeds after the claim");
+
+        pool.close().await;
+        pg_db.drop().await;
     }
 
     #[test]

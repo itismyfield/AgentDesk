@@ -991,7 +991,7 @@ mod busy_retry_fifo_tests {
             .intervention
             .expect("A is dequeued first");
         assert_eq!(dequeued.message_id, first.message_id);
-        crate::services::discord::mailbox_clear_pending_dispatch_reservation(
+        let _ = crate::services::discord::mailbox_clear_pending_dispatch_reservation(
             &shared,
             &provider,
             channel_id,
@@ -1032,7 +1032,7 @@ mod busy_retry_fifo_tests {
             .await
             .intervention
             .expect("A retries before B");
-        crate::services::discord::mailbox_abandon_pending_dispatch(
+        let _ = crate::services::discord::mailbox_abandon_pending_dispatch(
             &shared,
             &provider,
             channel_id,
@@ -1047,7 +1047,7 @@ mod busy_retry_fifo_tests {
             .expect("B remains second");
         assert_eq!(retried_first.message_id, first.message_id);
         assert_eq!(later_second.message_id, second.message_id);
-        crate::services::discord::mailbox_abandon_pending_dispatch(
+        let _ = crate::services::discord::mailbox_abandon_pending_dispatch(
             &shared,
             &provider,
             channel_id,
@@ -1065,7 +1065,7 @@ mod busy_retry_fifo_tests {
             .await
             .intervention
             .expect("normal FIFO returns A");
-        crate::services::discord::mailbox_abandon_pending_dispatch(
+        let _ = crate::services::discord::mailbox_abandon_pending_dispatch(
             &shared,
             &provider,
             channel_id,

@@ -9,19 +9,18 @@ impl ChannelMailboxHandle {
         &self,
         user_message_id: MessageId,
         persistence: QueuePersistenceContext,
-    ) {
-        let _ = self
-            .request(
-                |reply| ChannelMailboxMsg::AbandonPendingDispatch {
-                    user_message_id,
-                    dispatch_lease: None,
-                    persistence,
-                    consume_marker: true,
-                    reply,
-                },
-                false,
-            )
-            .await;
+    ) -> bool {
+        self.request(
+            |reply| ChannelMailboxMsg::AbandonPendingDispatch {
+                user_message_id,
+                dispatch_lease: None,
+                persistence,
+                consume_marker: true,
+                reply,
+            },
+            false,
+        )
+        .await
     }
 
     pub(crate) async fn abandon_pending_dispatch_if_lease_matches(
@@ -47,18 +46,17 @@ impl ChannelMailboxHandle {
         &self,
         user_message_id: MessageId,
         persistence: QueuePersistenceContext,
-    ) {
-        let _ = self
-            .request(
-                |reply| ChannelMailboxMsg::AbandonPendingDispatch {
-                    user_message_id,
-                    dispatch_lease: None,
-                    persistence,
-                    consume_marker: false,
-                    reply,
-                },
-                false,
-            )
-            .await;
+    ) -> bool {
+        self.request(
+            |reply| ChannelMailboxMsg::AbandonPendingDispatch {
+                user_message_id,
+                dispatch_lease: None,
+                persistence,
+                consume_marker: false,
+                reply,
+            },
+            false,
+        )
+        .await
     }
 }

@@ -112,9 +112,12 @@ pub(super) fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
                     RuntimeHandoffKind::ClaudeTui,
                 )
             {
-                let Some(channel_id) =
-                    owner_channel_for_tmux_session(&shared, &ProviderKind::Claude, &tmux_session_name)
-                else {
+                let Some(channel_id) = owner_channel_for_tmux_session(
+                    &shared,
+                    &ProviderKind::Claude,
+                    &tmux_session_name,
+                    RelayEmissionKind::Poll,
+                ) else {
                     // #3018/#3306/#3656: registry miss ⇒ drop; chokepoint repairs.
                     continue;
                 };

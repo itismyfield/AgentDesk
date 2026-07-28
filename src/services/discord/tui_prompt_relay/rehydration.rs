@@ -39,7 +39,7 @@ pub(super) fn claude_tui_session_is_dead_orphaned(
     }
     pane_is_confirmed_dead_orphaned(
         || crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name),
-        || crate::services::tmux_diagnostics::tmux_session_exists(tmux_session_name),
+        || crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
         DEAD_ORPHANED_PANE_PROBE_SAMPLES,
         Some(DEAD_ORPHANED_PANE_PROBE_DELAY),
     )
@@ -55,7 +55,7 @@ pub(super) fn claude_tui_session_is_dead_orphaned(
 #[cfg(unix)]
 pub(super) fn pane_is_confirmed_dead_orphaned(
     mut has_live_pane: impl FnMut() -> bool,
-    session_exists: impl FnOnce() -> bool,
+    session_liveness: impl FnOnce() -> crate::services::platform::tmux::PaneLiveness,
     samples: usize,
     inter_probe_delay: Option<Duration>,
 ) -> bool {
@@ -77,9 +77,12 @@ pub(super) fn pane_is_confirmed_dead_orphaned(
             }
         }
     }
-    // Every soft probe agreed the pane is dead. Require the hard has-session check
-    // to confirm the session truly does not exist before declaring it orphaned.
-    !session_exists()
+    // Every soft probe agreed the pane is dead. Require the three-state hard
+    // probe to confirm death; transport/permission failures preserve the mirror.
+    matches!(
+        session_liveness(),
+        crate::services::platform::tmux::PaneLiveness::DeadOrAbsent
+    )
 }
 
 /// #3105 (codex P1 sub-case B): evict the stale dedupe mirror for every Claude
@@ -110,10 +113,20 @@ pub(super) fn evict_dead_orphaned_claude_tui_mirrors(shared: &Arc<SharedData>) {
         shared
             .tmux_watchers
             .clear_restored_owner_for_tmux_session(&tmux_session_name);
+        let mirror_channel =
+            crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(&tmux_session_name)
+                .unwrap_or(0);
+        let permanent_loss_count =
+            super::super::idle_relay_drift::record_confirmed_dead_orphan_loss(
+                &ProviderKind::Claude,
+                &tmux_session_name,
+                mirror_channel,
+            );
         if crate::services::tui_prompt_dedupe::evict_dead_tmux_mirror(&tmux_session_name) {
             tracing::warn!(
                 tmux_session_name = %tmux_session_name,
                 provider = "claude",
+                permanent_loss_count,
                 "evicted stale dedupe mirror for dead/orphaned Claude TUI session \
                  (pane gone, no live watcher); idle relay will no longer re-emit \
                  per-poll drift/skip warnings for it"
@@ -132,7 +145,7 @@ fn codex_tui_session_is_dead_orphaned(shared: &Arc<SharedData>, tmux_session_nam
     }
     pane_is_confirmed_dead_orphaned(
         || crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name),
-        || crate::services::tmux_diagnostics::tmux_session_exists(tmux_session_name),
+        || crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
         DEAD_ORPHANED_PANE_PROBE_SAMPLES,
         Some(DEAD_ORPHANED_PANE_PROBE_DELAY),
     )
@@ -149,10 +162,20 @@ fn evict_dead_orphaned_codex_tui_mirrors(shared: &Arc<SharedData>) {
         shared
             .tmux_watchers
             .clear_restored_owner_for_tmux_session(&tmux_session_name);
+        let mirror_channel =
+            crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(&tmux_session_name)
+                .unwrap_or(0);
+        let permanent_loss_count =
+            super::super::idle_relay_drift::record_confirmed_dead_orphan_loss(
+                &ProviderKind::Codex,
+                &tmux_session_name,
+                mirror_channel,
+            );
         if crate::services::tui_prompt_dedupe::evict_dead_tmux_mirror(&tmux_session_name) {
             tracing::warn!(
                 tmux_session_name = %tmux_session_name,
                 provider = "codex",
+                permanent_loss_count,
                 "evicted stale dedupe mirror for dead/orphaned Codex TUI session \
                  (pane gone, no live watcher); idle relay will no longer re-emit \
                  per-poll drift/skip warnings for it"
@@ -208,15 +231,22 @@ pub(super) fn rehydrate_existing_claude_tui_bindings(shared: &Arc<SharedData>) {
             // and left the mirror to spam). `clear_restored_owner_*` above already
             // ran, so the dead-orphaned predicate cannot be masked by a stale
             // restored owner here.
-            if claude_tui_session_is_dead_orphaned(shared, &tmux_session_name)
-                && crate::services::tui_prompt_dedupe::evict_dead_tmux_mirror(&tmux_session_name)
-            {
-                tracing::warn!(
-                    tmux_session_name = %tmux_session_name,
-                    provider = "claude",
-                    "evicted stale dedupe mirror for dead/orphaned Claude TUI session \
-                     (listed pane dead, no live watcher)"
-                );
+            if claude_tui_session_is_dead_orphaned(shared, &tmux_session_name) {
+                let permanent_loss_count =
+                    super::super::idle_relay_drift::record_confirmed_dead_orphan_loss(
+                        &ProviderKind::Claude,
+                        &tmux_session_name,
+                        channel_id,
+                    );
+                if crate::services::tui_prompt_dedupe::evict_dead_tmux_mirror(&tmux_session_name) {
+                    tracing::warn!(
+                        tmux_session_name = %tmux_session_name,
+                        provider = "claude",
+                        permanent_loss_count,
+                        "evicted stale dedupe mirror for dead/orphaned Claude TUI session \
+                         (listed pane dead, no live watcher)"
+                    );
+                }
             }
             continue;
         }
@@ -347,15 +377,22 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(shared: &Arc<SharedData>) {
             shared
                 .tmux_watchers
                 .clear_restored_owner_for_tmux_session(&tmux_session_name);
-            if codex_tui_session_is_dead_orphaned(shared, &tmux_session_name)
-                && crate::services::tui_prompt_dedupe::evict_dead_tmux_mirror(&tmux_session_name)
-            {
-                tracing::warn!(
-                    tmux_session_name = %tmux_session_name,
-                    provider = "codex",
-                    "evicted stale dedupe mirror for dead/orphaned Codex TUI session \
-                     (listed pane dead, no live watcher)"
-                );
+            if codex_tui_session_is_dead_orphaned(shared, &tmux_session_name) {
+                let permanent_loss_count =
+                    super::super::idle_relay_drift::record_confirmed_dead_orphan_loss(
+                        &ProviderKind::Codex,
+                        &tmux_session_name,
+                        channel_id,
+                    );
+                if crate::services::tui_prompt_dedupe::evict_dead_tmux_mirror(&tmux_session_name) {
+                    tracing::warn!(
+                        tmux_session_name = %tmux_session_name,
+                        provider = "codex",
+                        permanent_loss_count,
+                        "evicted stale dedupe mirror for dead/orphaned Codex TUI session \
+                         (listed pane dead, no live watcher)"
+                    );
+                }
             }
             continue;
         }

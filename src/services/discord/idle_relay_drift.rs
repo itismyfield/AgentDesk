@@ -67,7 +67,8 @@ use poise::serenity_prelude::ChannelId;
 
 #[cfg(unix)]
 use super::SharedData;
-#[cfg(unix)]
+// `note_pending_emission_count` / `record_confirmed_dead_orphan_loss` and their
+// unit test are platform-independent, so this import must not be unix-gated.
 use crate::services::provider::ProviderKind;
 
 /// Re-emit the per-session drift WARN at most once per this window after the
@@ -90,6 +91,9 @@ struct DriftState {
     last_touched_at: Instant,
     last_warn_at: Option<Instant>,
     suppressed_count: u64,
+    pending_emission_count: u64,
+    pending_provider: Option<String>,
+    pending_channel_id: Option<u64>,
     #[cfg_attr(not(unix), allow(dead_code))]
     last_repair_attempt_at: Option<Instant>,
     repair_inflight: bool,
@@ -102,6 +106,9 @@ impl DriftState {
             last_touched_at: now,
             last_warn_at: None,
             suppressed_count: 0,
+            pending_emission_count: 0,
+            pending_provider: None,
+            pending_channel_id: None,
             last_repair_attempt_at: None,
             repair_inflight: false,
         }
@@ -152,10 +159,45 @@ fn decide_drift_warn(state: &mut DriftState, now: Instant) -> WarnDecision {
 }
 
 fn purge_expired_locked(map: &mut HashMap<String, DriftState>, now: Instant) {
-    map.retain(|_, state| {
-        state.repair_inflight
-            || now.saturating_duration_since(state.last_touched_at) < DRIFT_STATE_TTL
-    });
+    let expired = map
+        .iter()
+        .filter_map(|(tmux_session_name, state)| {
+            (!state.repair_inflight
+                && now.saturating_duration_since(state.last_touched_at) >= DRIFT_STATE_TTL)
+                .then(|| {
+                    (
+                        tmux_session_name.clone(),
+                        state.pending_emission_count,
+                        state.pending_channel_id.unwrap_or(0),
+                        state
+                            .pending_provider
+                            .as_deref()
+                            .unwrap_or("unknown")
+                            .to_string(),
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+
+    for (tmux_session_name, pending_count, channel_id, provider) in expired {
+        if pending_count > 0 {
+            crate::services::observability::metrics::record_relay_permanent_loss(
+                channel_id,
+                &provider,
+                crate::services::observability::metrics::RelayPermanentLossReason::DriftStateTtlExpired,
+                pending_count,
+            );
+            tracing::error!(
+                tmux_session_name = %tmux_session_name,
+                channel_id,
+                provider,
+                permanent_loss_count = pending_count,
+                permanent_loss_reason = "drift_state_ttl_expired",
+                "expired unresolved idle relay drift state with pending emissions"
+            );
+        }
+        map.remove(&tmux_session_name);
+    }
 }
 
 /// Rate-limit decision for the resolver-internal drift WARN (the
@@ -174,6 +216,55 @@ pub(super) fn should_emit_drift_warn(tmux_session_name: &str) -> WarnDecision {
     decide_drift_warn(state, now)
 }
 
+fn note_pending_emission_count(
+    tmux_session_name: &str,
+    provider: &ProviderKind,
+    channel_id: Option<u64>,
+    count: u64,
+) {
+    if count == 0 {
+        return;
+    }
+    let now = Instant::now();
+    let mut map = DRIFT_STATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    purge_expired_locked(&mut map, now);
+    let state = map
+        .entry(tmux_session_name.to_string())
+        .or_insert_with(|| DriftState::new(now));
+    state.pending_emission_count = state.pending_emission_count.saturating_add(count);
+    state.pending_provider = Some(provider.as_str().to_string());
+    if channel_id.is_some() {
+        state.pending_channel_id = channel_id;
+    }
+}
+
+fn take_pending_emission_count(tmux_session_name: &str) -> u64 {
+    let mut map = DRIFT_STATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let Some(state) = map.get_mut(tmux_session_name) else {
+        return 0;
+    };
+    std::mem::take(&mut state.pending_emission_count)
+}
+
+pub(super) fn record_confirmed_dead_orphan_loss(
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    channel_id: u64,
+) -> u64 {
+    let permanent_loss_count = take_pending_emission_count(tmux_session_name);
+    crate::services::observability::metrics::record_relay_permanent_loss(
+        channel_id,
+        provider.as_str(),
+        crate::services::observability::metrics::RelayPermanentLossReason::DeadPane,
+        permanent_loss_count,
+    );
+    permanent_loss_count
+}
+
 /// Source a repair value was promoted from (for the success log) or the reason a
 /// promotion was blocked / had no source.
 #[cfg(unix)]
@@ -190,8 +281,10 @@ pub(super) enum RepairSource {
 pub(super) enum BlockReason {
     /// DB row's `instance_id` belongs to another instance.
     ForeignInstance,
-    /// The tmux pane is no longer live.
+    /// The tmux pane is definitively dead or absent.
     DeadPane,
+    /// tmux could not provide a definitive pane result; preserve pending output.
+    PaneProbeError,
     /// The dedupe mirror channel disagrees with the DB channel (possible session
     /// name reuse / rebind — dropping is safer than mis-delivery).
     MirrorMismatch,
@@ -214,7 +307,7 @@ pub(super) enum RepairDecision {
 
 /// Resolved facts the IO layer feeds into the pure repair decision core.
 #[cfg(unix)]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(super) struct RepairInputs {
     /// Settings-derived channel (`resolve_rehydrated_claude_tmux_channel_id`).
     pub(super) settings_channel: Option<u64>,
@@ -226,8 +319,9 @@ pub(super) struct RepairInputs {
     pub(super) local_instance: String,
     /// Dedupe mirror's last-seen channel (drift witness / agreement check).
     pub(super) mirror_channel: Option<u64>,
-    /// Whether the tmux session currently has a live pane.
-    pub(super) pane_live: bool,
+    /// Three-state bounded tmux pane result. `ProbeError` must preserve pending
+    /// emissions because unknown liveness is not proof of permanent loss.
+    pub(super) pane_liveness: crate::services::platform::tmux::PaneLiveness,
 }
 
 /// Pure, IO-free repair decision (#3306). Mis-delivery is strictly worse than a
@@ -239,14 +333,14 @@ pub(super) struct RepairInputs {
 ///    guards: live pane, matching instance, AND mirror-agrees.
 #[cfg(unix)]
 pub(super) fn evaluate_drift_repair(inputs: &RepairInputs) -> RepairDecision {
-    if !inputs.pane_live {
-        // A dead pane can never resolve (mirrors the #3105 dead-pane branch). If
-        // there is no candidate at all, report NoSource so callers don't log a
-        // spurious block.
-        if inputs.settings_channel.is_none() && inputs.db_channel.is_none() {
-            return RepairDecision::NoSource;
+    match inputs.pane_liveness {
+        crate::services::platform::tmux::PaneLiveness::Live => {}
+        crate::services::platform::tmux::PaneLiveness::DeadOrAbsent => {
+            return RepairDecision::Blocked(BlockReason::DeadPane);
         }
-        return RepairDecision::Blocked(BlockReason::DeadPane);
+        crate::services::platform::tmux::PaneLiveness::ProbeError => {
+            return RepairDecision::Blocked(BlockReason::PaneProbeError);
+        }
     }
 
     if let Some(channel) = inputs.settings_channel {
@@ -345,24 +439,26 @@ pub(super) fn on_idle_relay_drift(
     _shared: &std::sync::Arc<super::SharedData>,
     _provider: crate::services::provider::ProviderKind,
     _tmux_session_name: &str,
+    _emission_count: u64,
 ) {
 }
 
-/// Entry point invoked from the owner-resolution chokepoint's drift (drop)
-/// branch. The resolver owns the single rate-limited drift WARN; this path only
-/// fires the Claude one-shot async repair (cooldown + single-flight gated).
+/// Entry point invoked from the owner-resolution chokepoint's drift branch.
+/// The resolver owns the single rate-limited WARN; this path tracks only actual
+/// observed-prompt emissions (poll misses pass zero) and runs one bounded repair
+/// or permanent-loss classification for both Claude and Codex.
 #[cfg(unix)]
 pub(super) fn on_idle_relay_drift(
     shared: &Arc<SharedData>,
     provider: ProviderKind,
     tmux_session_name: &str,
+    emission_count: u64,
 ) {
-    // Repair is Claude-only: the settings resolver is Claude-specific and the
-    // durable DB column is written by the Claude/routine hook flow. Codex drift
-    // is WARN-only at the resolver.
-    if provider != ProviderKind::Claude {
-        return;
-    }
+    let channel_id = shared
+        .tmux_watchers
+        .owner_channel_for_tmux_session(tmux_session_name)
+        .map(|channel| channel.get());
+    note_pending_emission_count(tmux_session_name, &provider, channel_id, emission_count);
     if tokio::runtime::Handle::try_current().is_err() {
         return;
     }
@@ -377,36 +473,44 @@ pub(super) fn on_idle_relay_drift(
     super::task_supervisor::spawn_observed("idle_relay_drift_repair", async move {
         // The guard is moved into the task so the single-flight slot stays held
         // for the whole repair and is released (even on panic) on drop.
-        attempt_drift_repair(&shared, &tmux_session_name, guard).await;
+        attempt_drift_repair(&shared, provider, &tmux_session_name, guard).await;
     });
 }
 
 #[cfg(unix)]
 async fn attempt_drift_repair(
     shared: &Arc<SharedData>,
+    provider: ProviderKind,
     tmux_session_name: &str,
     _guard: RepairInflightGuard,
 ) {
-    // (a) settings source — synchronous, no lock held.
-    let settings_channel =
-        super::tui_prompt_relay::resolve_rehydrated_claude_tmux_channel_id(tmux_session_name);
+    // Claude has settings + sessions-table repair sources. Codex still runs the
+    // same bounded liveness/accounting path; it simply has no promotable source.
+    let settings_channel = (provider == ProviderKind::Claude)
+        .then(|| {
+            super::tui_prompt_relay::resolve_rehydrated_claude_tmux_channel_id(tmux_session_name)
+        })
+        .flatten();
 
-    // (b) durable DB source — `sessions.channel_id` for either the namespaced or
-    // the legacy session key. Only consulted when storage is configured.
-    let (db_channel, db_instance) = load_db_channel(shared, tmux_session_name).await;
+    let (db_channel, db_instance) = if provider == ProviderKind::Claude {
+        load_db_channel(shared, tmux_session_name).await
+    } else {
+        (None, None)
+    };
 
     // Drift witness / agreement check value (read-only mirror use).
     let mirror_channel =
         crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(tmux_session_name);
 
-    // Live-pane check on the blocking pool (synchronous tmux subprocess call).
-    let pane_live = {
+    // The shared #3635 probe bounds both tmux commands and keeps transient probe
+    // failures distinct from confirmed death. A blocking-task failure is unknown.
+    let pane_liveness = {
         let probe_name = tmux_session_name.to_string();
         tokio::task::spawn_blocking(move || {
-            crate::services::tmux_diagnostics::tmux_session_has_live_pane(&probe_name)
+            crate::services::tmux_diagnostics::tmux_session_pane_liveness(&probe_name)
         })
         .await
-        .unwrap_or(false)
+        .unwrap_or(crate::services::platform::tmux::PaneLiveness::ProbeError)
     };
 
     let inputs = RepairInputs {
@@ -416,42 +520,67 @@ async fn attempt_drift_repair(
         local_instance:
             crate::services::cluster::node_registry::resolve_self_instance_id_without_config(),
         mirror_channel,
-        pane_live,
+        pane_liveness,
     };
 
     match evaluate_drift_repair(&inputs) {
         RepairDecision::Promote { source, channel } => {
-            // All awaits are complete; `restore_owner_channel_for_tmux_session`
-            // briefly takes the registry lock synchronously (no await held).
+            // Whether this call inserted a row or another actor already repaired
+            // it, a successful authoritative lookup means every pending emission
+            // remains delayed/retryable rather than permanently lost.
             let repaired = shared
                 .tmux_watchers
                 .restore_owner_channel_for_tmux_session(tmux_session_name, ChannelId::new(channel));
-            if repaired {
-                tracing::warn!(
-                    tmux_session_name = %tmux_session_name,
-                    channel_id = channel,
-                    repair_source = source.label(),
-                    provider = "claude",
-                    "repaired authoritative tmux-session→channel registry (drift-triggered); \
-                     idle relay can route again"
-                );
-            }
+            let authoritative = shared
+                .tmux_watchers
+                .owner_channel_for_tmux_session(tmux_session_name)
+                == Some(ChannelId::new(channel));
+            let delayed_emission_count = if authoritative {
+                take_pending_emission_count(tmux_session_name)
+            } else {
+                0
+            };
+            tracing::warn!(
+                tmux_session_name = %tmux_session_name,
+                channel_id = channel,
+                repair_source = source.label(),
+                provider = provider.as_str(),
+                repaired,
+                authoritative,
+                delayed_emission_count,
+                "evaluated authoritative tmux-session→channel registry repair"
+            );
         }
         RepairDecision::Blocked(reason) => {
+            let permanent_loss_count = if reason == BlockReason::DeadPane {
+                take_pending_emission_count(tmux_session_name)
+            } else {
+                0
+            };
+            let metric_channel = mirror_channel.or(db_channel).unwrap_or(0);
+            if permanent_loss_count > 0 {
+                crate::services::observability::metrics::record_relay_permanent_loss(
+                    metric_channel,
+                    provider.as_str(),
+                    crate::services::observability::metrics::RelayPermanentLossReason::DeadPane,
+                    permanent_loss_count,
+                );
+            }
             tracing::warn!(
                 tmux_session_name = %tmux_session_name,
                 block_reason = reason.label(),
                 db_channel_id = db_channel,
                 mirror_channel_id = mirror_channel,
-                provider = "claude",
-                "idle relay drift repair blocked; keeping the drop (no mis-delivery)"
+                provider = provider.as_str(),
+                permanent_loss_count,
+                "idle relay drift repair blocked; preserving fail-closed routing"
             );
         }
         RepairDecision::NoSource => {
             tracing::debug!(
                 tmux_session_name = %tmux_session_name,
-                provider = "claude",
-                "idle relay drift repair found no durable source; keeping the drop"
+                provider = provider.as_str(),
+                "idle relay drift repair has no routing source while pane remains live"
             );
         }
     }
@@ -502,6 +631,7 @@ impl BlockReason {
         match self {
             BlockReason::ForeignInstance => "foreign_instance",
             BlockReason::DeadPane => "dead_pane",
+            BlockReason::PaneProbeError => "pane_probe_error",
             BlockReason::MirrorMismatch => "mirror_mismatch",
             BlockReason::NoMirrorWitness => "no_mirror_witness",
         }
@@ -546,7 +676,7 @@ mod tests {
             db_instance: None,
             local_instance: "host-1234".to_string(),
             mirror_channel: None,
-            pane_live: true,
+            pane_liveness: crate::services::platform::tmux::PaneLiveness::Live,
         }
     }
 
@@ -609,7 +739,7 @@ mod tests {
     fn settings_hit_live_pane_promotes_settings() {
         let i = RepairInputs {
             settings_channel: Some(111),
-            pane_live: true,
+            pane_liveness: crate::services::platform::tmux::PaneLiveness::Live,
             ..inputs()
         };
         assert_eq!(
@@ -629,7 +759,7 @@ mod tests {
             mirror_channel: Some(222),
             db_instance: Some("host-1234".to_string()),
             local_instance: "host-1234".to_string(),
-            pane_live: true,
+            pane_liveness: crate::services::platform::tmux::PaneLiveness::Live,
             ..inputs()
         };
         assert_eq!(
@@ -650,7 +780,7 @@ mod tests {
         let i = RepairInputs {
             db_channel: Some(1),     // C1 (stale)
             mirror_channel: Some(2), // C2 (new dispatch witness)
-            pane_live: true,
+            pane_liveness: crate::services::platform::tmux::PaneLiveness::Live,
             ..inputs()
         };
         assert_eq!(
@@ -665,7 +795,7 @@ mod tests {
         let i = RepairInputs {
             db_channel: Some(222),
             mirror_channel: None,
-            pane_live: true,
+            pane_liveness: crate::services::platform::tmux::PaneLiveness::Live,
             ..inputs()
         };
         assert_eq!(
@@ -682,7 +812,7 @@ mod tests {
             mirror_channel: Some(222),
             db_instance: Some("other-host-9999".to_string()),
             local_instance: "host-1234".to_string(),
-            pane_live: true,
+            pane_liveness: crate::services::platform::tmux::PaneLiveness::Live,
             ..inputs()
         };
         assert_eq!(
@@ -696,7 +826,7 @@ mod tests {
     fn dead_pane_blocks_any_candidate() {
         let i = RepairInputs {
             settings_channel: Some(111),
-            pane_live: false,
+            pane_liveness: crate::services::platform::tmux::PaneLiveness::DeadOrAbsent,
             ..inputs()
         };
         assert_eq!(
@@ -707,12 +837,28 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn dead_pane_no_candidate_is_no_source() {
+    fn dead_pane_without_source_is_still_permanent() {
         let i = RepairInputs {
-            pane_live: false,
+            pane_liveness: crate::services::platform::tmux::PaneLiveness::DeadOrAbsent,
             ..inputs()
         };
-        assert_eq!(evaluate_drift_repair(&i), RepairDecision::NoSource);
+        assert_eq!(
+            evaluate_drift_repair(&i),
+            RepairDecision::Blocked(BlockReason::DeadPane)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_error_preserves_pending_emissions() {
+        let i = RepairInputs {
+            pane_liveness: crate::services::platform::tmux::PaneLiveness::ProbeError,
+            ..inputs()
+        };
+        assert_eq!(
+            evaluate_drift_repair(&i),
+            RepairDecision::Blocked(BlockReason::PaneProbeError)
+        );
     }
 
     #[cfg(unix)]
@@ -722,7 +868,62 @@ mod tests {
         assert_eq!(evaluate_drift_repair(&inputs()), RepairDecision::NoSource);
     }
 
+    #[test]
+    fn confirmed_dead_orphan_drains_pending_emissions_once() {
+        let _serial = DRIFT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_drift_state_for_tests();
+        let tmux = "AgentDesk-codex-confirmed-dead-orphan";
+
+        note_pending_emission_count(tmux, &ProviderKind::Codex, Some(4_794), 3);
+        assert_eq!(
+            record_confirmed_dead_orphan_loss(&ProviderKind::Codex, tmux, 4_794),
+            3
+        );
+        assert_eq!(
+            record_confirmed_dead_orphan_loss(&ProviderKind::Codex, tmux, 4_794),
+            0,
+            "take semantics must prevent duplicate permanent-loss attribution"
+        );
+        reset_drift_state_for_tests();
+    }
+
     // --- cooldown / single-flight state machine ------------------------
+
+    #[test]
+    fn ttl_expiry_accounts_pending_emissions_before_removal() {
+        let _serial = DRIFT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_drift_state_for_tests();
+        let tmux = "AgentDesk-claude-expired-pending";
+        let channel_id = 4_794_024;
+        let before = crate::services::observability::metrics::snapshot()
+            .into_iter()
+            .find(|row| row.channel_id == channel_id && row.provider == "claude")
+            .map(|row| row.relay_permanent_loss_drift_state_ttl_expired)
+            .unwrap_or(0);
+        let now = Instant::now();
+        let mut map = DRIFT_STATE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut state = DriftState::new(now - DRIFT_STATE_TTL - Duration::from_secs(1));
+        state.pending_emission_count = 4;
+        state.pending_provider = Some("claude".to_string());
+        state.pending_channel_id = Some(channel_id);
+        map.insert(tmux.to_string(), state);
+
+        purge_expired_locked(&mut map, now);
+        assert!(
+            !map.contains_key(tmux),
+            "expired drift state must be removed"
+        );
+        drop(map);
+        let after = crate::services::observability::metrics::snapshot()
+            .into_iter()
+            .find(|row| row.channel_id == channel_id && row.provider == "claude")
+            .map(|row| row.relay_permanent_loss_drift_state_ttl_expired)
+            .unwrap_or(0);
+        assert_eq!(after - before, 4, "TTL loss must be counted exactly once");
+        reset_drift_state_for_tests();
+    }
 
     #[cfg(unix)]
     #[test]

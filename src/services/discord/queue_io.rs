@@ -139,6 +139,14 @@ pub(super) fn schedule_race_loss_requeue_post_enqueue_idle_recheck(
     channel_id: ChannelId,
 ) {
     super::task_supervisor::spawn_observed("race_loss_requeue_idle_recheck", async move {
+        // A race-loss recheck is an edge-trigger, not competing transition
+        // authority. Waiting here coalesces the one recheck behind the current
+        // transition instead of dequeue/requeue spinning while it is held.
+        let transition_guard = shared
+            .session_transition_lock(channel_id)
+            .lock_owned()
+            .await;
+
         let snapshot = super::mailbox_snapshot(&shared, channel_id).await;
         if !race_loss_requeue_snapshot_has_idle_kickable_backlog(
             &shared, &provider, channel_id, &snapshot,
@@ -153,6 +161,7 @@ pub(super) fn schedule_race_loss_requeue_post_enqueue_idle_recheck(
             return;
         }
 
+        drop(transition_guard);
         let outcome = kick_idle_queue_channel_if_context_available(
             &shared,
             &provider,
@@ -1674,8 +1683,13 @@ mod presleep_tests {
                         )
                         .await;
                         assert!(requeue.enqueued, "race-loss path requeues the message");
-                        mailbox_abandon_pending_dispatch(&shared, &provider, channel, requeued_msg)
-                            .await;
+                        let _ = mailbox_abandon_pending_dispatch(
+                            &shared,
+                            &provider,
+                            channel,
+                            requeued_msg,
+                        )
+                        .await;
                         schedule_race_loss_requeue_post_enqueue_idle_recheck(
                             shared.clone(),
                             provider.clone(),
@@ -1851,6 +1865,82 @@ mod presleep_tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn race_loss_recheck_waits_for_transition_before_kickoff_4794() {
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(tmp.path());
+
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_794_210);
+        let queued_msg = MessageId::new(4_794_211);
+        shared
+            .mailbox(channel_id)
+            .replace_queue(
+                vec![user_intervention(
+                    queued_msg.get(),
+                    "queued during transition",
+                )],
+                queue_persistence_context(&shared, &provider, channel_id),
+            )
+            .await;
+
+        let transition_guard = shared
+            .session_transition_lock(channel_id)
+            .lock_owned()
+            .await;
+        let kick_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_calls = kick_calls.clone();
+        let _hook = set_idle_queue_kick_hook_for_tests(Arc::new(
+            move |shared, provider, channel, reason| {
+                let hook_calls = hook_calls.clone();
+                Box::pin(async move {
+                    if channel != channel_id {
+                        return None;
+                    }
+                    assert_eq!(reason, "race_loss_requeue_idle_recheck");
+                    hook_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let taken = super::super::mailbox_take_next_automatic_intervention(
+                        &shared, &provider, channel,
+                    )
+                    .await;
+                    Some(IdleQueueKickoffChannelOutcome {
+                        started: taken.intervention.is_some(),
+                    })
+                })
+            },
+        ));
+
+        schedule_race_loss_requeue_post_enqueue_idle_recheck(
+            shared.clone(),
+            provider.clone(),
+            channel_id,
+        );
+        yield_backstop_tasks().await;
+        assert_eq!(
+            kick_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the production kickoff seam must not run while transition is held"
+        );
+        assert_eq!(
+            mailbox_snapshot(&shared, channel_id)
+                .await
+                .intervention_queue
+                .first()
+                .map(|item| item.message_id),
+            Some(queued_msg),
+            "waiting recheck must leave the queued head untouched"
+        );
+
+        drop(transition_guard);
+        yield_backstop_tasks().await;
+        assert_eq!(
+            kick_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "exactly one coalesced recheck runs after transition release"
+        );
+    }
+
     #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
     async fn race_loss_requeue_idle_recheck_kicks_after_missed_completion_4078() {
@@ -1942,7 +2032,7 @@ mod presleep_tests {
         ))
         .await;
         assert!(requeue.enqueued, "race-loss requeue lands durably");
-        mailbox_abandon_pending_dispatch(&shared, &provider, channel_id, queued_msg).await;
+        let _ = mailbox_abandon_pending_dispatch(&shared, &provider, channel_id, queued_msg).await;
         schedule_race_loss_requeue_post_enqueue_idle_recheck(
             shared.clone(),
             provider.clone(),

@@ -377,7 +377,12 @@ async fn owner_channel_chokepoint_triggers_drift_repair_on_drift_drop() {
 
     crate::services::tui_prompt_dedupe::register_tmux_channel(tmux, owner.get());
     assert_eq!(
-        owner_channel_for_tmux_session(&shared, &ProviderKind::Claude, tmux),
+        owner_channel_for_tmux_session(
+            &shared,
+            &ProviderKind::Claude,
+            tmux,
+            RelayEmissionKind::Poll
+        ),
         None,
         "registry miss + mirror hit still drops rather than routing from the mirror"
     );
@@ -414,7 +419,12 @@ fn live_session_relay_self_heals_via_authoritative_registry_not_mirror() {
     // (1)+(2): the mirror alone must never be used as the delivery owner —
     // the resolver drops (the #3018 single-authority rule stays intact).
     assert_eq!(
-        owner_channel_for_tmux_session(&shared, &ProviderKind::Claude, tmux),
+        owner_channel_for_tmux_session(
+            &shared,
+            &ProviderKind::Claude,
+            tmux,
+            RelayEmissionKind::Poll
+        ),
         None,
         "registry miss + dedupe mirror hit must drop, never route from the mirror"
     );
@@ -429,7 +439,12 @@ fn live_session_relay_self_heals_via_authoritative_registry_not_mirror() {
         "first restore reports a change (single bounded incident)"
     );
     assert_eq!(
-        owner_channel_for_tmux_session(&shared, &ProviderKind::Claude, tmux),
+        owner_channel_for_tmux_session(
+            &shared,
+            &ProviderKind::Claude,
+            tmux,
+            RelayEmissionKind::Poll
+        ),
         Some(owner),
         "after authoritative re-registration the live session must route again"
     );
@@ -463,7 +478,12 @@ fn drift_triggered_restore_makes_routine_session_route_again() {
     // Drift precondition: mirror holds a mapping, registry misses ⇒ drop.
     crate::services::tui_prompt_dedupe::register_tmux_channel(tmux, owner.get());
     assert_eq!(
-        owner_channel_for_tmux_session(&shared, &ProviderKind::Claude, tmux),
+        owner_channel_for_tmux_session(
+            &shared,
+            &ProviderKind::Claude,
+            tmux,
+            RelayEmissionKind::Poll
+        ),
         None,
         "registry miss + mirror hit must drop (drift), never route from mirror"
     );
@@ -476,7 +496,12 @@ fn drift_triggered_restore_makes_routine_session_route_again() {
         .restore_owner_channel_for_tmux_session(tmux, owner);
     assert!(repaired, "first drift-triggered restore reports a change");
     assert_eq!(
-        owner_channel_for_tmux_session(&shared, &ProviderKind::Claude, tmux),
+        owner_channel_for_tmux_session(
+            &shared,
+            &ProviderKind::Claude,
+            tmux,
+            RelayEmissionKind::Poll
+        ),
         Some(owner),
         "after the drift-triggered authoritative restore the session routes again"
     );
@@ -545,7 +570,12 @@ fn dead_orphaned_session_mirror_is_evicted_and_stops_drift_spam() {
         "precondition: dead session's binding is in the relay loop's iteration set"
     );
     assert_eq!(
-        owner_channel_for_tmux_session(&shared, &ProviderKind::Claude, tmux),
+        owner_channel_for_tmux_session(
+            &shared,
+            &ProviderKind::Claude,
+            tmux,
+            RelayEmissionKind::Poll
+        ),
         None,
         "precondition: registry misses + mirror hit == the drift the relay loop hits"
     );
@@ -635,7 +665,7 @@ fn transient_pane_flake_on_live_session_is_not_dead_orphaned() {
     let is_dead = pane_is_confirmed_dead_orphaned(
         || live_reads.borrow_mut().next().unwrap_or(true),
         // session_exists must NOT even be consulted once a live pane is seen.
-        || panic!("session_exists must not be probed once a live pane is observed"),
+        || panic!("session liveness must not be probed once a live pane is observed"),
         DEAD_ORPHANED_PANE_PROBE_SAMPLES,
         None,
     );
@@ -660,7 +690,7 @@ fn genuinely_gone_session_is_still_dead_orphaned_after_retries() {
             probe_count.set(probe_count.get() + 1);
             false // never a live pane
         },
-        || false, // hard has-session: session truly gone
+        || crate::services::platform::tmux::PaneLiveness::DeadOrAbsent,
         DEAD_ORPHANED_PANE_PROBE_SAMPLES,
         None,
     );
@@ -685,13 +715,28 @@ fn genuinely_gone_session_is_still_dead_orphaned_after_retries() {
 fn confirmed_existing_session_is_not_dead_even_if_pane_probes_flake() {
     let is_dead = pane_is_confirmed_dead_orphaned(
         || false, // soft pane probe: reads dead on every sample
-        || true,  // hard has-session: the session IS present on this host
+        || crate::services::platform::tmux::PaneLiveness::Live,
         DEAD_ORPHANED_PANE_PROBE_SAMPLES,
         None,
     );
     assert!(
         !is_dead,
         "a session still present per has-session must not be evicted on soft pane reads alone"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn hard_probe_failure_preserves_dead_looking_session() {
+    let is_dead = pane_is_confirmed_dead_orphaned(
+        || false,
+        || crate::services::platform::tmux::PaneLiveness::ProbeError,
+        DEAD_ORPHANED_PANE_PROBE_SAMPLES,
+        None,
+    );
+    assert!(
+        !is_dead,
+        "a failed hard probe is unknown and must not evict the runtime mirror"
     );
 }
 

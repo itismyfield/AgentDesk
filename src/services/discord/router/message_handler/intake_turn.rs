@@ -8,9 +8,11 @@ use super::*;
 
 mod adk_thread;
 mod claim_bootstrap;
+mod dispatch_runtime;
 pub(crate) mod inflight_create_log;
 mod placeholder_handoff;
 pub(super) mod race_loss;
+mod runtime_transition;
 mod stale_dispatch_guard;
 mod steering_hook;
 mod turn_watchdog;
@@ -784,62 +786,40 @@ pub(super) async fn handle_text_message(
     } else {
         channel_id
     };
-    let final_thread_parent = super::super::super::resolve_thread_parent(http, channel_id).await;
-    let mut authoritative = dispatch_worktree_path.is_some() || dispatch_target_repo_path.is_some();
-    if dispatch_should_recover_session_worktree(
-        dispatch_id_for_thread.is_some(),
-        dispatch_type_str.as_deref(),
-        dispatch_worktree_path.is_some(),
-    ) {
-        let session_worktree_path = {
-            let data = shared.core.lock().await;
-            data.sessions
-                .get(&channel_id)
-                .and_then(|session| session.worktree.as_ref())
-                .map(|worktree| worktree.worktree_path.clone())
-                .filter(|path| std::path::Path::new(path).is_dir())
-        };
-        if let Some(worktree_path) = session_worktree_path {
-            authoritative = true;
-            if dispatch_effective_path != worktree_path {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] 🌿 Dispatch recovered thread worktree CWD: {} → {}",
-                    dispatch_effective_path,
-                    worktree_path
-                );
-                dispatch_effective_path = worktree_path;
-            }
-        }
-    }
-    let active_dispatch_id_for_prompt =
-        super::super::super::adk_session::lookup_pending_dispatch_for_thread(
-            shared.api_port,
-            channel_id.get(),
-        )
-        .await
-        .or_else(|| dispatch_id_for_thread.clone());
-    let active_dispatch_info = match active_dispatch_id_for_prompt.as_deref() {
-        Some(did) if dispatch_id_for_thread.as_deref() == Some(did) => dispatch_info_cached.clone(),
-        Some(did) => super::super::lookup_dispatch_info(shared.api_port, did).await,
-        None => None,
-    };
-    if let Some(active_dispatch_type) = active_dispatch_info
-        .as_ref()
-        .and_then(|info| info.dispatch_type.clone())
-    {
-        dispatch_type_str = Some(active_dispatch_type);
-    }
-
-    let (mut session_id, mut memento_context_loaded, current_path) = {
-        let mut data = shared.core.lock().await;
-        session_runtime_state_after_redirect(
-            &mut data.sessions,
-            original_channel_id,
+    let (final_thread_parent, authoritative, active_dispatch_info, active_dispatch_id_for_prompt) =
+        dispatch_runtime::prepare_post_redirect_dispatch_runtime(
+            http,
+            shared,
             channel_id,
-            (session_id, memento_context_loaded, current_path),
+            dispatch_id_for_thread.as_ref(),
+            dispatch_info_cached.clone(),
+            (
+                dispatch_worktree_path.as_ref(),
+                dispatch_target_repo_path.as_ref(),
+            ),
+            (&mut dispatch_type_str, &mut dispatch_effective_path),
         )
+        .await;
+    let Some(intake_runtime_transition) = runtime_transition::acquire_after_redirect_or_requeue(
+        (http, shared, token, &provider),
+        (channel_id, original_channel_id),
+        (turn_kind, original_request_owner, user_msg_id, user_text),
+        (&reply_context, has_reply_boundary, merge_consecutive),
+        (&pending_uploads, &voice_announcement),
+        (
+            reply_to_user_message,
+            &dispatch_id_for_thread,
+            turn_start_attempt,
+            preserve_on_cancel,
+        ),
+        (session_id, memento_context_loaded, current_path),
+    )
+    .await?
+    else {
+        return Ok(());
     };
+    let (mut session_id, mut memento_context_loaded, current_path) =
+        intake_runtime_transition.state.clone();
     let mut session_strategy_reason = if session_id.is_some() {
         "runtime_cached_provider_session"
     } else if bootstrapped_fresh_thread_session {
@@ -1208,23 +1188,24 @@ pub(super) async fn handle_text_message(
     // because the async gap between check and insert allows interleaving.
     // If another message won the race, queue ourselves and clean up.
     let cancel_token = Arc::new(CancelToken::new());
-    let started = try_start_turn_with_stale_busy_heal(
-        shared,
-        channel_id,
-        cancel_token.clone(),
-        request_owner,
-        user_msg_id,
-        intake_claim_context(
-            adk_session_key.as_deref(),
-            &provider,
-            tmux_session_name.as_deref(),
-            &mut current_path,
-            &mut session_id,
-            &mut memento_context_loaded,
-            &mut session_strategy_reason,
-        ),
-    )
-    .await;
+    let started = intake_runtime_transition
+        .complete_mailbox_claim(try_start_turn_with_stale_busy_heal(
+            shared,
+            channel_id,
+            cancel_token.clone(),
+            request_owner,
+            user_msg_id,
+            intake_claim_context(
+                adk_session_key.as_deref(),
+                &provider,
+                tmux_session_name.as_deref(),
+                &mut current_path,
+                &mut session_id,
+                &mut memento_context_loaded,
+                &mut session_strategy_reason,
+            ),
+        ))
+        .await;
 
     // #3813 Phase 1a: intake latency span anchor (turn claimed; observation-only
     // — see latency_spans.rs). Never `.log()`'d on the early returns below.

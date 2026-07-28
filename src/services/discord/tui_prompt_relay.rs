@@ -764,7 +764,18 @@ fn owner_channel_for_prompt(
     prompt: &ObservedTuiPrompt,
 ) -> Option<ChannelId> {
     let provider = ProviderKind::from_str(&prompt.provider)?;
-    owner_channel_for_tmux_session(shared, &provider, &prompt.tmux_session_name)
+    owner_channel_for_tmux_session(
+        shared,
+        &provider,
+        &prompt.tmux_session_name,
+        RelayEmissionKind::ObservedPrompt,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum RelayEmissionKind {
+    Poll,
+    ObservedPrompt,
 }
 
 /// Resolve the owner channel for a tmux session.
@@ -783,6 +794,7 @@ fn owner_channel_for_tmux_session(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     tmux_session_name: &str,
+    emission_kind: RelayEmissionKind,
 ) -> Option<ChannelId> {
     let registry_owner = shared
         .tmux_watchers
@@ -792,7 +804,13 @@ fn owner_channel_for_tmux_session(
     let resolved =
         resolve_owner_channel_authoritatively(tmux_session_name, registry_owner, dedupe_owner);
     if resolved.is_none() && registry_owner.is_none() && dedupe_owner.is_some() {
-        super::idle_relay_drift::on_idle_relay_drift(shared, provider.clone(), tmux_session_name);
+        let emission_count = matches!(emission_kind, RelayEmissionKind::ObservedPrompt) as u64;
+        super::idle_relay_drift::on_idle_relay_drift(
+            shared,
+            provider.clone(),
+            tmux_session_name,
+            emission_count,
+        );
     }
     resolved
 }

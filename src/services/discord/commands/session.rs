@@ -237,6 +237,9 @@ pub(in crate::services::discord) async fn cmd_resume(
         provider_session_id = ?session_id,
         cwd = ?cwd
     );
+    // A transition may legitimately wait for an intake mailbox claim. Acknowledge
+    // the interaction before any database, forwarding, or bounded-lock work.
+    ctx.defer().await?;
 
     let shared = &ctx.data().shared;
     let provider = &ctx.data().provider;
