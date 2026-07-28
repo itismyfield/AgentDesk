@@ -3696,6 +3696,21 @@ async fn idle_queue_take_next_soft_if_ready(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> MailboxTakeNextSoftOutcome {
+    let _transition_guard = match shared
+        .session_transition_lock(channel_id)
+        .try_lock_owned()
+    {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::debug!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                "KICKOFF: session transition owns channel; preserving queued head"
+            );
+            return MailboxTakeNextSoftOutcome::default();
+        }
+    };
+
     // #3167 — only a real (non-background) active turn blocks the dequeue. The
     // cleanup-retry guard remains a correctness guard; the hosted-TUI busy-pane
     // re-scrape gate was removed in #4048 S3 because finalize completion is now
@@ -5152,6 +5167,66 @@ mod idle_queue_background_supersede_tests {
             pending_uploads: Vec::new(),
             voice_announcement: None,
         }
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_transition_preserves_queued_head_order_until_release() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+
+        let shared = make_shared_data_for_tests();
+        let provider = ProviderKind::Claude;
+        let channel_id = ChannelId::new(4_794_200);
+        let first = user_intervention(4_794_201, "first");
+        let second = user_intervention(4_794_202, "second");
+        shared
+            .mailbox(channel_id)
+            .replace_queue(
+                vec![first.clone(), second.clone()],
+                queue_persistence_context(&shared, &provider, channel_id),
+            )
+            .await;
+
+        let transition_guard = shared
+            .session_transition_lock(channel_id)
+            .lock_owned()
+            .await;
+        let blocked = idle_queue_take_next_soft_if_ready(&shared, &provider, channel_id).await;
+        assert!(
+            blocked.intervention.is_none(),
+            "transition ownership must defer kickoff before dequeue"
+        );
+        let blocked_snapshot = mailbox_snapshot(&shared, channel_id).await;
+        assert_eq!(
+            blocked_snapshot
+                .intervention_queue
+                .iter()
+                .map(|item| item.message_id)
+                .collect::<Vec<_>>(),
+            vec![first.message_id, second.message_id],
+            "deferred kickoff must preserve FIFO without tail requeue"
+        );
+        assert_eq!(blocked_snapshot.pending_user_dispatch, None);
+
+        drop(transition_guard);
+        let released = idle_queue_take_next_soft_if_ready(&shared, &provider, channel_id).await;
+        assert_eq!(
+            released.intervention.as_ref().map(|item| item.message_id),
+            Some(first.message_id),
+            "the original head must dequeue first after transition release"
+        );
+        assert_eq!(
+            mailbox_snapshot(&shared, channel_id)
+                .await
+                .intervention_queue
+                .iter()
+                .map(|item| item.message_id)
+                .collect::<Vec<_>>(),
+            vec![second.message_id]
+        );
     }
 
     // SAFETY (await_holding_lock): the test-env Mutex is held across awaits to
