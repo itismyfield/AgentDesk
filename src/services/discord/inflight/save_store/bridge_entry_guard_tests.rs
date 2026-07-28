@@ -33,11 +33,7 @@ fn bridge_entry_guarded_save_persists_same_owner() {
     owner.current_msg_id = 42;
     owner.full_response = "same-owner bridge entry".to_string();
     assert_eq!(
-        save_inflight_state_if_identity_unchanged_in_root(
-            temp.path(),
-            &owner,
-            BRIDGE_ENTRY_CALLER,
-        ),
+        save_inflight_state_if_identity_unchanged_in_root(temp.path(), &owner, BRIDGE_ENTRY_CALLER,),
         GuardedSaveOutcome::Saved
     );
 
