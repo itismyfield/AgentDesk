@@ -278,8 +278,15 @@ test("opens all rotated inputs before reading so a mid-scan rotation cannot drop
     writeFileSync(current, `${shadow("_section_A")}\n`);
     writeFileSync(rotated, `${shadow("_section_J", { reducer_decision: "incomparable", agree: false, incomparable: true })}\n`);
     let rotatedDuringRead = false;
+    let ctimeChanged = false;
     const io = {
       ...fs,
+      fstatSync(descriptor, options) {
+        const stat = fs.fstatSync(descriptor, options);
+        if (!rotatedDuringRead) return stat;
+        ctimeChanged = true;
+        return { ...stat, ctimeNs: stat.ctimeNs + 1n };
+      },
       readSync(...args) {
         const bytes = fs.readSync(...args);
         if (!rotatedDuringRead) {
@@ -292,6 +299,7 @@ test("opens all rotated inputs before reading so a mid-scan rotation cannot drop
       }
     };
     const report = aggregateFiles([current, rotated], {}, io);
+    assert.equal(ctimeChanged, true);
     assert.deepEqual(report._section_A, { total: 1, comparable: 1, agreement: 1, divergence: 0, error: 0 });
     assert.deepEqual(report._section_J, { total: 1, successful: 1, incomparable: 1, ratio: 1, error: 0 });
   } finally {

@@ -248,7 +248,10 @@ function processLine(report, line, options) {
 }
 
 function statSignature(stat) {
-  return `${stat.dev}:${stat.ino}:${stat.size}:${stat.ctimeNs}:${stat.mtimeNs}`;
+  // ctime changes for a pure rename even though this opened inode's bytes are
+  // unchanged.  Preserve it on the snapshot for diagnostics, but let the
+  // content double-hash plus identity/size/mtime decide acceptance.
+  return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}`;
 }
 
 function createLineScanner(onLine) {
