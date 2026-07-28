@@ -400,6 +400,7 @@ _adk_stage_preserved_asset_surface() {
     local runtime_root="$2"
     local txn_root="$3"
     local surface="$4"
+    local incoming_root="${5:-}"
     local live_root="$runtime_root/$surface"
     local staged_root="$txn_root/staged/$surface"
     local root_mode
@@ -407,6 +408,10 @@ _adk_stage_preserved_asset_surface() {
     _adk_assert_active_txn "$runtime_root" "$txn_root" || return 1
     [ "$(_adk_read_txn_phase "$txn_root")" = "staging" ] || return 1
     _adk_assert_no_symlink_tree "$source_root" || return 1
+    if [ -n "$incoming_root" ]; then
+        [ -d "$incoming_root" ] || return 1
+        _adk_assert_no_symlink_tree "$incoming_root" || return 1
+    fi
     _adk_assert_surface_paths_safe "$runtime_root" "$surface" || return 1
     if [ -d "$live_root" ]; then
         root_mode="$(_adk_path_mode "$live_root")" || return 1
@@ -418,6 +423,14 @@ _adk_stage_preserved_asset_surface() {
     chmod "$root_mode" "$staged_root" || return 1
     if [ -d "$live_root" ]; then
         if ! rsync -a "$live_root/" "$staged_root/"; then
+            rm -rf "$staged_root" 2>/dev/null || true
+            return 1
+        fi
+    fi
+    # A peer inbox is operator data delivered out-of-band. It overlays the
+    # peer's old live tree but never wins over repository-owned paths below.
+    if [ -n "$incoming_root" ]; then
+        if ! rsync -a "$incoming_root/" "$staged_root/"; then
             rm -rf "$staged_root" 2>/dev/null || true
             return 1
         fi
@@ -440,11 +453,16 @@ adk_stage_routines() {
     local repo_root="$1"
     local runtime_root="$2"
     local txn_root="$3"
+    local incoming_root="${4:-}"
     local staged_root="$txn_root/staged/routines"
 
     adk_validate_quickjs_routine_tree "$repo_root/routines" || return 1
+    if [ -n "$incoming_root" ]; then
+        adk_validate_quickjs_routine_tree "$incoming_root" || return 1
+    fi
     _adk_stage_preserved_asset_surface \
         "$repo_root/routines" "$runtime_root" "$txn_root" "routines" \
+        "$incoming_root" \
         || return 1
     if ! adk_remove_legacy_routine_helpers "$staged_root" \
       || ! adk_validate_quickjs_routine_tree "$staged_root"; then
@@ -458,11 +476,16 @@ adk_stage_routine_helpers() {
     local repo_root="$1"
     local runtime_root="$2"
     local txn_root="$3"
+    local incoming_root="${4:-}"
     local staged_root="$txn_root/staged/routine-helpers"
 
     adk_validate_routine_helper_surface "$repo_root/routine-helpers" || return 1
+    if [ -n "$incoming_root" ]; then
+        adk_validate_routine_helper_surface "$incoming_root" || return 1
+    fi
     _adk_stage_preserved_asset_surface \
         "$repo_root/routine-helpers" "$runtime_root" "$txn_root" "routine-helpers" \
+        "$incoming_root" \
         || return 1
     if ! adk_validate_routine_helper_surface "$staged_root"; then
         rm -rf "$staged_root" 2>/dev/null || true
@@ -783,6 +806,138 @@ _adk_validate_peer_timeout() {
         ''|*[!0-9]*) return 1 ;;
     esac
     [ "$1" -le 86400 ]
+}
+
+_adk_validate_incoming_token() {
+    local token="$1"
+
+    [ -n "$token" ] && [ "${#token}" -le 128 ] || return 1
+    case "$token" in
+        *[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+}
+
+_adk_routine_asset_incoming_path() {
+    local runtime_root="$1"
+    local token="$2"
+
+    adk_validate_peer_runtime_root "$runtime_root" || return 1
+    _adk_validate_incoming_token "$token" || return 1
+    printf '%s/runtime/routine-assets.incoming.%s\n' "$runtime_root" "$token"
+}
+
+adk_prepare_peer_asset_incoming() {
+    local peer="$1"
+    local remote_root="$2"
+    local token="$3"
+    local timeout_seconds="$4"
+    local incoming
+    local remote_command
+
+    adk_validate_peer_destination "$peer" || return 1
+    adk_validate_peer_runtime_root "$remote_root" || return 1
+    _adk_validate_incoming_token "$token" || return 1
+    _adk_validate_peer_timeout "$timeout_seconds" || return 1
+    incoming="$(_adk_routine_asset_incoming_path "$remote_root" "$token")" \
+        || return 1
+    remote_command="set -e
+runtime_root=$(printf '%q' "$remote_root")
+incoming=$(printf '%q' "$incoming")
+runtime_parent=\$(dirname \"\$runtime_root\")
+for path in \"\$runtime_parent\" \"\$runtime_root\" \"\$runtime_root/runtime\" \"\$incoming\"; do
+    [ ! -L \"\$path\" ] || exit 61
+done
+[ ! -e \"\$incoming\" ] || exit 62
+mkdir -p \"\$runtime_root/runtime\"
+mkdir \"\$incoming\"
+chmod 700 \"\$incoming\""
+    ssh -o "ConnectTimeout=$timeout_seconds" "$peer" \
+        "bash -lc $(printf '%q' "$remote_command")" || return 1
+    printf '%s\n' "$incoming"
+}
+
+adk_remove_peer_asset_incoming() {
+    local peer="$1"
+    local remote_root="$2"
+    local token="$3"
+    local timeout_seconds="$4"
+    local incoming
+    local remote_command
+
+    adk_validate_peer_destination "$peer" || return 1
+    adk_validate_peer_runtime_root "$remote_root" || return 1
+    _adk_validate_incoming_token "$token" || return 1
+    _adk_validate_peer_timeout "$timeout_seconds" || return 1
+    incoming="$(_adk_routine_asset_incoming_path "$remote_root" "$token")" \
+        || return 1
+    remote_command="set -e
+incoming=$(printf '%q' "$incoming")
+[ ! -L \"\$incoming\" ] || exit 63
+if [ -e \"\$incoming\" ]; then
+    [ -d \"\$incoming\" ] || exit 64
+    first_link=\$(find \"\$incoming\" -type l -print -quit) || exit 65
+    [ -z \"\$first_link\" ] || exit 66
+    rm -rf \"\$incoming\"
+fi"
+    ssh -o "ConnectTimeout=$timeout_seconds" "$peer" \
+        "bash -lc $(printf '%q' "$remote_command")"
+}
+
+_adk_assert_routine_asset_incoming_path() {
+    local runtime_root="$1"
+    local incoming="$2"
+    local expected_parent="$runtime_root/runtime"
+    local incoming_parent
+    local incoming_name
+
+    adk_validate_peer_runtime_root "$runtime_root" || return 1
+    [ -n "$incoming" ] && [ "${#incoming}" -le 4096 ] || return 1
+    incoming_parent="$(dirname "$incoming")" || return 1
+    incoming_name="$(basename "$incoming")" || return 1
+    [ "$incoming_parent" = "$expected_parent" ] || return 1
+    case "$incoming_name" in
+        routine-assets.incoming.*)
+            _adk_validate_incoming_token \
+                "${incoming_name#routine-assets.incoming.}" || return 1
+            ;;
+        *) return 1 ;;
+    esac
+    [ ! -L "$runtime_root" ] \
+        && [ ! -L "$expected_parent" ] \
+        && [ ! -L "$incoming" ] \
+        && [ -d "$incoming" ] || return 1
+    _adk_assert_no_symlink_tree "$incoming"
+}
+
+adk_claim_routine_asset_incoming() {
+    local runtime_root="$1"
+    local incoming="$2"
+    local lock_file="${3:-$runtime_root/runtime/deploy-release.lock}"
+    local claim="$incoming/.claimed"
+
+    [ "$ADK_ROUTINE_ASSET_LOCK_DIR" = "${lock_file}.d" ] || {
+        echo "Routine asset inbox claim requires the shared deploy lock" >&2
+        return 1
+    }
+    _adk_assert_routine_asset_incoming_path "$runtime_root" "$incoming" \
+        || return 1
+    [ ! -e "$claim" ] && [ ! -L "$claim" ] || return 1
+    _adk_write_atomic_file "$claim" "$ADK_ROUTINE_ASSET_LOCK_TOKEN"
+}
+
+adk_remove_claimed_routine_asset_incoming() {
+    local runtime_root="$1"
+    local incoming="$2"
+    local lock_file="${3:-$runtime_root/runtime/deploy-release.lock}"
+    local claim="$incoming/.claimed"
+    local claim_token
+
+    [ "$ADK_ROUTINE_ASSET_LOCK_DIR" = "${lock_file}.d" ] || return 1
+    _adk_assert_routine_asset_incoming_path "$runtime_root" "$incoming" \
+        || return 1
+    claim_token="$(sed -n '1p' "$claim" 2>/dev/null)" || return 1
+    [ "$claim_token" = "$ADK_ROUTINE_ASSET_LOCK_TOKEN" ] || return 1
+    rm -rf "$incoming"
 }
 
 adk_guard_peer_routine_asset_paths() {

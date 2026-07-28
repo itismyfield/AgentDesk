@@ -547,6 +547,88 @@ unset -f ssh rsync
         "$LEGACY_ROOT/routines/valid.js" >/dev/null \
     || fail_test 'legacy rsync fallback lost quoted tar-stream assets'
 
+# Peer pre-sync owns only a unique inbox. The receiving deploy must hold its
+# shared lock to claim it; staging merges operator files while repository bytes
+# remain authoritative, and live v0 stays untouched until explicit promotion.
+INBOX_RUNTIME="$TMP_ROOT/peer incoming runtime"
+INBOX_SOURCE="$TMP_ROOT/peer-incoming-source"
+INBOX_REPO="$TMP_ROOT/peer-incoming-repo"
+seed_live "$INBOX_RUNTIME" 'v0'
+seed_source "$INBOX_SOURCE" 'v1'
+seed_source "$INBOX_REPO" 'v2'
+write_quickjs_routine "$INBOX_SOURCE/routines/operator-private.js" 'operator'
+printf 'operator helper\n' > "$INBOX_SOURCE/routine-helpers/operator-private.py"
+INBOX_TOKEN='test.123.safe'
+ssh() {
+    command bash -c "${4:?missing inbox fake-ssh remote command}"
+}
+INBOX_PATH="$(adk_prepare_peer_asset_incoming 'operator@peer.local' \
+    "$INBOX_RUNTIME" "$INBOX_TOKEN" 7)"
+rsync() {
+    if [ "${1:-}" = '--protect-args' ] && [ "${2:-}" = '--version' ]; then
+        return 1
+    fi
+    return 91
+}
+adk_rsync_peer_asset_surface "$INBOX_SOURCE/routines" 'operator@peer.local' \
+    "$INBOX_PATH" 'routines' 7
+adk_rsync_peer_asset_surface "$INBOX_SOURCE/routine-helpers" 'operator@peer.local' \
+    "$INBOX_PATH" 'routine-helpers' 7
+unset -f rsync ssh
+[ "$(<"$INBOX_RUNTIME/routines/generation-marker")" = 'v0' ] \
+    && [ "$(<"$INBOX_RUNTIME/routine-helpers/generation-marker")" = 'v0' ] \
+    || fail_test 'peer inbox transfer mutated live surfaces before remote lock'
+if adk_claim_routine_asset_incoming "$INBOX_RUNTIME" "$INBOX_PATH" \
+    "$INBOX_RUNTIME/runtime/deploy-release.lock" >/dev/null 2>&1; then
+    fail_test 'peer inbox claim succeeded without owning the shared lock'
+fi
+acquire_runtime_lock "$INBOX_RUNTIME"
+adk_claim_routine_asset_incoming "$INBOX_RUNTIME" "$INBOX_PATH" "$CURRENT_LOCK"
+INBOX_TXN="$(adk_begin_routine_asset_transaction "$INBOX_RUNTIME" "$CURRENT_LOCK")"
+adk_stage_routines "$INBOX_REPO" "$INBOX_RUNTIME" "$INBOX_TXN" \
+    "$INBOX_PATH/routines" >/dev/null
+adk_stage_routine_helpers "$INBOX_REPO" "$INBOX_RUNTIME" "$INBOX_TXN" \
+    "$INBOX_PATH/routine-helpers" >/dev/null
+[ "$(<"$INBOX_RUNTIME/routines/generation-marker")" = 'v0' ] \
+    && [ "$(<"$INBOX_TXN/staged/routines/generation-marker")" = 'v2' ] \
+    && [ "$(<"$INBOX_TXN/staged/routine-helpers/generation-marker")" = 'v2' ] \
+    && [ -f "$INBOX_TXN/staged/routines/operator-private.js" ] \
+    && [ -f "$INBOX_TXN/staged/routine-helpers/operator-private.py" ] \
+    || fail_test 'remote lock-owned inbox staging changed live or lost overlay precedence'
+adk_abort_routine_asset_transaction "$INBOX_RUNTIME" "$INBOX_TXN"
+adk_remove_claimed_routine_asset_incoming "$INBOX_RUNTIME" "$INBOX_PATH" "$CURRENT_LOCK"
+release_runtime_lock
+[ ! -e "$INBOX_PATH" ] \
+    && [ "$(<"$INBOX_RUNTIME/routines/generation-marker")" = 'v0' ] \
+    || fail_test 'aborted peer inbox transaction changed live or leaked its inbox'
+
+# A partial transfer is inert and removable: without both surfaces the remote
+# preflight cannot consume it, while the old live pair remains exact.
+PARTIAL_TOKEN='partial.456.safe'
+ssh() {
+    command bash -c "${4:?missing partial-inbox fake-ssh command}"
+}
+PARTIAL_PATH="$(adk_prepare_peer_asset_incoming 'operator@peer.local' \
+    "$INBOX_RUNTIME" "$PARTIAL_TOKEN" 7)"
+rsync() {
+    if [ "${1:-}" = '--protect-args' ] && [ "${2:-}" = '--version' ]; then
+        return 1
+    fi
+    return 91
+}
+adk_rsync_peer_asset_surface "$INBOX_SOURCE/routines" 'operator@peer.local' \
+    "$PARTIAL_PATH" 'routines' 7
+unset -f rsync
+[ -d "$PARTIAL_PATH/routines" ] \
+    && [ ! -e "$PARTIAL_PATH/routine-helpers" ] \
+    && [ "$(<"$INBOX_RUNTIME/routines/generation-marker")" = 'v0' ] \
+    || fail_test 'partial peer transfer escaped its isolated inbox'
+adk_remove_peer_asset_incoming 'operator@peer.local' "$INBOX_RUNTIME" \
+    "$PARTIAL_TOKEN" 7
+unset -f ssh
+[ ! -e "$PARTIAL_PATH" ] \
+    || fail_test 'partial peer transfer inbox could not be safely removed'
+
 # Exercise installer preflight and promotion functions. An incomplete old
 # artifact must fail before a binary marker or live assets change.
 extract_function() {

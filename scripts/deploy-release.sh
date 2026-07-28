@@ -135,6 +135,8 @@ DASHBOARD_SOURCE=""
 STAGED_BINARY=""
 POLICIES_STAGED=""
 ROUTINE_ASSET_TXN=""
+ROUTINE_ASSET_INCOMING="${AGENTDESK_ROUTINE_ASSET_INCOMING:-}"
+ROUTINE_ASSET_INCOMING_CLAIMED=0
 LAUNCHD_MIGRATED_STAGED=""
 RELEASE_ROOT_SCRIPTS_STAGED=""
 PG_TUNNEL_PREFLIGHT_PID=""
@@ -1170,6 +1172,17 @@ _cleanup_on_exit() {
     if [ -n "${RELEASE_ROOT_SCRIPTS_STAGED:-}" ] && [ -d "$RELEASE_ROOT_SCRIPTS_STAGED" ]; then
         rm -rf "$RELEASE_ROOT_SCRIPTS_STAGED" 2>/dev/null || true
     fi
+    if [ "${ROUTINE_ASSET_INCOMING_CLAIMED:-0}" = 1 ] \
+      && [ -n "${ROUTINE_ASSET_INCOMING:-}" ] \
+      && [ -d "$ROUTINE_ASSET_INCOMING" ]; then
+        if adk_remove_claimed_routine_asset_incoming \
+            "$ADK_REL" "$ROUTINE_ASSET_INCOMING" "$DEPLOY_LOCK_FILE"; then
+            ROUTINE_ASSET_INCOMING_CLAIMED=0
+        else
+            status=1
+            echo "🛑 Failed to remove claimed peer routine asset inbox" >&2
+        fi
+    fi
     if ! adk_release_routine_asset_lock; then
         status=1
         echo "🛑 Failed to release shared routine asset deploy lock" >&2
@@ -1190,6 +1203,9 @@ trap '_handle_cleanup_signal 143' TERM
 
 _self_hosted_release_session() {
     [ "$DEPLOY_DETACHED_CHILD" != "1" ] || return 1
+    # Peer inbox ownership is synchronous with the SSH caller. Never detach a
+    # peer leg before it has claimed and consumed that unique inbox.
+    [ "$DEPLOY_PEER_INVOCATION" != "1" ] || return 1
     [ -n "${TMUX:-}" ] || return 1
     [ -n "$REPORT_CHANNEL_ID" ] || return 1
     [ -n "$REPORT_PROVIDER" ] || return 1
@@ -1270,6 +1286,10 @@ _deploy_to_one_peer() {
     local remote_cd_command
     local remote_deploy_command
     local remote_presync_command
+    local peer_adk_rel=""
+    local peer_incoming=""
+    local peer_incoming_token=""
+    local peer_incoming_created=0
     if ! adk_validate_peer_destination "$peer" \
       || ! _adk_validate_peer_timeout "$DEPLOY_SSH_CONNECT_TIMEOUT"; then
         echo "✗ Refusing unsafe peer destination or SSH timeout" >&2
@@ -1289,21 +1309,21 @@ ${remote_cd_command}
 git fetch --quiet origin main
 git checkout --quiet main
 git merge --quiet --ff-only origin/main"
-    remote_deploy_command="${remote_cd_command} && ${env_prelude} bash scripts/deploy-release.sh${quoted_args}"
-
     echo "▸ [peer:$peer] Pre-syncing repo (fast-forward only)..."
     if ! ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" "bash -lc $(printf '%q' "$remote_presync_command")"; then
         echo "✗ [peer:$peer] Pre-sync failed (diverged, fetch error, or unreachable within ${DEPLOY_SSH_CONNECT_TIMEOUT}s). Resolve on the peer and retry."
         return 1
     fi
 
-    # Operator-private routine and helper assets are excluded from the repo, so
-    # the peer's own `git fetch` above cannot deliver them. Push both surfaces
-    # before the peer deploys: leadership can move between nodes, and prompts
-    # resolve helper paths against the local release root. No --delete: the peer
-    # may hold local assets this node does not.
+    # Operator-private assets travel only into a unique remote inbox. The peer
+    # deploy claims that inbox under its own shared deploy lock, validates it,
+    # and merges it into its transaction stage. Pre-sync never mutates live
+    # routines, even if transport or remote preflight fails halfway through.
     if [ -d "$ADK_REL/routines" ] || [ -d "$ADK_REL/routine-helpers" ]; then
-        local peer_adk_rel
+        if [ ! -d "$ADK_REL/routines" ] || [ ! -d "$ADK_REL/routine-helpers" ]; then
+            echo "✗ [peer:$peer] local routine asset surfaces are incomplete"
+            return 1
+        fi
         if ! peer_adk_rel="$(ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" \
             'bash -lc '"$(printf '%q' 'echo "${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"')"'')"; then
             echo "✗ [peer:$peer] could not resolve remote AGENTDESK_ROOT_DIR"
@@ -1314,44 +1334,54 @@ git merge --quiet --ff-only origin/main"
             echo "✗ [peer:$peer] remote AGENTDESK_ROOT_DIR is not a safe absolute path"
             return 1
         fi
-        if [ -d "$ADK_REL/routines" ]; then
-            adk_validate_quickjs_routine_tree "$ADK_REL/routines" || {
-                echo "✗ [peer:$peer] local routine surface failed portability validation"
-                return 1
-            }
-        fi
-        if [ -d "$ADK_REL/routine-helpers" ]; then
-            adk_validate_routine_helper_surface "$ADK_REL/routine-helpers" || {
-                echo "✗ [peer:$peer] local helper surface failed portability validation"
-                return 1
-            }
-        fi
-        if ! adk_guard_peer_routine_asset_paths \
-            "$peer" "$peer_adk_rel" "$DEPLOY_SSH_CONNECT_TIMEOUT"; then
-            echo "✗ [peer:$peer] remote routine asset symlink guard failed"
+        adk_validate_quickjs_routine_tree "$ADK_REL/routines" || {
+            echo "✗ [peer:$peer] local routine surface failed portability validation"
+            return 1
+        }
+        adk_validate_routine_helper_surface "$ADK_REL/routine-helpers" || {
+            echo "✗ [peer:$peer] local helper surface failed portability validation"
+            return 1
+        }
+
+        peer_incoming_token="$(date '+%Y%m%d%H%M%S').$$.$RANDOM"
+        if ! peer_incoming="$(adk_prepare_peer_asset_incoming \
+            "$peer" "$peer_adk_rel" "$peer_incoming_token" \
+            "$DEPLOY_SSH_CONNECT_TIMEOUT")"; then
+            echo "✗ [peer:$peer] could not create unique routine asset inbox"
             return 1
         fi
-        if [ -d "$ADK_REL/routines" ]; then
-            echo "▸ [peer:$peer] Syncing operator routine scripts..."
-            if ! adk_rsync_peer_asset_surface "$ADK_REL/routines" "$peer" \
-                "$peer_adk_rel" "routines" "$DEPLOY_SSH_CONNECT_TIMEOUT"; then
-                echo "✗ [peer:$peer] routine script sync failed"
-                return 1
-            fi
+        peer_incoming_created=1
+
+        echo "▸ [peer:$peer] Uploading routine assets into transaction inbox..."
+        if ! adk_rsync_peer_asset_surface "$ADK_REL/routines" "$peer" \
+            "$peer_incoming" "routines" "$DEPLOY_SSH_CONNECT_TIMEOUT" \
+          || ! adk_rsync_peer_asset_surface "$ADK_REL/routine-helpers" "$peer" \
+            "$peer_incoming" "routine-helpers" "$DEPLOY_SSH_CONNECT_TIMEOUT"; then
+            adk_remove_peer_asset_incoming "$peer" "$peer_adk_rel" \
+                "$peer_incoming_token" "$DEPLOY_SSH_CONNECT_TIMEOUT" \
+                >/dev/null 2>&1 || true
+            echo "✗ [peer:$peer] routine asset inbox transfer failed"
+            return 1
         fi
-        if [ -d "$ADK_REL/routine-helpers" ]; then
-            echo "▸ [peer:$peer] Syncing operator routine helper assets..."
-            if ! adk_rsync_peer_asset_surface "$ADK_REL/routine-helpers" "$peer" \
-                "$peer_adk_rel" "routine-helpers" "$DEPLOY_SSH_CONNECT_TIMEOUT"; then
-                echo "✗ [peer:$peer] routine helper asset sync failed"
-                return 1
-            fi
-        fi
+        env_prelude="$env_prelude AGENTDESK_ROUTINE_ASSET_INCOMING=$(printf '%q' "$peer_incoming")"
     fi
 
+    remote_deploy_command="${remote_cd_command} && ${env_prelude} bash scripts/deploy-release.sh${quoted_args}"
     echo "▸ [peer:$peer] Running deploy-release.sh..."
     if ! ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" "bash -lc $(printf '%q' "$remote_deploy_command")"; then
+        if [ "$peer_incoming_created" = 1 ]; then
+            adk_remove_peer_asset_incoming "$peer" "$peer_adk_rel" \
+                "$peer_incoming_token" "$DEPLOY_SSH_CONNECT_TIMEOUT" \
+                >/dev/null 2>&1 || true
+        fi
         echo "✗ [peer:$peer] deploy-release.sh failed"
+        return 1
+    fi
+
+    if [ "$peer_incoming_created" = 1 ] \
+      && ! adk_remove_peer_asset_incoming "$peer" "$peer_adk_rel" \
+          "$peer_incoming_token" "$DEPLOY_SSH_CONNECT_TIMEOUT"; then
+        echo "✗ [peer:$peer] deployed but could not verify routine asset inbox cleanup"
         return 1
     fi
 
@@ -1447,6 +1477,7 @@ export AGENTDESK_DEPLOY_ALL_NODES=$(printf '%q' "${AGENTDESK_DEPLOY_ALL_NODES:-0
 export AGENTDESK_DEPLOY_PEERS=$(printf '%q' "${AGENTDESK_DEPLOY_PEERS:-}")
 export AGENTDESK_DEPLOY_PEERS_FILE=$(printf '%q' "${AGENTDESK_DEPLOY_PEERS_FILE:-}")
 export AGENTDESK_DEPLOY_PEER_INVOCATION=$(printf '%q' "${AGENTDESK_DEPLOY_PEER_INVOCATION:-0}")
+export AGENTDESK_ROUTINE_ASSET_INCOMING=$(printf '%q' "${AGENTDESK_ROUTINE_ASSET_INCOMING:-}")
 export AGENTDESK_BUNDLE_ID=$(printf '%q' "$BUNDLE_ID")
 export AGENTDESK_DCSERVER_LABEL=$(printf '%q' "$PLIST_REL")
 export AGENTDESK_PLIST_REL=$(printf '%q' "${AGENTDESK_PLIST_REL:-}")
@@ -1486,6 +1517,15 @@ if _self_hosted_release_session; then
 fi
 
 _acquire_release_deploy_lock "$@"
+
+if [ -n "$ROUTINE_ASSET_INCOMING" ]; then
+    if ! adk_claim_routine_asset_incoming \
+        "$ADK_REL" "$ROUTINE_ASSET_INCOMING" "$DEPLOY_LOCK_FILE"; then
+        echo "✗ Refusing unsafe or unowned peer routine asset inbox"
+        exit 1
+    fi
+    ROUTINE_ASSET_INCOMING_CLAIMED=1
+fi
 
 # #4255: resource-contention pre-flight — refuse (or, with the force hatch,
 # warn) BEFORE any expensive build work when the machine is already saturated by
@@ -1635,6 +1675,17 @@ if ! adk_validate_repo_routine_assets "$REPO"; then
     echo "✗ Routine asset preflight failed; refusing an incomplete deploy"
     exit 1
 fi
+if [ "$ROUTINE_ASSET_INCOMING_CLAIMED" = 1 ]; then
+    if [ ! -d "$ROUTINE_ASSET_INCOMING/routines" ] \
+      || [ ! -d "$ROUTINE_ASSET_INCOMING/routine-helpers" ] \
+      || ! adk_validate_quickjs_routine_tree \
+          "$ROUTINE_ASSET_INCOMING/routines" \
+      || ! adk_validate_routine_helper_surface \
+          "$ROUTINE_ASSET_INCOMING/routine-helpers"; then
+        echo "✗ Claimed peer routine asset inbox is incomplete or invalid"
+        exit 1
+    fi
+fi
 
 echo "▸ Staging managed skills..."
 SKILLS_STAGED="$ADK_REL/skills.new"
@@ -1659,7 +1710,9 @@ if ! ROUTINE_ASSET_TXN="$(
     exit 1
 fi
 echo "▸ Staging routines..."
-if ! adk_stage_routines "$REPO" "$ADK_REL" "$ROUTINE_ASSET_TXN" >/dev/null; then
+if ! adk_stage_routines "$REPO" "$ADK_REL" "$ROUTINE_ASSET_TXN" \
+    "${ROUTINE_ASSET_INCOMING:+$ROUTINE_ASSET_INCOMING/routines}" \
+    >/dev/null; then
     echo "✗ Routine staging failed; refusing to swap an incomplete asset tree"
     exit 1
 fi
@@ -1668,9 +1721,20 @@ fi
 # Seed with any operator-owned helpers, then overlay repository assets without
 # --delete so unrelated local helpers survive release deployment.
 echo "▸ Staging routine helper assets..."
-if ! adk_stage_routine_helpers "$REPO" "$ADK_REL" "$ROUTINE_ASSET_TXN" >/dev/null; then
+if ! adk_stage_routine_helpers "$REPO" "$ADK_REL" "$ROUTINE_ASSET_TXN" \
+    "${ROUTINE_ASSET_INCOMING:+$ROUTINE_ASSET_INCOMING/routine-helpers}" \
+    >/dev/null; then
     echo "✗ Routine helper staging failed; refusing to swap an incomplete asset tree"
     exit 1
+fi
+
+if [ "$ROUTINE_ASSET_INCOMING_CLAIMED" = 1 ]; then
+    if ! adk_remove_claimed_routine_asset_incoming \
+        "$ADK_REL" "$ROUTINE_ASSET_INCOMING" "$DEPLOY_LOCK_FILE"; then
+        echo "✗ Could not retire consumed peer routine asset inbox"
+        exit 1
+    fi
+    ROUTINE_ASSET_INCOMING_CLAIMED=0
 fi
 
 # Stage launchd-migrated shell entrypoints before stopping release so routines
