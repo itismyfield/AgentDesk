@@ -17,7 +17,7 @@ const SHADOW_PREFIX = "[timeout_shadow] ";
 const SHADOW_TARGET = "agentdesk::timeout_shadow";
 const SECTIONS = new Set(["_section_A", "_section_J"]);
 const COMPARABLE_A_DECISIONS = new Set(["retry", "exhaust"]);
-const VALID_J_REDUCER_DECISIONS = new Set(["retry", "exhaust", "incomparable"]);
+const EXPECTED_J_REDUCER_DECISION = "incomparable";
 const STRICT_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 const FILE_READ_CHUNK_BYTES = 64 * 1024;
 const STABLE_READ_ATTEMPTS = 2;
@@ -218,19 +218,18 @@ function addRecord(report, record) {
       else section.divergence += 1;
     }
   } else {
-    const reducerValid = VALID_J_REDUCER_DECISIONS.has(record.reducer_decision);
-    if (record.js_decision !== "retry" || !reducerValid) {
+    // _section_J currently previews with null status/state, so the reducer can
+    // only produce incomparable or error.  A comparable label is not evidence
+    // of agreement; it violates the producer contract and must fail closed.
+    if (record.js_decision !== "retry" || record.reducer_decision !== EXPECTED_J_REDUCER_DECISION) {
       section.error += 1;
       return;
     }
-    const derivedIncomparable = record.reducer_decision === "incomparable";
-    const derivedAgreement = record.reducer_decision === record.js_decision && !derivedIncomparable;
-    const diagnosticMismatch = (record.incomparable === true) !== derivedIncomparable ||
-      record.agree !== derivedAgreement;
+    const diagnosticMismatch = record.incomparable !== true || record.agree !== false;
     if (diagnosticMismatch) section.error += 1;
     else {
       section.successful += 1;
-      if (derivedIncomparable) section.incomparable += 1;
+      section.incomparable += 1;
     }
   }
 }
@@ -454,9 +453,6 @@ function closeSnapshots(snapshots, io) {
       io.closeSync(snapshot.descriptor);
     } catch (error) {
       if (!firstError) firstError = error;
-      // Retry this fd once for transient close failures, while still moving on
-      // to every other descriptor regardless of either result.
-      try { io.closeSync(snapshot.descriptor); } catch (_) {}
     }
   }
   return firstError;

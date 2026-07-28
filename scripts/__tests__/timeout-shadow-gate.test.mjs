@@ -112,11 +112,26 @@ test("reports A divergence separately from reducer errors", () => {
 
 test("reports J incomparable ratio and preserves zero-sample null ratio", () => {
   const report = aggregateText([
-    shadow("_section_J", { reducer_decision: "incomparable", agree: false, incomparable: true }),
-    shadow("_section_J", { reducer_decision: "retry", agree: true })
+    shadow("_section_J", { reducer_decision: "incomparable", agree: false, incomparable: true })
   ]);
-  assert.deepEqual(report._section_J, { total: 2, successful: 2, incomparable: 1, ratio: 0.5, error: 0 });
+  assert.deepEqual(report._section_J, { total: 1, successful: 1, incomparable: 1, ratio: 1, error: 0 });
   assert.equal(aggregateText([])._section_J.ratio, null);
+});
+
+test("J comparable output fails closed under the current producer contract", () => {
+  const result = run([
+    "--stdin", "--min-a-samples", "1", "--min-j-samples", "0",
+    "--max-divergence", "0", "--max-errors", "0"
+  ], [
+    shadow("_section_A", { js_decision: "retry", reducer_decision: "retry", agree: true }),
+    shadow("_section_J", { js_decision: "retry", reducer_decision: "exhaust", agree: false })
+  ].join("\n"));
+
+  assert.deepEqual(JSON.parse(result.output)._section_J, {
+    total: 1, successful: 0, incomparable: 0, ratio: null, error: 1
+  });
+  assert.equal(result.exitCode, 1);
+  assert.match(result.failures.join(" "), /shadow errors 1 > 0/);
 });
 
 test("default positive sample thresholds fail on zero samples instead of passing as clean", () => {
@@ -317,21 +332,24 @@ test("opened descriptors close on fstat failures while pre-open realpath failure
   }
 });
 
-test("close errors still attempt every descriptor and propagate the first failure", () => {
+test("close errors attempt every original descriptor once without closing a reused fd", () => {
   const directory = mkdtempSync(join(tmpdir(), "timeout-shadow-gate-"));
+  let replacementDescriptor = null;
   try {
     const first = join(directory, "a.log");
     const second = join(directory, "b.log");
+    const replacement = join(directory, "replacement.log");
     writeFileSync(first, `${shadow("_section_A")}\n`);
     writeFileSync(second, `${shadow("_section_J")}\n`);
+    writeFileSync(replacement, "replacement");
     const closeCalls = [];
-    let injected = false;
     const io = {
       ...fs,
       closeSync(descriptor) {
         closeCalls.push(descriptor);
-        if (!injected) {
-          injected = true;
+        if (replacementDescriptor === null) {
+          fs.closeSync(descriptor);
+          replacementDescriptor = fs.openSync(replacement, "r");
           throw new Error("first close injected failure");
         }
         return fs.closeSync(descriptor);
@@ -339,8 +357,13 @@ test("close errors still attempt every descriptor and propagate the first failur
     };
     assert.throws(() => aggregateFiles([first, second], {}, io), /first close injected failure/);
     assert.equal(new Set(closeCalls).size, 2);
-    assert.equal(closeCalls.length, 3);
+    assert.equal(closeCalls.length, 2);
+    assert.equal(replacementDescriptor, closeCalls[0]);
+    assert.doesNotThrow(() => fs.fstatSync(replacementDescriptor));
   } finally {
+    if (replacementDescriptor !== null) {
+      try { fs.closeSync(replacementDescriptor); } catch (_) {}
+    }
     rmSync(directory, { recursive: true, force: true });
   }
 });
