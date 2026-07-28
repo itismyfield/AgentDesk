@@ -2413,12 +2413,13 @@ class TickChannelTests(unittest.TestCase):
 
     def write_transcript(self, blocks: list[tuple[float, str]]) -> None:
         lines = []
-        for epoch, text in blocks:
+        for index, (epoch, text) in enumerate(blocks):
             ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
             lines.append(
                 json.dumps(
                     {
                         "type": "assistant",
+                        "uuid": f"00000000-0000-4000-8000-{index:012d}",
                         "timestamp": ts,
                         "message": {"content": [{"type": "text", "text": text}]},
                     }
@@ -6110,11 +6111,13 @@ class TickChannelTests(unittest.TestCase):
     def append_transcript_block(self, epoch: float, text: str) -> None:
         transcript = self.proj_dir / "s.jsonl"
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+        record_uuid = f"00000000-0000-4000-9000-{transcript.stat().st_size:012d}"
         with transcript.open("a", encoding="utf-8") as stream:
             stream.write(
                 json.dumps(
                     {
                         "type": "assistant",
+                        "uuid": record_uuid,
                         "timestamp": ts,
                         "message": {"content": [{"type": "text", "text": text}]},
                     }
@@ -6361,7 +6364,7 @@ class TickChannelTests(unittest.TestCase):
             relay_watchdog.ISSUE_FILING_DC_UNREACHABLE_REASON,
         )
 
-    def test_duplicate_same_timestamp_text_uses_stable_source_offsets(self):
+    def test_duplicate_same_timestamp_text_uses_stable_record_identities(self):
         duplicate = (self.now - 4000, "same duplicate obligation")
         first = (self.now - 3000, "duplicate first successor")
         second = (self.now - 2000, "duplicate second successor")
@@ -6377,6 +6380,31 @@ class TickChannelTests(unittest.TestCase):
         tombstones = permanent_loss_tombstones(state["999"])
         self.assertEqual(len(tombstones), 1)
         self.assertEqual(permanent_loss_total(state["999"]), 1)
+
+    def test_record_uuid_identity_survives_actual_head_truncation(self):
+        prefix = (self.now - 5000, "truncated delivered prefix")
+        missing = (self.now - 4000, "late block retained after truncation")
+        first = (self.now - 3000, "truncate first successor")
+        second = (self.now - 2000, "truncate second successor")
+        self.write_transcript([prefix, missing, first])
+        rt = self.make_rt()
+        state: dict = {}
+        rt.haystack = norm(f"{prefix[1]} {first[1]}")
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        self.append_transcript_block(*second)
+        rt.haystack = norm(f"{prefix[1]} {first[1]} {second[1]}")
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+
+        before = set(permanent_loss_tombstones(state["999"]))
+        self.assertEqual(len(before), 1)
+        transcript = self.proj_dir / "s.jsonl"
+        raw_lines = transcript.read_bytes().splitlines(keepends=True)
+        transcript.write_bytes(b"".join(raw_lines[1:]))
+        rt.haystack = norm(f"{missing[1]} {first[1]} {second[1]}")
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+
+        self.assertEqual(permanent_loss_total(state["999"]), 0)
+        self.assertTrue(any("permanent-loss-retracted" in line for line in rt.log_lines))
 
     def test_legacy_actual_delivery_scalar_migrates_to_selected_path(self):
         missing = (self.now - 4000, "legacy migration missing response")

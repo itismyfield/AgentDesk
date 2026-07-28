@@ -586,7 +586,8 @@ class TranscriptReadResult:
     incomplete_tail: bool = False
     semantic_end_offset: int = 0
     observed_size: int = 0
-    block_offsets: list[int] = field(default_factory=list)
+    block_source_ids: list[str] = field(default_factory=list)
+    identity_fallbacks: int = 0
 
 
 def transcript_candidates(dirs: list[Path]) -> list[TranscriptCandidate]:
@@ -1291,31 +1292,39 @@ def is_harness_control_assistant_record(record: object) -> bool:
     return isinstance(message, dict) and message.get("model") == "<synthetic>"
 
 
+def _assistant_blocks_from_record(
+    record: object,
+) -> list[tuple[float, str]]:
+    if (
+        not isinstance(record, dict)
+        or record.get("type") != "assistant"
+        or is_harness_control_assistant_record(record)
+    ):
+        return []
+    epoch = parse_transcript_ts(record.get("timestamp", ""))
+    if epoch is None:
+        return []
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return []
+    out: list[tuple[float, str]] = []
+    for content in message.get("content") or []:
+        if isinstance(content, dict) and content.get("type") == "text":
+            text = (content.get("text") or "").strip()
+            if text:
+                out.append((epoch, text))
+    return out
+
+
 def assistant_blocks_from_lines(lines) -> list[tuple[float, str]]:
     """(epoch, text) for every assistant text block in a transcript's lines."""
     out: list[tuple[float, str]] = []
     for line in lines:
         try:
-            r = json.loads(line)
+            record = json.loads(line)
         except (json.JSONDecodeError, TypeError):
             continue
-        if (
-            not isinstance(r, dict)
-            or r.get("type") != "assistant"
-            or is_harness_control_assistant_record(r)
-        ):
-            continue
-        epoch = parse_transcript_ts(r.get("timestamp", ""))
-        if epoch is None:
-            continue
-        message = r.get("message")
-        if not isinstance(message, dict):
-            continue
-        for c in message.get("content") or []:
-            if isinstance(c, dict) and c.get("type") == "text":
-                t = (c.get("text") or "").strip()
-                if t:
-                    out.append((epoch, t))
+        out.extend(_assistant_blocks_from_record(record))
     return out
 
 
@@ -1361,16 +1370,30 @@ def assistant_blocks(
                 except (json.JSONDecodeError, TypeError):
                     incomplete_tail = True
             blocks: list[tuple[float, str]] = []
-            block_offsets: list[int] = []
+            block_source_ids: list[str] = []
+            identity_fallbacks = 0
             semantic_end_offset = 0
             byte_offset = 0
             for raw_line, line in zip(raw_lines, lines):
                 line_start_offset = byte_offset
-                line_blocks = assistant_blocks_from_lines([line])
+                try:
+                    record = json.loads(line)
+                except (json.JSONDecodeError, TypeError):
+                    record = None
+                line_blocks = _assistant_blocks_from_record(record)
                 blocks.extend(line_blocks)
-                block_offsets.extend(
-                    line_start_offset + index for index in range(len(line_blocks))
-                )
+                record_uuid = record.get("uuid") if isinstance(record, dict) else None
+                if isinstance(record_uuid, str) and record_uuid:
+                    block_source_ids.extend(
+                        f"uuid:{record_uuid}:{index}"
+                        for index in range(len(line_blocks))
+                    )
+                else:
+                    block_source_ids.extend(
+                        f"offset:{line_start_offset + index}"
+                        for index in range(len(line_blocks))
+                    )
+                    identity_fallbacks += len(line_blocks)
                 byte_offset += len(raw_line)
                 if line_blocks:
                     semantic_end_offset = byte_offset
@@ -1379,7 +1402,8 @@ def assistant_blocks(
                 incomplete_tail=incomplete_tail,
                 semantic_end_offset=semantic_end_offset,
                 observed_size=byte_offset,
-                block_offsets=block_offsets,
+                block_source_ids=block_source_ids,
+                identity_fallbacks=identity_fallbacks,
             )
     except (OSError, UnicodeError, ValueError) as exc:
         return TranscriptReadResult([], type(exc).__name__)
@@ -1459,11 +1483,11 @@ class PermanentLossUpdate:
 
 
 def _assistant_block_id(
-    transcript: str | Path, epoch: float, text: str, source_offset: int
+    transcript: str | Path, epoch: float, text: str, source_id: str
 ) -> str:
-    """Stable source identity based on the transcript byte position."""
+    """Stable identity from a record UUID plus its text-block index."""
     digest = hashlib.sha256(norm(text).encode("utf-8")).hexdigest()
-    identity = f"{transcript}\0{source_offset}\0{epoch:.6f}\0{digest}"
+    identity = f"{transcript}\0{source_id}\0{epoch:.6f}\0{digest}"
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
@@ -1596,7 +1620,7 @@ def update_permanent_loss_tombstones(
     channel_state: dict[str, Any],
     transcript: str | Path,
     blocks: list[tuple[float, str]],
-    block_offsets: list[int],
+    block_source_ids: list[str],
     hay: str,
     now: float,
     grace_secs: int,
@@ -1618,11 +1642,11 @@ def update_permanent_loss_tombstones(
         channel_state, now
     )
     corrupted = tombstones_corrupted or observations_corrupted
-    if len(block_offsets) != len(blocks):
-        raise ValueError("block_offsets must identify every source block")
+    if len(block_source_ids) != len(blocks):
+        raise ValueError("block_source_ids must identify every source block")
     block_ids = [
-        _assistant_block_id(path, epoch, text, source_offset)
-        for (epoch, text), source_offset in zip(blocks, block_offsets)
+        _assistant_block_id(path, epoch, text, source_id)
+        for (epoch, text), source_id in zip(blocks, block_source_ids)
     ]
     matched = delivered_flags(blocks, hay)
 
@@ -4101,7 +4125,7 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             chs,
             candidate.path,
             read_result.blocks,
-            read_result.block_offsets,
+            read_result.block_source_ids,
             hay,
             now,
             cfg.grace_secs,
@@ -4110,6 +4134,12 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         )
         suspected_permanent_losses += tombstone_update.suspected
         new_permanent_losses += len(tombstone_update.newly_tombstoned)
+        if read_result.identity_fallbacks:
+            rt.log(
+                f"[{cid}] permanent-loss-identity-offset-fallback path={path} "
+                f"blocks={read_result.identity_fallbacks}; identity may change "
+                "after head truncation"
+            )
         if tombstone_update.corrupted:
             rt.log(
                 f"[{cid}] permanent-loss-state-corrupt path={path}; "
