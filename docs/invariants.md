@@ -38,14 +38,13 @@ path, and exposed at `GET /api/analytics/invariants`.
 
 Each auto_queue_run assigns cards to agents through a `(thread_group, slot_index)`
 pool. The tick-based runtime allocates a slot via
-`allocate_slot_for_group_agent`, flips the picked entry to `dispatched`, then
-releases the slot in `release_slot_for_group_agent` once the entry reaches a
-terminal status. If two entries under the same `(agent_id, slot_index)` appear
-as `dispatched` concurrently, a tick has either failed to release the prior
-slot, or it has picked a second entry before the prior dispatched entry
-reached a terminal status. Both cases produce confused operator UI (the status
-view shows two "active" entries in one slot) and desync the agent-side tmux
-session binding. The check runs inside `assemble_status_response` — the same
+`allocate_slot_for_group_agent`; allocator guards reject slots with an active
+dispatch, a post-claim probe closes allocation races, and terminal transitions
+release slot ownership in the same transaction. If two entries under the same
+`(agent_id, slot_index)` appear as `dispatched` concurrently, those guards or
+the transactional release have failed. That produces confused operator UI (the
+status view shows two "active" entries in one slot) and desyncs the agent-side
+tmux session binding. The check runs inside `assemble_status_response` — the same
 path the HTTP status endpoint renders — so any operator query triggers the
 observation without extra DB round trips.
 
