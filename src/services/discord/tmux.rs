@@ -1388,10 +1388,12 @@ pub(in crate::services::discord) fn advance_watcher_confirmed_end(
 ) {
     let generation_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
     let _ = advance_watcher_confirmed_end_inner(
-        shared,
-        provider,
-        channel_id,
-        tmux_session_name,
+        WatcherDeliveryTarget {
+            shared,
+            provider,
+            channel_id,
+            tmux_session_name,
+        },
         committed_end_offset,
         (generation_mtime_ns != 0).then_some(generation_mtime_ns),
         context,
@@ -1402,40 +1404,47 @@ pub(in crate::services::discord) fn advance_watcher_confirmed_end(
 /// with its bytes. Callers hold the relay-frontier mutation guard, so reset
 /// incarnation is stable while this validates and advances.
 pub(in crate::services::discord) fn advance_watcher_confirmed_end_for_generation(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    tmux_session_name: &str,
+    target: WatcherDeliveryTarget<'_>,
     committed_end_offset: u64,
     source_generation_mtime_ns: i64,
     context: &'static str,
 ) -> bool {
     if source_generation_mtime_ns == 0
-        || read_generation_file_mtime_ns(tmux_session_name) != source_generation_mtime_ns
+        || read_generation_file_mtime_ns(target.tmux_session_name) != source_generation_mtime_ns
     {
         return false;
     }
     advance_watcher_confirmed_end_inner(
-        shared,
-        provider,
-        channel_id,
-        tmux_session_name,
+        target,
         committed_end_offset,
         Some(source_generation_mtime_ns),
         context,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The `(shared state, provider, channel, tmux session)` tuple every watcher
+/// delivery advance is scoped to. Bundled so the guarded funnel's helpers stay
+/// within the argument-count ratchet instead of carrying an `allow`.
+#[derive(Clone, Copy)]
+pub(in crate::services::discord) struct WatcherDeliveryTarget<'a> {
+    pub(in crate::services::discord) shared: &'a SharedData,
+    pub(in crate::services::discord) provider: &'a ProviderKind,
+    pub(in crate::services::discord) channel_id: ChannelId,
+    pub(in crate::services::discord) tmux_session_name: &'a str,
+}
+
 fn advance_watcher_confirmed_end_inner(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    tmux_session_name: &str,
+    target: WatcherDeliveryTarget<'_>,
     committed_end_offset: u64,
     mtime_at_attempt: Option<i64>,
     context: &'static str,
 ) -> bool {
+    let WatcherDeliveryTarget {
+        shared,
+        provider,
+        channel_id,
+        tmux_session_name,
+    } = target;
     let relay_coord = shared.tmux_relay_coord(channel_id);
     let mut cur = relay_coord
         .confirmed_end_offset

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use poise::serenity_prelude::ChannelId;
 
 use super::{SessionRelayDelivery, SinkDeliveryLeaseGuard};
+use crate::services::discord::tmux::WatcherDeliveryTarget;
 use crate::services::discord::tmux::tmux_watcher::terminal_long_chunks::{
     WatcherDeliveryIdentity, WatcherDeliveryMutation, begin_watcher_delivery_mutation,
     watcher_delivery_identity,
@@ -14,6 +15,39 @@ use crate::services::provider::ProviderKind;
 pub(super) struct SinkDeliveryAuthority {
     identity: WatcherDeliveryIdentity,
     range: (u64, u64),
+}
+
+/// Everything one sink delivery epilogue is scoped to: where it posts, which
+/// frame it carries, and the immutable source authority captured before
+/// transport. Bundled so the epilogue helpers stay within the argument-count
+/// ratchet instead of carrying an `allow`.
+#[derive(Clone, Copy)]
+pub(super) struct SinkDeliveryCtx<'a> {
+    pub(super) shared: &'a Arc<SharedData>,
+    pub(super) provider: &'a ProviderKind,
+    pub(super) channel: ChannelId,
+    pub(super) delivery: &'a SessionRelayDelivery,
+    pub(super) authority: SinkDeliveryAuthority,
+}
+
+impl<'a> SinkDeliveryCtx<'a> {
+    fn target(&self) -> WatcherDeliveryTarget<'a> {
+        WatcherDeliveryTarget {
+            shared: self.shared,
+            provider: self.provider,
+            channel_id: self.channel,
+            tmux_session_name: &self.delivery.session_name,
+        }
+    }
+
+    fn inflight_matches(&self) -> Option<crate::services::discord::InflightTurnState> {
+        current_inflight_matches(
+            self.provider,
+            self.channel.get(),
+            &self.delivery.session_name,
+            self.delivery,
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,95 +90,59 @@ fn current_inflight_matches(
 }
 
 pub(super) fn begin_sink_delivery_mutation(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel: ChannelId,
-    delivery: &SessionRelayDelivery,
-    authority: SinkDeliveryAuthority,
+    ctx: SinkDeliveryCtx<'_>,
     context: &'static str,
 ) -> Option<WatcherDeliveryMutation> {
-    if delivery.relay_range.is_none() {
-        current_inflight_matches(provider, channel.get(), &delivery.session_name, delivery)?;
+    if ctx.delivery.relay_range.is_none() {
+        ctx.inflight_matches()?;
     }
     let mutation = begin_watcher_delivery_mutation(
-        shared,
-        channel,
-        &delivery.session_name,
-        authority.identity,
+        ctx.shared,
+        ctx.channel,
+        &ctx.delivery.session_name,
+        ctx.authority.identity,
     )?;
     mutation
-        .advance(
-            shared,
-            provider,
-            channel,
-            &delivery.session_name,
-            authority.range.1,
-            context,
-        )
+        .advance(ctx.target(), ctx.authority.range.1, context)
         .then_some(mutation)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn persist_sink_delivery(
     mutation: WatcherDeliveryMutation,
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel: ChannelId,
-    delivery: &SessionRelayDelivery,
-    authority: SinkDeliveryAuthority,
+    ctx: SinkDeliveryCtx<'_>,
     terminal_anchor_msg_id: Option<u64>,
     raw_body: &str,
 ) -> SinkDeliveryProofResult {
     if !mutation.persist(
-        shared,
-        provider,
-        channel,
-        &delivery.session_name,
-        authority.range,
+        ctx.target(),
+        ctx.authority.range,
         terminal_anchor_msg_id,
         raw_body,
     ) {
         return SinkDeliveryProofResult::LandedUnrecorded;
     }
-    if let Some(inflight) =
-        current_inflight_matches(provider, channel.get(), &delivery.session_name, delivery)
-    {
+    if let Some(inflight) = ctx.inflight_matches() {
         crate::services::discord::inflight::mark_session_bound_relay_delivered_locked(
-            provider,
-            channel.get(),
+            ctx.provider,
+            ctx.channel.get(),
             &crate::services::discord::inflight::InflightTurnIdentity::from_state(&inflight),
-            &delivery.session_name,
+            &ctx.delivery.session_name,
         );
     }
     SinkDeliveryProofResult::Persisted
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn finish_sink_delivery(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel: ChannelId,
-    delivery: &SessionRelayDelivery,
-    authority: SinkDeliveryAuthority,
+    ctx: SinkDeliveryCtx<'_>,
     terminal_anchor_msg_id: Option<u64>,
     raw_body: &str,
     lease_guard: Option<&SinkDeliveryLeaseGuard>,
     context: &'static str,
 ) -> SinkDeliveryProofResult {
-    let result =
-        begin_sink_delivery_mutation(shared, provider, channel, delivery, authority, context)
-            .map_or(SinkDeliveryProofResult::LandedStale, |mutation| {
-                persist_sink_delivery(
-                    mutation,
-                    shared,
-                    provider,
-                    channel,
-                    delivery,
-                    authority,
-                    terminal_anchor_msg_id,
-                    raw_body,
-                )
-            });
+    let result = begin_sink_delivery_mutation(ctx, context)
+        .map_or(SinkDeliveryProofResult::LandedStale, |mutation| {
+            persist_sink_delivery(mutation, ctx, terminal_anchor_msg_id, raw_body)
+        });
     if let Some(guard) = lease_guard {
         // The transport landed even when its source authority went stale. Commit
         // the lease as delivered so reconciliation never duplicates that POST.

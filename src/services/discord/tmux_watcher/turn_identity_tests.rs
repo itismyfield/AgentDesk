@@ -605,10 +605,12 @@ fn watcher_long_chunk_wrapper_uses_caller_identity_without_registry_4911() {
     // The send has committed, but both the inflight row and registry binding are
     // gone. The immutable caller identity still supplies the receipt-less guard.
     super::super::terminal_long_chunks::record_watcher_terminal_delivery(
-        &shared,
-        &provider,
-        channel,
-        tmux,
+        crate::services::discord::tmux::WatcherDeliveryTarget {
+            shared: &shared,
+            provider: &provider,
+            channel_id: channel,
+            tmux_session_name: tmux,
+        },
         identity,
         (0, 128),
         Some(7_491_102),
@@ -710,10 +712,12 @@ fn watcher_long_chunk_a_range_is_not_stamped_as_replacement_b_4911() {
         .expect("seed replacement B inflight");
 
     super::super::terminal_long_chunks::record_watcher_terminal_delivery(
-        &shared,
-        &provider,
-        channel,
-        tmux,
+        crate::services::discord::tmux::WatcherDeliveryTarget {
+            shared: &shared,
+            provider: &provider,
+            channel_id: channel,
+            tmux_session_name: tmux,
+        },
         identity_a,
         (0, 128),
         Some(7_491_202),
@@ -806,10 +810,12 @@ fn watcher_legacy_short_and_long_same_generation_reset_reject_delayed_record_491
         };
         assert!(
             !super::super::terminal_long_chunks::commit_legacy_watcher_delivery(
-                &shared,
-                &provider,
-                channel,
-                tmux,
+                crate::services::discord::tmux::WatcherDeliveryTarget {
+                    shared: &shared,
+                    provider: &provider,
+                    channel_id: channel,
+                    tmux_session_name: tmux,
+                },
                 identity_a,
                 (0, 128),
                 Some(&proof),

@@ -191,6 +191,12 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
         source_authority.reset_incarnation,
         lease_key.as_ref(),
     );
+    let delivery_target = crate::services::discord::tmux::WatcherDeliveryTarget {
+        shared,
+        provider,
+        channel_id,
+        tmux_session_name,
+    };
     let delivery_mutation = std::sync::Mutex::new(None);
     let landed_stale = std::sync::atomic::AtomicBool::new(false);
     let holder = LeaseHolder::Watcher { instance_id };
@@ -217,10 +223,7 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
             return true;
         };
         if !mutation.advance(
-            shared,
-            provider,
-            channel_id,
-            tmux_session_name,
+            delivery_target,
             end,
             "src/services/discord/tmux_watcher/terminal_send.rs:watcher_controller_advance",
         ) {
@@ -318,10 +321,7 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
             .take()
             .is_some_and(|mutation| {
                 mutation.persist(
-                    shared,
-                    provider,
-                    channel_id,
-                    tmux_session_name,
+                    delivery_target,
                     (start, end),
                     terminal_anchor_msg_id,
                     delivered_body,
@@ -636,10 +636,12 @@ mod tests {
         let channel = ChannelId::new(556_677_889);
         // Does not panic; missing generation → writes nothing.
         super::super::terminal_long_chunks::record_watcher_terminal_delivery(
-            &shared,
-            &ProviderKind::Claude,
-            channel,
-            "AgentDesk-claude-watcher-off-noop",
+            crate::services::discord::tmux::WatcherDeliveryTarget {
+                shared: &shared,
+                provider: &ProviderKind::Claude,
+                channel_id: channel,
+                tmux_session_name: "AgentDesk-claude-watcher-off-noop",
+            },
             super::super::terminal_long_chunks::WatcherDeliveryIdentity {
                 generation_mtime_ns: 0,
                 lease_reset_incarnation: 0,
@@ -665,10 +667,12 @@ mod tests {
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel = ChannelId::new(112_233_445);
         super::super::terminal_long_chunks::record_watcher_terminal_delivery(
-            &shared,
-            &ProviderKind::Claude,
-            channel,
-            "AgentDesk-claude-watcher-none-anchor-noop",
+            crate::services::discord::tmux::WatcherDeliveryTarget {
+                shared: &shared,
+                provider: &ProviderKind::Claude,
+                channel_id: channel,
+                tmux_session_name: "AgentDesk-claude-watcher-none-anchor-noop",
+            },
             super::super::terminal_long_chunks::WatcherDeliveryIdentity {
                 generation_mtime_ns: 0,
                 lease_reset_incarnation: 0,

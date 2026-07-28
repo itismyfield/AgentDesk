@@ -759,42 +759,12 @@ impl SessionBoundDiscordRelaySink {
     /// `CommitOnFallback`, identity-gated advance (FRESH post-POST reload): confirmed POST →
     /// `Delivered`, ambiguous → `Err(Transient)` (I2); `Replace { Active }` → `post_send_finalize`
     /// no-op. `gateway` seam (review-fix Medium-1): live = real gateway, test fakes it.
-    #[allow(clippy::too_many_arguments)]
     async fn deliver_short_replace_via_controller<G: super::gateway::TurnGateway + ?Sized>(
         &self,
         gateway: &G,
-        shared: &Arc<super::SharedData>,
-        provider: &ProviderKind,
-        channel: ChannelId,
-        channel_id: u64,
-        msg_id: MessageId,
-        relay_text: &str,
-        delivered_fingerprint_body: &str,
-        delivery: &SessionRelayDelivery,
-        sink_lease_key: super::DeliveryLeaseKey,
-        sink_delivery_authority: delivery_frontier::SinkDeliveryAuthority,
-        trace: &SessionRelayTraceContext,
-        start: u64,
-        end: u64,
+        ctx: short_controller::SinkShortReplaceCtx<'_>,
     ) -> Result<SessionRelayDeliveryOutcome, RelaySinkError> {
-        short_controller::deliver_short_replace_via_controller(
-            gateway,
-            shared,
-            provider,
-            channel,
-            channel_id,
-            msg_id,
-            relay_text,
-            delivered_fingerprint_body,
-            delivery,
-            sink_lease_key,
-            sink_delivery_authority,
-            trace,
-            start,
-            end,
-            &self.delivered_total,
-        )
-        .await
+        short_controller::deliver_short_replace_via_controller(gateway, ctx).await
     }
 
     async fn deliver_response(
@@ -916,6 +886,13 @@ impl SessionBoundDiscordRelaySink {
             &sink_lease_key,
             lease_range,
         );
+        let sink_delivery_ctx = delivery_frontier::SinkDeliveryCtx {
+            shared: &shared,
+            provider: &provider,
+            channel,
+            delivery: &delivery,
+            authority: sink_delivery_authority,
+        };
         let sink_lease_guard = if cutover_short_replace {
             None
         } else {
@@ -1028,19 +1005,21 @@ impl SessionBoundDiscordRelaySink {
                 return self
                     .deliver_short_replace_via_controller(
                         &gateway,
-                        &shared,
-                        &provider,
-                        channel,
-                        channel_id,
-                        msg_id,
-                        &relay_text,
-                        &raw_response_text,
-                        &delivery,
-                        sink_lease_key,
-                        sink_delivery_authority,
-                        &trace,
-                        start,
-                        end,
+                        short_controller::SinkShortReplaceCtx {
+                            shared: &shared,
+                            provider: &provider,
+                            channel,
+                            channel_id,
+                            msg_id,
+                            relay_text: &relay_text,
+                            delivered_fingerprint_body: &raw_response_text,
+                            delivery: &delivery,
+                            sink_lease_key,
+                            sink_delivery_authority,
+                            trace: &trace,
+                            range: (start, end),
+                            delivered_total: &self.delivered_total,
+                        },
                     )
                     .await;
             }
@@ -1084,11 +1063,7 @@ impl SessionBoundDiscordRelaySink {
                     Some("long response sent as ordered chunks"),
                 );
                 let proof = delivery_frontier::finish_sink_delivery(
-                    &shared,
-                    &provider,
-                    channel,
-                    &delivery,
-                    sink_delivery_authority,
+                    sink_delivery_ctx,
                     message_ids.last().map(|message_id| message_id.get()),
                     &raw_response_text,
                     sink_lease_guard.as_ref(),
@@ -1143,11 +1118,7 @@ impl SessionBoundDiscordRelaySink {
                     )
                     .0;
                     let proof = delivery_frontier::finish_sink_delivery(
-                        &shared,
-                        &provider,
-                        channel,
-                        &delivery,
-                        sink_delivery_authority,
+                        sink_delivery_ctx,
                         Some(anchor.get()),
                         &raw_response_text,
                         sink_lease_guard.as_ref(),
@@ -1194,11 +1165,7 @@ impl SessionBoundDiscordRelaySink {
                         Some("fallback after edit failure"),
                     );
                     let proof = delivery_frontier::finish_sink_delivery(
-                        &shared,
-                        &provider,
-                        channel,
-                        &delivery,
-                        sink_delivery_authority,
+                        sink_delivery_ctx,
                         replacement_anchor.map(|anchor| anchor.get()),
                         &raw_response_text,
                         sink_lease_guard.as_ref(),
@@ -3505,19 +3472,21 @@ mod tests {
         let outcome = rt
             .block_on(sink.deliver_short_replace_via_controller(
                 &gateway,
-                &shared,
-                &provider,
-                channel,
-                channel.get(),
-                MessageId::new(99),
-                "answer",
-                "answer",
-                &delivery,
-                lease_key,
-                authority,
-                &trace,
-                start,
-                end,
+                short_controller::SinkShortReplaceCtx {
+                    shared: &shared,
+                    provider: &provider,
+                    channel: channel,
+                    channel_id: channel.get(),
+                    msg_id: MessageId::new(99),
+                    relay_text: "answer",
+                    delivered_fingerprint_body: "answer",
+                    delivery: &delivery,
+                    sink_lease_key: lease_key,
+                    sink_delivery_authority: authority,
+                    trace: &trace,
+                    range: (start, end),
+                    delivered_total: &sink.delivered_total,
+                },
             ))
             .expect("matching-identity cut-over delivery is Ok");
         assert!(
@@ -3572,19 +3541,21 @@ mod tests {
         let outcome2 = rt
             .block_on(sink2.deliver_short_replace_via_controller(
                 &gateway2,
-                &shared2,
-                &provider,
-                channel,
-                channel.get(),
-                MessageId::new(99),
-                "answer",
-                "answer",
-                &delivery,
-                lease_key2,
-                authority2,
-                &trace,
-                start,
-                end,
+                short_controller::SinkShortReplaceCtx {
+                    shared: &shared2,
+                    provider: &provider,
+                    channel: channel,
+                    channel_id: channel.get(),
+                    msg_id: MessageId::new(99),
+                    relay_text: "answer",
+                    delivered_fingerprint_body: "answer",
+                    delivery: &delivery,
+                    sink_lease_key: lease_key2,
+                    sink_delivery_authority: authority2,
+                    trace: &trace,
+                    range: (start, end),
+                    delivered_total: &sink.delivered_total,
+                },
             ))
             .expect("mismatched-identity cut-over delivery is still Ok (POST landed)");
         // The POST landed (sink-local Delivered maps both lease outcomes), but the
@@ -3707,19 +3678,21 @@ mod tests {
         let outcome = rt
             .block_on(sink.deliver_short_replace_via_controller(
                 &gateway,
-                &shared,
-                &provider,
-                channel,
-                channel.get(),
-                MessageId::new(99),
-                "old body",
-                "old body",
-                &delivery,
-                lease_key,
-                authority,
-                &SessionRelayTraceContext::default(),
-                start,
-                end,
+                short_controller::SinkShortReplaceCtx {
+                    shared: &shared,
+                    provider: &provider,
+                    channel: channel,
+                    channel_id: channel.get(),
+                    msg_id: MessageId::new(99),
+                    relay_text: "old body",
+                    delivered_fingerprint_body: "old body",
+                    delivery: &delivery,
+                    sink_lease_key: lease_key,
+                    sink_delivery_authority: authority,
+                    trace: &SessionRelayTraceContext::default(),
+                    range: (start, end),
+                    delivered_total: &sink.delivered_total,
+                },
             ))
             .unwrap();
         assert_eq!(outcome, SessionRelayDeliveryOutcome::LandedStale);
@@ -3852,11 +3825,13 @@ mod tests {
                 );
 
                 let result = delivery_frontier::finish_sink_delivery(
-                    &shared,
-                    &provider,
-                    channel,
-                    &delivery,
-                    authority,
+                    delivery_frontier::SinkDeliveryCtx {
+                        shared: &shared,
+                        provider: &provider,
+                        channel,
+                        delivery: &delivery,
+                        authority,
+                    },
                     Some(8_041_492_800 + index),
                     "old landed body",
                     Some(&lease_guard),
@@ -3927,7 +3902,9 @@ mod tests {
             "session sink status-panel formatting must also use the preserved raw body"
         );
         assert!(
-            module_src.contains("&relay_text,\n                        &raw_response_text,"),
+            module_src.contains(
+                "relay_text: &relay_text,\n                            delivered_fingerprint_body: &raw_response_text,"
+            ),
             "session sink production cut-over call must thread the raw pre-format body into the fingerprint slot"
         );
 
@@ -3980,19 +3957,21 @@ mod tests {
         let outcome = rt
             .block_on(sink.deliver_short_replace_via_controller(
                 &gateway,
-                &shared,
-                &provider,
-                channel,
-                channel.get(),
-                MessageId::new(99),
-                &relay_text,
-                &raw_body,
-                &delivery,
-                lease_key,
-                authority,
-                &trace,
-                start,
-                end,
+                short_controller::SinkShortReplaceCtx {
+                    shared: &shared,
+                    provider: &provider,
+                    channel: channel,
+                    channel_id: channel.get(),
+                    msg_id: MessageId::new(99),
+                    relay_text: &relay_text,
+                    delivered_fingerprint_body: &raw_body,
+                    delivery: &delivery,
+                    sink_lease_key: lease_key,
+                    sink_delivery_authority: authority,
+                    trace: &trace,
+                    range: (start, end),
+                    delivered_total: &sink.delivered_total,
+                },
             ))
             .expect("raw-fingerprint cut-over delivery is Ok");
         assert!(matches!(outcome, SessionRelayDeliveryOutcome::Delivered));

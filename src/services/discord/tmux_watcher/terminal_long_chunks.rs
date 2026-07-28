@@ -6,6 +6,7 @@ use crate::services::discord::gateway::TurnGateway;
 use crate::services::discord::inflight::RelayOwnerKind;
 use crate::services::discord::outbound::turn_output_controller as toc;
 use crate::services::discord::placeholder_controller::PlaceholderKey;
+use crate::services::discord::tmux::WatcherDeliveryTarget;
 use crate::services::discord::turn_finalizer::TurnKey;
 use crate::services::discord::{DeliveryLeaseCell, LeaseHolder, SharedData, lease_now_ms};
 use crate::services::provider::ProviderKind;
@@ -55,7 +56,7 @@ pub(in crate::services::discord) struct WatcherTerminalDeliveryProof {
 }
 
 pub(in crate::services::discord) fn begin_watcher_delivery_mutation(
-    shared: &Arc<SharedData>,
+    shared: &SharedData,
     channel_id: ChannelId,
     tmux_session_name: &str,
     identity: WatcherDeliveryIdentity,
@@ -78,35 +79,31 @@ pub(in crate::services::discord) fn begin_watcher_delivery_mutation(
 impl WatcherDeliveryMutation {
     pub(in crate::services::discord) fn advance(
         &self,
-        shared: &Arc<SharedData>,
-        provider: &ProviderKind,
-        channel_id: ChannelId,
-        tmux_session_name: &str,
+        target: WatcherDeliveryTarget<'_>,
         end: u64,
         context: &'static str,
     ) -> bool {
         crate::services::discord::tmux::advance_watcher_confirmed_end_for_generation(
-            shared,
-            provider,
-            channel_id,
-            tmux_session_name,
+            target,
             end,
             self.identity.generation_mtime_ns,
             context,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(in crate::services::discord) fn persist(
         self,
-        shared: &Arc<SharedData>,
-        provider: &ProviderKind,
-        channel_id: ChannelId,
-        tmux_session_name: &str,
+        target: WatcherDeliveryTarget<'_>,
         range: (u64, u64),
         terminal_anchor_msg_id: Option<u64>,
         delivered_body: &str,
     ) -> bool {
+        let WatcherDeliveryTarget {
+            shared,
+            provider,
+            channel_id,
+            tmux_session_name,
+        } = target;
         let frontier_token = shared.relay_frontier_token(channel_id);
         dr::record_watcher_terminal_delivery(
             shared,
@@ -127,23 +124,20 @@ impl WatcherDeliveryMutation {
 }
 
 pub(in crate::services::discord) fn advance_watcher_terminal_delivery(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    tmux_session_name: &str,
+    target: WatcherDeliveryTarget<'_>,
     identity: WatcherDeliveryIdentity,
     end: u64,
 ) -> GuardedWatcherDeliveryResult {
-    let Some(mutation) =
-        begin_watcher_delivery_mutation(shared, channel_id, tmux_session_name, identity)
-    else {
+    let Some(mutation) = begin_watcher_delivery_mutation(
+        target.shared,
+        target.channel_id,
+        target.tmux_session_name,
+        identity,
+    ) else {
         return GuardedWatcherDeliveryResult::LandedStale;
     };
     if mutation.advance(
-        shared,
-        provider,
-        channel_id,
-        tmux_session_name,
+        target,
         end,
         "src/services/discord/tmux_watcher/terminal_long_chunks.rs:guarded_watcher_advance_without_proof",
     ) {
@@ -157,84 +151,57 @@ pub(in crate::services::discord) fn advance_watcher_terminal_delivery(
 /// succeed. The mutation guard prevents a reset from crossing the lease-time
 /// identity snapshot and durable record mutation.
 pub(in crate::services::discord) fn record_watcher_terminal_delivery(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    tmux_session_name: &str,
+    target: WatcherDeliveryTarget<'_>,
     identity: WatcherDeliveryIdentity,
     range: (u64, u64),
     last_chunk_anchor_msg_id: Option<u64>,
     delivered_body: &str,
 ) -> GuardedWatcherDeliveryResult {
-    let Some(mutation) =
-        begin_watcher_delivery_mutation(shared, channel_id, tmux_session_name, identity)
-    else {
+    let Some(mutation) = begin_watcher_delivery_mutation(
+        target.shared,
+        target.channel_id,
+        target.tmux_session_name,
+        identity,
+    ) else {
         tracing::warn!(
-            provider = provider.as_str(),
-            channel_id = channel_id.get(),
+            provider = target.provider.as_str(),
+            channel_id = target.channel_id.get(),
             range = ?range,
             "watcher frontier reset after delivery lease capture"
         );
         return GuardedWatcherDeliveryResult::LandedStale;
     };
     if !mutation.advance(
-        shared,
-        provider,
-        channel_id,
-        tmux_session_name,
+        target,
         range.1,
         "src/services/discord/tmux_watcher/terminal_long_chunks.rs:guarded_watcher_advance",
     ) {
         tracing::warn!(
-            provider = provider.as_str(),
-            channel_id = channel_id.get(),
+            provider = target.provider.as_str(),
+            channel_id = target.channel_id.get(),
             range = ?range,
             "watcher frontier changed before durable record"
         );
         return GuardedWatcherDeliveryResult::LandedStale;
     }
-    if mutation.persist(
-        shared,
-        provider,
-        channel_id,
-        tmux_session_name,
-        range,
-        last_chunk_anchor_msg_id,
-        delivered_body,
-    ) {
+    if mutation.persist(target, range, last_chunk_anchor_msg_id, delivered_body) {
         GuardedWatcherDeliveryResult::Persisted
     } else {
         GuardedWatcherDeliveryResult::LandedUnrecorded
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) fn commit_legacy_watcher_delivery(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    tmux_session_name: &str,
+    target: WatcherDeliveryTarget<'_>,
     identity: WatcherDeliveryIdentity,
     range: (u64, u64),
     proof: Option<&WatcherTerminalDeliveryProof>,
 ) -> bool {
     let result = proof.map_or_else(
-        || {
-            advance_watcher_terminal_delivery(
-                shared,
-                provider,
-                channel_id,
-                tmux_session_name,
-                identity,
-                range.1,
-            )
-        },
+        || advance_watcher_terminal_delivery(target, identity, range.1),
         |proof| {
             record_watcher_terminal_delivery(
-                shared,
-                provider,
-                channel_id,
-                tmux_session_name,
+                target,
                 identity,
                 range,
                 proof.anchor_msg_id.map(|anchor| anchor.get()),
@@ -274,6 +241,12 @@ pub(in crate::services::discord) async fn deliver_long_chunks_via_controller<
         source_authority.reset_incarnation,
         lease_key.as_ref(),
     );
+    let delivery_target = WatcherDeliveryTarget {
+        shared,
+        provider,
+        channel_id,
+        tmux_session_name,
+    };
     let delivery_mutation = std::sync::Mutex::new(None);
     let landed_stale = std::sync::atomic::AtomicBool::new(false);
     let holder = LeaseHolder::Watcher { instance_id };
@@ -291,10 +264,7 @@ pub(in crate::services::discord) async fn deliver_long_chunks_via_controller<
             return true;
         };
         if !mutation.advance(
-            shared,
-            provider,
-            channel_id,
-            tmux_session_name,
+            delivery_target,
             end,
             "src/services/discord/tmux_watcher/terminal_long_chunks.rs:watcher_long_chunks_controller_advance",
         ) {
@@ -352,10 +322,7 @@ pub(in crate::services::discord) async fn deliver_long_chunks_via_controller<
             .take();
         let persisted = mutation.is_some_and(|mutation| {
             mutation.persist(
-                shared,
-                provider,
-                channel_id,
-                tmux_session_name,
+                delivery_target,
                 (start, end),
                 chunks.tail_message_id.map(|m| m.get()),
                 delivered_body,

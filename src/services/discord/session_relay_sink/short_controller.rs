@@ -13,38 +13,60 @@ use crate::services::discord::outbound::turn_output_controller as toc;
 use crate::services::discord::placeholder_controller::{PlaceholderKey, PlaceholderLifecycle};
 use crate::services::provider::ProviderKind;
 
-#[allow(clippy::too_many_arguments)]
+/// Every input one cut-over short-replace delivery needs. Bundled so the entry
+/// point stays within the argument-count ratchet instead of carrying an `allow`.
+pub(super) struct SinkShortReplaceCtx<'a> {
+    pub(super) shared: &'a Arc<crate::services::discord::SharedData>,
+    pub(super) provider: &'a ProviderKind,
+    pub(super) channel: ChannelId,
+    pub(super) channel_id: u64,
+    pub(super) msg_id: MessageId,
+    pub(super) relay_text: &'a str,
+    pub(super) delivered_fingerprint_body: &'a str,
+    pub(super) delivery: &'a SessionRelayDelivery,
+    pub(super) sink_lease_key: crate::services::discord::DeliveryLeaseKey,
+    pub(super) sink_delivery_authority: delivery_frontier::SinkDeliveryAuthority,
+    pub(super) trace: &'a SessionRelayTraceContext,
+    pub(super) range: (u64, u64),
+    pub(super) delivered_total: &'a AtomicU64,
+}
+
 pub(super) async fn deliver_short_replace_via_controller<
     G: crate::services::discord::gateway::TurnGateway + ?Sized,
 >(
     gateway: &G,
-    shared: &Arc<crate::services::discord::SharedData>,
-    provider: &ProviderKind,
-    channel: ChannelId,
-    channel_id: u64,
-    msg_id: MessageId,
-    relay_text: &str,
-    delivered_fingerprint_body: &str,
-    delivery: &SessionRelayDelivery,
-    sink_lease_key: crate::services::discord::DeliveryLeaseKey,
-    sink_delivery_authority: delivery_frontier::SinkDeliveryAuthority,
-    trace: &SessionRelayTraceContext,
-    start: u64,
-    end: u64,
-    delivered_total: &AtomicU64,
+    ctx: SinkShortReplaceCtx<'_>,
 ) -> Result<SessionRelayDeliveryOutcome, RelaySinkError> {
+    let SinkShortReplaceCtx {
+        shared,
+        provider,
+        channel,
+        channel_id,
+        msg_id,
+        relay_text,
+        delivered_fingerprint_body,
+        delivery,
+        sink_lease_key,
+        sink_delivery_authority,
+        trace,
+        range: (start, end),
+        delivered_total,
+    } = ctx;
     let cell = shared.delivery_lease(channel);
     cell.reclaim_if_expired(crate::services::discord::lease_now_ms());
     let heartbeat = SinkPostHeartbeat { cell: cell.clone() };
+    let sink_delivery_ctx = delivery_frontier::SinkDeliveryCtx {
+        shared,
+        provider,
+        channel,
+        delivery,
+        authority: sink_delivery_authority,
+    };
     let delivery_mutation = Mutex::new(None);
     let landed_stale = AtomicBool::new(false);
     let advance = |_range: (u64, u64)| -> bool {
         let Some(mutation) = delivery_frontier::begin_sink_delivery_mutation(
-            shared,
-            provider,
-            channel,
-            delivery,
-            sink_delivery_authority,
+            sink_delivery_ctx,
             "src/services/discord/session_relay_sink/short_controller.rs:sink_short_controller_advance",
         ) else {
             landed_stale.store(true, Ordering::Release);
@@ -113,11 +135,7 @@ pub(super) async fn deliver_short_replace_via_controller<
             };
             if delivery_frontier::persist_sink_delivery(
                 mutation,
-                shared,
-                provider,
-                channel,
-                delivery,
-                sink_delivery_authority,
+                sink_delivery_ctx,
                 anchor,
                 delivered_fingerprint_body,
             ) != delivery_frontier::SinkDeliveryProofResult::Persisted

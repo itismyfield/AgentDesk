@@ -2754,10 +2754,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             if committed && commit_outcome == crate::services::discord::LeaseOutcome::Delivered {
                 watcher_response_frontier_committed =
                     terminal_long_chunks::commit_legacy_watcher_delivery(
-                        &shared,
-                        &watcher_provider,
-                        channel_id,
-                        &tmux_session_name,
+                        crate::services::discord::tmux::WatcherDeliveryTarget {
+                            shared: &shared,
+                            provider: &watcher_provider,
+                            channel_id,
+                            tmux_session_name: &tmux_session_name,
+                        },
                         watcher_long_chunk_identity,
                         (watcher_lease_start, watcher_lease_end),
                         watcher_terminal_delivery_proof.as_ref(),
