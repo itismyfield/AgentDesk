@@ -6512,6 +6512,34 @@ class TickChannelTests(unittest.TestCase):
             any("permanent-loss-state-corrupt" in line for line in rt.log_lines)
         )
 
+    def test_corruption_warning_is_edge_triggered_by_content(self):
+        chs = {
+            relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY: {"bad": "shape"},
+            relay_watchdog.PERMANENT_LOSS_TOTAL_KEY: 9,
+        }
+        state = {"999": chs}
+        self.write_transcript([(self.now - 2000, "corrupt warning candidate")])
+        rt = self.make_rt()
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
+
+        warnings = [
+            line
+            for line in rt.log_lines
+            if "permanent-loss-state-corrupt" in line
+        ]
+        self.assertEqual(len(warnings), 1)
+        chs[relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY] = {"changed": "shape"}
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+
+        warnings = [
+            line
+            for line in rt.log_lines
+            if "permanent-loss-state-corrupt" in line
+        ]
+        self.assertEqual(len(warnings), 2)
 
     def test_corrupt_tick_does_not_increment_overflow_projection(self):
         path = str(self.proj_dir / "s.jsonl")

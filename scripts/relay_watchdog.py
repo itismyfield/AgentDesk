@@ -146,6 +146,7 @@ PERMANENT_LOSS_TOTAL_KEY = "permanent_loss_total"
 PERMANENT_LOSS_SUSPECTED_KEY = "permanent_loss_suspected"
 PERMANENT_LOSS_OVERFLOW_TOTAL_KEY = "permanent_loss_overflow_total"
 PERMANENT_LOSS_IDENTITY_WARNING_KEY = "permanent_loss_identity_warnings"
+PERMANENT_LOSS_CORRUPTION_WARNING_KEY = "permanent_loss_corruption_warnings"
 LAST_ACTUAL_DELIVERY_AT_KEY = "last_actual_delivery_at"
 LAST_ACTUAL_DELIVERY_BY_PATH_KEY = "last_actual_delivery_by_path"
 # Permanent loss requires two different delivered-frontier advances beyond the
@@ -4188,11 +4189,47 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             chs[PERMANENT_LOSS_IDENTITY_WARNING_KEY] = identity_warnings
         else:
             chs.pop(PERMANENT_LOSS_IDENTITY_WARNING_KEY, None)
+        raw_corruption_warnings = chs.get(
+            PERMANENT_LOSS_CORRUPTION_WARNING_KEY, {}
+        )
+        corruption_warnings = (
+            {
+                warning_path: fingerprint
+                for warning_path, fingerprint in raw_corruption_warnings.items()
+                if isinstance(warning_path, str)
+                and isinstance(fingerprint, str)
+                and fingerprint
+            }
+            if isinstance(raw_corruption_warnings, dict)
+            else {}
+        )
+        prior_corruption = corruption_warnings.get(path)
         if tombstone_update.corrupted:
-            rt.log(
-                f"[{cid}] permanent-loss-state-corrupt path={path}; "
-                "preserving raw state"
-            )
+            corruption_fingerprint = hashlib.sha256(
+                json.dumps(
+                    {
+                        LOSS_OBSERVATIONS_KEY: chs.get(LOSS_OBSERVATIONS_KEY),
+                        PERMANENT_LOSS_TOMBSTONES_KEY: chs.get(
+                            PERMANENT_LOSS_TOMBSTONES_KEY
+                        ),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=repr,
+                ).encode("utf-8")
+            ).hexdigest()
+            corruption_warnings[path] = corruption_fingerprint
+            if prior_corruption != corruption_fingerprint:
+                rt.log(
+                    f"[{cid}] permanent-loss-state-corrupt path={path}; "
+                    "preserving raw state"
+                )
+        else:
+            corruption_warnings.pop(path, None)
+        if corruption_warnings:
+            chs[PERMANENT_LOSS_CORRUPTION_WARNING_KEY] = corruption_warnings
+        else:
+            chs.pop(PERMANENT_LOSS_CORRUPTION_WARNING_KEY, None)
         if tombstone_update.overflowed and not tombstone_update.corrupted:
             rt.log(
                 f"[{cid}] permanent-loss-state-overflow path={path} "
