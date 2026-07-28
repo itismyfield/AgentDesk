@@ -14,7 +14,8 @@ use discovery::candidate_failure_key;
 use discovery::{
     DiscoveredRoutineScript, RoutineDiscoveryHooks, ValidatedHelperSurface, ValidatedRoutineRoot,
     ValidatedRuntimeRoot, add_cached_candidates_for_root, bind_routine_root_authority,
-    collect_routine_script_paths, routine_roots_identity, script_ref, validate_routine_authority,
+    collect_routine_script_paths, require_nonempty_routine_tree, routine_roots_identity,
+    script_ref, validate_routine_authority,
 };
 #[cfg(test)]
 use evaluator::load_single_routine_script;
@@ -528,7 +529,11 @@ impl RoutineScriptLoader {
                 read_observer: None,
                 authority_check: Some(&authority_check),
             };
-            let entries_result = collect_routine_script_paths(root, discovery_hooks);
+            let entries_result =
+                collect_routine_script_paths(root, discovery_hooks).and_then(|entries| {
+                    require_nonempty_routine_tree(&entries)?;
+                    Ok(entries)
+                });
             self.verify_bound_authority(&runtime_root, current_dir_override.as_deref())?;
             let entries = match entries_result {
                 Ok(entries) => entries,

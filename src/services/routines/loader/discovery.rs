@@ -18,6 +18,7 @@ use std::os::unix::fs::MetadataExt as _;
 use std::os::windows::fs::OpenOptionsExt as _;
 
 mod authority;
+mod bounded_scan;
 #[cfg(test)]
 mod tests;
 use authority::AuthorityFileKind;
@@ -32,6 +33,10 @@ pub(super) use authority::{
     bind_routine_root_authority_with_hook, validate_routine_authority_with_hook,
     validate_routine_roots,
 };
+use bounded_scan::{DEFAULT_ROUTINE_TREE_LIMITS, TraversalBudget};
+#[cfg(test)]
+use bounded_scan::{RoutineTreeLimits, collect_routine_script_paths_with_limits};
+pub(super) use bounded_scan::{collect_routine_script_paths, require_nonempty_routine_tree};
 
 #[derive(Debug)]
 pub(super) struct DiscoveredRoutineScript {
@@ -217,6 +222,7 @@ pub(super) fn routine_roots_identity(
     );
     for root in roots {
         hasher.update(b"root");
+        update_path(&mut hasher, &root.configured);
         update_path(&mut hasher, &root.canonical);
         #[cfg(unix)]
         let identity = root
@@ -236,6 +242,7 @@ pub(super) fn routine_roots_identity(
         });
     }
     hasher.update(b"helper");
+    update_path(&mut hasher, &helper_authority.configured);
     update_path(&mut hasher, &helper_authority.canonical);
     #[cfg(unix)]
     let helper_identity = helper_authority
@@ -259,6 +266,21 @@ pub(super) fn routine_roots_identity(
             }
         },
     );
+    #[cfg(unix)]
+    {
+        let mut entry_identities = helper_authority
+            .entry_identities
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        entry_identities.sort_unstable();
+        hasher.update(b"helper-entries");
+        hasher.update((entry_identities.len() as u64).to_le_bytes());
+        for identity in entry_identities {
+            hasher.update(identity.device.to_le_bytes());
+            hasher.update(identity.inode.to_le_bytes());
+        }
+    }
     PathBuf::from(hex::encode(hasher.finalize()))
 }
 
@@ -333,7 +355,11 @@ impl Drop for DirectoryStream {
 }
 
 #[cfg(unix)]
-fn directory_entries(directory: &File) -> io::Result<Vec<PinnedDirectoryEntry>> {
+fn directory_entries(
+    directory: &File,
+    current_path: &Path,
+    budget: &mut TraversalBudget,
+) -> io::Result<Vec<PinnedDirectoryEntry>> {
     // SAFETY: `fcntl` receives a valid live descriptor and returns an independent descriptor.
     let duplicate = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
     if duplicate < 0 {
@@ -367,6 +393,7 @@ fn directory_entries(directory: &File) -> io::Result<Vec<PinnedDirectoryEntry>> 
         if bytes == b"." || bytes == b".." {
             continue;
         }
+        budget.record_entry(current_path)?;
         let name = OsStr::from_bytes(bytes).to_os_string();
         let (identity, kind) = entry_identity(directory, &name)?;
         entries.push(PinnedDirectoryEntry {
@@ -644,14 +671,17 @@ fn verify_mount_authority(
 fn collect_helper_identities_inner(
     directory: &File,
     current_path: &Path,
+    depth: usize,
     root_identity: FileIdentity,
     root_mount_id: Option<u64>,
     identities: &mut HashSet<FileIdentity>,
+    budget: &mut TraversalBudget,
 ) -> io::Result<()> {
-    for entry in directory_entries(directory)? {
+    for entry in directory_entries(directory, current_path, budget)? {
         let path = current_path.join(&entry.name);
         match entry.kind {
             PinnedEntryKind::Directory => {
+                budget.verify_depth(depth + 1, &path)?;
                 let child = openat(
                     directory,
                     &entry.name,
@@ -681,12 +711,15 @@ fn collect_helper_identities_inner(
                 collect_helper_identities_inner(
                     &child,
                     &path,
+                    depth + 1,
                     root_identity,
                     root_mount_id,
                     identities,
+                    budget,
                 )?;
             }
             PinnedEntryKind::RegularFile => {
+                budget.record_file(&path)?;
                 let file = openat(
                     directory,
                     &entry.name,
@@ -727,12 +760,15 @@ fn collect_helper_authority_identities(
         root_path,
     )?;
     let mut identities = HashSet::from([root_identity]);
+    let mut budget = TraversalBudget::new(DEFAULT_ROUTINE_TREE_LIMITS);
     collect_helper_identities_inner(
         directory,
         root_path,
+        0,
         root_identity,
         root_mount_id,
         &mut identities,
+        &mut budget,
     )?;
     Ok(identities)
 }
@@ -772,17 +808,23 @@ fn validate_routine_namespace_name(
 fn collect_routine_scripts_inner(
     directory: &File,
     current_path: &Path,
+    depth: usize,
     hooks: RoutineDiscoveryHooks<'_>,
     authority: &mut UnixTraversalAuthority<'_>,
+    budget: &mut TraversalBudget,
     out: &mut Vec<DiscoveredRoutineScript>,
 ) -> io::Result<()> {
-    let mut entries = directory_entries(directory)?;
+    let mut entries = directory_entries(directory, current_path, budget)?;
     entries.sort_by(|first, second| first.name.cmp(&second.name));
     for entry in entries {
         validate_routine_namespace_name(&entry.name, entry.kind, current_path)?;
         let path = current_path.join(&entry.name);
+        if entry.kind == PinnedEntryKind::RegularFile {
+            budget.record_file(&path)?;
+        }
         match entry.kind {
             PinnedEntryKind::Directory => {
+                budget.verify_depth(depth + 1, &path)?;
                 if let Some(hook) = hooks.before_open {
                     hook(&path);
                 }
@@ -823,7 +865,15 @@ fn collect_routine_scripts_inner(
                     ));
                 }
                 verify_discovery_authority(hooks)?;
-                collect_routine_scripts_inner(&child_directory, &path, hooks, authority, out)?;
+                collect_routine_scripts_inner(
+                    &child_directory,
+                    &path,
+                    depth + 1,
+                    hooks,
+                    authority,
+                    budget,
+                    out,
+                )?;
             }
             PinnedEntryKind::RegularFile
                 if path.extension().is_some_and(|extension| extension == "js") =>
@@ -854,6 +904,10 @@ fn collect_routine_scripts_inner(
                         ),
                     ));
                 }
+                let source_length = file.metadata()?.len();
+                if source_length <= MAX_ROUTINE_SOURCE_BYTES {
+                    budget.reserve_source(source_length, &path)?;
+                }
                 if let Some(hook) = hooks.before_read {
                     hook(&path);
                 }
@@ -876,10 +930,16 @@ fn collect_routine_scripts_inner(
 #[cfg(not(unix))]
 fn collect_routine_scripts_inner(
     current_path: &Path,
+    depth: usize,
     hooks: RoutineDiscoveryHooks<'_>,
+    budget: &mut TraversalBudget,
     out: &mut Vec<DiscoveredRoutineScript>,
 ) -> io::Result<()> {
-    let mut entries = std::fs::read_dir(current_path)?.collect::<io::Result<Vec<_>>>()?;
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(current_path)? {
+        budget.record_entry(current_path)?;
+        entries.push(entry?);
+    }
     entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
         let path = entry.path();
@@ -889,10 +949,15 @@ fn collect_routine_scripts_inner(
         verify_discovery_authority(hooks)?;
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            collect_routine_scripts_inner(&path, hooks, out)?;
+            budget.verify_depth(depth + 1, &path)?;
+            collect_routine_scripts_inner(&path, depth + 1, hooks, budget, out)?;
             continue;
         }
-        if !file_type.is_file() || path.extension().is_none_or(|extension| extension != "js") {
+        if !file_type.is_file() {
+            continue;
+        }
+        budget.record_file(&path)?;
+        if path.extension().is_none_or(|extension| extension != "js") {
             continue;
         }
         let mut options = std::fs::OpenOptions::new();
@@ -907,6 +972,10 @@ fn collect_routine_scripts_inner(
                 path.display()
             )));
         }
+        let source_length = file.metadata()?.len();
+        if source_length <= MAX_ROUTINE_SOURCE_BYTES {
+            budget.reserve_source(source_length, &path)?;
+        }
         if let Some(hook) = hooks.before_read {
             hook(&path);
         }
@@ -920,53 +989,4 @@ fn collect_routine_scripts_inner(
         out.push(DiscoveredRoutineScript { path, source });
     }
     Ok(())
-}
-
-pub(super) fn collect_routine_script_paths(
-    root: &ValidatedRoutineRoot,
-    hooks: RoutineDiscoveryHooks<'_>,
-) -> io::Result<Vec<DiscoveredRoutineScript>> {
-    #[cfg(unix)]
-    {
-        verify_discovery_authority(hooks)?;
-        let directory = open_root(root)?;
-        let root_identity = require_available_identity(
-            FileIdentity::from_metadata(&directory.metadata()?),
-            &root.canonical,
-        )?;
-        if root.forbidden_entry_identities.contains(&root_identity) {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!(
-                    "routine root `{}` aliases the protected routine helper surface",
-                    root.canonical.display()
-                ),
-            ));
-        }
-        let mut authority = UnixTraversalAuthority {
-            root_identity,
-            root_mount_id: root.mount_id,
-            forbidden_entry_identities: &root.forbidden_entry_identities,
-            visited_directory_identities: HashSet::from([root_identity]),
-        };
-        verify_discovery_authority(hooks)?;
-        let mut out = Vec::new();
-        collect_routine_scripts_inner(
-            &directory,
-            &root.canonical,
-            hooks,
-            &mut authority,
-            &mut out,
-        )?;
-        verify_discovery_authority(hooks)?;
-        Ok(out)
-    }
-    #[cfg(not(unix))]
-    {
-        verify_discovery_authority(hooks)?;
-        let mut out = Vec::new();
-        collect_routine_scripts_inner(&root.canonical, hooks, &mut out)?;
-        verify_discovery_authority(hooks)?;
-        Ok(out)
-    }
 }

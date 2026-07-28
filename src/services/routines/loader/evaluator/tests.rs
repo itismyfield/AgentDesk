@@ -317,6 +317,154 @@ fn captures_registered_routine_metadata() {
 }
 
 #[test]
+fn bounded_runtime_rejects_oversized_validation_allocation() {
+    assert_source_rejected(
+        r#"
+        const oversized = new Uint8Array(64 * 1024 * 1024);
+        agentdesk.routines.register({
+          name: "Oversized Validation Allocation",
+          metadata: { oversized },
+          tick() { return { action: "skip" }; }
+        });
+        "#,
+        "JS eval error",
+    );
+}
+
+#[test]
+fn bounded_runtime_rejects_oversized_tick_allocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("oversized-tick-allocation.js");
+    std::fs::write(
+        &path,
+        r#"
+        agentdesk.routines.register({
+          name: "Oversized Tick Allocation",
+          tick() {
+            const oversized = new Uint8Array(64 * 1024 * 1024);
+            return { action: "complete", result: { oversized } };
+          }
+        });
+        "#,
+    )
+    .unwrap();
+
+    let loader = RoutineScriptLoader::new().unwrap();
+    loader.load_script(dir.path(), &path).unwrap();
+    let error = loader
+        .execute_tick(
+            "oversized-tick-allocation.js",
+            tick_context("oversized-tick-allocation.js", "Oversized Tick Allocation"),
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("tick(ctx) failed"));
+}
+
+#[test]
+fn rejects_promise_nested_in_registered_metadata() {
+    assert_source_rejected(
+        r#"
+        agentdesk.routines.register({
+          name: "Promise Metadata",
+          metadata: { nested: { value: Promise.resolve(7) } },
+          tick() { return { action: "skip" }; }
+        });
+        "#,
+        "routine metadata contains unsupported Promise",
+    );
+}
+
+#[test]
+fn rejects_exotic_registered_metadata_objects_before_enumeration() {
+    for (expression, expected) in [
+        ("new Date(0)", "unsupported non-plain JavaScript object"),
+        (
+            "new Map([['key', 1]])",
+            "unsupported non-plain JavaScript object",
+        ),
+        (
+            "new Uint8Array([1, 2, 3])",
+            "unsupported non-plain JavaScript object",
+        ),
+        (
+            "Object.create({ custom: true })",
+            "unsupported non-plain JavaScript object",
+        ),
+        (
+            "new Proxy({ key: 1 }, {})",
+            "unsupported non-plain JavaScript object",
+        ),
+        (
+            "new Proxy([1, 2, 3], {})",
+            "unsupported non-plain JavaScript object",
+        ),
+        (
+            "(() => { const proxy = Proxy.revocable({ key: 1 }, {}); proxy.revoke(); return proxy.proxy; })()",
+            "unsupported non-plain JavaScript object",
+        ),
+    ] {
+        let source = format!(
+            r#"
+            agentdesk.routines.register({{
+              name: "Exotic Metadata",
+              metadata: {{ nested: {expression} }},
+              tick() {{ return {{ action: "skip" }}; }}
+            }});
+            "#
+        );
+        assert_source_rejected(&source, expected);
+    }
+}
+
+#[test]
+fn accepts_valid_nested_json_metadata_and_action_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nested-json.js");
+    std::fs::write(
+        &path,
+        r#"
+        const nullPrototype = Object.create(null);
+        nullPrototype.enabled = true;
+        agentdesk.routines.register({
+          name: "Nested JSON",
+          metadata: {
+            nested: [{ count: 3, values: [true, null, "ok"] }],
+            nullPrototype
+          },
+          tick() {
+            return {
+              action: "complete",
+              result: { nested: [{ count: 3, values: [true, null, "ok"] }] }
+            };
+          }
+        });
+        "#,
+    )
+    .unwrap();
+
+    let loader = RoutineScriptLoader::new().unwrap();
+    loader.load_script(dir.path(), &path).unwrap();
+    let script = loader.get_script("nested-json.js").unwrap().unwrap();
+    assert_eq!(script.metadata["nested"][0]["count"], 3);
+    assert_eq!(script.metadata["nullPrototype"]["enabled"], true);
+
+    let action = loader
+        .execute_tick(
+            "nested-json.js",
+            tick_context("nested-json.js", "Nested JSON"),
+        )
+        .unwrap();
+    match action {
+        crate::services::routines::RoutineAction::Complete { result_json, .. } => {
+            let result = result_json.unwrap();
+            assert_eq!(result["nested"][0]["values"][2], "ok");
+        }
+        other => panic!("unexpected action: {other:?}"),
+    }
+}
+
+#[test]
 fn rejects_cyclic_registered_routine_metadata() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("metadata-cycle.js");
@@ -369,6 +517,25 @@ fn snapshots_stateful_metadata_getter_exactly_once() {
     .unwrap();
 
     assert_eq!(validated.metadata["value"], 7);
+}
+
+#[test]
+fn rejects_throwing_plain_object_getter_without_runtime_abort() {
+    assert_source_rejected(
+        r#"
+        const metadata = {};
+        Object.defineProperty(metadata, "explosive", {
+          enumerable: true,
+          get() { throw new Error("getter exploded"); }
+        });
+        agentdesk.routines.register({
+          name: "Throwing Metadata Getter",
+          metadata,
+          tick() { return { action: "skip" }; }
+        });
+        "#,
+        "routine metadata field explosive conversion failed: getter exploded",
+    );
 }
 
 #[test]
@@ -519,6 +686,77 @@ fn rejects_promise_returning_tick_without_awaiting() {
         error
             .to_string()
             .contains("returned a Promise; async tick is not supported")
+    );
+}
+
+#[test]
+fn rejects_promise_nested_in_action_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nested-promise-result.js");
+    std::fs::write(
+        &path,
+        r#"
+        agentdesk.routines.register({
+          name: "Nested Promise Result",
+          tick() {
+            return {
+              action: "complete",
+              result: { nested: { value: Promise.resolve(7) } }
+            };
+          }
+        });
+        "#,
+    )
+    .unwrap();
+
+    let loader = RoutineScriptLoader::new().unwrap();
+    loader.load_script(dir.path(), &path).unwrap();
+    let error = loader
+        .execute_tick(
+            "nested-promise-result.js",
+            tick_context("nested-promise-result.js", "Nested Promise Result"),
+        )
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("routine action contains unsupported Promise")
+    );
+}
+
+#[test]
+fn rejects_function_with_enumerable_action_field() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("function-action.js");
+    std::fs::write(
+        &path,
+        r#"
+        agentdesk.routines.register({
+          name: "Function Action",
+          tick() {
+            function forgedAction() {}
+            forgedAction.action = "skip";
+            return forgedAction;
+          }
+        });
+        "#,
+    )
+    .unwrap();
+
+    let loader = RoutineScriptLoader::new().unwrap();
+    loader.load_script(dir.path(), &path).unwrap();
+    let error = loader
+        .execute_tick(
+            "function-action.js",
+            tick_context("function-action.js", "Function Action"),
+        )
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("routine action contains unsupported function")
     );
 }
 

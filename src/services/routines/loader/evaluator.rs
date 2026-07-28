@@ -3,15 +3,17 @@ use super::{LoadedRoutineScript, RoutineTickContext};
 use crate::engine::loader::compute_policy_version;
 use anyhow::{Result, anyhow};
 use rquickjs::function::Opt;
-use rquickjs::{Context, Function, Object, Runtime};
+use rquickjs::{Array, Context, Function, Object, Runtime};
 use serde_json::{Map, Number, Value};
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::fmt::Display;
 use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 const ROUTINE_QUICKJS_TIMEOUT: Duration = Duration::from_secs(5);
+const ROUTINE_QUICKJS_MEMORY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ROUTINE_JSON_DEPTH: usize = 128;
 const MAX_ROUTINE_JSON_ARRAY_LENGTH: usize = 16_384;
 const MAX_ROUTINE_JSON_NODES: usize = 32_768;
@@ -64,13 +66,7 @@ pub(super) fn validate_routine_script_source(
     script_ref: &str,
     path: &Path,
 ) -> Result<ValidatedRoutineSource> {
-    let runtime =
-        Runtime::new().map_err(|e| anyhow!("routine QuickJS runtime creation failed: {e}"))?;
-    install_interrupt_handler(&runtime, ROUTINE_QUICKJS_TIMEOUT);
-    let context = Context::full(&runtime)
-        .map_err(|e| anyhow!("routine QuickJS context creation failed: {e}"))?;
-
-    context.with(|ctx| -> Result<ValidatedRoutineSource> {
+    with_bounded_quickjs_context(|ctx| -> Result<ValidatedRoutineSource> {
         let registration =
             capture_registered_routine(ctx.clone(), source, fallback_name, script_ref, path)?;
         Ok(ValidatedRoutineSource {
@@ -84,11 +80,6 @@ pub(super) fn evaluate_tick_action(
     script: &LoadedRoutineScript,
     tick_context: &RoutineTickContext,
 ) -> Result<Value> {
-    let runtime =
-        Runtime::new().map_err(|e| anyhow!("routine QuickJS runtime creation failed: {e}"))?;
-    install_interrupt_handler(&runtime, ROUTINE_QUICKJS_TIMEOUT);
-    let context = Context::full(&runtime)
-        .map_err(|e| anyhow!("routine QuickJS context creation failed: {e}"))?;
     let fallback_name = script
         .file
         .file_stem()
@@ -96,7 +87,7 @@ pub(super) fn evaluate_tick_action(
         .to_string_lossy()
         .to_string();
 
-    context.with(|ctx| -> Result<Value> {
+    with_bounded_quickjs_context(|ctx| -> Result<Value> {
         let registration = capture_registered_routine(
             ctx.clone(),
             &script.source,
@@ -127,8 +118,36 @@ pub(super) fn evaluate_tick_action(
                 script.script_ref
             ));
         }
-        js_value_to_json(action_value, "routine action")
+        js_value_to_json(
+            action_value,
+            "routine action",
+            &registration.json_container_policy,
+        )
     })
+}
+
+fn create_bounded_quickjs_context() -> Result<(Runtime, Context)> {
+    let runtime =
+        Runtime::new().map_err(|e| anyhow!("routine QuickJS runtime creation failed: {e}"))?;
+    // QuickJS requires the allocator limit to be installed before the context and
+    // its intrinsic objects allocate from the runtime heap.
+    runtime.set_memory_limit(ROUTINE_QUICKJS_MEMORY_LIMIT_BYTES);
+    install_interrupt_handler(&runtime, ROUTINE_QUICKJS_TIMEOUT);
+    let context = Context::full(&runtime)
+        .map_err(|e| anyhow!("routine QuickJS context creation failed: {e}"))?;
+    Ok((runtime, context))
+}
+
+fn with_bounded_quickjs_context<T>(
+    operation: impl for<'js> FnOnce(rquickjs::Ctx<'js>) -> Result<T>,
+) -> Result<T> {
+    let (runtime, context) = create_bounded_quickjs_context()?;
+    let result = context.with(operation);
+    // Drop every context-owned reference before collecting cycles. In particular,
+    // revoked Proxy internals can otherwise survive until JS_FreeRuntime asserts.
+    drop(context);
+    runtime.run_gc();
+    result
 }
 
 fn install_interrupt_handler(runtime: &Runtime, timeout: Duration) {
@@ -156,16 +175,73 @@ fn quickjs_exception_detail(ctx: &rquickjs::Ctx<'_>, error: &rquickjs::Error) ->
         .unwrap_or_else(|| error.to_string())
 }
 
+fn conversion_js_error(
+    ctx: &rquickjs::Ctx<'_>,
+    operation: impl Display,
+    error: &rquickjs::Error,
+) -> anyhow::Error {
+    let detail = quickjs_exception_detail(ctx, error);
+    anyhow!("{operation}: {detail}")
+}
+
 struct CapturedRoutineRegistration<'js> {
     name: String,
     tick: Function<'js>,
     metadata: Value,
+    json_container_policy: JsonContainerPolicy<'js>,
 }
 
 struct RegistrationCapture<'js> {
     invocation_count: usize,
     registration: Option<Result<CapturedRoutineRegistration<'js>>>,
     tick_classifier: Option<Function<'js>>,
+    json_container_policy: Option<JsonContainerPolicy<'js>>,
+}
+
+#[derive(Clone, Copy)]
+struct JsonContainerClassIds {
+    object: rquickjs::qjs::JSClassID,
+    array: rquickjs::qjs::JSClassID,
+}
+
+#[derive(Clone)]
+struct JsonContainerPolicy<'js> {
+    class_ids: JsonContainerClassIds,
+    plain_object_classifier: Function<'js>,
+}
+
+fn capture_json_container_class_ids(ctx: rquickjs::Ctx<'_>) -> Result<JsonContainerClassIds> {
+    let object = Object::new(ctx.clone())
+        .map_err(|e| anyhow!("failed to create routine JSON object sample: {e}"))?;
+    let array =
+        Array::new(ctx).map_err(|e| anyhow!("failed to create routine JSON array sample: {e}"))?;
+    // SAFETY: Both samples are live object values owned by this QuickJS context.
+    // QuickJS class IDs are runtime-stable Copy identifiers, so retaining only
+    // the IDs cannot outlive or alias the sample JS values.
+    Ok(unsafe {
+        JsonContainerClassIds {
+            object: rquickjs::qjs::JS_GetClassID(object.as_raw()),
+            array: rquickjs::qjs::JS_GetClassID(array.as_raw()),
+        }
+    })
+}
+
+fn create_plain_object_classifier<'js>(ctx: rquickjs::Ctx<'js>) -> Result<Function<'js>> {
+    ctx.eval(
+        r#"
+        (() => {
+            "use strict";
+            const getPrototypeOf = Object.getPrototypeOf;
+            const objectPrototype = Object.prototype;
+
+            return function isPlainDataObject(value) {
+                const prototype = getPrototypeOf(value);
+                return prototype === null || prototype === objectPrototype;
+            };
+        })()
+        "#,
+    )
+    .map_err(|e| anyhow!("failed to create routine plain-object classifier: {e}"))
 }
 
 fn create_tick_function_classifier<'js>(ctx: rquickjs::Ctx<'js>) -> Result<Function<'js>> {
@@ -215,6 +291,7 @@ fn snapshot_registered_routine<'js>(
     fallback_name: &str,
     script_ref: &str,
     tick_classifier: &Function<'js>,
+    json_container_policy: &JsonContainerPolicy<'js>,
 ) -> Result<CapturedRoutineRegistration<'js>> {
     let routine_obj = registered
         .and_then(|value| value.into_object())
@@ -262,7 +339,7 @@ fn snapshot_registered_routine<'js>(
         .get::<_, rquickjs::Value>("metadata")
         .ok()
         .filter(|value| !value.is_null() && !value.is_undefined())
-        .map(|value| js_value_to_json(value, "routine metadata"))
+        .map(|value| js_value_to_json(value, "routine metadata", json_container_policy))
         .transpose()?
         .unwrap_or(Value::Null);
 
@@ -270,6 +347,7 @@ fn snapshot_registered_routine<'js>(
         name,
         tick,
         metadata,
+        json_container_policy: json_container_policy.clone(),
     })
 }
 
@@ -282,10 +360,15 @@ fn capture_registered_routine<'js>(
 ) -> Result<CapturedRoutineRegistration<'js>> {
     let globals = ctx.globals();
     let tick_classifier = create_tick_function_classifier(ctx.clone())?;
+    let json_container_policy = JsonContainerPolicy {
+        class_ids: capture_json_container_class_ids(ctx.clone())?,
+        plain_object_classifier: create_plain_object_classifier(ctx.clone())?,
+    };
     let capture = Rc::new(RefCell::new(RegistrationCapture {
         invocation_count: 0,
         registration: None,
         tick_classifier: Some(tick_classifier),
+        json_container_policy: Some(json_container_policy),
     }));
     let callback_capture = Rc::clone(&capture);
     let callback_fallback_name = fallback_name.to_string();
@@ -303,15 +386,19 @@ fn capture_registered_routine<'js>(
                 // registration snapshot. A getter may re-enter register(), and the nested
                 // callback must increment the count instead of panicking on borrow_mut().
                 let tick_classifier = { callback_capture.borrow().tick_classifier.clone() };
+                let json_container_policy =
+                    { callback_capture.borrow().json_container_policy.clone() };
                 let registration = tick_classifier
-                    .ok_or_else(|| anyhow!("routine tick classifier was unavailable"))
-                    .and_then(|tick_classifier| {
+                    .zip(json_container_policy)
+                    .ok_or_else(|| anyhow!("routine value classifiers were unavailable"))
+                    .and_then(|(tick_classifier, json_container_policy)| {
                         snapshot_registered_routine(
                             callback_ctx,
                             registered,
                             &callback_fallback_name,
                             &callback_script_ref,
                             &tick_classifier,
+                            &json_container_policy,
                         )
                     });
                 callback_capture.borrow_mut().registration = Some(registration);
@@ -343,6 +430,7 @@ fn capture_registered_routine<'js>(
     let (invocation_count, registration) = {
         let mut capture = capture.borrow_mut();
         capture.tick_classifier = None;
+        capture.json_container_policy = None;
         (capture.invocation_count, capture.registration.take())
     };
     if let Some(exception_detail) = eval_error {
@@ -374,15 +462,27 @@ fn capture_registered_routine<'js>(
     })?
 }
 
-fn js_value_to_json<'js>(value: rquickjs::Value<'js>, label: &'static str) -> Result<Value> {
+fn js_value_to_json<'js>(
+    value: rquickjs::Value<'js>,
+    label: &'static str,
+    json_container_policy: &JsonContainerPolicy<'js>,
+) -> Result<Value> {
     let mut active = HashSet::new();
     let mut remaining_nodes = MAX_ROUTINE_JSON_NODES;
-    js_value_to_json_inner(value, label, 0, &mut active, &mut remaining_nodes)
+    js_value_to_json_inner(
+        value,
+        label,
+        json_container_policy,
+        0,
+        &mut active,
+        &mut remaining_nodes,
+    )
 }
 
 fn js_value_to_json_inner<'js>(
     value: rquickjs::Value<'js>,
     label: &'static str,
+    json_container_policy: &JsonContainerPolicy<'js>,
     depth: usize,
     active: &mut HashSet<rquickjs::Value<'js>>,
     remaining_nodes: &mut usize,
@@ -409,22 +509,42 @@ fn js_value_to_json_inner<'js>(
         return Ok(Value::Number(number));
     }
     if let Some(value) = value.as_string() {
-        return Ok(Value::String(
-            value
-                .to_string()
-                .map_err(|e| anyhow!("{label} string conversion failed: {e}"))?,
-        ));
+        return Ok(Value::String(value.to_string().map_err(|e| {
+            conversion_js_error(
+                value.ctx(),
+                format_args!("{label} string conversion failed"),
+                &e,
+            )
+        })?));
+    }
+    if value.is_promise() {
+        return Err(anyhow!("{label} contains unsupported Promise"));
+    }
+    if value.is_function() {
+        return Err(anyhow!("{label} contains unsupported function"));
     }
     if depth >= MAX_ROUTINE_JSON_DEPTH {
         return Err(anyhow!(
             "{label} exceeds maximum nesting depth {MAX_ROUTINE_JSON_DEPTH}"
         ));
     }
+    if !value.is_object() {
+        return Err(anyhow!("{label} contains unsupported JavaScript value"));
+    }
+    // SAFETY: JS_GetClassID requires an object-tagged live JSValue. The check
+    // above establishes that invariant, and `value` remains owned for this call.
+    let class_id = unsafe { rquickjs::qjs::JS_GetClassID(value.as_raw()) };
+    let is_array = class_id == json_container_policy.class_ids.array;
+    if !is_array && class_id != json_container_policy.class_ids.object {
+        return Err(anyhow!(
+            "{label} contains unsupported non-plain JavaScript object"
+        ));
+    }
     let identity = value.clone();
     if !active.insert(identity.clone()) {
         return Err(anyhow!("{label} contains cyclic object graph"));
     }
-    if value.is_array() {
+    if is_array {
         let array = value
             .into_array()
             .ok_or_else(|| anyhow!("{label} array conversion failed"));
@@ -442,12 +562,17 @@ fn js_value_to_json_inner<'js>(
             }
             let mut out = Vec::with_capacity(length);
             for index in 0..length {
-                let item: rquickjs::Value = array
-                    .get(index)
-                    .map_err(|e| anyhow!("{label} array[{index}] conversion failed: {e}"))?;
+                let item: rquickjs::Value = array.get(index).map_err(|e| {
+                    conversion_js_error(
+                        array.ctx(),
+                        format_args!("{label} array[{index}] conversion failed"),
+                        &e,
+                    )
+                })?;
                 out.push(js_value_to_json_inner(
                     item,
                     label,
+                    json_container_policy,
                     depth + 1,
                     active,
                     remaining_nodes,
@@ -458,25 +583,58 @@ fn js_value_to_json_inner<'js>(
         active.remove(&identity);
         return result;
     }
-    if value.is_object() {
+    if class_id == json_container_policy.class_ids.object {
+        let is_plain_data_object: bool = json_container_policy
+            .plain_object_classifier
+            .call((value.clone(),))
+            .map_err(|e| {
+                conversion_js_error(
+                    json_container_policy.plain_object_classifier.ctx(),
+                    format_args!("{label} object classification failed"),
+                    &e,
+                )
+            })?;
+        if !is_plain_data_object {
+            active.remove(&identity);
+            return Err(anyhow!(
+                "{label} contains unsupported non-plain JavaScript object"
+            ));
+        }
         let object = value
             .into_object()
             .ok_or_else(|| anyhow!("{label} object conversion failed"));
         let result = object.and_then(|object| {
             let mut out = Map::new();
             for key in object.keys::<String>() {
-                let key = key.map_err(|e| anyhow!("{label} object key conversion failed: {e}"))?;
+                let key = key.map_err(|e| {
+                    conversion_js_error(
+                        object.ctx(),
+                        format_args!("{label} object key conversion failed"),
+                        &e,
+                    )
+                })?;
                 if *remaining_nodes == 0 {
                     return Err(anyhow!(
                         "{label} exceeds maximum value count {MAX_ROUTINE_JSON_NODES}"
                     ));
                 }
-                let item: rquickjs::Value = object
-                    .get(key.as_str())
-                    .map_err(|e| anyhow!("{label} field {key} conversion failed: {e}"))?;
+                let item: rquickjs::Value = object.get(key.as_str()).map_err(|e| {
+                    conversion_js_error(
+                        object.ctx(),
+                        format_args!("{label} field {key} conversion failed"),
+                        &e,
+                    )
+                })?;
                 out.insert(
                     key,
-                    js_value_to_json_inner(item, label, depth + 1, active, remaining_nodes)?,
+                    js_value_to_json_inner(
+                        item,
+                        label,
+                        json_container_policy,
+                        depth + 1,
+                        active,
+                        remaining_nodes,
+                    )?,
                 );
             }
             Ok(Value::Object(out))

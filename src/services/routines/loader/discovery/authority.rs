@@ -283,7 +283,7 @@ impl std::error::Error for RoutineRootValidationError {
 }
 
 #[cfg(unix)]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(super) struct FileIdentity {
     pub(super) device: u64,
     pub(super) inode: u64,
@@ -516,7 +516,7 @@ impl ValidatedRuntimeRoot {
 
 #[derive(Clone, Debug)]
 pub(in super::super) struct ValidatedHelperSurface {
-    configured: PathBuf,
+    pub(super) configured: PathBuf,
     pub(super) canonical: PathBuf,
     pub(super) exists: bool,
     pub(super) kind: Option<AuthorityFileKind>,
@@ -527,7 +527,7 @@ pub(in super::super) struct ValidatedHelperSurface {
     #[cfg(unix)]
     pub(super) mount_id: Option<u64>,
     #[cfg(unix)]
-    entry_identities: Arc<std::collections::HashSet<FileIdentity>>,
+    pub(super) entry_identities: Arc<std::collections::HashSet<FileIdentity>>,
 }
 
 impl ValidatedHelperSurface {
@@ -542,6 +542,7 @@ impl ValidatedHelperSurface {
         {
             self.identity == observed.identity
                 && self.mount_id == observed.mount_id
+                && self.entry_identities == observed.entry_identities
                 && retained_directory_handle_matches(
                     self.handle.as_ref(),
                     self.identity,

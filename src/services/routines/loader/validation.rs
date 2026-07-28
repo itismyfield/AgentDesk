@@ -1,5 +1,6 @@
 use super::discovery::{
-    RoutineDiscoveryHooks, bind_routine_root_authority, collect_routine_script_paths, script_ref,
+    RoutineDiscoveryHooks, bind_routine_root_authority, collect_routine_script_paths,
+    require_nonempty_routine_tree, script_ref,
 };
 use super::evaluator::validate_routine_script_source;
 use super::{verify_bound_root_set, verify_bound_runtime_surface, verify_bound_scan_surface};
@@ -87,8 +88,15 @@ pub(crate) fn validate_routine_tree(
         },
     )?;
 
-    let mut validated_files = Vec::with_capacity(snapshots.len());
     let mut failures = Vec::new();
+    if let Err(error) = require_nonempty_routine_tree(&snapshots) {
+        failures.push(RoutineValidationFailure {
+            path: root.canonical.clone(),
+            script_ref: "<routine-root>".to_string(),
+            message: error.to_string(),
+        });
+    }
+    let mut validated_files = Vec::with_capacity(snapshots.len());
     for snapshot in snapshots {
         authority_check()?;
         let path = snapshot.path.clone();
@@ -173,6 +181,27 @@ mod tests {
         assert_eq!(report.validated_files.len(), 1);
         assert_eq!(report.failures.len(), 1);
         assert_eq!(report.failures[0].script_ref, "invalid.js");
+    }
+
+    #[test]
+    fn rejects_empty_routine_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_root = temp.path().join("release-root");
+        let root = runtime_root.join("routines");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(runtime_root.join("routine-helpers")).unwrap();
+
+        let report = validate_routine_tree(&root, &runtime_root).unwrap();
+
+        assert!(!report.valid);
+        assert!(report.validated_files.is_empty());
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].path, root.canonicalize().unwrap());
+        assert_eq!(report.failures[0].script_ref, "<routine-root>");
+        assert_eq!(
+            report.failures[0].message,
+            "routine root contains no JavaScript entrypoints"
+        );
     }
 
     #[cfg(unix)]

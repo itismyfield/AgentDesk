@@ -1253,6 +1253,7 @@ src/
 │   │   │   │   ├── authority/
 │   │   │   │   │   └── tests.rs
 │   │   │   │   ├── authority.rs
+│   │   │   │   ├── bounded_scan.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── evaluator/
 │   │   │   │   └── tests.rs

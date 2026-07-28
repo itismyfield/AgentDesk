@@ -1805,6 +1805,11 @@ these contextual numbers to match ordinary LoC churn.
   `src/services/settings.rs` (frozen giant surface) — service-layer route support surfaces
   split out of the large dashboard route modules. (`src/services/onboarding.rs`
   and `src/services/api_friction.rs` have been removed/decomposed.)
+- `src/services/routines/loader/discovery/authority.rs` (frozen giant surface;
+  #4902 descriptor-binds the runtime root, configured routine roots, and
+  protected helper membership as one fail-closed filesystem authority). Keep
+  those cross-surface identity and mount checks coupled; new bounded traversal
+  policy belongs in `discovery/bounded_scan.rs` instead of this authority core.
 - `src/services/dispatches/outbox_route.rs` (frozen giant surface) — dispatch outbox route
   support extracted from the route layer; split before adding non-bugfix
   behavior.

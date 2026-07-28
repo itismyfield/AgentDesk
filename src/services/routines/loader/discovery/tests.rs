@@ -27,6 +27,129 @@ fn isolated_release_surfaces() -> (tempfile::TempDir, PathBuf, PathBuf) {
 }
 
 #[cfg(unix)]
+fn collect_with_limits(
+    runtime_root: &Path,
+    routines: &Path,
+    limits: super::RoutineTreeLimits,
+) -> std::io::Result<Vec<super::DiscoveredRoutineScript>> {
+    let (_, roots, _) =
+        bind_routine_root_authority(&[routines.to_path_buf()], runtime_root).unwrap();
+    super::collect_routine_script_paths_with_limits(
+        &roots[0],
+        super::RoutineDiscoveryHooks::default(),
+        limits,
+    )
+}
+
+#[cfg(unix)]
+fn test_limits(
+    max_entries: usize,
+    max_files: usize,
+    max_depth: usize,
+    max_source_bytes: u64,
+) -> super::RoutineTreeLimits {
+    super::RoutineTreeLimits {
+        max_entries,
+        max_files,
+        max_depth,
+        max_source_bytes,
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn routine_tree_limits_accept_exact_boundaries() {
+    let release = tempfile::tempdir().unwrap();
+    let routines = release.path().join("routines");
+    let nested = routines.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir_all(release.path().join("routine-helpers")).unwrap();
+    std::fs::write(nested.join("a.js"), "aa").unwrap();
+    std::fs::write(nested.join("b.js"), "bb").unwrap();
+
+    let snapshots =
+        collect_with_limits(release.path(), &routines, test_limits(3, 2, 1, 4)).unwrap();
+
+    assert_eq!(snapshots.len(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn routine_tree_entry_limit_rejects_before_unbounded_retention() {
+    let release = tempfile::tempdir().unwrap();
+    let routines = release.path().join("routines");
+    std::fs::create_dir_all(&routines).unwrap();
+    std::fs::create_dir_all(release.path().join("routine-helpers")).unwrap();
+    std::fs::write(routines.join("a.js"), "a").unwrap();
+    std::fs::write(routines.join("b.js"), "b").unwrap();
+
+    let error =
+        collect_with_limits(release.path(), &routines, test_limits(1, 2, 1, 2)).unwrap_err();
+
+    assert!(error.to_string().contains("maximum entry count 1"));
+}
+
+#[cfg(unix)]
+#[test]
+fn routine_tree_file_limit_rejects_overflow() {
+    let release = tempfile::tempdir().unwrap();
+    let routines = release.path().join("routines");
+    std::fs::create_dir_all(&routines).unwrap();
+    std::fs::create_dir_all(release.path().join("routine-helpers")).unwrap();
+    std::fs::write(routines.join("a.js"), "a").unwrap();
+    std::fs::write(routines.join("b.js"), "b").unwrap();
+
+    let error =
+        collect_with_limits(release.path(), &routines, test_limits(2, 1, 1, 2)).unwrap_err();
+
+    assert!(error.to_string().contains("maximum file count 1"));
+}
+
+#[cfg(unix)]
+#[test]
+fn routine_tree_depth_limit_rejects_overflow() {
+    let release = tempfile::tempdir().unwrap();
+    let routines = release.path().join("routines");
+    let too_deep = routines.join("a").join("b");
+    std::fs::create_dir_all(&too_deep).unwrap();
+    std::fs::create_dir_all(release.path().join("routine-helpers")).unwrap();
+    std::fs::write(too_deep.join("deep.js"), "x").unwrap();
+
+    let error =
+        collect_with_limits(release.path(), &routines, test_limits(3, 1, 1, 1)).unwrap_err();
+
+    assert!(error.to_string().contains("maximum depth 1"));
+}
+
+#[cfg(unix)]
+#[test]
+fn routine_tree_total_source_limit_rejects_overflow() {
+    let release = tempfile::tempdir().unwrap();
+    let routines = release.path().join("routines");
+    std::fs::create_dir_all(&routines).unwrap();
+    std::fs::create_dir_all(release.path().join("routine-helpers")).unwrap();
+    std::fs::write(routines.join("a.js"), "aa").unwrap();
+    std::fs::write(routines.join("b.js"), "bb").unwrap();
+
+    let error =
+        collect_with_limits(release.path(), &routines, test_limits(2, 2, 1, 3)).unwrap_err();
+
+    assert!(error.to_string().contains("source bytes"));
+    assert!(error.to_string().contains("maximum 3"));
+}
+
+#[test]
+fn shared_nonempty_contract_rejects_empty_snapshot() {
+    let error = super::require_nonempty_routine_tree(&[]).unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(
+        error.to_string(),
+        "routine root contains no JavaScript entrypoints"
+    );
+}
+
+#[cfg(unix)]
 #[test]
 fn shared_state_identity_includes_each_mount_authority() {
     let (release, routines, _helpers) = isolated_release_surfaces();
@@ -916,6 +1039,54 @@ fn shared_loader_identity_separates_distinct_runtime_alias_authorities() {
     let second = RoutineScriptLoader::new_shared(&roots, &second_alias).unwrap();
 
     assert!(!Arc::ptr_eq(&first.state, &second.state));
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_loader_identity_separates_raw_root_aliases() {
+    use std::os::unix::fs::symlink;
+
+    let layout = tempfile::tempdir().unwrap();
+    let runtime = layout.path().join("runtime");
+    let routines = layout.path().join("routines");
+    let routines_alias = layout.path().join("routines-alias");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::create_dir_all(&routines).unwrap();
+    symlink(&routines, &routines_alias).unwrap();
+
+    let canonical = RoutineScriptLoader::new_shared(&[routines], &runtime).unwrap();
+    let aliased = RoutineScriptLoader::new_shared(&[routines_alias], &runtime).unwrap();
+
+    assert!(!Arc::ptr_eq(&canonical.state, &aliased.state));
+}
+
+#[cfg(unix)]
+#[test]
+fn helper_entry_move_creates_fresh_shared_state_and_invalidates_old_authority() {
+    let release = tempfile::tempdir().unwrap();
+    let routines = release.path().join("routines");
+    let helpers = release.path().join("routine-helpers");
+    std::fs::create_dir_all(&routines).unwrap();
+    std::fs::create_dir_all(&helpers).unwrap();
+    let helper_script = helpers.join("moved.js");
+    std::fs::write(
+        &helper_script,
+        "agentdesk.routines.register({ name: 'Moved', tick() { return {}; } });",
+    )
+    .unwrap();
+    let roots = vec![routines.clone()];
+    let before = RoutineScriptLoader::new_shared(&roots, release.path()).unwrap();
+
+    std::fs::rename(&helper_script, routines.join("moved.js")).unwrap();
+    let after = RoutineScriptLoader::new_shared(&roots, release.path()).unwrap();
+
+    assert!(!Arc::ptr_eq(&before.state, &after.state));
+    assert_eq!(after.load_dirs(&roots).unwrap(), 1);
+    let error = before.load_dirs(&roots).unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<RoutineRootValidationError>(),
+        Some(RoutineRootValidationError::HelperSurfaceAuthorityChanged { .. })
+    ));
 }
 
 #[cfg(unix)]
