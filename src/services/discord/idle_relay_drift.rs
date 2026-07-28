@@ -201,6 +201,20 @@ fn take_pending_emission_count(tmux_session_name: &str) -> u64 {
     std::mem::take(&mut state.pending_emission_count)
 }
 
+pub(super) fn record_confirmed_dead_orphan_loss(
+    provider: &ProviderKind,
+    tmux_session_name: &str,
+    channel_id: u64,
+) -> u64 {
+    let permanent_loss_count = take_pending_emission_count(tmux_session_name);
+    crate::services::observability::metrics::record_relay_permanent_loss(
+        channel_id,
+        provider.as_str(),
+        permanent_loss_count,
+    );
+    permanent_loss_count
+}
+
 /// Source a repair value was promoted from (for the success log) or the reason a
 /// promotion was blocked / had no source.
 #[cfg(unix)]
@@ -490,11 +504,13 @@ async fn attempt_drift_repair(
                 0
             };
             let metric_channel = mirror_channel.or(db_channel).unwrap_or(0);
-            crate::services::observability::metrics::record_relay_permanent_loss(
-                metric_channel,
-                provider.as_str(),
-                permanent_loss_count,
-            );
+            if permanent_loss_count > 0 {
+                crate::services::observability::metrics::record_relay_permanent_loss(
+                    metric_channel,
+                    provider.as_str(),
+                    permanent_loss_count,
+                );
+            }
             tracing::warn!(
                 tmux_session_name = %tmux_session_name,
                 block_reason = reason.label(),
@@ -795,6 +811,25 @@ mod tests {
     fn all_sources_miss_is_no_source() {
         // #3018 semantics preserved: no durable source ⇒ keep the drop.
         assert_eq!(evaluate_drift_repair(&inputs()), RepairDecision::NoSource);
+    }
+
+    #[test]
+    fn confirmed_dead_orphan_drains_pending_emissions_once() {
+        let _serial = DRIFT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_drift_state_for_tests();
+        let tmux = "AgentDesk-codex-confirmed-dead-orphan";
+
+        note_pending_emission_count(tmux, 3);
+        assert_eq!(
+            record_confirmed_dead_orphan_loss(&ProviderKind::Codex, tmux, 4_794),
+            3
+        );
+        assert_eq!(
+            record_confirmed_dead_orphan_loss(&ProviderKind::Codex, tmux, 4_794),
+            0,
+            "take semantics must prevent duplicate permanent-loss attribution"
+        );
+        reset_drift_state_for_tests();
     }
 
     // --- cooldown / single-flight state machine ------------------------
