@@ -767,10 +767,12 @@ src/
 │   │   │   ├── startup_doctor.rs
 │   │   │   └── voice.rs
 │   │   ├── session_relay_sink/
+│   │   │   ├── delivery_frontier.rs
 │   │   │   ├── delivery_outcome_classify.rs
 │   │   │   ├── idle_jsonl.rs
 │   │   │   ├── orphan_reclaim.rs
 │   │   │   ├── relay_format.rs
+│   │   │   ├── short_controller.rs
 │   │   │   ├── task_notification_context.rs
 │   │   │   └── turn_parser.rs
 │   │   ├── session_runtime/
@@ -843,6 +845,7 @@ src/
 │   │   │   ├── task_response_authority.rs
 │   │   │   ├── terminal_abort_exits.rs
 │   │   │   ├── terminal_commit_epilogue.rs
+│   │   │   ├── terminal_delivery_types.rs
 │   │   │   ├── terminal_direct_fallback.rs
 │   │   │   ├── terminal_direct_fallback_tests.rs
 │   │   │   ├── terminal_long_chunks.rs
