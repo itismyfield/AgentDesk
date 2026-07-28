@@ -66,6 +66,7 @@ class PortablePathLintTests(unittest.TestCase):
                 scripts_dir / "deploy.sh",
                 scripts_dir / "ensure-agentdesk-cli.sh",
                 scripts_dir / "queue-stability-batch.sh",
+                scripts_dir / "routine-asset-surface.sh",
             ]
             for path in bad_script_paths:
                 path.write_text("echo /Users/itismyfield/.adk/release\n", encoding="utf-8")
@@ -88,7 +89,36 @@ class PortablePathLintTests(unittest.TestCase):
         self.assertIn("scripts/deploy.sh", result.stderr)
         self.assertIn("scripts/ensure-agentdesk-cli.sh", result.stderr)
         self.assertIn("scripts/queue-stability-batch.sh", result.stderr)
+        self.assertIn("scripts/routine-asset-surface.sh", result.stderr)
         self.assertIn("policies/lib/portable.js", result.stderr)
+
+    def test_default_scan_includes_moved_node_routine_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            helper = (
+                Path(tmp)
+                / "routine-helpers"
+                / "monitoring"
+                / "local_worktree_inventory.js"
+            )
+            helper.parent.mkdir(parents=True)
+            helper.write_text(
+                "const root = '/Users/itismyfield/.adk/release';\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--root", tmp],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "routine-helpers/monitoring/local_worktree_inventory.js",
+            result.stderr,
+        )
 
     def test_placeholder_home_literals_are_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

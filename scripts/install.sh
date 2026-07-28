@@ -57,6 +57,46 @@ ok()    { echo -e "${GREEN}✓${NC} $1"; }
 warn()  { echo -e "${YELLOW}⚠${NC} $1"; }
 fail()  { echo -e "${RED}✗${NC} $1"; exit 1; }
 
+install_routine_asset_surfaces() {
+  local source_root="$1"
+  local runtime_root="$2"
+  local primitives="$source_root/scripts/routine-asset-surface.sh"
+  local routines_staged=""
+  local helpers_staged=""
+
+  if [ ! -f "$primitives" ] \
+    || [ ! -d "$source_root/routines" ] \
+    || [ ! -d "$source_root/routine-helpers" ]; then
+    echo "Routine asset payload is incomplete under $source_root" >&2
+    return 1
+  fi
+
+  # The same preservation, exact-tombstone, and atomic-swap primitives power
+  # deploy-release.sh, deploy.sh, source installs, and release-artifact installs.
+  # shellcheck disable=SC1090
+  . "$primitives"
+
+  adk_validate_repo_routine_assets "$source_root" || return 1
+
+  routines_staged="$(adk_stage_routines "$source_root" "$runtime_root")" \
+    || return 1
+  if ! helpers_staged="$(adk_stage_routine_helpers "$source_root" "$runtime_root")"; then
+    rm -rf "$routines_staged" 2>/dev/null || true
+    return 1
+  fi
+  if ! adk_swap_staged_routines "$runtime_root" "$routines_staged"; then
+    rm -rf "$routines_staged" "$helpers_staged" 2>/dev/null || true
+    return 1
+  fi
+  if ! adk_swap_staged_routine_helpers "$runtime_root" "$helpers_staged"; then
+    adk_rollback_routine_swap "$runtime_root" || true
+    rm -rf "$helpers_staged" 2>/dev/null || true
+    return 1
+  fi
+  adk_commit_routine_helper_swap "$runtime_root" \
+    && adk_commit_routine_swap "$runtime_root"
+}
+
 launchd_domain() {
   local uid domain
   uid="$(id -u 2>/dev/null)" || return 1
@@ -333,6 +373,10 @@ if [ -z "$LATEST_TAG" ]; then
     rsync -a --delete "skills/" "$INSTALL_DIR/skills/"
   fi
 
+  info "Installing routine entrypoints and helper assets..."
+  install_routine_asset_surfaces "$TMPDIR_BUILD" "$INSTALL_DIR" \
+    || fail "Routine asset installation failed"
+
   cd /
   rm -rf "$TMPDIR_BUILD"
   ok "Built and installed from source"
@@ -369,6 +413,10 @@ else
   if [ -d "${ARTIFACT}/skills" ]; then
     rsync -a --delete "${ARTIFACT}/skills/" "$INSTALL_DIR/skills/"
   fi
+
+  info "Installing routine entrypoints and helper assets..."
+  install_routine_asset_surfaces "$TMPDIR_DL/${ARTIFACT}" "$INSTALL_DIR" \
+    || fail "Routine asset installation failed"
 
   cd /
   rm -rf "$TMPDIR_DL"

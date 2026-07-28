@@ -137,6 +137,8 @@ STAGED_BINARY=""
 POLICIES_STAGED=""
 ROUTINES_STAGED=""
 ROUTINE_HELPERS_STAGED=""
+ROUTINE_SWAP_ARMED=0
+ROUTINE_HELPER_SWAP_ARMED=0
 LAUNCHD_MIGRATED_STAGED=""
 RELEASE_ROOT_SCRIPTS_STAGED=""
 PG_TUNNEL_PREFLIGHT_PID=""
@@ -1058,6 +1060,19 @@ _cleanup_on_exit() {
         _rollback_pg_tunnel_migration || true
         _cleanup_owned_pg_tunnel_preflight
     fi
+    # Routine surfaces are promoted before restart, but their .old trees stay
+    # intact until the same health gate that commits the binary. Restore assets
+    # first so the old binary never restarts against new/incompatible scripts.
+    if [ "${DEPLOY_OK:-0}" != 1 ]; then
+        if [ "${ROUTINE_HELPER_SWAP_ARMED:-0}" = 1 ]; then
+            adk_rollback_routine_helper_swap "$ADK_REL" \
+                || echo "✗ Routine helper rollback failed; inspect $ADK_REL/routine-helpers.old" >&2
+        fi
+        if [ "${ROUTINE_SWAP_ARMED:-0}" = 1 ]; then
+            adk_rollback_routine_swap "$ADK_REL" \
+                || echo "✗ Routine rollback failed; inspect $ADK_REL/routines.old" >&2
+        fi
+    fi
     # #3858: if the binary was promoted (ROLLBACK_ARMED) but the deploy never
     # reached DEPLOY_OK, restore the last-known-good binary and restart BEFORE the
     # staging cleanup below. This catches ANY non-zero exit after promotion — an
@@ -1071,6 +1086,9 @@ _cleanup_on_exit() {
     fi
     if [ -n "${POLICIES_STAGED:-}" ] && [ -d "$POLICIES_STAGED" ]; then
         rm -rf "$POLICIES_STAGED" 2>/dev/null || true
+    fi
+    if [ -n "${ROUTINES_STAGED:-}" ] && [ -d "$ROUTINES_STAGED" ]; then
+        rm -rf "$ROUTINES_STAGED" 2>/dev/null || true
     fi
     if [ -n "${ROUTINE_HELPERS_STAGED:-}" ] && [ -d "$ROUTINE_HELPERS_STAGED" ]; then
         rm -rf "$ROUTINE_HELPERS_STAGED" 2>/dev/null || true
@@ -1208,12 +1226,47 @@ git merge --quiet --ff-only origin/main"
     # may hold local assets this node does not.
     if [ -d "$ADK_REL/routines" ] || [ -d "$ADK_REL/routine-helpers" ]; then
         local peer_adk_rel
+        local remote_asset_guard
         if ! peer_adk_rel="$(ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" \
             'bash -lc '"$(printf '%q' 'echo "${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"')"'')"; then
             echo "✗ [peer:$peer] could not resolve remote AGENTDESK_ROOT_DIR"
             return 1
         fi
         peer_adk_rel="$(printf '%s' "$peer_adk_rel" | tr -d '\r')"
+        if [ -d "$ADK_REL/routines" ]; then
+            adk_validate_quickjs_routine_tree "$ADK_REL/routines" || {
+                echo "✗ [peer:$peer] local routine surface failed portability validation"
+                return 1
+            }
+        fi
+        if [ -d "$ADK_REL/routine-helpers" ]; then
+            adk_validate_routine_helper_surface "$ADK_REL/routine-helpers" || {
+                echo "✗ [peer:$peer] local helper surface failed portability validation"
+                return 1
+            }
+        fi
+        remote_asset_guard="runtime_root=$(printf '%q' "$peer_adk_rel")
+runtime_parent=\$(dirname \"\$runtime_root\")
+for path in \"\$runtime_parent\" \"\$runtime_root\" \"\$runtime_root/routines\" \"\$runtime_root/routine-helpers\"; do
+    if [ -L \"\$path\" ]; then
+        echo \"refusing symlinked peer routine asset path: \$path\" >&2
+        exit 1
+    fi
+done
+for root in \"\$runtime_root/routines\" \"\$runtime_root/routine-helpers\"; do
+    if [ -d \"\$root\" ]; then
+        first_link=\$(find \"\$root\" -type l -print -quit) || exit 1
+        [ -z \"\$first_link\" ] || {
+            echo \"refusing symlink in peer routine asset surface: \$first_link\" >&2
+            exit 1
+        }
+    fi
+done"
+        if ! ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" \
+            "bash -lc $(printf '%q' "$remote_asset_guard")"; then
+            echo "✗ [peer:$peer] remote routine asset symlink guard failed"
+            return 1
+        fi
         if [ -d "$ADK_REL/routines" ]; then
             echo "▸ [peer:$peer] Syncing operator routine scripts..."
             if ! rsync -a -e "ssh -o ConnectTimeout=$DEPLOY_SSH_CONNECT_TIMEOUT" \
@@ -1544,6 +1597,12 @@ else
 fi
 
 # Stage managed skills before stopping release so skill sync never sees partial content.
+echo "▸ Validating required routine asset payload..."
+if ! adk_validate_repo_routine_assets "$REPO"; then
+    echo "✗ Routine asset preflight failed; refusing an incomplete deploy"
+    exit 1
+fi
+
 echo "▸ Staging managed skills..."
 SKILLS_STAGED="$ADK_REL/skills.new"
 rm -rf "$SKILLS_STAGED"
@@ -1560,38 +1619,19 @@ rsync -a --delete "$REPO/policies/" "$POLICIES_STAGED/"
 
 # Stage routine scripts before stopping release so the runtime never executes a
 # stale JS asset after a binary deploy.
-if [ -d "$REPO/routines" ]; then
-    echo "▸ Staging routines..."
-    ROUTINES_STAGED="$ADK_REL/routines.new"
-    rm -rf "$ROUTINES_STAGED"
-    mkdir -p "$ROUTINES_STAGED"
-    # Operator-private routines (.gitignore:50) live only under $ADK_REL/routines,
-    # never in the repo. Seed the staging dir with them first so the repo overlay
-    # below cannot delete a routine whose row still exists in `routines`; the
-    # runtime would then fail it with "routine script ... is not loaded".
-    if [ -d "$ADK_REL/routines" ]; then
-        rsync -a "$ADK_REL/routines/" "$ROUTINES_STAGED/"
-    fi
-    # Engine-owned routines win on conflict. No --delete: see above.
-    rsync -a "$REPO/routines/" "$ROUTINES_STAGED/"
-    # #4902: helpers no longer belong in the QuickJS loader root. Tombstone
-    # exactly their former paths after both overlays so an old release layout
-    # cannot keep loading Node/Python helper files as routine candidates.
-    adk_remove_legacy_routine_helpers "$ROUTINES_STAGED"
-else
-    echo "⚠ Routines source missing: $REPO/routines"
-    echo "  Skipping routine staging — existing $ADK_REL/routines/ will be retained."
+echo "▸ Staging routines..."
+if ! ROUTINES_STAGED="$(adk_stage_routines "$REPO" "$ADK_REL")"; then
+    echo "✗ Routine staging failed; refusing to swap an incomplete asset tree"
+    exit 1
 fi
 
 # Stage deterministic helper assets outside the QuickJS-only routines root.
 # Seed with any operator-owned helpers, then overlay repository assets without
 # --delete so unrelated local helpers survive release deployment.
-if [ -d "$REPO/routine-helpers" ]; then
-    echo "▸ Staging routine helper assets..."
-    ROUTINE_HELPERS_STAGED="$(adk_stage_routine_helpers "$REPO" "$ADK_REL")"
-else
-    echo "⚠ Routine helper source missing: $REPO/routine-helpers"
-    echo "  Skipping helper staging — existing $ADK_REL/routine-helpers/ will be retained."
+echo "▸ Staging routine helper assets..."
+if ! ROUTINE_HELPERS_STAGED="$(adk_stage_routine_helpers "$REPO" "$ADK_REL")"; then
+    echo "✗ Routine helper staging failed; refusing to swap an incomplete asset tree"
+    exit 1
 fi
 
 # Stage launchd-migrated shell entrypoints before stopping release so routines
@@ -2440,16 +2480,21 @@ PYEOF
 fi
 
 if [ -n "${ROUTINES_STAGED:-}" ] && [ -d "$ROUTINES_STAGED" ]; then
-    rm -rf "$ADK_REL/routines.old"
-    [ -d "$ADK_REL/routines" ] && mv "$ADK_REL/routines" "$ADK_REL/routines.old"
-    mv "$ROUTINES_STAGED" "$ADK_REL/routines"
+    if ! adk_swap_staged_routines "$ADK_REL" "$ROUTINES_STAGED"; then
+        echo "✗ Routine asset swap failed"
+        exit 1
+    fi
     ROUTINES_STAGED=""
-    rm -rf "$ADK_REL/routines.old"
+    ROUTINE_SWAP_ARMED=1
 fi
 
 if [ -n "${ROUTINE_HELPERS_STAGED:-}" ] && [ -d "$ROUTINE_HELPERS_STAGED" ]; then
-    adk_swap_staged_routine_helpers "$ADK_REL" "$ROUTINE_HELPERS_STAGED"
+    if ! adk_swap_staged_routine_helpers "$ADK_REL" "$ROUTINE_HELPERS_STAGED"; then
+        echo "✗ Routine helper asset swap failed"
+        exit 1
+    fi
     ROUTINE_HELPERS_STAGED=""
+    ROUTINE_HELPER_SWAP_ARMED=1
 fi
 
 if [ -n "${LAUNCHD_MIGRATED_STAGED:-}" ] && [ -d "$LAUNCHD_MIGRATED_STAGED" ]; then
@@ -2527,6 +2572,23 @@ fi
 # to roll back with no .prev, and a hiccup in a non-critical step (lock, manifest)
 # must never tear down a healthy, health-confirmed binary.
 DEPLOY_OK=1
+# Routine/helper backups are committed only after the release passed health.
+# Cleanup failure is non-fatal: the live release is proven good and retaining a
+# backup is safer than restarting or attempting a late rollback.
+if [ "$ROUTINE_HELPER_SWAP_ARMED" = 1 ]; then
+    if adk_commit_routine_helper_swap "$ADK_REL"; then
+        ROUTINE_HELPER_SWAP_ARMED=0
+    else
+        echo "⚠ Healthy release retained routine helper rollback backup"
+    fi
+fi
+if [ "$ROUTINE_SWAP_ARMED" = 1 ]; then
+    if adk_commit_routine_swap "$ADK_REL"; then
+        ROUTINE_SWAP_ARMED=0
+    else
+        echo "⚠ Healthy release retained routine rollback backup"
+    fi
+fi
 # Lock it against unsigned overwrites (deferred from promotion) and drop the
 # now-unneeded rollback backup. chflags is best-effort: failing to re-lock a
 # healthy serving binary must not fail the deploy.

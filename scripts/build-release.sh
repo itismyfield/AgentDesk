@@ -8,7 +8,8 @@
 #
 # Output:
 #   dist/agentdesk-{os}-{arch}.tar.gz|zip  +  dist/checksums.txt
-#   Contents: agentdesk / agentdesk.exe, dashboard/dist/, policies/, skills/
+#   Contents: agentdesk / agentdesk.exe, dashboard/dist/, policies/, routines/,
+#             routine-helpers/, skills/
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -16,7 +17,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=_defaults.sh
 . "$SCRIPT_DIR/_defaults.sh"
+# shellcheck source=routine-asset-surface.sh
+. "$SCRIPT_DIR/routine-asset-surface.sh"
 cd "$PROJECT_DIR"
+
+if ! adk_validate_repo_routine_assets "$PROJECT_DIR"; then
+  echo "Error: routine asset preflight failed; refusing an incomplete artifact"
+  exit 1
+fi
 
 SKIP_DASHBOARD=false
 for arg in "$@"; do
@@ -168,26 +176,28 @@ if [ -d "policies" ]; then
   fi
 fi
 
-# Routine scripts
-if [ -d "routines" ]; then
-  mkdir -p "$STAGING/routines"
-  if command -v rsync &>/dev/null; then
-    rsync -a --delete "routines/" "$STAGING/routines/"
-  else
-    cp -R "routines/." "$STAGING/routines/"
-  fi
+# Routine scripts. Preflight above makes these required, not optional artifact
+# extras that can disappear silently when a checkout is incomplete.
+mkdir -p "$STAGING/routines"
+if command -v rsync &>/dev/null; then
+  rsync -a --delete "routines/" "$STAGING/routines/"
+else
+  cp -R "routines/." "$STAGING/routines/"
 fi
 
 # Deterministic Node/Python helpers intentionally live outside the QuickJS
 # routine loader root and are packaged as their own release asset surface.
-if [ -d "routine-helpers" ]; then
-  mkdir -p "$STAGING/routine-helpers"
-  if command -v rsync &>/dev/null; then
-    rsync -a --delete "routine-helpers/" "$STAGING/routine-helpers/"
-  else
-    cp -R "routine-helpers/." "$STAGING/routine-helpers/"
-  fi
+mkdir -p "$STAGING/routine-helpers"
+if command -v rsync &>/dev/null; then
+  rsync -a --delete "routine-helpers/" "$STAGING/routine-helpers/"
+else
+  cp -R "routine-helpers/." "$STAGING/routine-helpers/"
 fi
+
+# Shared staging primitives are required by install.sh when it consumes this
+# extracted artifact rather than a full repository checkout.
+mkdir -p "$STAGING/scripts"
+cp "scripts/routine-asset-surface.sh" "$STAGING/scripts/routine-asset-surface.sh"
 
 # Launchd-migrated shell entrypoints used by bundled routine prompts.
 if [ -d "scripts/launchd-migrated" ]; then

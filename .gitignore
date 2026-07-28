@@ -65,3 +65,14 @@ routines/monitoring/*
 !routines/monitoring/automation-candidate-detector.js
 !routines/monitoring/automation-candidate-recommender.js
 !routines/monitoring/daily-log-digest.js
+
+# Operator-private deterministic routine helpers share the release surface but
+# stay out of public history. Only the four authoritative bundled helpers are
+# tracked; deploy overlays them without deleting unrelated operator assets.
+routine-helpers/*
+!routine-helpers/monitoring/
+routine-helpers/monitoring/*
+!routine-helpers/monitoring/local_worktree_inventory.js
+!routine-helpers/monitoring/daily_log_digest.py
+!routine-helpers/monitoring/log_digest_issue_drafts.py
+!routine-helpers/monitoring/weekly_churn_audit.py

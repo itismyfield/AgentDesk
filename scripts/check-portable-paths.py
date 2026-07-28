@@ -22,6 +22,7 @@ DEFAULT_PATTERNS = (
     "scripts/ensure-agentdesk-cli.sh",
     "scripts/install.sh",
     "scripts/queue-stability-batch.sh",
+    "scripts/routine-asset-surface.sh",
     "scripts/setup-hooks.sh",
     "scripts/resolve-python-runner.sh",
     "scripts/pg_tunnel.sh",
@@ -33,6 +34,7 @@ DEFAULT_PATTERNS = (
     "scripts/portable-operator-migration-dry-run.py",
     "policies/**/*",
     "routines/**/*.js",
+    "routine-helpers/**/*.js",
     "agentdesk.example.yaml",
 )
 

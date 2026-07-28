@@ -17,6 +17,18 @@ tallies remain restricted to conventional fix commits.
 
 ## Weekly cron entry point
 
+Before deploying the helper split from issue #4902, migrate any existing crontab entry that still
+uses the old path. Deployment removes that exact legacy file from `routines/monitoring/`; it does
+not rewrite operator-owned crontabs automatically.
+
+```text
+old: $HOME/.adk/release/routines/monitoring/weekly_churn_audit.py
+new: $HOME/.adk/release/routine-helpers/monitoring/weekly_churn_audit.py
+```
+
+Run `crontab -l` and replace the old path before deployment. Otherwise the next scheduled run will
+fail after the compatibility tombstone is applied.
+
 The default invocation is a dry run and prints the report to stdout:
 
 ```bash

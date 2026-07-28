@@ -100,8 +100,26 @@ class InstallBootstrapPortableTests(unittest.TestCase):
                 """
                 if [[ "${1:-}" == "clone" ]]; then
                   target="${@: -1}"
-                  mkdir -p "$target/policies"
+                  mkdir -p \
+                    "$target/policies" \
+                    "$target/routines/monitoring" \
+                    "$target/routine-helpers/monitoring" \
+                    "$target/scripts"
                   printf 'agentdesk.registerPolicy({});\\n' > "$target/policies/default.js"
+                  printf 'agentdesk.routines.register({ name: "fixture", tick() { return { action: "complete" }; } });\\n' \
+                    > "$target/routines/monitoring/fixture.js"
+                  printf 'module.exports = {};\\n' \
+                    > "$target/routine-helpers/monitoring/fixture.js"
+                  for helper in \
+                    local_worktree_inventory.js \
+                    daily_log_digest.py \
+                    log_digest_issue_drafts.py \
+                    weekly_churn_audit.py; do
+                    printf 'fixture helper\\n' \
+                      > "$target/routine-helpers/monitoring/$helper"
+                  done
+                  cp "$PWD/scripts/routine-asset-surface.sh" \
+                    "$target/scripts/routine-asset-surface.sh"
                   exit 0
                 fi
                 /usr/bin/git "$@"
@@ -194,6 +212,19 @@ class InstallBootstrapPortableTests(unittest.TestCase):
             sandbox_plists = sorted((home / "Library" / "LaunchAgents").glob("com.agentdesk.release.sandbox-release.*.plist"))
 
             self.assertTrue(config.is_file(), result.stdout)
+            self.assertTrue(
+                (normalized_runtime_root / "routines" / "monitoring" / "fixture.js").is_file(),
+                result.stdout,
+            )
+            self.assertTrue(
+                (
+                    normalized_runtime_root
+                    / "routine-helpers"
+                    / "monitoring"
+                    / "weekly_churn_audit.py"
+                ).is_file(),
+                result.stdout,
+            )
             self.assertFalse(legacy_config.exists(), result.stdout)
             self.assertFalse(default_plist.exists(), result.stdout)
             self.assertEqual(len(sandbox_plists), 1, result.stdout)

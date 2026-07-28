@@ -58,6 +58,9 @@ ok()    { printf "\033[1;32m[deploy]\033[0m %s\n" "$*"; }
 error() { printf "\033[1;31m[deploy]\033[0m %s\n" "$*" >&2; }
 fail()  { error "$*"; exit 1; }
 
+adk_validate_repo_routine_assets "$PROJECT_DIR" \
+  || fail "Routine asset preflight failed; refusing an incomplete deploy"
+
 normalize_codesign_mode() {
   local raw_mode="${1:-}"
   raw_mode="$(printf '%s' "$raw_mode" | tr '[:upper:]' '[:lower:]')"
@@ -507,28 +510,34 @@ if [ -d "$PROJECT_DIR/policies" ]; then
   ok "Policies: $AD_HOME/policies/"
 fi
 
-if [ -d "$PROJECT_DIR/routines" ]; then
-  ROUTINES_STAGED="$AD_HOME/routines.new"
-  rm -rf "$ROUTINES_STAGED"
-  mkdir -p "$ROUTINES_STAGED"
-  # Preserve operator routines, then let bundled entries win only on conflict.
-  # Do not broadly delete: #4902 migrates four former helper paths explicitly.
-  if [ -d "$AD_HOME/routines" ]; then
-    rsync -a "$AD_HOME/routines/" "$ROUTINES_STAGED/"
-  fi
-  rsync -a "$PROJECT_DIR/routines/" "$ROUTINES_STAGED/"
-  adk_remove_legacy_routine_helpers "$ROUTINES_STAGED"
-  rm -rf "$AD_HOME/routines.old"
-  [ -d "$AD_HOME/routines" ] && mv "$AD_HOME/routines" "$AD_HOME/routines.old"
-  mv "$ROUTINES_STAGED" "$AD_HOME/routines"
-  rm -rf "$AD_HOME/routines.old"
-  ok "Routines: $AD_HOME/routines/"
-fi
+ROUTINES_STAGED=""
+ROUTINE_HELPERS_STAGED=""
+ROUTINES_STAGED="$(adk_stage_routines "$PROJECT_DIR" "$AD_HOME")" \
+  || fail "Routine staging failed; refusing to swap an incomplete asset tree"
 
-if [ -d "$PROJECT_DIR/routine-helpers" ]; then
-  ROUTINE_HELPERS_STAGED="$(adk_stage_routine_helpers "$PROJECT_DIR" "$AD_HOME")"
-  adk_swap_staged_routine_helpers "$AD_HOME" "$ROUTINE_HELPERS_STAGED"
-  ok "Routine helpers: $AD_HOME/routine-helpers/"
+ROUTINE_HELPERS_STAGED="$(adk_stage_routine_helpers "$PROJECT_DIR" "$AD_HOME")" \
+  || {
+    rm -rf "$ROUTINES_STAGED"
+    fail "Routine helper staging failed; refusing to swap an incomplete asset tree"
+  }
+
+if ! adk_swap_staged_routines "$AD_HOME" "$ROUTINES_STAGED"; then
+  rm -rf "$ROUTINES_STAGED" "$ROUTINE_HELPERS_STAGED" 2>/dev/null || true
+  fail "Routine asset swap failed"
+fi
+ok "Routines: $AD_HOME/routines/"
+
+if ! adk_swap_staged_routine_helpers "$AD_HOME" "$ROUTINE_HELPERS_STAGED"; then
+  adk_rollback_routine_swap "$AD_HOME" \
+    || error "Routine rollback also failed; inspect $AD_HOME/routines.old"
+  rm -rf "$ROUTINE_HELPERS_STAGED" 2>/dev/null || true
+  fail "Routine helper asset swap failed"
+fi
+ok "Routine helpers: $AD_HOME/routine-helpers/"
+
+if ! adk_commit_routine_helper_swap "$AD_HOME" \
+  || ! adk_commit_routine_swap "$AD_HOME"; then
+  fail "Routine assets are live, but transaction backup cleanup failed"
 fi
 
 if [ -d "$PROJECT_DIR/skills" ]; then
