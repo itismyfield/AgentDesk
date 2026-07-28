@@ -509,10 +509,10 @@ pub(super) fn spawn_turn_bridge(
         {
             return;
         }
-        let mut expected_current_message = (
-            inflight_state.current_msg_id,
-            inflight_state.current_msg_len,
-        );
+        // Keep the durable entry owner distinct from later in-process handoffs.
+        let bridge_entry_relay_owner_kind = inflight_state.effective_relay_owner_kind();
+        let entry_msg_id = inflight_state.current_msg_id;
+        let mut expected_current_message = (entry_msg_id, inflight_state.current_msg_len);
 
         let (mut completion_guard, mut inflight_guard) =
             make_bridge_guards(&mut bridge, &inflight_state, &shared_owned, &provider);
@@ -738,7 +738,7 @@ pub(super) fn spawn_turn_bridge(
                 standby_relay_owns_output,
                 watcher_owns_assistant_relay,
                 watcher_relay_available_for_turn,
-                initial_relay_owner_kind,
+                bridge_entry_relay_owner_kind,
                 response_sent_offset,
                 tmux_last_offset,
                 watcher_owner_channel_id,

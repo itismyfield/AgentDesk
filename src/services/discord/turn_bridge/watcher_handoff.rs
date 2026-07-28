@@ -25,6 +25,23 @@ pub(super) fn should_delegate_bridge_relay_to_watcher(
         && !recovery_retry
 }
 
+/// A watcher owner adopted by the durable bridge-entry merge predates this
+/// process's stream handling, so it owns the whole turn even when detached
+/// bridge locals still contain bytes that appear unsent.
+pub(super) fn recovered_watcher_owns_output_at_bridge_entry(
+    bridge_entry_relay_owner_kind: super::super::inflight::RelayOwnerKind,
+    watcher_owns_assistant_relay: bool,
+    watcher_relay_available_for_turn: bool,
+    terminal_error_path: bool,
+) -> bool {
+    matches!(
+        bridge_entry_relay_owner_kind,
+        super::super::inflight::RelayOwnerKind::Watcher
+    ) && watcher_owns_assistant_relay
+        && watcher_relay_available_for_turn
+        && !terminal_error_path
+}
+
 /// A watcher handle is registered for `owner_channel_id` and is not cancelled.
 /// This availability check is used by non-handoff observability sites that only
 /// need handle presence.
@@ -196,5 +213,26 @@ mod tests {
             ),
             None,
         );
+    }
+
+    #[test]
+    fn bridge_entry_watcher_adoption_owns_pending_detached_response() {
+        let terminal_error_path = false;
+        let bridge_response_pending = true;
+        assert!(recovered_watcher_owns_output_at_bridge_entry(
+            super::super::super::inflight::RelayOwnerKind::Watcher,
+            true,
+            true,
+            terminal_error_path,
+        ));
+        assert!(!should_delegate_bridge_relay_to_watcher(
+            true,
+            true,
+            bridge_response_pending,
+            false,
+            false,
+            false,
+            false,
+        ));
     }
 }

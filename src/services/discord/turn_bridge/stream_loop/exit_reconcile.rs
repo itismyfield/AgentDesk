@@ -6,6 +6,44 @@ pub(in crate::services::discord::turn_bridge) enum StreamLoopOutcome {
     AuthorityLost,
 }
 
+pub(super) fn stream_loop_should_continue(
+    done: bool,
+    terminal_control_drain_until: Option<std::time::Instant>,
+    runtime_handoff_retry_retained: bool,
+    guarded_tool_frame_retry_retained: bool,
+    now: std::time::Instant,
+) -> bool {
+    !done
+        || runtime_handoff_retry_retained
+        || guarded_tool_frame_retry_retained
+        || terminal_control_drain_until.is_some_and(|deadline| now < deadline)
+}
+
+pub(super) fn should_exit_completed_turn_on_cancel(
+    done: bool,
+    cancel_requested: bool,
+    guarded_tool_frame_retry_retained: bool,
+) -> bool {
+    done && cancel_requested && !guarded_tool_frame_retry_retained
+}
+
+pub(super) const RETAINED_STREAM_RETRY_BACKOFF: std::time::Duration =
+    std::time::Duration::from_millis(100);
+
+pub(super) fn retained_stream_retry_backoff(
+    done: bool,
+    terminal_control_drain_until: Option<std::time::Instant>,
+    runtime_handoff_retry_pending: bool,
+    guarded_tool_frame_retry_pending: bool,
+    now: std::time::Instant,
+) -> Option<std::time::Duration> {
+    (guarded_tool_frame_retry_pending
+        || (runtime_handoff_retry_pending
+            && done
+            && terminal_control_drain_until.is_none_or(|deadline| now >= deadline)))
+    .then_some(RETAINED_STREAM_RETRY_BACKOFF)
+}
+
 /// A successful exit-candidate flush replaces `inflight_state` with the exact
 /// lock-held merge. Mirror every merged stream field back into the caller-owned
 /// loop state before terminal handling can observe the detached pre-await view.

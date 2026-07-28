@@ -40,7 +40,7 @@ pub(super) struct PostLoopFinalizeContext {
     pub(super) standby_relay_owns_output: bool,
     pub(super) watcher_owns_assistant_relay: bool,
     pub(super) watcher_relay_available_for_turn: bool,
-    pub(super) initial_relay_owner_kind: super::super::inflight::RelayOwnerKind,
+    pub(super) bridge_entry_relay_owner_kind: super::super::inflight::RelayOwnerKind,
     pub(super) response_sent_offset: usize,
     pub(super) tmux_last_offset: Option<u64>,
     pub(super) watcher_owner_channel_id: ChannelId,
@@ -112,7 +112,7 @@ pub(super) async fn run_post_loop_finalize(
     let standby_relay_owns_output = ctx.standby_relay_owns_output;
     let watcher_owns_assistant_relay = ctx.watcher_owns_assistant_relay;
     let watcher_relay_available_for_turn = ctx.watcher_relay_available_for_turn;
-    let initial_relay_owner_kind = ctx.initial_relay_owner_kind;
+    let bridge_entry_relay_owner_kind = ctx.bridge_entry_relay_owner_kind;
     let response_sent_offset = ctx.response_sent_offset;
     let tmux_last_offset = ctx.tmux_last_offset;
     let watcher_owner_channel_id = ctx.watcher_owner_channel_id;
@@ -331,12 +331,13 @@ pub(super) async fn run_post_loop_finalize(
     // A bridge rebuilt from durable state must honor the row's existing
     // relay owner. The pending-response guard below only applies to
     // in-process handoffs where the bridge may already own unsent bytes.
-    let recovered_watcher_owns_output = matches!(
-        initial_relay_owner_kind,
-        super::super::inflight::RelayOwnerKind::Watcher
-    ) && watcher_owns_assistant_relay
-        && watcher_relay_available_for_turn
-        && !terminal_error_path;
+    let recovered_watcher_owns_output =
+        watcher_handoff::recovered_watcher_owns_output_at_bridge_entry(
+            bridge_entry_relay_owner_kind,
+            watcher_owns_assistant_relay,
+            watcher_relay_available_for_turn,
+            terminal_error_path,
+        );
     let response_unsent = response_portion_after_offset(&full_response, response_sent_offset);
     let response_pending_trimmed_empty = response_unsent.trim().is_empty();
     let bridge_relay_delegated_to_watcher = recovered_watcher_owns_output

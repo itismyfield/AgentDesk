@@ -462,6 +462,10 @@ mod tests {
             .find("let (mut completion_guard, mut inflight_guard) = make_bridge_guards(")
             .map(|offset| authority + offset)
             .expect("production caller constructs guards");
+        let entry_owner = caller[authority..guards]
+            .find("let bridge_entry_relay_owner_kind = inflight_state.effective_relay_owner_kind()")
+            .map(|offset| authority + offset)
+            .expect("post-authority relay owner snapshot remains explicit");
         let guard_call = &caller[guards
             ..caller[guards..]
                 .find(");")
@@ -487,6 +491,7 @@ mod tests {
             .find("post_loop_finalize::run_post_loop_finalize")
             .map(|offset| stream + offset)
             .expect("post-loop finalize remains present");
+        let finalize_context = &caller[finalize..];
 
         let establish = helper
             .find("pub(super) async fn establish_bridge_entry_authority")
@@ -510,7 +515,8 @@ mod tests {
 
         assert!(persist < gate && gate < anchor && anchor < refresh);
         assert!(
-            authority < guards
+            authority < entry_owner
+                && entry_owner < guards
                 && guards < notice_decision
                 && notice_decision < notice_edit
                 && notice_edit < emit
@@ -534,6 +540,34 @@ mod tests {
             guard_call.contains("&inflight_state"),
             "finalizer and cleanup guards must use the exact post-authority merge"
         );
+        assert!(
+            finalize_context.contains("bridge_entry_relay_owner_kind,"),
+            "post-loop recovery classification must receive the post-authority owner snapshot"
+        );
+    }
+
+    #[test]
+    fn post_authority_owner_snapshot_observes_same_identity_watcher_adoption() {
+        let mut detached = InflightTurnState::new(
+            ProviderKind::Codex,
+            42_590_611,
+            Some("entry-owner-adoption".to_string()),
+            343_742_347_365_974_026,
+            77_611,
+            18,
+            "prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-entry-owner-adoption".to_string()),
+            Some("/tmp/entry-owner-adoption.jsonl".to_string()),
+            Some("/tmp/entry-owner-adoption.input".to_string()),
+            512,
+        );
+        let pre_authority_owner_kind = detached.effective_relay_owner_kind();
+        detached.set_relay_owner_kind(RelayOwnerKind::Watcher);
+        let bridge_entry_relay_owner_kind = detached.effective_relay_owner_kind();
+
+        assert_eq!(pre_authority_owner_kind, RelayOwnerKind::None);
+        assert_eq!(bridge_entry_relay_owner_kind, RelayOwnerKind::Watcher);
     }
 
     #[test]

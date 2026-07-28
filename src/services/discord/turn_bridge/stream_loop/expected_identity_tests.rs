@@ -1,5 +1,9 @@
 use super::tool_arms::{StreamToolArmOutcome, reconcile_exact_stream_frame_after_tool_outcome};
-use super::{refresh_stream_tick_expected_identity_after_handoff, stream_loop_should_continue};
+use super::{
+    RETAINED_STREAM_RETRY_BACKOFF, refresh_stream_tick_expected_identity_after_handoff,
+    retained_stream_retry_backoff, should_exit_completed_turn_on_cancel,
+    stream_loop_should_continue,
+};
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::discord::inflight::{
     GuardedSaveOutcome, InflightTurnIdentity, InflightTurnState, load_inflight_state,
@@ -110,6 +114,84 @@ fn done_terminal_tool_result_io_retry_survives_and_replays_exactly_once() {
         tool_retry_retained,
         now,
     ));
+}
+
+#[test]
+fn done_cancel_waits_for_retained_terminal_tool_result_replay() {
+    assert!(
+        !should_exit_completed_turn_on_cancel(true, true, true),
+        "post-Done cancel must not discard the retained exact ToolResult",
+    );
+    assert!(
+        should_exit_completed_turn_on_cancel(true, true, false),
+        "Done keeps its normal cancel-after-completion exit after replay settles",
+    );
+}
+
+#[test]
+fn disconnected_receiver_with_done_behind_retained_retry_is_backed_off() {
+    let now = std::time::Instant::now();
+    let receiver_disconnected = true;
+    let done = false;
+    let mut pending = std::collections::VecDeque::from([StreamMessage::Done {
+        result: "done behind retry".to_string(),
+        session_id: Some("session-4259-r11".to_string()),
+    }]);
+    let exact_frame = StreamMessage::ToolResult {
+        content: "retry before disconnected Done".to_string(),
+        is_error: true,
+        tool_use_id: Some("tool-4259-r11".to_string()),
+    };
+    let mut retry_retained = false;
+
+    assert!(receiver_disconnected);
+    assert!(reconcile_exact_stream_frame_after_tool_outcome(
+        &mut pending,
+        exact_frame,
+        StreamToolArmOutcome::RetryExactFrame,
+        &mut retry_retained,
+    ));
+    assert!(matches!(
+        pending.front(),
+        Some(StreamMessage::ToolResult { .. })
+    ));
+    assert!(matches!(pending.get(1), Some(StreamMessage::Done { .. })));
+    assert_eq!(
+        retained_stream_retry_backoff(done, None, false, retry_retained, now),
+        Some(RETAINED_STREAM_RETRY_BACKOFF),
+        "every retained guarded retry must yield even before queued Done is reached",
+    );
+}
+
+#[test]
+fn retained_retry_policies_are_wired_to_both_cancel_boundaries_and_backoff() {
+    let source = include_str!("../stream_loop.rs")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(
+        source
+            .matches("if should_exit_completed_turn_on_cancel(")
+            .count(),
+        2,
+        "both post-Done cancel boundaries must defer retained ToolResult replay",
+    );
+    let retry_block = source
+        .find("if runtime_handoff_retry_pending || guarded_tool_frame_retry_pending")
+        .map(|start| &source[start..])
+        .expect("retained retry block");
+    let backoff = retry_block
+        .find("if let Some(backoff) = retained_stream_retry_backoff(")
+        .expect("retained retry block applies bounded backoff");
+    let sleep = backoff
+        + retry_block[backoff..]
+            .find("tokio::time::sleep(backoff).await")
+            .expect("retained retry backoff is awaited before replay");
+    let replay = sleep
+        + retry_block[sleep..]
+            .find("continue 'outer")
+            .expect("exact retained frame is replayed on the next outer iteration");
+    assert!(sleep < replay);
 }
 
 #[test]

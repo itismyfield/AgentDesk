@@ -33,21 +33,11 @@ mod expected_identity_tests;
 mod message_conversion;
 mod tool_arms;
 pub(super) use exit_reconcile::StreamLoopOutcome;
-use exit_reconcile::reconcile_saved_exit_candidate;
+use exit_reconcile::{
+    RETAINED_STREAM_RETRY_BACKOFF, reconcile_saved_exit_candidate, retained_stream_retry_backoff,
+    should_exit_completed_turn_on_cancel, stream_loop_should_continue,
+};
 use expected_identity::refresh_stream_tick_expected_identity_after_handoff;
-
-fn stream_loop_should_continue(
-    done: bool,
-    terminal_control_drain_until: Option<std::time::Instant>,
-    runtime_handoff_retry_retained: bool,
-    guarded_tool_frame_retry_retained: bool,
-    now: std::time::Instant,
-) -> bool {
-    !done
-        || runtime_handoff_retry_retained
-        || guarded_tool_frame_retry_retained
-        || terminal_control_drain_until.is_some_and(|deadline| now < deadline)
-}
 
 pub(super) struct StreamLoopContext {
     pub(super) shared_owned: Arc<SharedData>,
@@ -327,7 +317,11 @@ pub(super) async fn run_stream_loop(
             finalize_cancel_inner!();
             break 'outer;
         }
-        if done && cancel_requested(Some(cancel_token.as_ref())) {
+        if should_exit_completed_turn_on_cancel(
+            done,
+            cancel_requested(Some(cancel_token.as_ref())),
+            guarded_tool_frame_retry_retained,
+        ) {
             // Exit residual drain without reclassifying the completed turn.
             break 'outer;
         }
@@ -353,8 +347,11 @@ pub(super) async fn run_stream_loop(
             finalize_cancel_inner!();
             break 'outer;
         }
-        if done && cancel_requested(Some(cancel_token.as_ref())) {
-            // See note above on the cancel-after-Done race.
+        if should_exit_completed_turn_on_cancel(
+            done,
+            cancel_requested(Some(cancel_token.as_ref())),
+            guarded_tool_frame_retry_retained,
+        ) {
             break 'outer;
         }
 
@@ -906,11 +903,14 @@ pub(super) async fn run_stream_loop(
             // Once a completed turn's residual drain expires there is no next
             // receiver wake, so keep the loop alive with a bounded retry
             // backoff rather than dropping the exact frame or busy-spinning.
-            if done
-                && terminal_control_drain_until
-                    .is_none_or(|deadline| std::time::Instant::now() >= deadline)
-            {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if let Some(backoff) = retained_stream_retry_backoff(
+                done,
+                terminal_control_drain_until,
+                runtime_handoff_retry_pending,
+                guarded_tool_frame_retry_pending,
+                std::time::Instant::now(),
+            ) {
+                tokio::time::sleep(backoff).await;
             }
             continue 'outer;
         }
