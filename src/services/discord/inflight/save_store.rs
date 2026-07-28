@@ -25,6 +25,7 @@ pub(in crate::services::discord) use self::identity_gate::{
     GuardedSaveOutcome, bind_recovery_anchor_if_matches_identity,
     clear_long_running_placeholder_if_matches_identity,
     mark_readopted_from_inflight_if_identity_unchanged,
+    patch_bridge_entry_state_if_identity_unchanged,
     patch_restart_full_response_if_identity_unchanged, patch_restart_mode_if_matches_identity,
     persist_leak_recovery_response_offset_if_matches_identity_locked,
     persist_recovery_output_path_if_matches_identity_locked,
@@ -42,15 +43,16 @@ pub(in crate::services::discord) use self::rebind_adoption::{
 };
 
 #[cfg(test)]
+use self::identity_gate::{
+    patch_bridge_entry_state_if_identity_unchanged_in_root,
+    save_inflight_state_if_identity_matches_allow_output_restamp_in_root,
+    save_inflight_state_if_identity_unchanged_in_root,
+};
+#[cfg(test)]
 pub(super) use self::identity_gate::{
     save_existing_inflight_rebind_adoption_if_matches_identity_in_root,
     save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity_in_root,
     save_inflight_state_if_matches_identity_in_root,
-};
-#[cfg(test)]
-use self::identity_gate::{
-    save_inflight_state_if_identity_matches_allow_output_restamp_in_root,
-    save_inflight_state_if_identity_unchanged_in_root,
 };
 #[cfg(test)]
 #[path = "save_store/bridge_entry_guard_tests.rs"]
@@ -59,15 +61,10 @@ mod bridge_entry_guard_tests;
 /// Blind whole-blob write of `InflightTurnState`: serializes the ENTIRE row and
 /// clobbers whatever is on disk, with no compare-and-set on turn identity.
 ///
-/// SEALED (#4259) — do not add new callers. A concurrent turn that legitimately
-/// re-owns the channel between a caller's snapshot and this write is silently
-/// overwritten. For any new site use the drop-in guarded variant
-/// `save_inflight_state_if_identity_unchanged` (save_store/identity_gate.rs),
-/// which refuses that race and returns a `GuardedSaveOutcome`. The remaining
-/// blind callers are tracked as a monotonically-decreasing ceiling by
-/// `scripts/check_inflight_blind_save_ratchet.py` — that ratchet is the living
-/// inventory that replaced the stale hand-maintained line-number list, and its
-/// BASELINE is lowered per track as #4259 PR-2..N convert the sites.
+/// TEST SEED ONLY (#4259 R4): the production symbol is compile-time absent.
+/// Runtime writers must use a create-shaped API or a lock-held narrow RMW seam;
+/// identity checking alone does not make a stale whole-row snapshot safe.
+#[cfg(test)]
 pub(in crate::services::discord) fn save_inflight_state(
     state: &InflightTurnState,
 ) -> Result<(), String> {
@@ -903,6 +900,7 @@ fn save_inflight_state_create_new_in_root(
     }
 }
 
+#[cfg(test)]
 pub(super) fn save_inflight_state_in_root(
     root: &Path,
     state: &InflightTurnState,

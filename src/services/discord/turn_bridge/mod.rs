@@ -1,4 +1,5 @@
 mod activity_heartbeat;
+mod bridge_entry_persist;
 mod bridge_latency_spans;
 mod cancel_finalize_policy;
 mod chunk_compose;
@@ -142,40 +143,10 @@ pub(super) use watcher_orphan_cleanup::{
 // Re-export pub(crate) items
 pub(crate) use tmux_runtime::tmux_runtime_paths;
 
-/// Saves bridge-entry mutations without recreating or overwriting a row this turn no longer owns.
-fn persist_bridge_entry_inflight_state(
-    inflight_state: &InflightTurnState,
-) -> crate::services::discord::inflight::GuardedSaveOutcome {
-    use crate::services::discord::inflight::{
-        GuardedSaveOutcome, save_inflight_state_if_identity_unchanged,
-    };
-
-    const CALLER: &str = "turn_bridge::spawn_turn_bridge::bridge_entry";
-    let outcome = save_inflight_state_if_identity_unchanged(inflight_state, CALLER);
-    match outcome {
-        GuardedSaveOutcome::Saved => {}
-        GuardedSaveOutcome::Missing => tracing::warn!(
-            channel_id = inflight_state.channel_id,
-            caller = CALLER,
-            "bridge-entry guarded save skipped: durable row missing; row was not recreated"
-        ),
-        GuardedSaveOutcome::IdentityMismatch => tracing::warn!(
-            channel_id = inflight_state.channel_id,
-            caller = CALLER,
-            "bridge-entry guarded save skipped: durable row belongs to another turn"
-        ),
-        GuardedSaveOutcome::IoError => tracing::warn!(
-            channel_id = inflight_state.channel_id,
-            caller = CALLER,
-            "bridge-entry guarded save failed: inflight store I/O error"
-        ),
-    }
-    outcome
-}
-
 // Items used by spawn_turn_bridge from submodules
 use super::watcher_lifecycle_decision::should_resume_watcher_after_turn;
 use crate::db::session_status::{AWAITING_BG, IDLE, TURN_ACTIVE};
+use bridge_entry_persist::bridge_stream_relay_suppressed;
 use completion_guard::complete_work_dispatch_on_turn_end;
 use context_window::{apply_context_token_update, persisted_context_tokens, resolve_done_response};
 use guards::{make_bridge_guards, resolve_guard_owner_channel};
@@ -527,7 +498,7 @@ pub(super) fn spawn_turn_bridge(
         // Codex P2: a no-anchor recovery turn (bridge.current_msg_id == None)
         // had a fresh placeholder created above into the working `current_msg_id`,
         // but the cloned inflight still carries `current_msg_id == 0`. Mirror the
-        // real id back NOW so the `save_inflight_state` below persists it; without
+        // real id back NOW so the bridge-entry patch below persists it; without
         // this, a restart before the first streaming edit would see id 0 again,
         // re-create a placeholder, and orphan the spinner we just sent. The
         // synthetic-headless fallback (creation failed) is intentionally NOT
@@ -623,7 +594,32 @@ pub(super) fn spawn_turn_bridge(
             inflight_state.long_running_placeholder_active = false;
         }
 
-        let _ = persist_bridge_entry_inflight_state(&inflight_state);
+        let _ = bridge_entry_persist::persist_bridge_entry_inflight_state(
+            &bridge.inflight_state,
+            shared_owned.as_ref(),
+            bridge_entry_persist::BridgeEntryRuntimeState {
+                inflight_state: &mut inflight_state,
+                full_response: &mut full_response,
+                response_sent_offset: &mut response_sent_offset,
+                bridge_confirmed_response_sent_offset:
+                    &mut bridge_confirmed_response_sent_offset,
+                current_msg_id: &mut current_msg_id,
+                current_tool_line: &mut current_tool_line,
+                prev_tool_status: &mut prev_tool_status,
+                last_tool_name: &mut last_tool_name,
+                last_tool_summary: &mut last_tool_summary,
+                any_tool_used: &mut any_tool_used,
+                has_post_tool_text: &mut has_post_tool_text,
+                streaming_rollover_frozen_msg_ids: &mut streaming_rollover_frozen_msg_ids,
+                tmux_last_offset: &mut tmux_last_offset,
+                watcher_owner_channel_id: &mut watcher_owner_channel_id,
+                watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
+                watcher_relay_available_for_turn: &mut watcher_relay_available_for_turn,
+                standby_relay_owns_output: &mut standby_relay_owns_output,
+                status_panel_msg_id: &mut status_panel_msg_id,
+                status_panel_generation: &mut status_panel_generation,
+            },
+        );
         crate::services::observability::emit_turn_started(
             provider.as_str(),
             channel_id.get(),

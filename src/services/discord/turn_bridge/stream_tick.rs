@@ -340,7 +340,7 @@ pub(super) async fn run_bridge_stream_tick(
         last_status_panel_edit = tokio::time::Instant::now();
         status_panel_dirty = false;
     }
-    if !watcher_owns_assistant_relay && !standby_relay_owns_output {
+    if !bridge_stream_relay_suppressed(watcher_owns_assistant_relay, standby_relay_owns_output) {
         // #3805 P2 (PR-D): track whether an answer rollover created a fresh
         // tail message this interval, so the two-message status panel is
         // re-anchored BELOW it exactly once (not on quiet intervals).

@@ -1,13 +1,21 @@
 use super::*;
+#[path = "identity_gate/bridge_entry.rs"]
+mod bridge_entry;
 #[path = "identity_gate/claude_e_stamp.rs"]
 mod claude_e_stamp;
+#[path = "identity_gate/guarded_read.rs"]
+mod guarded_read;
 #[path = "identity_gate/heartbeat.rs"]
 mod heartbeat;
 #[path = "identity_gate/runtime_stamp.rs"]
 mod runtime_stamp;
 #[path = "identity_gate/stream_loop_patch.rs"]
 mod stream_loop_patch;
+pub(in crate::services::discord) use bridge_entry::patch_bridge_entry_state_if_identity_unchanged;
+#[cfg(test)]
+pub(in crate::services::discord::inflight) use bridge_entry::patch_bridge_entry_state_if_identity_unchanged_in_root;
 pub(in crate::services::discord) use claude_e_stamp::stamp_claude_e_process_if_matches_identity;
+use guarded_read::read_inflight_state_for_guarded_write;
 pub(in crate::services::discord) use heartbeat::touch_inflight_state_if_matches_identity;
 pub(in crate::services::discord) use runtime_stamp::stamp_runtime_handoff_if_matches_identity;
 pub(in crate::services::discord) use stream_loop_patch::{
@@ -97,25 +105,15 @@ fn save_inflight_state_identity_gated_in_root(
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return GuardedSaveOutcome::IoError;
     };
-    let Ok(data) = fs::read_to_string(&path) else {
-        tracing::debug!(
-            provider = %provider.as_str(),
-            channel_id = state.channel_id,
-            caller = caller,
-            snapshot_identity = ?InflightTurnIdentity::from_state(state),
-            "inflight identity-refresh save skipped because durable row is missing"
-        );
-        return GuardedSaveOutcome::Missing;
-    };
-    let Ok(on_disk) = serde_json::from_str::<InflightTurnState>(&data) else {
-        tracing::debug!(
-            provider = %provider.as_str(),
-            channel_id = state.channel_id,
-            caller = caller,
-            snapshot_identity = ?InflightTurnIdentity::from_state(state),
-            "inflight identity-refresh save skipped because durable row is malformed"
-        );
-        return GuardedSaveOutcome::IdentityMismatch;
+    let on_disk = match read_inflight_state_for_guarded_write(
+        &path,
+        &provider,
+        state.channel_id,
+        expected,
+        caller,
+    ) {
+        Ok(on_disk) => on_disk,
+        Err(outcome) => return outcome,
     };
     let durable = InflightTurnIdentity::from_state(&on_disk);
     if expected.user_msg_id == 0 && expected.turn_start_offset.is_none() {
@@ -234,13 +232,17 @@ pub(in crate::services::discord::inflight) fn patch_restart_full_response_if_ide
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return GuardedSaveOutcome::IoError;
     };
-    let Ok(data) = fs::read_to_string(&path) else {
-        return GuardedSaveOutcome::Missing;
-    };
-    let Ok(mut on_disk) = serde_json::from_str::<InflightTurnState>(&data) else {
-        return GuardedSaveOutcome::IdentityMismatch;
-    };
     let expected = InflightTurnIdentity::from_state(state);
+    let mut on_disk = match read_inflight_state_for_guarded_write(
+        &path,
+        &provider,
+        state.channel_id,
+        &expected,
+        caller,
+    ) {
+        Ok(on_disk) => on_disk,
+        Err(outcome) => return outcome,
+    };
     let durable = InflightTurnIdentity::from_state(&on_disk);
     if state.user_msg_id == 0 && state.turn_start_offset.is_none() {
         tracing::info!(
@@ -342,7 +344,7 @@ pub(in crate::services::discord) enum GuardedSaveOutcome {
     /// or a planned-restart / rebind-origin marker now owns the row). We do
     /// NOT clobber it.
     IdentityMismatch,
-    /// Filesystem / serialization error during the write.
+    /// Filesystem, malformed durable JSON, or serialization error.
     IoError,
 }
 

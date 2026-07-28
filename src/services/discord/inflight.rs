@@ -145,14 +145,17 @@ use self::store::{
 // Save cluster re-exports (original visibility mirrored). The save child declares
 // these `pub(in crate::services::discord)` (the absolute spelling of the parent's
 // original `pub(super)`), so this `pub(super)` re-export does not widen the surface.
+#[cfg(test)]
+pub(super) use self::save_store::save_inflight_state;
 pub(super) use self::save_store::{
-    CreateNewInflightError, save_inflight_delivery_rewind_if_matches_identity, save_inflight_state,
+    CreateNewInflightError, save_inflight_delivery_rewind_if_matches_identity,
     save_inflight_state_create_new, save_inflight_state_if_absent,
 };
 pub(in crate::services::discord) use self::save_store::{
     GuardedSaveOutcome, bind_recovery_anchor_if_matches_identity,
     clear_long_running_placeholder_if_matches_identity,
     mark_readopted_from_inflight_if_identity_unchanged,
+    patch_bridge_entry_state_if_identity_unchanged,
     patch_restart_full_response_if_identity_unchanged, patch_restart_mode_if_matches_identity,
     persist_leak_recovery_response_offset_if_matches_identity_locked,
     persist_recovery_output_path_if_matches_identity_locked,
