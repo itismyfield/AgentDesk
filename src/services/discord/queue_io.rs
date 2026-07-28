@@ -1865,15 +1865,10 @@ mod presleep_tests {
         );
     }
 
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
     async fn race_loss_recheck_waits_for_transition_before_kickoff_4794() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let tmp = tempfile::tempdir().expect("temp runtime root");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+        let _env = crate::config::set_agentdesk_root_for_test(tmp.path());
 
         let shared = make_shared_data_for_tests();
         let provider = ProviderKind::Claude;

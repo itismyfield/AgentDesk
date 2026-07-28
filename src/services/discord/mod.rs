@@ -5166,13 +5166,10 @@ mod idle_queue_background_supersede_tests {
         }
     }
 
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
     async fn session_transition_preserves_queued_head_order_until_release() {
-        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
         let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
-        let _env_guard = EnvGuard;
+        let _env_guard = crate::config::set_agentdesk_root_for_test(tmp.path());
 
         let shared = make_shared_data_for_tests();
         let provider = ProviderKind::Claude;

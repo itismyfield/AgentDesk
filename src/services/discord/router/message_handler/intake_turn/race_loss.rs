@@ -683,15 +683,10 @@ mod race_loss_requeue_tests {
         }
     }
 
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
     async fn busy_transition_is_durable_before_the_guard_is_released() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let tmp = tempfile::tempdir().expect("temp runtime root");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+        let _env = crate::config::set_agentdesk_root_for_test(tmp.path());
 
         let shared = crate::services::discord::make_shared_data_for_tests();
         let provider = ProviderKind::Claude;
@@ -741,15 +736,10 @@ mod race_loss_requeue_tests {
         drop(held);
     }
 
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
     async fn persistence_failure_rolls_back_queue_and_clears_dispatch_reservation() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let tmp = tempfile::tempdir().expect("temp runtime root");
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
+        let _env = crate::config::set_agentdesk_root_for_test(tmp.path());
 
         let shared = crate::services::discord::make_shared_data_for_tests();
         let provider = ProviderKind::Claude;
