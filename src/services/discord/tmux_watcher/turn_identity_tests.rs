@@ -564,9 +564,10 @@ fn watcher_long_chunk_identity(
         "turn_identity_tests.watcher_long_chunk",
     );
     super::super::terminal_long_chunks::watcher_delivery_identity(
-        shared,
-        channel,
-        tmux_session_name,
+        crate::services::discord::outbound::delivery_record::current_generation_mtime_ns(
+            tmux_session_name,
+        ),
+        shared.relay_frontier_token(channel).reset_incarnation,
         Some(&lease_key),
     )
 }
@@ -739,7 +740,7 @@ fn watcher_long_chunk_a_range_is_not_stamped_as_replacement_b_4911() {
 }
 
 #[test]
-fn watcher_legacy_same_generation_reset_rejects_delayed_record_4911() {
+fn watcher_legacy_short_and_long_same_generation_reset_reject_delayed_record_4911() {
     let temp = tempfile::TempDir::new().expect("temp runtime root");
     let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
     let shared = crate::services::discord::make_shared_data_for_tests();
@@ -798,15 +799,29 @@ fn watcher_legacy_same_generation_reset_rejects_delayed_record_4911() {
         "replacement legacy body",
     );
 
-    super::super::terminal_long_chunks::record_watcher_terminal_delivery(
-        &shared,
-        &provider,
-        channel,
-        tmux,
-        identity_a,
-        (0, 128),
-        Some(7_491_303),
-        a_body,
+    for anchor in [7_491_303, 7_491_304] {
+        let proof = super::super::terminal_long_chunks::WatcherTerminalDeliveryProof {
+            anchor_msg_id: Some(poise::serenity_prelude::MessageId::new(anchor)),
+            raw_body: a_body.to_string(),
+        };
+        assert!(
+            !super::super::terminal_long_chunks::commit_legacy_watcher_delivery(
+                &shared,
+                &provider,
+                channel,
+                tmux,
+                identity_a,
+                (0, 128),
+                Some(&proof),
+            ),
+            "legacy short and long landed POSTs both settle stale without advancing"
+        );
+    }
+    assert_eq!(
+        coord
+            .confirmed_end_offset
+            .load(std::sync::atomic::Ordering::Acquire),
+        64
     );
     let record =
         crate::services::discord::outbound::delivery_record::read_record(&provider, channel.get())
@@ -977,13 +992,22 @@ async fn live_long_chunk_delivery_fingerprint_uses_raw_body_4081() {
         turn,
         Some(lease_key),
         1,
+        super::super::loop_poll_prologue::WatcherSourceAuthority {
+            generation_mtime_ns:
+                crate::services::discord::outbound::delivery_record::current_generation_mtime_ns(
+                    session,
+                ),
+            reset_incarnation: shared.relay_frontier_token(channel_id).reset_incarnation,
+        },
         0,
         raw_body.len() as u64,
     )
     .await;
     assert!(matches!(
         outcome,
-        crate::services::discord::outbound::turn_output_controller::DeliveryOutcome::Delivered { .. }
+        super::super::terminal_long_chunks::WatcherLongChunksResult::Outcome(
+            crate::services::discord::outbound::turn_output_controller::DeliveryOutcome::Delivered { .. }
+        )
     ));
 
     assert_eq!(

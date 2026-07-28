@@ -467,6 +467,21 @@ impl RelayProducer {
         self.enqueue(payload, None, frame_identity, None, None)
     }
 
+    pub fn try_send_frame_with_sequence_identity_and_generation(
+        &self,
+        payload: String,
+        frame_identity: Option<RelayTurnIdentity>,
+        relay_generation_mtime_ns: i64,
+    ) -> RelaySendOutcome {
+        self.enqueue(
+            payload,
+            None,
+            frame_identity,
+            None,
+            (relay_generation_mtime_ns != 0).then_some(relay_generation_mtime_ns),
+        )
+    }
+
     /// #3041 P1-3 (Part a, B1): forward the RESULT-bearing chunk as a terminal
     /// frame carrying the commit fence (`terminal.consumed_end` + the pinned turn
     /// identity). The frame both triggers the sink's terminal delivery AND is the
@@ -478,6 +493,21 @@ impl RelayProducer {
         terminal: TerminalCommitFence,
     ) -> RelaySendOutcome {
         self.enqueue(payload, Some(terminal), None, None, None)
+    }
+
+    pub fn try_send_terminal_frame_with_sequence_and_generation(
+        &self,
+        payload: String,
+        terminal: TerminalCommitFence,
+        relay_generation_mtime_ns: i64,
+    ) -> RelaySendOutcome {
+        self.enqueue(
+            payload,
+            Some(terminal),
+            None,
+            None,
+            (relay_generation_mtime_ns != 0).then_some(relay_generation_mtime_ns),
+        )
     }
 }
 

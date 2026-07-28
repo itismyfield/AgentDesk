@@ -4393,6 +4393,10 @@ mod watcher_short_replace_controller {
             turn(),
             Some(lease_key()),
             INSTANCE,
+            WatcherSourceAuthority {
+                generation_mtime_ns: crate::services::discord::outbound::delivery_record::current_generation_mtime_ns("AgentDesk-claude-8141"),
+                reset_incarnation: shared.relay_frontier_token(ch()).reset_incarnation,
+            },
             START,
             END,
         )
@@ -4403,7 +4407,7 @@ mod watcher_short_replace_controller {
         gw: &LongChunksFakeGateway,
         shared: &Arc<crate::services::discord::SharedData>,
         cell: &Arc<DeliveryLeaseCell>,
-    ) -> toc::DeliveryOutcome {
+    ) -> super::super::terminal_long_chunks::WatcherLongChunksResult {
         deliver_long_chunks_via_controller(
             gw,
             shared,
@@ -4417,6 +4421,10 @@ mod watcher_short_replace_controller {
             turn(),
             Some(lease_key()),
             INSTANCE,
+            WatcherSourceAuthority {
+                generation_mtime_ns: crate::services::discord::outbound::delivery_record::current_generation_mtime_ns("AgentDesk-claude-8141"),
+                reset_incarnation: shared.relay_frontier_token(ch()).reset_incarnation,
+            },
             START,
             END,
         )
@@ -4523,7 +4531,12 @@ mod watcher_short_replace_controller {
             let cell = Arc::new(DeliveryLeaseCell::new(ch()));
             assert_eq!(
                 run(&gw, &shared, &cell).await,
-                WatcherShortReplaceResult::Delivered
+                WatcherShortReplaceResult::LandedStale
+            );
+            assert_eq!(
+                coord.confirmed_end_offset.load(Ordering::Acquire),
+                0,
+                "the stale POST must not advance the replacement incarnation"
             );
             let record =
                 crate::services::discord::outbound::delivery_record::read_record(&provider, CH)
@@ -4600,8 +4613,13 @@ mod watcher_short_replace_controller {
             let cell = Arc::new(DeliveryLeaseCell::new(ch()));
             assert!(matches!(
                 run_long(&gw, &shared, &cell).await,
-                toc::DeliveryOutcome::Delivered { .. }
+                super::super::terminal_long_chunks::WatcherLongChunksResult::LandedStale
             ));
+            assert_eq!(
+                coord.confirmed_end_offset.load(Ordering::Acquire),
+                0,
+                "the stale long POST must not advance the replacement incarnation"
+            );
             let record =
                 crate::services::discord::outbound::delivery_record::read_record(&provider, CH)
                     .expect("replacement record");
@@ -5149,15 +5167,17 @@ mod watcher_short_replace_controller {
             let gw = long_gateway(true, true);
             let outcome = run_long(&gw, &shared, &cell).await;
             match outcome {
-                toc::DeliveryOutcome::Delivered {
-                    new_chunks: Some(chunks),
-                    ..
-                } => {
+                super::super::terminal_long_chunks::WatcherLongChunksResult::Outcome(
+                    toc::DeliveryOutcome::Delivered {
+                        new_chunks: Some(chunks),
+                        ..
+                    },
+                ) => {
                     assert_eq!(chunks.first_message_id, Some(MessageId::new(9100)));
                     assert_eq!(chunks.tail_message_id, Some(MessageId::new(9101)));
                     assert_eq!(chunks.anchor_delete_error, None);
                 }
-                other => panic!("expected Delivered, got {}", toc_debug_outcome(&other)),
+                _ => panic!("expected persisted Delivered"),
             }
             assert_eq!(gw.send_calls.load(Ordering::SeqCst), 1);
             assert_eq!(gw.delete_calls.load(Ordering::SeqCst), 1);
@@ -5267,14 +5287,13 @@ mod watcher_short_replace_controller {
             let gw = long_gateway(true, false);
             let outcome = run_long(&gw, &shared, &cell).await;
             match outcome {
-                toc::DeliveryOutcome::Delivered {
-                    new_chunks: Some(chunks),
-                    ..
-                } => assert_eq!(chunks.anchor_delete_error.as_deref(), Some("delete failed")),
-                other => panic!(
-                    "delete failure should still be Delivered, got {}",
-                    toc_debug_outcome(&other)
-                ),
+                super::super::terminal_long_chunks::WatcherLongChunksResult::Outcome(
+                    toc::DeliveryOutcome::Delivered {
+                        new_chunks: Some(chunks),
+                        ..
+                    },
+                ) => assert_eq!(chunks.anchor_delete_error.as_deref(), Some("delete failed")),
+                _ => panic!("delete failure should still be persisted Delivered"),
             }
             assert_eq!(shared.committed_relay_offset(ch()), END);
         });
@@ -5287,7 +5306,12 @@ mod watcher_short_replace_controller {
         let gw = long_gateway(false, true);
         let outcome = run_long(&gw, &shared, &cell).await;
         assert!(
-            matches!(outcome, toc::DeliveryOutcome::NotDelivered { .. }),
+            matches!(
+                outcome,
+                super::super::terminal_long_chunks::WatcherLongChunksResult::Outcome(
+                    toc::DeliveryOutcome::NotDelivered { .. }
+                )
+            ),
             "send failure maps to NotDelivered"
         );
         assert_eq!(gw.delete_calls.load(Ordering::SeqCst), 0);
@@ -5302,6 +5326,10 @@ mod watcher_short_replace_controller {
         let mut restored = true;
         let mut last_edit = String::from("streamed");
         let mut frozen = Vec::new();
+        let super::super::terminal_long_chunks::WatcherLongChunksResult::Outcome(outcome) = outcome
+        else {
+            panic!("send failure must remain an ordinary controller outcome");
+        };
         apply_watcher_long_chunks_result(
             outcome,
             &http,
@@ -5349,7 +5377,12 @@ mod watcher_short_replace_controller {
         ));
         let gw = long_gateway(true, true);
         let outcome = run_long(&gw, &shared, &cell).await;
-        assert!(matches!(outcome, toc::DeliveryOutcome::Transient { .. }));
+        assert!(matches!(
+            outcome,
+            super::super::terminal_long_chunks::WatcherLongChunksResult::Outcome(
+                toc::DeliveryOutcome::Transient { .. }
+            )
+        ));
         assert_eq!(gw.send_calls.load(Ordering::SeqCst), 0);
         assert_eq!(shared.committed_relay_offset(ch()), 0);
     }

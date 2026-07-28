@@ -2004,7 +2004,7 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
     delivered_body: Option<&str>,
     ledger_user_msg_id: Option<u64>,
 ) {
-    shadow_mirror_delivered_frontier_inner(
+    let _ = shadow_mirror_delivered_frontier_inner(
         shared,
         provider,
         channel,
@@ -2032,7 +2032,7 @@ fn shadow_mirror_delivered_frontier_inner(
     delivered_body: Option<&str>,
     ledger_user_msg_id: Option<u64>,
     watcher_authority: Option<WatcherDeliveryRecordAuthority>,
-) {
+) -> bool {
     let channel_id = channel.get();
     let coord = shared.tmux_relay_coord(channel);
     let generation_mtime_ns = watcher_authority
@@ -2043,7 +2043,7 @@ fn shadow_mirror_delivered_frontier_inner(
                 .load(Ordering::Acquire)
         });
     if !is_delivered {
-        return;
+        return false;
     }
     if generation_mtime_ns == 0 || range.1 <= range.0 {
         tracing::warn!(
@@ -2053,7 +2053,7 @@ fn shadow_mirror_delivered_frontier_inner(
             generation_mtime_ns,
             "confirmed delivery lacks an authoritative JSONL incarnation/range; preserving prior durable frontier"
         );
-        return;
+        return false;
     }
     let in_memory_confirmed_end = coord.confirmed_end_offset.load(Ordering::Acquire);
     let delivery_channel_id = terminal_anchor_channel_id.unwrap_or(channel_id);
@@ -2131,7 +2131,7 @@ fn shadow_mirror_delivered_frontier_inner(
             error = %error,
             "confirmed delivery frontier/receipt write failed"
         );
-        return;
+        return false;
     }
 
     // Retry evidence and completed-turn settlement become visible only after
@@ -2162,6 +2162,7 @@ fn shadow_mirror_delivered_frontier_inner(
             "#3089 B1: delivered_frontier END diverged from in-memory confirmed_end_offset (observe-only)"
         );
     }
+    true
 }
 
 pub(in crate::services::discord) fn record_delivered_frontier_with_body(
@@ -2283,7 +2284,7 @@ pub(in crate::services::discord) fn record_watcher_terminal_delivery(
     range: (u64, u64),
     last_chunk_anchor_msg_id: Option<u64>,
     delivered_body: &str,
-) {
+) -> bool {
     shadow_mirror_delivered_frontier_inner(
         shared,
         provider,
@@ -2296,7 +2297,7 @@ pub(in crate::services::discord) fn record_watcher_terminal_delivery(
         Some(delivered_body),
         None,
         Some(authority),
-    );
+    )
 }
 
 #[cfg(test)]

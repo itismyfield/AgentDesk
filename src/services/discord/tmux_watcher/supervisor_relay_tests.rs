@@ -89,6 +89,7 @@ async fn forward_chunk_surfaces_backpressure_evicted_victim_identity() {
         &registry,
         &mut cached,
         Some(&victim),
+        77,
     );
     assert!(blocked.mirrored);
     tokio::time::timeout(
@@ -104,6 +105,7 @@ async fn forward_chunk_surfaces_backpressure_evicted_victim_identity() {
         &registry,
         &mut cached,
         Some(&victim),
+        77,
     );
     let newest_forward = forward_chunk_to_supervisor_relay_for_turn(
         &session,
@@ -111,6 +113,7 @@ async fn forward_chunk_surfaces_backpressure_evicted_victim_identity() {
         &registry,
         &mut cached,
         Some(&newest),
+        77,
     );
 
     assert!(queued_victim.evicted_frames.is_empty());

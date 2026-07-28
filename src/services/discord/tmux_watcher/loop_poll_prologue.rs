@@ -3,6 +3,12 @@ use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct WatcherSourceAuthority {
+    pub(super) generation_mtime_ns: i64,
+    pub(super) reset_incarnation: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PollOutcome {
     ContinueWatcherLoop,
@@ -11,6 +17,7 @@ pub(super) enum PollOutcome {
         data: Vec<u8>,
         data_start_offset: u64,
         epoch_snapshot: u64,
+        source_authority: WatcherSourceAuthority,
     },
 }
 
@@ -256,6 +263,17 @@ pub(super) async fn poll_watcher_output_or_continue(
 
     // Snapshot pause epoch — if this changes later, a Discord turn claimed this data
     let epoch_snapshot = pause_epoch.load(Ordering::Relaxed);
+    let source_frontier_token = shared.relay_frontier_token(channel_id);
+    let Some(source_frontier_mutation) =
+        shared.acquire_relay_frontier_mutation(channel_id, source_frontier_token)
+    else {
+        commit_poll_state!();
+        return PollOutcome::ContinueWatcherLoop;
+    };
+    // Bind the bytes about to be read to the wrapper generation observed before
+    // opening the JSONL. A rotation after this snapshot makes the old authority
+    // stale; it can never relabel already-buffered bytes as the new incarnation.
+    let source_generation_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
 
     // Try to read new data from output file
     let read_result = tokio::time::timeout(
@@ -275,6 +293,7 @@ pub(super) async fn poll_watcher_output_or_continue(
         }),
     )
     .await;
+    drop(source_frontier_mutation);
 
     let (data, new_offset) = match read_result {
         Ok(Ok(Ok((data, off)))) => (data, off),
@@ -605,5 +624,9 @@ pub(super) async fn poll_watcher_output_or_continue(
         data,
         data_start_offset,
         epoch_snapshot,
+        source_authority: WatcherSourceAuthority {
+            generation_mtime_ns: source_generation_mtime_ns,
+            reset_incarnation: source_frontier_token.reset_incarnation,
+        },
     }
 }

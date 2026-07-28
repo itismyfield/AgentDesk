@@ -71,8 +71,11 @@ mod single_message_footer_tests;
 #[path = "tmux_watcher/terminal_send.rs"]
 mod terminal_send;
 
+#[path = "tmux_watcher/terminal_delivery_types.rs"]
+mod terminal_delivery_types;
+
 #[path = "tmux_watcher/terminal_long_chunks.rs"]
-mod terminal_long_chunks;
+pub(in crate::services::discord) mod terminal_long_chunks;
 
 #[path = "tmux_watcher/terminal_direct_fallback.rs"]
 mod terminal_direct_fallback;
@@ -426,7 +429,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     };
 
     'watcher_loop: loop {
-        let (data, data_start_offset, epoch_snapshot) = {
+        let (data, data_start_offset, epoch_snapshot, source_authority) = {
             let mut relay_offset_state = RelayOffsetState {
                 current_offset: &mut current_offset,
                 terminal_delivery_observed: &mut terminal_delivery_observed,
@@ -465,7 +468,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     data,
                     data_start_offset,
                     epoch_snapshot,
-                } => (data, data_start_offset, epoch_snapshot),
+                    source_authority,
+                } => (data, data_start_offset, epoch_snapshot, source_authority),
                 PollOutcome::ContinueWatcherLoop => continue,
                 PollOutcome::BreakWatcherLoop => break 'watcher_loop,
             }
@@ -517,6 +521,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 data,
                 data_start_offset,
                 epoch_snapshot,
+                source_authority,
             },
             &mut turn_parse_state,
             &mut supervisor_relay_state,
@@ -530,6 +535,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         };
         let CollectedTurnStream {
             turn_data_start_offset,
+            source_authority,
             split_trailing_turn_follows,
             state,
             restored_response_seed,
@@ -1866,13 +1872,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 watcher_lease_start,
             );
         let watcher_long_chunk_identity = terminal_long_chunks::watcher_delivery_identity(
-            &shared,
-            channel_id,
-            &tmux_session_name,
+            source_authority.generation_mtime_ns,
+            source_authority.reset_incarnation,
             Some(&watcher_lease_key),
         );
-        let mut watcher_long_chunk_anchor_msg_id: Option<MessageId> = None;
-        let mut watcher_long_chunk_delivered_body: Option<String> = None;
+        let mut watcher_terminal_delivery_proof = None;
         let mut watcher_task_response_claim = None;
         let watcher_lease_cell = shared.delivery_lease(channel_id);
         // Lease only a watcher-direct real body; zero/inverted ranges never deliver.
@@ -2121,6 +2125,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 watcher_lease_turn,
                 &watcher_lease_key,
                 watcher_instance_id,
+                source_authority,
                 watcher_lease_start,
                 watcher_lease_end,
                 &inflight_before_relay,
@@ -2138,8 +2143,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     last_edit_text: &mut last_edit_text,
                     watcher_streaming_rollover_frozen_msg_ids:
                         &mut watcher_streaming_rollover_frozen_msg_ids,
-                    watcher_long_chunk_anchor_msg_id: &mut watcher_long_chunk_anchor_msg_id,
-                    watcher_long_chunk_delivered_body: &mut watcher_long_chunk_delivered_body,
+                    watcher_terminal_delivery_proof: &mut watcher_terminal_delivery_proof,
                     completion_footer_terminal_target: &mut completion_footer_terminal_target,
                     retry_terminal_delivery_from_offset: &mut retry_terminal_delivery_from_offset,
                     tui_direct_anchor_or_lease_present_for_lifecycle:
@@ -2748,30 +2752,16 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 "watcher must be able to commit its own freshly-acquired lease"
             );
             if committed && commit_outcome == crate::services::discord::LeaseOutcome::Delivered {
-                // INLINE advance — exactly the pre-P1-1 call site/timing.
-                advance_watcher_confirmed_end(
-                    &shared,
-                    &watcher_provider,
-                    channel_id,
-                    &tmux_session_name,
-                    watcher_lease_end,
-                    "src/services/discord/tmux_watcher.rs:watcher_lease_commit_advance",
-                );
-                watcher_response_frontier_committed = true;
-                if let Some(anchor) = watcher_long_chunk_anchor_msg_id {
-                    if let Some(body) = watcher_long_chunk_delivered_body.as_deref() {
-                        terminal_long_chunks::record_watcher_terminal_delivery(
-                            &shared,
-                            &watcher_provider,
-                            channel_id,
-                            &tmux_session_name,
-                            watcher_long_chunk_identity,
-                            (watcher_lease_start, watcher_lease_end),
-                            Some(anchor.get()),
-                            body,
-                        );
-                    }
-                }
+                watcher_response_frontier_committed =
+                    terminal_long_chunks::commit_legacy_watcher_delivery(
+                        &shared,
+                        &watcher_provider,
+                        channel_id,
+                        &tmux_session_name,
+                        watcher_long_chunk_identity,
+                        (watcher_lease_start, watcher_lease_end),
+                        watcher_terminal_delivery_proof.as_ref(),
+                    );
             }
             // Release (Unleased for the next turn). Inline same-holder compare-and-
             // release; idempotent no-op if the identity no longer matches (e.g. a dead

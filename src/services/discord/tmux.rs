@@ -1386,22 +1386,60 @@ pub(in crate::services::discord) fn advance_watcher_confirmed_end(
     committed_end_offset: u64,
     context: &'static str,
 ) {
+    let generation_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
+    let _ = advance_watcher_confirmed_end_inner(
+        shared,
+        provider,
+        channel_id,
+        tmux_session_name,
+        committed_end_offset,
+        (generation_mtime_ns != 0).then_some(generation_mtime_ns),
+        context,
+    );
+}
+
+/// Advance a delivery range only for the immutable source generation captured
+/// with its bytes. Callers hold the relay-frontier mutation guard, so reset
+/// incarnation is stable while this validates and advances.
+pub(in crate::services::discord) fn advance_watcher_confirmed_end_for_generation(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    committed_end_offset: u64,
+    source_generation_mtime_ns: i64,
+    context: &'static str,
+) -> bool {
+    if source_generation_mtime_ns == 0
+        || read_generation_file_mtime_ns(tmux_session_name) != source_generation_mtime_ns
+    {
+        return false;
+    }
+    advance_watcher_confirmed_end_inner(
+        shared,
+        provider,
+        channel_id,
+        tmux_session_name,
+        committed_end_offset,
+        Some(source_generation_mtime_ns),
+        context,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_watcher_confirmed_end_inner(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    committed_end_offset: u64,
+    mtime_at_attempt: Option<i64>,
+    context: &'static str,
+) -> bool {
     let relay_coord = shared.tmux_relay_coord(channel_id);
     let mut cur = relay_coord
         .confirmed_end_offset
         .load(std::sync::atomic::Ordering::Acquire);
-    // #1270 codex P2 (round 4): capture the `.generation` mtime BEFORE
-    // the CAS so the stored mtime reflects what was on disk when we
-    // decided to label `committed_end_offset` as delivered. Reading after
-    // the CAS opens a TOCTOU window where a fresh respawn writes a new
-    // `.generation` between our advance and our marker store, then the
-    // new mtime ends up paired with the OLD offset and the next
-    // regression check mis-classifies the next fresh respawn as
-    // same-wrapper rotation.
-    let mtime_at_attempt = {
-        let m = read_generation_file_mtime_ns(tmux_session_name);
-        if m == 0 { None } else { Some(m) }
-    };
     let mut won_advance = false;
     while cur < committed_end_offset {
         match relay_coord.confirmed_end_offset.compare_exchange(
@@ -1450,6 +1488,7 @@ pub(in crate::services::discord) fn advance_watcher_confirmed_end(
         confirmed_reached_current,
         "watcher confirmed_end_offset must reach committed output end"
     );
+    confirmed_reached_current
 }
 
 async fn drain_watcher_output_tail_to_eof(
@@ -2671,7 +2710,7 @@ async fn release_restored_watcher_active_turn_before_panel_edit(
 /// When Claude produces output from terminal input (not Discord), relay it to Discord.
 #[path = "tmux_watcher.rs"]
 #[allow(clippy::too_many_arguments)]
-mod tmux_watcher;
+pub(in crate::services::discord) mod tmux_watcher;
 #[cfg(test)]
 pub(in crate::services::discord) use self::tmux_watcher::pinned_delivery_lease_key_for_test;
 pub(super) use self::tmux_watcher::{

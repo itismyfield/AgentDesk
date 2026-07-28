@@ -17,6 +17,7 @@ pub(in crate::services::discord) struct SessionRelayParser {
     assistant_text_seen: bool,
     frames_observed: u64,
     last_sequence: u64,
+    source_generation_mtime_ns: Option<i64>,
 }
 
 impl Default for SessionRelayParser {
@@ -31,6 +32,7 @@ impl Default for SessionRelayParser {
             assistant_text_seen: false,
             frames_observed: 0,
             last_sequence: 0,
+            source_generation_mtime_ns: None,
         }
     }
 }
@@ -42,6 +44,16 @@ impl SessionRelayParser {
     ) -> Vec<SessionRelayDelivery> {
         self.frames_observed = self.frames_observed.saturating_add(1);
         self.last_sequence = frame.sequence;
+        if let Some(generation) = frame.relay_generation_mtime_ns {
+            if self
+                .source_generation_mtime_ns
+                .is_some_and(|current| current != generation)
+            {
+                self.buffer.clear();
+                self.reset_turn();
+            }
+            self.source_generation_mtime_ns = Some(generation);
+        }
         self.buffer.push_str(&frame.payload);
 
         let channel_id = match frame.binding.channel_id.parse::<u64>() {
@@ -100,6 +112,7 @@ impl SessionRelayParser {
                 // the next turn while the previous POST is still in flight; retaining the
                 // completed response until POST completion would seed the next response with
                 // the previous turn's prose.
+                let source_generation_mtime_ns = self.source_generation_mtime_ns;
                 self.reset_turn();
                 deliveries.push(SessionRelayDelivery {
                     provider: frame.binding.provider.clone(),
@@ -113,7 +126,7 @@ impl SessionRelayParser {
                     frame_turn_started_at: frame.turn_started_at.clone(),
                     frame_turn_start_offset: frame.turn_start_offset,
                     relay_range: frame.relay_range,
-                    relay_generation_mtime_ns: frame.relay_generation_mtime_ns,
+                    relay_generation_mtime_ns: source_generation_mtime_ns,
                 });
                 break;
             } else {

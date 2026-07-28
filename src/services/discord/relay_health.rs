@@ -7,7 +7,9 @@
 use serde::Serialize;
 
 mod frontier;
-pub(in crate::services::discord) use frontier::{FrontierResetState, RelayFrontierToken};
+pub(in crate::services::discord) use frontier::{
+    FrontierResetState, RelayFrontierMutationGuard, RelayFrontierToken,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

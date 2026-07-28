@@ -38,6 +38,7 @@ pub(super) struct TurnStreamCollectorIo {
     pub(super) data: Vec<u8>,
     pub(super) data_start_offset: u64,
     pub(super) epoch_snapshot: u64,
+    pub(super) source_authority: WatcherSourceAuthority,
 }
 
 pub(super) struct TurnParseState<'a> {
@@ -98,6 +99,7 @@ pub(super) struct ActiveReadState {
 
 pub(super) struct CollectedTurnStream {
     pub(super) turn_data_start_offset: u64,
+    pub(super) source_authority: WatcherSourceAuthority,
     pub(super) split_trailing_turn_follows: bool,
     pub(super) state: StreamLineState,
     pub(super) restored_response_seed: String,
@@ -168,6 +170,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
     let data = io.data;
     let data_start_offset = io.data_start_offset;
     let epoch_snapshot = io.epoch_snapshot;
+    let source_authority = io.source_authority;
     let utf8_decoder = &mut *parser.utf8_decoder;
     let watcher_turn_identity = (*parser.watcher_turn_identity).clone();
     let producer_registry = (*relay.producer_registry).clone();
@@ -465,6 +468,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
             &producer_registry,
             &mut cached_relay_producer,
             fence,
+            source_authority.generation_mtime_ns,
         ),
         None => forward_chunk_to_supervisor_relay_for_turn(
             &tmux_session_name,
@@ -472,6 +476,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
             &producer_registry,
             &mut cached_relay_producer,
             turn_identity_for_panel.as_ref(),
+            source_authority.generation_mtime_ns,
         ),
     };
     let supervisor_turn_state = apply_initial_supervisor_relay_forward(
@@ -736,6 +741,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
                             &producer_registry,
                             &mut cached_relay_producer,
                             fence,
+                            source_authority.generation_mtime_ns,
                         ),
                         None => forward_chunk_to_supervisor_relay_for_turn(
                             &tmux_session_name,
@@ -743,6 +749,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
                             &producer_registry,
                             &mut cached_relay_producer,
                             turn_identity_for_panel.as_ref(),
+                            source_authority.generation_mtime_ns,
                         ),
                     };
                     apply_streaming_supervisor_relay_forward(
@@ -1098,6 +1105,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
     commit_collect_state!();
     return CollectOutcome::Fallthrough(CollectedTurnStream {
         turn_data_start_offset,
+        source_authority,
         split_trailing_turn_follows,
         state,
         restored_response_seed,

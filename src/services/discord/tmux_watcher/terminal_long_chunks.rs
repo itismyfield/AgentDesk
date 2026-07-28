@@ -16,24 +16,140 @@ use super::controller_heartbeat::WatcherPostHeartbeat;
 /// Exact receipts still require a matching fresh inflight row; the pinned user
 /// message id is used only for post-persist completed-turn settlement.
 #[derive(Clone, Copy)]
-pub(super) struct WatcherDeliveryIdentity {
-    pub(super) generation_mtime_ns: i64,
-    pub(super) lease_reset_incarnation: u64,
-    pub(super) ledger_user_msg_id: Option<u64>,
+pub(in crate::services::discord) struct WatcherDeliveryIdentity {
+    pub(in crate::services::discord) generation_mtime_ns: i64,
+    pub(in crate::services::discord) lease_reset_incarnation: u64,
+    pub(in crate::services::discord) ledger_user_msg_id: Option<u64>,
 }
 
-pub(super) fn watcher_delivery_identity(
-    shared: &SharedData,
-    channel_id: ChannelId,
-    tmux_session_name: &str,
+pub(in crate::services::discord) fn watcher_delivery_identity(
+    source_generation_mtime_ns: i64,
+    source_reset_incarnation: u64,
     lease_key: Option<&crate::services::discord::DeliveryLeaseKey>,
 ) -> WatcherDeliveryIdentity {
     WatcherDeliveryIdentity {
-        generation_mtime_ns: dr::current_generation_mtime_ns(tmux_session_name),
-        lease_reset_incarnation: shared.relay_frontier_token(channel_id).reset_incarnation,
+        generation_mtime_ns: source_generation_mtime_ns,
+        lease_reset_incarnation: source_reset_incarnation,
         ledger_user_msg_id: lease_key
             .map(|key| key.user_msg_id)
             .filter(|user_msg_id| *user_msg_id != 0),
+    }
+}
+
+pub(in crate::services::discord) struct WatcherDeliveryMutation {
+    _guard: crate::services::discord::RelayFrontierMutationGuard,
+    identity: WatcherDeliveryIdentity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) enum GuardedWatcherDeliveryResult {
+    Persisted,
+    AdvancedWithoutProof,
+    LandedStale,
+    LandedUnrecorded,
+}
+
+pub(in crate::services::discord) struct WatcherTerminalDeliveryProof {
+    pub(in crate::services::discord) anchor_msg_id: Option<MessageId>,
+    pub(in crate::services::discord) raw_body: String,
+}
+
+pub(in crate::services::discord) fn begin_watcher_delivery_mutation(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    identity: WatcherDeliveryIdentity,
+) -> Option<WatcherDeliveryMutation> {
+    let frontier_token = shared.relay_frontier_token(channel_id);
+    if frontier_token.reset_incarnation != identity.lease_reset_incarnation
+        || dr::current_generation_mtime_ns(tmux_session_name) != identity.generation_mtime_ns
+    {
+        return None;
+    }
+    let guard = shared.acquire_relay_frontier_mutation(channel_id, frontier_token)?;
+    (dr::current_generation_mtime_ns(tmux_session_name) == identity.generation_mtime_ns).then_some(
+        WatcherDeliveryMutation {
+            _guard: guard,
+            identity,
+        },
+    )
+}
+
+impl WatcherDeliveryMutation {
+    pub(in crate::services::discord) fn advance(
+        &self,
+        shared: &Arc<SharedData>,
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+        tmux_session_name: &str,
+        end: u64,
+        context: &'static str,
+    ) -> bool {
+        crate::services::discord::tmux::advance_watcher_confirmed_end_for_generation(
+            shared,
+            provider,
+            channel_id,
+            tmux_session_name,
+            end,
+            self.identity.generation_mtime_ns,
+            context,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::services::discord) fn persist(
+        self,
+        shared: &Arc<SharedData>,
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+        tmux_session_name: &str,
+        range: (u64, u64),
+        terminal_anchor_msg_id: Option<u64>,
+        delivered_body: &str,
+    ) -> bool {
+        let frontier_token = shared.relay_frontier_token(channel_id);
+        dr::record_watcher_terminal_delivery(
+            shared,
+            provider,
+            channel_id,
+            tmux_session_name,
+            dr::WatcherDeliveryRecordAuthority {
+                frontier_token,
+                lease_reset_incarnation: self.identity.lease_reset_incarnation,
+                generation_mtime_ns: self.identity.generation_mtime_ns,
+                ledger_user_msg_id: self.identity.ledger_user_msg_id,
+            },
+            range,
+            terminal_anchor_msg_id,
+            delivered_body,
+        )
+    }
+}
+
+pub(in crate::services::discord) fn advance_watcher_terminal_delivery(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    identity: WatcherDeliveryIdentity,
+    end: u64,
+) -> GuardedWatcherDeliveryResult {
+    let Some(mutation) =
+        begin_watcher_delivery_mutation(shared, channel_id, tmux_session_name, identity)
+    else {
+        return GuardedWatcherDeliveryResult::LandedStale;
+    };
+    if mutation.advance(
+        shared,
+        provider,
+        channel_id,
+        tmux_session_name,
+        end,
+        "src/services/discord/tmux_watcher/terminal_long_chunks.rs:guarded_watcher_advance_without_proof",
+    ) {
+        GuardedWatcherDeliveryResult::AdvancedWithoutProof
+    } else {
+        GuardedWatcherDeliveryResult::LandedStale
     }
 }
 
@@ -49,43 +165,88 @@ pub(in crate::services::discord) fn record_watcher_terminal_delivery(
     range: (u64, u64),
     last_chunk_anchor_msg_id: Option<u64>,
     delivered_body: &str,
-) {
-    let frontier_token = shared.relay_frontier_token(channel_id);
-    if frontier_token.reset_incarnation != identity.lease_reset_incarnation {
+) -> GuardedWatcherDeliveryResult {
+    let Some(mutation) =
+        begin_watcher_delivery_mutation(shared, channel_id, tmux_session_name, identity)
+    else {
         tracing::warn!(
             provider = provider.as_str(),
             channel_id = channel_id.get(),
             range = ?range,
             "watcher frontier reset after delivery lease capture"
         );
-        return;
-    }
-    let Some(_frontier_mutation) =
-        shared.acquire_relay_frontier_mutation(channel_id, frontier_token)
-    else {
+        return GuardedWatcherDeliveryResult::LandedStale;
+    };
+    if !mutation.advance(
+        shared,
+        provider,
+        channel_id,
+        tmux_session_name,
+        range.1,
+        "src/services/discord/tmux_watcher/terminal_long_chunks.rs:guarded_watcher_advance",
+    ) {
         tracing::warn!(
             provider = provider.as_str(),
             channel_id = channel_id.get(),
             range = ?range,
             "watcher frontier changed before durable record"
         );
-        return;
-    };
-    dr::record_watcher_terminal_delivery(
+        return GuardedWatcherDeliveryResult::LandedStale;
+    }
+    if mutation.persist(
         shared,
         provider,
         channel_id,
         tmux_session_name,
-        dr::WatcherDeliveryRecordAuthority {
-            frontier_token,
-            lease_reset_incarnation: identity.lease_reset_incarnation,
-            generation_mtime_ns: identity.generation_mtime_ns,
-            ledger_user_msg_id: identity.ledger_user_msg_id,
-        },
         range,
         last_chunk_anchor_msg_id,
         delivered_body,
+    ) {
+        GuardedWatcherDeliveryResult::Persisted
+    } else {
+        GuardedWatcherDeliveryResult::LandedUnrecorded
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::services::discord) fn commit_legacy_watcher_delivery(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    identity: WatcherDeliveryIdentity,
+    range: (u64, u64),
+    proof: Option<&WatcherTerminalDeliveryProof>,
+) -> bool {
+    let result = proof.map_or_else(
+        || {
+            advance_watcher_terminal_delivery(
+                shared,
+                provider,
+                channel_id,
+                tmux_session_name,
+                identity,
+                range.1,
+            )
+        },
+        |proof| {
+            record_watcher_terminal_delivery(
+                shared,
+                provider,
+                channel_id,
+                tmux_session_name,
+                identity,
+                range,
+                proof.anchor_msg_id.map(|anchor| anchor.get()),
+                &proof.raw_body,
+            )
+        },
     );
+    matches!(
+        result,
+        GuardedWatcherDeliveryResult::Persisted
+            | GuardedWatcherDeliveryResult::AdvancedWithoutProof
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -104,24 +265,45 @@ pub(in crate::services::discord) async fn deliver_long_chunks_via_controller<
     turn: TurnKey,
     lease_key: Option<crate::services::discord::DeliveryLeaseKey>,
     instance_id: u64,
+    source_authority: WatcherSourceAuthority,
     start: u64,
     end: u64,
-) -> toc::DeliveryOutcome {
-    let delivery_identity =
-        watcher_delivery_identity(shared, channel_id, tmux_session_name, lease_key.as_ref());
+) -> WatcherLongChunksResult {
+    let delivery_identity = watcher_delivery_identity(
+        source_authority.generation_mtime_ns,
+        source_authority.reset_incarnation,
+        lease_key.as_ref(),
+    );
+    let delivery_mutation = std::sync::Mutex::new(None);
+    let landed_stale = std::sync::atomic::AtomicBool::new(false);
     let holder = LeaseHolder::Watcher { instance_id };
     cell.reclaim_if_expired(lease_now_ms());
     let heartbeat = WatcherPostHeartbeat { cell: cell.clone() };
     let advance = |range: (u64, u64)| -> bool {
         debug_assert_eq!(range, (start, end));
-        crate::services::discord::tmux::advance_watcher_confirmed_end(
+        let Some(mutation) = begin_watcher_delivery_mutation(
+            shared,
+            channel_id,
+            tmux_session_name,
+            delivery_identity,
+        ) else {
+            landed_stale.store(true, Ordering::Release);
+            return true;
+        };
+        if !mutation.advance(
             shared,
             provider,
             channel_id,
             tmux_session_name,
             end,
             "src/services/discord/tmux_watcher/terminal_long_chunks.rs:watcher_long_chunks_controller_advance",
-        );
+        ) {
+            landed_stale.store(true, Ordering::Release);
+            return true;
+        }
+        *delivery_mutation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(mutation);
         true
     };
     let outcome = toc::deliver_turn_output(
@@ -161,18 +343,35 @@ pub(in crate::services::discord) async fn deliver_long_chunks_via_controller<
         ..
     } = &outcome
     {
-        record_watcher_terminal_delivery(
-            shared,
-            provider,
-            channel_id,
-            tmux_session_name,
-            delivery_identity,
-            (start, end),
-            chunks.tail_message_id.map(|m| m.get()),
-            delivered_body,
-        );
+        if landed_stale.load(Ordering::Acquire) {
+            return WatcherLongChunksResult::LandedStale;
+        }
+        let mutation = delivery_mutation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        let persisted = mutation.is_some_and(|mutation| {
+            mutation.persist(
+                shared,
+                provider,
+                channel_id,
+                tmux_session_name,
+                (start, end),
+                chunks.tail_message_id.map(|m| m.get()),
+                delivered_body,
+            )
+        });
+        if !persisted {
+            return WatcherLongChunksResult::LandedUnrecorded;
+        }
     }
-    outcome
+    WatcherLongChunksResult::Outcome(outcome)
+}
+
+pub(in crate::services::discord) enum WatcherLongChunksResult {
+    Outcome(toc::DeliveryOutcome),
+    LandedStale,
+    LandedUnrecorded,
 }
 
 pub(super) fn remember_ordered_long_chunks_footer_target(
@@ -222,6 +421,7 @@ pub(in crate::services::discord) async fn apply_watcher_long_chunks_controller(
     turn: TurnKey,
     lease_key: Option<crate::services::discord::DeliveryLeaseKey>,
     instance_id: u64,
+    source_authority: WatcherSourceAuthority,
     range: (u64, u64),
     session_bound_fallback_uses_full_body: bool,
     frozen_rollover_msg_ids: &mut Vec<MessageId>,
@@ -247,25 +447,28 @@ pub(in crate::services::discord) async fn apply_watcher_long_chunks_controller(
         turn,
         lease_key,
         instance_id,
+        source_authority,
         range.0,
         range.1,
     )
     .await;
-    apply_watcher_long_chunks_result(
-        outcome,
-        http,
-        shared,
-        provider,
-        channel_id,
-        tmux_session_name,
-        msg_id,
-        relay_text,
-        session_bound_fallback_uses_full_body,
-        frozen_rollover_msg_ids,
-        inflight_before_relay,
-        locals,
-    )
-    .await;
+    if let WatcherLongChunksResult::Outcome(outcome) = outcome {
+        apply_watcher_long_chunks_result(
+            outcome,
+            http,
+            shared,
+            provider,
+            channel_id,
+            tmux_session_name,
+            msg_id,
+            relay_text,
+            session_bound_fallback_uses_full_body,
+            frozen_rollover_msg_ids,
+            inflight_before_relay,
+            locals,
+        )
+        .await;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
