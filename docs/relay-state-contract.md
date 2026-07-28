@@ -466,6 +466,22 @@ plan.
   controller mutation-sensitive post-count tests, delivery-record generation/EOF
   tests, and controller/legacy owner wiring tests).
 
+## I12. Bounded no-progress redrive (#4906)
+
+- Definition: a redrive cannot move below the committed frontier or enqueue the
+  same still-pending frontier twice.
+- Producer: the relay auto-healer computes the requested frontier as the maximum
+  of the watcher snapshot and committed frontier, then rejects already-covered
+  or identical pending requests before mutating watcher state.
+- Consumer: six no-progress actions enter a one-hour degraded backoff and then
+  re-arm the same stalled episode; reaching the cap never abandons recovery
+  permanently.
+- Violation surface: a frozen frontier is enqueued on every health pass, or a
+  capped stalled episode is never reconsidered after its bounded backoff.
+- Tracing events: `redrive_frontier_no_progress` and
+  `redrive_no_progress_capped`. This recovery path currently emits tracing logs
+  rather than `record_invariant_check` observability rows.
+
 ## How to add a new invariant
 
 1. Document it here with the same structure (definition, producer,
