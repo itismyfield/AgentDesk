@@ -1,4 +1,3 @@
-
 use super::*;
 
 struct EnvReset(Option<std::ffi::OsString>);

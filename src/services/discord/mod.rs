@@ -88,6 +88,7 @@ pub(crate) mod session_canonical_identity;
 pub(crate) mod session_identity;
 mod session_runtime;
 mod session_status_hook;
+mod session_transition;
 pub(crate) mod settings;
 pub(crate) mod shared_memory;
 // #3038 S1/S2: extracted SharedData field clusters (named sub-structs + their
@@ -2378,11 +2379,7 @@ pub(crate) struct SharedData {
     readopted_mailbox_ledger: readopted_mailbox_ledger::ReadoptedMailboxLedger, // #4370
 }
 
-pub(crate) const SESSION_TRANSITION_LOCK_WAIT_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(3);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SessionTransitionBusy;
+pub(crate) use session_transition::{SESSION_TRANSITION_LOCK_WAIT_TIMEOUT, SessionTransitionBusy};
 
 impl SharedData {
     pub(super) fn has_runtime_storage(&self) -> bool {
@@ -2391,51 +2388,6 @@ impl SharedData {
 
     fn mailbox(&self, channel_id: ChannelId) -> ChannelMailboxHandle {
         self.mailboxes.handle(channel_id)
-    }
-
-    pub(crate) fn session_transition_lock(
-        &self,
-        channel_id: ChannelId,
-    ) -> Arc<tokio::sync::Mutex<()>> {
-        if let Some(lock) = self
-            .session_transition_locks
-            .get(&channel_id)
-            .and_then(|lock| lock.upgrade())
-        {
-            return lock;
-        }
-        let lock = Arc::new(tokio::sync::Mutex::new(()));
-        match self.session_transition_locks.entry(channel_id) {
-            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
-                if let Some(existing) = entry.get().upgrade() {
-                    existing
-                } else {
-                    entry.insert(Arc::downgrade(&lock));
-                    lock
-                }
-            }
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                entry.insert(Arc::downgrade(&lock));
-                // Prune only on registry growth. The common existing-channel path
-                // above remains O(1), while dead Weak entries are still bounded by
-                // subsequent vacant insertions.
-                self.session_transition_locks
-                    .retain(|_, candidate| candidate.strong_count() > 0);
-                lock
-            }
-        }
-    }
-
-    pub(crate) async fn acquire_session_transition(
-        &self,
-        channel_id: ChannelId,
-    ) -> Result<tokio::sync::OwnedMutexGuard<()>, SessionTransitionBusy> {
-        tokio::time::timeout(
-            SESSION_TRANSITION_LOCK_WAIT_TIMEOUT,
-            self.session_transition_lock(channel_id).lock_owned(),
-        )
-        .await
-        .map_err(|_| SessionTransitionBusy)
     }
 
     /// #3293: non-creating mailbox lookup for probes — `mailbox()` mints a
@@ -2611,61 +2563,6 @@ impl SharedData {
     // queued_placeholder_still_owned, add/remove_pending_queue_exit_placeholder_clear*,
     // pending_queue_exit_placeholder_clears) moved verbatim to the
     // `shared_state` sibling module alongside `QueuedPlaceholderState`.
-}
-
-#[cfg(test)]
-mod session_transition_lock_tests {
-    use super::*;
-
-    #[tokio::test(start_paused = true)]
-    async fn transition_acquisition_times_out_after_contract_window() {
-        let shared = make_shared_data_for_tests();
-        let channel_id = ChannelId::new(4_794_899);
-        let held = shared
-            .session_transition_lock(channel_id)
-            .lock_owned()
-            .await;
-        let waiting_shared = Arc::clone(&shared);
-        let waiter =
-            tokio::spawn(
-                async move { waiting_shared.acquire_session_transition(channel_id).await },
-            );
-
-        tokio::task::yield_now().await;
-        assert!(!waiter.is_finished());
-        tokio::time::advance(SESSION_TRANSITION_LOCK_WAIT_TIMEOUT).await;
-        tokio::task::yield_now().await;
-        assert!(
-            waiter.is_finished(),
-            "transition wait must end at the configured three-second boundary"
-        );
-        assert!(matches!(waiter.await.unwrap(), Err(SessionTransitionBusy)));
-        drop(held);
-    }
-
-    #[test]
-    fn inactive_channel_locks_are_pruned_only_on_vacant_insertion() {
-        let shared = make_shared_data_for_tests();
-        let old_channel = ChannelId::new(4_794_900);
-        let live_channel = ChannelId::new(4_794_901);
-        let new_channel = ChannelId::new(4_794_902);
-
-        let old = shared.session_transition_lock(old_channel);
-        let live = shared.session_transition_lock(live_channel);
-        drop(old);
-
-        let same_live = shared.session_transition_lock(live_channel);
-        assert!(Arc::ptr_eq(&live, &same_live));
-        assert!(
-            shared.session_transition_locks.contains_key(&old_channel),
-            "the O(1) existing-channel path must not scan and prune the registry"
-        );
-
-        let _new = shared.session_transition_lock(new_channel);
-        assert!(!shared.session_transition_locks.contains_key(&old_channel));
-        assert!(shared.session_transition_locks.contains_key(&live_channel));
-        assert!(shared.session_transition_locks.contains_key(&new_channel));
-    }
 }
 
 #[cfg(test)]
