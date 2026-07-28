@@ -236,22 +236,22 @@ mod redrive_reclaim_e2e_tests {
             let mut creates = 0;
             let mut deletes = 0;
             let mut nudges = 0;
-            for pass in 0..20 {
+            for elapsed in [0, 30, 90, 210, 450] {
                 let nudged = registry
                     .redrive_undelivered_backlog_at(
                         &provider,
                         shared.clone(),
                         channel_id,
-                        base + i64::from(pass) * 30,
+                        base + elapsed,
                     )
                     .await
                     .expect("redrive pass");
-                if nudged {
-                    nudges += 1;
-                    if placeholder_msg_id.is_none() {
-                        placeholder_msg_id = Some(message_id_at(base + 300, 2));
-                        creates += 1;
-                    }
+                assert!(nudged, "scheduled redrive must fire at +{elapsed}s");
+                nudges += 1;
+                *resume_offset.lock().expect("resume offset") = None;
+                if placeholder_msg_id.is_none() {
+                    placeholder_msg_id = Some(message_id_at(base + 300, 2));
+                    creates += 1;
                 }
                 if placeholder_msg_id.is_some() {
                     let reclaimed = reclaim_orphan_external_input_placeholder(
@@ -292,6 +292,7 @@ mod redrive_reclaim_e2e_tests {
                     .expect("sixth redrive pass")
             );
             nudges += 1;
+            *resume_offset.lock().expect("resume offset") = None;
             assert!(
                 !registry
                     .redrive_undelivered_backlog_at(
