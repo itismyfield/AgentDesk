@@ -544,10 +544,17 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("load non-live terminal state");
+            let expected_run_status = if matches!(run_status, "generated" | "unknown-status") {
+                // Non-terminal but non-live runs can be finalized once their last
+                // entry becomes terminal. Already-terminal runs remain unchanged.
+                "completed"
+            } else {
+                run_status
+            };
             assert_eq!(
                 state,
-                ("failed".to_string(), 1, run_status.to_string(), 1),
-                "run status {run_status} must preserve the run and terminalize its entry"
+                ("failed".to_string(), 1, expected_run_status.to_string(), 1),
+                "run status {run_status} must not block entry terminalization"
             );
 
             pool.close().await;
