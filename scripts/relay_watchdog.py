@@ -2129,7 +2129,6 @@ def evaluate(
     grace_secs: int,
     gap_alert_secs: int,
     prior_delivered_ts: float = 0.0,
-    last_actual_delivery_ts: float | None = None,
 ) -> Verdict:
     """Core relay-gap judgment descended from the 07-09 logic and subsequently
     extended through the #4140→#4178→#4181 lineage. The health watermark is the
@@ -2153,15 +2152,7 @@ def evaluate(
     delivered_ts = max(prior, current_delivered_ts)
     stale = [(e, t) for e, t in blocks if now - e > grace_secs]
     lost = [(e, t) for e, t in stale if e > delivered_ts and not delivered(t, hay)]
-    if last_actual_delivery_ts is None:
-        actual_delivery_ts = delivered_ts
-    else:
-        actual_delivery_ts = (
-            float(last_actual_delivery_ts)
-            if _is_finite_nonnegative_number(last_actual_delivery_ts)
-            else 0.0
-        )
-    gap_secs = (now - actual_delivery_ts) if actual_delivery_ts else float("inf")
+    gap_secs = (now - delivered_ts) if delivered_ts else float("inf")
     if lost and gap_secs > gap_alert_secs:
         state = STATE_GAP
     elif lost:
@@ -2259,13 +2250,6 @@ def delivered_watermark_for_path(
 ) -> float:
     entry = delivered_watermarks(channel_state).get(str(transcript))
     return entry[0] if entry is not None else 0.0
-
-
-def last_delivery_observed_at_for_path(
-    channel_state: Mapping[str, Any], transcript: str | Path
-) -> float:
-    entry = delivered_watermarks(channel_state).get(str(transcript))
-    return entry[1] if entry is not None else 0.0
 
 
 def advance_delivered_watermark(
@@ -3941,9 +3925,6 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             continue
         pending_failures.pop(path, None)
         prior_delivered_ts = delivered_watermark_for_path(chs, candidate.path)
-        prior_delivery_observed_at = last_delivery_observed_at_for_path(
-            chs, candidate.path
-        )
         # Advance the health watermark from the unfiltered source before removing
         # permanent-loss tombstones. Elapsed time must describe real transport
         # progress, never the age of an unmatched block.
@@ -3976,9 +3957,6 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             cfg.grace_secs,
             cfg.gap_alert_secs,
             prior_delivered_ts,
-            now
-            if observed_verdict.delivered_ts > prior_delivered_ts
-            else prior_delivery_observed_at,
         )
         fresh_undelivered = sum(
             1

@@ -6136,7 +6136,7 @@ class TickChannelTests(unittest.TestCase):
         missing = (self.now - 1200, "new skipped response")
         later_missing = (self.now - 800, "still retryable response")
         self.write_transcript([prior_delivery, missing, later_missing])
-        rt = self.make_rt(gap_alert_secs=900)
+        rt = self.make_rt(gap_alert_secs=3000)
         rt.haystack = norm(prior_delivery[1])
         state: dict = {}
 
@@ -6161,8 +6161,8 @@ class TickChannelTests(unittest.TestCase):
         )
 
         self.assertEqual(len(rt.alerts), 1)
-        self.assertIn("마지막 정상 도달 이후 **16분**", rt.alerts[0][0])
-        self.assertNotIn("40분", rt.alerts[0][0])
+        self.assertIn("마지막 정상 도달 이후 **51분**", rt.alerts[0][0])
+        self.assertNotIn("92분", rt.alerts[0][0])
 
     def test_new_permanent_loss_after_prior_tombstone_alerts_again(self):
         first_missing = (self.now - 4000, "first skipped response")
