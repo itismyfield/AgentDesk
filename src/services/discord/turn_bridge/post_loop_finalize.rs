@@ -370,7 +370,7 @@ pub(super) async fn run_post_loop_finalize(
         dispatch_id.as_deref(),
         adk_session_key.as_deref(),
         turn_id.as_str(),
-        current_msg_id.get(),
+        durable_current_msg_id_from_detached(current_msg_id),
         response_pending_trimmed_empty,
         watcher_owns_assistant_relay,
         watcher_relay_available_for_turn,

@@ -337,7 +337,8 @@ pub(super) async fn handle_stream_tool_message(
                         request_owner_name
                     ),
                 );
-                report.current_msg_id = Some(current_msg_id.get());
+                report.current_msg_id =
+                    optional_durable_current_msg_id_from_detached(current_msg_id);
                 report.channel_name = adk_session_name.clone();
                 if save_restart_report(&report).is_ok() {
                     restart_followup_pending = true;
@@ -345,12 +346,11 @@ pub(super) async fn handle_stream_tool_message(
                         crate::services::discord::InflightRestartMode::DrainRestart,
                     );
                     let handoff_text = "♻️ dcserver 재시작 중...\n\n재시작 후 현재 turn은 자동 새 턴으로 이어가지 않고, 상태만 다시 확인합니다.";
-                    let _ = gateway
-                        .edit_message(channel_id, current_msg_id, handoff_text)
-                        .await;
-                    last_edit_text = handoff_text.to_string();
-                    inflight_state.current_msg_id = current_msg_id.get();
-                    inflight_state.current_msg_len = handoff_text.len();
+                    if edit_bound_current_message(
+                        gateway.as_ref(), channel_id, current_msg_id, inflight_state, handoff_text,
+                    ).await {
+                        last_edit_text = handoff_text.to_string();
+                    }
                     state_dirty = true;
                 }
             }

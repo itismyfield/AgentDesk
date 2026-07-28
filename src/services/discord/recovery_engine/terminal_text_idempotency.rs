@@ -224,6 +224,7 @@ impl RecoveryDeliveryContext {
             self.expected_current_msg_id,
             anchor.get(),
             text.len(),
+            None,
         );
         if matches!(
             bind,

@@ -293,6 +293,34 @@ fn bridge_entry_patch_adopts_same_turn_external_relay_owner_advancement() {
 }
 
 #[test]
+fn bridge_entry_patch_adopts_same_turn_current_message_clear() {
+    let temp = tempfile::TempDir::new().expect("runtime root");
+    let mut before = bridge_entry_state(4_259_413, 77_010);
+    before.current_msg_id = 900_001;
+    save_inflight_state_in_root(temp.path(), &before).expect("seed anchored owner row");
+
+    let mut durable = before.clone();
+    durable.current_msg_id = 0;
+    save_inflight_state_in_root(temp.path(), &durable)
+        .expect("persist same-turn orphan placeholder clear");
+
+    let mut after = before.clone();
+    after.current_msg_id = 900_002;
+    after.long_running_placeholder_active = true;
+    assert_eq!(
+        patch_bridge_entry_state_if_identity_unchanged_in_root(
+            temp.path(),
+            &before,
+            &mut after,
+            BRIDGE_ENTRY_CALLER,
+        ),
+        GuardedSaveOutcome::Saved
+    );
+    assert_eq!(after.current_msg_id, 0);
+    assert_eq!(read_state(temp.path(), before.channel_id).current_msg_id, 0);
+}
+
+#[test]
 fn bridge_entry_patch_reports_malformed_json_as_io_error() {
     let temp = tempfile::TempDir::new().expect("runtime root");
     let before = bridge_entry_state(4_259_404, 77_010);

@@ -1,6 +1,7 @@
 //! Bridge-entry lock-held narrow inflight patch (#4259 R4).
 
 use super::*;
+use crate::services::discord::inflight::store::persist_under_lock_with_snapshot;
 
 fn field_is_contended<T: PartialEq>(before: &T, after: &T, durable: &T) -> bool {
     before != after && durable != before && durable != after
@@ -29,10 +30,39 @@ pub(in crate::services::discord) fn patch_bridge_entry_state_if_identity_unchang
     patch_bridge_entry_state_if_identity_unchanged_in_root(&root, before, after, caller)
 }
 
+pub(in crate::services::discord) fn patch_bridge_entry_state_tracking_placeholder_clear(
+    before: &InflightTurnState,
+    after: &mut InflightTurnState,
+    placeholder_clear_applied: &mut bool,
+    caller: &'static str,
+) -> GuardedSaveOutcome {
+    *placeholder_clear_applied = false;
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedSaveOutcome::IoError;
+    };
+    patch_bridge_entry_state_if_identity_unchanged_in_root_impl(
+        &root,
+        before,
+        after,
+        Some(placeholder_clear_applied),
+        caller,
+    )
+}
+
 pub(in crate::services::discord::inflight) fn patch_bridge_entry_state_if_identity_unchanged_in_root(
     root: &Path,
     before: &InflightTurnState,
     after: &mut InflightTurnState,
+    caller: &'static str,
+) -> GuardedSaveOutcome {
+    patch_bridge_entry_state_if_identity_unchanged_in_root_impl(root, before, after, None, caller)
+}
+
+fn patch_bridge_entry_state_if_identity_unchanged_in_root_impl(
+    root: &Path,
+    before: &InflightTurnState,
+    after: &mut InflightTurnState,
+    placeholder_clear_applied: Option<&mut bool>,
     caller: &'static str,
 ) -> GuardedSaveOutcome {
     let Some(provider) = before.provider_kind() else {
@@ -72,6 +102,9 @@ pub(in crate::services::discord::inflight) fn patch_bridge_entry_state_if_identi
         return GuardedSaveOutcome::IdentityMismatch;
     }
 
+    let bridge_placeholder_clear_applied = before.long_running_placeholder_active
+        && !after.long_running_placeholder_active
+        && on_disk.long_running_placeholder_active == before.long_running_placeholder_active;
     if !field_is_contended(
         &before.watcher_owner_channel_id,
         &after.watcher_owner_channel_id,
@@ -161,16 +194,20 @@ pub(in crate::services::discord::inflight) fn patch_bridge_entry_state_if_identi
         );
     }
 
-    match persist_under_lock(
+    match persist_under_lock_with_snapshot(
         root,
         &path,
         &on_disk,
         "src/services/discord/inflight/save_store/identity_gate/bridge_entry.rs:patch_bridge_entry_state_if_identity_unchanged_in_root",
     ) {
-        Ok(()) => {
-            after.clone_from(&on_disk);
+        Ok(Some(persisted)) => {
+            after.clone_from(&persisted);
+            if let Some(applied) = placeholder_clear_applied {
+                *applied = bridge_placeholder_clear_applied;
+            }
             GuardedSaveOutcome::Saved
         }
+        Ok(None) => GuardedSaveOutcome::IdentityMismatch,
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
@@ -181,5 +218,100 @@ pub(in crate::services::discord::inflight) fn patch_bridge_entry_state_if_identi
             );
             GuardedSaveOutcome::IoError
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn placeholder_state(channel_id: u64) -> InflightTurnState {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            channel_id,
+            Some("bridge-clear-effect".to_string()),
+            343_742_347_365_974_026,
+            77_010,
+            18,
+            "prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-bridge-clear-effect".to_string()),
+            Some("/tmp/bridge-clear-effect.jsonl".to_string()),
+            Some("/tmp/bridge-clear-effect.input".to_string()),
+            512,
+        );
+        state.long_running_placeholder_active = true;
+        state.current_msg_id = 901;
+        state.current_msg_len = 12;
+        state.full_response = "partial".to_string();
+        state
+    }
+
+    #[test]
+    fn placeholder_clear_effect_reports_only_the_bridge_winner() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let channel_id = 42_594_250;
+        let before = placeholder_state(channel_id);
+        let mut durable = before.clone();
+        durable.long_running_placeholder_active = false;
+        durable.current_msg_id = 902;
+        durable.current_msg_len = 24;
+        durable.full_response = "partial watcher completion".to_string();
+        durable.response_sent_offset = durable.full_response.len();
+        save_inflight_state_in_root(root.path(), &durable).expect("seed watcher winner");
+
+        let mut after = before.clone();
+        after.long_running_placeholder_active = false;
+        let mut clear_applied = true;
+        assert_eq!(
+            patch_bridge_entry_state_if_identity_unchanged_in_root_impl(
+                root.path(),
+                &before,
+                &mut after,
+                Some(&mut clear_applied),
+                "test::watcher_placeholder_clear_winner",
+            ),
+            GuardedSaveOutcome::Saved,
+        );
+        assert!(!clear_applied);
+        assert_eq!(after.current_msg_id, 902);
+        assert_eq!(after.full_response, "partial watcher completion");
+        let persisted = load_inflight_state_unlocked(&inflight_state_path(
+            root.path(),
+            &ProviderKind::Codex,
+            channel_id,
+        ))
+        .expect("load watcher-winner row");
+        assert_eq!(
+            serde_json::to_value(&after).unwrap(),
+            serde_json::to_value(&persisted).unwrap(),
+        );
+
+        let bridge_root = tempfile::tempdir().expect("bridge-winner runtime root");
+        save_inflight_state_in_root(bridge_root.path(), &before)
+            .expect("seed bridge-owned placeholder");
+        after = before.clone();
+        after.long_running_placeholder_active = false;
+        assert_eq!(
+            patch_bridge_entry_state_if_identity_unchanged_in_root_impl(
+                bridge_root.path(),
+                &before,
+                &mut after,
+                Some(&mut clear_applied),
+                "test::bridge_placeholder_clear_winner",
+            ),
+            GuardedSaveOutcome::Saved,
+        );
+        assert!(clear_applied);
+        let persisted = load_inflight_state_unlocked(&inflight_state_path(
+            bridge_root.path(),
+            &ProviderKind::Codex,
+            channel_id,
+        ))
+        .expect("load bridge-winner row");
+        assert_eq!(
+            serde_json::to_value(&after).unwrap(),
+            serde_json::to_value(&persisted).unwrap(),
+        );
     }
 }

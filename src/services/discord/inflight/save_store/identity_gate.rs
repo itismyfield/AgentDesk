@@ -11,15 +11,19 @@ mod heartbeat;
 mod runtime_stamp;
 #[path = "identity_gate/stream_loop_patch.rs"]
 mod stream_loop_patch;
-pub(in crate::services::discord) use bridge_entry::patch_bridge_entry_state_if_identity_unchanged;
 #[cfg(test)]
 pub(in crate::services::discord::inflight) use bridge_entry::patch_bridge_entry_state_if_identity_unchanged_in_root;
+pub(in crate::services::discord) use bridge_entry::{
+    patch_bridge_entry_state_if_identity_unchanged,
+    patch_bridge_entry_state_tracking_placeholder_clear,
+};
 pub(in crate::services::discord) use claude_e_stamp::stamp_claude_e_process_if_matches_identity;
 use guarded_read::read_inflight_state_for_guarded_write;
 pub(in crate::services::discord) use heartbeat::touch_inflight_state_if_matches_identity;
 pub(in crate::services::discord) use runtime_stamp::stamp_runtime_handoff_if_matches_identity;
 pub(in crate::services::discord) use stream_loop_patch::{
     clear_long_running_placeholder_if_matches_identity, patch_restart_mode_if_matches_identity,
+    save_stream_tick_state_preserving_current_message_races,
 };
 
 pub(in crate::services::discord) fn save_inflight_state_if_identity_unchanged(
@@ -379,6 +383,23 @@ pub(in crate::services::discord) fn recovery_anchor_msg_id_if_matches_identity(
     expected: &InflightTurnIdentity,
     expected_turn_start_offset: Option<u64>,
 ) -> Option<u64> {
+    recovery_anchor_message_if_matches_identity(
+        provider,
+        channel_id,
+        expected,
+        expected_turn_start_offset,
+        None,
+    )
+    .map(|(message_id, _)| message_id)
+}
+
+pub(in crate::services::discord) fn recovery_anchor_message_if_matches_identity(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    expected_turn_start_offset: Option<u64>,
+    refresh_on_match: Option<&mut InflightTurnState>,
+) -> Option<(u64, usize)> {
     let root = inflight_runtime_root()?;
     let path = inflight_state_path(&root, provider, channel_id);
     let _lock = lock_inflight_state_path(&path).ok()?;
@@ -387,7 +408,12 @@ pub(in crate::services::discord) fn recovery_anchor_msg_id_if_matches_identity(
     if !identity_matches_with_offset_guard(expected, expected_turn_start_offset, &state) {
         return None;
     }
-    (state.current_msg_id != 0).then_some(state.current_msg_id)
+    let current_message =
+        (state.current_msg_id != 0).then_some((state.current_msg_id, state.current_msg_len))?;
+    if let Some(refresh) = refresh_on_match {
+        refresh.clone_from(&state);
+    }
+    Some(current_message)
 }
 
 pub(in crate::services::discord) fn bind_recovery_anchor_if_matches_identity(
@@ -398,6 +424,7 @@ pub(in crate::services::discord) fn bind_recovery_anchor_if_matches_identity(
     expected_current_msg_id: u64,
     anchor_msg_id: u64,
     anchor_text_len: usize,
+    refresh_on_saved: Option<&mut InflightTurnState>,
 ) -> GuardedSaveOutcome {
     let Some(root) = inflight_runtime_root() else {
         return GuardedSaveOutcome::IoError;
@@ -439,7 +466,12 @@ pub(in crate::services::discord) fn bind_recovery_anchor_if_matches_identity(
         return GuardedSaveOutcome::IoError;
     };
     match atomic_write(&path, &json) {
-        Ok(()) => GuardedSaveOutcome::Saved,
+        Ok(()) => {
+            if let Some(refresh) = refresh_on_saved {
+                refresh.clone_from(&on_disk);
+            }
+            GuardedSaveOutcome::Saved
+        }
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),

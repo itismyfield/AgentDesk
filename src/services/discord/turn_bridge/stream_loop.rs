@@ -1,9 +1,4 @@
-//! #4230 S6 stream loop shell for `turn_bridge::spawn_turn_bridge`.
-//!
-//! Moved from the main stream receive/drain loop of `spawn_turn_bridge`:
-//! cancel finalization gates, ready-frame drain, remaining stream event arms,
-//! long-running placeholder open/retarget state, runtime handoff delegation,
-//! stream/status ticks, and bridge latency span emission.
+//! #4230 S6 stream receive/drain loop and its cancel, handoff, tick, and latency gates.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -13,6 +8,7 @@ use super::runtime_handoff_loop::{
     RuntimeHandoffLoopContext, RuntimeHandoffLoopMessage, RuntimeHandoffLoopOutcome,
     RuntimeHandoffLoopState, handle_runtime_handoff_loop_message,
 };
+use super::stream_tick::guarded_persist::settle_pending_current_message_candidate_on_loop_exit;
 use super::stream_tick::{
     BridgeStreamTickContext, BridgeStreamTickState, LongRunningPlaceholderActive,
     PendingLongRunningOpenAfterStateSave, PendingLongRunningRetargetAfterStateSave,
@@ -29,25 +25,15 @@ use tool_arms::{
 };
 
 mod content_arms;
+mod exit_reconcile;
+mod expected_identity;
 #[cfg(test)]
 #[path = "stream_loop/expected_identity_tests.rs"]
 mod expected_identity_tests;
 mod message_conversion;
 mod tool_arms;
-
-fn refresh_stream_tick_expected_identity_after_handoff(
-    expected: &mut crate::services::discord::inflight::InflightTurnIdentity,
-    inflight_state: &InflightTurnState,
-    guarded_save_outcome: Option<crate::services::discord::inflight::GuardedSaveOutcome>,
-) {
-    if matches!(
-        guarded_save_outcome,
-        Some(crate::services::discord::inflight::GuardedSaveOutcome::Saved)
-    ) {
-        *expected =
-            crate::services::discord::inflight::InflightTurnIdentity::from_state(inflight_state);
-    }
-}
+use exit_reconcile::reconcile_saved_exit_candidate;
+use expected_identity::refresh_stream_tick_expected_identity_after_handoff;
 
 pub(super) struct StreamLoopContext {
     pub(super) shared_owned: Arc<SharedData>,
@@ -115,6 +101,8 @@ pub(super) struct StreamLoopState<'a> {
     pub(super) terminal_control_ready_observed: &'a mut bool,
     pub(super) terminal_control_drain_until: &'a mut Option<std::time::Instant>,
     pub(super) current_msg_id: &'a mut MessageId,
+    pub(super) expected_current_message: &'a mut (u64, usize),
+    pub(super) bridge_created_response_placeholder_msg_id: &'a mut Option<MessageId>,
     pub(super) response_sent_offset: &'a mut usize,
     pub(super) bridge_confirmed_response_sent_offset: &'a mut usize,
     pub(super) streamed_assistant_text_this_turn: &'a mut bool,
@@ -151,7 +139,7 @@ pub(super) struct StreamLoopOutput {
 
 pub(super) async fn run_stream_loop(
     ctx: StreamLoopContext,
-    state: StreamLoopState<'_>,
+    mut state: StreamLoopState<'_>,
 ) -> StreamLoopOutput {
     let (shared_owned, gateway) = (ctx.shared_owned, ctx.gateway);
     let (channel_id, provider) = (ctx.channel_id, ctx.provider);
@@ -216,6 +204,11 @@ pub(super) async fn run_stream_loop(
     let mut terminal_control_ready_observed = *state.terminal_control_ready_observed;
     let mut terminal_control_drain_until = *state.terminal_control_drain_until;
     let mut current_msg_id = *state.current_msg_id;
+    let mut expected_current_message = *state.expected_current_message;
+    let mut pending_current_message_candidate =
+        unbound_current_message_candidate(current_msg_id, expected_current_message.0);
+    let mut bridge_created_response_placeholder_msg_id =
+        *state.bridge_created_response_placeholder_msg_id;
     let mut response_sent_offset = *state.response_sent_offset;
     let mut bridge_confirmed_response_sent_offset = *state.bridge_confirmed_response_sent_offset;
     let mut streamed_assistant_text_this_turn = *state.streamed_assistant_text_this_turn;
@@ -239,6 +232,18 @@ pub(super) async fn run_stream_loop(
     let mut status_panel_generation = *state.status_panel_generation;
     let mut stream_tick_expected_identity =
         crate::services::discord::inflight::InflightTurnIdentity::from_state(&inflight_state);
+    let mut persisted_inflight_baseline = inflight_state.clone();
+
+    macro_rules! refresh_expected_after_handoff {
+        ($outcome:expr) => {
+            refresh_stream_tick_expected_identity_after_handoff(
+                &mut stream_tick_expected_identity,
+                &mut persisted_inflight_baseline,
+                &inflight_state,
+                $outcome,
+            )
+        };
+    }
 
     // #2289: both cancel guards share this macro to keep inflight sync, cancellation, and child abort atomic without closure borrow conflicts.
     // Callers must then exit `'outer` (explicitly or by fallthrough) into cancel post-processing.
@@ -255,11 +260,7 @@ pub(super) async fn run_stream_loop(
                         previous_restart_generation,
                         "turn_bridge::stream_loop::cancel_restart_mode",
                     );
-                refresh_stream_tick_expected_identity_after_handoff(
-                    &mut stream_tick_expected_identity,
-                    &inflight_state,
-                    Some(outcome),
-                );
+                refresh_expected_after_handoff!(Some(outcome));
             }
             cancelled = true;
             close_all_tracked_background_children(
@@ -274,41 +275,23 @@ pub(super) async fn run_stream_loop(
 
     let mut pending_long_running_open_after_state_save = None;
     let mut pending_long_running_retarget_after_state_save = None;
+    let mut state_dirty = false;
 
     'outer: while !done
         || terminal_control_drain_until.is_some_and(|deadline| std::time::Instant::now() < deadline)
     {
-        let mut state_dirty = false;
-
-        // #2172 cancel boundary: once `done` is true the turn's
-        // terminal outcome (Completed / Done message) has already been
-        // observed; the loop continues only to drain residual control
-        // frames during `terminal_control_drain_until`. A cancel that
-        // arrives in that drain window MUST NOT reclassify the
-        // already-completed turn as cancelled (which would re-run
-        // stop_active_turn and dispatch-cancel finalisation). The
-        // documented "whichever comes first wins" priority is
-        // enforced by gating the cancel arm on `!done`. Cancels
-        // arriving during the drain window break out of the loop
-        // normally as a completed turn.
+        // #2172: Done wins over a later cancel during residual-control drain;
+        // only `!done` may run cancel finalization.
         if !done && cancel_requested(Some(cancel_token.as_ref())) {
             finalize_cancel_inner!();
             break 'outer;
         }
         if done && cancel_requested(Some(cancel_token.as_ref())) {
-            // #2172: cancel-after-Done during terminal drain — exit
-            // the drain immediately as a completed turn instead of
-            // burning the rest of the drain window. Suppressing the
-            // reclassification still preserves the "stop after
-            // completion is a no-op" UX.
+            // Exit residual drain without reclassifying the completed turn.
             break 'outer;
         }
 
-        // #2426 H3/H4 graduation: wait for the next stream frame and
-        // treat the duration as a safety wake, not a pre-drain sleep.
-        // Explicit handoff frames (`TmuxReady` / `ProcessReady` /
-        // `RuntimeReady`) wake this loop immediately and clear
-        // `terminal_control_drain_until` in their handlers.
+        // #2426: timeout is only a safety wake; handoff frames wake immediately.
         let stream_wait = turn_bridge_stream_wait_duration(
             done,
             terminal_control_drain_until,
@@ -699,11 +682,7 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            refresh_stream_tick_expected_identity_after_handoff(
-                                &mut stream_tick_expected_identity,
-                                &inflight_state,
-                                outcome,
-                            );
+                            refresh_expected_after_handoff!(outcome);
                         }
                         StreamMessage::RuntimeReady { handoff } => {
                             let outcome = handle_runtime_handoff_loop_message(
@@ -734,11 +713,7 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            refresh_stream_tick_expected_identity_after_handoff(
-                                &mut stream_tick_expected_identity,
-                                &inflight_state,
-                                outcome,
-                            );
+                            refresh_expected_after_handoff!(outcome);
                         }
                         StreamMessage::ProcessReady {
                             output_path,
@@ -777,11 +752,7 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            refresh_stream_tick_expected_identity_after_handoff(
-                                &mut stream_tick_expected_identity,
-                                &inflight_state,
-                                outcome,
-                            );
+                            refresh_expected_after_handoff!(outcome);
                         }
                         StreamMessage::OutputOffset { offset } => {
                             let outcome = handle_runtime_handoff_loop_message(
@@ -812,11 +783,7 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            refresh_stream_tick_expected_identity_after_handoff(
-                                &mut stream_tick_expected_identity,
-                                &inflight_state,
-                                outcome,
-                            );
+                            refresh_expected_after_handoff!(outcome);
                         }
                     }
                 }
@@ -858,19 +825,12 @@ pub(super) async fn run_stream_loop(
                 footer_owner,
                 status_panel_started_at,
                 done,
-                standby_relay_owns_output,
-                watcher_owner_channel_id,
-                full_response: full_response.as_str(),
                 dispatch_id: dispatch_id.clone(),
                 adk_session_key: adk_session_key.clone(),
                 adk_session_name: adk_session_name.clone(),
                 adk_session_info: adk_session_info.clone(),
                 adk_cwd: adk_cwd.clone(),
                 role_binding: role_binding.clone(),
-                current_tool_line: current_tool_line.clone(),
-                last_tool_name: last_tool_name.clone(),
-                last_tool_summary: last_tool_summary.clone(),
-                prev_tool_status: prev_tool_status.clone(),
                 spinner: SPINNER,
                 live_long_run_heartbeat_interval: LIVE_LONG_RUN_HEARTBEAT_INTERVAL,
             },
@@ -885,12 +845,27 @@ pub(super) async fn run_stream_loop(
                 last_status_panel_text: &mut last_status_panel_text,
                 watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
                 watcher_relay_available_for_turn: &mut watcher_relay_available_for_turn,
+                standby_relay_owns_output: &mut standby_relay_owns_output,
+                watcher_owner_channel_id: &mut watcher_owner_channel_id,
+                full_response: &mut full_response,
                 response_sent_offset: &mut response_sent_offset,
                 bridge_confirmed_response_sent_offset: &mut bridge_confirmed_response_sent_offset,
                 streaming_rollover_frozen_msg_ids: &mut streaming_rollover_frozen_msg_ids,
                 current_msg_id: &mut current_msg_id,
+                expected_current_message: &mut expected_current_message,
+                pending_current_message_candidate: &mut pending_current_message_candidate,
+                bridge_created_response_placeholder_msg_id:
+                    &mut bridge_created_response_placeholder_msg_id,
                 last_edit_text: &mut last_edit_text,
                 first_answer_relayed: &mut first_answer_relayed,
+                current_tool_line: &mut current_tool_line,
+                prev_tool_status: &mut prev_tool_status,
+                last_tool_name: &mut last_tool_name,
+                last_tool_summary: &mut last_tool_summary,
+                any_tool_used: &mut any_tool_used,
+                has_post_tool_text: &mut has_post_tool_text,
+                tmux_last_offset: &mut tmux_last_offset,
+                persisted_inflight_baseline: &mut persisted_inflight_baseline,
                 inflight_state: &mut inflight_state,
                 bridge_spans: &mut bridge_spans,
                 status_panel_generation: &mut status_panel_generation,
@@ -905,7 +880,6 @@ pub(super) async fn run_stream_loop(
         )
         .await;
     }
-
     // #3813 AC#1 tail: emit bridge-side latency spans once at loop exit
     // (observation-only; self-suppresses when no bridge relay happened).
     bridge_spans.log(channel_id.get(), provider.as_str());
@@ -950,6 +924,8 @@ pub(super) async fn run_stream_loop(
     *state.terminal_control_ready_observed = terminal_control_ready_observed;
     *state.terminal_control_drain_until = terminal_control_drain_until;
     *state.current_msg_id = current_msg_id;
+    *state.expected_current_message = expected_current_message;
+    *state.bridge_created_response_placeholder_msg_id = bridge_created_response_placeholder_msg_id;
     *state.response_sent_offset = response_sent_offset;
     *state.bridge_confirmed_response_sent_offset = bridge_confirmed_response_sent_offset;
     *state.streamed_assistant_text_this_turn = streamed_assistant_text_this_turn;
@@ -969,6 +945,29 @@ pub(super) async fn run_stream_loop(
     *state.last_status_panel_edit = last_status_panel_edit;
     *state.bridge_spans = bridge_spans;
     *state.status_panel_generation = status_panel_generation;
+
+    let current_msg_id_before_exit_settle = *state.current_msg_id;
+    if settle_pending_current_message_candidate_on_loop_exit(
+        gateway.as_ref(),
+        &provider,
+        &shared_owned.token_hash,
+        channel_id,
+        &mut persisted_inflight_baseline,
+        state.inflight_state,
+        &stream_tick_expected_identity,
+        state.expected_current_message,
+        state.current_msg_id,
+        &mut pending_current_message_candidate,
+        state.bridge_created_response_placeholder_msg_id,
+    )
+    .await
+    {
+        reconcile_saved_exit_candidate(
+            shared_owned.as_ref(),
+            &mut state,
+            current_msg_id_before_exit_settle,
+        );
+    }
 
     StreamLoopOutput {
         outcome: StreamLoopOutcome::Completed,

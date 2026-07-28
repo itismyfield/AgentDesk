@@ -1,8 +1,9 @@
 use super::refresh_stream_tick_expected_identity_after_handoff;
 use crate::services::discord::inflight::{
     GuardedSaveOutcome, InflightTurnIdentity, InflightTurnState, load_inflight_state,
-    save_inflight_state,
+    save_inflight_state, stamp_runtime_handoff_if_matches_identity,
 };
+use crate::services::discord::turn_bridge::detached_current_msg_id_from_durable;
 use crate::services::discord::turn_bridge::stream_tick::guarded_persist::persist_stream_tick_state;
 use crate::services::provider::ProviderKind;
 use serenity::model::id::ChannelId;
@@ -43,22 +44,44 @@ fn saved_tmux_ready_first_fill_recaptures_and_allows_next_stream_tick_flush() {
     with_runtime_root(|| {
         let channel = ChannelId::new(4_836_001);
         let mut state = owner_state(channel.get(), 77_010, None);
+        save_inflight_state(&state).expect("seed pre-handoff row");
         let mut expected = InflightTurnIdentity::from_state(&state);
+        let mut persisted_baseline = state.clone();
 
+        state.full_response = "answer already buffered before handoff".to_string();
         state.tmux_session_name = Some("AgentDesk-codex-handoff-ready".to_string());
-        save_inflight_state(&state).expect("seed successful handoff row");
+        state.last_offset = 1_024;
+        let handoff_outcome = stamp_runtime_handoff_if_matches_identity(
+            &state,
+            &expected,
+            "turn_bridge::stream_loop::saved_handoff_test",
+        );
+        assert_eq!(handoff_outcome, GuardedSaveOutcome::Saved);
+        let handoff_row =
+            load_inflight_state(&ProviderKind::Codex, channel.get()).expect("handoff row");
+        assert!(handoff_row.full_response.is_empty());
+        assert_eq!(handoff_row.tmux_session_name, state.tmux_session_name);
         refresh_stream_tick_expected_identity_after_handoff(
             &mut expected,
+            &mut persisted_baseline,
             &state,
-            Some(GuardedSaveOutcome::Saved),
+            Some(handoff_outcome),
+        );
+        assert!(persisted_baseline.full_response.is_empty());
+        assert_eq!(
+            persisted_baseline.tmux_session_name,
+            state.tmux_session_name
         );
 
-        state.full_response = "answer after handoff".to_string();
-        state.last_offset = 1_024;
+        let mut expected_current_message = (state.current_msg_id, state.current_msg_len);
+        let mut current_msg_id = detached_current_msg_id_from_durable(state.current_msg_id);
         assert_eq!(
             persist_stream_tick_state(
-                &state,
+                &mut persisted_baseline,
+                &mut state,
                 &expected,
+                &mut expected_current_message,
+                &mut current_msg_id,
                 channel,
                 "turn_bridge::stream_loop::saved_handoff_test",
             ),
@@ -66,7 +89,10 @@ fn saved_tmux_ready_first_fill_recaptures_and_allows_next_stream_tick_flush() {
         );
         let persisted =
             load_inflight_state(&ProviderKind::Codex, channel.get()).expect("persisted row");
-        assert_eq!(persisted.full_response, "answer after handoff");
+        assert_eq!(
+            persisted.full_response,
+            "answer already buffered before handoff"
+        );
         assert_eq!(persisted.last_offset, 1_024);
     });
 }
@@ -77,6 +103,7 @@ fn identity_mismatch_handoff_does_not_recapture_or_authorize_stream_tick_flush()
         let channel = ChannelId::new(4_836_002);
         let mut stale = owner_state(channel.get(), 77_010, None);
         let mut expected = InflightTurnIdentity::from_state(&stale);
+        let mut persisted_baseline = stale.clone();
         stale.tmux_session_name = Some("AgentDesk-codex-stale-handoff".to_string());
 
         let mut successor = owner_state(channel.get(), 99_999, Some("AgentDesk-codex-successor"));
@@ -86,6 +113,7 @@ fn identity_mismatch_handoff_does_not_recapture_or_authorize_stream_tick_flush()
 
         refresh_stream_tick_expected_identity_after_handoff(
             &mut expected,
+            &mut persisted_baseline,
             &stale,
             Some(GuardedSaveOutcome::IdentityMismatch),
         );
@@ -93,10 +121,15 @@ fn identity_mismatch_handoff_does_not_recapture_or_authorize_stream_tick_flush()
 
         stale.full_response = "stale answer".to_string();
         stale.last_offset = 1_024;
+        let mut expected_current_message = (stale.current_msg_id, stale.current_msg_len);
+        let mut current_msg_id = detached_current_msg_id_from_durable(stale.current_msg_id);
         assert_eq!(
             persist_stream_tick_state(
-                &stale,
+                &mut persisted_baseline,
+                &mut stale,
                 &expected,
+                &mut expected_current_message,
+                &mut current_msg_id,
                 channel,
                 "turn_bridge::stream_loop::mismatched_handoff_test",
             ),
@@ -121,13 +154,19 @@ fn no_handoff_keeps_original_expected_identity_and_stream_tick_behavior() {
         );
         save_inflight_state(&state).expect("seed owner row");
         let expected = InflightTurnIdentity::from_state(&state);
+        let mut persisted_baseline = state.clone();
 
         state.full_response = "ordinary stream answer".to_string();
         state.last_offset = 2_048;
+        let mut expected_current_message = (state.current_msg_id, state.current_msg_len);
+        let mut current_msg_id = detached_current_msg_id_from_durable(state.current_msg_id);
         assert_eq!(
             persist_stream_tick_state(
-                &state,
+                &mut persisted_baseline,
+                &mut state,
                 &expected,
+                &mut expected_current_message,
+                &mut current_msg_id,
                 channel,
                 "turn_bridge::stream_loop::no_handoff_test",
             ),

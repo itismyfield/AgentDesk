@@ -1,4 +1,308 @@
 use super::*;
+use crate::services::discord::inflight::store::persist_under_lock_with_snapshot;
+
+fn apply_local_change_if_durable_unchanged<T: Clone + PartialEq>(
+    before: &T,
+    local: &T,
+    durable: &mut T,
+) {
+    if local != before && (durable == before || durable == local) {
+        durable.clone_from(local);
+    }
+}
+
+fn merge_stream_response_progress(
+    before: (&str, usize),
+    local: (&str, usize),
+    durable: (&str, usize),
+) -> Option<(String, usize)> {
+    let (local_body, local_offset) = local;
+    let (durable_body, durable_offset) = durable;
+    if local == before {
+        return Some((durable_body.to_string(), durable_offset));
+    }
+    if durable == before {
+        return Some((local_body.to_string(), local_offset));
+    }
+    if local_body == durable_body {
+        let offset = normalize_response_sent_offset(local_body, local_offset.max(durable_offset));
+        return Some((local_body.to_string(), offset));
+    }
+    let merged_body = if local_body.starts_with(durable_body) {
+        local_body
+    } else if durable_body.starts_with(local_body) {
+        durable_body
+    } else {
+        return None;
+    };
+    let merged_offset =
+        normalize_response_sent_offset(merged_body, local_offset.max(durable_offset));
+    Some((merged_body.to_string(), merged_offset))
+}
+
+/// Three-way merges the stream loop's owned fields onto a lock-held durable
+/// row. The persisted baseline keeps unsaved local deltas visible across retry;
+/// durable same-turn owner/session/tool changes win conflicts, response progress
+/// merges only when the two bodies are identical or prefix-compatible, and a
+/// divergent body fails closed without mutating either snapshot.
+pub(in crate::services::discord) fn save_stream_tick_state_preserving_current_message_races(
+    persisted_baseline: &mut InflightTurnState,
+    state: &mut InflightTurnState,
+    expected: &InflightTurnIdentity,
+    expected_current_msg_id: u64,
+    expected_current_msg_len: usize,
+    caller: &'static str,
+) -> GuardedSaveOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedSaveOutcome::IoError;
+    };
+    save_stream_tick_state_preserving_current_message_races_in_root(
+        &root,
+        persisted_baseline,
+        state,
+        expected,
+        expected_current_msg_id,
+        expected_current_msg_len,
+        caller,
+    )
+}
+
+pub(in crate::services::discord::inflight) fn save_stream_tick_state_preserving_current_message_races_in_root(
+    root: &Path,
+    persisted_baseline: &mut InflightTurnState,
+    state: &mut InflightTurnState,
+    expected: &InflightTurnIdentity,
+    expected_current_msg_id: u64,
+    expected_current_msg_len: usize,
+    caller: &'static str,
+) -> GuardedSaveOutcome {
+    let Some(provider) = state.provider_kind() else {
+        return GuardedSaveOutcome::IoError;
+    };
+    if !expected.matches_state(state) || !expected.matches_state(persisted_baseline) {
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+    let path = inflight_state_path(root, &provider, state.channel_id);
+    if let Some(parent) = path.parent()
+        && fs::create_dir_all(parent).is_err()
+    {
+        return GuardedSaveOutcome::IoError;
+    }
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return GuardedSaveOutcome::IoError;
+    };
+    let on_disk = match super::read_inflight_state_for_guarded_write(
+        &path,
+        &provider,
+        state.channel_id,
+        expected,
+        caller,
+    ) {
+        Ok(on_disk) => on_disk,
+        Err(outcome) => return outcome,
+    };
+    if expected.user_msg_id == 0 && expected.turn_start_offset.is_none() {
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+    if on_disk.restart_mode.is_some() || on_disk.rebind_origin || !expected.matches_state(&on_disk)
+    {
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+
+    let mut updated = on_disk.clone();
+    let baseline_current_message = (expected_current_msg_id, expected_current_msg_len);
+    let local_current_message = (state.current_msg_id, state.current_msg_len);
+    let durable_current_message = (on_disk.current_msg_id, on_disk.current_msg_len);
+    if local_current_message != baseline_current_message
+        && (durable_current_message == baseline_current_message
+            || durable_current_message == local_current_message)
+    {
+        (updated.current_msg_id, updated.current_msg_len) = local_current_message;
+    }
+
+    let Some((merged_response, merged_response_offset)) = merge_stream_response_progress(
+        (
+            &persisted_baseline.full_response,
+            persisted_baseline.response_sent_offset,
+        ),
+        (&state.full_response, state.response_sent_offset),
+        (&on_disk.full_response, on_disk.response_sent_offset),
+    ) else {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = state.channel_id,
+            caller,
+            baseline_bytes = persisted_baseline.full_response.len(),
+            local_bytes = state.full_response.len(),
+            durable_bytes = on_disk.full_response.len(),
+            "stream-tick response merge deferred: concurrent bodies are not prefix-compatible"
+        );
+        return GuardedSaveOutcome::IoError;
+    };
+    updated.full_response = merged_response;
+    updated.response_sent_offset = merged_response_offset;
+
+    let local_status_changed = (state.status_message_id, state.status_panel_generation)
+        != (
+            persisted_baseline.status_message_id,
+            persisted_baseline.status_panel_generation,
+        );
+    let durable_status_changed = (on_disk.status_message_id, on_disk.status_panel_generation)
+        != (
+            persisted_baseline.status_message_id,
+            persisted_baseline.status_panel_generation,
+        );
+    if local_status_changed && !durable_status_changed {
+        updated.status_message_id = state.status_message_id;
+        updated.status_panel_generation = state.status_panel_generation;
+    }
+
+    apply_local_change_if_durable_unchanged(
+        &persisted_baseline.session_id,
+        &state.session_id,
+        &mut updated.session_id,
+    );
+    apply_local_change_if_durable_unchanged(
+        &persisted_baseline.runtime_kind,
+        &state.runtime_kind,
+        &mut updated.runtime_kind,
+    );
+    apply_local_change_if_durable_unchanged(
+        &persisted_baseline.tmux_session_name,
+        &state.tmux_session_name,
+        &mut updated.tmux_session_name,
+    );
+    apply_local_change_if_durable_unchanged(
+        &persisted_baseline.output_path,
+        &state.output_path,
+        &mut updated.output_path,
+    );
+    apply_local_change_if_durable_unchanged(
+        &persisted_baseline.input_fifo_path,
+        &state.input_fifo_path,
+        &mut updated.input_fifo_path,
+    );
+    apply_local_change_if_durable_unchanged(
+        &persisted_baseline.claude_e_pid,
+        &state.claude_e_pid,
+        &mut updated.claude_e_pid,
+    );
+    apply_local_change_if_durable_unchanged(
+        &persisted_baseline.claude_e_process_starttime,
+        &state.claude_e_process_starttime,
+        &mut updated.claude_e_process_starttime,
+    );
+    apply_local_change_if_durable_unchanged(
+        &persisted_baseline.claude_e_macos_lstart_hash,
+        &state.claude_e_macos_lstart_hash,
+        &mut updated.claude_e_macos_lstart_hash,
+    );
+    updated.last_offset = updated.last_offset.max(state.last_offset);
+    apply_local_change_if_durable_unchanged(
+        &persisted_baseline.current_tool_line,
+        &state.current_tool_line,
+        &mut updated.current_tool_line,
+    );
+    apply_local_change_if_durable_unchanged(
+        &persisted_baseline.prev_tool_status,
+        &state.prev_tool_status,
+        &mut updated.prev_tool_status,
+    );
+    apply_local_change_if_durable_unchanged(
+        &persisted_baseline.last_tool_name,
+        &state.last_tool_name,
+        &mut updated.last_tool_name,
+    );
+    apply_local_change_if_durable_unchanged(
+        &persisted_baseline.last_tool_summary,
+        &state.last_tool_summary,
+        &mut updated.last_tool_summary,
+    );
+    apply_local_change_if_durable_unchanged(
+        &persisted_baseline.task_notification_kind,
+        &state.task_notification_kind,
+        &mut updated.task_notification_kind,
+    );
+    apply_local_change_if_durable_unchanged(
+        &persisted_baseline.any_tool_used,
+        &state.any_tool_used,
+        &mut updated.any_tool_used,
+    );
+    apply_local_change_if_durable_unchanged(
+        &persisted_baseline.has_post_tool_text,
+        &state.has_post_tool_text,
+        &mut updated.has_post_tool_text,
+    );
+    apply_local_change_if_durable_unchanged(
+        &persisted_baseline.long_running_placeholder_active,
+        &state.long_running_placeholder_active,
+        &mut updated.long_running_placeholder_active,
+    );
+
+    let local_owner_changed = (
+        state.watcher_owner_channel_id,
+        state.watcher_owns_live_relay,
+        state.relay_owner_kind,
+    ) != (
+        persisted_baseline.watcher_owner_channel_id,
+        persisted_baseline.watcher_owns_live_relay,
+        persisted_baseline.relay_owner_kind,
+    );
+    let durable_owner_changed = (
+        on_disk.watcher_owner_channel_id,
+        on_disk.watcher_owns_live_relay,
+        on_disk.relay_owner_kind,
+    ) != (
+        persisted_baseline.watcher_owner_channel_id,
+        persisted_baseline.watcher_owns_live_relay,
+        persisted_baseline.relay_owner_kind,
+    );
+    if local_owner_changed && !durable_owner_changed {
+        updated.watcher_owner_channel_id = state.watcher_owner_channel_id;
+        updated.watcher_owns_live_relay = state.watcher_owns_live_relay;
+        updated.relay_owner_kind = state.relay_owner_kind;
+    }
+    for frozen_id in &state.streaming_rollover_frozen_msg_ids {
+        if !updated
+            .streaming_rollover_frozen_msg_ids
+            .contains(frozen_id)
+        {
+            updated.streaming_rollover_frozen_msg_ids.push(*frozen_id);
+        }
+    }
+    updated.ensure_finalizer_turn_id();
+    if !validate_inflight_state_for_save(
+        root,
+        &path,
+        &updated,
+        "src/services/discord/inflight/save_store/identity_gate/stream_loop_patch.rs:save_stream_tick_state_preserving_current_message_races_in_root",
+    ) {
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+    match persist_under_lock_with_snapshot(
+        root,
+        &path,
+        &updated,
+        "src/services/discord/inflight/save_store/identity_gate/stream_loop_patch.rs:save_stream_tick_state_preserving_current_message_races_in_root",
+    ) {
+        Ok(Some(persisted)) => {
+            state.clone_from(&persisted);
+            persisted_baseline.clone_from(&persisted);
+            GuardedSaveOutcome::Saved
+        }
+        Ok(None) => GuardedSaveOutcome::IdentityMismatch,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id = state.channel_id,
+                caller,
+                error = %error,
+                "stream-tick state merge failed; leaving durable row untouched"
+            );
+            GuardedSaveOutcome::IoError
+        }
+    }
+}
 
 pub(in crate::services::discord) fn patch_restart_mode_if_matches_identity(
     state: &InflightTurnState,
@@ -199,6 +503,193 @@ mod tests {
         let path = inflight_state_path(root, provider, channel_id);
         serde_json::from_str(&std::fs::read_to_string(path).expect("read inflight row"))
             .expect("parse inflight row")
+    }
+
+    #[test]
+    fn stream_tick_merge_keeps_first_local_chunk_while_adopting_watcher_progress() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let channel_id = 42_593_104;
+        let mut baseline = owner_state(channel_id, 77_010);
+        baseline.full_response = "base".to_string();
+        save_inflight_state_in_root(root.path(), &baseline).expect("seed owner row");
+        let expected = InflightTurnIdentity::from_state(&baseline);
+
+        let mut local = baseline.clone();
+        local.full_response = "base plus bridge chunk".to_string();
+        local.current_tool_line = Some("bridge-local tool".to_string());
+        local.last_offset = 640;
+
+        let mut watcher = baseline.clone();
+        watcher.full_response = "base plus".to_string();
+        watcher.response_sent_offset = watcher.full_response.len();
+        watcher.session_id = Some("watcher-session".to_string());
+        watcher.current_tool_line = Some("watcher tool".to_string());
+        watcher.set_watcher_owner_channel_id(channel_id + 1);
+        watcher.set_relay_owner_kind(RelayOwnerKind::Watcher);
+        watcher.last_offset = 768;
+        save_inflight_state_in_root(root.path(), &watcher).expect("advance watcher row");
+
+        assert_eq!(
+            save_stream_tick_state_preserving_current_message_races_in_root(
+                root.path(),
+                &mut baseline,
+                &mut local,
+                &expected,
+                0,
+                0,
+                "test::watcher_progress_and_first_chunk",
+            ),
+            GuardedSaveOutcome::Saved,
+        );
+        let persisted = load(root.path(), &ProviderKind::Codex, channel_id);
+        assert_eq!(persisted.full_response, "base plus bridge chunk");
+        assert_eq!(persisted.response_sent_offset, "base plus".len());
+        assert_eq!(persisted.session_id.as_deref(), Some("watcher-session"));
+        assert_eq!(persisted.current_tool_line.as_deref(), Some("watcher tool"));
+        assert_eq!(
+            persisted.effective_relay_owner_kind(),
+            RelayOwnerKind::Watcher
+        );
+        assert_eq!(persisted.watcher_owner_channel_id, Some(channel_id + 1));
+        assert_eq!(persisted.last_offset, 768);
+        assert_eq!(
+            serde_json::to_value(&local).unwrap(),
+            serde_json::to_value(&persisted).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&baseline).unwrap(),
+            serde_json::to_value(&persisted).unwrap()
+        );
+    }
+
+    #[test]
+    fn stream_tick_merge_preserves_unsaved_chunk_across_competing_clear_and_bind() {
+        for (case, baseline_message, local_message, durable_message) in [
+            ("clear", (901, 12), (901, 12), (0, 0)),
+            ("bind", (0, 0), (902, 13), (903, 14)),
+        ] {
+            let root = tempfile::tempdir().expect("runtime root");
+            let channel_id = if case == "clear" {
+                42_593_105
+            } else {
+                42_593_106
+            };
+            let mut baseline = owner_state(channel_id, 77_010);
+            baseline.full_response = "base".to_string();
+            (baseline.current_msg_id, baseline.current_msg_len) = baseline_message;
+            save_inflight_state_in_root(root.path(), &baseline).expect("seed owner row");
+            let expected = InflightTurnIdentity::from_state(&baseline);
+
+            let mut local = baseline.clone();
+            local.full_response = format!("base-{case}-local-chunk");
+            (local.current_msg_id, local.current_msg_len) = local_message;
+            let mut competitor = baseline.clone();
+            (competitor.current_msg_id, competitor.current_msg_len) = durable_message;
+            save_inflight_state_in_root(root.path(), &competitor).expect("persist competitor");
+
+            assert_eq!(
+                save_stream_tick_state_preserving_current_message_races_in_root(
+                    root.path(),
+                    &mut baseline,
+                    &mut local,
+                    &expected,
+                    baseline_message.0,
+                    baseline_message.1,
+                    "test::current_message_competitor",
+                ),
+                GuardedSaveOutcome::Saved,
+                "{case}",
+            );
+            let persisted = load(root.path(), &ProviderKind::Codex, channel_id);
+            assert_eq!(
+                (persisted.current_msg_id, persisted.current_msg_len),
+                durable_message,
+                "{case}",
+            );
+            assert_eq!(persisted.full_response, format!("base-{case}-local-chunk"));
+            assert_eq!(
+                serde_json::to_value(&local).unwrap(),
+                serde_json::to_value(&persisted).unwrap(),
+                "{case}",
+            );
+        }
+    }
+
+    #[test]
+    fn stream_tick_merge_fails_closed_on_non_prefix_response_divergence() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let channel_id = 42_593_107;
+        let mut baseline = owner_state(channel_id, 77_010);
+        baseline.full_response = "base".to_string();
+        save_inflight_state_in_root(root.path(), &baseline).expect("seed owner row");
+        let expected = InflightTurnIdentity::from_state(&baseline);
+
+        let mut local = baseline.clone();
+        local.full_response = "base-local".to_string();
+        let mut durable = baseline.clone();
+        durable.full_response = "base-durable".to_string();
+        save_inflight_state_in_root(root.path(), &durable).expect("persist divergent row");
+        let path = inflight_state_path(root.path(), &ProviderKind::Codex, channel_id);
+        let durable_bytes_before = std::fs::read(&path).expect("read durable bytes");
+        let local_before = serde_json::to_value(&local).unwrap();
+        let baseline_before = serde_json::to_value(&baseline).unwrap();
+
+        assert_eq!(
+            save_stream_tick_state_preserving_current_message_races_in_root(
+                root.path(),
+                &mut baseline,
+                &mut local,
+                &expected,
+                0,
+                0,
+                "test::non_prefix_divergence",
+            ),
+            GuardedSaveOutcome::IoError,
+        );
+        assert_eq!(
+            std::fs::read(path).expect("durable survives"),
+            durable_bytes_before
+        );
+        assert_eq!(serde_json::to_value(&local).unwrap(), local_before);
+        assert_eq!(serde_json::to_value(&baseline).unwrap(), baseline_before);
+    }
+
+    #[test]
+    fn stream_tick_merge_retry_is_idempotent() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let channel_id = 42_593_108;
+        let mut baseline = owner_state(channel_id, 77_010);
+        baseline.full_response = "base".to_string();
+        save_inflight_state_in_root(root.path(), &baseline).expect("seed owner row");
+        let expected = InflightTurnIdentity::from_state(&baseline);
+        let mut local = baseline.clone();
+        local.full_response.push_str(" local-once");
+
+        for caller in ["test::first_attempt", "test::retry"] {
+            assert_eq!(
+                save_stream_tick_state_preserving_current_message_races_in_root(
+                    root.path(),
+                    &mut baseline,
+                    &mut local,
+                    &expected,
+                    0,
+                    0,
+                    caller,
+                ),
+                GuardedSaveOutcome::Saved,
+            );
+        }
+        let persisted = load(root.path(), &ProviderKind::Codex, channel_id);
+        assert_eq!(persisted.full_response, "base local-once");
+        assert_eq!(persisted.full_response.matches("local-once").count(), 1);
+        assert_eq!(
+            serde_json::to_value(&local).unwrap(),
+            serde_json::to_value(&persisted).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&baseline).unwrap(),
+            serde_json::to_value(&persisted).unwrap()
+        );
     }
 
     #[test]

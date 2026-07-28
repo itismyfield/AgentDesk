@@ -90,6 +90,14 @@ pub(super) struct InflightCleanupGuard {
     token_hash: String,
 }
 
+impl InflightCleanupGuard {
+    /// Disarms abnormal-exit cleanup after the caller explicitly handled or
+    /// deliberately preserved the durable row.
+    pub(super) fn defuse(&mut self) {
+        self.provider.take();
+    }
+}
+
 pub(super) fn make_bridge_guards(
     bridge: &mut TurnBridgeContext,
     shared_owned: &Arc<SharedData>,

@@ -708,7 +708,7 @@ pub(super) async fn run_completion_postlude(
                 "turn_bridge::restart_full_response_patch@6330",
             );
         }
-        inflight_guard.provider.take();
+        inflight_guard.defuse();
     } else if preserve_inflight_for_cleanup_retry || bridge_output_owner.is_some() {
         // #3041 P1-2 (codex P1-2 R3): on a delivery-lease `Skip` the live
         // HOLDER (the watcher) owns this turn's inflight lifecycle and CLEARS
@@ -750,7 +750,7 @@ pub(super) async fn run_completion_postlude(
                 "turn_bridge::delegated_owner_preserve@6374",
             );
         }
-        inflight_guard.provider.take();
+        inflight_guard.defuse();
         if let Some(owner) = bridge_output_owner {
             let lifecycle_event = match owner {
                 BridgeOutputOwner::WatcherRelay => "delegated_to_watcher",
@@ -819,7 +819,7 @@ pub(super) async fn run_completion_postlude(
                 dispatch_id.as_deref(),
                 adk_session_key.as_deref(),
                 Some(turn_id.as_str()),
-                Some(current_msg_id.get()),
+                optional_durable_current_msg_id_from_detached(current_msg_id),
                 "turn_bridge",
                 "skip",
                 None,
@@ -910,7 +910,7 @@ pub(super) async fn run_completion_postlude(
             }
         }
         // Defuse the guard — cleanup already done above.
-        inflight_guard.provider.take();
+        inflight_guard.defuse();
         crate::services::observability::emit_inflight_lifecycle_event(
             provider.as_str(),
             channel_id.get(),
