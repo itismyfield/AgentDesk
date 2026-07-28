@@ -1,3 +1,6 @@
+use super::super::stream_tick::guarded_persist::{
+    StreamTickCandidateSaveContext, settle_pending_current_message_candidate_on_loop_exit,
+};
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,4 +79,46 @@ pub(super) fn reconcile_saved_exit_candidate(
         *state.current_msg_id,
         state.last_edit_text,
     );
+}
+
+pub(super) struct StreamLoopExitCandidateContext<'context, 'state, G: TurnGateway + ?Sized> {
+    pub(super) shared: &'context SharedData,
+    pub(super) gateway: &'context G,
+    pub(super) provider: &'context ProviderKind,
+    pub(super) token_hash: &'context str,
+    pub(super) channel_id: ChannelId,
+    pub(super) persisted_inflight_baseline: &'context mut InflightTurnState,
+    pub(super) expected_identity:
+        &'context crate::services::discord::inflight::InflightTurnIdentity,
+    pub(super) pending_current_message_candidate: &'context mut Option<MessageId>,
+    pub(super) state: StreamLoopState<'state>,
+}
+
+pub(super) async fn settle_and_reconcile_exit_candidate<G: TurnGateway + ?Sized>(
+    mut context: StreamLoopExitCandidateContext<'_, '_, G>,
+) {
+    let current_msg_id_before_exit_settle = *context.state.current_msg_id;
+    if settle_pending_current_message_candidate_on_loop_exit(StreamTickCandidateSaveContext {
+        gateway: context.gateway,
+        provider: context.provider,
+        token_hash: context.token_hash,
+        channel_id: context.channel_id,
+        persisted_baseline: context.persisted_inflight_baseline,
+        inflight_state: &mut *context.state.inflight_state,
+        expected_identity: context.expected_identity,
+        expected_current_message: &mut *context.state.expected_current_message,
+        current_msg_id: &mut *context.state.current_msg_id,
+        pending_current_message_candidate: context.pending_current_message_candidate,
+        bridge_created_response_placeholder_msg_id: &mut *context
+            .state
+            .bridge_created_response_placeholder_msg_id,
+    })
+    .await
+    {
+        reconcile_saved_exit_candidate(
+            context.shared,
+            &mut context.state,
+            current_msg_id_before_exit_settle,
+        );
+    }
 }

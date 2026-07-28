@@ -1129,28 +1129,32 @@ mod tests {
             .find("*state.inflight_state = inflight_state;")
             .map(|offset| outer + offset)
             .expect("detached state is staged for exit settlement");
-        let pre_settle_anchor = stream_loop[writeback..]
-            .find("let current_msg_id_before_exit_settle = *state.current_msg_id;")
+        let exit_settlement_call = stream_loop[writeback..]
+            .find("settle_and_reconcile_exit_candidate(")
             .map(|offset| writeback + offset)
-            .expect("candidate edit-cache identity is captured before settlement");
-        let settle = stream_loop[pre_settle_anchor..]
-            .find("settle_pending_current_message_candidate_on_loop_exit(")
-            .map(|offset| pre_settle_anchor + offset)
-            .expect("stream-loop exit settles a remaining candidate");
-        let exit_reconcile = stream_loop[settle..]
-            .find("reconcile_saved_exit_candidate(")
-            .map(|offset| settle + offset)
-            .expect("successful exit merge refreshes caller-owned state");
+            .expect("stream-loop exit delegates remaining-candidate settlement");
         assert!(
             persistent_dirty < outer
                 && outer < tick_call
                 && tick_call < authority_loss
                 && authority_loss < authority_break
                 && authority_break < writeback
-                && writeback < pre_settle_anchor
-                && pre_settle_anchor < settle
-                && settle < exit_reconcile
+                && writeback < exit_settlement_call
         );
+
+        let exit_reconcile = include_str!("../stream_loop/exit_reconcile.rs");
+        let pre_settle_anchor = exit_reconcile
+            .find("let current_msg_id_before_exit_settle = *context.state.current_msg_id;")
+            .expect("candidate edit-cache identity is captured before settlement");
+        let settle = exit_reconcile[pre_settle_anchor..]
+            .find("settle_pending_current_message_candidate_on_loop_exit(")
+            .map(|offset| pre_settle_anchor + offset)
+            .expect("stream-loop exit settles a remaining candidate");
+        let saved_reconcile = exit_reconcile[settle..]
+            .find("reconcile_saved_exit_candidate(")
+            .map(|offset| settle + offset)
+            .expect("successful exit merge refreshes caller-owned state");
+        assert!(pre_settle_anchor < settle && settle < saved_reconcile);
     }
 
     #[test]

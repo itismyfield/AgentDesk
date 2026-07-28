@@ -2,121 +2,23 @@
 
 use std::sync::Arc;
 
-use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::tool_output_guard::matched_or_last_tool;
 
-use super::super::stream_tick::guarded_persist::{
-    VisibleMutationAuthority, visible_mutation_authority_after_guarded_save,
-};
 use super::*;
 
-pub(super) enum StreamToolArmMessage {
-    ToolUse {
-        name: String,
-        input: String,
-        tool_use_id: Option<String>,
-    },
-    ToolResult {
-        content: String,
-        is_error: bool,
-        tool_use_id: Option<String>,
-    },
-    TaskNotification {
-        tool_use_id: Option<String>,
-        summary: String,
-        status: String,
-        kind: TaskNotificationKind,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum StreamToolArmOutcome {
-    Continue,
-    RetryExactFrame,
-    AuthorityLost,
-}
-
-fn stream_tool_outcome_after_restart_authority(
-    authority: Option<VisibleMutationAuthority>,
-) -> StreamToolArmOutcome {
-    if authority == Some(VisibleMutationAuthority::AuthorityLost) {
-        StreamToolArmOutcome::AuthorityLost
-    } else {
-        StreamToolArmOutcome::Continue
-    }
-}
-
-fn terminal_tool_result_transition_permission(
-    authority: VisibleMutationAuthority,
-) -> Result<bool, StreamToolArmOutcome> {
-    match authority {
-        VisibleMutationAuthority::Authorized => Ok(true),
-        VisibleMutationAuthority::Suppressed => Ok(false),
-        VisibleMutationAuthority::Retry => Err(StreamToolArmOutcome::RetryExactFrame),
-        VisibleMutationAuthority::AuthorityLost => Err(StreamToolArmOutcome::AuthorityLost),
-    }
-}
-
-pub(super) fn reconcile_exact_stream_frame_after_tool_outcome(
-    pending: &mut std::collections::VecDeque<StreamMessage>,
-    frame: StreamMessage,
-    outcome: StreamToolArmOutcome,
-    retry_retained: &mut bool,
-) -> bool {
-    if outcome != StreamToolArmOutcome::RetryExactFrame {
-        *retry_retained = false;
-        return false;
-    }
-    pending.push_front(frame);
-    *retry_retained = true;
-    true
-}
-
-pub(super) struct StreamToolArmContext<'a> {
-    pub(super) shared_owned: &'a Arc<SharedData>,
-    pub(super) gateway: &'a Arc<dyn TurnGateway>,
-    pub(super) channel_id: ChannelId,
-    pub(super) provider: &'a ProviderKind,
-    pub(super) user_text_owned: &'a String,
-    pub(super) request_owner_name: &'a str,
-    pub(super) adk_session_key: &'a Option<String>,
-    pub(super) adk_session_name: &'a Option<String>,
-    pub(super) role_binding: &'a Option<RoleBinding>,
-    pub(super) voice_progress_playback_channel_id: Option<ChannelId>,
-    pub(super) single_message_panel_footer_mode: bool,
-    pub(super) footer_owner: super::super::super::footer_view_reconciler::CompletionFooterOwner,
-    pub(super) current_msg_id: MessageId,
-}
-
-pub(super) struct StreamToolArmState<'a> {
-    pub(super) state_dirty: &'a mut bool,
-    pub(super) inflight_state: &'a mut InflightTurnState,
-    pub(super) persisted_inflight_baseline: &'a mut InflightTurnState,
-    pub(super) stream_tick_expected_identity:
-        &'a crate::services::discord::inflight::InflightTurnIdentity,
-    pub(super) expected_current_message: &'a mut (u64, usize),
-    pub(super) current_tool_line: &'a mut Option<String>,
-    pub(super) prev_tool_status: &'a mut Option<String>,
-    pub(super) last_tool_name: &'a mut Option<String>,
-    pub(super) last_tool_summary: &'a mut Option<String>,
-    pub(super) any_tool_used: &'a mut bool,
-    pub(super) has_post_tool_text: &'a mut bool,
-    pub(super) last_assistant_text_line: &'a mut Option<String>,
-    pub(super) spin_idx: &'a mut usize,
-    pub(super) transcript_events: &'a mut Vec<SessionTranscriptEvent>,
-    pub(super) pending_status_tool_results: &'a mut VecDeque<String>,
-    pub(super) pending_status_tool_results_by_id: &'a mut std::collections::HashMap<String, String>,
-    pub(super) long_running_placeholder_active: &'a mut LongRunningPlaceholderActive,
-    pub(super) active_background_child_session_ids: &'a mut Vec<i64>,
-    pub(super) pending_long_running_open_after_state_save:
-        &'a mut PendingLongRunningOpenAfterStateSave,
-    pub(super) pending_long_running_retarget_after_state_save:
-        &'a mut PendingLongRunningRetargetAfterStateSave,
-    pub(super) restart_followup_pending: &'a mut bool,
-    pub(super) last_edit_text: &'a mut String,
-    pub(super) full_response: &'a mut String,
-    pub(super) status_panel_dirty: &'a mut bool,
-}
+mod authority;
+#[cfg(test)]
+mod authority_tests;
+mod task_notification;
+mod types;
+pub(super) use authority::{StreamToolArmOutcome, reconcile_exact_stream_frame_after_tool_outcome};
+use authority::{
+    StreamToolAuthorityContext, TerminalToolResultFence, VisibleMutationAuthority,
+    fence_restart_visible_mutation, fence_terminal_tool_result_transition,
+    stream_tool_outcome_after_restart_authority,
+};
+use task_notification::{StreamTaskNotificationContext, handle_stream_task_notification};
+pub(super) use types::{StreamToolArmContext, StreamToolArmMessage, StreamToolArmState};
 
 #[rustfmt::skip]
 pub(super) async fn handle_stream_tool_message(
@@ -380,33 +282,14 @@ pub(super) async fn handle_stream_tool_message(
             let restart_bridge_authorized = if !restart_followup_pending
                 && is_dcserver_restart_command(&input)
             {
-                let intended_authority =
-                    crate::services::discord::inflight::StreamRelayAuthority::from_state(
-                        inflight_state,
-                    );
-                let outcome =
-                    crate::services::discord::inflight::save_stream_tick_state_if_bridge_authority(
-                        persisted_inflight_baseline,
-                        inflight_state,
-                        stream_tick_expected_identity,
-                        expected_current_message.0,
-                        expected_current_message.1,
-                        "turn_bridge::stream_loop::tool_restart_visible_fence",
-                    );
-                if matches!(
-                    outcome,
-                    crate::services::discord::inflight::GuardedSaveOutcome::Saved
-                ) {
-                    *expected_current_message = (
-                        inflight_state.current_msg_id,
-                        inflight_state.current_msg_len,
-                    );
-                }
-                let authority = visible_mutation_authority_after_guarded_save(
-                    outcome,
+                let authority = fence_restart_visible_mutation(StreamToolAuthorityContext {
+                    shared_owned: &shared_owned,
+                    gateway: &gateway,
+                    persisted_inflight_baseline,
                     inflight_state,
-                    intended_authority,
-                );
+                    stream_tick_expected_identity,
+                    expected_current_message,
+                });
                 restart_visible_authority = Some(authority);
                 authority == VisibleMutationAuthority::Authorized
             } else {
@@ -460,74 +343,30 @@ pub(super) async fn handle_stream_tool_message(
             // the terminal PATCH before any ToolResult side effect so an I/O
             // failure can retain and replay this exact frame without duplicate
             // transcript/status mutations.
-            let terminal_transition = long_running_placeholder_active.as_ref().and_then(
-                |(key, _, close_trigger, ack_consumed)| {
-                    let monitor_like = matches!(
-                        close_trigger,
-                        super::super::super::formatting::LongRunningCloseTrigger::MonitorLike
-                    );
-                    let is_dispatch_ack = !monitor_like && !ack_consumed;
-                    let pending_retarget_matches_key =
-                        pending_long_running_retarget_after_state_save
-                            .as_ref()
-                            .is_some_and(|(pending_key, _, _, _, _)| pending_key == key);
-                    (monitor_like || (is_dispatch_ack && is_error))
-                        .then_some(())
-                        .filter(|_| !pending_retarget_matches_key)
-                        .map(|()| {
-                            let target = if is_error {
-                                super::super::super::placeholder_controller::PlaceholderLifecycle::Aborted
-                            } else {
-                                super::super::super::placeholder_controller::PlaceholderLifecycle::Completed
-                            };
-                            (key.clone(), target)
-                        })
-                },
-            );
-            let mut prefenced_terminal_transition = None;
-            let mut terminal_transition_suppressed = false;
-            if let Some((key, target)) = terminal_transition {
-                let intended_authority =
-                    crate::services::discord::inflight::StreamRelayAuthority::from_state(
-                        inflight_state,
-                    );
-                let outcome =
-                    crate::services::discord::inflight::save_stream_tick_state_if_bridge_authority(
-                        persisted_inflight_baseline,
-                        inflight_state,
-                        stream_tick_expected_identity,
-                        expected_current_message.0,
-                        expected_current_message.1,
-                        "turn_bridge::stream_loop::terminal_tool_result_visible_fence",
-                    );
-                if outcome == crate::services::discord::inflight::GuardedSaveOutcome::Saved {
-                    *expected_current_message = (
-                        inflight_state.current_msg_id,
-                        inflight_state.current_msg_len,
-                    );
-                }
-                let authority = visible_mutation_authority_after_guarded_save(
-                    outcome,
+            let terminal_fence = fence_terminal_tool_result_transition(
+                StreamToolAuthorityContext {
+                    shared_owned: &shared_owned,
+                    gateway: &gateway,
+                    persisted_inflight_baseline,
                     inflight_state,
-                    intended_authority,
-                );
-                match terminal_tool_result_transition_permission(authority) {
-                    Ok(true) => {
-                        prefenced_terminal_transition = Some(
-                            shared_owned
-                                .ui
-                                .placeholder_controller
-                                .transition(gateway.as_ref(), key, target)
-                                .await,
-                        );
-                    }
-                    Ok(false) => terminal_transition_suppressed = true,
-                    Err(outcome) => {
+                    stream_tick_expected_identity,
+                    expected_current_message,
+                },
+                &long_running_placeholder_active,
+                &pending_long_running_retarget_after_state_save,
+                is_error,
+            )
+            .await;
+            let (mut prefenced_terminal_transition, terminal_transition_suppressed) =
+                match terminal_fence {
+                    TerminalToolResultFence::NoTransition => (None, false),
+                    TerminalToolResultFence::Prefenced(outcome) => (Some(outcome), false),
+                    TerminalToolResultFence::Suppressed => (None, true),
+                    TerminalToolResultFence::Stop(outcome) => {
                         tool_outcome = outcome;
                         break 'tool_result;
                     }
-                }
-            }
+                };
             // Resolve delayed results by id; preserve the FIFO fallback.
             let status_tool_name = match tool_use_id.as_deref() {
                 Some(id) => pending_status_tool_results_by_id
@@ -731,94 +570,26 @@ pub(super) async fn handle_stream_tool_message(
             kind,
             ..
         } => {
-            inflight_state.task_notification_kind = merge_task_notification_kind(
-                inflight_state.task_notification_kind,
+            handle_stream_task_notification(
+                tool_use_id,
+                summary,
+                status,
                 kind,
-            );
-            state_dirty = true;
-            record_placeholder_live_event(
-                shared_owned.as_ref(),
-                channel_id,
-                super::super::super::placeholder_live_events::RecentPlaceholderEvent::task_notification(
-                    kind.as_str(),
-                    &status,
-                    &summary,
-                ),
-            );
-            status_panel_dirty |= record_status_panel_events(
-                shared_owned.as_ref(),
-                channel_id,
-                super::super::super::placeholder_live_events::status_events_from_task_notification_with_tool_use_id(
-                    kind.as_str(),
-                    &status,
-                    &summary,
-                    tool_use_id.as_deref(),
-                ),
-            );
-            if single_message_panel_footer_mode {
-                let indicator =
-                    super::super::super::single_message_panel::single_message_panel_spinner_frame(
-                        spin_idx,
-                    );
-                spin_idx = spin_idx.wrapping_add(1);
-                refresh_bridge_footer(
-                    shared_owned.as_ref(),
+                StreamTaskNotificationContext {
+                    shared_owned: shared_owned.as_ref(),
                     channel_id,
+                    single_message_panel_footer_mode,
                     footer_owner,
-                    indicator,
-                )
-                .await;
-            }
-            if task_notification_closes_background_child(kind, &status) {
-                let close_status = if matches!(
-                    status.trim().to_ascii_lowercase().as_str(),
-                    "aborted" | "cancelled" | "canceled" | "failed" | "error"
-                ) {
-                    "aborted"
-                } else {
-                    "completed"
-                };
-                close_next_tracked_background_child(
-                    shared_owned.pg_pool.as_ref(),
-                    &mut active_background_child_session_ids,
-                    close_status,
-                    "task notification",
-                )
-                .await;
-                // #1670: `merge_task_notification_kind` is an
-                // absorb operator (priority-max). Without an
-                // explicit release on the terminal status the
-                // outer `inflight_state.task_notification_kind`
-                // sticks at Subagent/Background past the child
-                // close, which then misroutes downstream
-                // suppression decisions and persists into the
-                // saved inflight when the watcher takes over.
-                //
-                // codex P2 followup: only release the closed
-                // child's kind once ALL tracked children have
-                // closed. If a lower-priority child is the
-                // last tracked one while a higher-priority
-                // active classification is absorbed, keep the
-                // higher-priority kind instead of clearing it.
-                if active_background_child_session_ids.is_empty() {
-                    inflight_state.task_notification_kind =
-                        release_task_notification_kind(
-                            inflight_state.task_notification_kind,
-                            kind,
-                        );
-                }
-            }
-            push_transcript_event(
-                &mut transcript_events,
-                SessionTranscriptEvent {
-                    kind: SessionTranscriptEventKind::Task,
-                    tool_name: None,
-                    summary: Some(summary.clone()),
-                    content: summary,
-                    status: Some("info".to_string()),
-                    is_error: false,
+                    inflight_state,
+                    state_dirty: &mut state_dirty,
+                    status_panel_dirty: &mut status_panel_dirty,
+                    spin_idx: &mut spin_idx,
+                    active_background_child_session_ids:
+                        &mut active_background_child_session_ids,
+                    transcript_events: &mut transcript_events,
                 },
-            );
+            )
+            .await;
         }
     }
 
@@ -848,115 +619,5 @@ pub(super) async fn handle_stream_tool_message(
         stream_tool_outcome_after_restart_authority(restart_visible_authority)
     } else {
         tool_outcome
-    }
-}
-
-#[cfg(test)]
-mod authority_tests {
-    use super::*;
-
-    fn bridge_state(channel_id: u64) -> InflightTurnState {
-        InflightTurnState::new(
-            ProviderKind::Codex,
-            channel_id,
-            Some("adk-4259-r8".to_string()),
-            343_742_347_365_974_026,
-            77_010,
-            18,
-            "queued restart".to_string(),
-            Some("session".to_string()),
-            Some("AgentDesk-codex-r8-restart".to_string()),
-            Some("/tmp/AgentDesk-codex-r8-restart.jsonl".to_string()),
-            None,
-            512,
-        )
-    }
-
-    #[test]
-    fn queued_restart_foreign_authority_propagates_loss_while_self_delegation_continues() {
-        let bridge = bridge_state(42_593_120);
-        let intended =
-            crate::services::discord::inflight::StreamRelayAuthority::from_state(&bridge);
-        let mut foreign = bridge.clone();
-        foreign.set_watcher_owner_channel_id(foreign.channel_id + 1);
-        foreign.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
-        let foreign_authority = visible_mutation_authority_after_guarded_save(
-            crate::services::discord::inflight::GuardedSaveOutcome::IdentityMismatch,
-            &foreign,
-            intended,
-        );
-        assert_eq!(foreign_authority, VisibleMutationAuthority::AuthorityLost);
-        assert_eq!(
-            stream_tool_outcome_after_restart_authority(Some(foreign_authority)),
-            StreamToolArmOutcome::AuthorityLost,
-        );
-
-        let delegated =
-            crate::services::discord::inflight::StreamRelayAuthority::from_state(&foreign);
-        let self_delegated = visible_mutation_authority_after_guarded_save(
-            crate::services::discord::inflight::GuardedSaveOutcome::Saved,
-            &foreign,
-            delegated,
-        );
-        assert_eq!(self_delegated, VisibleMutationAuthority::Suppressed);
-        assert_eq!(
-            stream_tool_outcome_after_restart_authority(Some(self_delegated)),
-            StreamToolArmOutcome::Continue,
-        );
-    }
-
-    #[test]
-    fn terminal_tool_result_fence_maps_handoff_loss_and_io_retry_fail_closed() {
-        assert_eq!(
-            terminal_tool_result_transition_permission(VisibleMutationAuthority::Authorized),
-            Ok(true),
-        );
-        assert_eq!(
-            terminal_tool_result_transition_permission(VisibleMutationAuthority::Suppressed),
-            Ok(false),
-        );
-        assert_eq!(
-            terminal_tool_result_transition_permission(VisibleMutationAuthority::AuthorityLost),
-            Err(StreamToolArmOutcome::AuthorityLost),
-        );
-        assert_eq!(
-            terminal_tool_result_transition_permission(VisibleMutationAuthority::Retry),
-            Err(StreamToolArmOutcome::RetryExactFrame),
-        );
-    }
-
-    #[test]
-    fn transient_terminal_tool_result_fence_requeues_the_exact_frame_at_front() {
-        let mut pending = std::collections::VecDeque::from([StreamMessage::Text {
-            content: "later frame".to_string(),
-        }]);
-        let frame = StreamMessage::ToolResult {
-            content: "exact terminal payload".to_string(),
-            is_error: true,
-            tool_use_id: Some("tool-4259-r9".to_string()),
-        };
-        let mut retry_retained = false;
-        assert!(reconcile_exact_stream_frame_after_tool_outcome(
-            &mut pending,
-            frame,
-            StreamToolArmOutcome::RetryExactFrame,
-            &mut retry_retained,
-        ));
-        assert!(retry_retained);
-        let Some(StreamMessage::ToolResult {
-            content,
-            is_error,
-            tool_use_id,
-        }) = pending.pop_front()
-        else {
-            panic!("exact ToolResult must remain at queue front");
-        };
-        assert_eq!(content, "exact terminal payload");
-        assert!(is_error);
-        assert_eq!(tool_use_id.as_deref(), Some("tool-4259-r9"));
-        assert!(matches!(
-            pending.pop_front(),
-            Some(StreamMessage::Text { content }) if content == "later frame"
-        ));
     }
 }

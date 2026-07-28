@@ -1,20 +1,11 @@
 //! #4230 S6 stream receive/drain loop and its cancel, handoff, tick, and latency gates.
 
-use std::collections::VecDeque;
-use std::sync::Arc;
-
-use super::bridge_latency_spans::BridgeLatencySpans;
 use super::runtime_handoff_loop::{
     RuntimeHandoffLoopContext, RuntimeHandoffLoopMessage, RuntimeHandoffLoopState,
     handle_runtime_handoff_loop_message,
 };
-use super::stream_tick::guarded_persist::{
-    StreamTickCandidateSaveContext, settle_pending_current_message_candidate_on_loop_exit,
-};
 use super::stream_tick::{
-    BridgeStreamTickContext, BridgeStreamTickState, LongRunningPlaceholderActive,
-    PendingLongRunningOpenAfterStateSave, PendingLongRunningRetargetAfterStateSave,
-    StreamTickOutcome, run_bridge_stream_tick,
+    BridgeStreamTickContext, BridgeStreamTickState, StreamTickOutcome, run_bridge_stream_tick,
 };
 use super::{streaming_edit_text::TuiErrorClassification, *};
 use content_arms::{
@@ -34,114 +25,19 @@ mod expected_identity;
 mod expected_identity_tests;
 mod message_conversion;
 mod tool_arms;
+mod types;
 pub(super) use exit_reconcile::StreamLoopOutcome;
 use exit_reconcile::{
-    RETAINED_STREAM_RETRY_BACKOFF, reconcile_saved_exit_candidate, retained_stream_retry_backoff,
-    should_exit_completed_turn_on_cancel, stream_loop_should_continue,
+    StreamLoopExitCandidateContext, retained_stream_retry_backoff,
+    settle_and_reconcile_exit_candidate, should_exit_completed_turn_on_cancel,
+    stream_loop_should_continue,
 };
 use expected_identity::refresh_stream_tick_expected_identity_after_handoff;
-
-pub(super) struct StreamLoopContext {
-    pub(super) shared_owned: Arc<SharedData>,
-    pub(super) gateway: Arc<dyn TurnGateway>,
-    pub(super) channel_id: ChannelId,
-    pub(super) provider: ProviderKind,
-    pub(super) cancel_token: Arc<crate::services::provider::CancelToken>,
-    pub(super) user_text_owned: String,
-    pub(super) request_owner_name: String,
-    pub(super) adk_session_key: Option<String>,
-    pub(super) adk_session_name: Option<String>,
-    pub(super) adk_session_info: Option<String>,
-    pub(super) adk_cwd: Option<String>,
-    pub(super) dispatch_id: Option<String>,
-    pub(super) role_binding: Option<RoleBinding>,
-    pub(super) turn_id: String,
-    pub(super) voice_progress_playback_channel_id: Option<ChannelId>,
-    pub(super) single_message_panel_footer_mode: bool,
-    pub(super) footer_owner: super::super::footer_view_reconciler::CompletionFooterOwner,
-    pub(super) status_panel_started_at: i64,
-    pub(super) status_interval: std::time::Duration,
-    pub(super) context_window_tokens: u64,
-    pub(super) context_compact_percent: u64,
-}
-
-pub(super) struct StreamLoopState<'a> {
-    pub(super) rx: &'a mut super::StreamMessageReceiverAdapter,
-    pub(super) full_response: &'a mut String,
-    pub(super) last_edit_text: &'a mut String,
-    pub(super) done: &'a mut bool,
-    pub(super) cancelled: &'a mut bool,
-    pub(super) rx_disconnected: &'a mut bool,
-    pub(super) current_tool_line: &'a mut Option<String>,
-    pub(super) prev_tool_status: &'a mut Option<String>,
-    pub(super) last_tool_name: &'a mut Option<String>,
-    pub(super) last_tool_summary: &'a mut Option<String>,
-    pub(super) accumulated_input_tokens: &'a mut u64,
-    pub(super) accumulated_cache_create_tokens: &'a mut u64,
-    pub(super) accumulated_cache_read_tokens: &'a mut u64,
-    pub(super) accumulated_output_tokens: &'a mut u64,
-    pub(super) spin_idx: &'a mut usize,
-    pub(super) restart_followup_pending: &'a mut bool,
-    pub(super) any_tool_used: &'a mut bool,
-    pub(super) has_post_tool_text: &'a mut bool,
-    pub(super) tmux_handed_off: &'a mut bool,
-    pub(super) watcher_owns_assistant_relay: &'a mut bool,
-    pub(super) watcher_relay_available_for_turn: &'a mut bool,
-    pub(super) watcher_handoff_claim_outcome: &'a mut WatcherHandoffClaimOutcome,
-    pub(super) standby_relay_owns_output: &'a mut bool,
-    pub(super) last_assistant_text_line: &'a mut Option<String>,
-    pub(super) long_running_placeholder_active: &'a mut LongRunningPlaceholderActive,
-    pub(super) active_background_child_session_ids: &'a mut Vec<i64>,
-    pub(super) transport_error: &'a mut bool,
-    pub(super) transcript_events: &'a mut Vec<SessionTranscriptEvent>,
-    pub(super) resume_failure_detected: &'a mut bool,
-    pub(super) session_handshake_seen: &'a mut bool,
-    pub(super) terminal_session_reset_required: &'a mut bool,
-    pub(super) recovery_retry: &'a mut bool,
-    pub(super) last_adk_heartbeat: &'a mut std::time::Instant,
-    pub(super) pending_stream_messages: &'a mut VecDeque<StreamMessage>,
-    pub(super) pending_status_tool_results: &'a mut VecDeque<String>,
-    pub(super) pending_status_tool_results_by_id: &'a mut std::collections::HashMap<String, String>,
-    pub(super) last_inflight_long_run_heartbeat: &'a mut std::time::Instant,
-    pub(super) last_activity_heartbeat_at: &'a mut Option<std::time::Instant>,
-    pub(super) terminal_control_ready_observed: &'a mut bool,
-    pub(super) terminal_control_drain_until: &'a mut Option<std::time::Instant>,
-    pub(super) current_msg_id: &'a mut MessageId,
-    pub(super) expected_current_message: &'a mut (u64, usize),
-    pub(super) bridge_created_response_placeholder_msg_id: &'a mut Option<MessageId>,
-    pub(super) response_sent_offset: &'a mut usize,
-    pub(super) bridge_confirmed_response_sent_offset: &'a mut usize,
-    pub(super) streamed_assistant_text_this_turn: &'a mut bool,
-    pub(super) streaming_rollover_frozen_msg_ids: &'a mut Vec<MessageId>,
-    pub(super) terminal_full_replay_cleanup_msg_ids: &'a mut Vec<MessageId>,
-    pub(super) tmux_last_offset: &'a mut Option<u64>,
-    pub(super) watcher_owner_channel_id: &'a mut ChannelId,
-    pub(super) new_session_id: &'a mut Option<String>,
-    pub(super) new_raw_provider_session_id: &'a mut Option<String>,
-    pub(super) inflight_state: &'a mut InflightTurnState,
-    pub(super) last_status_edit: &'a mut tokio::time::Instant,
-    pub(super) first_answer_relayed: &'a mut bool,
-    pub(super) last_session_panel_lifecycle_refresh: &'a mut tokio::time::Instant,
-    pub(super) status_panel_msg_id: &'a mut Option<MessageId>,
-    pub(super) last_status_panel_text: &'a mut String,
-    pub(super) status_panel_dirty: &'a mut bool,
-    pub(super) last_status_panel_edit: &'a mut tokio::time::Instant,
-    pub(super) bridge_spans: &'a mut BridgeLatencySpans,
-    pub(super) status_panel_generation: &'a mut u64,
-    pub(super) entry_watcher_epoch_current: &'a mut bool,
-}
-
-pub(super) struct StreamLoopOutput {
-    pub(super) outcome: StreamLoopOutcome,
-    pub(super) tui_error_classification: TuiErrorClassification,
-    pub(super) pending_long_running_open_after_state_save: PendingLongRunningOpenAfterStateSave,
-    pub(super) pending_long_running_retarget_after_state_save:
-        PendingLongRunningRetargetAfterStateSave,
-}
+pub(super) use types::{StreamLoopContext, StreamLoopOutput, StreamLoopState};
 
 pub(super) async fn run_stream_loop(
     ctx: StreamLoopContext,
-    mut state: StreamLoopState<'_>,
+    state: StreamLoopState<'_>,
 ) -> StreamLoopOutput {
     let (shared_owned, gateway) = (ctx.shared_owned, ctx.gateway);
     let (channel_id, provider) = (ctx.channel_id, ctx.provider);
@@ -1055,29 +951,18 @@ pub(super) async fn run_stream_loop(
     *state.bridge_spans = bridge_spans;
     *state.status_panel_generation = status_panel_generation;
 
-    let current_msg_id_before_exit_settle = *state.current_msg_id;
-    if settle_pending_current_message_candidate_on_loop_exit(StreamTickCandidateSaveContext {
+    settle_and_reconcile_exit_candidate(StreamLoopExitCandidateContext {
+        shared: shared_owned.as_ref(),
         gateway: gateway.as_ref(),
         provider: &provider,
         token_hash: &shared_owned.token_hash,
         channel_id,
-        persisted_baseline: &mut persisted_inflight_baseline,
-        inflight_state: state.inflight_state,
+        persisted_inflight_baseline: &mut persisted_inflight_baseline,
         expected_identity: &stream_tick_expected_identity,
-        expected_current_message: state.expected_current_message,
-        current_msg_id: state.current_msg_id,
         pending_current_message_candidate: &mut pending_current_message_candidate,
-        bridge_created_response_placeholder_msg_id: state
-            .bridge_created_response_placeholder_msg_id,
+        state,
     })
-    .await
-    {
-        reconcile_saved_exit_candidate(
-            shared_owned.as_ref(),
-            &mut state,
-            current_msg_id_before_exit_settle,
-        );
-    }
+    .await;
 
     StreamLoopOutput {
         outcome: loop_outcome,

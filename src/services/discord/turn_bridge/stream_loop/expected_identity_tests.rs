@@ -1,8 +1,8 @@
+use super::exit_reconcile::RETAINED_STREAM_RETRY_BACKOFF;
 use super::tool_arms::{StreamToolArmOutcome, reconcile_exact_stream_frame_after_tool_outcome};
 use super::{
-    RETAINED_STREAM_RETRY_BACKOFF, refresh_stream_tick_expected_identity_after_handoff,
-    retained_stream_retry_backoff, should_exit_completed_turn_on_cancel,
-    stream_loop_should_continue,
+    refresh_stream_tick_expected_identity_after_handoff, retained_stream_retry_backoff,
+    should_exit_completed_turn_on_cancel, stream_loop_should_continue,
 };
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::discord::inflight::{
