@@ -362,6 +362,11 @@ pub(crate) async fn perform_resume_rebind(
         Some(lock) => Some(lock.lock().await),
         None => None,
     };
+    // Keep the guard through the bounded, conservatively-biased pane probe below.
+    // Releasing it earlier would let intake claim the channel from the old runtime
+    // snapshot while `/resume` is still deciding whether that runtime must be kept.
+    // The maximum 10-second pause is preferable to launching against a stale
+    // provider session; probe failures preserve the runtime rather than destroy it.
 
     let Some(SessionRebindContext {
         resolved_session_key: _,
