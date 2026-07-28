@@ -5,8 +5,8 @@ use super::{
     JsonContainerPolicy, RetainedOutputBudget, capture_json_container_class_ids,
     create_plain_object_classifier, evaluate_tick_action_with_retained_output_limit,
     js_value_to_json_with_budgets, js_value_to_json_with_byte_budget, load_single_routine_script,
-    validate_routine_script_source, validate_routine_script_source_with_budget,
-    with_bounded_quickjs_context,
+    quickjs_exception_detail, validate_routine_script_source,
+    validate_routine_script_source_with_budget, with_bounded_quickjs_context,
 };
 use std::path::Path;
 
@@ -42,6 +42,17 @@ fn validate_test_source_with_retained_limit(
         &retained_output_budget,
     );
     (result, retained_output_budget)
+}
+
+fn quickjs_exception_detail_with_limit(
+    source: &str,
+    maximum_retained_output_bytes: usize,
+) -> anyhow::Result<String> {
+    with_bounded_quickjs_context(|ctx| {
+        let error = ctx.eval::<(), _>(source.as_bytes().to_vec()).unwrap_err();
+        let budget = RetainedOutputBudget::new(maximum_retained_output_bytes);
+        quickjs_exception_detail(&ctx, &error, &budget)
+    })
 }
 
 fn convert_test_json_with_byte_budget(
@@ -810,6 +821,48 @@ fn quickjs_eval_error_includes_primitive_throw_value() {
 
     let error = load_single_routine_script(dir.path(), &path).unwrap_err();
     assert!(error.to_string().contains("bad config"));
+}
+
+#[test]
+fn quickjs_primitive_exception_budget_accepts_exact_utf8_boundary() {
+    assert_eq!(
+        quickjs_exception_detail_with_limit(r#"throw "é💣";"#, 6).unwrap(),
+        "é💣"
+    );
+    let error = quickjs_exception_detail_with_limit(r#"throw "é💣";"#, 5).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "routine retained output exceeds maximum 5 bytes"
+    );
+}
+
+#[test]
+fn quickjs_stack_budget_accepts_exact_utf8_boundary() {
+    let source = r#"const error = new Error(""); error.stack = "💣"; throw error;"#;
+    assert_eq!(
+        quickjs_exception_detail_with_limit(source, 4).unwrap(),
+        "💣"
+    );
+    let error = quickjs_exception_detail_with_limit(source, 3).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "routine retained output exceeds maximum 3 bytes"
+    );
+}
+
+#[test]
+fn retained_display_budget_accepts_exact_utf8_boundary() {
+    assert_eq!(
+        RetainedOutputBudget::new(6).retain_display("é💣").unwrap(),
+        "é💣"
+    );
+    let error = RetainedOutputBudget::new(5)
+        .retain_display("é💣")
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "routine retained output exceeds maximum 5 bytes"
+    );
 }
 
 #[test]

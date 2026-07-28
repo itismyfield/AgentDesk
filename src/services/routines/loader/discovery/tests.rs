@@ -199,6 +199,87 @@ fn routine_tree_source_budget_accepts_shrink_to_exact_boundary_before_read() {
     assert_eq!(snapshots[0].read_source().unwrap(), "ok");
 }
 
+#[cfg(unix)]
+#[test]
+fn routine_tree_file_budget_spans_257_roots() {
+    let release = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(release.path().join("routine-helpers")).unwrap();
+    let configured_roots = (0..257)
+        .map(|index| {
+            let root = release.path().join(format!("root-{index:03}"));
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("routine.js"), "x").unwrap();
+            root
+        })
+        .collect::<Vec<_>>();
+    let (_, roots, _) = bind_routine_root_authority(&configured_roots, release.path()).unwrap();
+    let mut budget = super::TraversalBudget::new(super::DEFAULT_ROUTINE_TREE_LIMITS);
+
+    for root in roots.iter().take(256) {
+        let snapshots = super::collect_routine_script_paths_with_budget(
+            root,
+            super::RoutineDiscoveryHooks::default(),
+            &mut budget,
+        )
+        .unwrap();
+        assert_eq!(snapshots.len(), 1);
+    }
+    let error = super::collect_routine_script_paths_with_budget(
+        &roots[256],
+        super::RoutineDiscoveryHooks::default(),
+        &mut budget,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("maximum file count 256"));
+    assert!(budget.is_exhausted());
+}
+
+#[cfg(unix)]
+#[test]
+fn routine_tree_source_budget_spans_roots_at_exact_boundary() {
+    let release = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(release.path().join("routine-helpers")).unwrap();
+    let configured_roots = [release.path().join("first"), release.path().join("second")];
+    for root in &configured_roots {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join("routine.js"), "aa").unwrap();
+    }
+    let (_, roots, _) = bind_routine_root_authority(&configured_roots, release.path()).unwrap();
+    let limits = test_limits(2, 2, 1, 4);
+    let mut exact_budget = super::TraversalBudget::new(limits);
+    for root in &roots {
+        assert_eq!(
+            super::collect_routine_script_paths_with_budget(
+                root,
+                super::RoutineDiscoveryHooks::default(),
+                &mut exact_budget,
+            )
+            .unwrap()
+            .len(),
+            1
+        );
+    }
+
+    let mut overflow_budget = super::TraversalBudget::new(test_limits(2, 2, 1, 3));
+    super::collect_routine_script_paths_with_budget(
+        &roots[0],
+        super::RoutineDiscoveryHooks::default(),
+        &mut overflow_budget,
+    )
+    .unwrap();
+    let error = super::collect_routine_script_paths_with_budget(
+        &roots[1],
+        super::RoutineDiscoveryHooks::default(),
+        &mut overflow_budget,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("source bytes"));
+    assert!(error.to_string().contains("maximum 3"));
+    assert!(overflow_budget.is_exhausted());
+}
+
 #[test]
 fn shared_nonempty_contract_rejects_empty_snapshot() {
     let error = super::require_nonempty_routine_tree(&[]).unwrap_err();

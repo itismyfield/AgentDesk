@@ -33,10 +33,12 @@ pub(super) use authority::{
     bind_routine_root_authority_with_hook, validate_routine_authority_with_hook,
     validate_routine_roots,
 };
-use bounded_scan::{DEFAULT_ROUTINE_TREE_LIMITS, TraversalBudget};
 #[cfg(test)]
-use bounded_scan::{RoutineTreeLimits, collect_routine_script_paths_with_limits};
-pub(super) use bounded_scan::{collect_routine_script_paths, require_nonempty_routine_tree};
+use bounded_scan::collect_routine_script_paths_with_limits;
+pub(super) use bounded_scan::{
+    DEFAULT_ROUTINE_TREE_LIMITS, RoutineTreeLimits, TraversalBudget, collect_routine_script_paths,
+    collect_routine_script_paths_with_budget, require_nonempty_routine_tree,
+};
 
 #[derive(Debug)]
 pub(super) struct DiscoveredRoutineScript {

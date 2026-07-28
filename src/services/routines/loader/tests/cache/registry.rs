@@ -83,14 +83,52 @@ fn load_dirs_preserves_cached_override_when_root_scan_fails() {
         loader.get_script("shared.js").unwrap().unwrap().name,
         "Operator Shared"
     );
+    let retained_version = loader
+        .get_script("shared.js")
+        .unwrap()
+        .unwrap()
+        .script_version;
+    let retained_refs = loader.script_refs().unwrap();
+    let retained_failure_keys = loader
+        .state
+        .failed_scripts
+        .lock()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
 
     std::fs::remove_dir_all(&operator).unwrap();
     std::fs::write(&operator, "not a directory").unwrap();
 
-    assert_eq!(loader.load_dirs(&roots).unwrap(), 0);
+    let authority_error = loader.load_dirs(&roots).unwrap_err();
+    assert!(
+        authority_error.to_string().contains("not a directory"),
+        "{authority_error}"
+    );
     assert_eq!(
         loader.get_script("shared.js").unwrap().unwrap().name,
         "Operator Shared"
+    );
+    assert_eq!(loader.script_refs().unwrap(), retained_refs);
+    assert_eq!(
+        loader
+            .get_script("shared.js")
+            .unwrap()
+            .unwrap()
+            .script_version,
+        retained_version
+    );
+    assert_eq!(
+        loader
+            .state
+            .failed_scripts
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        retained_failure_keys
     );
 
     std::fs::remove_file(&operator).unwrap();
@@ -99,6 +137,14 @@ fn load_dirs_preserves_cached_override_when_root_scan_fails() {
     assert_eq!(
         loader.get_script("shared.js").unwrap().unwrap().name,
         "Operator Shared"
+    );
+    assert_eq!(
+        loader
+            .get_script("shared.js")
+            .unwrap()
+            .unwrap()
+            .script_version,
+        retained_version
     );
 }
 

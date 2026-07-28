@@ -15,14 +15,14 @@ const MAX_ROUTINE_TREE_DEPTH: usize = 16;
 const MAX_ROUTINE_TREE_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct RoutineTreeLimits {
-    pub(super) max_entries: usize,
-    pub(super) max_files: usize,
-    pub(super) max_depth: usize,
-    pub(super) max_source_bytes: u64,
+pub(in super::super) struct RoutineTreeLimits {
+    pub(in super::super) max_entries: usize,
+    pub(in super::super) max_files: usize,
+    pub(in super::super) max_depth: usize,
+    pub(in super::super) max_source_bytes: u64,
 }
 
-pub(super) const DEFAULT_ROUTINE_TREE_LIMITS: RoutineTreeLimits = RoutineTreeLimits {
+pub(in super::super) const DEFAULT_ROUTINE_TREE_LIMITS: RoutineTreeLimits = RoutineTreeLimits {
     max_entries: MAX_ROUTINE_TREE_ENTRIES,
     max_files: MAX_ROUTINE_TREE_FILES,
     max_depth: MAX_ROUTINE_TREE_DEPTH,
@@ -30,31 +30,42 @@ pub(super) const DEFAULT_ROUTINE_TREE_LIMITS: RoutineTreeLimits = RoutineTreeLim
 };
 
 #[derive(Debug)]
-pub(super) struct TraversalBudget {
+pub(in super::super) struct TraversalBudget {
     limits: RoutineTreeLimits,
     entries: usize,
     files: usize,
     source_bytes: u64,
+    exhausted: bool,
 }
 
 impl TraversalBudget {
-    pub(super) fn new(limits: RoutineTreeLimits) -> Self {
+    pub(in super::super) fn new(limits: RoutineTreeLimits) -> Self {
         Self {
             limits,
             entries: 0,
             files: 0,
             source_bytes: 0,
+            exhausted: false,
         }
     }
 
+    pub(in super::super) fn is_exhausted(&self) -> bool {
+        self.exhausted
+    }
+
     pub(super) fn record_entry(&mut self, directory: &Path) -> io::Result<()> {
-        self.entries = self.entries.checked_add(1).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "routine tree entry count overflow",
-            )
-        })?;
+        self.entries = match self.entries.checked_add(1) {
+            Some(entries) => entries,
+            None => {
+                self.exhausted = true;
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "routine tree entry count overflow",
+                ));
+            }
+        };
         if self.entries > self.limits.max_entries {
+            self.exhausted = true;
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -68,13 +79,18 @@ impl TraversalBudget {
     }
 
     pub(super) fn record_file(&mut self, path: &Path) -> io::Result<()> {
-        self.files = self.files.checked_add(1).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "routine tree file count overflow",
-            )
-        })?;
+        self.files = match self.files.checked_add(1) {
+            Some(files) => files,
+            None => {
+                self.exhausted = true;
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "routine tree file count overflow",
+                ));
+            }
+        };
         if self.files > self.limits.max_files {
+            self.exhausted = true;
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -102,13 +118,18 @@ impl TraversalBudget {
     }
 
     pub(super) fn reserve_source(&mut self, bytes: u64, path: &Path) -> io::Result<()> {
-        let total = self.source_bytes.checked_add(bytes).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "routine tree source byte count overflow",
-            )
-        })?;
+        let total = match self.source_bytes.checked_add(bytes) {
+            Some(total) => total,
+            None => {
+                self.exhausted = true;
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "routine tree source byte count overflow",
+                ));
+            }
+        };
         if total > self.limits.max_source_bytes {
+            self.exhausted = true;
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -130,10 +151,10 @@ pub(in super::super) fn collect_routine_script_paths(
     collect_routine_script_paths_with_limits(root, hooks, DEFAULT_ROUTINE_TREE_LIMITS)
 }
 
-pub(super) fn collect_routine_script_paths_with_limits(
+pub(in super::super) fn collect_routine_script_paths_with_budget(
     root: &ValidatedRoutineRoot,
     hooks: RoutineDiscoveryHooks<'_>,
-    limits: RoutineTreeLimits,
+    budget: &mut TraversalBudget,
 ) -> io::Result<Vec<DiscoveredRoutineScript>> {
     #[cfg(unix)]
     {
@@ -158,7 +179,6 @@ pub(super) fn collect_routine_script_paths_with_limits(
             forbidden_entry_identities: &root.forbidden_entry_identities,
             visited_directory_identities: HashSet::from([root_identity]),
         };
-        let mut budget = TraversalBudget::new(limits);
         verify_discovery_authority(hooks)?;
         let mut out = Vec::new();
         collect_routine_scripts_inner(
@@ -167,7 +187,7 @@ pub(super) fn collect_routine_script_paths_with_limits(
             0,
             hooks,
             &mut authority,
-            &mut budget,
+            budget,
             &mut out,
         )?;
         verify_discovery_authority(hooks)?;
@@ -176,12 +196,20 @@ pub(super) fn collect_routine_script_paths_with_limits(
     #[cfg(not(unix))]
     {
         verify_discovery_authority(hooks)?;
-        let mut budget = TraversalBudget::new(limits);
         let mut out = Vec::new();
-        collect_routine_scripts_inner(&root.canonical, 0, hooks, &mut budget, &mut out)?;
+        collect_routine_scripts_inner(&root.canonical, 0, hooks, budget, &mut out)?;
         verify_discovery_authority(hooks)?;
         Ok(out)
     }
+}
+
+pub(super) fn collect_routine_script_paths_with_limits(
+    root: &ValidatedRoutineRoot,
+    hooks: RoutineDiscoveryHooks<'_>,
+    limits: RoutineTreeLimits,
+) -> io::Result<Vec<DiscoveredRoutineScript>> {
+    let mut budget = TraversalBudget::new(limits);
+    collect_routine_script_paths_with_budget(root, hooks, &mut budget)
 }
 
 pub(in super::super) fn require_nonempty_routine_tree(

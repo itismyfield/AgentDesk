@@ -12,10 +12,11 @@ mod validation;
 #[cfg(test)]
 use discovery::candidate_failure_key;
 use discovery::{
-    DiscoveredRoutineScript, RoutineDiscoveryHooks, ValidatedHelperSurface, ValidatedRoutineRoot,
-    ValidatedRuntimeRoot, add_cached_candidates_for_root, bind_routine_root_authority,
-    collect_routine_script_paths, require_nonempty_routine_tree, routine_roots_identity,
-    script_ref, validate_routine_authority,
+    DEFAULT_ROUTINE_TREE_LIMITS, DiscoveredRoutineScript, RoutineDiscoveryHooks, RoutineTreeLimits,
+    TraversalBudget, ValidatedHelperSurface, ValidatedRoutineRoot, ValidatedRuntimeRoot,
+    add_cached_candidates_for_root, bind_routine_root_authority,
+    collect_routine_script_paths_with_budget, routine_roots_identity, script_ref,
+    validate_routine_authority,
 };
 #[cfg(test)]
 use evaluator::load_single_routine_script;
@@ -413,6 +414,19 @@ impl RoutineScriptLoader {
         roots: &[PathBuf],
         maximum_retained_output_bytes: usize,
     ) -> Result<usize> {
+        self.load_dirs_with_limits(
+            roots,
+            maximum_retained_output_bytes,
+            DEFAULT_ROUTINE_TREE_LIMITS,
+        )
+    }
+
+    fn load_dirs_with_limits(
+        &self,
+        roots: &[PathBuf],
+        maximum_retained_output_bytes: usize,
+        routine_tree_limits: RoutineTreeLimits,
+    ) -> Result<usize> {
         let _load_permit = self
             .state
             .load_gate
@@ -480,6 +494,7 @@ impl RoutineScriptLoader {
             .lock()
             .unwrap_or_else(recover_poisoned_lock)
             .clone();
+        let mut traversal_budget = TraversalBudget::new(routine_tree_limits);
 
         for root in &validated_roots {
             if !root.exists {
@@ -540,15 +555,18 @@ impl RoutineScriptLoader {
                 read_observer: None,
                 authority_check: Some(&authority_check),
             };
-            let entries_result =
-                collect_routine_script_paths(root, discovery_hooks).and_then(|entries| {
-                    require_nonempty_routine_tree(&entries)?;
-                    Ok(entries)
-                });
+            let entries_result = collect_routine_script_paths_with_budget(
+                root,
+                discovery_hooks,
+                &mut traversal_budget,
+            );
             self.verify_bound_authority(&runtime_root, current_dir_override.as_deref())?;
             let entries = match entries_result {
                 Ok(entries) => entries,
                 Err(e) => {
+                    if traversal_budget.is_exhausted() {
+                        return Err(e.into());
+                    }
                     tracing::warn!(
                         routines_dir = %root.canonical.display(),
                         configured_routines_dir = %root.configured.display(),
@@ -926,6 +944,7 @@ impl RoutineScriptLoader {
         for script in staged_scripts.values() {
             charge_existing_routine_output(
                 &retained_output_budget,
+                &script.source,
                 &script.name,
                 &script.metadata,
             )?;

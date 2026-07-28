@@ -42,9 +42,10 @@ pub(crate) fn validate_routine_tree(
     configured_root: &Path,
     configured_runtime_root: &Path,
 ) -> Result<RoutineValidationReport> {
-    validate_routine_tree_with_retained_output_limit(
+    validate_routine_tree_with_limits(
         configured_root,
         configured_runtime_root,
+        MAX_ROUTINE_RETAINED_OUTPUT_BYTES,
         MAX_ROUTINE_RETAINED_OUTPUT_BYTES,
     )
 }
@@ -53,6 +54,20 @@ fn validate_routine_tree_with_retained_output_limit(
     configured_root: &Path,
     configured_runtime_root: &Path,
     maximum_retained_output_bytes: usize,
+) -> Result<RoutineValidationReport> {
+    validate_routine_tree_with_limits(
+        configured_root,
+        configured_runtime_root,
+        maximum_retained_output_bytes,
+        MAX_ROUTINE_RETAINED_OUTPUT_BYTES,
+    )
+}
+
+fn validate_routine_tree_with_limits(
+    configured_root: &Path,
+    configured_runtime_root: &Path,
+    maximum_retained_output_bytes: usize,
+    maximum_report_bytes: usize,
 ) -> Result<RoutineValidationReport> {
     let configured_roots = [configured_root.to_path_buf()];
     let (runtime_authority, roots, helper_authority) =
@@ -103,12 +118,21 @@ fn validate_routine_tree_with_retained_output_limit(
         },
     )?;
 
+    let mut report_budget = RetainedOutputBudget::new(maximum_report_bytes);
+    charge_validation_path(&report_budget, &root.canonical)?;
+    charge_validation_path(&report_budget, &canonical_runtime_root)?;
+
     let mut failures = Vec::new();
     if let Err(error) = require_nonempty_routine_tree(&snapshots) {
+        let candidate_report_budget = report_budget.fork();
+        let script_ref = "<routine-root>";
+        charge_validation_file_identity(&candidate_report_budget, &root.canonical, script_ref)?;
+        let message = candidate_report_budget.retain_display(&error)?;
+        report_budget = candidate_report_budget;
         failures.push(RoutineValidationFailure {
             path: root.canonical.clone(),
-            script_ref: "<routine-root>".to_string(),
-            message: error.to_string(),
+            script_ref: script_ref.to_string(),
+            message,
         });
     }
     let mut validated_files = Vec::with_capacity(snapshots.len());
@@ -116,15 +140,19 @@ fn validate_routine_tree_with_retained_output_limit(
     for snapshot in snapshots {
         let candidate_output_budget = retained_output_budget.fork();
         authority_check()?;
-        let path = snapshot.path.clone();
-        let script_ref = script_ref(&root.canonical, &path);
+        let path = &snapshot.path;
+        let script_ref = script_ref(&root.canonical, path);
+        let candidate_report_budget = report_budget.fork();
+        charge_validation_file_identity(&candidate_report_budget, path, &script_ref)?;
         let source = match snapshot.read_source() {
             Ok(source) => source,
             Err(error) => {
+                let message = candidate_report_budget.retain_display(&error)?;
+                report_budget = candidate_report_budget;
                 failures.push(RoutineValidationFailure {
-                    path,
+                    path: path.clone(),
                     script_ref,
-                    message: error.to_string(),
+                    message,
                 });
                 continue;
             }
@@ -141,18 +169,24 @@ fn validate_routine_tree_with_retained_output_limit(
         }
         match evaluation {
             Ok(validated) => {
+                candidate_report_budget.charge(validated.name.len())?;
                 retained_output_budget = candidate_output_budget;
+                report_budget = candidate_report_budget;
                 validated_files.push(RoutineValidationFile {
-                    path,
+                    path: path.clone(),
                     script_ref,
                     name: validated.name,
                 });
             }
-            Err(error) => failures.push(RoutineValidationFailure {
-                path,
-                script_ref,
-                message: error.to_string(),
-            }),
+            Err(error) => {
+                let message = candidate_report_budget.retain_display(&error)?;
+                report_budget = candidate_report_budget;
+                failures.push(RoutineValidationFailure {
+                    path: path.clone(),
+                    script_ref,
+                    message,
+                });
+            }
         }
     }
 
@@ -172,14 +206,46 @@ fn validate_routine_tree_with_retained_output_limit(
     })
 }
 
+fn charge_validation_path(budget: &RetainedOutputBudget, path: &Path) -> Result<()> {
+    budget.charge(path.as_os_str().as_encoded_bytes().len())
+}
+
+fn charge_validation_file_identity(
+    budget: &RetainedOutputBudget,
+    path: &Path,
+    script_ref: &str,
+) -> Result<()> {
+    charge_validation_path(budget, path)?;
+    budget.charge(script_ref.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
 
-    fn write_routine(root: &Path, name: &str, source: &str) {
+    fn write_routine(root: &Path, name: &str, source: &str) -> usize {
         fs::create_dir_all(root).unwrap();
         fs::write(root.join(name), source).unwrap();
+        source.len()
+    }
+
+    fn report_payload_bytes(report: &RoutineValidationReport) -> usize {
+        let path_bytes = |path: &Path| path.as_os_str().as_encoded_bytes().len();
+        path_bytes(&report.root)
+            + path_bytes(&report.runtime_root)
+            + report
+                .validated_files
+                .iter()
+                .map(|file| path_bytes(&file.path) + file.script_ref.len() + file.name.len())
+                .sum::<usize>()
+            + report
+                .failures
+                .iter()
+                .map(|failure| {
+                    path_bytes(&failure.path) + failure.script_ref.len() + failure.message.len()
+                })
+                .sum::<usize>()
     }
 
     #[test]
@@ -213,41 +279,50 @@ mod tests {
         let runtime_root = temp.path().join("release-root");
         let root = runtime_root.join("routines");
         fs::create_dir_all(runtime_root.join("routine-helpers")).unwrap();
-        write_routine(
+        let first_source_bytes = write_routine(
             &root,
             "first.js",
             r#"agentdesk.routines.register({ name: "one", metadata: { key: "value" }, tick() { return {}; } });"#,
         );
-        write_routine(
+        let second_source_bytes = write_routine(
             &root,
             "second.js",
             r#"agentdesk.routines.register({ name: "two", metadata: { "é": "💣" }, tick() { return {}; } });"#,
         );
 
-        // first: 3 + 3 + 5 bytes; second: 3 + 2 + 4 bytes.
+        // first payload: 3 + 3 + 5 bytes; second: 3 + 2 + 4 bytes.
+        let exact_budget = first_source_bytes + second_source_bytes + 20;
         let report =
-            validate_routine_tree_with_retained_output_limit(&root, &runtime_root, 20).unwrap();
+            validate_routine_tree_with_retained_output_limit(&root, &runtime_root, exact_budget)
+                .unwrap();
         assert!(report.valid);
         assert_eq!(report.validated_files.len(), 2);
 
         let runtime_loader = super::super::RoutineScriptLoader::new().unwrap();
         assert_eq!(
             runtime_loader
-                .load_dirs_with_retained_output_limit(&[root.clone()], 20)
+                .load_dirs_with_retained_output_limit(&[root.clone()], exact_budget)
                 .unwrap(),
             2
         );
 
-        let error =
-            validate_routine_tree_with_retained_output_limit(&root, &runtime_root, 19).unwrap_err();
+        let error = validate_routine_tree_with_retained_output_limit(
+            &root,
+            &runtime_root,
+            exact_budget - 1,
+        )
+        .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "routine retained output exceeds maximum 19 bytes"
+            format!(
+                "routine retained output exceeds maximum {} bytes",
+                exact_budget - 1
+            )
         );
 
         let constrained_runtime_loader = super::super::RoutineScriptLoader::new().unwrap();
         let runtime_error = constrained_runtime_loader
-            .load_dirs_with_retained_output_limit(&[root], 19)
+            .load_dirs_with_retained_output_limit(&[root], exact_budget - 1)
             .unwrap_err();
         assert_eq!(runtime_error.to_string(), error.to_string());
         assert!(constrained_runtime_loader.script_refs().unwrap().is_empty());
@@ -264,20 +339,106 @@ mod tests {
             "a-failed.js",
             r#"agentdesk.routines.register({ name: "fail", tick: 1 });"#,
         );
-        write_routine(
+        let valid_source_bytes = write_routine(
             &root,
             "b-valid.js",
             r#"agentdesk.routines.register({ name: "ok", metadata: { k: "v" }, tick() { return {}; } });"#,
         );
 
-        let report =
-            validate_routine_tree_with_retained_output_limit(&root, &runtime_root, 4).unwrap();
+        let report = validate_routine_tree_with_retained_output_limit(
+            &root,
+            &runtime_root,
+            valid_source_bytes + 4,
+        )
+        .unwrap();
 
         assert!(!report.valid);
         assert_eq!(report.failures.len(), 1);
         assert_eq!(report.failures[0].script_ref, "a-failed.js");
         assert_eq!(report.validated_files.len(), 1);
         assert_eq!(report.validated_files[0].name, "ok");
+    }
+
+    #[test]
+    fn validation_report_budget_accepts_exact_utf8_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_root = temp.path().join("release-root");
+        let root = runtime_root.join("routines");
+        fs::create_dir_all(runtime_root.join("routine-helpers")).unwrap();
+        write_routine(
+            &root,
+            "é.js",
+            r#"agentdesk.routines.register({ name: "é💣", tick() { return {}; } });"#,
+        );
+        let unrestricted = validate_routine_tree(&root, &runtime_root).unwrap();
+        let exact_report_bytes = report_payload_bytes(&unrestricted);
+
+        let exact = validate_routine_tree_with_limits(
+            &root,
+            &runtime_root,
+            MAX_ROUTINE_RETAINED_OUTPUT_BYTES,
+            exact_report_bytes,
+        )
+        .unwrap();
+        assert!(exact.valid);
+        assert_eq!(exact.validated_files[0].name, "é💣");
+
+        let error = validate_routine_tree_with_limits(
+            &root,
+            &runtime_root,
+            MAX_ROUTINE_RETAINED_OUTPUT_BYTES,
+            exact_report_bytes - 1,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "routine retained output exceeds maximum {} bytes",
+                exact_report_bytes - 1
+            )
+        );
+    }
+
+    #[test]
+    fn validation_report_budget_aggregates_multiple_failure_messages() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_root = temp.path().join("release-root");
+        let root = runtime_root.join("routines");
+        fs::create_dir_all(runtime_root.join("routine-helpers")).unwrap();
+        for name in ["first.js", "second.js"] {
+            write_routine(
+                &root,
+                name,
+                r#"agentdesk.routines.register({ name: "fail", tick: 1 });"#,
+            );
+        }
+        let unrestricted = validate_routine_tree(&root, &runtime_root).unwrap();
+        assert_eq!(unrestricted.failures.len(), 2);
+        let exact_report_bytes = report_payload_bytes(&unrestricted);
+
+        let exact = validate_routine_tree_with_limits(
+            &root,
+            &runtime_root,
+            MAX_ROUTINE_RETAINED_OUTPUT_BYTES,
+            exact_report_bytes,
+        )
+        .unwrap();
+        assert_eq!(exact.failures.len(), 2);
+
+        let error = validate_routine_tree_with_limits(
+            &root,
+            &runtime_root,
+            MAX_ROUTINE_RETAINED_OUTPUT_BYTES,
+            exact_report_bytes - 1,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "routine retained output exceeds maximum {} bytes",
+                exact_report_bytes - 1
+            )
+        );
     }
 
     #[test]

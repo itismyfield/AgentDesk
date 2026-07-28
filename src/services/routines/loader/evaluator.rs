@@ -7,7 +7,7 @@ use rquickjs::{Array, Context, Function, Object, Runtime};
 use serde_json::{Map, Number, Value};
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
-use std::fmt::Display;
+use std::fmt::{Display, Write as _};
 use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -53,7 +53,7 @@ impl RetainedOutputBudget {
         }
     }
 
-    fn charge(&self, bytes: usize) -> Result<()> {
+    pub(super) fn charge(&self, bytes: usize) -> Result<()> {
         if self.state.exhausted.get() {
             return Err(self.limit_error());
         }
@@ -74,6 +74,32 @@ impl RetainedOutputBudget {
             "routine retained output exceeds maximum {} bytes",
             self.maximum
         )
+    }
+
+    pub(super) fn retain_display(&self, value: impl Display) -> Result<String> {
+        let mut writer = RetainedOutputWriter {
+            budget: self,
+            value: String::new(),
+        };
+        if write!(&mut writer, "{value}").is_err() {
+            return Err(self.limit_error());
+        }
+        Ok(writer.value)
+    }
+}
+
+struct RetainedOutputWriter<'a> {
+    budget: &'a RetainedOutputBudget,
+    value: String,
+}
+
+impl std::fmt::Write for RetainedOutputWriter<'_> {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        self.budget
+            .charge(value.len())
+            .map_err(|_| std::fmt::Error)?;
+        self.value.push_str(value);
+        Ok(())
     }
 }
 
@@ -102,6 +128,7 @@ pub(super) fn load_single_routine_script_from_source_with_budget(
     source: String,
     retained_output_budget: &RetainedOutputBudget,
 ) -> Result<LoadedRoutineScript> {
+    charge_routine_source_output(retained_output_budget, &source)?;
     let fallback_name = path.file_stem().unwrap_or_default().to_string_lossy();
     let script_ref = script_ref(root, path);
     let script_version = compute_policy_version(&source);
@@ -210,10 +237,12 @@ fn evaluate_tick_action_with_retained_output_limit(
         let js_context: rquickjs::Value = ctx
             .eval(format!("JSON.parse({context_literal})"))
             .map_err(|e| anyhow!("build routine tick context: {e}"))?;
+        let action_retained_output_budget =
+            RetainedOutputBudget::new(maximum_action_retained_output_bytes);
         let action_value: rquickjs::Value = match registration.tick.call((js_context,)) {
             Ok(value) => value,
             Err(e) => {
-                let detail = quickjs_exception_detail(&ctx, &e);
+                let detail = quickjs_exception_detail(&ctx, &e, &action_retained_output_budget)?;
                 return Err(anyhow!(
                     "routine script {} tick(ctx) failed: {detail}",
                     script.script_ref
@@ -226,8 +255,6 @@ fn evaluate_tick_action_with_retained_output_limit(
                 script.script_ref
             ));
         }
-        let action_retained_output_budget =
-            RetainedOutputBudget::new(maximum_action_retained_output_bytes);
         js_value_to_json_with_retained_output_budget(
             action_value,
             "routine action",
@@ -266,33 +293,114 @@ fn install_interrupt_handler(runtime: &Runtime, timeout: Duration) {
     runtime.set_interrupt_handler(Some(Box::new(move || started.elapsed() > timeout)));
 }
 
-fn quickjs_exception_detail(ctx: &rquickjs::Ctx<'_>, error: &rquickjs::Error) -> String {
+fn append_quickjs_exception_text(
+    output: &mut String,
+    value: rquickjs::String<'_>,
+    prefix: &str,
+    trim_start: bool,
+    retained_output_budget: &RetainedOutputBudget,
+) -> Result<bool> {
+    let value = value
+        .to_cstring()
+        .map_err(|_| anyhow!("routine QuickJS exception string conversion failed"))?;
+    // SAFETY: `value` owns a non-null QuickJS buffer of exactly `value.len()`
+    // bytes for this scope. Validate it before any Rust String allocation.
+    let bytes = unsafe { std::slice::from_raw_parts(value.as_ptr().cast::<u8>(), value.len()) };
+    let value = std::str::from_utf8(bytes)
+        .map_err(|_| anyhow!("routine QuickJS exception string is not UTF-8"))?;
+    let value = if trim_start {
+        value.trim_start()
+    } else {
+        value
+    };
+    if value.is_empty() {
+        return Ok(false);
+    }
+    let retained_bytes = prefix
+        .len()
+        .checked_add(value.len())
+        .ok_or_else(|| retained_output_budget.limit_error())?;
+    retained_output_budget.charge(retained_bytes)?;
+    output.push_str(prefix);
+    output.push_str(value);
+    Ok(true)
+}
+
+fn quickjs_exception_detail(
+    ctx: &rquickjs::Ctx<'_>,
+    error: &rquickjs::Error,
+    retained_output_budget: &RetainedOutputBudget,
+) -> Result<String> {
+    if !error.is_exception() {
+        return retained_output_budget.retain_display(error);
+    }
     let caught = ctx.catch();
     if let Some(exception) = caught.clone().into_exception() {
-        let message = exception.message().unwrap_or_default();
-        let stack = exception.stack().unwrap_or_default();
-        return match (message.is_empty(), stack.is_empty()) {
-            (false, false) => format!("{message}\n{stack}"),
-            (false, true) => message,
-            (true, false) => stack.trim_start().to_string(),
-            (true, true) => error.to_string(),
+        let message = exception
+            .as_object()
+            .get::<_, Option<rquickjs::convert::Coerced<rquickjs::String>>>("message")
+            .ok()
+            .flatten()
+            .map(|value| value.0);
+        let stack = exception
+            .as_object()
+            .get::<_, Option<rquickjs::convert::Coerced<rquickjs::String>>>("stack")
+            .ok()
+            .flatten()
+            .map(|value| value.0);
+        let mut detail = String::new();
+        let has_message = match message {
+            Some(message) => append_quickjs_exception_text(
+                &mut detail,
+                message,
+                "",
+                false,
+                retained_output_budget,
+            )?,
+            None => false,
         };
+        if let Some(stack) = stack {
+            append_quickjs_exception_text(
+                &mut detail,
+                stack,
+                if has_message { "\n" } else { "" },
+                !has_message,
+                retained_output_budget,
+            )?;
+        }
+        if !detail.is_empty() {
+            return Ok(detail);
+        }
     }
 
-    <rquickjs::convert::Coerced<String> as rquickjs::FromJs>::from_js(ctx, caught)
-        .map(|rquickjs::convert::Coerced(detail)| detail)
-        .ok()
-        .filter(|detail| !detail.is_empty())
-        .unwrap_or_else(|| error.to_string())
+    let mut detail = String::new();
+    if let Ok(rquickjs::convert::Coerced(value)) =
+        <rquickjs::convert::Coerced<rquickjs::String> as rquickjs::FromJs>::from_js(ctx, caught)
+        && append_quickjs_exception_text(&mut detail, value, "", false, retained_output_budget)?
+    {
+        return Ok(detail);
+    }
+    retained_output_budget.retain_display(error)
 }
 
 fn conversion_js_error(
     ctx: &rquickjs::Ctx<'_>,
     operation: impl Display,
     error: &rquickjs::Error,
+    retained_output_budget: Option<&RetainedOutputBudget>,
 ) -> anyhow::Error {
-    let detail = quickjs_exception_detail(ctx, error);
-    anyhow!("{operation}: {detail}")
+    let scratch_budget;
+    let retained_output_budget = match retained_output_budget {
+        Some(retained_output_budget) => retained_output_budget,
+        None => {
+            scratch_budget = RetainedOutputBudget::new(MAX_ROUTINE_RETAINED_OUTPUT_BYTES);
+            &scratch_budget
+        }
+    };
+    match quickjs_exception_detail(ctx, error, retained_output_budget) {
+        Ok(detail) => anyhow!("{operation}: {detail}"),
+        Err(error) => error,
+    }
 }
 
 struct CapturedRoutineRegistration<'js> {
@@ -439,8 +547,12 @@ fn snapshot_registered_routine<'js>(
         .into_function()
         .ok_or_else(|| anyhow!("routine script {script_ref} tick must be a function"))?;
     let tick_kind: i32 = tick_classifier.call((tick.clone(),)).map_err(|e| {
-        let detail = quickjs_exception_detail(&ctx, &e);
-        anyhow!("routine script {script_ref} tick classification failed: {detail}")
+        conversion_js_error(
+            &ctx,
+            format_args!("routine script {script_ref} tick classification failed"),
+            &e,
+            Some(retained_output_budget),
+        )
     })?;
     match tick_kind {
         0 => {}
@@ -557,14 +669,14 @@ fn capture_registered_routine<'js>(
         ctx.eval_with_options(source.as_bytes().to_vec(), eval_opts);
     let eval_error = eval_result
         .err()
-        .map(|error| quickjs_exception_detail(&ctx, &error));
+        .map(|error| quickjs_exception_detail(&ctx, &error, retained_output_budget));
     let (invocation_count, registration) = {
         let mut capture = capture.borrow_mut();
         capture.tick_classifier = None;
         capture.json_container_policy = None;
         (capture.invocation_count, capture.registration.take())
     };
-    if let Some(exception_detail) = eval_error {
+    if let Some(exception_detail) = eval_error.transpose()? {
         return Err(anyhow!(
             "JS eval error in routine script {}: {exception_detail}",
             path.display()
@@ -595,11 +707,20 @@ fn capture_registered_routine<'js>(
 
 pub(super) fn charge_existing_routine_output(
     retained_output_budget: &RetainedOutputBudget,
+    source: &str,
     name: &str,
     metadata: &Value,
 ) -> Result<()> {
+    charge_routine_source_output(retained_output_budget, source)?;
     retained_output_budget.charge(name.len())?;
     charge_existing_json_payload(retained_output_budget, metadata)
+}
+
+fn charge_routine_source_output(
+    retained_output_budget: &RetainedOutputBudget,
+    source: &str,
+) -> Result<()> {
+    retained_output_budget.charge(source.len())
 }
 
 fn charge_existing_json_payload(
@@ -691,7 +812,12 @@ fn copy_quickjs_string_with_budgets<'js>(
 ) -> Result<String> {
     let ctx = value.ctx().clone();
     let value = value.to_cstring().map_err(|e| {
-        conversion_js_error(&ctx, format_args!("{label} {kind} conversion failed"), &e)
+        conversion_js_error(
+            &ctx,
+            format_args!("{label} {kind} conversion failed"),
+            &e,
+            retained_output_budget,
+        )
     })?;
     // SAFETY: `value` owns a non-null QuickJS buffer of exactly `value.len()`
     // bytes for this scope. Treat it as bytes first because QuickJS preserves
@@ -835,6 +961,7 @@ fn js_value_to_json_inner<'js>(
                         array.ctx(),
                         format_args!("{label} array[{index}] conversion failed"),
                         &e,
+                        budgets.retained_output,
                     )
                 })?;
                 out.push(js_value_to_json_inner(
@@ -861,6 +988,7 @@ fn js_value_to_json_inner<'js>(
                     json_container_policy.plain_object_classifier.ctx(),
                     format_args!("{label} object classification failed"),
                     &e,
+                    budgets.retained_output,
                 )
             })?;
         if !is_plain_data_object {
@@ -880,6 +1008,7 @@ fn js_value_to_json_inner<'js>(
                         object.ctx(),
                         format_args!("{label} object key conversion failed"),
                         &e,
+                        budgets.retained_output,
                     )
                 })?;
                 if *remaining_nodes == 0 {
@@ -900,6 +1029,7 @@ fn js_value_to_json_inner<'js>(
                         object.ctx(),
                         format_args!("{label} field {key} conversion failed"),
                         &e,
+                        budgets.retained_output,
                     )
                 })?;
                 out.insert(
