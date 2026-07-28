@@ -4097,6 +4097,7 @@ mod delivery_lease_heartbeat {
 // identity-gated advance, heartbeat) is exercised end-to-end. Pinned inline in
 // this `#[cfg(test)] mod tests` block of the FROZEN file => ZERO production LoC.
 mod watcher_short_replace_controller {
+    use super::super::loop_poll_prologue::WatcherSourceAuthority;
     use super::super::terminal_long_chunks::{
         WatcherLongChunksLocals, apply_watcher_long_chunks_result,
         deliver_long_chunks_via_controller, remember_ordered_long_chunks_footer_target,
