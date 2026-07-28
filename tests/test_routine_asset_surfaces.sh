@@ -536,11 +536,48 @@ extract_function() {
 eval "$(extract_function prepare_install_routine_asset_surfaces)"
 eval "$(extract_function promote_install_routine_asset_surfaces)"
 eval "$(extract_function finalize_install_routine_asset_surfaces)"
+eval "$(extract_function _install_sha256_file)"
+eval "$(extract_function prepare_install_binary_transaction)"
+eval "$(extract_function promote_install_binary_transaction)"
+eval "$(extract_function _install_binary_live_sha256)"
+eval "$(extract_function _install_binary_is_promoted)"
+eval "$(extract_function _restore_install_binary_transaction)"
+eval "$(extract_function _install_cleanup)"
 warn() { :; }
-INSTALL_BINARY_PROMOTED=0
-INSTALL_ASSET_FINALIZED=0
-INSTALL_ROUTINE_ASSET_TXN=""
-INSTALL_ROUTINE_ASSET_RUNTIME=""
+
+reset_install_transaction_state() {
+    INSTALL_ROUTINE_ASSET_TXN=""
+    INSTALL_ROUTINE_ASSET_RUNTIME=""
+    INSTALL_BINARY_LIVE=""
+    INSTALL_BINARY_STAGE=""
+    INSTALL_BINARY_BACKUP=""
+    INSTALL_BINARY_NEW_SHA256=""
+    INSTALL_BINARY_OLD_SHA256=""
+    INSTALL_BINARY_HAD_LIVE=0
+    INSTALL_BINARY_SWAP_ARMED=0
+    INSTALL_BINARY_PROMOTED=0
+    INSTALL_COMMIT_INTENT=0
+    INSTALL_ASSET_FINALIZED=0
+}
+
+assert_install_generation() {
+    local runtime_root="$1"
+    local generation="$2"
+    local binary="$3"
+
+    [ "$(<"$runtime_root/routines/generation-marker")" = "$generation" ] \
+        && [ "$(<"$runtime_root/routine-helpers/generation-marker")" = "$generation" ] \
+        && [ "$(<"$runtime_root/bin/agentdesk")" = "$binary" ] \
+        && [ ! -e "$runtime_root/runtime/routine-assets.active" ]
+}
+
+make_install_runtime() {
+    local runtime_root="$1"
+    seed_live "$runtime_root" 'v0'
+    mkdir -p "$runtime_root/bin"
+    printf 'old-binary\n' > "$runtime_root/bin/agentdesk"
+    chmod +x "$runtime_root/bin/agentdesk"
+}
 
 BAD_ARTIFACT="$TMP_ROOT/old-artifact"
 INSTALL_RUNTIME="$TMP_ROOT/install-release"
@@ -566,19 +603,125 @@ seed_source "$GOOD_ARTIFACT" 'v1'
 mkdir -p "$GOOD_ARTIFACT/scripts"
 cp "$REPO_ROOT/scripts/routine-asset-surface.sh" "$GOOD_ARTIFACT/scripts/"
 cp "$REPO_ROOT/scripts/validate-quickjs-routines.py" "$GOOD_ARTIFACT/scripts/"
+printf 'new-binary\n' > "$GOOD_ARTIFACT/agentdesk"
+chmod +x "$GOOD_ARTIFACT/agentdesk"
+
+# A binary copy failure occurs while both live surfaces still carry v0.
+COPY_FAIL_RUNTIME="$TMP_ROOT/install-copy-fail"
+make_install_runtime "$COPY_FAIL_RUNTIME"
+(
+    reset_install_transaction_state
+    prepare_install_routine_asset_surfaces "$GOOD_ARTIFACT" "$COPY_FAIL_RUNTIME"
+    cp() {
+        [ "${1:-}" != "$GOOD_ARTIFACT/agentdesk" ] || return 71
+        command cp "$@"
+    }
+    set +e
+    prepare_install_binary_transaction "$GOOD_ARTIFACT/agentdesk" "$COPY_FAIL_RUNTIME"
+    copy_status=$?
+    unset -f cp
+    _install_cleanup "$copy_status"
+    cleanup_status=$?
+    set -e
+    [ "$copy_status" -ne 0 ] && [ "$cleanup_status" -ne 0 ]
+) || fail_test 'installer masked staged binary copy failure'
+assert_install_generation "$COPY_FAIL_RUNTIME" 'v0' 'old-binary' \
+    || fail_test 'binary copy failure produced an old-binary/new-assets pair'
+
+# Failure after asset promotion but before the binary rename rolls assets back.
+PRE_RENAME_RUNTIME="$TMP_ROOT/install-pre-rename"
+make_install_runtime "$PRE_RENAME_RUNTIME"
+(
+    reset_install_transaction_state
+    prepare_install_routine_asset_surfaces "$GOOD_ARTIFACT" "$PRE_RENAME_RUNTIME"
+    prepare_install_binary_transaction "$GOOD_ARTIFACT/agentdesk" "$PRE_RENAME_RUNTIME"
+    promote_install_routine_asset_surfaces
+    set +e
+    _install_cleanup 72
+    cleanup_status=$?
+    set -e
+    [ "$cleanup_status" -eq 72 ]
+) || fail_test 'installer cleanup failed at the assets-to-binary boundary'
+assert_install_generation "$PRE_RENAME_RUNTIME" 'v0' 'old-binary' \
+    || fail_test 'pre-rename failure left promoted assets beside the old binary'
+
+# Model TERM in the success-to-assignment gap: mv atomically replaces live,
+# then reports 143 before INSTALL_BINARY_PROMOTED can be assigned.
+TERM_GAP_RUNTIME="$TMP_ROOT/install-term-gap"
+make_install_runtime "$TERM_GAP_RUNTIME"
+(
+    reset_install_transaction_state
+    prepare_install_routine_asset_surfaces "$GOOD_ARTIFACT" "$TERM_GAP_RUNTIME"
+    prepare_install_binary_transaction "$GOOD_ARTIFACT/agentdesk" "$TERM_GAP_RUNTIME"
+    promote_install_routine_asset_surfaces
+    promoted_stage="$INSTALL_BINARY_STAGE"
+    promoted_live="$INSTALL_BINARY_LIVE"
+    mv() {
+        if [ "${1:-}" = '-f' ] \
+          && [ "${2:-}" = "$promoted_stage" ] \
+          && [ "${3:-}" = "$promoted_live" ]; then
+            command mv "$@"
+            return 143
+        fi
+        command mv "$@"
+    }
+    set +e
+    promote_install_binary_transaction
+    promote_status=$?
+    unset -f mv
+    _install_cleanup 143
+    cleanup_status=$?
+    set -e
+    [ "$promote_status" -ne 0 ] && [ "$cleanup_status" -eq 143 ]
+) || fail_test 'installer did not preserve TERM status across paired recovery'
+assert_install_generation "$TERM_GAP_RUNTIME" 'v0' 'old-binary' \
+    || fail_test 'TERM after binary rename escaped paired rollback'
+
+# Ordinary post-rename failure and cleanup-file deletion failure both leave a
+# completely old pair. Cleanup failure must not undo the paired recovery.
+CLEANUP_FAIL_RUNTIME="$TMP_ROOT/install-cleanup-fail"
+make_install_runtime "$CLEANUP_FAIL_RUNTIME"
+(
+    reset_install_transaction_state
+    prepare_install_routine_asset_surfaces "$GOOD_ARTIFACT" "$CLEANUP_FAIL_RUNTIME"
+    prepare_install_binary_transaction "$GOOD_ARTIFACT/agentdesk" "$CLEANUP_FAIL_RUNTIME"
+    promote_install_routine_asset_surfaces
+    promote_install_binary_transaction
+    rollback_copy="$INSTALL_BINARY_BACKUP"
+    rm() {
+        [ "${1:-}" != '-f' ] || [ "${2:-}" != "$rollback_copy" ] || return 74
+        command rm "$@"
+    }
+    set +e
+    _install_cleanup 73
+    cleanup_status=$?
+    set -e
+    unset -f rm
+    [ "$cleanup_status" -ne 0 ]
+) || fail_test 'installer masked cleanup-file deletion failure'
+assert_install_generation "$CLEANUP_FAIL_RUNTIME" 'v0' 'old-binary' \
+    || fail_test 'cleanup failure broke the recovered binary/assets pair'
+
+# Healthy commit removes rollback generations only after durable commit intent.
+INSTALL_RUNTIME="$TMP_ROOT/install-success"
+make_install_runtime "$INSTALL_RUNTIME"
 printf 'operator routine\n' > "$INSTALL_RUNTIME/routines/operator-private.txt"
 printf 'operator helper\n' > "$INSTALL_RUNTIME/routine-helpers/operator-private.txt"
-prepare_install_routine_asset_surfaces "$GOOD_ARTIFACT" "$INSTALL_RUNTIME"
-printf 'new binary\n' > "$INSTALL_RUNTIME/bin/agentdesk"
-INSTALL_BINARY_PROMOTED=1
-promote_install_routine_asset_surfaces
-finalize_install_routine_asset_surfaces
+(
+    reset_install_transaction_state
+    prepare_install_routine_asset_surfaces "$GOOD_ARTIFACT" "$INSTALL_RUNTIME"
+    prepare_install_binary_transaction "$GOOD_ARTIFACT/agentdesk" "$INSTALL_RUNTIME"
+    promote_install_routine_asset_surfaces
+    promote_install_binary_transaction
+    finalize_install_routine_asset_surfaces
+    _install_cleanup 0
+)
 [ "$(<"$INSTALL_RUNTIME/routines/generation-marker")" = 'v1' ] \
+    && [ "$(<"$INSTALL_RUNTIME/bin/agentdesk")" = 'new-binary' ] \
     && [ ! -e "$INSTALL_RUNTIME/routines.old" ] \
     && [ -f "$INSTALL_RUNTIME/routines/operator-private.txt" ] \
     && [ -f "$INSTALL_RUNTIME/routine-helpers/operator-private.txt" ] \
-    || fail_test 'installer did not promote and finalize the prepared payload'
-adk_release_routine_asset_lock
+    || fail_test 'installer did not atomically promote and finalize its paired payload'
 
 # Gitignore keeps operator helpers private while the four bundled files remain
 # explicitly trackable.

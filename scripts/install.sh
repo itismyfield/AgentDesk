@@ -59,8 +59,159 @@ fail()  { echo -e "${RED}✗${NC} $1"; exit 1; }
 
 INSTALL_ROUTINE_ASSET_TXN=""
 INSTALL_ROUTINE_ASSET_RUNTIME=""
+INSTALL_BINARY_LIVE=""
+INSTALL_BINARY_STAGE=""
+INSTALL_BINARY_BACKUP=""
+INSTALL_BINARY_NEW_SHA256=""
+INSTALL_BINARY_OLD_SHA256=""
+INSTALL_BINARY_HAD_LIVE=0
+INSTALL_BINARY_SWAP_ARMED=0
 INSTALL_BINARY_PROMOTED=0
+INSTALL_COMMIT_INTENT=0
 INSTALL_ASSET_FINALIZED=0
+
+_install_sha256_file() {
+  local path="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{ print $1 }'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{ print $1 }'
+  else
+    echo "A SHA-256 tool is required for atomic binary installation" >&2
+    return 1
+  fi
+}
+
+prepare_install_binary_transaction() {
+  local source_binary="$1"
+  local runtime_root="$2"
+  local bin_dir="$runtime_root/bin"
+  local stage=""
+  local backup=""
+
+  [ -f "$source_binary" ] && [ ! -L "$source_binary" ] \
+    && [ -s "$source_binary" ] || {
+      echo "Install binary payload is missing, empty, or symlinked: $source_binary" >&2
+      return 1
+    }
+  [ ! -L "$runtime_root" ] && [ ! -L "$bin_dir" ] || {
+    echo "Refusing symlinked install binary root: $bin_dir" >&2
+    return 1
+  }
+  mkdir -p "$bin_dir" || return 1
+
+  INSTALL_BINARY_LIVE="$bin_dir/agentdesk"
+  [ ! -L "$INSTALL_BINARY_LIVE" ] || {
+    echo "Refusing symlinked installed binary: $INSTALL_BINARY_LIVE" >&2
+    return 1
+  }
+  if [ -e "$INSTALL_BINARY_LIVE" ] && [ ! -f "$INSTALL_BINARY_LIVE" ]; then
+    echo "Installed binary path is not a regular file: $INSTALL_BINARY_LIVE" >&2
+    return 1
+  fi
+
+  stage="$(mktemp "$bin_dir/.agentdesk.install.XXXXXXXX")" || return 1
+  INSTALL_BINARY_STAGE="$stage"
+  if ! cp "$source_binary" "$stage" \
+    || ! chmod +x "$stage" \
+    || [ ! -f "$stage" ] \
+    || [ -L "$stage" ] \
+    || [ ! -s "$stage" ] \
+    || [ ! -x "$stage" ]; then
+    echo "Could not stage a validated install binary" >&2
+    return 1
+  fi
+  INSTALL_BINARY_NEW_SHA256="$(_install_sha256_file "$stage")" || return 1
+
+  if [ -f "$INSTALL_BINARY_LIVE" ]; then
+    backup="$(mktemp "$bin_dir/.agentdesk.rollback.XXXXXXXX")" || return 1
+    INSTALL_BINARY_BACKUP="$backup"
+    if ! cp -p "$INSTALL_BINARY_LIVE" "$backup" \
+      || [ ! -f "$backup" ] \
+      || [ -L "$backup" ] \
+      || [ ! -s "$backup" ]; then
+      echo "Could not preserve the installed binary for rollback" >&2
+      return 1
+    fi
+    INSTALL_BINARY_OLD_SHA256="$(_install_sha256_file "$backup")" || return 1
+    INSTALL_BINARY_HAD_LIVE=1
+  else
+    INSTALL_BINARY_HAD_LIVE=0
+  fi
+}
+
+promote_install_binary_transaction() {
+  local phase
+
+  phase="$(adk_routine_asset_transaction_phase \
+    "$INSTALL_ROUTINE_ASSET_RUNTIME" "$INSTALL_ROUTINE_ASSET_TXN")" || return 1
+  [ "$phase" = "promoted" ] || {
+    echo "Refusing binary promotion before matching assets are promoted" >&2
+    return 1
+  }
+  [ -n "$INSTALL_BINARY_STAGE" ] \
+    && [ -f "$INSTALL_BINARY_STAGE" ] \
+    && [ ! -L "$INSTALL_BINARY_STAGE" ] \
+    && [ -s "$INSTALL_BINARY_STAGE" ] \
+    && [ -x "$INSTALL_BINARY_STAGE" ] \
+    && [ ! -L "$INSTALL_BINARY_LIVE" ] || return 1
+
+  # Arm before the rename. If TERM lands after mv replaced the live binary but
+  # before the success assignment, cleanup infers promotion from the missing
+  # stage plus the exact staged digest and rolls both binary and assets back.
+  INSTALL_BINARY_SWAP_ARMED=1
+  mv -f "$INSTALL_BINARY_STAGE" "$INSTALL_BINARY_LIVE" || return 1
+  INSTALL_BINARY_PROMOTED=1
+  INSTALL_BINARY_SWAP_ARMED=0
+}
+
+_install_binary_live_sha256() {
+  [ -n "$INSTALL_BINARY_LIVE" ] \
+    && [ -f "$INSTALL_BINARY_LIVE" ] \
+    && [ ! -L "$INSTALL_BINARY_LIVE" ] || return 1
+  _install_sha256_file "$INSTALL_BINARY_LIVE"
+}
+
+_install_binary_is_promoted() {
+  local live_sha=""
+
+  [ "$INSTALL_BINARY_PROMOTED" = 1 ] && return 0
+  [ "$INSTALL_BINARY_SWAP_ARMED" = 1 ] \
+    && [ -n "$INSTALL_BINARY_STAGE" ] \
+    && [ ! -e "$INSTALL_BINARY_STAGE" ] \
+    && live_sha="$(_install_binary_live_sha256)" \
+    && [ "$live_sha" = "$INSTALL_BINARY_NEW_SHA256" ]
+}
+
+_restore_install_binary_transaction() {
+  local restore_stage=""
+  local live_sha=""
+
+  _install_binary_is_promoted || return 0
+  if [ "$INSTALL_BINARY_HAD_LIVE" = 1 ]; then
+    [ -f "$INSTALL_BINARY_BACKUP" ] \
+      && [ ! -L "$INSTALL_BINARY_BACKUP" ] \
+      && [ ! -L "$INSTALL_BINARY_LIVE" ] || return 1
+    restore_stage="$(mktemp "$(dirname "$INSTALL_BINARY_LIVE")/.agentdesk.restore.XXXXXXXX")" \
+      || return 1
+    if ! cp -p "$INSTALL_BINARY_BACKUP" "$restore_stage"; then
+      rm -f "$restore_stage" 2>/dev/null || true
+      return 1
+    fi
+    if ! mv -f "$restore_stage" "$INSTALL_BINARY_LIVE"; then
+      # A signal/failure injector can report failure after the atomic rename.
+      # Accept that boundary only when the live bytes prove restoration won.
+      live_sha="$(_install_binary_live_sha256 2>/dev/null || true)"
+      [ "$live_sha" = "$INSTALL_BINARY_OLD_SHA256" ] || return 1
+    fi
+  else
+    rm -f "$INSTALL_BINARY_LIVE" || {
+      [ ! -e "$INSTALL_BINARY_LIVE" ] || return 1
+    }
+  fi
+  INSTALL_BINARY_PROMOTED=0
+  INSTALL_BINARY_SWAP_ARMED=0
+}
 
 prepare_install_routine_asset_surfaces() {
   local source_root="$1"
@@ -94,6 +245,7 @@ prepare_install_routine_asset_surfaces() {
     adk_stage_routines \
     adk_stage_routine_helpers \
     adk_promote_routine_asset_transaction \
+    adk_routine_asset_transaction_phase \
     adk_mark_routine_asset_transaction_committing \
     adk_commit_routine_asset_transaction_forward \
     adk_commit_routine_asset_transaction \
@@ -126,9 +278,15 @@ promote_install_routine_asset_surfaces() {
 }
 
 finalize_install_routine_asset_surfaces() {
+  # Commit intent is durable before the in-memory flag. Either side of a TERM
+  # boundary therefore makes the same paired decision in cleanup.
+  adk_mark_routine_asset_transaction_committing \
+    "$INSTALL_ROUTINE_ASSET_RUNTIME" "$INSTALL_ROUTINE_ASSET_TXN" || return 1
+  INSTALL_COMMIT_INTENT=1
   if ! adk_commit_routine_asset_transaction \
-    "$INSTALL_ROUTINE_ASSET_RUNTIME" "$INSTALL_ROUTINE_ASSET_TXN"; then
+      "$INSTALL_ROUTINE_ASSET_RUNTIME" "$INSTALL_ROUTINE_ASSET_TXN"; then
     warn "Installed assets are live; durable commit cleanup will resume next run"
+    return 0
   fi
   INSTALL_ASSET_FINALIZED=1
 }
@@ -137,13 +295,23 @@ _install_cleanup() {
   local status=${1:-$?}
   local active_txn=""
   local active_status=1
+  local active_phase=""
+  local asset_action="none"
+  local pair_resolved=0
+  local live_sha=""
 
   trap - EXIT INT TERM
   if command -v _adk_active_txn >/dev/null 2>&1 \
-    && [ -n "$INSTALL_ROUTINE_ASSET_RUNTIME" ] \
-    && [ "$INSTALL_ASSET_FINALIZED" != 1 ]; then
+    && [ -n "$INSTALL_ROUTINE_ASSET_RUNTIME" ]; then
     if active_txn="$(_adk_active_txn "$INSTALL_ROUTINE_ASSET_RUNTIME")"; then
       active_status=0
+      if ! active_phase="$(adk_routine_asset_transaction_phase \
+          "$INSTALL_ROUTINE_ASSET_RUNTIME" "$active_txn")"; then
+        active_status=2
+        active_txn=""
+        echo "Install routine asset phase is corrupt; refusing partial recovery" >&2
+        status=1
+      fi
     else
       active_status=$?
       active_txn=""
@@ -152,17 +320,81 @@ _install_cleanup() {
         status=1
       fi
     fi
-    if [ "$active_status" -eq 0 ]; then
-      if [ "$INSTALL_BINARY_PROMOTED" = 1 ]; then
-        adk_commit_routine_asset_transaction_forward \
-          "$INSTALL_ROUTINE_ASSET_RUNTIME" "$active_txn" \
-          || { echo "Install asset fail-forward failed: $active_txn" >&2; status=1; }
-      else
-        adk_rollback_routine_asset_transaction \
-          "$INSTALL_ROUTINE_ASSET_RUNTIME" "$active_txn" \
-          || { echo "Install asset rollback failed: $active_txn" >&2; status=1; }
-      fi
+  fi
+
+  if [ "$INSTALL_ASSET_FINALIZED" = 1 ]; then
+    pair_resolved=1
+  elif [ "$active_status" -eq 0 ]; then
+    case "$active_phase" in
+      committing|committed) asset_action="commit" ;;
+      staging|armed|promoted|rolling-back)
+        if _install_binary_is_promoted; then
+          if _restore_install_binary_transaction; then
+            asset_action="rollback"
+          else
+            live_sha="$(_install_binary_live_sha256 2>/dev/null || true)"
+            if [ -n "$INSTALL_BINARY_OLD_SHA256" ] \
+              && [ "$live_sha" = "$INSTALL_BINARY_OLD_SHA256" ]; then
+              INSTALL_BINARY_PROMOTED=0
+              INSTALL_BINARY_SWAP_ARMED=0
+              asset_action="rollback"
+            elif [ -n "$INSTALL_BINARY_NEW_SHA256" ] \
+              && [ "$live_sha" = "$INSTALL_BINARY_NEW_SHA256" ]; then
+              echo "Install binary rollback failed; committing matching new assets" >&2
+              asset_action="commit"
+              status=1
+            else
+              echo "Install binary state is unknown; preserving asset transaction" >&2
+              status=1
+            fi
+          fi
+        else
+          asset_action="rollback"
+        fi
+        ;;
+      *)
+        echo "Install routine asset phase is invalid: $active_phase" >&2
+        status=1
+        ;;
+    esac
+  elif [ "$active_status" -eq 1 ]; then
+    if [ "$INSTALL_COMMIT_INTENT" = 1 ]; then
+      # A missing marker after durable commit intent means commit cleanup
+      # already closed the exact transaction.
+      pair_resolved=1
+    elif _install_binary_is_promoted; then
+      echo "Install asset transaction disappeared before commit intent; refusing binary-only recovery" >&2
+      status=1
+    else
+      pair_resolved=1
     fi
+  fi
+
+  if [ -n "$active_txn" ] && [ "$asset_action" = "commit" ]; then
+    if adk_commit_routine_asset_transaction_forward \
+        "$INSTALL_ROUTINE_ASSET_RUNTIME" "$active_txn"; then
+      pair_resolved=1
+    else
+      echo "Install asset fail-forward failed: $active_txn" >&2
+      status=1
+    fi
+  elif [ -n "$active_txn" ] && [ "$asset_action" = "rollback" ]; then
+    if adk_rollback_routine_asset_transaction \
+        "$INSTALL_ROUTINE_ASSET_RUNTIME" "$active_txn"; then
+      pair_resolved=1
+    else
+      echo "Install asset rollback failed: $active_txn" >&2
+      status=1
+    fi
+  fi
+
+  if [ "$pair_resolved" = 1 ]; then
+    [ -z "$INSTALL_BINARY_STAGE" ] || [ ! -e "$INSTALL_BINARY_STAGE" ] \
+      || rm -f "$INSTALL_BINARY_STAGE" \
+      || { echo "Could not remove staged install binary" >&2; status=1; }
+    [ -z "$INSTALL_BINARY_BACKUP" ] || [ ! -e "$INSTALL_BINARY_BACKUP" ] \
+      || rm -f "$INSTALL_BINARY_BACKUP" \
+      || { echo "Could not remove install binary rollback copy" >&2; status=1; }
   fi
   if command -v adk_release_routine_asset_lock >/dev/null 2>&1; then
     adk_release_routine_asset_lock \
@@ -443,12 +675,12 @@ if [ -z "$LATEST_TAG" ]; then
   info "Validating and staging routine asset payload..."
   prepare_install_routine_asset_surfaces "$TMPDIR_BUILD" "$INSTALL_DIR" \
     || fail "Routine asset preflight failed before binary installation"
+  prepare_install_binary_transaction \
+    "$TMPDIR_BUILD/target/release/agentdesk" "$INSTALL_DIR" \
+    || fail "Binary staging failed before live installation"
 
   # Install
   mkdir -p "$INSTALL_DIR"/{bin,config,data,logs,policies,dashboard,skills}
-  INSTALL_BINARY_PROMOTED=1
-  cp target/release/agentdesk "$INSTALL_DIR/bin/"
-  chmod +x "$INSTALL_DIR/bin/agentdesk"
 
   if [ -d "dashboard/dist" ]; then
     cp -r dashboard/dist "$INSTALL_DIR/dashboard/dist"
@@ -465,6 +697,8 @@ if [ -z "$LATEST_TAG" ]; then
   info "Promoting routine entrypoints and helper assets..."
   promote_install_routine_asset_surfaces \
     || fail "Routine asset installation failed"
+  promote_install_binary_transaction \
+    || fail "Binary installation failed after asset promotion"
 
   cd /
   rm -rf "$TMPDIR_BUILD"
@@ -487,12 +721,12 @@ else
   info "Validating and staging routine asset payload..."
   prepare_install_routine_asset_surfaces "$TMPDIR_DL/${ARTIFACT}" "$INSTALL_DIR" \
     || fail "Routine asset preflight failed before binary installation"
+  prepare_install_binary_transaction \
+    "$TMPDIR_DL/${ARTIFACT}/agentdesk" "$INSTALL_DIR" \
+    || fail "Binary staging failed before live installation"
 
   # Install
   mkdir -p "$INSTALL_DIR"/{bin,config,data,logs,skills}
-  INSTALL_BINARY_PROMOTED=1
-  cp "${ARTIFACT}/agentdesk" "$INSTALL_DIR/bin/"
-  chmod +x "$INSTALL_DIR/bin/agentdesk"
 
   if [ -d "${ARTIFACT}/dashboard" ]; then
     rm -rf "$INSTALL_DIR/dashboard"
@@ -511,6 +745,8 @@ else
   info "Promoting routine entrypoints and helper assets..."
   promote_install_routine_asset_surfaces \
     || fail "Routine asset installation failed"
+  promote_install_binary_transaction \
+    || fail "Binary installation failed after asset promotion"
 
   cd /
   rm -rf "$TMPDIR_DL"
