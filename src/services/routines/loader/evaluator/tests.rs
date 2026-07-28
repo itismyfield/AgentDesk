@@ -1,7 +1,259 @@
 use super::super::{
     ObservationLimits, RoutineScriptLoader, RoutineTickContext, RoutineTickRoutine, RoutineTickRun,
 };
-use super::load_single_routine_script;
+use super::{load_single_routine_script, validate_routine_script_source};
+use std::path::Path;
+
+fn validate_test_source(source: &str) -> anyhow::Result<super::ValidatedRoutineSource> {
+    validate_routine_script_source(
+        source,
+        "adversarial",
+        "adversarial.js",
+        Path::new("adversarial.js"),
+    )
+}
+
+fn assert_source_rejected(source: &str, expected: &str) {
+    let error = validate_test_source(source).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains(expected), "{message}");
+}
+
+fn tick_context(script_ref: &str, name: &str) -> RoutineTickContext {
+    RoutineTickContext {
+        routine: RoutineTickRoutine {
+            id: "routine-1".to_string(),
+            agent_id: None,
+            script_ref: script_ref.to_string(),
+            name: name.to_string(),
+            execution_strategy: "fresh".to_string(),
+            fresh_context_guaranteed: false,
+        },
+        run: RoutineTickRun {
+            id: "run-1".to_string(),
+            lease_expires_at: chrono::Utc::now(),
+        },
+        agent: None,
+        checkpoint: None,
+        now: chrono::Utc::now(),
+        observations: None,
+        automation_inventory: None,
+        limits: ObservationLimits::default(),
+    }
+}
+
+#[test]
+fn zero_call_capture_assignment_cannot_forge_registration() {
+    assert_source_rejected(
+        r#"
+        globalThis.__routineCapture = {
+          captured: { name: "Forged", tick() { return { action: "skip" }; } }
+        };
+        "#,
+        "did not call agentdesk.routines.register()",
+    );
+}
+
+#[test]
+fn rejects_multiple_register_invocations() {
+    assert_source_rejected(
+        r#"
+        agentdesk.routines.register({
+          name: "First",
+          tick() { return { action: "skip" }; }
+        });
+        agentdesk.routines.register({
+          name: "Second",
+          tick() { return { action: "skip" }; }
+        });
+        "#,
+        "must call agentdesk.routines.register() exactly once (got 2)",
+    );
+}
+
+#[test]
+fn registration_getter_reentry_is_counted_without_refcell_panic() {
+    assert_source_rejected(
+        r#"
+        const outer = {
+          tick() { return { action: "skip" }; }
+        };
+        Object.defineProperty(outer, "name", {
+          enumerable: true,
+          get() {
+            agentdesk.routines.register({
+              name: "Nested",
+              tick() { return { action: "skip" }; }
+            });
+            return "Outer";
+          }
+        });
+        agentdesk.routines.register(outer);
+        "#,
+        "must call agentdesk.routines.register() exactly once (got 2)",
+    );
+}
+
+#[test]
+fn fake_register_assignment_cannot_replace_capture() {
+    let validated = validate_test_source(
+        r#"
+        agentdesk.routines.register = function fakeRegister() {};
+        agentdesk.routines.register({
+          name: "Protected",
+          tick() { return { action: "skip" }; }
+        });
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(validated.name, "Protected");
+}
+
+#[test]
+fn global_this_agentdesk_assignment_cannot_replace_capture() {
+    let validated = validate_test_source(
+        r#"
+        this["agentdesk"] = {
+          routines: { register() {} }
+        };
+        agentdesk.routines.register({
+          name: "Still Protected",
+          tick() { return { action: "skip" }; }
+        });
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(validated.name, "Still Protected");
+}
+
+#[test]
+fn define_property_cannot_replace_register_capture() {
+    let validated = validate_test_source(
+        r#"
+        let overwriteRejected = false;
+        try {
+          Object.defineProperty(agentdesk.routines, "register", {
+            value() {}
+          });
+        } catch (_) {
+          overwriteRejected = true;
+        }
+        if (!overwriteRejected) throw new Error("register overwrite unexpectedly succeeded");
+        agentdesk.routines.register({
+          name: "Define Protected",
+          tick() { return { action: "skip" }; }
+        });
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(validated.name, "Define Protected");
+}
+
+#[test]
+fn registration_argument_is_snapshotted_at_invocation() {
+    let validated = validate_test_source(
+        r#"
+        const routine = {
+          name: "Before Mutation",
+          metadata: { phase: "before" },
+          tick() { return { action: "skip" }; }
+        };
+        agentdesk.routines.register(routine);
+        routine.name = "After Mutation";
+        routine.metadata.phase = "after";
+        routine.tick = async function () { return { action: "skip" }; };
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(validated.name, "Before Mutation");
+    assert_eq!(validated.metadata["phase"], "before");
+}
+
+#[test]
+fn register_after_throw_is_unreachable() {
+    assert_source_rejected(
+        r#"
+        throw new Error("stopped before registration");
+        agentdesk.routines.register({
+          name: "Unreachable",
+          tick() { return { action: "skip" }; }
+        });
+        "#,
+        "stopped before registration",
+    );
+}
+
+#[test]
+fn rejects_syntax_invalid_balanced_source() {
+    assert_source_rejected(
+        r#"
+        const invalid = ;
+        agentdesk.routines.register({
+          name: "Balanced But Invalid",
+          tick() { return { action: "skip" }; }
+        });
+        "#,
+        "JS eval error in routine script adversarial.js",
+    );
+}
+
+#[test]
+fn rejects_async_tick_method_at_registration() {
+    assert_source_rejected(
+        r#"
+        agentdesk.routines.register({
+          name: "Async Method",
+          async tick() { return { action: "skip" }; }
+        });
+        "#,
+        "tick must be synchronous",
+    );
+}
+
+#[test]
+fn rejects_async_tick_function_value_at_registration() {
+    assert_source_rejected(
+        r#"
+        agentdesk.routines.register({
+          name: "Async Function Value",
+          tick: async function (ctx) { return { action: "skip" }; }
+        });
+        "#,
+        "tick must be synchronous",
+    );
+}
+
+#[test]
+fn rejects_async_tick_function_value_across_newline() {
+    assert_source_rejected(
+        r#"
+        agentdesk.routines.register({
+          name: "Async Across Newline",
+          tick:
+            async function (ctx) { return { action: "skip" }; }
+        });
+        "#,
+        "tick must be synchronous",
+    );
+}
+
+#[test]
+fn rejects_line_terminated_async_method_syntax() {
+    assert_source_rejected(
+        r#"
+        agentdesk.routines.register({
+          name: "Invalid Async Line Terminator",
+          async
+          tick() { return { action: "skip" }; }
+        });
+        "#,
+        "JS eval error in routine script adversarial.js",
+    );
+}
 
 #[test]
 fn loads_registered_routine_script() {
@@ -95,6 +347,64 @@ fn rejects_cyclic_registered_routine_metadata() {
 }
 
 #[test]
+fn snapshots_stateful_metadata_getter_exactly_once() {
+    let validated = validate_test_source(
+        r#"
+        const metadata = {};
+        let reads = 0;
+        Object.defineProperty(metadata, "value", {
+          enumerable: true,
+          get() {
+            reads += 1;
+            return reads === 1 ? 7 : metadata;
+          }
+        });
+        agentdesk.routines.register({
+          name: "Single Read Metadata",
+          metadata,
+          tick() { return { action: "skip" }; }
+        });
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(validated.metadata["value"], 7);
+}
+
+#[test]
+fn rejects_sparse_metadata_array_before_large_host_allocation() {
+    assert_source_rejected(
+        r#"
+        agentdesk.routines.register({
+          name: "Sparse Metadata",
+          metadata: new Array(0x3fffffff),
+          tick() { return { action: "skip" }; }
+        });
+        "#,
+        "array length 1073741823 exceeds maximum 16384",
+    );
+}
+
+#[test]
+fn rejects_metadata_exceeding_total_value_budget() {
+    assert_source_rejected(
+        r#"
+        agentdesk.routines.register({
+          name: "Wide Metadata",
+          metadata: [
+            new Array(10000),
+            new Array(10000),
+            new Array(10000),
+            new Array(10000)
+          ],
+          tick() { return { action: "skip" }; }
+        });
+        "#,
+        "exceeds maximum value count 32768",
+    );
+}
+
+#[test]
 fn isolates_global_bindings_between_scripts() {
     let dir = tempfile::tempdir().unwrap();
     let first = dir.path().join("first.js");
@@ -174,26 +484,7 @@ fn tick_error_includes_primitive_throw_value() {
     let error = loader
         .execute_tick(
             "primitive-tick.js",
-            RoutineTickContext {
-                routine: RoutineTickRoutine {
-                    id: "routine-1".to_string(),
-                    agent_id: None,
-                    script_ref: "primitive-tick.js".to_string(),
-                    name: "Primitive Tick".to_string(),
-                    execution_strategy: "fresh".to_string(),
-                    fresh_context_guaranteed: false,
-                },
-                run: RoutineTickRun {
-                    id: "run-1".to_string(),
-                    lease_expires_at: chrono::Utc::now(),
-                },
-                agent: None,
-                checkpoint: None,
-                now: chrono::Utc::now(),
-                observations: None,
-                automation_inventory: None,
-                limits: ObservationLimits::default(),
-            },
+            tick_context("primitive-tick.js", "Primitive Tick"),
         )
         .unwrap_err();
 
@@ -202,6 +493,32 @@ fn tick_error_includes_primitive_throw_value() {
     assert!(
         !message.contains("Exception generated by QuickJS"),
         "{message}"
+    );
+}
+
+#[test]
+fn rejects_promise_returning_tick_without_awaiting() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("promise-tick.js");
+    std::fs::write(
+        &path,
+        "agentdesk.routines.register({ name: 'Promise Tick', tick() { return Promise.resolve({ action: 'skip' }); } });",
+    )
+    .unwrap();
+
+    let loader = RoutineScriptLoader::new().unwrap();
+    loader.load_script(dir.path(), &path).unwrap();
+    let error = loader
+        .execute_tick(
+            "promise-tick.js",
+            tick_context("promise-tick.js", "Promise Tick"),
+        )
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("returned a Promise; async tick is not supported")
     );
 }
 
@@ -227,29 +544,7 @@ fn rejects_cyclic_action_result_payloads() {
     let loader = RoutineScriptLoader::new().unwrap();
     loader.load_script(dir.path(), &path).unwrap();
     let error = loader
-        .execute_tick(
-            "cycle.js",
-            RoutineTickContext {
-                routine: RoutineTickRoutine {
-                    id: "routine-1".to_string(),
-                    agent_id: None,
-                    script_ref: "cycle.js".to_string(),
-                    name: "Cycle".to_string(),
-                    execution_strategy: "fresh".to_string(),
-                    fresh_context_guaranteed: false,
-                },
-                run: RoutineTickRun {
-                    id: "run-1".to_string(),
-                    lease_expires_at: chrono::Utc::now(),
-                },
-                agent: None,
-                checkpoint: None,
-                now: chrono::Utc::now(),
-                observations: None,
-                automation_inventory: None,
-                limits: ObservationLimits::default(),
-            },
-        )
+        .execute_tick("cycle.js", tick_context("cycle.js", "Cycle"))
         .unwrap_err();
 
     let message = error.to_string();
@@ -257,4 +552,82 @@ fn rejects_cyclic_action_result_payloads() {
         message.contains("cycle check failed") || message.contains("cyclic object graph"),
         "{message}"
     );
+}
+
+#[test]
+fn snapshots_stateful_action_getter_exactly_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("single-read-action.js");
+    std::fs::write(
+        &path,
+        r#"
+            agentdesk.routines.register({
+              name: "Single Read Action",
+              tick() {
+                const action = { action: "complete" };
+                let reads = 0;
+                Object.defineProperty(action, "result", {
+                  enumerable: true,
+                  get() {
+                    reads += 1;
+                    return reads === 1 ? { ok: true } : action;
+                  }
+                });
+                return action;
+              }
+            });
+            "#,
+    )
+    .unwrap();
+
+    let loader = RoutineScriptLoader::new().unwrap();
+    loader.load_script(dir.path(), &path).unwrap();
+    let action = loader
+        .execute_tick(
+            "single-read-action.js",
+            tick_context("single-read-action.js", "Single Read Action"),
+        )
+        .unwrap();
+
+    match action {
+        crate::services::routines::RoutineAction::Complete { result_json, .. } => {
+            assert_eq!(result_json.unwrap()["ok"], true);
+        }
+        other => panic!("unexpected action: {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_action_exceeding_json_depth_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("deep-action.js");
+    std::fs::write(
+        &path,
+        r#"
+            agentdesk.routines.register({
+              name: "Deep Action",
+              tick() {
+                const root = {};
+                let cursor = root;
+                for (let index = 0; index < 140; index += 1) {
+                  cursor.next = {};
+                  cursor = cursor.next;
+                }
+                return root;
+              }
+            });
+            "#,
+    )
+    .unwrap();
+
+    let loader = RoutineScriptLoader::new().unwrap();
+    loader.load_script(dir.path(), &path).unwrap();
+    let error = loader
+        .execute_tick(
+            "deep-action.js",
+            tick_context("deep-action.js", "Deep Action"),
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("maximum nesting depth"));
 }

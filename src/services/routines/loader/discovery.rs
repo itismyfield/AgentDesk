@@ -6,12 +6,14 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+pub(super) const MAX_ROUTINE_SOURCE_BYTES: u64 = 1024 * 1024;
+
 #[cfg(unix)]
 use std::os::fd::{AsRawFd as _, FromRawFd as _};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt as _;
 #[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::os::unix::fs::MetadataExt as _;
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt as _;
 
@@ -77,10 +79,49 @@ fn read_opened_routine_source(file: &File, path: &Path) -> io::Result<String> {
             path.display()
         )));
     }
-    let mut source = String::new();
-    let mut file = file;
-    file.read_to_string(&mut source)?;
-    Ok(source)
+    #[cfg(unix)]
+    if metadata.nlink() != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "routine candidate `{}` has {} hard links; code files must have exactly one link",
+                path.display(),
+                metadata.nlink()
+            ),
+        ));
+    }
+    if metadata.len() > MAX_ROUTINE_SOURCE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "routine candidate `{}` exceeds {} bytes",
+                path.display(),
+                MAX_ROUTINE_SOURCE_BYTES
+            ),
+        ));
+    }
+    let mut source = Vec::with_capacity(metadata.len() as usize);
+    let mut limited = file.take(MAX_ROUTINE_SOURCE_BYTES + 1);
+    limited.read_to_end(&mut source)?;
+    if source.len() as u64 > MAX_ROUTINE_SOURCE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "routine candidate `{}` exceeds {} bytes",
+                path.display(),
+                MAX_ROUTINE_SOURCE_BYTES
+            ),
+        ));
+    }
+    String::from_utf8(source).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "routine candidate `{}` is not UTF-8: {error}",
+                path.display()
+            ),
+        )
+    })
 }
 
 fn verify_discovery_authority(hooks: RoutineDiscoveryHooks<'_>) -> io::Result<()> {
@@ -121,6 +162,7 @@ pub(super) fn routine_roots_identity(
         exists: bool,
         kind: Option<AuthorityFileKind>,
         identity: Option<(u64, u64)>,
+        mount_id: Option<u64>,
     ) {
         hasher.update([u8::from(exists)]);
         hasher.update([match kind {
@@ -135,6 +177,13 @@ pub(super) fn routine_roots_identity(
                 hasher.update([1]);
                 hasher.update(device.to_le_bytes());
                 hasher.update(inode.to_le_bytes());
+            }
+            None => hasher.update([0]),
+        }
+        match mount_id {
+            Some(mount_id) => {
+                hasher.update([1]);
+                hasher.update(mount_id.to_le_bytes());
             }
             None => hasher.update([0]),
         }
@@ -155,6 +204,16 @@ pub(super) fn routine_roots_identity(
         runtime_authority.exists,
         runtime_authority.kind,
         runtime_identity,
+        {
+            #[cfg(unix)]
+            {
+                runtime_authority.mount_id
+            }
+            #[cfg(not(unix))]
+            {
+                None
+            }
+        },
     );
     for root in roots {
         hasher.update(b"root");
@@ -165,7 +224,16 @@ pub(super) fn routine_roots_identity(
             .map(|identity| (identity.device, identity.inode));
         #[cfg(not(unix))]
         let identity = None;
-        update_identity(&mut hasher, root.exists, root.kind, identity);
+        update_identity(&mut hasher, root.exists, root.kind, identity, {
+            #[cfg(unix)]
+            {
+                root.mount_id
+            }
+            #[cfg(not(unix))]
+            {
+                None
+            }
+        });
     }
     hasher.update(b"helper");
     update_path(&mut hasher, &helper_authority.canonical);
@@ -180,15 +248,34 @@ pub(super) fn routine_roots_identity(
         helper_authority.exists,
         helper_authority.kind,
         helper_identity,
+        {
+            #[cfg(unix)]
+            {
+                helper_authority.mount_id
+            }
+            #[cfg(not(unix))]
+            {
+                None
+            }
+        },
     );
     PathBuf::from(hex::encode(hasher.finalize()))
 }
 
 pub(super) fn script_ref(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
+    let script_ref = path
+        .strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()
-        .replace('\\', "/")
+        .into_owned();
+    #[cfg(windows)]
+    {
+        script_ref.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        script_ref
+    }
 }
 
 pub(super) fn add_cached_candidates_for_root(
@@ -390,12 +477,86 @@ fn openat(parent: &File, name: &OsStr, flags: libc::c_int) -> io::Result<File> {
 }
 
 #[cfg(unix)]
+pub(super) fn directory_mount_id(directory: &File) -> io::Result<Option<u64>> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut statx = std::mem::MaybeUninit::<libc::statx>::zeroed();
+        let empty_path = b"\0";
+        // SAFETY: `directory` is live, the empty path is NUL-terminated, and
+        // `statx` points to writable storage for the complete result.
+        let result = unsafe {
+            libc::statx(
+                directory.as_raw_fd(),
+                empty_path.as_ptr().cast(),
+                libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW,
+                libc::STATX_MNT_ID,
+                statx.as_mut_ptr(),
+            )
+        };
+        if result < 0 {
+            let error = io::Error::last_os_error();
+            if error
+                .raw_os_error()
+                .is_some_and(|code| code == libc::ENOSYS || code == libc::EINVAL)
+            {
+                return proc_fd_mount_id(directory).map(Some);
+            }
+            return Err(error);
+        }
+        // SAFETY: successful `statx` initialized the complete result.
+        let statx = unsafe { statx.assume_init() };
+        if statx.stx_mask & libc::STATX_MNT_ID == 0 {
+            return proc_fd_mount_id(directory).map(Some);
+        }
+        return Ok(Some(statx.stx_mnt_id));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = directory;
+        Ok(None)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn proc_fd_mount_id(file: &File) -> io::Result<u64> {
+    let fdinfo_path = format!("/proc/self/fdinfo/{}", file.as_raw_fd());
+    let fdinfo = std::fs::read_to_string(&fdinfo_path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("failed to read mount authority from `{fdinfo_path}`: {error}"),
+        )
+    })?;
+    parse_proc_fdinfo_mount_id(&fdinfo)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_proc_fdinfo_mount_id(fdinfo: &str) -> io::Result<u64> {
+    let value = fdinfo
+        .lines()
+        .find_map(|line| line.split_once(':').filter(|(key, _)| *key == "mnt_id"))
+        .map(|(_, value)| value.trim())
+        .ok_or_else(|| io::Error::other("fdinfo omitted required mnt_id authority"))?;
+    value.parse::<u64>().map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("fdinfo contained invalid mnt_id `{value}`: {error}"),
+        )
+    })
+}
+
+#[cfg(unix)]
 fn open_root(root: &ValidatedRoutineRoot) -> io::Result<File> {
-    let mut options = std::fs::OpenOptions::new();
-    options
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
-    let directory = options.open(&root.canonical)?;
+    let retained = root.handle.as_ref().ok_or_else(|| {
+        io::Error::other(format!(
+            "validated routine root `{}` has no retained authority handle",
+            root.canonical.display()
+        ))
+    })?;
+    let directory = openat(
+        retained,
+        OsStr::new("."),
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+    )?;
     let metadata = directory.metadata()?;
     let observed_identity =
         require_available_identity(FileIdentity::from_metadata(&metadata), &root.canonical)?;
@@ -406,6 +567,12 @@ fn open_root(root: &ValidatedRoutineRoot) -> io::Result<File> {
     {
         return Err(io::Error::other(format!(
             "validated routine root `{}` no longer names the preflight directory",
+            root.canonical.display()
+        )));
+    }
+    if directory_mount_id(&directory)? != root.mount_id {
+        return Err(io::Error::other(format!(
+            "validated routine root `{}` changed mount authority",
             root.canonical.display()
         )));
     }
@@ -431,15 +598,188 @@ fn verify_opened_entry_identity(
 }
 
 #[cfg(unix)]
+fn verify_entry_provenance(
+    opened: &File,
+    path: &Path,
+    root_identity: FileIdentity,
+    root_mount_id: Option<u64>,
+    entry_kind: &str,
+) -> io::Result<FileIdentity> {
+    let metadata = opened.metadata()?;
+    let identity = require_available_identity(FileIdentity::from_metadata(&metadata), path)?;
+    if identity.device != root_identity.device {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "routine {entry_kind} `{}` crosses filesystem device authority",
+                path.display()
+            ),
+        ));
+    }
+    let mount_id = directory_mount_id(opened)?;
+    verify_mount_authority(mount_id, root_mount_id, path, entry_kind)?;
+    Ok(identity)
+}
+
+#[cfg(unix)]
+fn verify_mount_authority(
+    observed_mount_id: Option<u64>,
+    root_mount_id: Option<u64>,
+    path: &Path,
+    entry_kind: &str,
+) -> io::Result<()> {
+    if observed_mount_id != root_mount_id {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "routine {entry_kind} `{}` crosses mount authority",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn collect_helper_identities_inner(
+    directory: &File,
+    current_path: &Path,
+    root_identity: FileIdentity,
+    root_mount_id: Option<u64>,
+    identities: &mut HashSet<FileIdentity>,
+) -> io::Result<()> {
+    for entry in directory_entries(directory)? {
+        let path = current_path.join(&entry.name);
+        match entry.kind {
+            PinnedEntryKind::Directory => {
+                let child = openat(
+                    directory,
+                    &entry.name,
+                    libc::O_RDONLY
+                        | libc::O_DIRECTORY
+                        | libc::O_NOFOLLOW
+                        | libc::O_NONBLOCK
+                        | libc::O_CLOEXEC,
+                )?;
+                verify_opened_entry_identity(&entry, &child, &path)?;
+                let identity = verify_entry_provenance(
+                    &child,
+                    &path,
+                    root_identity,
+                    root_mount_id,
+                    "helper directory",
+                )?;
+                if !identities.insert(identity) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!(
+                            "helper authority cycle or alias detected at `{}`",
+                            path.display()
+                        ),
+                    ));
+                }
+                collect_helper_identities_inner(
+                    &child,
+                    &path,
+                    root_identity,
+                    root_mount_id,
+                    identities,
+                )?;
+            }
+            PinnedEntryKind::RegularFile => {
+                let file = openat(
+                    directory,
+                    &entry.name,
+                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+                )?;
+                verify_opened_entry_identity(&entry, &file, &path)?;
+                let identity = verify_entry_provenance(
+                    &file,
+                    &path,
+                    root_identity,
+                    root_mount_id,
+                    "helper file",
+                )?;
+                if !identities.insert(identity) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!(
+                            "helper authority cycle or alias detected at `{}`",
+                            path.display()
+                        ),
+                    ));
+                }
+            }
+            PinnedEntryKind::Other => {}
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn collect_helper_authority_identities(
+    directory: &File,
+    root_path: &Path,
+    root_mount_id: Option<u64>,
+) -> io::Result<HashSet<FileIdentity>> {
+    let root_identity = require_available_identity(
+        FileIdentity::from_metadata(&directory.metadata()?),
+        root_path,
+    )?;
+    let mut identities = HashSet::from([root_identity]);
+    collect_helper_identities_inner(
+        directory,
+        root_path,
+        root_identity,
+        root_mount_id,
+        &mut identities,
+    )?;
+    Ok(identities)
+}
+
+#[cfg(unix)]
+struct UnixTraversalAuthority<'a> {
+    root_identity: FileIdentity,
+    root_mount_id: Option<u64>,
+    forbidden_entry_identities: &'a HashSet<FileIdentity>,
+    visited_directory_identities: HashSet<FileIdentity>,
+}
+
+#[cfg(unix)]
+fn validate_routine_namespace_name(
+    name: &OsStr,
+    kind: PinnedEntryKind,
+    parent: &Path,
+) -> io::Result<()> {
+    let participates_in_routine_namespace = kind == PinnedEntryKind::Directory
+        || (kind == PinnedEntryKind::RegularFile
+            && Path::new(name)
+                .extension()
+                .is_some_and(|extension| extension == "js"));
+    if participates_in_routine_namespace && name.to_str().is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "routine entry under `{}` has a non-UTF-8 name; script references must be injective UTF-8 paths",
+                parent.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn collect_routine_scripts_inner(
     directory: &File,
     current_path: &Path,
     hooks: RoutineDiscoveryHooks<'_>,
+    authority: &mut UnixTraversalAuthority<'_>,
     out: &mut Vec<DiscoveredRoutineScript>,
 ) -> io::Result<()> {
     let mut entries = directory_entries(directory)?;
     entries.sort_by(|first, second| first.name.cmp(&second.name));
     for entry in entries {
+        validate_routine_namespace_name(&entry.name, entry.kind, current_path)?;
         let path = current_path.join(&entry.name);
         match entry.kind {
             PinnedEntryKind::Directory => {
@@ -457,8 +797,33 @@ fn collect_routine_scripts_inner(
                         | libc::O_CLOEXEC,
                 )?;
                 verify_opened_entry_identity(&entry, &child_directory, &path)?;
+                let identity = verify_entry_provenance(
+                    &child_directory,
+                    &path,
+                    authority.root_identity,
+                    authority.root_mount_id,
+                    "directory",
+                )?;
+                if authority.forbidden_entry_identities.contains(&identity) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!(
+                            "routine directory `{}` aliases the protected routine helper surface",
+                            path.display()
+                        ),
+                    ));
+                }
+                if !authority.visited_directory_identities.insert(identity) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!(
+                            "routine directory authority cycle or alias detected at `{}`",
+                            path.display()
+                        ),
+                    ));
+                }
                 verify_discovery_authority(hooks)?;
-                collect_routine_scripts_inner(&child_directory, &path, hooks, out)?;
+                collect_routine_scripts_inner(&child_directory, &path, hooks, authority, out)?;
             }
             PinnedEntryKind::RegularFile
                 if path.extension().is_some_and(|extension| extension == "js") =>
@@ -473,6 +838,22 @@ fn collect_routine_scripts_inner(
                     libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
                 )?;
                 verify_opened_entry_identity(&entry, &file, &path)?;
+                let identity = verify_entry_provenance(
+                    &file,
+                    &path,
+                    authority.root_identity,
+                    authority.root_mount_id,
+                    "file",
+                )?;
+                if authority.forbidden_entry_identities.contains(&identity) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!(
+                            "routine file `{}` aliases the protected routine helper surface",
+                            path.display()
+                        ),
+                    ));
+                }
                 if let Some(hook) = hooks.before_read {
                     hook(&path);
                 }
@@ -549,9 +930,34 @@ pub(super) fn collect_routine_script_paths(
     {
         verify_discovery_authority(hooks)?;
         let directory = open_root(root)?;
+        let root_identity = require_available_identity(
+            FileIdentity::from_metadata(&directory.metadata()?),
+            &root.canonical,
+        )?;
+        if root.forbidden_entry_identities.contains(&root_identity) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "routine root `{}` aliases the protected routine helper surface",
+                    root.canonical.display()
+                ),
+            ));
+        }
+        let mut authority = UnixTraversalAuthority {
+            root_identity,
+            root_mount_id: root.mount_id,
+            forbidden_entry_identities: &root.forbidden_entry_identities,
+            visited_directory_identities: HashSet::from([root_identity]),
+        };
         verify_discovery_authority(hooks)?;
         let mut out = Vec::new();
-        collect_routine_scripts_inner(&directory, &root.canonical, hooks, &mut out)?;
+        collect_routine_scripts_inner(
+            &directory,
+            &root.canonical,
+            hooks,
+            &mut authority,
+            &mut out,
+        )?;
         verify_discovery_authority(hooks)?;
         Ok(out)
     }

@@ -2576,6 +2576,45 @@ mod routine_config_unit_tests {
     }
 
     #[test]
+    fn mixed_case_config_directory_never_becomes_runtime_root_without_provenance() {
+        let _root_override = TestEnvVarGuard::remove("AGENTDESK_ROOT_DIR");
+        let runtime = tempfile::tempdir().unwrap();
+        let mixed_case_config = runtime.path().join("Config").join("agentdesk.yaml");
+        save_to_path(&mixed_case_config, &Config::default()).unwrap();
+
+        let derived = runtime_root_for_config_path(&mixed_case_config);
+
+        assert_ne!(derived.as_deref(), mixed_case_config.parent());
+        if !runtime
+            .path()
+            .join("config")
+            .join("agentdesk.yaml")
+            .exists()
+        {
+            assert!(derived.is_none());
+        }
+    }
+
+    #[test]
+    fn config_resolution_carries_known_runtime_root_provenance() {
+        let _root_override = TestEnvVarGuard::remove("AGENTDESK_ROOT_DIR");
+        let runtime = tempfile::tempdir().unwrap();
+
+        let resolved = resolve_graceful_config_path_with_provenance(
+            None,
+            Some(runtime.path().to_path_buf()),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            resolved.path,
+            runtime.path().join("config").join("agentdesk.yaml")
+        );
+        assert_eq!(resolved.runtime_root.as_deref(), Some(runtime.path()));
+    }
+
+    #[test]
     fn unresolved_config_has_no_runtime_root_authority() {
         let config = Config::default().resolve_runtime_relative_paths(None);
 
@@ -2798,6 +2837,73 @@ fn resolve_runtime_path(root: &Path, raw: &Path) -> PathBuf {
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct ResolvedConfigPath {
+    path: PathBuf,
+    runtime_root: Option<PathBuf>,
+}
+
+fn absolute_root(root: &Path, current_dir: Option<&Path>) -> Option<PathBuf> {
+    if root.is_absolute() {
+        Some(root.to_path_buf())
+    } else {
+        current_dir.map(|cwd| cwd.join(root))
+    }
+}
+
+fn config_path_matches_root(path: &Path, root: &Path) -> bool {
+    [
+        crate::runtime_layout::config_file_path(root),
+        crate::runtime_layout::legacy_config_file_path(root),
+    ]
+    .into_iter()
+    .any(|candidate| {
+        path == candidate
+            || match (path.canonicalize(), candidate.canonicalize()) {
+                (Ok(path), Ok(candidate)) => path == candidate,
+                _ => false,
+            }
+    })
+}
+
+fn known_runtime_root_for_config_path(
+    path: &Path,
+    runtime_root: Option<&Path>,
+    current_dir: Option<&Path>,
+    home_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let absolute_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        current_dir?.join(path)
+    };
+
+    if std::env::var("AGENTDESK_ROOT_DIR")
+        .ok()
+        .is_some_and(|root| !root.trim().is_empty())
+    {
+        return runtime_root.and_then(|root| absolute_root(root, current_dir));
+    }
+
+    let runtime_root = runtime_root.and_then(|root| absolute_root(root, current_dir));
+    if let Some(root) = runtime_root
+        && config_path_matches_root(&absolute_path, &root)
+    {
+        return Some(root);
+    }
+    if let Some(root) = current_dir
+        && config_path_matches_root(&absolute_path, root)
+    {
+        return Some(root.to_path_buf());
+    }
+    if let Some(root) = home_dir.map(|home| home.join(".adk").join("release"))
+        && config_path_matches_root(&absolute_path, &root)
+    {
+        return Some(root);
+    }
+    None
+}
+
 fn runtime_root_for_config_path(path: &Path) -> Option<PathBuf> {
     let override_root = std::env::var("AGENTDESK_ROOT_DIR")
         .ok()
@@ -2805,46 +2911,12 @@ fn runtime_root_for_config_path(path: &Path) -> Option<PathBuf> {
         .filter(|root| !root.is_empty())
         .map(PathBuf::from);
     let current_dir = std::env::current_dir().ok();
-    if let Some(root) = override_root {
-        return if root.is_absolute() {
-            Some(root)
-        } else {
-            current_dir.map(|cwd| cwd.join(root))
-        };
-    }
-
-    let absolute_path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        current_dir.as_ref()?.join(path)
-    };
-    let belongs_to_root = |root: &Path| {
-        absolute_path == crate::runtime_layout::config_file_path(root)
-            || absolute_path == crate::runtime_layout::legacy_config_file_path(root)
-    };
-    if let Some(current_dir) = current_dir
-        && belongs_to_root(&current_dir)
-    {
-        return Some(current_dir);
-    }
-    if let Some(release_root) = dirs::home_dir().map(|home| home.join(".adk").join("release"))
-        && belongs_to_root(&release_root)
-    {
-        return Some(release_root);
-    }
-
-    if absolute_path.file_name() != Some(OsStr::new("agentdesk.yaml")) {
-        return None;
-    }
-    let parent = absolute_path.parent()?;
-    if parent.file_name() == Some(OsStr::new("config")) {
-        // `.../config/agentdesk.yaml` is ambiguous without source provenance:
-        // it can be a canonical file for the parent runtime or a legacy file
-        // for a runtime root literally named `config`. Fail closed instead of
-        // authorizing the wrong sibling code surface.
-        return None;
-    }
-    Some(parent.to_path_buf())
+    known_runtime_root_for_config_path(
+        path,
+        override_root.as_deref(),
+        current_dir.as_deref(),
+        dirs::home_dir().as_deref(),
+    )
 }
 
 impl Default for Config {
@@ -2884,7 +2956,7 @@ impl Default for Config {
 
 pub fn load() -> Result<Config> {
     crate::utils::redact::register_common_env_secrets();
-    let path = resolve_graceful_config_path(
+    let resolved = resolve_graceful_config_path_with_provenance(
         std::env::var("AGENTDESK_CONFIG")
             .ok()
             .map(std::path::PathBuf::from),
@@ -2892,6 +2964,8 @@ pub fn load() -> Result<Config> {
         std::env::current_dir().ok(),
         dirs::home_dir(),
     );
+    let path = resolved.path;
+    let runtime_root = resolved.runtime_root;
     let path_display = path.display().to_string();
 
     let contents = std::fs::read_to_string(&path)
@@ -2899,7 +2973,6 @@ pub fn load() -> Result<Config> {
 
     let config: Config = serde_yaml::from_str(&contents)
         .with_context(|| format!("Failed to parse config: {path_display}"))?;
-    let runtime_root = runtime_root_for_config_path(&path);
     let config = config
         .apply_runtime_defaults()
         .resolve_runtime_relative_paths(runtime_root.as_deref());
@@ -3124,7 +3197,37 @@ mod secret_bearing_config_file_tests {
     }
 }
 
+fn resolve_graceful_config_path_with_provenance(
+    explicit: Option<std::path::PathBuf>,
+    runtime_root: Option<std::path::PathBuf>,
+    cwd: Option<std::path::PathBuf>,
+    home_dir: Option<std::path::PathBuf>,
+) -> ResolvedConfigPath {
+    let path = resolve_graceful_config_path_only(
+        explicit,
+        runtime_root.clone(),
+        cwd.clone(),
+        home_dir.clone(),
+    );
+    let runtime_root = known_runtime_root_for_config_path(
+        &path,
+        runtime_root.as_deref(),
+        cwd.as_deref(),
+        home_dir.as_deref(),
+    );
+    ResolvedConfigPath { path, runtime_root }
+}
+
 fn resolve_graceful_config_path(
+    explicit: Option<std::path::PathBuf>,
+    runtime_root: Option<std::path::PathBuf>,
+    cwd: Option<std::path::PathBuf>,
+    home_dir: Option<std::path::PathBuf>,
+) -> std::path::PathBuf {
+    resolve_graceful_config_path_with_provenance(explicit, runtime_root, cwd, home_dir).path
+}
+
+fn resolve_graceful_config_path_only(
     explicit: Option<std::path::PathBuf>,
     runtime_root: Option<std::path::PathBuf>,
     cwd: Option<std::path::PathBuf>,
@@ -3216,7 +3319,7 @@ fn resolve_graceful_config_path(
 /// ~/.adk/release/config/agentdesk.yaml →
 /// ~/.adk/release/agentdesk.yaml
 pub fn load_graceful() -> Config {
-    let path = resolve_graceful_config_path(
+    let resolved = resolve_graceful_config_path_with_provenance(
         std::env::var("AGENTDESK_CONFIG")
             .ok()
             .map(std::path::PathBuf::from),
@@ -3226,8 +3329,9 @@ pub fn load_graceful() -> Config {
         std::env::current_dir().ok(),
         dirs::home_dir(),
     );
+    let path = resolved.path;
+    let runtime_root = resolved.runtime_root;
     let path_display = path.display().to_string();
-    let runtime_root = runtime_root_for_config_path(&path);
 
     let config = match std::fs::read_to_string(&path) {
         Ok(contents) => match serde_yaml::from_str::<Config>(&contents) {

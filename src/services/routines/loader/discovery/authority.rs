@@ -1,12 +1,16 @@
 use std::fmt;
+#[cfg(unix)]
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Component, Path, PathBuf};
+#[cfg(unix)]
+use std::sync::Arc;
 
 #[cfg(test)]
 mod tests;
 
 #[cfg(unix)]
-use std::os::unix::fs::MetadataExt as _;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 
 const ROUTINE_HELPERS_DIR_NAME: &str = "routine-helpers";
 
@@ -48,6 +52,10 @@ impl std::error::Error for PathResolutionError {
 
 #[derive(Debug)]
 pub(in super::super) enum RoutineRootValidationError {
+    #[cfg(not(unix))]
+    StableFilesystemAuthorityUnavailable {
+        platform: &'static str,
+    },
     CurrentDirectoryUnavailable {
         source: io::Error,
     },
@@ -122,6 +130,11 @@ pub(in super::super) enum RoutineRootValidationError {
 impl fmt::Display for RoutineRootValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(not(unix))]
+            Self::StableFilesystemAuthorityUnavailable { platform } => write!(
+                f,
+                "QuickJS routines are disabled on `{platform}` because stable descriptor-relative filesystem authority is unavailable"
+            ),
             Self::CurrentDirectoryUnavailable { source } => write!(
                 f,
                 "failed to resolve the current directory for configured QuickJS routine roots: {source}"
@@ -270,7 +283,7 @@ impl std::error::Error for RoutineRootValidationError {
 }
 
 #[cfg(unix)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct FileIdentity {
     pub(super) device: u64,
     pub(super) inode: u64,
@@ -325,6 +338,75 @@ fn checked_file_identity(
     })
 }
 
+#[cfg(unix)]
+fn bind_directory_handle(
+    authority: &ResolvedPathAuthority,
+    path: &Path,
+) -> std::result::Result<(Option<Arc<File>>, Option<u64>), PathResolutionError> {
+    if !authority.exists {
+        return Ok((None, None));
+    }
+    if authority.kind != Some(AuthorityFileKind::Directory) {
+        return Err(PathResolutionError::Io {
+            path: path.to_path_buf(),
+            source: io::Error::other("filesystem authority is not a directory"),
+        });
+    }
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    let handle = options
+        .open(path)
+        .map_err(|source| PathResolutionError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let observed = checked_file_identity(
+        &handle
+            .metadata()
+            .map_err(|source| PathResolutionError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?,
+        path,
+    )?;
+    if authority.identity != Some(observed) {
+        return Err(PathResolutionError::Io {
+            path: path.to_path_buf(),
+            source: io::Error::other("filesystem authority changed before its handle was retained"),
+        });
+    }
+    let mount_id =
+        super::directory_mount_id(&handle).map_err(|source| PathResolutionError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok((Some(Arc::new(handle)), mount_id))
+}
+
+#[cfg(unix)]
+fn retained_directory_handle_matches(
+    handle: Option<&Arc<File>>,
+    identity: Option<FileIdentity>,
+    mount_id: Option<u64>,
+) -> bool {
+    match (handle, identity) {
+        (None, None) => true,
+        (Some(handle), Some(identity)) => {
+            let Ok(metadata) = handle.metadata() else {
+                return false;
+            };
+            if FileIdentity::from_metadata(&metadata) != identity {
+                return false;
+            }
+            super::directory_mount_id(handle)
+                .is_ok_and(|observed_mount_id| observed_mount_id == mount_id)
+        }
+        _ => false,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(in super::super) struct ValidatedRoutineRoot {
     pub(in super::super) index: usize,
@@ -334,6 +416,12 @@ pub(in super::super) struct ValidatedRoutineRoot {
     pub(super) kind: Option<AuthorityFileKind>,
     #[cfg(unix)]
     pub(super) identity: Option<FileIdentity>,
+    #[cfg(unix)]
+    pub(super) handle: Option<Arc<File>>,
+    #[cfg(unix)]
+    pub(super) mount_id: Option<u64>,
+    #[cfg(unix)]
+    pub(super) forbidden_entry_identities: Arc<std::collections::HashSet<FileIdentity>>,
 }
 
 impl ValidatedRoutineRoot {
@@ -347,6 +435,12 @@ impl ValidatedRoutineRoot {
         #[cfg(unix)]
         {
             self.identity == observed.identity
+                && self.mount_id == observed.mount_id
+                && retained_directory_handle_matches(
+                    self.handle.as_ref(),
+                    self.identity,
+                    self.mount_id,
+                )
         }
         #[cfg(not(unix))]
         {
@@ -364,6 +458,10 @@ pub(in super::super) struct ValidatedRuntimeRoot {
     pub(super) kind: Option<AuthorityFileKind>,
     #[cfg(unix)]
     pub(super) identity: Option<FileIdentity>,
+    #[cfg(unix)]
+    handle: Option<Arc<File>>,
+    #[cfg(unix)]
+    pub(super) mount_id: Option<u64>,
 }
 
 impl ValidatedRuntimeRoot {
@@ -381,6 +479,12 @@ impl ValidatedRuntimeRoot {
         #[cfg(unix)]
         {
             self.identity == observed.identity
+                && self.mount_id == observed.mount_id
+                && retained_directory_handle_matches(
+                    self.handle.as_ref(),
+                    self.identity,
+                    self.mount_id,
+                )
         }
         #[cfg(not(unix))]
         {
@@ -418,6 +522,12 @@ pub(in super::super) struct ValidatedHelperSurface {
     pub(super) kind: Option<AuthorityFileKind>,
     #[cfg(unix)]
     pub(super) identity: Option<FileIdentity>,
+    #[cfg(unix)]
+    handle: Option<Arc<File>>,
+    #[cfg(unix)]
+    pub(super) mount_id: Option<u64>,
+    #[cfg(unix)]
+    entry_identities: Arc<std::collections::HashSet<FileIdentity>>,
 }
 
 impl ValidatedHelperSurface {
@@ -431,6 +541,12 @@ impl ValidatedHelperSurface {
         #[cfg(unix)]
         {
             self.identity == observed.identity
+                && self.mount_id == observed.mount_id
+                && retained_directory_handle_matches(
+                    self.handle.as_ref(),
+                    self.identity,
+                    self.mount_id,
+                )
         }
         #[cfg(not(unix))]
         {
@@ -630,6 +746,14 @@ fn validate_absolute_runtime_root_authority(
             observed_canonical_root: observed.canonical,
         });
     }
+    #[cfg(unix)]
+    let (handle, mount_id) =
+        bind_directory_handle(&expected, &expected.canonical).map_err(|source| {
+            RoutineRootValidationError::RuntimeRootCanonicalization {
+                runtime_root: absolute_runtime_root.to_path_buf(),
+                source,
+            }
+        })?;
     Ok(ValidatedRuntimeRoot {
         configured: absolute_runtime_root.to_path_buf(),
         canonical: expected.canonical,
@@ -637,6 +761,10 @@ fn validate_absolute_runtime_root_authority(
         kind: expected.kind,
         #[cfg(unix)]
         identity: expected.identity,
+        #[cfg(unix)]
+        handle,
+        #[cfg(unix)]
+        mount_id,
     })
 }
 
@@ -684,6 +812,15 @@ where
                 },
             );
         }
+        #[cfg(unix)]
+        let (handle, mount_id) =
+            bind_directory_handle(&expected, &expected.canonical).map_err(|source| {
+                RoutineRootValidationError::RootCanonicalization {
+                    root_index: index,
+                    root: root.clone(),
+                    source,
+                }
+            })?;
         identities.push(ValidatedRoutineRoot {
             index,
             configured: root.clone(),
@@ -692,6 +829,12 @@ where
             kind: expected.kind,
             #[cfg(unix)]
             identity: expected.identity,
+            #[cfg(unix)]
+            handle,
+            #[cfg(unix)]
+            mount_id,
+            #[cfg(unix)]
+            forbidden_entry_identities: Arc::new(std::collections::HashSet::new()),
         });
     }
 
@@ -717,6 +860,32 @@ where
             observed_canonical_surface: observed_helper.canonical,
         });
     }
+    #[cfg(unix)]
+    let (helper_handle, helper_mount_id) =
+        bind_directory_handle(&expected_helper, &expected_helper.canonical).map_err(|source| {
+            RoutineRootValidationError::HelperSurfaceCanonicalization {
+                helper_surface: helper_surface.clone(),
+                source,
+            }
+        })?;
+    #[cfg(unix)]
+    let helper_entry_identities = match helper_handle.as_deref() {
+        Some(handle) => super::collect_helper_authority_identities(
+            handle,
+            &expected_helper.canonical,
+            helper_mount_id,
+        )
+        .map_err(
+            |source| RoutineRootValidationError::HelperSurfaceCanonicalization {
+                helper_surface: helper_surface.clone(),
+                source: PathResolutionError::Io {
+                    path: expected_helper.canonical.clone(),
+                    source,
+                },
+            },
+        )?,
+        None => std::collections::HashSet::new(),
+    };
     let canonical_helper_surface = expected_helper.canonical;
     let helper_authority = ValidatedHelperSurface {
         configured: helper_surface.clone(),
@@ -725,12 +894,23 @@ where
         kind: expected_helper.kind,
         #[cfg(unix)]
         identity: expected_helper.identity,
+        #[cfg(unix)]
+        handle: helper_handle,
+        #[cfg(unix)]
+        mount_id: helper_mount_id,
+        #[cfg(unix)]
+        entry_identities: Arc::new(helper_entry_identities),
     };
+    #[cfg(unix)]
+    for root in &mut identities {
+        root.forbidden_entry_identities = Arc::clone(&helper_authority.entry_identities);
+    }
     for root in &identities {
         let aliases_helper_identity = {
             #[cfg(unix)]
             {
-                root.identity.is_some() && root.identity == helper_authority.identity
+                root.identity
+                    .is_some_and(|identity| helper_authority.entry_identities.contains(&identity))
             }
             #[cfg(not(unix))]
             {
@@ -832,6 +1012,21 @@ fn bind_routine_root_authority_inner<F>(
 where
     F: FnOnce(),
 {
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            roots,
+            runtime_root,
+            current_dir_override,
+            &after_runtime_root_resolve,
+        );
+        return Err(
+            RoutineRootValidationError::StableFilesystemAuthorityUnavailable {
+                platform: std::env::consts::OS,
+            },
+        );
+    }
+
     let current_dir = match current_dir_override {
         Some(current_dir) => current_dir.to_path_buf(),
         None => std::env::current_dir()

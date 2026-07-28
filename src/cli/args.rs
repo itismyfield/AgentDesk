@@ -461,6 +461,15 @@ pub(crate) enum Commands {
     },
     /// Build + deploy dev + promote to release
     Deploy,
+    /// Validate staged QuickJS routines with the exact runtime evaluator
+    ValidateRoutines {
+        /// Staged routines directory to validate
+        #[arg(long)]
+        root: PathBuf,
+        /// Staged release root containing routine-helpers
+        #[arg(long = "runtime-root")]
+        runtime_root: PathBuf,
+    },
     /// List agents and their status
     Agents,
     /// Show turn/session diagnostics for an agent ID or Discord channel ID
@@ -1034,6 +1043,7 @@ mod tests {
             "query",
             "phase",
             "deploy",
+            "validate-routines",
             "agents",
             "diag",
             "config",
@@ -1050,6 +1060,36 @@ mod tests {
         ];
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn validate_routines_requires_explicit_root_and_runtime_root() {
+        let parsed = Cli::try_parse_from([
+            "agentdesk",
+            "validate-routines",
+            "--root",
+            "/tmp/staged/release-root/routines",
+            "--runtime-root",
+            "/tmp/staged/release-root",
+        ])
+        .expect("complete validation authority must parse");
+        assert!(matches!(
+            parsed.command,
+            Some(Commands::ValidateRoutines { root, runtime_root })
+                if root == PathBuf::from("/tmp/staged/release-root/routines")
+                    && runtime_root == PathBuf::from("/tmp/staged/release-root")
+        ));
+
+        let error = match Cli::try_parse_from([
+            "agentdesk",
+            "validate-routines",
+            "--root",
+            "/tmp/staged/release-root/routines",
+        ]) {
+            Err(error) => error,
+            Ok(_) => panic!("runtime authority must be explicit"),
+        };
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
     }
 
     #[test]

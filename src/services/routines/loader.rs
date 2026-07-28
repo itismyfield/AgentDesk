@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 mod discovery;
 mod evaluator;
+mod validation;
 #[cfg(test)]
 use discovery::candidate_failure_key;
 use discovery::{
@@ -18,6 +19,87 @@ use discovery::{
 #[cfg(test)]
 use evaluator::load_single_routine_script;
 use evaluator::{evaluate_tick_action, load_single_routine_script_from_source};
+pub(crate) use validation::{RoutineValidationReport, validate_routine_tree};
+
+fn verify_bound_root_set(
+    bound_roots: &[ValidatedRoutineRoot],
+    bound_helper_surface: &ValidatedHelperSurface,
+    configured_roots: &[PathBuf],
+    runtime_root: &Path,
+    current_dir_override: Option<&Path>,
+) -> Result<()> {
+    let (observed_roots, observed_helper_surface) =
+        validate_routine_authority(configured_roots, runtime_root, current_dir_override)?;
+    bound_helper_surface.verify_observed(&observed_helper_surface)?;
+    if bound_roots.len() != observed_roots.len() {
+        return Err(
+            discovery::RoutineRootValidationError::ConfiguredRootCountChanged {
+                expected: bound_roots.len(),
+                observed: observed_roots.len(),
+            }
+            .into(),
+        );
+    }
+    for (observed, expected) in observed_roots.iter().zip(bound_roots) {
+        if observed.canonical != expected.canonical {
+            return Err(
+                discovery::RoutineRootValidationError::RootAuthorityChanged {
+                    root_index: observed.index,
+                    root: observed.configured.clone(),
+                    expected_canonical_root: expected.canonical.clone(),
+                    observed_canonical_root: observed.canonical.clone(),
+                }
+                .into(),
+            );
+        }
+        if !expected.retains_bound_identity(observed) {
+            return Err(discovery::RoutineRootValidationError::RootIdentityChanged {
+                root_index: observed.index,
+                root: observed.configured.clone(),
+                canonical_root: observed.canonical.clone(),
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn verify_bound_runtime_surface(
+    runtime_authority: &ValidatedRuntimeRoot,
+    helper_authority: &ValidatedHelperSurface,
+    runtime_root: &Path,
+    current_dir_override: Option<&Path>,
+) -> Result<()> {
+    runtime_authority.verify_current()?;
+    let (_, observed_helper) = validate_routine_authority(&[], runtime_root, current_dir_override)?;
+    helper_authority.verify_observed(&observed_helper)?;
+    runtime_authority.verify_current()?;
+    Ok(())
+}
+
+fn verify_bound_scan_surface(
+    runtime_authority: Option<&ValidatedRuntimeRoot>,
+    bound_roots: &[ValidatedRoutineRoot],
+    bound_helper_surface: &ValidatedHelperSurface,
+    configured_roots: &[PathBuf],
+    runtime_root: &Path,
+    current_dir_override: Option<&Path>,
+) -> Result<()> {
+    if let Some(runtime_authority) = runtime_authority {
+        runtime_authority.verify_current()?;
+    }
+    verify_bound_root_set(
+        bound_roots,
+        bound_helper_surface,
+        configured_roots,
+        runtime_root,
+        current_dir_override,
+    )?;
+    if let Some(runtime_authority) = runtime_authority {
+        runtime_authority.verify_current()?;
+    }
+    Ok(())
+}
 
 fn full_source_version(source: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -304,18 +386,18 @@ impl RoutineScriptLoader {
         runtime_root: &Path,
         current_dir_override: Option<&Path>,
     ) -> Result<()> {
-        if let Some(runtime_authority) = &self.bound_runtime_root {
-            runtime_authority.verify_current()?;
+        match (&self.bound_runtime_root, &self.bound_helper_surface) {
+            (Some(runtime_authority), Some(helper_authority)) => verify_bound_runtime_surface(
+                runtime_authority,
+                helper_authority,
+                runtime_root,
+                current_dir_override,
+            ),
+            (Some(runtime_authority), None) => {
+                runtime_authority.verify_current().map_err(Into::into)
+            }
+            (None, _) => Ok(()),
         }
-        let Some(helper_authority) = &self.bound_helper_surface else {
-            return Ok(());
-        };
-        let (_, observed) = validate_routine_authority(&[], runtime_root, current_dir_override)?;
-        helper_authority.verify_observed(&observed)?;
-        if let Some(runtime_authority) = &self.bound_runtime_root {
-            runtime_authority.verify_current()?;
-        }
-        Ok(())
     }
 
     pub fn load_dirs(&self, roots: &[PathBuf]) -> Result<usize> {
@@ -342,43 +424,26 @@ impl RoutineScriptLoader {
         #[cfg(not(test))]
         let current_dir_override: Option<PathBuf> = None;
         self.verify_bound_authority(&runtime_root, current_dir_override.as_deref())?;
-        let (validated_roots, observed_helper_surface) =
-            validate_routine_authority(roots, &runtime_root, current_dir_override.as_deref())?;
-        if let Some(expected) = &self.bound_helper_surface {
-            expected.verify_observed(&observed_helper_surface)?;
-        }
-        if let Some(bound_roots) = &self.bound_roots {
-            if bound_roots.len() != validated_roots.len() {
-                return Err(
-                    discovery::RoutineRootValidationError::ConfiguredRootCountChanged {
-                        expected: bound_roots.len(),
-                        observed: validated_roots.len(),
-                    }
-                    .into(),
-                );
-            }
-            for (root, expected) in validated_roots.iter().zip(bound_roots) {
-                if root.canonical != expected.canonical {
-                    return Err(
-                        discovery::RoutineRootValidationError::RootAuthorityChanged {
-                            root_index: root.index,
-                            root: root.configured.clone(),
-                            expected_canonical_root: expected.canonical.clone(),
-                            observed_canonical_root: root.canonical.clone(),
-                        }
-                        .into(),
-                    );
-                }
-                if !expected.retains_bound_identity(root) {
-                    return Err(discovery::RoutineRootValidationError::RootIdentityChanged {
-                        root_index: root.index,
-                        root: root.configured.clone(),
-                        canonical_root: root.canonical.clone(),
-                    }
-                    .into());
-                }
-            }
-        }
+        let (validated_roots, validation_helper_surface) =
+            if let (Some(bound_roots), Some(bound_helper_surface)) =
+                (&self.bound_roots, &self.bound_helper_surface)
+            {
+                verify_bound_scan_surface(
+                    self.bound_runtime_root.as_ref(),
+                    bound_roots,
+                    bound_helper_surface,
+                    roots,
+                    &runtime_root,
+                    current_dir_override.as_deref(),
+                )?;
+                (bound_roots.clone(), bound_helper_surface.clone())
+            } else {
+                validate_routine_authority(roots, &runtime_root, current_dir_override.as_deref())?
+            };
+        let scan_authority_roots = validated_roots
+            .iter()
+            .map(|root| root.canonical.clone())
+            .collect::<Vec<_>>();
         #[cfg(test)]
         if let Some(hook) = self
             .before_scan_hook
@@ -439,8 +504,15 @@ impl RoutineScriptLoader {
                 .unwrap_or_else(recover_poisoned_lock)
                 .clone();
             let authority_check = || {
-                self.verify_bound_authority(&runtime_root, current_dir_override.as_deref())
-                    .map_err(|error| std::io::Error::other(error.to_string()))
+                verify_bound_scan_surface(
+                    self.bound_runtime_root.as_ref(),
+                    &validated_roots,
+                    &validation_helper_surface,
+                    &scan_authority_roots,
+                    &runtime_root,
+                    current_dir_override.as_deref(),
+                )
+                .map_err(|error| std::io::Error::other(error.to_string()))
             };
             #[cfg(test)]
             let discovery_hooks = RoutineDiscoveryHooks {

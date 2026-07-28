@@ -1,7 +1,10 @@
 use super::super::{
     RoutineScriptFailure, RoutineScriptLoader, full_source_version, test_runtime_root,
 };
-use super::{PathResolutionError, RoutineRootValidationError, candidate_failure_key};
+use super::{
+    PathResolutionError, RoutineRootValidationError, bind_routine_root_authority,
+    candidate_failure_key, routine_roots_identity,
+};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,6 +24,140 @@ fn isolated_release_surfaces() -> (tempfile::TempDir, PathBuf, PathBuf) {
     .unwrap();
     std::fs::write(helpers.join("helper.js"), "module.exports = {};").unwrap();
     (release, routines, helpers)
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_state_identity_includes_each_mount_authority() {
+    let (release, routines, _helpers) = isolated_release_surfaces();
+    let (runtime, roots, helper) =
+        bind_routine_root_authority(&[routines], release.path()).unwrap();
+    let baseline = routine_roots_identity(&runtime, &roots, &helper);
+    let changed = |mount_id: Option<u64>| Some(mount_id.unwrap_or(0).wrapping_add(1));
+
+    let mut changed_runtime = runtime.clone();
+    changed_runtime.mount_id = changed(changed_runtime.mount_id);
+    assert_ne!(
+        baseline,
+        routine_roots_identity(&changed_runtime, &roots, &helper)
+    );
+
+    let mut changed_roots = roots.clone();
+    changed_roots[0].mount_id = changed(changed_roots[0].mount_id);
+    assert_ne!(
+        baseline,
+        routine_roots_identity(&runtime, &changed_roots, &helper)
+    );
+
+    let mut changed_helper = helper.clone();
+    changed_helper.mount_id = changed(changed_helper.mount_id);
+    assert_ne!(
+        baseline,
+        routine_roots_identity(&runtime, &roots, &changed_helper)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn regular_file_mount_transition_is_rejected() {
+    let error = super::verify_mount_authority(Some(12), Some(11), Path::new("routine.js"), "file")
+        .unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(error.to_string().contains("crosses mount authority"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn parses_proc_fdinfo_mount_authority_fallback() {
+    assert_eq!(
+        super::parse_proc_fdinfo_mount_id("pos:\t0\nflags:\t0100000\nmnt_id:\t42\n").unwrap(),
+        42
+    );
+    assert!(super::parse_proc_fdinfo_mount_id("pos:\t0\n").is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_js_name_fails_injective_namespace_validation() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let invalid_name = std::ffi::OsString::from_vec(vec![0xff, b'.', b'j', b's']);
+    let error = super::validate_routine_namespace_name(
+        &invalid_name,
+        super::PinnedEntryKind::RegularFile,
+        Path::new("routines"),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("non-UTF-8 name"));
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_backslash_and_directory_separator_have_distinct_script_refs() {
+    let release = tempfile::tempdir().unwrap();
+    let routines = release.path().join("routines");
+    std::fs::create_dir_all(routines.join("a")).unwrap();
+    std::fs::create_dir_all(release.path().join("routine-helpers")).unwrap();
+    std::fs::write(
+        routines.join("a").join("b.js"),
+        "agentdesk.routines.register({ name: 'Nested', tick() { return {}; } });",
+    )
+    .unwrap();
+    std::fs::write(
+        routines.join("a\\b.js"),
+        "agentdesk.routines.register({ name: 'Backslash', tick() { return {}; } });",
+    )
+    .unwrap();
+
+    let loader = RoutineScriptLoader::new().unwrap();
+    *loader.runtime_root_override.lock().unwrap() = Some(release.path().to_path_buf());
+
+    assert_eq!(loader.load_dirs(&[routines]).unwrap(), 2);
+    assert_eq!(
+        loader.script_refs().unwrap(),
+        vec!["a/b.js".to_string(), "a\\b.js".to_string()]
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn discovery_rejects_non_utf8_routine_names_before_script_ref_indexing() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let release = tempfile::tempdir().unwrap();
+    let routines = release.path().join("routines");
+    std::fs::create_dir_all(&routines).unwrap();
+    std::fs::create_dir_all(release.path().join("routine-helpers")).unwrap();
+    let invalid_name = std::ffi::OsString::from_vec(vec![0xff, b'.', b'j', b's']);
+    std::fs::write(
+        routines.join(invalid_name),
+        "agentdesk.routines.register({ tick() { return {}; } });",
+    )
+    .unwrap();
+
+    let loader = RoutineScriptLoader::new().unwrap();
+    *loader.runtime_root_override.lock().unwrap() = Some(release.path().to_path_buf());
+    let error = loader.load_dirs(&[routines]).unwrap_err();
+
+    assert!(error.to_string().contains("non-UTF-8 name"));
+    assert!(loader.script_refs().unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_routine_file_aliasing_protected_helper_file() {
+    let (release, routines, helpers) = isolated_release_surfaces();
+    std::fs::hard_link(helpers.join("helper.js"), routines.join("helper-alias.js")).unwrap();
+
+    let loader = RoutineScriptLoader::new().unwrap();
+    *loader.runtime_root_override.lock().unwrap() = Some(release.path().to_path_buf());
+    let loaded = loader.load_dirs(&[routines]).unwrap();
+
+    assert_eq!(loaded, 0);
+    assert!(!loader.has_script("helper-alias.js").unwrap());
 }
 
 fn preflight_observed_loader() -> (

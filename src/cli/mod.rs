@@ -16,6 +16,7 @@ pub(crate) mod provider_cli;
 pub(crate) mod query;
 pub(crate) mod run;
 pub(crate) mod utils;
+pub(crate) mod validate_routines;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

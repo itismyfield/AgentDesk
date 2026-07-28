@@ -41,6 +41,15 @@ fn exit_for_json_cli(result: std::result::Result<(), String>) -> Result<()> {
     }
 }
 
+fn exit_for_validation_cli(result: std::result::Result<bool, String>, json: bool) -> Result<()> {
+    match result {
+        Ok(true) => Ok(()),
+        Ok(false) => std::process::exit(1),
+        Err(error) if json => exit_for_json_cli(Err(error)),
+        Err(error) => exit_for_cli(Err(error)),
+    }
+}
+
 /// Build the single-line `{"error":"…"}` string emitted to stderr when a
 /// JSON-mode CLI command fails. Pure (the caller then does `process::exit`,
 /// which is not directly testable) and serde-serialized so quotes/newlines in
@@ -94,7 +103,8 @@ fn command_supports_json(command: &Commands) -> bool {
         | Commands::ProviderCli(..)
         | Commands::Health
         | Commands::MachineCompare
-        | Commands::Activity { .. } => true,
+        | Commands::Activity { .. }
+        | Commands::ValidateRoutines { .. } => true,
 
         // Text-only / operational commands — no JSON output path.
         Commands::Dcserver { .. }
@@ -620,6 +630,10 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             }
         }
         Commands::Deploy => exit_for_cli(super::client::cmd_deploy()),
+        Commands::ValidateRoutines { root, runtime_root } => exit_for_validation_cli(
+            super::validate_routines::handle_validate_routines(&root, &runtime_root, json),
+            json,
+        ),
         Commands::Config { action } => exit_for_cli(match action {
             ConfigAction::Get => super::client::cmd_config_get(),
             ConfigAction::Set { json } => super::client::cmd_config_set(&json),
@@ -826,6 +840,10 @@ mod exit_json_tests {
         }));
         // A representative always-JSON command.
         assert!(command_supports_json(&Commands::Agents));
+        assert!(command_supports_json(&Commands::ValidateRoutines {
+            root: "/tmp/routines".into(),
+            runtime_root: "/tmp/release".into(),
+        }));
     }
 
     #[test]

@@ -52,7 +52,8 @@ src/
 │   ├── monitoring.rs
 │   ├── query.rs
 │   ├── run.rs
-│   └── utils.rs
+│   ├── utils.rs
+│   └── validate_routines.rs
 ├── compat/
 │   ├── legacy_db_paths.rs
 │   ├── legacy_tmp_paths.rs
@@ -1274,7 +1275,8 @@ src/
 │   │   │   │   └── tick.rs
 │   │   │   ├── discovery.rs
 │   │   │   ├── evaluator.rs
-│   │   │   └── tests.rs
+│   │   │   ├── tests.rs
+│   │   │   └── validation.rs
 │   │   ├── action.rs
 │   │   ├── agent_executor.rs
 │   │   ├── discord_log.rs

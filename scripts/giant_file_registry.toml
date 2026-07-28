@@ -838,3 +838,13 @@ file = "src/services/discord/catch_up.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
 decompose_issue = "#4712"
+
+[[entry]]
+# #4902 centralizes descriptor-bound validation for the runtime root, routine
+# roots, and protected helper surface. Keeping those coupled authority checks
+# together makes cross-surface identity and mount invariants reviewable as one
+# fail-closed boundary.
+file = "src/services/routines/loader/discovery/authority.rs"
+owner = "routines-runtime"
+decision = "keep"
+keep_reason = "Runtime-root, routine-root, and helper-surface descriptor authority share one filesystem identity and mount contract; splitting the validator would obscure the cross-surface fail-closed invariant."
