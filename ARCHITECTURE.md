@@ -1248,7 +1248,10 @@ src/
 │   │   └── worktree_stale.rs
 │   ├── routines/
 │   │   ├── loader/
-│   │   │   └── discovery.rs
+│   │   │   ├── discovery/
+│   │   │   │   └── authority.rs
+│   │   │   ├── discovery.rs
+│   │   │   └── evaluator.rs
 │   │   ├── action.rs
 │   │   ├── agent_executor.rs
 │   │   ├── discord_log.rs

@@ -255,8 +255,8 @@
 | `POST` | `/api/routines/{id}/resume` | `routines::resume_routine` | `src/server/routes/routines/handlers.rs:253` | `src/server/routes/domains/ops.rs:260` |
 | `POST` | `/api/routines/{id}/run-now` | `routines::run_routine_now` | `src/server/routes/routines/handlers.rs:337` | `src/server/routes/domains/ops.rs:262` |
 | `GET` | `/api/routines/{id}/runs` | `routines::list_routine_runs` | `src/server/routes/routines/handlers.rs:116` | `src/server/routes/domains/ops.rs:258` |
-| `POST` | `/api/routines/{id}/session/kill` | `routines::kill_routine_session` | `src/server/routes/routines/handlers.rs:433` | `src/server/routes/domains/ops.rs:267` |
-| `POST` | `/api/routines/{id}/session/reset` | `routines::reset_routine_session` | `src/server/routes/routines/handlers.rs:426` | `src/server/routes/domains/ops.rs:263` |
+| `POST` | `/api/routines/{id}/session/kill` | `routines::kill_routine_session` | `src/server/routes/routines/handlers.rs:434` | `src/server/routes/domains/ops.rs:267` |
+| `POST` | `/api/routines/{id}/session/reset` | `routines::reset_routine_session` | `src/server/routes/routines/handlers.rs:427` | `src/server/routes/domains/ops.rs:263` |
 | `GET` | `/api/scheduled-messages` | `scheduled_messages::list_scheduled_messages` | `src/server/routes/scheduled_messages.rs:454` | `src/server/routes/domains/ops.rs:271` |
 | `POST` | `/api/scheduled-messages` | `scheduled_messages::create_scheduled_message` | `src/server/routes/scheduled_messages.rs:104` | `src/server/routes/domains/ops.rs:271` |
 | `DELETE` | `/api/scheduled-messages/{id}` | `scheduled_messages::cancel_scheduled_message` | `src/server/routes/scheduled_messages.rs:782` | `src/server/routes/domains/ops.rs:276` |
@@ -303,4 +303,4 @@
 | `GET` | `/api/v1/tokens` | `tokens` | `src/server/routes/v1.rs:202` | `src/server/routes/v1.rs:119` |
 | `GET` | `/api/voice/config` | `voice_config::get_voice_config` | `src/server/routes/voice_config.rs:110` | `src/server/routes/domains/admin.rs:68` |
 | `PUT` | `/api/voice/config` | `voice_config::put_voice_config` | `src/server/routes/voice_config.rs:120` | `src/server/routes/domains/admin.rs:68` |
-| `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:24` | `src/server/mod.rs:399` |
+| `GET` | `/ws` | `ws::ws_handler` | `src/server/ws.rs:24` | `src/server/mod.rs:400` |
