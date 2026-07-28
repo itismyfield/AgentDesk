@@ -1,7 +1,7 @@
 pub(crate) mod cancel_run;
 pub(crate) mod route;
-pub(crate) mod thread_group_contract;
 pub mod runtime;
+pub(crate) mod thread_group_contract;
 
 use serde::Serialize;
 use serde_json::{Value, json};
