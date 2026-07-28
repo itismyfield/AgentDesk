@@ -581,7 +581,7 @@ pub(in crate::services::discord) fn apply_watcher_short_replace_result(
 /// this helper remains the shared durable-anchor record point for the controller
 /// path and the flag-OFF legacy path.
 ///
-/// The caller (the FROZEN giant `tmux_watcher.rs`) invokes this with a SINGLE line,
+/// The caller (the FROZEN giant `tmux_watcher.rs`) invokes this with a SINGLE call,
 /// ONLY when BOTH gates hold (matching PR-1c's M4 discipline at the bridge):
 /// - (A) the send fully committed: `send_long_message_raw_with_rollback` is
 ///   all-or-nothing — a partial chunk failure rolls back the already-sent chunks
@@ -599,24 +599,23 @@ pub(in crate::services::discord) fn apply_watcher_short_replace_result(
 /// (offset authority) and the anchor pair's channel are BOTH `channel_id`. `range`
 /// is `(watcher_lease_start, watcher_lease_end)` — the SAME offset range the lease
 /// committed and `confirmed_end_offset` advanced to (never mix offset spaces).
-/// Delegates to the shared `dr::record_long_chunk_terminal_delivery` (PR-1c) with
-/// `watcher_owner_channel_id == delivery_channel_id == channel_id`.
+/// Delegates with same-channel ownership and the caller-held tmux identity only
+/// as receipt-less fallback; exact receipts remain fresh-inflight-row-only.
 pub(in crate::services::discord) fn record_watcher_long_chunk_terminal_delivery(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
+    tmux_session_name: &str,
     range: (u64, u64),
     last_chunk_anchor_msg_id: Option<u64>,
     delivered_body: &str,
 ) {
-    let tmux = shared.tmux_watchers.channel_binding(&channel_id);
     dr::record_long_chunk_terminal_delivery(
         shared,
         provider,
         channel_id,
         channel_id,
-        tmux.as_ref()
-            .map(|binding| binding.tmux_session_name.as_str()),
+        Some(tmux_session_name),
         range,
         last_chunk_anchor_msg_id,
         delivered_body,
@@ -691,6 +690,7 @@ mod tests {
             &shared,
             &ProviderKind::Claude,
             channel,
+            "AgentDesk-claude-watcher-off-noop",
             (0, 8192),
             Some(912_345_678),
             "",
@@ -714,6 +714,7 @@ mod tests {
             &shared,
             &ProviderKind::Claude,
             channel,
+            "AgentDesk-claude-watcher-none-anchor-noop",
             (0, 2048),
             None,
             "",

@@ -2757,15 +2757,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 );
                 watcher_response_frontier_committed = true;
                 // #3610 PR-1d: record the durable terminal anchor for the legacy
-                // long-chunk fallback arm ONLY here — gated on the SAME successful
-                // commit+advance (M4) AND `Some` anchor (⇒ the long-chunk arm ran and
-                // fully committed, (A)). Same-channel; logic in the sibling.
+                // long-chunk fallback arm ONLY here, gated on successful commit+advance
+                // (M4) and `Some` anchor (the long-chunk arm fully committed, A).
                 if let Some(anchor) = watcher_long_chunk_anchor_msg_id {
                     if let Some(body) = watcher_long_chunk_delivered_body.as_deref() {
                         terminal_send::record_watcher_long_chunk_terminal_delivery(
                             &shared,
                             &watcher_provider,
                             channel_id,
+                            &tmux_session_name,
                             (watcher_lease_start, watcher_lease_end),
                             Some(anchor.get()),
                             body,

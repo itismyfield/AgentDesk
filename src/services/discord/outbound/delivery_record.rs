@@ -514,6 +514,17 @@ fn write_confirmed_frontier_guarded_at_with_before_lock(
                 // Any concurrent re-anchor makes the comparison fail and leaves
                 // that newer whole commit untouched.
                 record.delivered_frontier = Some(frontier);
+            } else {
+                tracing::warn!(
+                    record_path = %path.display(),
+                    expected_generation_mtime_ns = frontier.generation_mtime_ns,
+                    expected_range = ?frontier.range,
+                    expected_panel_channel_id,
+                    expected_panel_msg_id,
+                    current_frontier = ?record.delivered_frontier,
+                    outcome = "preserved_current_frontier",
+                    "recovery proven-gone frontier CAS did not match"
+                );
             }
         }
     }
@@ -3969,6 +3980,34 @@ mod tests {
             Some(swapped_record),
             "the under-lock anchor CAS must preserve the concurrent whole commit"
         );
+    }
+
+    #[test]
+    fn proven_gone_reanchor_missing_frontier_is_conservative_noop_4911() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Claude;
+        let owner = 4_911_681;
+        let tmux = "AgentDesk-claude-phase-a-r6-reanchor-missing";
+        let generation = set_phase_a_generation(tmux, 1_700_491_681);
+        let path = record_path_or_err(&provider, owner).expect("record path");
+        let record_without_frontier = DeliveryRecord::default();
+        write_record_at(&path, &record_without_frontier).expect("seed record without frontier");
+
+        write_proven_gone_equal_range_frontier(
+            &provider,
+            owner,
+            tmux,
+            (4_911_682, 4_911_683),
+            DeliveredCommit {
+                range: (100, 300),
+                generation_mtime_ns: generation,
+                attempts: 1,
+                panel_channel_id: Some(4_911_684),
+                panel_msg_id: Some(4_911_685),
+            },
+        )
+        .expect("missing frontier remains a diagnosed conservative no-op");
+        assert_eq!(read_record_at(&path), Some(record_without_frontier));
     }
 
     #[test]
