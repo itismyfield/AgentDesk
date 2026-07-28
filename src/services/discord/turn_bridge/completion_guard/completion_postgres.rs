@@ -39,6 +39,25 @@ fn runtime_postgres_reconcile_key(dispatch_id: &str) -> String {
     format!("reconcile_dispatch:{dispatch_id}")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum DispatchFailureWriteOutcome {
+    Updated,
+    AlreadyTerminal,
+    Missing,
+    HardError(String),
+}
+
+#[derive(Debug, Clone)]
+struct DispatchFailurePostCommit {
+    dispatch_id: String,
+    current_status: String,
+    kanban_card_id: Option<String>,
+    agent_id: Option<String>,
+    dispatch_type: Option<String>,
+    transition_source: String,
+    result: serde_json::Value,
+}
+
 fn should_sync_runtime_auto_queue_terminal_entry(
     dispatch_type: Option<&str>,
     _result: &serde_json::Value,
@@ -245,58 +264,259 @@ fn runtime_pg_complete_dispatch_with_result(
     .unwrap_or(false)
 }
 
-pub(super) fn runtime_pg_reset_linked_auto_queue_entries(dispatch_id: &str) -> bool {
-    let dispatch_id = dispatch_id.to_string();
-    with_runtime_postgres_result(move |pool| {
-        Box::pin(async move {
-            let changed = sqlx::query(
-                "UPDATE auto_queue_entries
-                 SET status = 'pending',
-                     dispatch_id = NULL,
-                     slot_index = NULL,
-                     dispatched_at = NULL,
-                     completed_at = NULL
-                 WHERE dispatch_id = $1
-                   AND status IN ('pending', 'dispatched', 'failed')",
-            )
-            .bind(&dispatch_id)
-            .execute(&pool)
-            .await
-            .map_err(|error| {
-                format!("reset postgres auto_queue_entries for {dispatch_id}: {error}")
-            })?
-            .rows_affected();
-            Ok(changed > 0)
-        })
-    })
-    .unwrap_or(false)
+async fn runtime_max_entry_retries_pg(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<i64, String> {
+    let persisted = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT value FROM kv_meta WHERE key = 'runtime-config'",
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| format!("load runtime maxEntryRetries: {error}"))?
+    .flatten()
+    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+    .and_then(|value| {
+        value
+            .get("maxEntryRetries")
+            .and_then(serde_json::Value::as_u64)
+    });
+    let fallback = crate::config::load()
+        .map_err(|error| format!("load runtime config: {error}"))?
+        .runtime
+        .max_entry_retries
+        .unwrap_or(3);
+    Ok(i64::try_from(persisted.unwrap_or(fallback))
+        .unwrap_or(i64::MAX)
+        .max(1))
 }
 
-pub(super) fn runtime_pg_fail_linked_auto_queue_entries(dispatch_id: &str) -> bool {
-    let dispatch_id = dispatch_id.to_string();
-    with_runtime_postgres_result(move |pool| {
-        Box::pin(async move {
-            let changed = sqlx::query(
-                "UPDATE auto_queue_entries
-                 SET status = 'failed',
-                     dispatch_id = NULL,
-                     slot_index = NULL,
-                     dispatched_at = NULL,
-                     completed_at = NOW()
-                 WHERE dispatch_id = $1
-                   AND status IN ('pending', 'dispatched')",
+async fn record_runtime_dispatch_failure_entries_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    dispatch_id: &str,
+    retry_limit: i64,
+    trigger_source: &str,
+) -> Result<Vec<crate::db::auto_queue::EntryDispatchFailureResult>, String> {
+    let entry_ids = sqlx::query_scalar::<_, String>(
+        "SELECT id
+         FROM auto_queue_entries
+         WHERE dispatch_id = $1
+           AND status = 'dispatched'
+         ORDER BY id",
+    )
+    .bind(dispatch_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| {
+        format!("load auto-queue entries for failed dispatch {dispatch_id}: {error}")
+    })?;
+    let mut results = Vec::with_capacity(entry_ids.len());
+    for entry_id in entry_ids {
+        results.push(
+            crate::db::auto_queue::EntryDispatchFailureResult::record_on_pg_tx(
+                tx,
+                &entry_id,
+                retry_limit,
+                trigger_source,
             )
-            .bind(&dispatch_id)
-            .execute(&pool)
-            .await
-            .map_err(|error| {
-                format!("mark postgres auto_queue_entries failed for {dispatch_id}: {error}")
-            })?
-            .rows_affected();
-            Ok(changed > 0)
+            .await?,
+        );
+    }
+    Ok(results)
+}
+
+async fn fail_runtime_dispatch_on_pg_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    dispatch_id: &str,
+    result_json: &str,
+    retryable: bool,
+    transition_source: &str,
+) -> Result<
+    (
+        DispatchFailureWriteOutcome,
+        Option<DispatchFailurePostCommit>,
+    ),
+    String,
+> {
+    let current = sqlx::query(
+        "SELECT status, kanban_card_id, to_agent_id, dispatch_type,
+                context::TEXT AS context_text
+         FROM task_dispatches
+         WHERE id = $1
+         FOR UPDATE",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| format!("lock postgres dispatch {dispatch_id}: {error}"))?;
+    let Some(current) = current else {
+        return Ok((DispatchFailureWriteOutcome::Missing, None));
+    };
+    let current_status = current
+        .try_get::<Option<String>, _>("status")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if !matches!(current_status.as_str(), "pending" | "dispatched") {
+        return Ok((DispatchFailureWriteOutcome::AlreadyTerminal, None));
+    }
+    let retry_limit = if retryable {
+        runtime_max_entry_retries_pg(tx).await?
+    } else {
+        1
+    };
+    let entry_results = record_runtime_dispatch_failure_entries_on_pg_tx(
+        tx,
+        dispatch_id,
+        retry_limit,
+        transition_source,
+    )
+    .await?;
+    let retry_run_ids = entry_results
+        .iter()
+        .filter(|result| {
+            result.changed && result.to_status == crate::db::auto_queue::ENTRY_STATUS_PENDING
         })
-    })
-    .unwrap_or(false)
+        .map(|result| result.run_id.clone())
+        .collect::<Vec<_>>();
+    if !retry_run_ids.is_empty() {
+        let live_statuses = crate::db::auto_queue::run_status::LIVE_RUN_STATUSES;
+        let run_rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT DISTINCT r.id, r.status
+             FROM auto_queue_runs r
+             WHERE r.id = ANY($1)",
+        )
+        .bind(&retry_run_ids)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| {
+            format!("verify runnable auto-queue runs for failed dispatch {dispatch_id}: {error}")
+        })?;
+        if let Some((run_id, run_status)) = run_rows
+            .iter()
+            .find(|(_, status)| !live_statuses.contains(&status.as_str()))
+        {
+            return Err(format!(
+                "failed dispatch {dispatch_id} would leave a retry entry in non-live run {run_id} ({run_status})"
+            ));
+        }
+    }
+
+    let changed = sqlx::query(
+        "UPDATE task_dispatches
+         SET status = 'failed',
+             result = CAST($1 AS jsonb),
+             updated_at = NOW(),
+             last_stuck_alert_at = NULL
+         WHERE id = $2
+           AND status = $3",
+    )
+    .bind(result_json)
+    .bind(dispatch_id)
+    .bind(&current_status)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| format!("update postgres dispatch {dispatch_id} to failed: {error}"))?
+    .rows_affected();
+    if changed == 0 {
+        return Ok((DispatchFailureWriteOutcome::AlreadyTerminal, None));
+    }
+
+    let kanban_card_id = current
+        .try_get::<Option<String>, _>("kanban_card_id")
+        .map_err(|error| format!("decode kanban card for dispatch {dispatch_id}: {error}"))?;
+    let agent_id = current
+        .try_get::<Option<String>, _>("to_agent_id")
+        .map_err(|error| format!("decode target agent for dispatch {dispatch_id}: {error}"))?;
+    let dispatch_type = current
+        .try_get::<Option<String>, _>("dispatch_type")
+        .map_err(|error| format!("decode type for dispatch {dispatch_id}: {error}"))?;
+    let context_text = current
+        .try_get::<Option<String>, _>("context_text")
+        .map_err(|error| format!("decode context for dispatch {dispatch_id}: {error}"))?;
+    sqlx::query(
+        "INSERT INTO dispatch_events (
+            dispatch_id,
+            kanban_card_id,
+            dispatch_type,
+            from_status,
+            to_status,
+            transition_source,
+            payload_json
+        ) VALUES ($1, $2, $3, $4, 'failed', $5, CAST($6 AS jsonb))",
+    )
+    .bind(dispatch_id)
+    .bind(&kanban_card_id)
+    .bind(&dispatch_type)
+    .bind(&current_status)
+    .bind(transition_source)
+    .bind(result_json)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| {
+        format!("record postgres dispatch failure event for {dispatch_id}: {error}")
+    })?;
+
+    crate::db::auto_queue::reconcile_phase_gate_for_terminal_dispatch_on_pg_tx(
+        tx,
+        dispatch_id,
+        "failed",
+        context_text.as_deref(),
+        Some(result_json),
+    )
+    .await
+    .map_err(|error| format!("reconcile phase-gate for failed dispatch {dispatch_id}: {error}"))?;
+    crate::db::dispatch_semaphores::release_dispatch_semaphores_on_pg_tx(tx, dispatch_id)
+        .await
+        .map_err(|error| {
+            format!("release postgres dispatch semaphores for {dispatch_id}: {error}")
+        })?;
+    sqlx::query(
+        "UPDATE sessions
+         SET status = CASE
+                 WHEN status IN ('turn_active', 'awaiting_bg', 'awaiting_user', 'working') THEN 'idle'
+                 ELSE status
+             END,
+             active_dispatch_id = NULL,
+             session_info = 'Dispatch failed',
+             last_heartbeat = NOW()
+         WHERE active_dispatch_id = $1",
+    )
+    .bind(dispatch_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| format!("clear postgres session dispatch link {dispatch_id}: {error}"))?;
+
+    sqlx::query(
+        "INSERT INTO dispatch_outbox (dispatch_id, action)
+         SELECT $1, 'status_reaction'
+         WHERE NOT EXISTS (
+             SELECT 1
+             FROM dispatch_outbox
+             WHERE dispatch_id = $1
+               AND action = 'status_reaction'
+               AND status IN ('pending', 'processing')
+         )",
+    )
+    .bind(dispatch_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| {
+        format!("enqueue postgres failure status reaction for {dispatch_id}: {error}")
+    })?;
+    let result = serde_json::from_str(result_json)
+        .map_err(|error| format!("decode failure result for dispatch {dispatch_id}: {error}"))?;
+    Ok((
+        DispatchFailureWriteOutcome::Updated,
+        Some(DispatchFailurePostCommit {
+            dispatch_id: dispatch_id.to_string(),
+            current_status,
+            kanban_card_id,
+            agent_id,
+            dispatch_type,
+            transition_source: transition_source.to_string(),
+            result,
+        }),
+    ))
 }
 
 pub(super) fn dispatch_failure_result(
@@ -315,161 +535,94 @@ pub(super) fn dispatch_failure_result(
     }
 }
 
+fn emit_dispatch_failure_post_commit(effect: DispatchFailurePostCommit) {
+    crate::services::observability::emit_dispatch_result(
+        &effect.dispatch_id,
+        effect.kanban_card_id.as_deref(),
+        effect.dispatch_type.as_deref(),
+        Some(&effect.current_status),
+        "failed",
+        &effect.transition_source,
+        Some(&effect.result),
+    );
+    crate::dispatch::emit_dispatch_quality_event(
+        &effect.dispatch_id,
+        effect.agent_id.as_deref(),
+        effect.kanban_card_id.as_deref(),
+        effect.dispatch_type.as_deref(),
+        Some(&effect.current_status),
+        "failed",
+        &effect.transition_source,
+        Some(&effect.result),
+    );
+}
+
+fn runtime_pg_fail_dispatch_with_result_source(
+    dispatch_id: &str,
+    error_msg: &str,
+    error_code: Option<&str>,
+    retryable: bool,
+    transition_source: &str,
+    fallback: bool,
+) -> DispatchFailureWriteOutcome {
+    let dispatch_id = dispatch_id.to_string();
+    let mut failure_result = dispatch_failure_result(error_msg, error_code);
+    if fallback {
+        failure_result["fallback"] = serde_json::json!(true);
+    }
+    let failure_result = failure_result.to_string();
+    let transition_source = transition_source.to_string();
+    match with_runtime_postgres_result(move |pool| {
+        Box::pin(async move {
+            let mut tx = pool.begin().await.map_err(|error| {
+                format!("begin postgres failure transaction for {dispatch_id}: {error}")
+            })?;
+            let (outcome, post_commit) = fail_runtime_dispatch_on_pg_tx(
+                &mut tx,
+                &dispatch_id,
+                &failure_result,
+                retryable,
+                &transition_source,
+            )
+            .await?;
+            tx.commit().await.map_err(|error| {
+                format!("commit postgres failure transaction for {dispatch_id}: {error}")
+            })?;
+            if outcome == DispatchFailureWriteOutcome::Updated {
+                crate::services::dispatches::wait_queue::spawn_cached_constraint_release_wake(
+                    pool,
+                    "constraint_release",
+                    dispatch_id,
+                    "dispatch_failure_terminal_status",
+                );
+            }
+            Ok((outcome, post_commit))
+        })
+    }) {
+        Ok((outcome, post_commit)) => {
+            if let Some(effect) = post_commit {
+                emit_dispatch_failure_post_commit(effect);
+            }
+            outcome
+        }
+        Err(error) => DispatchFailureWriteOutcome::HardError(error),
+    }
+}
+
 pub(super) fn runtime_pg_fail_dispatch_with_result(
     dispatch_id: &str,
     error_msg: &str,
     error_code: Option<&str>,
-    reset_auto_queue_entries: bool,
-) -> bool {
-    let dispatch_id = dispatch_id.to_string();
-    let mut fallback_result = dispatch_failure_result(error_msg, error_code);
-    fallback_result["fallback"] = serde_json::json!(true);
-    let fallback_result = fallback_result.to_string();
-    with_runtime_postgres_result(move |pool| {
-        Box::pin(async move {
-            let mut tx = pool
-                .begin()
-                .await
-                .map_err(|error| format!("begin postgres failure fallback for {dispatch_id}: {error}"))?;
-
-            let current = sqlx::query(
-                "SELECT status, kanban_card_id, dispatch_type
-                 FROM task_dispatches
-                 WHERE id = $1",
-            )
-            .bind(&dispatch_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|error| format!("load postgres dispatch {dispatch_id}: {error}"))?;
-            let Some(current) = current else {
-                return Ok(false);
-            };
-
-            let current_status = current
-                .try_get::<Option<String>, _>("status")
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-            if !matches!(current_status.as_str(), "pending" | "dispatched") {
-                return Ok(false);
-            }
-
-            let changed = sqlx::query(
-                "UPDATE task_dispatches
-                 SET status = 'failed',
-                     result = CAST($1 AS jsonb),
-                     updated_at = NOW(),
-                     last_stuck_alert_at = NULL
-                 WHERE id = $2
-                   AND status = $3",
-            )
-            .bind(&fallback_result)
-            .bind(&dispatch_id)
-            .bind(&current_status)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| format!("update postgres dispatch {dispatch_id} to failed: {error}"))?
-            .rows_affected();
-            if changed == 0 {
-                return Ok(false);
-            }
-
-            let kanban_card_id = current
-                .try_get::<Option<String>, _>("kanban_card_id")
-                .ok()
-                .flatten();
-            let dispatch_type = current
-                .try_get::<Option<String>, _>("dispatch_type")
-                .ok()
-                .flatten();
-
-            sqlx::query(
-                "INSERT INTO dispatch_events (
-                    dispatch_id,
-                    kanban_card_id,
-                    dispatch_type,
-                    from_status,
-                    to_status,
-                    transition_source,
-                    payload_json
-                ) VALUES ($1, $2, $3, $4, 'failed', 'turn_bridge_patch_failure_fallback', CAST($5 AS jsonb))",
-            )
-            .bind(&dispatch_id)
-            .bind(kanban_card_id)
-            .bind(dispatch_type)
-            .bind(&current_status)
-            .bind(&fallback_result)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| format!("record postgres dispatch failure event for {dispatch_id}: {error}"))?;
-
-            if reset_auto_queue_entries {
-                sqlx::query(
-                    "UPDATE auto_queue_entries
-                     SET status = 'pending',
-                         dispatch_id = NULL,
-                         slot_index = NULL,
-                         dispatched_at = NULL,
-                         completed_at = NULL
-                     WHERE dispatch_id = $1
-                       AND status IN ('pending', 'dispatched')",
-                )
-                .bind(&dispatch_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| format!("reset postgres auto_queue_entries for failed dispatch {dispatch_id}: {error}"))?;
-            } else {
-                sqlx::query(
-                    "UPDATE auto_queue_entries
-                     SET status = 'failed',
-                         dispatch_id = NULL,
-                         slot_index = NULL,
-                         dispatched_at = NULL,
-                         completed_at = NOW()
-                     WHERE dispatch_id = $1
-                       AND status IN ('pending', 'dispatched')",
-                )
-                .bind(&dispatch_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| format!("mark postgres auto_queue_entries failed for dispatch {dispatch_id}: {error}"))?;
-            }
-
-            sqlx::query(
-                "INSERT INTO kv_meta (key, value)
-                 VALUES ($1, $2)
-                 ON CONFLICT (key) DO UPDATE
-                     SET value = EXCLUDED.value",
-            )
-            .bind(runtime_postgres_reconcile_key(&dispatch_id))
-            .bind(&dispatch_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| format!("set postgres reconcile marker for failed dispatch {dispatch_id}: {error}"))?;
-
-            sqlx::query(
-                "INSERT INTO dispatch_outbox (dispatch_id, action)
-                 SELECT $1, 'status_reaction'
-                 WHERE NOT EXISTS (
-                     SELECT 1
-                     FROM dispatch_outbox
-                     WHERE dispatch_id = $1
-                       AND action = 'status_reaction'
-                       AND status IN ('pending', 'processing')
-                 )",
-            )
-            .bind(&dispatch_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| format!("enqueue postgres failure status reaction for {dispatch_id}: {error}"))?;
-
-            tx.commit()
-                .await
-                .map_err(|error| format!("commit postgres failure fallback for {dispatch_id}: {error}"))?;
-            Ok(true)
-        })
-    })
-    .unwrap_or(false)
+    retryable: bool,
+) -> DispatchFailureWriteOutcome {
+    runtime_pg_fail_dispatch_with_result_source(
+        dispatch_id,
+        error_msg,
+        error_code,
+        retryable,
+        "turn_bridge_dispatch_failure",
+        false,
+    )
 }
 
 /// Explicitly complete implementation/rework dispatches at turn end.
@@ -546,8 +699,308 @@ pub(super) async fn store_reconcile_marker_with_handles(
 }
 
 #[cfg(test)]
-mod failure_result_tests {
-    use super::dispatch_failure_result;
+mod dispatch_failure_pg_tests {
+    use super::*;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+
+    async fn seed_failure_fixture(
+        pool: &sqlx::PgPool,
+        suffix: &str,
+        dispatch_status: &str,
+        retry_limit: i64,
+    ) -> (String, String, String) {
+        let run_id = format!("run-{suffix}");
+        let entry_id = format!("entry-{suffix}");
+        let dispatch_id = format!("dispatch-{suffix}");
+        sqlx::query("INSERT INTO auto_queue_runs (id, status) VALUES ($1, 'active')")
+            .bind(&run_id)
+            .execute(pool)
+            .await
+            .expect("seed dispatch failure run");
+        sqlx::query(
+            "INSERT INTO task_dispatches (id, status, dispatch_type)
+             VALUES ($1, $2, 'implementation')",
+        )
+        .bind(&dispatch_id)
+        .bind(dispatch_status)
+        .execute(pool)
+        .await
+        .expect("seed failed dispatch");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (
+                 id, run_id, agent_id, status, retry_count, dispatch_id
+             ) VALUES ($1, $2, 'agent-1', 'dispatched', 0, $3)",
+        )
+        .bind(&entry_id)
+        .bind(&run_id)
+        .bind(&dispatch_id)
+        .execute(pool)
+        .await
+        .expect("seed linked entry");
+        sqlx::query(
+            "INSERT INTO kv_meta (key, value)
+             VALUES ('runtime-config', $1)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(serde_json::json!({"maxEntryRetries": retry_limit}).to_string())
+        .execute(pool)
+        .await
+        .expect("seed retry policy");
+        (run_id, entry_id, dispatch_id)
+    }
+
+    #[tokio::test]
+    async fn fallback_failure_reduces_dispatch_entry_and_run_in_one_transaction_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let (run_id, entry_id, dispatch_id) =
+            seed_failure_fixture(&pool, "fallback", "dispatched", 3).await;
+        let result_json = dispatch_failure_result("transport failure", None).to_string();
+        let mut tx = pool.begin().await.expect("begin fallback test tx");
+        let (outcome, _) = fail_runtime_dispatch_on_pg_tx(
+            &mut tx,
+            &dispatch_id,
+            &result_json,
+            true,
+            "test_fallback",
+        )
+        .await
+        .expect("reduce fallback failure");
+        tx.commit().await.expect("commit fallback test tx");
+        assert_eq!(outcome, DispatchFailureWriteOutcome::Updated);
+
+        let state = sqlx::query_as::<_, (String, String, i64, String, i64, i64)>(
+            "SELECT d.status, e.status, e.retry_count, r.status,
+                    (SELECT COUNT(*) FROM dispatch_events
+                     WHERE dispatch_id = d.id AND to_status = 'failed'),
+                    (SELECT COUNT(*) FROM auto_queue_entry_transitions
+                     WHERE entry_id = e.id AND to_status = 'pending')
+             FROM task_dispatches d
+             JOIN auto_queue_entries e ON e.id = $2
+             JOIN auto_queue_runs r ON r.id = $3
+             WHERE d.id = $1",
+        )
+        .bind(&dispatch_id)
+        .bind(&entry_id)
+        .bind(&run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load fallback state");
+        assert_eq!(
+            state,
+            (
+                "failed".to_string(),
+                "pending".to_string(),
+                1,
+                "active".to_string(),
+                1,
+                1,
+            )
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_failure_has_one_dispatch_and_entry_cas_winner_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let (run_id, entry_id, dispatch_id) =
+            seed_failure_fixture(&pool, "concurrent", "dispatched", 3).await;
+        let result_json = dispatch_failure_result("concurrent failure", None).to_string();
+
+        let invoke = |pool: sqlx::PgPool, source: &'static str| {
+            let dispatch_id = dispatch_id.clone();
+            let result_json = result_json.clone();
+            tokio::spawn(async move {
+                let mut tx = pool.begin().await.expect("begin concurrent failure tx");
+                let (outcome, _) = fail_runtime_dispatch_on_pg_tx(
+                    &mut tx,
+                    &dispatch_id,
+                    &result_json,
+                    true,
+                    source,
+                )
+                .await
+                .expect("reduce concurrent failure");
+                tx.commit().await.expect("commit concurrent failure tx");
+                outcome
+            })
+        };
+        let first = invoke(pool.clone(), "test_concurrent_first");
+        let second = invoke(pool.clone(), "test_concurrent_second");
+        let outcomes = [
+            first.await.expect("join first failure"),
+            second.await.expect("join second failure"),
+        ];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == DispatchFailureWriteOutcome::Updated)
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == DispatchFailureWriteOutcome::AlreadyTerminal)
+                .count(),
+            1
+        );
+
+        let state = sqlx::query_as::<_, (String, String, i64, String, i64, i64)>(
+            "SELECT d.status, e.status, e.retry_count, r.status,
+                    (SELECT COUNT(*) FROM dispatch_events WHERE dispatch_id = d.id),
+                    (SELECT COUNT(*) FROM auto_queue_entry_transitions WHERE entry_id = e.id)
+             FROM task_dispatches d
+             JOIN auto_queue_entries e ON e.id = $2
+             JOIN auto_queue_runs r ON r.id = $3
+             WHERE d.id = $1",
+        )
+        .bind(&dispatch_id)
+        .bind(&entry_id)
+        .bind(&run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load concurrent failure state");
+        assert_eq!(
+            state,
+            (
+                "failed".to_string(),
+                "pending".to_string(),
+                1,
+                "active".to_string(),
+                1,
+                1,
+            )
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn terminal_fallback_finalizes_run_once_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let (run_id, entry_id, dispatch_id) =
+            seed_failure_fixture(&pool, "terminal", "dispatched", 1).await;
+        let result_json = dispatch_failure_result("terminal failure", None).to_string();
+        let mut tx = pool.begin().await.expect("begin terminal test tx");
+        let (first, _) = fail_runtime_dispatch_on_pg_tx(
+            &mut tx,
+            &dispatch_id,
+            &result_json,
+            false,
+            "test_terminal_fallback",
+        )
+        .await
+        .expect("reduce terminal fallback");
+        tx.commit().await.expect("commit terminal test tx");
+        let first_completed_at = sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
+            "SELECT completed_at FROM auto_queue_runs WHERE id = $1",
+        )
+        .bind(&run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load terminal completion timestamp");
+
+        let mut duplicate_tx = pool.begin().await.expect("begin duplicate test tx");
+        let (duplicate, _) = fail_runtime_dispatch_on_pg_tx(
+            &mut duplicate_tx,
+            &dispatch_id,
+            &result_json,
+            false,
+            "test_terminal_duplicate",
+        )
+        .await
+        .expect("duplicate terminal fallback");
+        duplicate_tx
+            .commit()
+            .await
+            .expect("commit duplicate test tx");
+        let state =
+            sqlx::query_as::<_, (String, i64, String, chrono::DateTime<chrono::Utc>, i64, i64)>(
+                "SELECT e.status, e.retry_count, r.status, r.completed_at,
+                    (SELECT COUNT(*) FROM dispatch_events WHERE dispatch_id = $2),
+                    (SELECT COUNT(*) FROM auto_queue_entry_transitions WHERE entry_id = e.id)
+             FROM auto_queue_entries e
+             JOIN auto_queue_runs r ON r.id = e.run_id
+             WHERE e.id = $1",
+            )
+            .bind(&entry_id)
+            .bind(&dispatch_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load terminal duplicate state");
+        assert_eq!(first, DispatchFailureWriteOutcome::Updated);
+        assert_eq!(duplicate, DispatchFailureWriteOutcome::AlreadyTerminal);
+        assert_eq!(
+            state,
+            (
+                "failed".to_string(),
+                1,
+                "completed".to_string(),
+                first_completed_at,
+                1,
+                1,
+            )
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn patch_conflict_preserves_completed_dispatch_and_linked_entry_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let (run_id, entry_id, dispatch_id) =
+            seed_failure_fixture(&pool, "conflict", "completed", 3).await;
+        let result_json = dispatch_failure_result("late failure", None).to_string();
+        let mut tx = pool.begin().await.expect("begin conflict test tx");
+        let (outcome, _) = fail_runtime_dispatch_on_pg_tx(
+            &mut tx,
+            &dispatch_id,
+            &result_json,
+            true,
+            "test_patch_conflict",
+        )
+        .await
+        .expect("reconcile completed conflict");
+        tx.commit().await.expect("commit conflict test tx");
+        let state = sqlx::query_as::<_, (String, String, i64, String, i64, i64)>(
+            "SELECT d.status, e.status, e.retry_count, r.status,
+                    (SELECT COUNT(*) FROM dispatch_events WHERE dispatch_id = d.id),
+                    (SELECT COUNT(*) FROM auto_queue_entry_transitions WHERE entry_id = e.id)
+             FROM task_dispatches d
+             JOIN auto_queue_entries e ON e.id = $2
+             JOIN auto_queue_runs r ON r.id = $3
+             WHERE d.id = $1",
+        )
+        .bind(&dispatch_id)
+        .bind(&entry_id)
+        .bind(&run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load conflict state");
+        assert_eq!(outcome, DispatchFailureWriteOutcome::AlreadyTerminal);
+        assert_eq!(
+            state,
+            (
+                "completed".to_string(),
+                "dispatched".to_string(),
+                0,
+                "active".to_string(),
+                0,
+                0,
+            )
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
 
     #[test]
     fn dispatch_failure_result_preserves_legacy_error_shape() {

@@ -1019,6 +1019,7 @@ pub(crate) async fn cancel_with_pg(
     pool: &PgPool,
 ) -> Result<Value, String> {
     let target_run_ids =
-        load_run_ids_with_status_pg(pool, &["active", "paused", RUN_STATUS_RESTORING]).await?;
+        load_run_ids_with_status_pg(pool, crate::db::auto_queue::run_status::LIVE_RUN_STATUSES)
+            .await?;
     cancel_selected_runs_with_pg(health_registry, pool, &target_run_ids, "auto_queue_cancel").await
 }
