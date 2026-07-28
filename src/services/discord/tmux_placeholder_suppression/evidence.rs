@@ -257,3 +257,47 @@ pub(super) fn cleanup_current_output_eof(
         .watcher_output_path(tmux_session_name)
         .and_then(|path| cleanup_output_eof_from_path(&path))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn winner_bound_frontier_does_not_delete_losing_anchor_4911() {
+        let channel_id = ChannelId::new(4_911_601);
+        let losing_message = MessageId::new(4_911_602);
+        let winning_anchor = delivery_frontier_probe::CurrentGenerationAnchor {
+            panel_msg_id: 4_911_603,
+            panel_channel_id: channel_id.get(),
+            range: (100, 300),
+        };
+        let signal = guarded_cleanup_delivered_elsewhere_signal_from_anchor(
+            channel_id,
+            losing_message,
+            (0, 200),
+            winning_anchor,
+            Some(300),
+            Some(300),
+        );
+
+        assert_eq!(
+            signal,
+            GuardedDeliveredElsewhereSignal::Ambiguous {
+                evidence: "current_generation_anchor_range_mismatch"
+            }
+        );
+        assert_eq!(
+            guarded_nonterminal_delete_decision(
+                &ProviderKind::Claude,
+                0,
+                "",
+                false,
+                signal,
+                GuardedCleanupTargetAuthor::Unknown,
+            ),
+            GuardedNonterminalDeleteDecision::PreserveNoEdit {
+                evidence: "current_generation_anchor_range_mismatch"
+            }
+        );
+    }
+}

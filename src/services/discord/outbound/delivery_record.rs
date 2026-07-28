@@ -438,6 +438,91 @@ pub(in crate::services::discord) fn write_delivered_frontier(
     write_delivered_frontier_at(&record_path_or_err(provider, channel_id)?, frontier)
 }
 
+fn merge_confirmed_frontier(
+    existing: Option<&DeliveredCommit>,
+    incoming: DeliveredCommit,
+) -> DeliveredCommit {
+    // The highest END wins, with the existing commit winning ties. Keep that
+    // winner whole: its START, attempts, and panel anchor describe one confirmed
+    // delivery and must never be combined with an unrelated commit's fields.
+    match existing {
+        Some(existing)
+            if existing.generation_mtime_ns == incoming.generation_mtime_ns
+                && existing.range.1 >= incoming.range.1 =>
+        {
+            existing.clone()
+        }
+        _ => incoming,
+    }
+}
+
+fn write_confirmed_frontier_guarded_at_with_before_lock(
+    path: &Path,
+    tmux_session_name: &str,
+    frontier: DeliveredCommit,
+    receipt: Option<ConfirmedDeliveryReceipt>,
+    before_lock: impl FnOnce(),
+) -> Result<(), String> {
+    if tmux_session_name.is_empty()
+        || frontier.generation_mtime_ns == 0
+        || frontier.range.1 <= frontier.range.0
+    {
+        return Err("delivery_record: refusing incomplete confirmed frontier authority".into());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    before_lock();
+    let _lock = lock_record_path(path)?;
+
+    // Receipt construction (or the receipt-less frontier fallback) can race a
+    // wrapper rotation while waiting for the record lock. Revalidate only after
+    // acquiring that lock so a stale incarnation can never replace the current
+    // one, regardless of which confirmed-delivery path reached this writer.
+    let current_generation = current_generation_mtime_ns(tmux_session_name);
+    if current_generation == 0 || current_generation != frontier.generation_mtime_ns {
+        return Err("delivery_record: refusing frontier from a stale JSONL incarnation".into());
+    }
+
+    let mut record = read_record_at(path).unwrap_or_default();
+    record.delivered_frontier = Some(merge_confirmed_frontier(
+        record.delivered_frontier.as_ref(),
+        frontier,
+    ));
+
+    if let Some(receipt) = receipt {
+        // A delayed, lower-range receipt remains exact proof for its own restored
+        // seed. Append it even when the monotonic frontier correctly stays put.
+        record
+            .confirmed_deliveries
+            .retain(|existing| existing != &receipt);
+        record.confirmed_deliveries.push(receipt);
+        let excess = record
+            .confirmed_deliveries
+            .len()
+            .saturating_sub(CONFIRMED_DELIVERY_RECEIPT_LIMIT);
+        if excess > 0 {
+            record.confirmed_deliveries.drain(..excess);
+        }
+    }
+    write_record_at(path, &record)
+}
+
+fn write_confirmed_frontier_guarded_at(
+    path: &Path,
+    tmux_session_name: &str,
+    frontier: DeliveredCommit,
+    receipt: Option<ConfirmedDeliveryReceipt>,
+) -> Result<(), String> {
+    write_confirmed_frontier_guarded_at_with_before_lock(
+        path,
+        tmux_session_name,
+        frontier,
+        receipt,
+        || {},
+    )
+}
+
 fn write_confirmed_delivery_at(
     path: &Path,
     frontier: DeliveredCommit,
@@ -451,57 +536,8 @@ fn write_confirmed_delivery_at(
     {
         return Err("delivery_record: refusing incomplete or frontier-mismatched receipt".into());
     }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let _lock = lock_record_path(path)?;
-
-    // Revalidate the transcript incarnation only after acquiring the record
-    // lock. Receipt construction can race a wrapper rotation; a receipt that
-    // was valid before waiting for this lock must not overwrite the new
-    // incarnation's frontier after it acquires the lock.
-    let current_generation = current_generation_mtime_ns(&receipt.source.tmux_session_name);
-    if current_generation == 0 || current_generation != receipt.source.generation_mtime_ns {
-        return Err("delivery_record: refusing receipt from a stale JSONL incarnation".into());
-    }
-
-    let mut record = read_record_at(path).unwrap_or_default();
-    let next_frontier = match record.delivered_frontier.as_ref() {
-        Some(existing) if existing.generation_mtime_ns == frontier.generation_mtime_ns => {
-            let merged_range = (
-                existing.range.0.min(frontier.range.0),
-                existing.range.1.max(frontier.range.1),
-            );
-            if frontier.range.1 > existing.range.1 {
-                DeliveredCommit {
-                    range: merged_range,
-                    ..frontier
-                }
-            } else {
-                DeliveredCommit {
-                    range: merged_range,
-                    ..existing.clone()
-                }
-            }
-        }
-        _ => frontier,
-    };
-    record.delivered_frontier = Some(next_frontier);
-
-    // A delayed, lower-range receipt remains exact proof for its own restored
-    // seed. Append it even when the monotonic frontier correctly stays put.
-    record
-        .confirmed_deliveries
-        .retain(|existing| existing != &receipt);
-    record.confirmed_deliveries.push(receipt);
-    let excess = record
-        .confirmed_deliveries
-        .len()
-        .saturating_sub(CONFIRMED_DELIVERY_RECEIPT_LIMIT);
-    if excess > 0 {
-        record.confirmed_deliveries.drain(..excess);
-    }
-    write_record_at(path, &record)
+    let tmux_session_name = receipt.source.tmux_session_name.clone();
+    write_confirmed_frontier_guarded_at(path, &tmux_session_name, frontier, Some(receipt))
 }
 
 /// Atomically persist the monotonic frontier and the exact Discord receipt.
@@ -1706,6 +1742,7 @@ fn exact_receipt_from_inflight(
 fn persist_confirmed_frontier_and_receipt(
     provider: &ProviderKind,
     offset_authority_channel: ChannelId,
+    tmux_session_name: Option<&str>,
     frontier: DeliveredCommit,
     receipt: Option<ConfirmedDeliveryReceipt>,
 ) -> Result<(), String> {
@@ -1713,7 +1750,20 @@ fn persist_confirmed_frontier_and_receipt(
         Some(receipt) => {
             write_confirmed_delivery(provider, offset_authority_channel.get(), frontier, receipt)
         }
-        None => write_delivered_frontier(provider, offset_authority_channel.get(), frontier),
+        None => {
+            let tmux_session_name = tmux_session_name
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| {
+                    "delivery_record: receipt-less frontier lacks tmux incarnation identity"
+                        .to_string()
+                })?;
+            write_confirmed_frontier_guarded_at(
+                &record_path_or_err(provider, offset_authority_channel.get())?,
+                tmux_session_name,
+                frontier,
+                None,
+            )
+        }
     }
 }
 
@@ -1826,6 +1876,10 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
         .as_ref()
         .map(|f| f.recovery_relay_attempts)
         .unwrap_or(0);
+    let tmux_session_name = fresh
+        .as_ref()
+        .and_then(|state| state.tmux_session_name.as_deref())
+        .filter(|name| !name.is_empty());
     let frontier = DeliveredCommit {
         range,
         generation_mtime_ns,
@@ -1842,8 +1896,13 @@ pub(in crate::services::discord) fn shadow_mirror_delivered_frontier(
         range,
         generation_mtime_ns,
     );
-    if let Err(error) = persist_confirmed_frontier_and_receipt(provider, channel, frontier, receipt)
-    {
+    if let Err(error) = persist_confirmed_frontier_and_receipt(
+        provider,
+        channel,
+        tmux_session_name,
+        frontier,
+        receipt,
+    ) {
         tracing::error!(
             provider = provider.as_str(),
             channel_id,
@@ -3422,7 +3481,7 @@ mod tests {
 
         let record = read_record(&provider, owner).expect("merged record");
         let frontier = record.delivered_frontier.expect("monotonic frontier");
-        assert_eq!(frontier.range, (0, 300));
+        assert_eq!(frontier.range, (100, 300));
         assert_eq!(frontier.panel_msg_id, Some(4_911_103));
         assert_eq!(record.confirmed_deliveries.len(), 3);
         assert_eq!(
@@ -3433,6 +3492,138 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![4_911_103, 4_911_104, 4_911_105]
         );
+    }
+
+    #[test]
+    fn receiptless_confirmed_frontiers_reverse_order_keep_winner_identity_4911() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Claude;
+        let owner = ChannelId::new(4_911_401);
+        let tmux = "AgentDesk-claude-phase-a-r3-receiptless-reverse";
+        let generation = set_phase_a_generation(tmux, 1_700_491_401);
+        let mut state = crate::services::discord::inflight::InflightTurnState::new(
+            provider.clone(),
+            owner.get(),
+            Some("phase-a-r3".into()),
+            7,
+            49_114,
+            4_911_402,
+            "receipt unavailable".into(),
+            Some("session-r3".into()),
+            Some(tmux.into()),
+            Some("/tmp/phase-a-r3-receiptless.jsonl".into()),
+            None,
+            100,
+        );
+        state.last_offset = 300;
+        state.turn_nonce = None;
+        crate::services::discord::inflight::save_inflight_state(&state)
+            .expect("persist receipt-less delivery incarnation");
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let coord = shared.tmux_relay_coord(owner);
+        coord.confirmed_end_offset.store(300, Ordering::Release);
+        coord
+            .confirmed_end_generation_mtime_ns
+            .store(generation, Ordering::Release);
+        let newer = DeliveredCommit {
+            range: (100, 300),
+            generation_mtime_ns: generation,
+            attempts: 0,
+            panel_msg_id: Some(4_911_402),
+            panel_channel_id: Some(owner.get()),
+        };
+        shadow_mirror_delivered_frontier(
+            &shared,
+            &provider,
+            owner,
+            newer.range,
+            true,
+            newer.panel_msg_id,
+            newer.panel_channel_id,
+            None,
+            Some(state.user_msg_id),
+        );
+
+        for (range, message_id) in [((0, 200), 4_911_404), ((50, 300), 4_911_406)] {
+            shadow_mirror_delivered_frontier(
+                &shared,
+                &provider,
+                owner,
+                range,
+                true,
+                Some(message_id),
+                Some(owner.get()),
+                None,
+                Some(state.user_msg_id),
+            );
+        }
+
+        let record = read_record(&provider, owner.get()).expect("receipt-less record");
+        assert_eq!(record.delivered_frontier, Some(newer));
+        assert!(record.confirmed_deliveries.is_empty());
+    }
+
+    #[test]
+    fn receiptless_blocked_writer_revalidates_after_rotation_4911() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Codex;
+        let owner = 4_911_501;
+        let delivery = 4_911_502;
+        let tmux = "AgentDesk-codex-phase-a-r3-receiptless-race";
+        let old_generation = set_phase_a_generation(tmux, 1_700_491_501);
+        let path = record_path_or_err(&provider, owner).expect("record path");
+        let held_lock = lock_record_path(&path).expect("hold record lock");
+        let stale_frontier = DeliveredCommit {
+            range: (0, 900),
+            generation_mtime_ns: old_generation,
+            attempts: 7,
+            panel_msg_id: Some(4_911_503),
+            panel_channel_id: Some(delivery),
+        };
+        let stale_path = path.clone();
+        let stale_tmux = tmux.to_string();
+        let (about_to_lock_tx, about_to_lock_rx) = std::sync::mpsc::channel();
+        let stale_writer = std::thread::spawn(move || {
+            write_confirmed_frontier_guarded_at_with_before_lock(
+                &stale_path,
+                &stale_tmux,
+                stale_frontier,
+                None,
+                || about_to_lock_tx.send(()).expect("signal lock attempt"),
+            )
+        });
+        about_to_lock_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("stale writer reached the record lock");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !stale_writer.is_finished(),
+            "stale writer must be lock-blocked"
+        );
+
+        let current_generation = set_phase_a_generation(tmux, 1_700_491_502);
+        let (current_frontier, current_receipt) = exact_delivery_fixture(
+            &provider,
+            tmux,
+            "current-after-rotation",
+            (100, 200),
+            current_generation,
+            (owner, delivery),
+            4_911_504,
+        );
+        let current_record = DeliveryRecord {
+            delivered_frontier: Some(current_frontier),
+            confirmed_deliveries: vec![current_receipt],
+            ..DeliveryRecord::default()
+        };
+        write_record_at(&path, &current_record).expect("install current incarnation under lock");
+        drop(held_lock);
+
+        assert!(
+            stale_writer.join().expect("join stale writer").is_err(),
+            "stale receipt-less writer must reject after acquiring the lock"
+        );
+        assert_eq!(read_record_at(&path), Some(current_record));
     }
 
     #[test]
