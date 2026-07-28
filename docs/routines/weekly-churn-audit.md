@@ -1,6 +1,6 @@
 # Weekly regression-churn audit
 
-Issue #4265 adds the offline `routines/monitoring/weekly_churn_audit.py` cron entry point. It reads
+Issue #4265 adds the offline `routine-helpers/monitoring/weekly_churn_audit.py` cron entry point. It reads
 the local repository's `git log --since='7 days'`, recognizes conventional `fix:` and
 `fix(scope):` subjects (including the optional breaking-change `!` marker), and counts each fix
 commit once per changed file and once per containing module directory. A file with at least the
@@ -21,7 +21,7 @@ The default invocation is a dry run and prints the report to stdout:
 
 ```bash
 ROOT="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"
-python3 "$ROOT/routines/monitoring/weekly_churn_audit.py" \
+python3 "$ROOT/routine-helpers/monitoring/weekly_churn_audit.py" \
   --repo-root "$ROOT" \
   --runtime-root "$ROOT"
 ```
@@ -29,7 +29,7 @@ python3 "$ROOT/routines/monitoring/weekly_churn_audit.py" \
 For example, an operator-managed KST cron can run it at 09:20 every Monday:
 
 ```cron
-20 9 * * 1 python3 "$HOME/.adk/release/routines/monitoring/weekly_churn_audit.py" --repo-root "$HOME/.adk/release" --runtime-root "$HOME/.adk/release"
+20 9 * * 1 python3 "$HOME/.adk/release/routine-helpers/monitoring/weekly_churn_audit.py" --repo-root "$HOME/.adk/release" --runtime-root "$HOME/.adk/release"
 ```
 
 Optional configuration:

@@ -6,7 +6,7 @@ const path = require("node:path");
 const { loadRoutine } = require("./support/routine-harness");
 
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
-const helper = require(path.join(REPO_ROOT, "routines/monitoring/local_worktree_inventory.js"));
+const helper = require(path.join(REPO_ROOT, "routine-helpers/monitoring/local_worktree_inventory.js"));
 
 const DAY = 24 * 60 * 60;
 
@@ -210,7 +210,7 @@ test("validateReport rejects a dirty worktree marked for anything but PRESERVE",
 // --- Safety by construction: the helper module has no destructive code path ---
 
 test("inventory helper source contains zero destructive operations", () => {
-  const raw = fs.readFileSync(path.join(REPO_ROOT, "routines/monitoring/local_worktree_inventory.js"), "utf8");
+  const raw = fs.readFileSync(path.join(REPO_ROOT, "routine-helpers/monitoring/local_worktree_inventory.js"), "utf8");
   // Scan executable code only: strip block and line comments so prose that
   // merely names a destructive command (e.g. explaining what is NOT done) does
   // not trip the guard. The guarantee is that no destructive call is reachable.
@@ -239,7 +239,7 @@ test("routine dispatches the deterministic helper and self-guards per day", () =
 
   const first = tick({ now: new Date("2026-07-21T00:00:00Z"), checkpoint: null });
   assert.equal(first.action, "agent");
-  assert.match(first.prompt, /local_worktree_inventory\.js/);
+  assert.match(first.prompt, /routine-helpers\/monitoring\/local_worktree_inventory\.js/);
   assert.match(first.prompt, /report-only inventory/i);
   assert.match(first.prompt, /Do NOT remove, prune, or modify/);
 

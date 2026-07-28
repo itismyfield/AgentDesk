@@ -10,7 +10,7 @@ input.
 
 ## Two pieces
 
-- `routines/monitoring/local_worktree_inventory.js` — the deterministic,
+- `routine-helpers/monitoring/local_worktree_inventory.js` — the deterministic,
   **read-only** helper that does the real work: enumerates `agent-*` worktree
   directories (no symlink follow), cross-references `git worktree list
   --porcelain`, and per candidate reads mtime/age, apparent disk size (`du
@@ -76,5 +76,5 @@ persisted in the routines table and claimed through the existing routine lease.
 The helper resolves the repository from `AGENTDESK_REPO_DIR` (the routine prompt
 sets it to `$ROOT/workspaces/agentdesk`). The age threshold defaults to 7 days
 and the integration ref to `origin/main`; both are parameters of `runInventory`.
-Running `node routines/monitoring/local_worktree_inventory.js` directly prints the
+Running `node routine-helpers/monitoring/local_worktree_inventory.js` directly prints the
 current inventory report for ad-hoc inspection.

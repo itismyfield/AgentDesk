@@ -55,8 +55,9 @@ routines/*
 
 # Exception: bundled monitoring routines are shipped engine code, loaded by
 # name via RoutineScriptLoader's default `./routines` dir, and exercised by CI.
-# The automation pipeline was swept up by mistake in the operator-routine
-# untrack pass (#4076); keep it and later bundled monitoring routines tracked.
+# Keep this configured root QuickJS-only: deterministic Node/Python helpers
+# ship separately from `routine-helpers/` and must never be added here.
+!routines/local-worktree-gc.js
 !routines/monitoring/
 routines/monitoring/*
 !routines/monitoring/automation-executor.js
@@ -64,7 +65,3 @@ routines/monitoring/*
 !routines/monitoring/automation-candidate-detector.js
 !routines/monitoring/automation-candidate-recommender.js
 !routines/monitoring/daily-log-digest.js
-!routines/monitoring/daily_log_digest.py
-!routines/monitoring/log_digest_issue_drafts.py
-!routines/monitoring/weekly_churn_audit.py
-!routines/monitoring/local_worktree_inventory.js

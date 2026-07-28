@@ -4,7 +4,7 @@
 // routine cannot enumerate `.claude/worktrees` itself. Matching the reviewed
 // daily-log-digest frame, it dispatches one fresh agent turn per KST day whose
 // only job is to run the deterministic, READ-ONLY sibling helper
-// (`routines/monitoring/local_worktree_inventory.js`) and return its JSON stdout
+// (`routine-helpers/monitoring/local_worktree_inventory.js`) and return its JSON stdout
 // verbatim. The helper performs zero destructive actions by construction; this
 // routine likewise issues no cleanup — it only schedules the inventory.
 
@@ -33,7 +33,7 @@ function buildPrompt(day) {
     "```bash",
     'ROOT="${AGENTDESK_ROOT_DIR:-${ADK_REL:-$HOME/.adk/release}}"',
     'REPO="${AGENTDESK_REPO_DIR:-$ROOT/workspaces/agentdesk}"',
-    'AGENTDESK_REPO_DIR="$REPO" node "$REPO/routines/monitoring/local_worktree_inventory.js"',
+    'AGENTDESK_REPO_DIR="$REPO" node "$ROOT/routine-helpers/monitoring/local_worktree_inventory.js"',
     "```",
     "",
     "Return the helper stdout (a single JSON report) verbatim as your final response, with no preface.",

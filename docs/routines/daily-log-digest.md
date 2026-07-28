@@ -32,7 +32,7 @@ so the routine dispatches at most one digest agent turn per KST day.
 
 ## Inputs and configuration
 
-`routines/monitoring/daily_log_digest.py` resolves the runtime root in the same order used by
+`routine-helpers/monitoring/daily_log_digest.py` resolves the runtime root in the same order used by
 release tooling: `AGENTDESK_ROOT_DIR`, then `ADK_REL`, then `$HOME/.adk/release`. It reads:
 
 - `logs/dcserver.stdout.log` and its numbered rotations (the internal tracing writer);

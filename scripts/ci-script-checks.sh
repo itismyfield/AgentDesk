@@ -101,6 +101,9 @@ echo "=== Inflight blind-save ratchet guard (#4259) ==="
 # #4511 post-deploy smoke WARN post-restart scoping
 bash tests/test_deploy_smoke_warn_scope_4511.sh
 
+# #4902 QuickJS routine roots vs deterministic helper asset surfaces
+bash tests/test_routine_asset_surfaces.sh
+
 echo "=== CI runner hardening guard ==="
 ./scripts/check-ci-runner-hardening.sh
 "$PYTHON" -m unittest tests.test_discord_thread_create_ci_wiring

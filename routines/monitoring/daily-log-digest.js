@@ -32,7 +32,7 @@ function buildPrompt(day) {
     "Run the repository-bundled deterministic helper:",
     "```bash",
     'ROOT="${AGENTDESK_ROOT_DIR:-${ADK_REL:-$HOME/.adk/release}}"',
-    'python3 "$ROOT/routines/monitoring/daily_log_digest.py"',
+    'python3 "$ROOT/routine-helpers/monitoring/daily_log_digest.py"',
     "```",
     "",
     "Return the helper stdout verbatim as your final response, with no preface or follow-up.",

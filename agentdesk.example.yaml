@@ -440,7 +440,8 @@ automation:
   allowed_authors: "REPLACE_ME,octocat"
 
 # JS routine worker 설정입니다. 기본값은 enabled=false, dir=./routines, tick=30초이며 PostgreSQL 없이는 실행되지 않습니다.
-# 운영 자동화 루틴을 켤 때 enabled를 true로 바꾸고 additional_dirs로 operator script를 덧붙이세요.
+# dir/additional_dirs는 QuickJS entrypoint 전용 root입니다. Node/Python helper는 별도 sibling
+# ./routine-helpers/에 배포되며 이 목록에 넣지 마세요. 운영 자동화 루틴은 additional_dirs로 덧붙이세요.
 # routines:
 #   enabled: false
 #   dir: "./routines"

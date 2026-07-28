@@ -23,6 +23,8 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # shellcheck source=_defaults.sh
 . "$SCRIPT_DIR/_defaults.sh"
+# shellcheck source=routine-asset-surface.sh
+. "$SCRIPT_DIR/routine-asset-surface.sh"
 
 AD_HOME="${AGENTDESK_HOME:-$HOME/.adk/release}"
 BIN_DIR="$AD_HOME/bin"
@@ -506,9 +508,27 @@ if [ -d "$PROJECT_DIR/policies" ]; then
 fi
 
 if [ -d "$PROJECT_DIR/routines" ]; then
-  mkdir -p "$AD_HOME/routines"
-  rsync -a --delete "$PROJECT_DIR/routines/" "$AD_HOME/routines/"
+  ROUTINES_STAGED="$AD_HOME/routines.new"
+  rm -rf "$ROUTINES_STAGED"
+  mkdir -p "$ROUTINES_STAGED"
+  # Preserve operator routines, then let bundled entries win only on conflict.
+  # Do not broadly delete: #4902 migrates four former helper paths explicitly.
+  if [ -d "$AD_HOME/routines" ]; then
+    rsync -a "$AD_HOME/routines/" "$ROUTINES_STAGED/"
+  fi
+  rsync -a "$PROJECT_DIR/routines/" "$ROUTINES_STAGED/"
+  adk_remove_legacy_routine_helpers "$ROUTINES_STAGED"
+  rm -rf "$AD_HOME/routines.old"
+  [ -d "$AD_HOME/routines" ] && mv "$AD_HOME/routines" "$AD_HOME/routines.old"
+  mv "$ROUTINES_STAGED" "$AD_HOME/routines"
+  rm -rf "$AD_HOME/routines.old"
   ok "Routines: $AD_HOME/routines/"
+fi
+
+if [ -d "$PROJECT_DIR/routine-helpers" ]; then
+  ROUTINE_HELPERS_STAGED="$(adk_stage_routine_helpers "$PROJECT_DIR" "$AD_HOME")"
+  adk_swap_staged_routine_helpers "$AD_HOME" "$ROUTINE_HELPERS_STAGED"
+  ok "Routine helpers: $AD_HOME/routine-helpers/"
 fi
 
 if [ -d "$PROJECT_DIR/skills" ]; then

@@ -14,6 +14,10 @@ agent to invoke the repo-deployed entrypoint under
 were copied from the original `~/.local/bin/*.sh` launchd targets and are
 deployed by `adk-release`, so leadership can move between eligible nodes
 without a manual script rsync.
+`routines/` and `routines.additional_dirs` are QuickJS-only loader roots. Deterministic
+Node/Python support programs are deployed separately under
+`${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}/routine-helpers/`; they are prompt/cron
+targets, never `script_ref` values.
 
 ## Migrated jobs
 

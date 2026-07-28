@@ -97,6 +97,8 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=_defaults.sh
 . "$SCRIPT_DIR/_defaults.sh"
+# shellcheck source=routine-asset-surface.sh
+. "$SCRIPT_DIR/routine-asset-surface.sh"
 
 ADK_REL="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"
 # The Rust dcserver reads AGENTDESK_DCSERVER_LABEL for the plist Label; honor it first
@@ -133,6 +135,8 @@ RESOLVED_RELEASE_SIGNING_MODE=""
 DASHBOARD_SOURCE=""
 STAGED_BINARY=""
 POLICIES_STAGED=""
+ROUTINES_STAGED=""
+ROUTINE_HELPERS_STAGED=""
 LAUNCHD_MIGRATED_STAGED=""
 RELEASE_ROOT_SCRIPTS_STAGED=""
 PG_TUNNEL_PREFLIGHT_PID=""
@@ -1068,6 +1072,9 @@ _cleanup_on_exit() {
     if [ -n "${POLICIES_STAGED:-}" ] && [ -d "$POLICIES_STAGED" ]; then
         rm -rf "$POLICIES_STAGED" 2>/dev/null || true
     fi
+    if [ -n "${ROUTINE_HELPERS_STAGED:-}" ] && [ -d "$ROUTINE_HELPERS_STAGED" ]; then
+        rm -rf "$ROUTINE_HELPERS_STAGED" 2>/dev/null || true
+    fi
     if [ -n "${LAUNCHD_MIGRATED_STAGED:-}" ] && [ -d "$LAUNCHD_MIGRATED_STAGED" ]; then
         rm -rf "$LAUNCHD_MIGRATED_STAGED" 2>/dev/null || true
     fi
@@ -1194,13 +1201,12 @@ git merge --quiet --ff-only origin/main"
         return 1
     fi
 
-    # Operator-private routines are excluded from the repo (.gitignore:50), so the
-    # peer's own `git fetch` above cannot deliver them. Push them before the peer
-    # deploys: leadership can move between nodes, and the routine runtime is a
-    # LeaderOnly worker that resolves `script_ref` against the local disk. A node
-    # missing these files fails every routine row with "routine script ... is not
-    # loaded". No --delete: the peer may hold routines this node does not.
-    if [ -d "$ADK_REL/routines" ]; then
+    # Operator-private routine and helper assets are excluded from the repo, so
+    # the peer's own `git fetch` above cannot deliver them. Push both surfaces
+    # before the peer deploys: leadership can move between nodes, and prompts
+    # resolve helper paths against the local release root. No --delete: the peer
+    # may hold local assets this node does not.
+    if [ -d "$ADK_REL/routines" ] || [ -d "$ADK_REL/routine-helpers" ]; then
         local peer_adk_rel
         if ! peer_adk_rel="$(ssh -o ConnectTimeout="$DEPLOY_SSH_CONNECT_TIMEOUT" "$peer" \
             'bash -lc '"$(printf '%q' 'echo "${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"')"'')"; then
@@ -1208,11 +1214,21 @@ git merge --quiet --ff-only origin/main"
             return 1
         fi
         peer_adk_rel="$(printf '%s' "$peer_adk_rel" | tr -d '\r')"
-        echo "▸ [peer:$peer] Syncing operator routine scripts..."
-        if ! rsync -a -e "ssh -o ConnectTimeout=$DEPLOY_SSH_CONNECT_TIMEOUT" \
-            "$ADK_REL/routines/" "$peer:$peer_adk_rel/routines/"; then
-            echo "✗ [peer:$peer] routine script sync failed"
-            return 1
+        if [ -d "$ADK_REL/routines" ]; then
+            echo "▸ [peer:$peer] Syncing operator routine scripts..."
+            if ! rsync -a -e "ssh -o ConnectTimeout=$DEPLOY_SSH_CONNECT_TIMEOUT" \
+                "$ADK_REL/routines/" "$peer:$peer_adk_rel/routines/"; then
+                echo "✗ [peer:$peer] routine script sync failed"
+                return 1
+            fi
+        fi
+        if [ -d "$ADK_REL/routine-helpers" ]; then
+            echo "▸ [peer:$peer] Syncing operator routine helper assets..."
+            if ! rsync -a -e "ssh -o ConnectTimeout=$DEPLOY_SSH_CONNECT_TIMEOUT" \
+                "$ADK_REL/routine-helpers/" "$peer:$peer_adk_rel/routine-helpers/"; then
+                echo "✗ [peer:$peer] routine helper asset sync failed"
+                return 1
+            fi
         fi
     fi
 
@@ -1558,9 +1574,24 @@ if [ -d "$REPO/routines" ]; then
     fi
     # Engine-owned routines win on conflict. No --delete: see above.
     rsync -a "$REPO/routines/" "$ROUTINES_STAGED/"
+    # #4902: helpers no longer belong in the QuickJS loader root. Tombstone
+    # exactly their former paths after both overlays so an old release layout
+    # cannot keep loading Node/Python helper files as routine candidates.
+    adk_remove_legacy_routine_helpers "$ROUTINES_STAGED"
 else
     echo "⚠ Routines source missing: $REPO/routines"
     echo "  Skipping routine staging — existing $ADK_REL/routines/ will be retained."
+fi
+
+# Stage deterministic helper assets outside the QuickJS-only routines root.
+# Seed with any operator-owned helpers, then overlay repository assets without
+# --delete so unrelated local helpers survive release deployment.
+if [ -d "$REPO/routine-helpers" ]; then
+    echo "▸ Staging routine helper assets..."
+    ROUTINE_HELPERS_STAGED="$(adk_stage_routine_helpers "$REPO" "$ADK_REL")"
+else
+    echo "⚠ Routine helper source missing: $REPO/routine-helpers"
+    echo "  Skipping helper staging — existing $ADK_REL/routine-helpers/ will be retained."
 fi
 
 # Stage launchd-migrated shell entrypoints before stopping release so routines
@@ -2414,6 +2445,11 @@ if [ -n "${ROUTINES_STAGED:-}" ] && [ -d "$ROUTINES_STAGED" ]; then
     mv "$ROUTINES_STAGED" "$ADK_REL/routines"
     ROUTINES_STAGED=""
     rm -rf "$ADK_REL/routines.old"
+fi
+
+if [ -n "${ROUTINE_HELPERS_STAGED:-}" ] && [ -d "$ROUTINE_HELPERS_STAGED" ]; then
+    adk_swap_staged_routine_helpers "$ADK_REL" "$ROUTINE_HELPERS_STAGED"
+    ROUTINE_HELPERS_STAGED=""
 fi
 
 if [ -n "${LAUNCHD_MIGRATED_STAGED:-}" ] && [ -d "$LAUNCHD_MIGRATED_STAGED" ]; then

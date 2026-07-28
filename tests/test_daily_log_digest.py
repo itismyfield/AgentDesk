@@ -18,8 +18,8 @@ from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ROUTINE_DIR = ROOT / "routines" / "monitoring"
-sys.path.insert(0, str(ROUTINE_DIR))
+HELPER_DIR = ROOT / "routine-helpers" / "monitoring"
+sys.path.insert(0, str(HELPER_DIR))
 
 from log_digest_issue_drafts import (  # noqa: E402
     _MEASURED_NUMBER_RE,

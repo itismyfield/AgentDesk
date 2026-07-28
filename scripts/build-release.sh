@@ -178,6 +178,17 @@ if [ -d "routines" ]; then
   fi
 fi
 
+# Deterministic Node/Python helpers intentionally live outside the QuickJS
+# routine loader root and are packaged as their own release asset surface.
+if [ -d "routine-helpers" ]; then
+  mkdir -p "$STAGING/routine-helpers"
+  if command -v rsync &>/dev/null; then
+    rsync -a --delete "routine-helpers/" "$STAGING/routine-helpers/"
+  else
+    cp -R "routine-helpers/." "$STAGING/routine-helpers/"
+  fi
+fi
+
 # Launchd-migrated shell entrypoints used by bundled routine prompts.
 if [ -d "scripts/launchd-migrated" ]; then
   mkdir -p "$STAGING/scripts/launchd-migrated"

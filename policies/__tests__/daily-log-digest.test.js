@@ -12,7 +12,7 @@ test("daily log digest uses the monitoring agent-action frame", () => {
 
   assert.equal(routine.name, "Daily dcserver Log Digest");
   assert.equal(result.action, "agent");
-  assert.match(result.prompt, /python3 "\$ROOT\/routines\/monitoring\/daily_log_digest\.py"/);
+  assert.match(result.prompt, /python3 "\$ROOT\/routine-helpers\/monitoring\/daily_log_digest\.py"/);
   assert.match(result.prompt, /Do not call `gh issue create` directly/);
   assert.match(result.prompt, /AGENTDESK_LOG_DIGEST_CREATE_ISSUE=confirmed/);
   assert.equal(result.checkpoint.last_dispatched_day, "2026-07-14");
