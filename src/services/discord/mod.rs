@@ -217,7 +217,9 @@ use formatting::{
     BUILTIN_SKILLS, extract_skill_description, format_for_discord, format_tool_input,
     send_long_message_raw, truncate_str,
 };
-use inflight::{InflightTurnState, load_inflight_states, save_inflight_state};
+#[cfg(test)]
+use inflight::save_inflight_state;
+use inflight::{InflightTurnState, load_inflight_states};
 pub(crate) use inflight::{clear_inflight_state, lock_inflight_state_path};
 pub(in crate::services::discord) use prompt_builder::load_channel_recent_context;
 use prompt_builder::{RecoveryContextManifestInput, build_system_prompt_with_manifest};

@@ -772,6 +772,16 @@ decompose_issue = "#4712"
 # Of the production decrease, -7 is blank-line compaction (imports 3 + spawn_turn_bridge body 4); the remainder is helper-move contribution.
 # registry entry is retired; the root is below the 1000-prod-LoC giant threshold.
 
+[[entry]]
+# Crossed the 1000-prod-LoC threshold in #4259 while stream persistence gained
+# guarded durable-winner reconciliation and identity-aware exit handling.
+# Decomposition should lift guarded persistence/reconciliation orchestration
+# into the existing stream_tick child modules once the authority rollout lands.
+file = "src/services/discord/turn_bridge/stream_tick.rs"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#4712"
+
 # RETIRED 2026-07-10 (#4230 S10): terminal_outcome_delivery.rs dropped from
 # 1370 to 882 production LoC after recovery fallback, post-commit epilogue, and
 # empty-response/silent-turn recovery moved to child modules. The root is below

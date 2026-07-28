@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
 """Ratchet guard for blind `save_inflight_state(...)` writes (#4259).
 
-`save_inflight_state` is the store-side "blind whole-blob write" half of the
+`save_inflight_state` was the store-side "blind whole-blob write" half of the
 inflight sidecar contract (src/services/discord/inflight/save_store.rs): it
 serializes the WHOLE `InflightTurnState` row and clobbers whatever is on disk,
 with no compare-and-set on turn identity. A concurrent turn that legitimately
 re-owns the channel between a caller's snapshot and its write is silently
-overwritten. The drop-in guarded variant
+overwritten. The identity-guarded variant
 `save_inflight_state_if_identity_unchanged(state, caller)`
-(save_store/identity_gate.rs) refuses that race (returns `GuardedSaveOutcome`),
-and every remaining blind caller holds a snapshot local it can pin an identity
-against.
+(save_store/identity_gate.rs) refuses cross-turn re-ownership (returns
+`GuardedSaveOutcome`); callers that can race same-turn writers must use a
+lock-held narrow patch like the R4 bridge-entry seam so watcher progress is
+preserved too.
 
 This guard is a monotonic ceiling on the number of *production* blind
 `save_inflight_state(` call sites. It may only ever go DOWN: converting a site
 to the guarded variant (or a `_if_absent` / `_create_new` create-shaped variant)
 drops the count, and the ceiling is lowered to match. It can never grow back, so
 the blind-write debt converges to zero (#4259 PR-2..N do the per-track
-conversions) without anyone having to remember to chase it.
+conversions) without anyone having to remember to chase it. At baseline zero,
+the blind helper and its facade re-export are `#[cfg(test)]`: production code
+cannot name the API, so the compiler is the authoritative boundary and this
+script remains the source inventory tripwire.
 
 Only `src/services/discord/**/*.rs` is scanned. Test surfaces are excluded:
 files named `tests.rs` / `*_tests.rs`, and `#[cfg(test)]` / `#[cfg(all(test, ...))]`
@@ -60,13 +64,12 @@ from pathlib import Path
 #   turn_bridge/stream_tick.rs .......... 0  (R1)
 #   turn_bridge/stream_loop.rs .......... 0  (R3 narrow locked patches)
 #   turn_bridge/post_loop_finalize.rs ... 0
-#   turn_bridge/mod.rs (hotfile, solo) .. 1  (R4)
+#   turn_bridge/mod.rs (hotfile, solo) .. 0  (R4)
 #   external (router/session/tui) ....... 0
 #
-# R3 converts cancel restart-mode sync and Done placeholder clearing to narrow
-# identity/authority-checked locked patches, so neither path can overwrite or
-# recreate a row owned by a newer turn.
-BASELINE = 1
+# R4 converts the final bridge-entry whole-row write to a lock-held narrow RMW,
+# then removes the blind helper from production compilation entirely.
+BASELINE = 0
 
 SCAN_ROOT = Path("src") / "services" / "discord"
 
@@ -251,9 +254,9 @@ def main() -> int:
             file=sys.stderr,
         )
         print(
-            "      The blind-write count may only decrease. Convert a site to "
-            "`save_inflight_state_if_identity_unchanged` (or a `_if_absent` / "
-            "`_create_new` create variant) instead of adding a blind write.",
+            "      The blind-write count may only decrease. Use a field-scoped "
+            "lock-held RMW (or a `_if_absent` / `_create_new` create variant) "
+            "instead of adding a blind write.",
             file=sys.stderr,
         )
         for loc in locations:

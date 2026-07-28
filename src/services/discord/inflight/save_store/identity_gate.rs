@@ -1,21 +1,45 @@
 use super::*;
+#[path = "identity_gate/bridge_entry.rs"]
+mod bridge_entry;
 #[path = "identity_gate/claude_e_stamp.rs"]
 mod claude_e_stamp;
+#[path = "identity_gate/completion_preserve.rs"]
+mod completion_preserve;
+#[path = "identity_gate/guarded_read.rs"]
+mod guarded_read;
 #[path = "identity_gate/heartbeat.rs"]
 mod heartbeat;
 #[path = "identity_gate/runtime_stamp.rs"]
 mod runtime_stamp;
+#[path = "identity_gate/stamp_merge.rs"]
+mod stamp_merge;
 #[path = "identity_gate/stream_loop_patch.rs"]
 mod stream_loop_patch;
+#[cfg(test)]
+pub(in crate::services::discord::inflight) use bridge_entry::patch_bridge_entry_state_if_identity_unchanged_in_root;
+pub(in crate::services::discord) use bridge_entry::{
+    patch_bridge_entry_state_if_identity_unchanged,
+    patch_bridge_entry_state_tracking_placeholder_clear,
+};
 pub(in crate::services::discord) use claude_e_stamp::stamp_claude_e_process_if_matches_identity;
+pub(in crate::services::discord) use completion_preserve::save_inflight_state_if_matches_identity;
+#[cfg(test)]
+pub(in crate::services::discord::inflight) use completion_preserve::save_inflight_state_if_matches_identity_in_root;
+use guarded_read::read_inflight_state_for_guarded_write;
 pub(in crate::services::discord) use heartbeat::touch_inflight_state_if_matches_identity;
 pub(in crate::services::discord) use runtime_stamp::stamp_runtime_handoff_if_matches_identity;
+pub(in crate::services::discord) use stamp_merge::GuardedStampTarget;
+use stamp_merge::{merge_forward_response_progress, merge_runtime_stamp_progress};
 pub(in crate::services::discord) use stream_loop_patch::{
-    clear_long_running_placeholder_if_matches_identity, patch_restart_mode_if_matches_identity,
+    StreamRelayAuthority, clear_long_running_placeholder_if_matches_identity,
+    patch_restart_mode_if_matches_identity, save_stream_tick_state_if_bridge_authority,
+    save_stream_tick_state_preserving_current_message_races,
 };
 
-pub(in crate::services::discord) fn save_inflight_state_if_identity_unchanged(
-    state: &InflightTurnState,
+pub(in crate::services::discord) fn save_inflight_state_if_identity_unchanged<
+    T: GuardedStampTarget,
+>(
+    state: T,
     caller: &'static str,
 ) -> GuardedSaveOutcome {
     let Some(root) = inflight_runtime_root() else {
@@ -24,18 +48,15 @@ pub(in crate::services::discord) fn save_inflight_state_if_identity_unchanged(
     save_inflight_state_if_identity_unchanged_in_root(&root, state, caller)
 }
 
-pub(in crate::services::discord::inflight) fn save_inflight_state_if_identity_unchanged_in_root(
+pub(in crate::services::discord::inflight) fn save_inflight_state_if_identity_unchanged_in_root<
+    T: GuardedStampTarget,
+>(
     root: &Path,
-    state: &InflightTurnState,
+    state: T,
     caller: &'static str,
 ) -> GuardedSaveOutcome {
-    save_inflight_state_identity_gated_in_root(
-        root,
-        state,
-        &InflightTurnIdentity::from_state(state),
-        caller,
-        false,
-    )
+    let expected = InflightTurnIdentity::from_state(state.local_state());
+    save_inflight_state_identity_gated_in_root(root, state, &expected, caller, false)
 }
 
 /// #4259: identity-guarded save for runtime-handoff restamps. It pins the
@@ -56,8 +77,10 @@ pub(in crate::services::discord::inflight) fn save_inflight_state_if_identity_un
 /// expected identity is captured before the caller mutates its restamp cursor,
 /// so the durable row must still have the loaded birth offset; the written state
 /// may then advance that cursor.
-pub(in crate::services::discord) fn save_inflight_state_if_identity_matches_allow_output_restamp(
-    state: &InflightTurnState,
+pub(in crate::services::discord) fn save_inflight_state_if_identity_matches_allow_output_restamp<
+    T: GuardedStampTarget,
+>(
+    state: T,
     expected: &InflightTurnIdentity,
     caller: &'static str,
 ) -> GuardedSaveOutcome {
@@ -69,22 +92,25 @@ pub(in crate::services::discord) fn save_inflight_state_if_identity_matches_allo
     )
 }
 
-pub(in crate::services::discord::inflight) fn save_inflight_state_if_identity_matches_allow_output_restamp_in_root(
+pub(in crate::services::discord::inflight) fn save_inflight_state_if_identity_matches_allow_output_restamp_in_root<
+    T: GuardedStampTarget,
+>(
     root: &Path,
-    state: &InflightTurnState,
+    state: T,
     expected: &InflightTurnIdentity,
     caller: &'static str,
 ) -> GuardedSaveOutcome {
     save_inflight_state_identity_gated_in_root(root, state, expected, caller, true)
 }
 
-fn save_inflight_state_identity_gated_in_root(
+fn save_inflight_state_identity_gated_in_root<T: GuardedStampTarget>(
     root: &Path,
-    state: &InflightTurnState,
+    target: T,
     expected: &InflightTurnIdentity,
     caller: &'static str,
     allow_output_restamp: bool,
 ) -> GuardedSaveOutcome {
+    let state = InflightTurnState::clone(target.local_state());
     let Some(provider) = state.provider_kind() else {
         return GuardedSaveOutcome::IoError;
     };
@@ -97,25 +123,15 @@ fn save_inflight_state_identity_gated_in_root(
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return GuardedSaveOutcome::IoError;
     };
-    let Ok(data) = fs::read_to_string(&path) else {
-        tracing::debug!(
-            provider = %provider.as_str(),
-            channel_id = state.channel_id,
-            caller = caller,
-            snapshot_identity = ?InflightTurnIdentity::from_state(state),
-            "inflight identity-refresh save skipped because durable row is missing"
-        );
-        return GuardedSaveOutcome::Missing;
-    };
-    let Ok(on_disk) = serde_json::from_str::<InflightTurnState>(&data) else {
-        tracing::debug!(
-            provider = %provider.as_str(),
-            channel_id = state.channel_id,
-            caller = caller,
-            snapshot_identity = ?InflightTurnIdentity::from_state(state),
-            "inflight identity-refresh save skipped because durable row is malformed"
-        );
-        return GuardedSaveOutcome::IdentityMismatch;
+    let on_disk = match read_inflight_state_for_guarded_write(
+        &path,
+        &provider,
+        state.channel_id,
+        expected,
+        caller,
+    ) {
+        Ok(on_disk) => on_disk,
+        Err(outcome) => return outcome,
     };
     let durable = InflightTurnIdentity::from_state(&on_disk);
     if expected.user_msg_id == 0 && expected.turn_start_offset.is_none() {
@@ -160,6 +176,17 @@ fn save_inflight_state_identity_gated_in_root(
         );
         return GuardedSaveOutcome::IdentityMismatch;
     }
+    if on_disk.save_generation != state.save_generation {
+        tracing::info!(
+            provider = %provider.as_str(),
+            channel_id = state.channel_id,
+            caller,
+            snapshot_save_generation = state.save_generation,
+            durable_save_generation = on_disk.save_generation,
+            "inflight identity-refresh save skipped because a same-turn writer advanced the durable row"
+        );
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
 
     let mut updated = state.clone();
     updated.ensure_finalizer_turn_id();
@@ -179,13 +206,17 @@ fn save_inflight_state_identity_gated_in_root(
         );
         return GuardedSaveOutcome::IdentityMismatch;
     }
-    updated.updated_at = now_string();
-    bump_save_generation_for_write(&path, &mut updated);
-    let Ok(json) = serde_json::to_string_pretty(&updated) else {
-        return GuardedSaveOutcome::IoError;
-    };
-    match atomic_write(&path, &json) {
-        Ok(()) => GuardedSaveOutcome::Saved,
+    match crate::services::discord::inflight::store::persist_under_lock_with_snapshot(
+        root,
+        &path,
+        &updated,
+        "src/services/discord/inflight/save_store/identity_gate.rs:save_inflight_state_identity_gated_in_root",
+    ) {
+        Ok(Some(persisted)) => {
+            target.adopt_persisted(persisted);
+            GuardedSaveOutcome::Saved
+        }
+        Ok(None) => GuardedSaveOutcome::IdentityMismatch,
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
@@ -234,13 +265,17 @@ pub(in crate::services::discord::inflight) fn patch_restart_full_response_if_ide
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return GuardedSaveOutcome::IoError;
     };
-    let Ok(data) = fs::read_to_string(&path) else {
-        return GuardedSaveOutcome::Missing;
-    };
-    let Ok(mut on_disk) = serde_json::from_str::<InflightTurnState>(&data) else {
-        return GuardedSaveOutcome::IdentityMismatch;
-    };
     let expected = InflightTurnIdentity::from_state(state);
+    let mut on_disk = match read_inflight_state_for_guarded_write(
+        &path,
+        &provider,
+        state.channel_id,
+        &expected,
+        caller,
+    ) {
+        Ok(on_disk) => on_disk,
+        Err(outcome) => return outcome,
+    };
     let durable = InflightTurnIdentity::from_state(&on_disk);
     if state.user_msg_id == 0 && state.turn_start_offset.is_none() {
         tracing::info!(
@@ -342,7 +377,7 @@ pub(in crate::services::discord) enum GuardedSaveOutcome {
     /// or a planned-restart / rebind-origin marker now owns the row). We do
     /// NOT clobber it.
     IdentityMismatch,
-    /// Filesystem / serialization error during the write.
+    /// Filesystem, malformed durable JSON, or serialization error.
     IoError,
 }
 
@@ -377,15 +412,48 @@ pub(in crate::services::discord) fn recovery_anchor_msg_id_if_matches_identity(
     expected: &InflightTurnIdentity,
     expected_turn_start_offset: Option<u64>,
 ) -> Option<u64> {
+    recovery_anchor_message_if_matches_identity(
+        provider,
+        channel_id,
+        expected,
+        expected_turn_start_offset,
+        None,
+        None,
+        None,
+    )
+    .map(|(message_id, _)| message_id)
+}
+
+pub(in crate::services::discord) fn recovery_anchor_message_if_matches_identity(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    expected_turn_start_offset: Option<u64>,
+    expected_current_message: Option<(u64, usize)>,
+    expected_relay_authority: Option<StreamRelayAuthority>,
+    refresh_on_match: Option<&mut InflightTurnState>,
+) -> Option<(u64, usize)> {
     let root = inflight_runtime_root()?;
     let path = inflight_state_path(&root, provider, channel_id);
     let _lock = lock_inflight_state_path(&path).ok()?;
     let data = fs::read_to_string(&path).ok()?;
     let state = serde_json::from_str::<InflightTurnState>(&data).ok()?;
-    if !identity_matches_with_offset_guard(expected, expected_turn_start_offset, &state) {
+    if state.restart_mode.is_some()
+        || state.rebind_origin
+        || !identity_matches_with_offset_guard(expected, expected_turn_start_offset, &state)
+        || expected_relay_authority
+            .is_some_and(|authority| StreamRelayAuthority::from_state(&state) != authority)
+        || expected_current_message
+            .is_some_and(|expected| (state.current_msg_id, state.current_msg_len) != expected)
+    {
         return None;
     }
-    (state.current_msg_id != 0).then_some(state.current_msg_id)
+    let current_message =
+        (state.current_msg_id != 0).then_some((state.current_msg_id, state.current_msg_len))?;
+    if let Some(refresh) = refresh_on_match {
+        refresh.clone_from(&state);
+    }
+    Some(current_message)
 }
 
 pub(in crate::services::discord) fn bind_recovery_anchor_if_matches_identity(
@@ -394,8 +462,11 @@ pub(in crate::services::discord) fn bind_recovery_anchor_if_matches_identity(
     expected: &InflightTurnIdentity,
     expected_turn_start_offset: Option<u64>,
     expected_current_msg_id: u64,
+    expected_current_msg_len: Option<usize>,
     anchor_msg_id: u64,
     anchor_text_len: usize,
+    expected_relay_authority: Option<StreamRelayAuthority>,
+    refresh_on_saved: Option<&mut InflightTurnState>,
 ) -> GuardedSaveOutcome {
     let Some(root) = inflight_runtime_root() else {
         return GuardedSaveOutcome::IoError;
@@ -422,10 +493,17 @@ pub(in crate::services::discord) fn bind_recovery_anchor_if_matches_identity(
     let Ok(mut on_disk) = serde_json::from_str::<InflightTurnState>(&data) else {
         return GuardedSaveOutcome::IdentityMismatch;
     };
-    if !identity_matches_with_offset_guard(expected, expected_turn_start_offset, &on_disk) {
+    if on_disk.restart_mode.is_some()
+        || on_disk.rebind_origin
+        || !identity_matches_with_offset_guard(expected, expected_turn_start_offset, &on_disk)
+        || expected_relay_authority
+            .is_some_and(|authority| StreamRelayAuthority::from_state(&on_disk) != authority)
+    {
         return GuardedSaveOutcome::IdentityMismatch;
     }
-    if on_disk.current_msg_id != expected_current_msg_id {
+    if on_disk.current_msg_id != expected_current_msg_id
+        || expected_current_msg_len.is_some_and(|len| on_disk.current_msg_len != len)
+    {
         return GuardedSaveOutcome::IdentityMismatch;
     }
     on_disk.current_msg_id = anchor_msg_id;
@@ -437,7 +515,12 @@ pub(in crate::services::discord) fn bind_recovery_anchor_if_matches_identity(
         return GuardedSaveOutcome::IoError;
     };
     match atomic_write(&path, &json) {
-        Ok(()) => GuardedSaveOutcome::Saved,
+        Ok(()) => {
+            if let Some(refresh) = refresh_on_saved {
+                refresh.clone_from(&on_disk);
+            }
+            GuardedSaveOutcome::Saved
+        }
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
@@ -677,35 +760,6 @@ pub(in crate::services::discord::inflight) fn mark_readopted_from_inflight_if_id
     }
 }
 
-/// #3041 P1-2 (codex P1-2 R3): identity-guarded re-save for the bridge's
-/// delivery-lease `Skip` epilogue. On a Skip the live HOLDER (watcher) owns the
-/// turn and CLEARS the row on success, so the bridge epilogue must NOT blindly
-/// `save_inflight_state`: if the holder's clear won the race, a blind re-save
-/// would resurrect a STALE row for an already-delivered turn (recovery then sees
-/// it delivered, never clears, leaks the row). This closes the window the same
-/// way `clear_inflight_state_if_matches` (#2427 D-wire) does: under the lock,
-/// write only when the row is STILL present AND its `(user_msg_id, started_at,
-/// tmux_session_name)` identity (+ `turn_start_offset` when known) matches. Gone
-/// (`Missing`) or replaced by a newer turn / restart-rebind marker
-/// (`IdentityMismatch`) → no-op; holder FAILED + didn't clear → still present &
-/// matching → refresh (`Saved`). Same flock + atomic_write primitives as the
-/// rest of the module (Windows-safe).
-pub(in crate::services::discord) fn save_inflight_state_if_matches_identity(
-    state: &InflightTurnState,
-    expected: &InflightTurnIdentity,
-    expected_turn_start_offset: Option<u64>,
-) -> GuardedSaveOutcome {
-    let Some(root) = inflight_runtime_root() else {
-        return GuardedSaveOutcome::IoError;
-    };
-    save_inflight_state_if_matches_identity_in_root(
-        &root,
-        state,
-        expected,
-        expected_turn_start_offset,
-    )
-}
-
 pub(in crate::services::discord::inflight) fn save_existing_inflight_rebind_adoption_if_matches_identity_in_root(
     root: &Path,
     state: &InflightTurnState,
@@ -862,95 +916,6 @@ pub(in crate::services::discord::inflight) fn lock_and_save_existing_inflight_re
     }
 }
 
-/// Root-explicit inner form of [`save_inflight_state_if_matches_identity`] for
-/// unit tests (avoids `AGENTDESK_ROOT_DIR` env-var races).
-pub(in crate::services::discord::inflight) fn save_inflight_state_if_matches_identity_in_root(
-    root: &Path,
-    state: &InflightTurnState,
-    expected: &InflightTurnIdentity,
-    expected_turn_start_offset: Option<u64>,
-) -> GuardedSaveOutcome {
-    let Some(provider) = state.provider_kind() else {
-        return GuardedSaveOutcome::IoError;
-    };
-    let path = inflight_state_path(root, &provider, state.channel_id);
-    if let Some(parent) = path.parent() {
-        if fs::create_dir_all(parent).is_err() {
-            return GuardedSaveOutcome::IoError;
-        }
-    }
-    // Hold the sidecar flock across the read AND the write so a concurrent
-    // holder `clear_inflight_state` (which takes the same lock) cannot land its
-    // remove between our identity check and our write.
-    let Ok(_lock) = lock_inflight_state_path(&path) else {
-        return GuardedSaveOutcome::IoError;
-    };
-    // Holder already cleared the row on its success path → do NOT resurrect.
-    let Ok(data) = fs::read_to_string(&path) else {
-        return GuardedSaveOutcome::Missing;
-    };
-    let Ok(on_disk) = serde_json::from_str::<InflightTurnState>(&data) else {
-        // Malformed row: treat like a mismatch and do not clobber — the loader
-        // eviction path GCs malformed payloads on the next read.
-        return GuardedSaveOutcome::IdentityMismatch;
-    };
-    // A newer turn (different identity) or a planned-restart / rebind-origin
-    // marker now owns the row — never overwrite it with this preserved turn.
-    if on_disk.restart_mode.is_some() || on_disk.rebind_origin {
-        return GuardedSaveOutcome::IdentityMismatch;
-    }
-    if expected.user_msg_id == 0 || !expected.matches_state(&on_disk) {
-        return GuardedSaveOutcome::IdentityMismatch;
-    }
-    if let Some(expected_offset) = expected_turn_start_offset {
-        if on_disk.turn_start_offset != Some(expected_offset) {
-            return GuardedSaveOutcome::IdentityMismatch;
-        }
-    }
-    if on_disk.output_path != state.output_path {
-        tracing::info!(
-            provider = %provider.as_str(),
-            channel_id = state.channel_id,
-            snapshot_identity = ?expected,
-            durable_identity = ?InflightTurnIdentity::from_state(&on_disk),
-            snapshot_output_path = ?state.output_path.as_deref(),
-            durable_output_path = ?on_disk.output_path.as_deref(),
-            durable_restart_mode = ?on_disk.restart_mode,
-            durable_rebind_origin = on_disk.rebind_origin,
-            "inflight identity-guarded save skipped because durable row output path changed"
-        );
-        return GuardedSaveOutcome::IdentityMismatch;
-    }
-    // #3089 B3: verdict observe-only here — this path already identity/offset-
-    // gates above; the #3416 backward vector is the plain overwrite tails.
-    let mut updated = state.clone();
-    updated.ensure_finalizer_turn_id();
-    let _ = validate_inflight_state_for_save(
-        root,
-        &path,
-        &updated,
-        "src/services/discord/inflight.rs:save_inflight_state_if_matches_identity_in_root",
-    );
-    updated.updated_at = now_string();
-    bump_save_generation_for_write(&path, &mut updated);
-    let Ok(json) = serde_json::to_string_pretty(&updated) else {
-        return GuardedSaveOutcome::IoError;
-    };
-    match atomic_write(&path, &json) {
-        Ok(()) => GuardedSaveOutcome::Saved,
-        Err(error) => {
-            tracing::warn!(
-                provider = %provider.as_str(),
-                channel_id = state.channel_id,
-                expected_user_msg_id = expected.user_msg_id,
-                error = %error,
-                "inflight identity-guarded save failed; leaving on-disk row untouched"
-            );
-            GuardedSaveOutcome::IoError
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -970,6 +935,48 @@ mod tests {
             None,
             512,
         )
+    }
+
+    #[test]
+    fn identity_guarded_mut_target_adopts_generation_for_sequential_post_loop_saves() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let seed = drain_restart_seed(42_593_119, "AgentDesk-codex-4259-r8-sequential");
+        save_inflight_state_in_root(temp.path(), &seed).expect("seed owner row");
+        let path = inflight_state_path(temp.path(), &ProviderKind::Codex, seed.channel_id);
+        let mut local: InflightTurnState =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read seeded row"))
+                .expect("parse seeded row");
+
+        local.long_running_placeholder_active = false;
+        assert_eq!(
+            save_inflight_state_if_identity_unchanged_in_root(
+                temp.path(),
+                &mut local,
+                "test::post_loop_first_save",
+            ),
+            GuardedSaveOutcome::Saved,
+        );
+        let first_generation = local.save_generation;
+
+        local.current_tool_line = Some("⚠ orphaned tool".to_string());
+        assert_eq!(
+            save_inflight_state_if_identity_unchanged_in_root(
+                temp.path(),
+                &mut local,
+                "test::post_loop_second_save",
+            ),
+            GuardedSaveOutcome::Saved,
+            "the first successful write must refresh the caller generation",
+        );
+        assert!(local.save_generation > first_generation);
+        let durable: InflightTurnState =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read final row"))
+                .expect("parse final row");
+        assert_eq!(
+            serde_json::to_value(&local).unwrap(),
+            serde_json::to_value(&durable).unwrap(),
+            "every successful write must return the exact persisted snapshot",
+        );
     }
 
     #[test]
@@ -1181,6 +1188,11 @@ mod tests {
         durable.output_path = Some("/tmp/old-rollout.jsonl".to_string());
         save_inflight_state_in_root(root.path(), &durable).expect("seed durable row");
 
+        let path = inflight_state_path(root.path(), &ProviderKind::Codex, durable.channel_id);
+        durable =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read seeded durable row"))
+                .expect("parse seeded durable row");
+
         let expected = InflightTurnIdentity::from_state(&durable);
         let mut restamped = durable.clone();
         restamped.turn_start_offset = Some(911);
@@ -1196,7 +1208,6 @@ mod tests {
             GuardedSaveOutcome::Saved,
             "the durable row is matched against the loaded offset, then written with the advanced offset",
         );
-        let path = inflight_state_path(root.path(), &ProviderKind::Codex, durable.channel_id);
         let persisted: InflightTurnState =
             serde_json::from_str(&std::fs::read_to_string(&path).expect("read restamped row"))
                 .expect("parse restamped row");
@@ -1408,5 +1419,108 @@ mod tests {
             GuardedSaveOutcome::IdentityMismatch,
             "an offsetless zero-id row cannot be uniquely named and must be refused fail-closed",
         );
+    }
+
+    #[test]
+    fn identity_refresh_generation_cas_preserves_same_turn_durable_progress() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let provider = ProviderKind::Codex;
+        let channel_id = 42_592_570;
+        let seed = drain_restart_seed(channel_id, "AgentDesk-codex-r7-cas");
+        save_inflight_state_in_root(root.path(), &seed).expect("seed owner row");
+        let path = inflight_state_path(root.path(), &provider, channel_id);
+        let baseline: InflightTurnState =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read baseline row"))
+                .expect("parse baseline row");
+
+        let mut durable_progress = baseline.clone();
+        durable_progress.current_msg_id = 820_001;
+        durable_progress.current_msg_len = 41;
+        durable_progress.full_response = "durable watcher response".to_string();
+        durable_progress.response_sent_offset = durable_progress.full_response.len();
+        durable_progress.current_tool_line = Some("durable tool".to_string());
+        durable_progress.watcher_owner_channel_id = Some(channel_id + 1);
+        durable_progress.set_relay_owner_kind(RelayOwnerKind::Watcher);
+        save_inflight_state_in_root(root.path(), &durable_progress)
+            .expect("advance same-turn durable row");
+
+        let mut stale = baseline.clone();
+        stale.full_response = "stale bridge response".to_string();
+        assert_eq!(
+            save_inflight_state_if_identity_unchanged_in_root(
+                root.path(),
+                &stale,
+                "test::generation_cas",
+            ),
+            GuardedSaveOutcome::IdentityMismatch,
+        );
+        let preserved: InflightTurnState =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read preserved row"))
+                .expect("parse preserved row");
+        assert_eq!(preserved.current_msg_id, 820_001);
+        assert_eq!(preserved.full_response, "durable watcher response");
+        assert_eq!(preserved.current_tool_line.as_deref(), Some("durable tool"));
+        assert_eq!(preserved.watcher_owner_channel_id, Some(channel_id + 1));
+    }
+
+    #[test]
+    fn completion_preserve_merges_forward_response_and_adopts_exact_durable_row() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let provider = ProviderKind::Codex;
+        let channel_id = 42_592_571;
+        let seed = drain_restart_seed(channel_id, "AgentDesk-codex-r7-preserve");
+        save_inflight_state_in_root(root.path(), &seed).expect("seed owner row");
+        let path = inflight_state_path(root.path(), &provider, channel_id);
+        let baseline: InflightTurnState =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read baseline row"))
+                .expect("parse baseline row");
+        let expected = InflightTurnIdentity::from_state(&baseline);
+
+        let mut durable_progress = baseline.clone();
+        durable_progress.current_msg_id = 830_001;
+        durable_progress.current_msg_len = 31;
+        durable_progress.full_response = "answer ".to_string();
+        durable_progress.response_sent_offset = durable_progress.full_response.len();
+        durable_progress.last_tool_name = Some("Read".to_string());
+        durable_progress.watcher_owner_channel_id = Some(channel_id + 1);
+        durable_progress.set_relay_owner_kind(RelayOwnerKind::Watcher);
+        save_inflight_state_in_root(root.path(), &durable_progress)
+            .expect("advance same-turn durable row");
+        let durable_progress: InflightTurnState = serde_json::from_str(
+            &std::fs::read_to_string(&path).expect("read advanced durable row"),
+        )
+        .expect("parse advanced durable row");
+
+        let mut local = baseline.clone();
+        local.full_response = "answer completed".to_string();
+        local.response_sent_offset = local.full_response.len();
+        local.last_offset = 4_096;
+        assert_eq!(
+            save_inflight_state_if_matches_identity_in_root(
+                root.path(),
+                &mut local,
+                &expected,
+                baseline.turn_start_offset,
+            ),
+            GuardedSaveOutcome::Saved,
+        );
+
+        let persisted: InflightTurnState =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read merged row"))
+                .expect("parse merged row");
+        assert_eq!(
+            serde_json::to_value(&local).expect("serialize adopted local row"),
+            serde_json::to_value(&persisted).expect("serialize persisted row"),
+        );
+        assert!(persisted.save_generation > durable_progress.save_generation);
+        assert_eq!(persisted.current_msg_id, 830_001);
+        assert_eq!(persisted.full_response, "answer completed");
+        assert_eq!(persisted.last_tool_name.as_deref(), Some("Read"));
+        assert_eq!(persisted.watcher_owner_channel_id, Some(channel_id + 1));
+        assert_eq!(
+            persisted.effective_relay_owner_kind(),
+            RelayOwnerKind::Watcher
+        );
+        assert_eq!(persisted.last_offset, 4_096);
     }
 }

@@ -1,22 +1,11 @@
-//! #4230 S6 stream loop shell for `turn_bridge::spawn_turn_bridge`.
-//!
-//! Moved from the main stream receive/drain loop of `spawn_turn_bridge`:
-//! cancel finalization gates, ready-frame drain, remaining stream event arms,
-//! long-running placeholder open/retarget state, runtime handoff delegation,
-//! stream/status ticks, and bridge latency span emission.
+//! #4230 S6 stream receive/drain loop and its cancel, handoff, tick, and latency gates.
 
-use std::collections::VecDeque;
-use std::sync::Arc;
-
-use super::bridge_latency_spans::BridgeLatencySpans;
 use super::runtime_handoff_loop::{
-    RuntimeHandoffLoopContext, RuntimeHandoffLoopMessage, RuntimeHandoffLoopOutcome,
-    RuntimeHandoffLoopState, handle_runtime_handoff_loop_message,
+    RuntimeHandoffLoopContext, RuntimeHandoffLoopMessage, RuntimeHandoffLoopState,
+    handle_runtime_handoff_loop_message,
 };
 use super::stream_tick::{
-    BridgeStreamTickContext, BridgeStreamTickState, LongRunningPlaceholderActive,
-    PendingLongRunningOpenAfterStateSave, PendingLongRunningRetargetAfterStateSave,
-    run_bridge_stream_tick,
+    BridgeStreamTickContext, BridgeStreamTickState, StreamTickOutcome, run_bridge_stream_tick,
 };
 use super::{streaming_edit_text::TuiErrorClassification, *};
 use content_arms::{
@@ -25,129 +14,26 @@ use content_arms::{
 };
 use tool_arms::{
     StreamToolArmContext, StreamToolArmMessage, StreamToolArmOutcome, StreamToolArmState,
-    handle_stream_tool_message,
+    handle_stream_tool_message, reconcile_exact_stream_frame_after_tool_outcome,
 };
 
 mod content_arms;
+mod exit_reconcile;
+mod expected_identity;
 #[cfg(test)]
 #[path = "stream_loop/expected_identity_tests.rs"]
 mod expected_identity_tests;
 mod message_conversion;
 mod tool_arms;
-
-fn refresh_stream_tick_expected_identity_after_handoff(
-    expected: &mut crate::services::discord::inflight::InflightTurnIdentity,
-    inflight_state: &InflightTurnState,
-    guarded_save_outcome: Option<crate::services::discord::inflight::GuardedSaveOutcome>,
-) {
-    if matches!(
-        guarded_save_outcome,
-        Some(crate::services::discord::inflight::GuardedSaveOutcome::Saved)
-    ) {
-        *expected =
-            crate::services::discord::inflight::InflightTurnIdentity::from_state(inflight_state);
-    }
-}
-
-pub(super) struct StreamLoopContext {
-    pub(super) shared_owned: Arc<SharedData>,
-    pub(super) gateway: Arc<dyn TurnGateway>,
-    pub(super) channel_id: ChannelId,
-    pub(super) provider: ProviderKind,
-    pub(super) cancel_token: Arc<crate::services::provider::CancelToken>,
-    pub(super) user_text_owned: String,
-    pub(super) request_owner_name: String,
-    pub(super) adk_session_key: Option<String>,
-    pub(super) adk_session_name: Option<String>,
-    pub(super) adk_session_info: Option<String>,
-    pub(super) adk_cwd: Option<String>,
-    pub(super) dispatch_id: Option<String>,
-    pub(super) role_binding: Option<RoleBinding>,
-    pub(super) turn_id: String,
-    pub(super) voice_progress_playback_channel_id: Option<ChannelId>,
-    pub(super) single_message_panel_footer_mode: bool,
-    pub(super) footer_owner: super::super::footer_view_reconciler::CompletionFooterOwner,
-    pub(super) status_panel_started_at: i64,
-    pub(super) status_interval: std::time::Duration,
-    pub(super) context_window_tokens: u64,
-    pub(super) context_compact_percent: u64,
-}
-
-pub(super) struct StreamLoopState<'a> {
-    pub(super) rx: &'a mut super::StreamMessageReceiverAdapter,
-    pub(super) full_response: &'a mut String,
-    pub(super) last_edit_text: &'a mut String,
-    pub(super) done: &'a mut bool,
-    pub(super) cancelled: &'a mut bool,
-    pub(super) rx_disconnected: &'a mut bool,
-    pub(super) current_tool_line: &'a mut Option<String>,
-    pub(super) prev_tool_status: &'a mut Option<String>,
-    pub(super) last_tool_name: &'a mut Option<String>,
-    pub(super) last_tool_summary: &'a mut Option<String>,
-    pub(super) accumulated_input_tokens: &'a mut u64,
-    pub(super) accumulated_cache_create_tokens: &'a mut u64,
-    pub(super) accumulated_cache_read_tokens: &'a mut u64,
-    pub(super) accumulated_output_tokens: &'a mut u64,
-    pub(super) spin_idx: &'a mut usize,
-    pub(super) restart_followup_pending: &'a mut bool,
-    pub(super) any_tool_used: &'a mut bool,
-    pub(super) has_post_tool_text: &'a mut bool,
-    pub(super) tmux_handed_off: &'a mut bool,
-    pub(super) watcher_owns_assistant_relay: &'a mut bool,
-    pub(super) watcher_relay_available_for_turn: &'a mut bool,
-    pub(super) watcher_handoff_claim_outcome: &'a mut WatcherHandoffClaimOutcome,
-    pub(super) standby_relay_owns_output: &'a mut bool,
-    pub(super) last_assistant_text_line: &'a mut Option<String>,
-    pub(super) long_running_placeholder_active: &'a mut LongRunningPlaceholderActive,
-    pub(super) active_background_child_session_ids: &'a mut Vec<i64>,
-    pub(super) transport_error: &'a mut bool,
-    pub(super) transcript_events: &'a mut Vec<SessionTranscriptEvent>,
-    pub(super) resume_failure_detected: &'a mut bool,
-    pub(super) session_handshake_seen: &'a mut bool,
-    pub(super) terminal_session_reset_required: &'a mut bool,
-    pub(super) recovery_retry: &'a mut bool,
-    pub(super) last_adk_heartbeat: &'a mut std::time::Instant,
-    pub(super) pending_stream_messages: &'a mut VecDeque<StreamMessage>,
-    pub(super) pending_status_tool_results: &'a mut VecDeque<String>,
-    pub(super) pending_status_tool_results_by_id: &'a mut std::collections::HashMap<String, String>,
-    pub(super) last_inflight_long_run_heartbeat: &'a mut std::time::Instant,
-    pub(super) last_activity_heartbeat_at: &'a mut Option<std::time::Instant>,
-    pub(super) terminal_control_ready_observed: &'a mut bool,
-    pub(super) terminal_control_drain_until: &'a mut Option<std::time::Instant>,
-    pub(super) current_msg_id: &'a mut MessageId,
-    pub(super) response_sent_offset: &'a mut usize,
-    pub(super) bridge_confirmed_response_sent_offset: &'a mut usize,
-    pub(super) streamed_assistant_text_this_turn: &'a mut bool,
-    pub(super) streaming_rollover_frozen_msg_ids: &'a mut Vec<MessageId>,
-    pub(super) terminal_full_replay_cleanup_msg_ids: &'a mut Vec<MessageId>,
-    pub(super) tmux_last_offset: &'a mut Option<u64>,
-    pub(super) watcher_owner_channel_id: &'a mut ChannelId,
-    pub(super) new_session_id: &'a mut Option<String>,
-    pub(super) new_raw_provider_session_id: &'a mut Option<String>,
-    pub(super) inflight_state: &'a mut InflightTurnState,
-    pub(super) last_status_edit: &'a mut tokio::time::Instant,
-    pub(super) first_answer_relayed: &'a mut bool,
-    pub(super) last_session_panel_lifecycle_refresh: &'a mut tokio::time::Instant,
-    pub(super) status_panel_msg_id: &'a mut Option<MessageId>,
-    pub(super) last_status_panel_text: &'a mut String,
-    pub(super) status_panel_dirty: &'a mut bool,
-    pub(super) last_status_panel_edit: &'a mut tokio::time::Instant,
-    pub(super) bridge_spans: &'a mut BridgeLatencySpans,
-    pub(super) status_panel_generation: &'a mut u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum StreamLoopOutcome {
-    Completed,
-}
-
-pub(super) struct StreamLoopOutput {
-    pub(super) outcome: StreamLoopOutcome,
-    pub(super) tui_error_classification: TuiErrorClassification,
-    pub(super) pending_long_running_open_after_state_save: PendingLongRunningOpenAfterStateSave,
-    pub(super) pending_long_running_retarget_after_state_save:
-        PendingLongRunningRetargetAfterStateSave,
-}
+mod types;
+pub(super) use exit_reconcile::StreamLoopOutcome;
+use exit_reconcile::{
+    StreamLoopExitCandidateContext, retained_stream_retry_backoff,
+    settle_and_reconcile_exit_candidate, should_exit_completed_turn_on_cancel,
+    stream_loop_should_continue,
+};
+use expected_identity::refresh_stream_tick_expected_identity_after_handoff;
+pub(super) use types::{StreamLoopContext, StreamLoopOutput, StreamLoopState};
 
 pub(super) async fn run_stream_loop(
     ctx: StreamLoopContext,
@@ -216,6 +102,11 @@ pub(super) async fn run_stream_loop(
     let mut terminal_control_ready_observed = *state.terminal_control_ready_observed;
     let mut terminal_control_drain_until = *state.terminal_control_drain_until;
     let mut current_msg_id = *state.current_msg_id;
+    let mut expected_current_message = *state.expected_current_message;
+    let mut pending_current_message_candidate =
+        unbound_current_message_candidate(current_msg_id, expected_current_message.0);
+    let mut bridge_created_response_placeholder_msg_id =
+        *state.bridge_created_response_placeholder_msg_id;
     let mut response_sent_offset = *state.response_sent_offset;
     let mut bridge_confirmed_response_sent_offset = *state.bridge_confirmed_response_sent_offset;
     let mut streamed_assistant_text_this_turn = *state.streamed_assistant_text_this_turn;
@@ -239,6 +130,43 @@ pub(super) async fn run_stream_loop(
     let mut status_panel_generation = *state.status_panel_generation;
     let mut stream_tick_expected_identity =
         crate::services::discord::inflight::InflightTurnIdentity::from_state(&inflight_state);
+    let mut persisted_inflight_baseline = inflight_state.clone();
+
+    macro_rules! refresh_expected_after_handoff {
+        ($outcome:expr) => {
+            refresh_stream_tick_expected_identity_after_handoff(
+                &mut stream_tick_expected_identity,
+                &mut persisted_inflight_baseline,
+                &inflight_state,
+                $outcome,
+            )
+        };
+    }
+
+    macro_rules! refresh_or_retain_runtime_handoff {
+        ($outcome:expr, $retry_pending:ident, $retry_retained:ident) => {{
+            let outcome = $outcome;
+            refresh_expected_after_handoff!(outcome.guarded_save_outcome);
+            if let Some(retry_message) = outcome.retry_message {
+                pending_stream_messages.push_front(retry_message.into_stream_message());
+                $retry_pending = true;
+                $retry_retained = true;
+                true
+            } else {
+                $retry_retained = false;
+                false
+            }
+        }};
+    }
+
+    macro_rules! stop_on_tool_authority_loss {
+        ($outcome:expr, $loop_outcome:ident, $label:lifetime) => {
+            if matches!($outcome, StreamToolArmOutcome::AuthorityLost) {
+                $loop_outcome = StreamLoopOutcome::AuthorityLost;
+                break $label;
+            }
+        };
+    }
 
     // #2289: both cancel guards share this macro to keep inflight sync, cancellation, and child abort atomic without closure borrow conflicts.
     // Callers must then exit `'outer` (explicitly or by fallthrough) into cancel post-processing.
@@ -255,11 +183,7 @@ pub(super) async fn run_stream_loop(
                         previous_restart_generation,
                         "turn_bridge::stream_loop::cancel_restart_mode",
                     );
-                refresh_stream_tick_expected_identity_after_handoff(
-                    &mut stream_tick_expected_identity,
-                    &inflight_state,
-                    Some(outcome),
-                );
+                refresh_expected_after_handoff!(Some(outcome));
             }
             cancelled = true;
             close_all_tracked_background_children(
@@ -274,41 +198,34 @@ pub(super) async fn run_stream_loop(
 
     let mut pending_long_running_open_after_state_save = None;
     let mut pending_long_running_retarget_after_state_save = None;
+    let mut state_dirty = false;
+    let mut loop_outcome = StreamLoopOutcome::Completed;
+    let mut runtime_handoff_retry_retained = false;
+    let mut guarded_tool_frame_retry_retained = false;
 
-    'outer: while !done
-        || terminal_control_drain_until.is_some_and(|deadline| std::time::Instant::now() < deadline)
-    {
-        let mut state_dirty = false;
-
-        // #2172 cancel boundary: once `done` is true the turn's
-        // terminal outcome (Completed / Done message) has already been
-        // observed; the loop continues only to drain residual control
-        // frames during `terminal_control_drain_until`. A cancel that
-        // arrives in that drain window MUST NOT reclassify the
-        // already-completed turn as cancelled (which would re-run
-        // stop_active_turn and dispatch-cancel finalisation). The
-        // documented "whichever comes first wins" priority is
-        // enforced by gating the cancel arm on `!done`. Cancels
-        // arriving during the drain window break out of the loop
-        // normally as a completed turn.
+    'outer: while stream_loop_should_continue(
+        done,
+        terminal_control_drain_until,
+        runtime_handoff_retry_retained,
+        guarded_tool_frame_retry_retained,
+        std::time::Instant::now(),
+    ) {
+        // #2172: Done wins over a later cancel during residual-control drain;
+        // only `!done` may run cancel finalization.
         if !done && cancel_requested(Some(cancel_token.as_ref())) {
             finalize_cancel_inner!();
             break 'outer;
         }
-        if done && cancel_requested(Some(cancel_token.as_ref())) {
-            // #2172: cancel-after-Done during terminal drain — exit
-            // the drain immediately as a completed turn instead of
-            // burning the rest of the drain window. Suppressing the
-            // reclassification still preserves the "stop after
-            // completion is a no-op" UX.
+        if should_exit_completed_turn_on_cancel(
+            done,
+            cancel_requested(Some(cancel_token.as_ref())),
+            guarded_tool_frame_retry_retained,
+        ) {
+            // Exit residual drain without reclassifying the completed turn.
             break 'outer;
         }
 
-        // #2426 H3/H4 graduation: wait for the next stream frame and
-        // treat the duration as a safety wake, not a pre-drain sleep.
-        // Explicit handoff frames (`TmuxReady` / `ProcessReady` /
-        // `RuntimeReady`) wake this loop immediately and clear
-        // `terminal_control_drain_until` in their handlers.
+        // #2426: timeout is only a safety wake; handoff frames wake immediately.
         let stream_wait = turn_bridge_stream_wait_duration(
             done,
             terminal_control_drain_until,
@@ -329,11 +246,16 @@ pub(super) async fn run_stream_loop(
             finalize_cancel_inner!();
             break 'outer;
         }
-        if done && cancel_requested(Some(cancel_token.as_ref())) {
-            // See note above on the cancel-after-Done race.
+        if should_exit_completed_turn_on_cancel(
+            done,
+            cancel_requested(Some(cancel_token.as_ref())),
+            guarded_tool_frame_retry_retained,
+        ) {
             break 'outer;
         }
 
+        let mut runtime_handoff_retry_pending = false;
+        let mut guarded_tool_frame_retry_pending = false;
         loop {
             // #2172 cancel boundary: re-check the cancel flag between
             // drained messages. Without this, the outer loop samples
@@ -506,6 +428,9 @@ pub(super) async fn run_stream_loop(
                                 StreamToolArmState {
                                     state_dirty: &mut state_dirty,
                                     inflight_state: &mut inflight_state,
+                                    persisted_inflight_baseline: &mut persisted_inflight_baseline,
+                                    stream_tick_expected_identity: &stream_tick_expected_identity,
+                                    expected_current_message: &mut expected_current_message,
                                     current_tool_line: &mut current_tool_line,
                                     prev_tool_status: &mut prev_tool_status,
                                     last_tool_name: &mut last_tool_name,
@@ -533,15 +458,18 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            match outcome {
-                                StreamToolArmOutcome::Continue => {}
-                            }
+                            stop_on_tool_authority_loss!(outcome, loop_outcome, 'outer);
                         }
                         StreamMessage::ToolResult {
                             content,
                             is_error,
                             tool_use_id,
                         } => {
+                            let retry_frame = StreamMessage::ToolResult {
+                                content: content.clone(),
+                                is_error,
+                                tool_use_id: tool_use_id.clone(),
+                            };
                             let outcome = handle_stream_tool_message(
                                 StreamToolArmMessage::ToolResult {
                                     content,
@@ -566,6 +494,9 @@ pub(super) async fn run_stream_loop(
                                 StreamToolArmState {
                                     state_dirty: &mut state_dirty,
                                     inflight_state: &mut inflight_state,
+                                    persisted_inflight_baseline: &mut persisted_inflight_baseline,
+                                    stream_tick_expected_identity: &stream_tick_expected_identity,
+                                    expected_current_message: &mut expected_current_message,
                                     current_tool_line: &mut current_tool_line,
                                     prev_tool_status: &mut prev_tool_status,
                                     last_tool_name: &mut last_tool_name,
@@ -593,9 +524,16 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            match outcome {
-                                StreamToolArmOutcome::Continue => {}
+                            if reconcile_exact_stream_frame_after_tool_outcome(
+                                &mut pending_stream_messages,
+                                retry_frame,
+                                outcome,
+                                &mut guarded_tool_frame_retry_retained,
+                            ) {
+                                guarded_tool_frame_retry_pending = true;
+                                break;
                             }
+                            stop_on_tool_authority_loss!(outcome, loop_outcome, 'outer);
                         }
                         StreamMessage::TaskNotification {
                             tool_use_id,
@@ -629,6 +567,9 @@ pub(super) async fn run_stream_loop(
                                 StreamToolArmState {
                                     state_dirty: &mut state_dirty,
                                     inflight_state: &mut inflight_state,
+                                    persisted_inflight_baseline: &mut persisted_inflight_baseline,
+                                    stream_tick_expected_identity: &stream_tick_expected_identity,
+                                    expected_current_message: &mut expected_current_message,
                                     current_tool_line: &mut current_tool_line,
                                     prev_tool_status: &mut prev_tool_status,
                                     last_tool_name: &mut last_tool_name,
@@ -656,9 +597,7 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            match outcome {
-                                StreamToolArmOutcome::Continue => {}
-                            }
+                            stop_on_tool_authority_loss!(outcome, loop_outcome, 'outer);
                         }
                         StreamMessage::TmuxReady {
                             output_path,
@@ -666,6 +605,7 @@ pub(super) async fn run_stream_loop(
                             tmux_session_name,
                             last_offset,
                         } => {
+                            *state.entry_watcher_epoch_current = false;
                             let outcome = handle_runtime_handoff_loop_message(
                                 RuntimeHandoffLoopMessage::TmuxReady {
                                     output_path,
@@ -699,13 +639,16 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            refresh_stream_tick_expected_identity_after_handoff(
-                                &mut stream_tick_expected_identity,
-                                &inflight_state,
+                            if refresh_or_retain_runtime_handoff!(
                                 outcome,
-                            );
+                                runtime_handoff_retry_pending,
+                                runtime_handoff_retry_retained
+                            ) {
+                                break;
+                            }
                         }
                         StreamMessage::RuntimeReady { handoff } => {
+                            *state.entry_watcher_epoch_current = false;
                             let outcome = handle_runtime_handoff_loop_message(
                                 RuntimeHandoffLoopMessage::RuntimeReady { handoff },
                                 RuntimeHandoffLoopContext {
@@ -734,17 +677,20 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            refresh_stream_tick_expected_identity_after_handoff(
-                                &mut stream_tick_expected_identity,
-                                &inflight_state,
+                            if refresh_or_retain_runtime_handoff!(
                                 outcome,
-                            );
+                                runtime_handoff_retry_pending,
+                                runtime_handoff_retry_retained
+                            ) {
+                                break;
+                            }
                         }
                         StreamMessage::ProcessReady {
                             output_path,
                             session_name,
                             last_offset,
                         } => {
+                            *state.entry_watcher_epoch_current = false;
                             let outcome = handle_runtime_handoff_loop_message(
                                 RuntimeHandoffLoopMessage::ProcessReady {
                                     output_path,
@@ -777,11 +723,13 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            refresh_stream_tick_expected_identity_after_handoff(
-                                &mut stream_tick_expected_identity,
-                                &inflight_state,
+                            if refresh_or_retain_runtime_handoff!(
                                 outcome,
-                            );
+                                runtime_handoff_retry_pending,
+                                runtime_handoff_retry_retained
+                            ) {
+                                break;
+                            }
                         }
                         StreamMessage::OutputOffset { offset } => {
                             let outcome = handle_runtime_handoff_loop_message(
@@ -812,11 +760,13 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
-                            refresh_stream_tick_expected_identity_after_handoff(
-                                &mut stream_tick_expected_identity,
-                                &inflight_state,
+                            if refresh_or_retain_runtime_handoff!(
                                 outcome,
-                            );
+                                runtime_handoff_retry_pending,
+                                runtime_handoff_retry_retained
+                            ) {
+                                break;
+                            }
                         }
                     }
                 }
@@ -845,7 +795,25 @@ pub(super) async fn run_stream_loop(
             }
         }
 
-        run_bridge_stream_tick(
+        if runtime_handoff_retry_pending || guarded_tool_frame_retry_pending {
+            // A guarded frame hit transient I/O and remains at the front of the
+            // exact stream queue. A multi-step handoff may also have durably
+            // landed its first snapshot while retaining its original identity.
+            // Running the generic tick here could misclassify either retry as
+            // authority loss or advance state past the retained ToolResult.
+            // Retry the exact frame on the next normal stream wake instead.
+            // Once a completed turn's residual drain expires there is no next
+            // receiver wake, so keep the loop alive with a bounded retry
+            // backoff rather than dropping the exact frame or busy-spinning.
+            tokio::time::sleep(retained_stream_retry_backoff(
+                runtime_handoff_retry_pending,
+                guarded_tool_frame_retry_pending,
+            ))
+            .await;
+            continue 'outer;
+        }
+
+        let tick_outcome = run_bridge_stream_tick(
             BridgeStreamTickContext {
                 shared_owned: shared_owned.clone(),
                 gateway: gateway.clone(),
@@ -858,19 +826,12 @@ pub(super) async fn run_stream_loop(
                 footer_owner,
                 status_panel_started_at,
                 done,
-                standby_relay_owns_output,
-                watcher_owner_channel_id,
-                full_response: full_response.as_str(),
                 dispatch_id: dispatch_id.clone(),
                 adk_session_key: adk_session_key.clone(),
                 adk_session_name: adk_session_name.clone(),
                 adk_session_info: adk_session_info.clone(),
                 adk_cwd: adk_cwd.clone(),
                 role_binding: role_binding.clone(),
-                current_tool_line: current_tool_line.clone(),
-                last_tool_name: last_tool_name.clone(),
-                last_tool_summary: last_tool_summary.clone(),
-                prev_tool_status: prev_tool_status.clone(),
                 spinner: SPINNER,
                 live_long_run_heartbeat_interval: LIVE_LONG_RUN_HEARTBEAT_INTERVAL,
             },
@@ -885,12 +846,27 @@ pub(super) async fn run_stream_loop(
                 last_status_panel_text: &mut last_status_panel_text,
                 watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
                 watcher_relay_available_for_turn: &mut watcher_relay_available_for_turn,
+                standby_relay_owns_output: &mut standby_relay_owns_output,
+                watcher_owner_channel_id: &mut watcher_owner_channel_id,
+                full_response: &mut full_response,
                 response_sent_offset: &mut response_sent_offset,
                 bridge_confirmed_response_sent_offset: &mut bridge_confirmed_response_sent_offset,
                 streaming_rollover_frozen_msg_ids: &mut streaming_rollover_frozen_msg_ids,
                 current_msg_id: &mut current_msg_id,
+                expected_current_message: &mut expected_current_message,
+                pending_current_message_candidate: &mut pending_current_message_candidate,
+                bridge_created_response_placeholder_msg_id:
+                    &mut bridge_created_response_placeholder_msg_id,
                 last_edit_text: &mut last_edit_text,
                 first_answer_relayed: &mut first_answer_relayed,
+                current_tool_line: &mut current_tool_line,
+                prev_tool_status: &mut prev_tool_status,
+                last_tool_name: &mut last_tool_name,
+                last_tool_summary: &mut last_tool_summary,
+                any_tool_used: &mut any_tool_used,
+                has_post_tool_text: &mut has_post_tool_text,
+                tmux_last_offset: &mut tmux_last_offset,
+                persisted_inflight_baseline: &mut persisted_inflight_baseline,
                 inflight_state: &mut inflight_state,
                 bridge_spans: &mut bridge_spans,
                 status_panel_generation: &mut status_panel_generation,
@@ -904,8 +880,11 @@ pub(super) async fn run_stream_loop(
             },
         )
         .await;
+        if tick_outcome == StreamTickOutcome::AuthorityLost {
+            loop_outcome = StreamLoopOutcome::AuthorityLost;
+            break 'outer;
+        }
     }
-
     // #3813 AC#1 tail: emit bridge-side latency spans once at loop exit
     // (observation-only; self-suppresses when no bridge relay happened).
     bridge_spans.log(channel_id.get(), provider.as_str());
@@ -950,6 +929,8 @@ pub(super) async fn run_stream_loop(
     *state.terminal_control_ready_observed = terminal_control_ready_observed;
     *state.terminal_control_drain_until = terminal_control_drain_until;
     *state.current_msg_id = current_msg_id;
+    *state.expected_current_message = expected_current_message;
+    *state.bridge_created_response_placeholder_msg_id = bridge_created_response_placeholder_msg_id;
     *state.response_sent_offset = response_sent_offset;
     *state.bridge_confirmed_response_sent_offset = bridge_confirmed_response_sent_offset;
     *state.streamed_assistant_text_this_turn = streamed_assistant_text_this_turn;
@@ -970,8 +951,21 @@ pub(super) async fn run_stream_loop(
     *state.bridge_spans = bridge_spans;
     *state.status_panel_generation = status_panel_generation;
 
+    settle_and_reconcile_exit_candidate(StreamLoopExitCandidateContext {
+        shared: shared_owned.as_ref(),
+        gateway: gateway.as_ref(),
+        provider: &provider,
+        token_hash: &shared_owned.token_hash,
+        channel_id,
+        persisted_inflight_baseline: &mut persisted_inflight_baseline,
+        expected_identity: &stream_tick_expected_identity,
+        pending_current_message_candidate: &mut pending_current_message_candidate,
+        state,
+    })
+    .await;
+
     StreamLoopOutput {
-        outcome: StreamLoopOutcome::Completed,
+        outcome: loop_outcome,
         tui_error_classification,
         pending_long_running_open_after_state_save,
         pending_long_running_retarget_after_state_save,

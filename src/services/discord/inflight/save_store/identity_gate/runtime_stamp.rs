@@ -1,7 +1,10 @@
 use super::*;
+use crate::services::discord::inflight::store::persist_under_lock_with_snapshot;
 
-pub(in crate::services::discord) fn stamp_runtime_handoff_if_matches_identity(
-    state: &InflightTurnState,
+pub(in crate::services::discord) fn stamp_runtime_handoff_if_matches_identity<
+    T: GuardedStampTarget,
+>(
+    state: T,
     expected: &InflightTurnIdentity,
     caller: &'static str,
 ) -> GuardedSaveOutcome {
@@ -11,27 +14,38 @@ pub(in crate::services::discord) fn stamp_runtime_handoff_if_matches_identity(
     stamp_runtime_handoff_if_matches_identity_in_root(&root, state, expected, caller)
 }
 
-pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_identity_in_root(
+pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_identity_in_root<
+    T: GuardedStampTarget,
+>(
     root: &Path,
-    state: &InflightTurnState,
+    state: T,
     expected: &InflightTurnIdentity,
     caller: &'static str,
 ) -> GuardedSaveOutcome {
-    let Some(provider) = state.provider_kind() else {
+    let requested = InflightTurnState::clone(state.local_state());
+    let baseline = state.baseline_state().cloned();
+    let Some(provider) = requested.provider_kind() else {
         return GuardedSaveOutcome::IoError;
     };
-    let path = inflight_state_path(root, &provider, state.channel_id);
+    let path = inflight_state_path(root, &provider, requested.channel_id);
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return GuardedSaveOutcome::IoError;
     };
-    let Some(mut on_disk) = load_inflight_state_unlocked(&path) else {
-        return GuardedSaveOutcome::Missing;
+    let mut on_disk = match read_inflight_state_for_guarded_write(
+        &path,
+        &provider,
+        requested.channel_id,
+        expected,
+        caller,
+    ) {
+        Ok(on_disk) => on_disk,
+        Err(outcome) => return outcome,
     };
     let durable = InflightTurnIdentity::from_state(&on_disk);
     if expected.user_msg_id == 0 && expected.turn_start_offset.is_none() {
         tracing::info!(
             provider = %provider.as_str(),
-            channel_id = state.channel_id,
+            channel_id = requested.channel_id,
             caller,
             snapshot_identity = ?expected,
             durable_identity = ?durable,
@@ -43,7 +57,7 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
     {
         tracing::info!(
             provider = %provider.as_str(),
-            channel_id = state.channel_id,
+            channel_id = requested.channel_id,
             caller,
             snapshot_identity = ?expected,
             durable_identity = ?durable,
@@ -53,38 +67,114 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
         );
         return GuardedSaveOutcome::IdentityMismatch;
     }
-    if expected.tmux_session_name.is_some() && state.tmux_session_name != expected.tmux_session_name
+    if expected.tmux_session_name.is_some()
+        && requested.tmux_session_name != expected.tmux_session_name
     {
         tracing::info!(
             provider = %provider.as_str(),
-            channel_id = state.channel_id,
+            channel_id = requested.channel_id,
             caller,
             snapshot_tmux_session_name = ?expected.tmux_session_name,
-            requested_tmux_session_name = ?state.tmux_session_name,
+            requested_tmux_session_name = ?requested.tmux_session_name,
             "runtime-handoff stamp skipped because an established runtime session changed"
         );
         return GuardedSaveOutcome::IdentityMismatch;
     }
 
-    on_disk.runtime_kind = state.runtime_kind;
-    on_disk.tmux_session_name = state.tmux_session_name.clone();
-    on_disk.output_path = state.output_path.clone();
-    on_disk.input_fifo_path = state.input_fifo_path.clone();
-    on_disk.session_id = state.session_id.clone();
-    on_disk.last_offset = state.last_offset;
-    on_disk.watcher_owner_channel_id = state.watcher_owner_channel_id;
-    on_disk.set_relay_owner_kind(state.effective_relay_owner_kind());
-    match persist_under_lock(
+    if !merge_runtime_stamp_progress(&mut on_disk, &requested) {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = requested.channel_id,
+            caller,
+            "runtime-handoff stamp rejected because local and durable responses diverged"
+        );
+        return GuardedSaveOutcome::IdentityMismatch;
+    }
+
+    let requested_runtime = (
+        requested.runtime_kind,
+        &requested.tmux_session_name,
+        &requested.output_path,
+        &requested.input_fifo_path,
+        &requested.session_id,
+    );
+    let durable_runtime = (
+        on_disk.runtime_kind,
+        &on_disk.tmux_session_name,
+        &on_disk.output_path,
+        &on_disk.input_fifo_path,
+        &on_disk.session_id,
+    );
+    let requested_owner = (
+        requested.watcher_owner_channel_id,
+        requested.watcher_owns_live_relay,
+        requested.relay_owner_kind,
+    );
+    let durable_owner = (
+        on_disk.watcher_owner_channel_id,
+        on_disk.watcher_owns_live_relay,
+        on_disk.relay_owner_kind,
+    );
+    let (apply_runtime, apply_owner) = if let Some(baseline) = baseline.as_ref() {
+        let baseline_runtime = (
+            baseline.runtime_kind,
+            &baseline.tmux_session_name,
+            &baseline.output_path,
+            &baseline.input_fifo_path,
+            &baseline.session_id,
+        );
+        let baseline_owner = (
+            baseline.watcher_owner_channel_id,
+            baseline.watcher_owns_live_relay,
+            baseline.relay_owner_kind,
+        );
+        let runtime_changed = requested_runtime != baseline_runtime;
+        let owner_changed = requested_owner != baseline_owner;
+        if runtime_changed
+            && durable_runtime != baseline_runtime
+            && durable_runtime != requested_runtime
+        {
+            return GuardedSaveOutcome::IdentityMismatch;
+        }
+        if owner_changed && durable_owner != baseline_owner && durable_owner != requested_owner {
+            return GuardedSaveOutcome::IdentityMismatch;
+        }
+        (runtime_changed, owner_changed)
+    } else {
+        (true, true)
+    };
+
+    if apply_runtime {
+        on_disk.runtime_kind = requested.runtime_kind;
+        on_disk
+            .tmux_session_name
+            .clone_from(&requested.tmux_session_name);
+        on_disk.output_path.clone_from(&requested.output_path);
+        on_disk
+            .input_fifo_path
+            .clone_from(&requested.input_fifo_path);
+        on_disk.session_id.clone_from(&requested.session_id);
+    }
+    if apply_owner {
+        on_disk.watcher_owner_channel_id = requested.watcher_owner_channel_id;
+        on_disk.watcher_owns_live_relay = requested.watcher_owns_live_relay;
+        on_disk.relay_owner_kind = requested.relay_owner_kind;
+    }
+    match persist_under_lock_with_snapshot(
         root,
         &path,
         &on_disk,
         "src/services/discord/inflight.rs:stamp_runtime_handoff_if_matches_identity_in_root",
     ) {
-        Ok(()) => GuardedSaveOutcome::Saved,
+        Ok(Some(persisted)) => {
+            state.adopt_persisted(persisted);
+            GuardedSaveOutcome::Saved
+        }
+        Ok(None) => GuardedSaveOutcome::IdentityMismatch,
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
-                channel_id = state.channel_id,
+                channel_id = requested.channel_id,
                 caller,
                 error = %error,
                 "runtime-handoff stamp failed; leaving durable row untouched"
@@ -360,6 +450,137 @@ mod tests {
         assert_eq!(
             persisted_watcher.effective_relay_owner_kind(),
             RelayOwnerKind::Watcher
+        );
+    }
+
+    #[test]
+    fn runtime_stamp_preserves_concurrent_progress_and_adopts_exact_persisted_row() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let provider = ProviderKind::Codex;
+        let channel_id = 42_592_550;
+        let seed = runtime_seed(provider.clone(), channel_id, None);
+        save_inflight_state_in_root(root.path(), &seed).expect("seed owner row");
+        let baseline = load(root.path(), &provider, channel_id);
+        let expected = InflightTurnIdentity::from_state(&baseline);
+
+        let mut durable_progress = baseline.clone();
+        durable_progress.current_msg_id = 800_001;
+        durable_progress.current_msg_len = 37;
+        durable_progress.full_response = "watcher response".to_string();
+        durable_progress.response_sent_offset = durable_progress.full_response.len();
+        durable_progress.current_tool_line = Some("watcher tool".to_string());
+        durable_progress.any_tool_used = true;
+        durable_progress.watcher_owner_channel_id = Some(channel_id + 1);
+        durable_progress.set_relay_owner_kind(RelayOwnerKind::Watcher);
+        save_inflight_state_in_root(root.path(), &durable_progress)
+            .expect("advance same-turn durable progress");
+        let durable_progress = load(root.path(), &provider, channel_id);
+
+        let mut local = baseline.clone();
+        local.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
+        local.tmux_session_name = Some("AgentDesk-codex-r7-exact".to_string());
+        local.output_path = Some("/runtime/r7-exact.jsonl".to_string());
+        local.last_offset = 4_096;
+        assert_eq!(
+            stamp_runtime_handoff_if_matches_identity_in_root(
+                root.path(),
+                (&baseline, &mut local),
+                &expected,
+                "test::runtime_exact_adoption",
+            ),
+            GuardedSaveOutcome::Saved,
+        );
+
+        let persisted = load(root.path(), &provider, channel_id);
+        assert_eq!(
+            serde_json::to_value(&local).expect("serialize adopted local row"),
+            serde_json::to_value(&persisted).expect("serialize persisted row"),
+        );
+        assert!(persisted.save_generation > durable_progress.save_generation);
+        assert_eq!(persisted.current_msg_id, 800_001);
+        assert_eq!(persisted.full_response, "watcher response");
+        assert_eq!(persisted.current_tool_line.as_deref(), Some("watcher tool"));
+        assert_eq!(persisted.watcher_owner_channel_id, Some(channel_id + 1));
+        assert_eq!(
+            persisted.effective_relay_owner_kind(),
+            RelayOwnerKind::Watcher
+        );
+        assert_eq!(persisted.runtime_kind, Some(RuntimeHandoffKind::CodexTui));
+        assert_eq!(
+            persisted.tmux_session_name.as_deref(),
+            Some("AgentDesk-codex-r7-exact")
+        );
+        assert_eq!(persisted.last_offset, 4_096);
+    }
+
+    #[test]
+    fn transient_runtime_stamp_read_error_is_retryable_and_preserves_local_frame() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let provider = ProviderKind::Codex;
+        let channel_id = 42_593_121;
+        let seed = runtime_seed(provider.clone(), channel_id, None);
+        save_inflight_state_in_root(root.path(), &seed).expect("seed owner row");
+        let baseline = load(root.path(), &provider, channel_id);
+        let expected = InflightTurnIdentity::from_state(&baseline);
+        let mut local = baseline.clone();
+        local.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
+        local.tmux_session_name = Some("AgentDesk-codex-r9-retry".to_string());
+        local.output_path = Some("/runtime/r9-retry.jsonl".to_string());
+        let local_before = serde_json::to_value(&local).expect("serialize local frame");
+
+        let path = inflight_state_path(root.path(), &provider, channel_id);
+        std::fs::remove_file(&path).expect("replace row with deterministic read failure");
+        std::fs::create_dir(&path).expect("directory at row path forces read error");
+        assert_eq!(
+            stamp_runtime_handoff_if_matches_identity_in_root(
+                root.path(),
+                (&baseline, &mut local),
+                &expected,
+                "test::transient_runtime_stamp_read_error",
+            ),
+            GuardedSaveOutcome::IoError,
+        );
+        assert_eq!(
+            serde_json::to_value(&local).expect("serialize retained local frame"),
+            local_before,
+            "retryable guarded-read failure must not adopt or mutate local handoff identity",
+        );
+    }
+
+    #[test]
+    fn divergent_runtime_response_is_non_retryable_and_preserves_both_snapshots() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let provider = ProviderKind::Codex;
+        let channel_id = 42_593_122;
+        let mut seed = runtime_seed(provider.clone(), channel_id, None);
+        seed.full_response = "shared base".to_string();
+        save_inflight_state_in_root(root.path(), &seed).expect("seed owner row");
+        let baseline = load(root.path(), &provider, channel_id);
+        let expected = InflightTurnIdentity::from_state(&baseline);
+
+        let mut durable = baseline.clone();
+        durable.full_response = "durable watcher branch".to_string();
+        save_inflight_state_in_root(root.path(), &durable).expect("persist divergent durable row");
+        let durable_before = load(root.path(), &provider, channel_id);
+        let mut local = baseline.clone();
+        local.full_response = "resolved terminal branch".to_string();
+        local.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
+        let local_before = serde_json::to_value(&local).expect("serialize local frame");
+
+        assert_eq!(
+            stamp_runtime_handoff_if_matches_identity_in_root(
+                root.path(),
+                (&baseline, &mut local),
+                &expected,
+                "test::divergent_runtime_response",
+            ),
+            GuardedSaveOutcome::IdentityMismatch,
+            "semantic body divergence must not enter the transient-I/O retry loop",
+        );
+        assert_eq!(serde_json::to_value(&local).unwrap(), local_before);
+        assert_eq!(
+            serde_json::to_value(load(root.path(), &provider, channel_id)).unwrap(),
+            serde_json::to_value(durable_before).unwrap(),
         );
     }
 }

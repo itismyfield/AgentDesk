@@ -25,6 +25,21 @@ pub(super) fn should_delegate_bridge_relay_to_watcher(
         && !recovery_retry
 }
 
+/// A watcher owner adopted by the durable bridge-entry merge owns the whole
+/// turn, including detached bytes, only while that exact owner epoch remains
+/// current. Later handoff claims invalidate the epoch before owner-kind ABA.
+pub(super) fn recovered_watcher_owns_output_at_bridge_entry(
+    bridge_entry_watcher_owner_epoch_current: bool,
+    watcher_owns_assistant_relay: bool,
+    watcher_relay_available_for_turn: bool,
+    terminal_error_path: bool,
+) -> bool {
+    bridge_entry_watcher_owner_epoch_current
+        && watcher_owns_assistant_relay
+        && watcher_relay_available_for_turn
+        && !terminal_error_path
+}
+
 /// A watcher handle is registered for `owner_channel_id` and is not cancelled.
 /// This availability check is used by non-handoff observability sites that only
 /// need handle presence.
@@ -196,5 +211,44 @@ mod tests {
             ),
             None,
         );
+    }
+
+    #[test]
+    fn bridge_entry_watcher_adoption_owns_pending_detached_response() {
+        let terminal_error_path = false;
+        let bridge_response_pending = true;
+        assert!(recovered_watcher_owns_output_at_bridge_entry(
+            true,
+            true,
+            true,
+            terminal_error_path,
+        ));
+        assert!(!should_delegate_bridge_relay_to_watcher(
+            true,
+            true,
+            bridge_response_pending,
+            false,
+            false,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn later_watcher_reclaim_cannot_aba_bridge_entry_owner_with_pending_bytes() {
+        let bridge_response_pending = true;
+        assert!(!recovered_watcher_owns_output_at_bridge_entry(
+            false, // invalidated by Watcher -> None -> new Watcher handoff
+            true, true, false,
+        ));
+        assert!(!should_delegate_bridge_relay_to_watcher(
+            true,
+            true,
+            bridge_response_pending,
+            false,
+            false,
+            false,
+            false,
+        ));
     }
 }

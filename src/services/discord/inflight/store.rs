@@ -310,18 +310,19 @@ fn persist_under_lock_inner(
     state: &InflightTurnState,
     caller: &'static str,
     bump_updated_at: bool,
-) -> Result<(), String> {
+) -> Result<Option<InflightTurnState>, String> {
     let mut updated = state.clone();
     updated.ensure_finalizer_turn_id();
     if !validate_inflight_state_for_save(root, path, &updated, caller) {
-        return Ok(());
+        return Ok(None);
     }
     if bump_updated_at {
         updated.updated_at = now_string();
     }
     bump_save_generation_for_write(path, &mut updated);
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
-    atomic_write(path, &json)
+    atomic_write(path, &json)?;
+    Ok(Some(updated))
 }
 
 /// Shared lock-held persist tail: validate, stamp `updated_at`, atomic-write.
@@ -332,6 +333,18 @@ pub(super) fn persist_under_lock(
     state: &InflightTurnState,
     caller: &'static str,
 ) -> Result<(), String> {
+    persist_under_lock_inner(root, path, state, caller, true).map(|_| ())
+}
+
+/// Persists while returning the exact stamped row written under the lock.
+/// Callers that keep a retry baseline must use this instead of retaining the
+/// pre-write snapshot, whose timestamp and save generation are stale.
+pub(super) fn persist_under_lock_with_snapshot(
+    root: &Path,
+    path: &Path,
+    state: &InflightTurnState,
+    caller: &'static str,
+) -> Result<Option<InflightTurnState>, String> {
     persist_under_lock_inner(root, path, state, caller, true)
 }
 
@@ -364,7 +377,7 @@ pub(super) fn persist_under_lock_preserving_updated_at(
     state: &InflightTurnState,
     caller: &'static str,
 ) -> Result<(), String> {
-    persist_under_lock_inner(root, path, state, caller, false)
+    persist_under_lock_inner(root, path, state, caller, false).map(|_| ())
 }
 
 #[cfg(test)]

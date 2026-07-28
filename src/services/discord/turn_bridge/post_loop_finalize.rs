@@ -40,7 +40,7 @@ pub(super) struct PostLoopFinalizeContext {
     pub(super) standby_relay_owns_output: bool,
     pub(super) watcher_owns_assistant_relay: bool,
     pub(super) watcher_relay_available_for_turn: bool,
-    pub(super) initial_relay_owner_kind: super::super::inflight::RelayOwnerKind,
+    pub(super) bridge_entry_watcher_owner_epoch_current: bool,
     pub(super) response_sent_offset: usize,
     pub(super) tmux_last_offset: Option<u64>,
     pub(super) watcher_owner_channel_id: ChannelId,
@@ -112,7 +112,7 @@ pub(super) async fn run_post_loop_finalize(
     let standby_relay_owns_output = ctx.standby_relay_owns_output;
     let watcher_owns_assistant_relay = ctx.watcher_owns_assistant_relay;
     let watcher_relay_available_for_turn = ctx.watcher_relay_available_for_turn;
-    let initial_relay_owner_kind = ctx.initial_relay_owner_kind;
+    let bridge_entry_watcher_owner_epoch_current = ctx.bridge_entry_watcher_owner_epoch_current;
     let response_sent_offset = ctx.response_sent_offset;
     let tmux_last_offset = ctx.tmux_last_offset;
     let watcher_owner_channel_id = ctx.watcher_owner_channel_id;
@@ -147,7 +147,7 @@ pub(super) async fn run_post_loop_finalize(
     if pending_long_running_open_after_state_save.take().is_some() {
         inflight_state.long_running_placeholder_active = false;
         let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
-            &inflight_state,
+            &mut inflight_state,
             "turn_bridge::post_loop_finalize::pending_long_running_open",
         );
     }
@@ -167,7 +167,7 @@ pub(super) async fn run_post_loop_finalize(
             shared_owned.ui.placeholder_controller.detach(&key);
             inflight_state.long_running_placeholder_active = false;
             let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
-                &inflight_state,
+                &mut inflight_state,
                 "turn_bridge::post_loop_finalize::relay_owned_retarget",
             );
         }
@@ -200,7 +200,7 @@ pub(super) async fn run_post_loop_finalize(
                 }
             }
             let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
-                &inflight_state,
+                &mut inflight_state,
                 "turn_bridge::post_loop_finalize::terminal_placeholder_transition",
             );
         }
@@ -235,7 +235,7 @@ pub(super) async fn run_post_loop_finalize(
             inflight_state.current_tool_line = current_tool_line.clone();
             inflight_state.prev_tool_status = prev_tool_status.clone();
             let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
-                &inflight_state,
+                &mut inflight_state,
                 "turn_bridge::post_loop_finalize::orphaned_tool_status",
             );
         }
@@ -328,15 +328,16 @@ pub(super) async fn run_post_loop_finalize(
         );
     }
     let terminal_error_path = cancelled || is_prompt_too_long || transport_error || recovery_retry;
-    // A bridge rebuilt from durable state must honor the row's existing
-    // relay owner. The pending-response guard below only applies to
-    // in-process handoffs where the bridge may already own unsent bytes.
-    let recovered_watcher_owns_output = matches!(
-        initial_relay_owner_kind,
-        super::super::inflight::RelayOwnerKind::Watcher
-    ) && watcher_owns_assistant_relay
-        && watcher_relay_available_for_turn
-        && !terminal_error_path;
+    // A bridge rebuilt from durable state must honor the row's existing relay
+    // owner while that exact entry epoch remains current. A later handoff
+    // invalidates it before owner kind can cycle back through Watcher (ABA).
+    let recovered_watcher_owns_output =
+        watcher_handoff::recovered_watcher_owns_output_at_bridge_entry(
+            bridge_entry_watcher_owner_epoch_current,
+            watcher_owns_assistant_relay,
+            watcher_relay_available_for_turn,
+            terminal_error_path,
+        );
     let response_unsent = response_portion_after_offset(&full_response, response_sent_offset);
     let response_pending_trimmed_empty = response_unsent.trim().is_empty();
     let bridge_relay_delegated_to_watcher = recovered_watcher_owns_output
@@ -370,7 +371,7 @@ pub(super) async fn run_post_loop_finalize(
         dispatch_id.as_deref(),
         adk_session_key.as_deref(),
         turn_id.as_str(),
-        current_msg_id.get(),
+        durable_current_msg_id_from_detached(current_msg_id),
         response_pending_trimmed_empty,
         watcher_owns_assistant_relay,
         watcher_relay_available_for_turn,

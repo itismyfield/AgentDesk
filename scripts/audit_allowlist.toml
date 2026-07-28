@@ -46,10 +46,6 @@ direct_discord_sends = [
   # announce-token fallback is removed; deliver_outbound currently collapses
   # HTTP status / Discord error code into a string on edit failures.
   "src/services/issue_announcements.rs#direct_discord_sends:c953e696eec38deb",
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:40a1288799a3f040",
-  # #4230 S7: existing ToolUse restart-handoff direct gateway edit moved verbatim from
-  # turn_bridge/stream_loop.rs to turn_bridge/stream_loop/tool_arms.rs.
-  "src/services/discord/turn_bridge/stream_loop/tool_arms.rs#direct_discord_sends:49054cadcdb1b240",
   # #4230 S10: existing recovery-notice direct gateway edit moved verbatim from
   # terminal_outcome_delivery.rs to the recovery_retry child handler.
   "src/services/discord/turn_bridge/terminal_outcome_delivery/recovery_retry.rs#direct_discord_sends:912eabdb5dce46d2",
@@ -84,10 +80,6 @@ direct_discord_sends = [
   # 2026-07-24 #4860 size-cap relief: the completion fallback send moved verbatim
   # from status_panel.rs to status_panel/fallback.rs (same call, same hash).
   "src/services/discord/turn_bridge/status_panel/fallback.rs#direct_discord_sends:c4f1e0c4fddb4380",
-  # #3016 msg_id==0 recovery: bridge creates a fresh placeholder / posts a recovery
-  # notice for turns with no anchored Discord message. Consistent with the bridge's
-  # existing pre-migration direct sends; retire with the #1436 outbound v3 extraction.
-  "src/services/discord/turn_bridge/mod.rs#direct_discord_sends:d77122f8dd3466ba",
 ]
 
 # Footer view writes: #4049 S4-b1 intentionally centralizes only the completion

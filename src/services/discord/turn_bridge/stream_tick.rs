@@ -8,8 +8,10 @@ use super::*;
 #[path = "stream_tick/guarded_persist.rs"]
 pub(super) mod guarded_persist;
 use guarded_persist::{
-    GuardedSaveOutcome, dirty_after_guarded_save, persist_stream_tick_heartbeat,
-    persist_stream_tick_state,
+    GuardedSaveOutcome, StreamTickCandidateSaveContext, VisibleMutationAuthority,
+    dirty_after_guarded_save, fence_stream_tick_visible_mutation_with_candidate_cleanup,
+    persist_stream_tick_heartbeat, persist_stream_tick_state_with_candidate_cleanup,
+    sync_stream_tick_tool_fields, visible_mutation_authority_after_guarded_save,
 };
 
 pub(super) type LongRunningPlaceholderActive = Option<(
@@ -26,6 +28,12 @@ pub(super) type PendingLongRunningRetargetAfterStateSave = Option<(
     bool,
     super::super::placeholder_controller::PlaceholderKey,
 )>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StreamTickOutcome {
+    Continue,
+    AuthorityLost,
+}
 
 struct ProviderRef<'a>(&'a ProviderKind);
 
@@ -59,22 +67,6 @@ impl TurnIdRef<'_> {
     }
 }
 
-struct FullResponseRef<'a>(&'a str);
-
-impl Deref for FullResponseRef<'_> {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        self.0
-    }
-}
-
-impl FullResponseRef<'_> {
-    fn clone(&self) -> String {
-        self.0.to_string()
-    }
-}
-
 pub(super) struct BridgeStreamTickContext<'a> {
     pub(super) shared_owned: Arc<SharedData>,
     pub(super) gateway: Arc<dyn TurnGateway>,
@@ -87,19 +79,12 @@ pub(super) struct BridgeStreamTickContext<'a> {
     pub(super) footer_owner: super::super::footer_view_reconciler::CompletionFooterOwner,
     pub(super) status_panel_started_at: i64,
     pub(super) done: bool,
-    pub(super) standby_relay_owns_output: bool,
-    pub(super) watcher_owner_channel_id: ChannelId,
-    pub(super) full_response: &'a str,
     pub(super) dispatch_id: Option<String>,
     pub(super) adk_session_key: Option<String>,
     pub(super) adk_session_name: Option<String>,
     pub(super) adk_session_info: Option<String>,
     pub(super) adk_cwd: Option<String>,
     pub(super) role_binding: Option<RoleBinding>,
-    pub(super) current_tool_line: Option<String>,
-    pub(super) last_tool_name: Option<String>,
-    pub(super) last_tool_summary: Option<String>,
-    pub(super) prev_tool_status: Option<String>,
     pub(super) spinner: &'static [&'static str],
     pub(super) live_long_run_heartbeat_interval: std::time::Duration,
 }
@@ -115,12 +100,26 @@ pub(super) struct BridgeStreamTickState<'a> {
     pub(super) last_status_panel_text: &'a mut String,
     pub(super) watcher_owns_assistant_relay: &'a mut bool,
     pub(super) watcher_relay_available_for_turn: &'a mut bool,
+    pub(super) standby_relay_owns_output: &'a mut bool,
+    pub(super) watcher_owner_channel_id: &'a mut ChannelId,
+    pub(super) full_response: &'a mut String,
     pub(super) response_sent_offset: &'a mut usize,
     pub(super) bridge_confirmed_response_sent_offset: &'a mut usize,
     pub(super) streaming_rollover_frozen_msg_ids: &'a mut Vec<MessageId>,
     pub(super) current_msg_id: &'a mut MessageId,
+    pub(super) expected_current_message: &'a mut (u64, usize),
+    pub(super) pending_current_message_candidate: &'a mut Option<MessageId>,
+    pub(super) bridge_created_response_placeholder_msg_id: &'a mut Option<MessageId>,
     pub(super) last_edit_text: &'a mut String,
     pub(super) first_answer_relayed: &'a mut bool,
+    pub(super) current_tool_line: &'a mut Option<String>,
+    pub(super) prev_tool_status: &'a mut Option<String>,
+    pub(super) last_tool_name: &'a mut Option<String>,
+    pub(super) last_tool_summary: &'a mut Option<String>,
+    pub(super) any_tool_used: &'a mut bool,
+    pub(super) has_post_tool_text: &'a mut bool,
+    pub(super) tmux_last_offset: &'a mut Option<u64>,
+    pub(super) persisted_inflight_baseline: &'a mut InflightTurnState,
     pub(super) inflight_state: &'a mut InflightTurnState,
     pub(super) bridge_spans: &'a mut BridgeLatencySpans,
     pub(super) status_panel_generation: &'a mut u64,
@@ -190,7 +189,7 @@ async fn guarded_bridge_rollover_edit<G: TurnGateway + ?Sized>(
 pub(super) async fn run_bridge_stream_tick(
     ctx: BridgeStreamTickContext<'_>,
     state: BridgeStreamTickState<'_>,
-) {
+) -> StreamTickOutcome {
     let shared_owned = ctx.shared_owned;
     let gateway = ctx.gateway;
     let channel_id = ctx.channel_id;
@@ -202,23 +201,16 @@ pub(super) async fn run_bridge_stream_tick(
     let footer_owner = ctx.footer_owner;
     let status_panel_started_at = ctx.status_panel_started_at;
     let done = ctx.done;
-    let standby_relay_owns_output = ctx.standby_relay_owns_output;
-    let watcher_owner_channel_id = ctx.watcher_owner_channel_id;
-    let full_response = FullResponseRef(ctx.full_response);
     let dispatch_id = ctx.dispatch_id;
     let adk_session_key = ctx.adk_session_key;
     let adk_session_name = ctx.adk_session_name;
     let adk_session_info = ctx.adk_session_info;
     let adk_cwd = ctx.adk_cwd;
     let role_binding = ctx.role_binding;
-    let current_tool_line = ctx.current_tool_line;
-    let last_tool_name = ctx.last_tool_name;
-    let last_tool_summary = ctx.last_tool_summary;
-    let prev_tool_status = ctx.prev_tool_status;
     let spinner = ctx.spinner;
     let live_long_run_heartbeat_interval = ctx.live_long_run_heartbeat_interval;
 
-    let mut state_dirty = *state.state_dirty;
+    let mut state_dirty: bool;
     let mut last_session_panel_lifecycle_refresh = *state.last_session_panel_lifecycle_refresh;
     let mut status_panel_dirty = *state.status_panel_dirty;
     let mut spin_idx = *state.spin_idx;
@@ -228,13 +220,28 @@ pub(super) async fn run_bridge_stream_tick(
     let mut last_status_panel_text = std::mem::take(state.last_status_panel_text);
     let mut watcher_owns_assistant_relay = *state.watcher_owns_assistant_relay;
     let mut watcher_relay_available_for_turn = *state.watcher_relay_available_for_turn;
+    let mut standby_relay_owns_output = *state.standby_relay_owns_output;
+    let mut watcher_owner_channel_id = *state.watcher_owner_channel_id;
+    let mut full_response = std::mem::take(state.full_response);
     let mut response_sent_offset = *state.response_sent_offset;
     let mut bridge_confirmed_response_sent_offset = *state.bridge_confirmed_response_sent_offset;
     let mut streaming_rollover_frozen_msg_ids =
         std::mem::take(state.streaming_rollover_frozen_msg_ids);
     let mut current_msg_id = *state.current_msg_id;
+    let expected_current_message = &mut *state.expected_current_message;
+    let pending_current_message_candidate = &mut *state.pending_current_message_candidate;
+    let bridge_created_response_placeholder_msg_id =
+        &mut *state.bridge_created_response_placeholder_msg_id;
     let mut last_edit_text = std::mem::take(state.last_edit_text);
     let mut first_answer_relayed = *state.first_answer_relayed;
+    let mut current_tool_line = state.current_tool_line.take();
+    let mut prev_tool_status = state.prev_tool_status.take();
+    let mut last_tool_name = state.last_tool_name.take();
+    let mut last_tool_summary = state.last_tool_summary.take();
+    let mut any_tool_used = *state.any_tool_used;
+    let mut has_post_tool_text = *state.has_post_tool_text;
+    let mut tmux_last_offset = *state.tmux_last_offset;
+    let persisted_inflight_baseline = &mut *state.persisted_inflight_baseline;
     let inflight_state = &mut *state.inflight_state;
     let bridge_spans = &mut *state.bridge_spans;
     let mut status_panel_generation = *state.status_panel_generation;
@@ -246,6 +253,164 @@ pub(super) async fn run_bridge_stream_tick(
     let mut last_adk_heartbeat = *state.last_adk_heartbeat;
     let mut last_inflight_long_run_heartbeat = *state.last_inflight_long_run_heartbeat;
 
+    macro_rules! reconcile_tick_runtime_from_inflight {
+        ($current_msg_id_before_save:expr) => {{
+            let mut runtime = super::bridge_entry_persist::BridgeEntryRuntimeState {
+                inflight_state: &mut *inflight_state,
+                full_response: &mut full_response,
+                response_sent_offset: &mut response_sent_offset,
+                bridge_confirmed_response_sent_offset: &mut bridge_confirmed_response_sent_offset,
+                current_msg_id: &mut current_msg_id,
+                current_tool_line: &mut current_tool_line,
+                prev_tool_status: &mut prev_tool_status,
+                last_tool_name: &mut last_tool_name,
+                last_tool_summary: &mut last_tool_summary,
+                any_tool_used: &mut any_tool_used,
+                has_post_tool_text: &mut has_post_tool_text,
+                streaming_rollover_frozen_msg_ids: &mut streaming_rollover_frozen_msg_ids,
+                tmux_last_offset: &mut tmux_last_offset,
+                watcher_owner_channel_id: &mut watcher_owner_channel_id,
+                watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
+                watcher_relay_available_for_turn: &mut watcher_relay_available_for_turn,
+                standby_relay_owns_output: &mut standby_relay_owns_output,
+                status_panel_msg_id: &mut status_panel_msg_id,
+                status_panel_generation: &mut status_panel_generation,
+            };
+            super::bridge_entry_persist::reconcile_runtime_locals_from_inflight_state(
+                shared_owned.as_ref(),
+                &mut runtime,
+            );
+            super::bridge_entry_persist::clear_last_edit_text_if_current_message_changed(
+                $current_msg_id_before_save,
+                current_msg_id,
+                &mut last_edit_text,
+            );
+        }};
+    }
+
+    macro_rules! stage_tick_state_for_guard {
+        () => {{
+            inflight_state.full_response.clone_from(&full_response);
+            inflight_state.response_sent_offset = response_sent_offset;
+            inflight_state.any_tool_used = any_tool_used;
+            inflight_state.has_post_tool_text = has_post_tool_text;
+            sync_stream_tick_tool_fields(
+                inflight_state,
+                &current_tool_line,
+                &prev_tool_status,
+                &last_tool_name,
+                &last_tool_summary,
+            );
+        }};
+    }
+
+    macro_rules! writeback_tick_state {
+        () => {{
+            *state.state_dirty = state_dirty;
+            *state.last_session_panel_lifecycle_refresh = last_session_panel_lifecycle_refresh;
+            *state.status_panel_dirty = status_panel_dirty;
+            *state.spin_idx = spin_idx;
+            *state.last_status_panel_edit = last_status_panel_edit;
+            *state.last_status_edit = last_status_edit;
+            *state.status_panel_msg_id = status_panel_msg_id;
+            *state.last_status_panel_text = last_status_panel_text;
+            *state.watcher_owns_assistant_relay = watcher_owns_assistant_relay;
+            *state.watcher_relay_available_for_turn = watcher_relay_available_for_turn;
+            *state.standby_relay_owns_output = standby_relay_owns_output;
+            *state.watcher_owner_channel_id = watcher_owner_channel_id;
+            *state.full_response = full_response;
+            *state.response_sent_offset = response_sent_offset;
+            *state.bridge_confirmed_response_sent_offset = bridge_confirmed_response_sent_offset;
+            *state.streaming_rollover_frozen_msg_ids = streaming_rollover_frozen_msg_ids;
+            *state.current_msg_id = current_msg_id;
+            *state.last_edit_text = last_edit_text;
+            *state.first_answer_relayed = first_answer_relayed;
+            *state.current_tool_line = current_tool_line;
+            *state.prev_tool_status = prev_tool_status;
+            *state.last_tool_name = last_tool_name;
+            *state.last_tool_summary = last_tool_summary;
+            *state.any_tool_used = any_tool_used;
+            *state.has_post_tool_text = has_post_tool_text;
+            *state.tmux_last_offset = tmux_last_offset;
+            *state.status_panel_generation = status_panel_generation;
+            *state.pending_long_running_open_after_state_save =
+                pending_long_running_open_after_state_save;
+            *state.pending_long_running_retarget_after_state_save =
+                pending_long_running_retarget_after_state_save;
+            *state.long_running_placeholder_active = long_running_placeholder_active;
+            *state.last_adk_heartbeat = last_adk_heartbeat;
+            *state.last_inflight_long_run_heartbeat = last_inflight_long_run_heartbeat;
+        }};
+    }
+
+    macro_rules! return_authority_lost {
+        () => {{
+            pending_long_running_open_after_state_save = None;
+            pending_long_running_retarget_after_state_save = None;
+            writeback_tick_state!();
+            return StreamTickOutcome::AuthorityLost;
+        }};
+    }
+
+    macro_rules! authorize_visible_mutation {
+        ($caller:expr) => {{
+            stage_tick_state_for_guard!();
+            let intended_authority =
+                crate::services::discord::inflight::StreamRelayAuthority::from_state(
+                    inflight_state,
+                );
+            let current_msg_id_before_fence = current_msg_id;
+            let guarded_outcome = fence_stream_tick_visible_mutation_with_candidate_cleanup(
+                StreamTickCandidateSaveContext {
+                    gateway: gateway.as_ref(),
+                    provider: &provider,
+                    token_hash: &shared_owned.token_hash,
+                    channel_id,
+                    persisted_baseline: persisted_inflight_baseline,
+                    inflight_state: &mut *inflight_state,
+                    expected_identity: stream_tick_expected,
+                    expected_current_message,
+                    current_msg_id: &mut current_msg_id,
+                    pending_current_message_candidate,
+                    bridge_created_response_placeholder_msg_id,
+                },
+                $caller,
+            )
+            .await;
+            state_dirty = dirty_after_guarded_save(guarded_outcome);
+            if guarded_outcome == GuardedSaveOutcome::Saved
+                || (guarded_outcome == GuardedSaveOutcome::IdentityMismatch
+                    && stream_tick_expected.matches_state(inflight_state))
+            {
+                reconcile_tick_runtime_from_inflight!(current_msg_id_before_fence);
+            }
+            match visible_mutation_authority_after_guarded_save(
+                guarded_outcome,
+                inflight_state,
+                intended_authority,
+            )
+            .mutation_permission()
+            {
+                Some(allowed) => allowed,
+                None => {
+                    tracing::warn!(
+                        channel_id = channel_id.get(),
+                        caller = $caller,
+                        ?guarded_outcome,
+                        relay_owner = inflight_state.effective_relay_owner_kind().as_str(),
+                        "stream tick lost durable Discord mutation authority"
+                    );
+                    return_authority_lost!();
+                }
+            }
+        }};
+    }
+
+    // Detect a durable handoff even on a quiet interval. Retryable store
+    // failure merely suppresses later fenced mutations.
+    let _ = authorize_visible_mutation!("turn_bridge::stream_tick::authority_preflight");
+
+    let status_panel_generation_before_fence = status_panel_generation;
     if shared_owned.ui.status_panel_v2_enabled
         && last_session_panel_lifecycle_refresh.elapsed() >= status_interval
     {
@@ -284,6 +449,9 @@ pub(super) async fn run_bridge_stream_tick(
         && !defer_status_panel_for_first_answer
         && last_status_panel_edit.elapsed() >= status_interval
         && let Some(status_msg_id) = status_panel_msg_id
+        && authorize_visible_mutation!("turn_bridge::stream_tick::status_panel_edit")
+        && status_panel_msg_id == Some(status_msg_id)
+        && status_panel_generation == status_panel_generation_before_fence
     {
         let panel_text = shared_owned.ui.placeholder_live_events.render_status_panel(
             channel_id,
@@ -335,17 +503,69 @@ pub(super) async fn run_bridge_stream_tick(
         && status_panel_dirty
         && !defer_status_panel_for_first_answer
         && last_status_panel_edit.elapsed() >= status_interval
+        && authorize_visible_mutation!("turn_bridge::stream_tick::footer_refresh")
     {
         refresh_bridge_footer(shared_owned.as_ref(), channel_id, footer_owner, indicator).await;
         last_status_panel_edit = tokio::time::Instant::now();
         status_panel_dirty = false;
     }
-    if !watcher_owns_assistant_relay && !standby_relay_owns_output {
+    let anchor_ready = if !done
+        && !response_portion_after_offset(&full_response, response_sent_offset).is_empty()
+        && durable_current_msg_id_from_detached(current_msg_id) == 0
+    {
+        if !authorize_visible_mutation!("turn_bridge::stream_tick::anchor_preflight") {
+            false
+        } else if durable_current_msg_id_from_detached(current_msg_id) != 0
+            || response_portion_after_offset(&full_response, response_sent_offset).is_empty()
+        {
+            true
+        } else {
+            let anchor_text = super::super::formatting::build_processing_status_block(
+                spinner[spin_idx % spinner.len()],
+            )
+            .to_string();
+            let current_msg_id_before_anchor = current_msg_id;
+            let ready = ensure_bridge_current_message_anchor(
+                gateway.as_ref(),
+                &provider,
+                &shared_owned.token_hash,
+                channel_id,
+                stream_tick_expected,
+                &mut current_msg_id,
+                bridge_created_response_placeholder_msg_id,
+                inflight_state,
+                &anchor_text,
+            )
+            .await;
+            reconcile_tick_runtime_from_inflight!(current_msg_id_before_anchor);
+            if ready {
+                persisted_inflight_baseline.clone_from(inflight_state);
+                *expected_current_message = (
+                    inflight_state.current_msg_id,
+                    inflight_state.current_msg_len,
+                );
+                last_edit_text.clear();
+                if *bridge_created_response_placeholder_msg_id == Some(current_msg_id) {
+                    last_edit_text.push_str(&anchor_text);
+                }
+                last_status_edit = tokio::time::Instant::now() - status_interval;
+            }
+            ready
+        }
+    } else {
+        true
+    };
+    if !bridge_stream_relay_suppressed(watcher_owns_assistant_relay, standby_relay_owns_output)
+        && anchor_ready
+    {
         // #3805 P2 (PR-D): track whether an answer rollover created a fresh
         // tail message this interval, so the two-message status panel is
         // re-anchored BELOW it exactly once (not on quiet intervals).
         let mut rolled_over_this_interval = false;
         loop {
+            if !authorize_visible_mutation!("turn_bridge::stream_tick::rollover_freeze") {
+                break;
+            }
             let raw_current_portion =
                 response_portion_after_offset(&full_response, response_sent_offset);
             // #3813 AC#1 tail: mark first-output pre-rollover (first_output<=first_relay).
@@ -394,6 +614,11 @@ pub(super) async fn run_bridge_stream_tick(
             if raw_split_at == 0 {
                 break;
             }
+            let rollover_source_epoch = (
+                current_msg_id,
+                response_sent_offset,
+                inflight_state.current_msg_len,
+            );
 
             match guarded_bridge_rollover_edit(
                 gateway.as_ref(),
@@ -406,6 +631,16 @@ pub(super) async fn run_bridge_stream_tick(
             .await
             {
                 Ok(GuardedRolloverEditOutcome::Clean) => {
+                    if !authorize_visible_mutation!("turn_bridge::stream_tick::rollover_send")
+                        || rollover_source_epoch
+                            != (
+                                current_msg_id,
+                                response_sent_offset,
+                                inflight_state.current_msg_len,
+                            )
+                    {
+                        break;
+                    }
                     match TurnGateway::send_message(gateway.as_ref(), channel_id, &status_block)
                         .await
                     {
@@ -430,14 +665,16 @@ pub(super) async fn run_bridge_stream_tick(
                                 &mut *inflight_state,
                             );
                             current_msg_id = next_msg_id;
+                            *pending_current_message_candidate = Some(next_msg_id);
+                            *bridge_created_response_placeholder_msg_id = Some(next_msg_id);
                             rolled_over_this_interval = true;
                             last_edit_text = status_block;
                             last_status_edit = tokio::time::Instant::now() - status_interval;
-                            inflight_state.current_msg_id = current_msg_id.get();
+                            inflight_state.current_msg_id =
+                                durable_current_msg_id_from_detached(current_msg_id);
                             inflight_state.current_msg_len = last_edit_text.len();
                             inflight_state.response_sent_offset = response_sent_offset;
                             inflight_state.full_response = full_response.clone();
-                            state_dirty = true;
                             // #3813 AC#1 tail: rollover send = bridge first relay.
                             bridge_spans.mark_first_relay(true);
                             if let Some((_, _, _, _, pending_new_key)) =
@@ -473,7 +710,16 @@ pub(super) async fn run_bridge_stream_tick(
                                     *ack_consumed,
                                     new_key,
                                 ));
-                                state_dirty = true;
+                            }
+                            // A rollover candidate must become durable before
+                            // this loop may create its successor.  On retryable
+                            // store failure the candidate remains the sole
+                            // pending message; loop-exit settlement either
+                            // binds or deterministically deletes it.
+                            if !authorize_visible_mutation!(
+                                "turn_bridge::stream_tick::rollover_candidate_bind"
+                            ) {
+                                break;
                             }
                         }
                         Err(error) => {
@@ -482,19 +728,31 @@ pub(super) async fn run_bridge_stream_tick(
                                 channel_id,
                                 error
                             );
-                            let _ = TurnGateway::edit_message(
-                                gateway.as_ref(),
-                                channel_id,
-                                current_msg_id,
-                                &plan.display_snapshot,
-                            )
-                            .await;
-                            last_edit_text = plan.display_snapshot;
+                            if authorize_visible_mutation!(
+                                "turn_bridge::stream_tick::rollover_send_failure_restore"
+                            ) && rollover_source_epoch
+                                == (
+                                    current_msg_id,
+                                    response_sent_offset,
+                                    inflight_state.current_msg_len,
+                                )
+                            {
+                                let _ = TurnGateway::edit_message(
+                                    gateway.as_ref(),
+                                    channel_id,
+                                    current_msg_id,
+                                    &plan.display_snapshot,
+                                )
+                                .await;
+                                last_edit_text = plan.display_snapshot;
+                            }
                             break;
                         }
                     }
                 }
-                Ok(GuardedRolloverEditOutcome::Held | GuardedRolloverEditOutcome::Blocked) => break,
+                Ok(GuardedRolloverEditOutcome::Held | GuardedRolloverEditOutcome::Blocked) => {
+                    break;
+                }
                 Err(error) => {
                     tracing::warn!(
                         "[discord] failed to freeze rollover chunk for message {} in channel {}: {}",
@@ -518,31 +776,31 @@ pub(super) async fn run_bridge_stream_tick(
                 shared_owned.ui.two_message_panel_enabled,
                 status_panel_msg_id.is_some(),
             )
+            && authorize_visible_mutation!("turn_bridge::stream_tick::panel_reanchor")
+            && status_panel_msg_id.is_some()
         {
             let panel_text = shared_owned.ui.placeholder_live_events.render_status_panel(
                 channel_id,
                 &provider,
                 status_panel_started_at,
             );
-            let reanchored =
-                two_message_panel::reanchor_bridge_two_message_status_panel_below_answer(
-                    gateway.as_ref(),
-                    shared_owned.as_ref(),
-                    channel_id,
-                    &provider,
-                    &panel_text,
-                    current_msg_id,
-                    &mut status_panel_msg_id,
-                    &mut *inflight_state,
-                    &mut status_panel_generation,
-                    &mut last_status_panel_text,
-                )
-                .await;
-            if reanchored {
-                state_dirty = true;
-            }
+            let _ = two_message_panel::reanchor_bridge_two_message_status_panel_below_answer(
+                gateway.as_ref(),
+                shared_owned.as_ref(),
+                channel_id,
+                &provider,
+                &panel_text,
+                current_msg_id,
+                &mut status_panel_msg_id,
+                &mut *inflight_state,
+                &mut status_panel_generation,
+                &mut last_status_panel_text,
+            )
+            .await;
         }
 
+        let streaming_edit_authorized =
+            authorize_visible_mutation!("turn_bridge::stream_tick::streaming_edit");
         let raw_current_portion =
             response_portion_after_offset(&full_response, response_sent_offset);
         let status_block = build_bridge_single_message_panel_status_block(
@@ -573,11 +831,13 @@ pub(super) async fn run_bridge_stream_tick(
             &provider,
         );
 
-        if super::super::single_message_panel::streaming_footer_text_changed(
-            single_message_panel_footer_mode,
-            &last_edit_text,
-            &stable_display_text,
-        ) && !done
+        if streaming_edit_authorized
+            && super::super::single_message_panel::streaming_footer_text_changed(
+                single_message_panel_footer_mode,
+                &last_edit_text,
+                &stable_display_text,
+            )
+            && !done
             && bridge_streaming_edit_gate_open(
                 last_status_edit.elapsed() >= status_interval,
                 first_answer_relayed,
@@ -601,7 +861,8 @@ pub(super) async fn run_bridge_stream_tick(
                 // #3813 AC#1 tail: first bridge-owned relay delivered.
                 bridge_spans.mark_first_relay(!raw_current_portion.is_empty());
                 last_edit_text = stable_display_text;
-                inflight_state.current_msg_id = current_msg_id.get();
+                inflight_state.current_msg_id =
+                    durable_current_msg_id_from_detached(current_msg_id);
                 inflight_state.current_msg_len = last_edit_text.len();
                 inflight_state.response_sent_offset = response_sent_offset;
                 inflight_state.full_response = full_response.clone();
@@ -612,6 +873,7 @@ pub(super) async fn run_bridge_stream_tick(
 
     if shared_owned.ui.placeholder_live_events_enabled
         && watcher_owns_assistant_relay
+        && authorize_visible_mutation!("turn_bridge::stream_tick::watcher_placeholder_edit")
         && let Some((key, input, _, _)) = long_running_placeholder_active.as_ref()
         && let Some(block) = shared_owned
             .ui
@@ -655,6 +917,7 @@ pub(super) async fn run_bridge_stream_tick(
     }
 
     if state_dirty
+        || pending_current_message_candidate.is_some()
         || pending_long_running_open_after_state_save.is_some()
         || pending_long_running_retarget_after_state_save.is_some()
         || inflight_state.current_tool_line != current_tool_line
@@ -662,21 +925,53 @@ pub(super) async fn run_bridge_stream_tick(
         || inflight_state.last_tool_summary != last_tool_summary
         || inflight_state.prev_tool_status != prev_tool_status
     {
-        inflight_state.current_tool_line = current_tool_line.clone();
-        inflight_state.last_tool_name = last_tool_name.clone();
-        inflight_state.last_tool_summary = last_tool_summary.clone();
-        inflight_state.prev_tool_status = prev_tool_status.clone();
-        let flush_outcome = persist_stream_tick_state(
-            &*inflight_state,
-            stream_tick_expected,
-            channel_id,
-            "turn_bridge::stream_tick::dirty_flush",
+        sync_stream_tick_tool_fields(
+            inflight_state,
+            &current_tool_line,
+            &prev_tool_status,
+            &last_tool_name,
+            &last_tool_summary,
         );
+        let intended_authority =
+            crate::services::discord::inflight::StreamRelayAuthority::from_state(inflight_state);
+        let current_msg_id_before_flush = current_msg_id;
+        let flush_outcome = persist_stream_tick_state_with_candidate_cleanup(
+            StreamTickCandidateSaveContext {
+                gateway: gateway.as_ref(),
+                provider: &provider,
+                token_hash: &shared_owned.token_hash,
+                channel_id,
+                persisted_baseline: persisted_inflight_baseline,
+                inflight_state: &mut *inflight_state,
+                expected_identity: stream_tick_expected,
+                expected_current_message,
+                current_msg_id: &mut current_msg_id,
+                pending_current_message_candidate,
+                bridge_created_response_placeholder_msg_id,
+            },
+            "turn_bridge::stream_tick::dirty_flush",
+        )
+        .await;
         state_dirty = dirty_after_guarded_save(flush_outcome);
+        if flush_outcome == GuardedSaveOutcome::Saved {
+            reconcile_tick_runtime_from_inflight!(current_msg_id_before_flush);
+        }
+        if visible_mutation_authority_after_guarded_save(
+            flush_outcome,
+            inflight_state,
+            intended_authority,
+        ) == VisibleMutationAuthority::AuthorityLost
+        {
+            return_authority_lost!();
+        }
         match flush_outcome {
             GuardedSaveOutcome::Saved => {
-                if let Some((key, snapshot, close_trigger, ack_consumed)) =
-                    pending_long_running_open_after_state_save.take()
+                if pending_long_running_open_after_state_save.is_some()
+                    && authorize_visible_mutation!(
+                        "turn_bridge::stream_tick::placeholder_open_edit"
+                    )
+                    && let Some((key, snapshot, close_trigger, ack_consumed)) =
+                        pending_long_running_open_after_state_save.take()
                 {
                     if key.message_id == current_msg_id && long_running_placeholder_active.is_none()
                     {
@@ -693,27 +988,23 @@ pub(super) async fn run_bridge_stream_tick(
                                 Some((key, snapshot, close_trigger, ack_consumed));
                         } else {
                             inflight_state.long_running_placeholder_active = false;
-                            let outcome = persist_stream_tick_state(
-                                &*inflight_state,
-                                stream_tick_expected,
-                                channel_id,
-                                "turn_bridge::stream_tick::placeholder_open_failure",
+                            let _ = authorize_visible_mutation!(
+                                "turn_bridge::stream_tick::placeholder_open_failure"
                             );
-                            state_dirty |= dirty_after_guarded_save(outcome);
                         }
                     } else {
                         inflight_state.long_running_placeholder_active = false;
-                        let outcome = persist_stream_tick_state(
-                            &*inflight_state,
-                            stream_tick_expected,
-                            channel_id,
-                            "turn_bridge::stream_tick::placeholder_open_drop",
+                        let _ = authorize_visible_mutation!(
+                            "turn_bridge::stream_tick::placeholder_open_drop"
                         );
-                        state_dirty |= dirty_after_guarded_save(outcome);
                     }
                 }
-                if let Some((old_key, snapshot, close_trigger, ack_consumed, new_key)) =
-                    pending_long_running_retarget_after_state_save.take()
+                if pending_long_running_retarget_after_state_save.is_some()
+                    && authorize_visible_mutation!(
+                        "turn_bridge::stream_tick::placeholder_retarget_edit"
+                    )
+                    && let Some((old_key, snapshot, close_trigger, ack_consumed, new_key)) =
+                        pending_long_running_retarget_after_state_save.take()
                 {
                     let active_still_matches_old_key = long_running_placeholder_active
                         .as_ref()
@@ -737,13 +1028,9 @@ pub(super) async fn run_bridge_stream_tick(
                             // normal handling.
                             long_running_placeholder_active = None;
                             inflight_state.long_running_placeholder_active = false;
-                            let outcome = persist_stream_tick_state(
-                                &*inflight_state,
-                                stream_tick_expected,
-                                channel_id,
-                                "turn_bridge::stream_tick::placeholder_retarget_failure",
+                            let _ = authorize_visible_mutation!(
+                                "turn_bridge::stream_tick::placeholder_retarget_failure"
                             );
-                            state_dirty |= dirty_after_guarded_save(outcome);
                         }
                     }
                 }
@@ -802,29 +1089,8 @@ pub(super) async fn run_bridge_stream_tick(
         }
     }
 
-    *state.state_dirty = state_dirty;
-    *state.last_session_panel_lifecycle_refresh = last_session_panel_lifecycle_refresh;
-    *state.status_panel_dirty = status_panel_dirty;
-    *state.spin_idx = spin_idx;
-    *state.last_status_panel_edit = last_status_panel_edit;
-    *state.last_status_edit = last_status_edit;
-    *state.status_panel_msg_id = status_panel_msg_id;
-    *state.last_status_panel_text = last_status_panel_text;
-    *state.watcher_owns_assistant_relay = watcher_owns_assistant_relay;
-    *state.watcher_relay_available_for_turn = watcher_relay_available_for_turn;
-    *state.response_sent_offset = response_sent_offset;
-    *state.bridge_confirmed_response_sent_offset = bridge_confirmed_response_sent_offset;
-    *state.streaming_rollover_frozen_msg_ids = streaming_rollover_frozen_msg_ids;
-    *state.current_msg_id = current_msg_id;
-    *state.last_edit_text = last_edit_text;
-    *state.first_answer_relayed = first_answer_relayed;
-    *state.status_panel_generation = status_panel_generation;
-    *state.pending_long_running_open_after_state_save = pending_long_running_open_after_state_save;
-    *state.pending_long_running_retarget_after_state_save =
-        pending_long_running_retarget_after_state_save;
-    *state.long_running_placeholder_active = long_running_placeholder_active;
-    *state.last_adk_heartbeat = last_adk_heartbeat;
-    *state.last_inflight_long_run_heartbeat = last_inflight_long_run_heartbeat;
+    writeback_tick_state!();
+    StreamTickOutcome::Continue
 }
 
 #[cfg(test)]
@@ -835,8 +1101,10 @@ mod provider_output_guard_tests {
     use std::sync::Mutex;
 
     #[derive(Default)]
-    struct CapturingGateway {
-        edits: Mutex<Vec<String>>,
+    pub(super) struct CapturingGateway {
+        pub(super) sends: Mutex<Vec<String>>,
+        pub(super) edits: Mutex<Vec<String>>,
+        pub(super) deletes: Mutex<Vec<u64>>,
     }
 
     impl TurnGateway for CapturingGateway {
@@ -845,6 +1113,10 @@ mod provider_output_guard_tests {
             _channel_id: ChannelId,
             _content: &'a str,
         ) -> GatewayFuture<'a, Result<MessageId, String>> {
+            self.sends
+                .lock()
+                .expect("sends lock")
+                .push(_content.to_string());
             Box::pin(async { Ok(MessageId::new(2)) })
         }
 
@@ -868,6 +1140,18 @@ mod provider_output_guard_tests {
             _content: &'a str,
         ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
             Box::pin(async { Ok(ReplaceLongMessageOutcome::EditedOriginal) })
+        }
+
+        fn delete_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            message_id: MessageId,
+        ) -> GatewayFuture<'a, Result<(), String>> {
+            self.deletes
+                .lock()
+                .expect("deletes lock")
+                .push(message_id.get());
+            Box::pin(async { Ok(()) })
         }
 
         fn schedule_retry_with_history<'a>(
@@ -910,6 +1194,175 @@ mod provider_output_guard_tests {
         fn bot_owner_provider(&self) -> Option<ProviderKind> {
             Some(ProviderKind::Claude)
         }
+    }
+
+    fn absent_anchor_state(channel_id: u64, user_msg_id: u64) -> InflightTurnState {
+        InflightTurnState::new(
+            ProviderKind::Codex,
+            channel_id,
+            Some("stream-tick-anchor".to_string()),
+            343_742_347_365_974_026,
+            user_msg_id,
+            0,
+            "anchor prompt".to_string(),
+            Some("anchor-session".to_string()),
+            Some(format!("AgentDesk-anchor-{channel_id}")),
+            Some(format!("/tmp/AgentDesk-anchor-{channel_id}.jsonl")),
+            Some(format!("/tmp/AgentDesk-anchor-{channel_id}.input")),
+            4_100,
+        )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn absent_anchor_becomes_real_only_after_guarded_bind() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env_guard =
+            crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+
+        let channel_id = ChannelId::new(4_259_601);
+        let mut state = absent_anchor_state(channel_id.get(), 77_601);
+        let expected = crate::services::discord::inflight::InflightTurnIdentity::from_state(&state);
+        let mut durable = state.clone();
+        durable.full_response = "watcher advanced during anchor send".to_string();
+        crate::services::discord::inflight::save_inflight_state(&durable)
+            .expect("seed absent anchor row with newer progress");
+        let mut detached = detached_current_msg_id_from_durable(0);
+        let mut stale_created_candidate = Some(MessageId::new(99));
+        let gateway = CapturingGateway::default();
+
+        assert!(
+            ensure_bridge_current_message_anchor(
+                &gateway,
+                &ProviderKind::Codex,
+                "anchor-test-token",
+                channel_id,
+                &expected,
+                &mut detached,
+                &mut stale_created_candidate,
+                &mut state,
+                "processing",
+            )
+            .await
+        );
+        assert_eq!(detached, MessageId::new(2));
+        assert_eq!(state.current_msg_id, 2);
+        assert_eq!(state.full_response, durable.full_response);
+        assert_eq!(stale_created_candidate, Some(MessageId::new(2)));
+        assert_eq!(
+            gateway.deletes.lock().expect("deletes lock").as_slice(),
+            &[99]
+        );
+        assert_eq!(
+            crate::services::discord::inflight::load_inflight_state(
+                &ProviderKind::Codex,
+                channel_id.get(),
+            )
+            .expect("bound row")
+            .current_msg_id,
+            2
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_anchor_bind_keeps_absence_and_deletes_candidate() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env_guard =
+            crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+
+        let channel_id = ChannelId::new(4_259_602);
+        let mut stale = absent_anchor_state(channel_id.get(), 77_602);
+        let expected = crate::services::discord::inflight::InflightTurnIdentity::from_state(&stale);
+        let mut successor = stale.clone();
+        successor.started_at = "successor-started-at".to_string();
+        successor.tmux_session_name = Some("AgentDesk-successor-owner".to_string());
+        crate::services::discord::inflight::save_inflight_state(&successor)
+            .expect("seed successor row");
+        let mut detached = detached_current_msg_id_from_durable(0);
+        let mut created_candidate = None;
+        let gateway = CapturingGateway::default();
+
+        assert!(
+            !ensure_bridge_current_message_anchor(
+                &gateway,
+                &ProviderKind::Codex,
+                "anchor-test-token",
+                channel_id,
+                &expected,
+                &mut detached,
+                &mut created_candidate,
+                &mut stale,
+                "processing",
+            )
+            .await
+        );
+        assert_eq!(durable_current_msg_id_from_detached(detached), 0);
+        assert_eq!(stale.current_msg_id, 0);
+        assert_eq!(created_candidate, None);
+        assert_eq!(
+            gateway.deletes.lock().expect("deletes lock").as_slice(),
+            &[2]
+        );
+        assert_eq!(
+            crate::services::discord::inflight::load_inflight_state(
+                &ProviderKind::Codex,
+                channel_id.get(),
+            )
+            .expect("successor row survives")
+            .started_at,
+            successor.started_at
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn competing_same_owner_anchor_aborts_stale_bridge_candidate() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env_guard =
+            crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+
+        let channel_id = ChannelId::new(4_259_603);
+        let mut local = absent_anchor_state(channel_id.get(), 77_603);
+        let expected = crate::services::discord::inflight::InflightTurnIdentity::from_state(&local);
+        let mut competing = local.clone();
+        competing.current_msg_id = 900_003;
+        competing.current_msg_len = 29;
+        competing.full_response = "competing binder progress".to_string();
+        crate::services::discord::inflight::save_inflight_state(&competing)
+            .expect("same owner binds competing anchor");
+        let mut detached = detached_current_msg_id_from_durable(0);
+        let mut created_candidate = None;
+        let gateway = CapturingGateway::default();
+
+        assert!(
+            !ensure_bridge_current_message_anchor(
+                &gateway,
+                &ProviderKind::Codex,
+                "anchor-test-token",
+                channel_id,
+                &expected,
+                &mut detached,
+                &mut created_candidate,
+                &mut local,
+                "processing",
+            )
+            .await
+        );
+        assert_eq!(durable_current_msg_id_from_detached(detached), 0);
+        assert_eq!(local.current_msg_id, 0);
+        assert!(local.full_response.is_empty());
+        assert_eq!(created_candidate, None);
+        assert_eq!(
+            gateway.deletes.lock().expect("deletes lock").as_slice(),
+            &[2]
+        );
+        let durable = crate::services::discord::inflight::load_inflight_state(
+            &ProviderKind::Codex,
+            channel_id.get(),
+        )
+        .expect("competing anchor remains durable");
+        assert_eq!(
+            (durable.current_msg_id, durable.current_msg_len),
+            (900_003, 29)
+        );
     }
 
     #[tokio::test]

@@ -100,7 +100,7 @@ pub(super) async fn handle_cancel_prompt_replace(
         if pending_long_running_open_after_state_save.take().is_some() {
             inflight_state.long_running_placeholder_active = false;
             let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
-                &inflight_state,
+                &mut *inflight_state,
                 "turn_bridge::cancel_longrun_open_after_state_save@4500",
             );
         }
@@ -127,7 +127,7 @@ pub(super) async fn handle_cancel_prompt_replace(
                 inflight_state.long_running_placeholder_active = false;
                 let _ =
                     crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
-                        &inflight_state,
+                        &mut *inflight_state,
                         "turn_bridge::cancel_longrun_retarget_detach@4524",
                     );
             } else {
@@ -144,7 +144,7 @@ pub(super) async fn handle_cancel_prompt_replace(
                 if matches!(outcome, Edited | Coalesced | AlreadyTerminal) {
                     inflight_state.long_running_placeholder_active = false;
                     let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
-                        &inflight_state,
+                        &mut *inflight_state,
                         "turn_bridge::cancel_longrun_placeholder_abort_committed@4537",
                     );
                 } else {
@@ -159,7 +159,7 @@ pub(super) async fn handle_cancel_prompt_replace(
                     // pass can finish the teardown.
                     let _ = (key, snapshot, close_trigger, ack_consumed);
                     let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
-                        &inflight_state,
+                        &mut *inflight_state,
                         "turn_bridge::cancel_longrun_placeholder_abort_edit_failed@4549",
                     );
                     preserve_inflight_for_cleanup_retry = true;

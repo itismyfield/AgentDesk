@@ -111,6 +111,7 @@
         "src/services/discord/outbound/turn_output_controller.rs",
         "src/services/discord/relay_recovery.rs",
         "src/services/discord/turn_finalizer.rs",
+        "src/services/discord/turn_bridge/stream_tick.rs",
         "src/services/discord/turn_view_reconciler.rs",
         "src/services/discord/idle_recap.rs",
         "src/services/discord/tui_direct_pending_start.rs",

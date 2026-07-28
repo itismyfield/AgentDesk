@@ -2,76 +2,23 @@
 
 use std::sync::Arc;
 
-use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::tool_output_guard::matched_or_last_tool;
 
 use super::*;
 
-pub(super) enum StreamToolArmMessage {
-    ToolUse {
-        name: String,
-        input: String,
-        tool_use_id: Option<String>,
-    },
-    ToolResult {
-        content: String,
-        is_error: bool,
-        tool_use_id: Option<String>,
-    },
-    TaskNotification {
-        tool_use_id: Option<String>,
-        summary: String,
-        status: String,
-        kind: TaskNotificationKind,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum StreamToolArmOutcome {
-    Continue,
-}
-
-pub(super) struct StreamToolArmContext<'a> {
-    pub(super) shared_owned: &'a Arc<SharedData>,
-    pub(super) gateway: &'a Arc<dyn TurnGateway>,
-    pub(super) channel_id: ChannelId,
-    pub(super) provider: &'a ProviderKind,
-    pub(super) user_text_owned: &'a String,
-    pub(super) request_owner_name: &'a str,
-    pub(super) adk_session_key: &'a Option<String>,
-    pub(super) adk_session_name: &'a Option<String>,
-    pub(super) role_binding: &'a Option<RoleBinding>,
-    pub(super) voice_progress_playback_channel_id: Option<ChannelId>,
-    pub(super) single_message_panel_footer_mode: bool,
-    pub(super) footer_owner: super::super::super::footer_view_reconciler::CompletionFooterOwner,
-    pub(super) current_msg_id: MessageId,
-}
-
-pub(super) struct StreamToolArmState<'a> {
-    pub(super) state_dirty: &'a mut bool,
-    pub(super) inflight_state: &'a mut InflightTurnState,
-    pub(super) current_tool_line: &'a mut Option<String>,
-    pub(super) prev_tool_status: &'a mut Option<String>,
-    pub(super) last_tool_name: &'a mut Option<String>,
-    pub(super) last_tool_summary: &'a mut Option<String>,
-    pub(super) any_tool_used: &'a mut bool,
-    pub(super) has_post_tool_text: &'a mut bool,
-    pub(super) last_assistant_text_line: &'a mut Option<String>,
-    pub(super) spin_idx: &'a mut usize,
-    pub(super) transcript_events: &'a mut Vec<SessionTranscriptEvent>,
-    pub(super) pending_status_tool_results: &'a mut VecDeque<String>,
-    pub(super) pending_status_tool_results_by_id: &'a mut std::collections::HashMap<String, String>,
-    pub(super) long_running_placeholder_active: &'a mut LongRunningPlaceholderActive,
-    pub(super) active_background_child_session_ids: &'a mut Vec<i64>,
-    pub(super) pending_long_running_open_after_state_save:
-        &'a mut PendingLongRunningOpenAfterStateSave,
-    pub(super) pending_long_running_retarget_after_state_save:
-        &'a mut PendingLongRunningRetargetAfterStateSave,
-    pub(super) restart_followup_pending: &'a mut bool,
-    pub(super) last_edit_text: &'a mut String,
-    pub(super) full_response: &'a mut String,
-    pub(super) status_panel_dirty: &'a mut bool,
-}
+mod authority;
+#[cfg(test)]
+mod authority_tests;
+mod task_notification;
+mod types;
+pub(super) use authority::{StreamToolArmOutcome, reconcile_exact_stream_frame_after_tool_outcome};
+use authority::{
+    StreamToolAuthorityContext, TerminalToolResultFence, VisibleMutationAuthority,
+    fence_restart_visible_mutation, fence_terminal_tool_result_transition,
+    stream_tool_outcome_after_restart_authority,
+};
+use task_notification::{StreamTaskNotificationContext, handle_stream_task_notification};
+pub(super) use types::{StreamToolArmContext, StreamToolArmMessage, StreamToolArmState};
 
 #[rustfmt::skip]
 pub(super) async fn handle_stream_tool_message(
@@ -95,6 +42,9 @@ pub(super) async fn handle_stream_tool_message(
 
     let mut state_dirty = *state.state_dirty;
     let inflight_state = &mut *state.inflight_state;
+    let persisted_inflight_baseline = &mut *state.persisted_inflight_baseline;
+    let stream_tick_expected_identity = state.stream_tick_expected_identity;
+    let expected_current_message = &mut *state.expected_current_message;
     let mut current_tool_line = state.current_tool_line.take();
     let mut prev_tool_status = state.prev_tool_status.take();
     let mut last_tool_name = state.last_tool_name.take();
@@ -118,6 +68,8 @@ pub(super) async fn handle_stream_tool_message(
     let mut last_edit_text = std::mem::take(state.last_edit_text);
     let mut full_response = std::mem::take(state.full_response);
     let mut status_panel_dirty = *state.status_panel_dirty;
+    let mut restart_visible_authority = None;
+    let mut tool_outcome = StreamToolArmOutcome::Continue;
 
     match message {
         StreamToolArmMessage::ToolUse {
@@ -327,7 +279,23 @@ pub(super) async fn handle_stream_tool_message(
                     is_error: false,
                 },
             );
-            if !restart_followup_pending && is_dcserver_restart_command(&input) {
+            let restart_bridge_authorized = if !restart_followup_pending
+                && is_dcserver_restart_command(&input)
+            {
+                let authority = fence_restart_visible_mutation(StreamToolAuthorityContext {
+                    shared_owned: &shared_owned,
+                    gateway: &gateway,
+                    persisted_inflight_baseline,
+                    inflight_state,
+                    stream_tick_expected_identity,
+                    expected_current_message,
+                });
+                restart_visible_authority = Some(authority);
+                authority == VisibleMutationAuthority::Authorized
+            } else {
+                false
+            };
+            if restart_bridge_authorized {
                 let mut report = RestartCompletionReport::new(
                     provider.clone(),
                     channel_id.get(),
@@ -337,7 +305,8 @@ pub(super) async fn handle_stream_tool_message(
                         request_owner_name
                     ),
                 );
-                report.current_msg_id = Some(current_msg_id.get());
+                report.current_msg_id =
+                    optional_durable_current_msg_id_from_detached(current_msg_id);
                 report.channel_name = adk_session_name.clone();
                 if save_restart_report(&report).is_ok() {
                     restart_followup_pending = true;
@@ -345,12 +314,11 @@ pub(super) async fn handle_stream_tool_message(
                         crate::services::discord::InflightRestartMode::DrainRestart,
                     );
                     let handoff_text = "♻️ dcserver 재시작 중...\n\n재시작 후 현재 turn은 자동 새 턴으로 이어가지 않고, 상태만 다시 확인합니다.";
-                    let _ = gateway
-                        .edit_message(channel_id, current_msg_id, handoff_text)
-                        .await;
-                    last_edit_text = handoff_text.to_string();
-                    inflight_state.current_msg_id = current_msg_id.get();
-                    inflight_state.current_msg_len = handoff_text.len();
+                    if edit_bound_current_message(
+                        gateway.as_ref(), channel_id, current_msg_id, inflight_state, handoff_text,
+                    ).await {
+                        last_edit_text = handoff_text.to_string();
+                    }
                     state_dirty = true;
                 }
             }
@@ -369,7 +337,36 @@ pub(super) async fn handle_stream_tool_message(
             content,
             is_error,
             tool_use_id,
-        } => {
+        } => 'tool_result: {
+            // A queued ToolResult can arrive after a watcher/standby handoff or
+            // after another bridge advanced the Discord message epoch. Fence
+            // the terminal PATCH before any ToolResult side effect so an I/O
+            // failure can retain and replay this exact frame without duplicate
+            // transcript/status mutations.
+            let terminal_fence = fence_terminal_tool_result_transition(
+                StreamToolAuthorityContext {
+                    shared_owned: &shared_owned,
+                    gateway: &gateway,
+                    persisted_inflight_baseline,
+                    inflight_state,
+                    stream_tick_expected_identity,
+                    expected_current_message,
+                },
+                &long_running_placeholder_active,
+                &pending_long_running_retarget_after_state_save,
+                is_error,
+            )
+            .await;
+            let (mut prefenced_terminal_transition, terminal_transition_suppressed) =
+                match terminal_fence {
+                    TerminalToolResultFence::NoTransition => (None, false),
+                    TerminalToolResultFence::Prefenced(outcome) => (Some(outcome), false),
+                    TerminalToolResultFence::Suppressed => (None, true),
+                    TerminalToolResultFence::Stop(outcome) => {
+                        tool_outcome = outcome;
+                        break 'tool_result;
+                    }
+                };
             // Resolve delayed results by id; preserve the FIFO fallback.
             let status_tool_name = match tool_use_id.as_deref() {
                 Some(id) => pending_status_tool_results_by_id
@@ -456,11 +453,6 @@ pub(super) async fn handle_stream_tool_message(
                         )
                         .await;
                     }
-                    let target = if is_error {
-                        super::super::super::placeholder_controller::PlaceholderLifecycle::Aborted
-                    } else {
-                        super::super::super::placeholder_controller::PlaceholderLifecycle::Completed
-                    };
                     let pending_retarget_matches_key =
                         pending_long_running_retarget_after_state_save
                             .as_ref()
@@ -473,12 +465,13 @@ pub(super) async fn handle_stream_tool_message(
                         shared_owned.ui.placeholder_controller.detach(&key);
                         inflight_state.long_running_placeholder_active = false;
                         state_dirty = true;
-                    } else {
-                        let outcome = shared_owned
-                            .ui
-                            .placeholder_controller
-                            .transition(gateway.as_ref(), key.clone(), target)
-                            .await;
+                    } else if terminal_transition_suppressed {
+                        // The exact same-turn durable row delegated visible
+                        // relay ownership. Its owner will settle the card; this
+                        // bridge keeps local retry state but must not PATCH it.
+                        long_running_placeholder_active =
+                            Some((key, snapshot, close_trigger, ack_consumed));
+                    } else if let Some(outcome) = prefenced_terminal_transition.take() {
                         // codex round-10 P2: only clear flag on
                         // committed/already-terminal outcome.
                         use super::super::super::placeholder_controller::PlaceholderControllerOutcome::*;
@@ -492,6 +485,16 @@ pub(super) async fn handle_stream_tool_message(
                             long_running_placeholder_active =
                                 Some((key, snapshot, close_trigger, ack_consumed));
                         }
+                    } else {
+                        // Every visible terminal transition must pass the
+                        // strict lock-held fence above. Fail closed if a future
+                        // control-flow edit violates that invariant.
+                        tracing::error!(
+                            channel_id = channel_id.get(),
+                            "terminal ToolResult reached placeholder mutation without authority fence"
+                        );
+                        long_running_placeholder_active =
+                            Some((key, snapshot, close_trigger, ack_consumed));
                     }
                 } else {
                     // Successful background dispatch ack OR a
@@ -567,94 +570,26 @@ pub(super) async fn handle_stream_tool_message(
             kind,
             ..
         } => {
-            inflight_state.task_notification_kind = merge_task_notification_kind(
-                inflight_state.task_notification_kind,
+            handle_stream_task_notification(
+                tool_use_id,
+                summary,
+                status,
                 kind,
-            );
-            state_dirty = true;
-            record_placeholder_live_event(
-                shared_owned.as_ref(),
-                channel_id,
-                super::super::super::placeholder_live_events::RecentPlaceholderEvent::task_notification(
-                    kind.as_str(),
-                    &status,
-                    &summary,
-                ),
-            );
-            status_panel_dirty |= record_status_panel_events(
-                shared_owned.as_ref(),
-                channel_id,
-                super::super::super::placeholder_live_events::status_events_from_task_notification_with_tool_use_id(
-                    kind.as_str(),
-                    &status,
-                    &summary,
-                    tool_use_id.as_deref(),
-                ),
-            );
-            if single_message_panel_footer_mode {
-                let indicator =
-                    super::super::super::single_message_panel::single_message_panel_spinner_frame(
-                        spin_idx,
-                    );
-                spin_idx = spin_idx.wrapping_add(1);
-                refresh_bridge_footer(
-                    shared_owned.as_ref(),
+                StreamTaskNotificationContext {
+                    shared_owned: shared_owned.as_ref(),
                     channel_id,
+                    single_message_panel_footer_mode,
                     footer_owner,
-                    indicator,
-                )
-                .await;
-            }
-            if task_notification_closes_background_child(kind, &status) {
-                let close_status = if matches!(
-                    status.trim().to_ascii_lowercase().as_str(),
-                    "aborted" | "cancelled" | "canceled" | "failed" | "error"
-                ) {
-                    "aborted"
-                } else {
-                    "completed"
-                };
-                close_next_tracked_background_child(
-                    shared_owned.pg_pool.as_ref(),
-                    &mut active_background_child_session_ids,
-                    close_status,
-                    "task notification",
-                )
-                .await;
-                // #1670: `merge_task_notification_kind` is an
-                // absorb operator (priority-max). Without an
-                // explicit release on the terminal status the
-                // outer `inflight_state.task_notification_kind`
-                // sticks at Subagent/Background past the child
-                // close, which then misroutes downstream
-                // suppression decisions and persists into the
-                // saved inflight when the watcher takes over.
-                //
-                // codex P2 followup: only release the closed
-                // child's kind once ALL tracked children have
-                // closed. If a lower-priority child is the
-                // last tracked one while a higher-priority
-                // active classification is absorbed, keep the
-                // higher-priority kind instead of clearing it.
-                if active_background_child_session_ids.is_empty() {
-                    inflight_state.task_notification_kind =
-                        release_task_notification_kind(
-                            inflight_state.task_notification_kind,
-                            kind,
-                        );
-                }
-            }
-            push_transcript_event(
-                &mut transcript_events,
-                SessionTranscriptEvent {
-                    kind: SessionTranscriptEventKind::Task,
-                    tool_name: None,
-                    summary: Some(summary.clone()),
-                    content: summary,
-                    status: Some("info".to_string()),
-                    is_error: false,
+                    inflight_state,
+                    state_dirty: &mut state_dirty,
+                    status_panel_dirty: &mut status_panel_dirty,
+                    spin_idx: &mut spin_idx,
+                    active_background_child_session_ids:
+                        &mut active_background_child_session_ids,
+                    transcript_events: &mut transcript_events,
                 },
-            );
+            )
+            .await;
         }
     }
 
@@ -680,5 +615,9 @@ pub(super) async fn handle_stream_tool_message(
     *state.full_response = full_response;
     *state.status_panel_dirty = status_panel_dirty;
 
-    StreamToolArmOutcome::Continue
+    if tool_outcome == StreamToolArmOutcome::Continue {
+        stream_tool_outcome_after_restart_authority(restart_visible_authority)
+    } else {
+        tool_outcome
+    }
 }
