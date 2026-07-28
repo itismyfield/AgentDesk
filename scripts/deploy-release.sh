@@ -1137,6 +1137,12 @@ _cleanup_on_exit() {
     local active_txn=""
     local active_status=0
     local active_phase=""
+    local asset_lock_held=0
+
+    # Cleanup traps are installed before this invocation acquires the shared
+    # deploy lock. A pre-lock signal must not inspect another deploy's durable
+    # asset marker or turn the original signal status into a cleanup failure.
+    [ -z "${ADK_ROUTINE_ASSET_LOCK_DIR:-}" ] || asset_lock_held=1
     trap - EXIT
     trap '' INT TERM
     _cleanup_owned_pg_tunnel_preflight
@@ -1149,7 +1155,7 @@ _cleanup_on_exit() {
     # leaves the new binary in place, so the already-promoted assets must commit
     # forward with it. The durable marker, not a post-mv caller flag, identifies
     # a transaction even when TERM lands inside its first rename.
-    if [ "${DEPLOY_OK:-0}" != 1 ]; then
+    if [ "${DEPLOY_OK:-0}" != 1 ] && [ "$asset_lock_held" = 1 ]; then
         if active_txn="$(_adk_active_txn "$ADK_REL")"; then
             active_status=0
             if ! active_phase="$(
@@ -1254,7 +1260,7 @@ _cleanup_on_exit() {
             echo "🛑 Failed to remove claimed peer routine asset inbox" >&2
         fi
     fi
-    if ! adk_release_routine_asset_lock; then
+    if [ "$asset_lock_held" = 1 ] && ! adk_release_routine_asset_lock; then
         status=1
         echo "🛑 Failed to release shared routine asset deploy lock" >&2
     fi
