@@ -6462,8 +6462,7 @@ class TickChannelTests(unittest.TestCase):
             any("permanent-loss-state-overflow" in line for line in rt.log_lines)
         )
 
-    def test_corrupt_loss_state_logs_and_preserves_raw_evidence(self):
-        path = str(self.proj_dir / "s.jsonl")
+    def test_corrupt_loss_state_is_quarantined_and_projection_recovers(self):
         corrupt = {"bad": "shape"}
         state = {
             "999": {
@@ -6477,13 +6476,23 @@ class TickChannelTests(unittest.TestCase):
         tick_channel(rt, TICK_CHANNEL, state, self.now)
 
         chs = state["999"]
-        self.assertEqual(chs[relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY], corrupt)
-        self.assertEqual(permanent_loss_total(chs), 9)
+        self.assertNotIn(relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY, chs)
+        self.assertEqual(permanent_loss_total(chs), 0)
+        self.assertEqual(chs[relay_watchdog.PERMANENT_LOSS_QUARANTINE_TOTAL_KEY], 1)
+        quarantine = chs[relay_watchdog.PERMANENT_LOSS_QUARANTINE_KEY]
+        self.assertEqual(
+            quarantine[-1]["entries"][
+                relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY
+            ],
+            corrupt,
+        )
         self.assertTrue(
             any("permanent-loss-state-corrupt" in line for line in rt.log_lines)
         )
+        self.assertFalse(any("PERMANENT LOSS ALERT" in line for line in rt.log_lines))
+        self.assertFalse(any("영구 릴레이 유실" in body for body, _ in rt.alerts))
 
-    def test_corrupt_state_suppresses_unpersisted_loss_confirmation(self):
+    def test_corrupt_state_suppresses_same_tick_loss_confirmation(self):
         missing = (self.now - 4000, "corrupt unpersisted skipped response")
         first = (self.now - 3000, "corrupt first successor")
         second = (self.now - 2000, "corrupt second successor")
@@ -6500,8 +6509,12 @@ class TickChannelTests(unittest.TestCase):
 
         tick_channel(rt, TICK_CHANNEL, state, self.now + 1)
 
+        self.assertNotIn("bad", chs[relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY])
         self.assertEqual(
-            chs[relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY], raw_tombstones
+            chs[relay_watchdog.PERMANENT_LOSS_QUARANTINE_KEY][-1]["entries"][
+                relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY
+            ],
+            raw_tombstones,
         )
         self.assertFalse(
             any("permanent-loss-confirmed" in line for line in rt.log_lines)
@@ -6518,6 +6531,62 @@ class TickChannelTests(unittest.TestCase):
             relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY: {"bad": "shape"},
         }
         self.assertEqual(permanent_loss_total(state), 9)
+
+    def test_corrupt_observation_does_not_block_valid_tombstone_retraction(self):
+        delivered = (self.now - 2000, "valid tombstone delivered late")
+        self.write_transcript([delivered])
+        path = str(self.proj_dir / "s.jsonl")
+        source_id = "uuid:00000000-0000-4000-8000-000000000000:0"
+        block_id = relay_watchdog._assistant_block_id(
+            path, float(int(delivered[0])), delivered[1], source_id
+        )
+        state = {
+            "999": {
+                relay_watchdog.LOSS_OBSERVATIONS_KEY: {"bad": "shape"},
+                relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY: {
+                    block_id: {
+                        "path": path,
+                        "epoch": float(int(delivered[0])),
+                        "confirmed_at": self.now - 1,
+                    }
+                },
+                relay_watchdog.PERMANENT_LOSS_TOTAL_KEY: 1,
+            }
+        }
+        rt = self.make_rt()
+        rt.haystack = norm(delivered[1])
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        chs = state["999"]
+        self.assertEqual(permanent_loss_total(chs), 0)
+        self.assertNotIn(relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY, chs)
+        self.assertEqual(chs[relay_watchdog.PERMANENT_LOSS_QUARANTINE_TOTAL_KEY], 1)
+        self.assertTrue(any("permanent-loss-retracted" in line for line in rt.log_lines))
+        self.assertFalse(any("PERMANENT LOSS ALERT" in line for line in rt.log_lines))
+
+    def test_quarantined_corruption_allows_next_tick_state_progress(self):
+        missing = (self.now - 4000, "progress after corrupt entry")
+        first = (self.now - 3000, "first frontier after corrupt entry")
+        second = (self.now - 2000, "second frontier after corrupt entry")
+        rt = self.make_rt()
+        state = {
+            "999": {
+                relay_watchdog.LOSS_OBSERVATIONS_KEY: {"bad": "shape"},
+            }
+        }
+
+        self.drive_distinct_delivery_advances(rt, state, missing, first, second)
+        self.append_transcript_block(self.now - 1000, "third frontier after quarantine")
+        rt.haystack = norm(
+            f"{first[1]} {second[1]} third frontier after quarantine"
+        )
+        tick_channel(rt, TICK_CHANNEL, state, self.now + 2)
+
+        chs = state["999"]
+        self.assertEqual(permanent_loss_total(chs), 1)
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertEqual(chs[relay_watchdog.PERMANENT_LOSS_QUARANTINE_TOTAL_KEY], 1)
 
     def test_lifecycle_reclaim_preserves_and_escalates_corrupt_loss_state(self):
         target = self.proj_dir / "corrupt-reclaim.jsonl"
