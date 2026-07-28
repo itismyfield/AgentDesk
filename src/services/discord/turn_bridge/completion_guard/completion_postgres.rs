@@ -566,8 +566,8 @@ async fn fail_runtime_dispatch_with_pool(
         .await
     {
         tracing::warn!(
-            dispatch_id,
-            error,
+            %dispatch_id,
+            %error,
             "post-commit constraint wait-queue wake failed"
         );
     }
