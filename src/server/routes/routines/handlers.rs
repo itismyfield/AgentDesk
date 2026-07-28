@@ -19,10 +19,10 @@ use super::audit::audit_routine_delete;
 use super::helpers::{
     ensure_routine_runtime_runnable, fallback_name, initial_attach_status,
     migrated_launchd_metadata_for_state, normalize_script_ref, routine_agent_executor,
-    routine_discord_logger, routine_session_controller, routine_store, validate_agent_id_request,
-    validate_distinct_fallback_agent, validate_execution_strategy_request,
-    validate_max_retries_request, validate_run_status_filter, validate_schedule_request,
-    validate_timeout_request,
+    routine_discord_logger, routine_runtime_root, routine_session_controller, routine_store,
+    validate_agent_id_request, validate_distinct_fallback_agent,
+    validate_execution_strategy_request, validate_max_retries_request, validate_run_status_filter,
+    validate_schedule_request, validate_timeout_request,
 };
 use super::responses::{delete_routine_response, session_control_error, store_error};
 use super::{
@@ -339,7 +339,7 @@ pub async fn run_routine_now(
     State(state): State<AppState>,
     Path(routine_id): Path<String>,
 ) -> AppResult<Json<Value>> {
-    ensure_routine_runtime_runnable(&state.config.routines)?;
+    ensure_routine_runtime_runnable(&state.config)?;
 
     let store = routine_store(&state)?;
     let Some(routine) = store.get_routine(&routine_id).await.map_err(store_error)? else {
@@ -349,11 +349,12 @@ pub async fn run_routine_now(
     };
 
     let routine_script_dirs = state.config.routines.script_dirs();
+    let runtime_root = routine_runtime_root(&state.config)?.to_path_buf();
     let script_dirs_for_task = routine_script_dirs.clone();
     let requested_script_ref = routine.script_ref.clone();
     let script_ref_for_task = requested_script_ref.clone();
     let (loader, script) = tokio::task::spawn_blocking(move || {
-        let loader = RoutineScriptLoader::new_shared(&script_dirs_for_task)
+        let loader = RoutineScriptLoader::new_shared(&script_dirs_for_task, &runtime_root)
             .map_err(|error| format!("routine script loader init failed: {error}"))?;
         loader
             .load_dirs(&script_dirs_for_task)

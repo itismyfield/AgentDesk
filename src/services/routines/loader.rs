@@ -11,9 +11,13 @@ use crate::engine::loader::compute_policy_version;
 
 mod discovery;
 use discovery::{
-    add_cached_candidates_for_root, candidate_failure_key, collect_routine_script_paths,
-    routine_roots_identity, script_ref, validate_routine_roots,
+    DiscoveredRoutineScript, RoutineDiscoveryHooks, ValidatedHelperSurface,
+    ValidatedRoutineRoot, ValidatedRuntimeRoot, add_cached_candidates_for_root,
+    bind_routine_root_authority, collect_routine_script_paths, routine_roots_identity, script_ref,
+    validate_routine_authority,
 };
+#[cfg(test)]
+use discovery::{bind_routine_root_authority_with_hook, candidate_failure_key};
 
 fn full_source_version(source: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -56,8 +60,13 @@ struct RoutineScriptCandidate {
     root_index: usize,
     root: PathBuf,
     path: PathBuf,
+    failure_key: PathBuf,
+    snapshot: Option<DiscoveredRoutineScript>,
     cached: Option<LoadedRoutineScript>,
 }
+
+#[cfg(test)]
+type SourcePathHook = Arc<dyn Fn(&Path) + Send + Sync>;
 
 pub const MAX_OBSERVATIONS_PER_TICK: usize = 100;
 pub const MAX_OBSERVATION_PAYLOAD_BYTES: usize = 65536;
@@ -177,19 +186,47 @@ pub struct RoutineTickAgent {
 /// process lifetime.
 pub struct RoutineScriptLoader {
     state: Arc<SharedRoutineLoaderState>,
+    runtime_root: PathBuf,
+    bound_runtime_root: Option<ValidatedRuntimeRoot>,
+    bound_roots: Option<Vec<ValidatedRoutineRoot>>,
+    bound_helper_surface: Option<ValidatedHelperSurface>,
     #[cfg(test)]
-    source_read_hook: Mutex<Option<Arc<dyn Fn(&Path) + Send + Sync>>>,
+    source_read_hook: Mutex<Option<SourcePathHook>>,
     #[cfg(test)]
-    source_reader: Mutex<Option<Arc<dyn Fn(&Path) -> std::io::Result<String> + Send + Sync>>>,
+    source_read_observer: Mutex<Option<SourcePathHook>>,
+    #[cfg(test)]
+    before_source_read_hook: Mutex<Option<SourcePathHook>>,
+    #[cfg(test)]
+    before_candidate_open_hook: Mutex<Option<SourcePathHook>>,
+    #[cfg(test)]
+    before_scan_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    runtime_root_override: Mutex<Option<PathBuf>>,
+    #[cfg(test)]
+    current_dir_override: Mutex<Option<PathBuf>>,
 }
 
 impl RoutineScriptLoader {
+    #[cfg(test)]
     pub fn new() -> Result<Self> {
-        Ok(Self::with_state(Arc::new(SharedRoutineLoaderState::new())))
+        Ok(Self::with_state(
+            Arc::new(SharedRoutineLoaderState::new()),
+            test_runtime_root(),
+            None,
+            None,
+            None,
+        ))
     }
 
-    pub fn new_shared(roots: &[PathBuf]) -> Result<Self> {
-        let key = routine_roots_identity(roots);
+    pub fn new_shared(roots: &[PathBuf], runtime_root: &Path) -> Result<Self> {
+        let (runtime_authority, validated_roots, helper_authority) =
+            bind_routine_root_authority(roots, runtime_root)?;
+        let key = routine_roots_identity(
+            &runtime_authority,
+            &validated_roots,
+            &helper_authority,
+        );
+        let runtime_root = runtime_authority.canonical().to_path_buf();
         let mut states = SHARED_LOADER_STATES
             .lock()
             .unwrap_or_else(recover_poisoned_lock);
@@ -198,16 +235,42 @@ impl RoutineScriptLoader {
             .entry(key)
             .or_insert_with(|| Arc::new(SharedRoutineLoaderState::new()))
             .clone();
-        Ok(Self::with_state(state))
+        Ok(Self::with_state(
+            state,
+            runtime_root,
+            Some(runtime_authority),
+            Some(validated_roots),
+            Some(helper_authority),
+        ))
     }
 
-    fn with_state(state: Arc<SharedRoutineLoaderState>) -> Self {
+    fn with_state(
+        state: Arc<SharedRoutineLoaderState>,
+        runtime_root: PathBuf,
+        bound_runtime_root: Option<ValidatedRuntimeRoot>,
+        bound_roots: Option<Vec<ValidatedRoutineRoot>>,
+        bound_helper_surface: Option<ValidatedHelperSurface>,
+    ) -> Self {
         Self {
             state,
+            runtime_root,
+            bound_runtime_root,
+            bound_roots,
+            bound_helper_surface,
             #[cfg(test)]
             source_read_hook: Mutex::new(None),
             #[cfg(test)]
-            source_reader: Mutex::new(None),
+            source_read_observer: Mutex::new(None),
+            #[cfg(test)]
+            before_source_read_hook: Mutex::new(None),
+            #[cfg(test)]
+            before_candidate_open_hook: Mutex::new(None),
+            #[cfg(test)]
+            before_scan_hook: Mutex::new(None),
+            #[cfg(test)]
+            runtime_root_override: Mutex::new(None),
+            #[cfg(test)]
+            current_dir_override: Mutex::new(None),
         }
     }
 
@@ -240,13 +303,99 @@ impl RoutineScriptLoader {
         self.load_dirs(&[root.to_path_buf()])
     }
 
+    fn verify_bound_authority(
+        &self,
+        runtime_root: &Path,
+        current_dir_override: Option<&Path>,
+    ) -> Result<()> {
+        if let Some(runtime_authority) = &self.bound_runtime_root {
+            runtime_authority.verify_current()?;
+        }
+        let Some(helper_authority) = &self.bound_helper_surface else {
+            return Ok(());
+        };
+        let (_, observed) =
+            validate_routine_authority(&[], runtime_root, current_dir_override)?;
+        helper_authority.verify_observed(&observed)?;
+        if let Some(runtime_authority) = &self.bound_runtime_root {
+            runtime_authority.verify_current()?;
+        }
+        Ok(())
+    }
+
     pub fn load_dirs(&self, roots: &[PathBuf]) -> Result<usize> {
         let _load_permit = self
             .state
             .load_gate
             .lock()
             .unwrap_or_else(recover_poisoned_lock);
-        validate_routine_roots(roots)?;
+        #[cfg(test)]
+        let runtime_root = self
+            .runtime_root_override
+            .lock()
+            .unwrap_or_else(recover_poisoned_lock)
+            .clone()
+            .unwrap_or_else(|| self.runtime_root.clone());
+        #[cfg(not(test))]
+        let runtime_root = self.runtime_root.clone();
+        #[cfg(test)]
+        let current_dir_override = self
+            .current_dir_override
+            .lock()
+            .unwrap_or_else(recover_poisoned_lock)
+            .clone();
+        #[cfg(not(test))]
+        let current_dir_override: Option<PathBuf> = None;
+        self.verify_bound_authority(&runtime_root, current_dir_override.as_deref())?;
+        let (validated_roots, observed_helper_surface) = validate_routine_authority(
+            roots,
+            &runtime_root,
+            current_dir_override.as_deref(),
+        )?;
+        if let Some(expected) = &self.bound_helper_surface {
+            expected.verify_observed(&observed_helper_surface)?;
+        }
+        if let Some(bound_roots) = &self.bound_roots {
+            if bound_roots.len() != validated_roots.len() {
+                return Err(discovery::RoutineRootValidationError::ConfiguredRootCountChanged {
+                    expected: bound_roots.len(),
+                    observed: validated_roots.len(),
+                }
+                .into());
+            }
+            for (root, expected) in validated_roots.iter().zip(bound_roots) {
+                if root.canonical != expected.canonical {
+                    return Err(discovery::RoutineRootValidationError::RootAuthorityChanged {
+                        root_index: root.index,
+                        root: root.configured.clone(),
+                        expected_canonical_root: expected.canonical.clone(),
+                        observed_canonical_root: root.canonical.clone(),
+                    }
+                    .into());
+                }
+                if !expected.retains_bound_identity(root) {
+                    return Err(discovery::RoutineRootValidationError::RootIdentityChanged {
+                        root_index: root.index,
+                        root: root.configured.clone(),
+                        canonical_root: root.canonical.clone(),
+                    }
+                    .into());
+                }
+            }
+        }
+        #[cfg(test)]
+        if let Some(hook) = self
+            .before_scan_hook
+            .lock()
+            .unwrap_or_else(recover_poisoned_lock)
+            .clone()
+        {
+            hook();
+        }
+        self.verify_bound_authority(
+            &runtime_root,
+            current_dir_override.as_deref(),
+        )?;
         let mut seen_refs = HashSet::new();
         let mut candidates_by_ref: BTreeMap<String, Vec<RoutineScriptCandidate>> = BTreeMap::new();
         let existing_scripts: HashMap<String, LoadedRoutineScript> = self
@@ -255,52 +404,115 @@ impl RoutineScriptLoader {
             .lock()
             .unwrap_or_else(recover_poisoned_lock)
             .clone();
+        let mut staged_failures = self
+            .state
+            .failed_scripts
+            .lock()
+            .unwrap_or_else(recover_poisoned_lock)
+            .clone();
 
-        for (root_index, root) in roots.iter().enumerate() {
-            if !root.exists() {
-                tracing::warn!("Routines directory does not exist: {}", root.display());
-                add_cached_candidates_for_root(
-                    &existing_scripts,
-                    &mut candidates_by_ref,
-                    &mut seen_refs,
-                    root_index,
-                    root,
-                );
-                continue;
-            }
-
-            let mut entries = Vec::new();
-            if let Err(e) = collect_routine_script_paths(root, &mut entries) {
+        for root in &validated_roots {
+            if !root.exists {
                 tracing::warn!(
-                    routines_dir = %root.display(),
-                    error = %e,
-                    "failed to scan routines directory; skipping root"
+                    "Routines directory does not exist: {}",
+                    root.configured.display()
                 );
                 add_cached_candidates_for_root(
                     &existing_scripts,
                     &mut candidates_by_ref,
                     &mut seen_refs,
-                    root_index,
-                    root,
+                    root.index,
+                    &root.canonical,
                 );
                 continue;
             }
-            entries.sort();
 
-            for path in entries {
-                let script_ref = script_ref(root, &path);
+            #[cfg(test)]
+            let before_open = self
+                .before_candidate_open_hook
+                .lock()
+                .unwrap_or_else(recover_poisoned_lock)
+                .clone();
+            #[cfg(test)]
+            let before_read = self
+                .before_source_read_hook
+                .lock()
+                .unwrap_or_else(recover_poisoned_lock)
+                .clone();
+            #[cfg(test)]
+            let read_observer = self
+                .source_read_observer
+                .lock()
+                .unwrap_or_else(recover_poisoned_lock)
+                .clone();
+            let authority_check = || {
+                self.verify_bound_authority(
+                    &runtime_root,
+                    current_dir_override.as_deref(),
+                )
+                .map_err(|error| std::io::Error::other(error.to_string()))
+            };
+            #[cfg(test)]
+            let discovery_hooks = RoutineDiscoveryHooks {
+                before_open: before_open.as_deref(),
+                before_read: before_read.as_deref(),
+                read_observer: read_observer.as_deref(),
+                authority_check: Some(&authority_check),
+            };
+            #[cfg(not(test))]
+            let discovery_hooks = RoutineDiscoveryHooks {
+                before_open: None,
+                before_read: None,
+                read_observer: None,
+                authority_check: Some(&authority_check),
+            };
+            let entries_result = collect_routine_script_paths(root, discovery_hooks);
+            self.verify_bound_authority(
+                &runtime_root,
+                current_dir_override.as_deref(),
+            )?;
+            let entries = match entries_result {
+                Ok(entries) => entries,
+                Err(e) => {
+                    tracing::warn!(
+                        routines_dir = %root.canonical.display(),
+                        configured_routines_dir = %root.configured.display(),
+                        error = %e,
+                        "failed to scan routines directory; skipping root"
+                    );
+                    add_cached_candidates_for_root(
+                        &existing_scripts,
+                        &mut candidates_by_ref,
+                        &mut seen_refs,
+                        root.index,
+                        &root.canonical,
+                    );
+                    continue;
+                }
+            };
+
+            for snapshot in entries {
+                let path = snapshot.path.clone();
+                let script_ref = script_ref(&root.canonical, &path);
                 seen_refs.insert(script_ref.clone());
                 candidates_by_ref
                     .entry(script_ref)
                     .or_default()
                     .push(RoutineScriptCandidate {
-                        root_index,
-                        root: root.clone(),
+                        root_index: root.index,
+                        root: root.canonical.clone(),
+                        failure_key: path.clone(),
                         path,
+                        snapshot: Some(snapshot),
                         cached: None,
                     });
             }
         }
+
+        self.verify_bound_authority(
+            &runtime_root,
+            current_dir_override.as_deref(),
+        )?;
 
         let existing_refs: HashSet<String> = existing_scripts.keys().cloned().collect();
         let candidate_paths: HashSet<PathBuf> = candidates_by_ref
@@ -308,7 +520,7 @@ impl RoutineScriptLoader {
             .flat_map(|candidates| {
                 candidates
                     .iter()
-                    .map(|candidate| candidate_failure_key(&candidate.path))
+                    .map(|candidate| candidate.failure_key.clone())
             })
             .collect();
 
@@ -318,7 +530,7 @@ impl RoutineScriptLoader {
             let has_existing = existing_refs.contains(&script_ref);
             let mut selected = None;
             for candidate in candidates.iter().rev() {
-                let candidate_key = candidate_failure_key(&candidate.path);
+                let candidate_key = candidate.failure_key.clone();
                 if let Some(script) = &candidate.cached {
                     tracing::warn!(
                         routine_script = %script_ref,
@@ -330,25 +542,32 @@ impl RoutineScriptLoader {
                     break;
                 }
 
-                #[cfg(test)]
-                let source_result = if let Some(reader) = self
-                    .source_reader
-                    .lock()
-                    .unwrap_or_else(recover_poisoned_lock)
-                    .clone()
-                {
-                    reader(&candidate.path)
-                } else {
-                    std::fs::read_to_string(&candidate.path)
-                };
-                #[cfg(not(test))]
-                let source_result = std::fs::read_to_string(&candidate.path);
+                let source_result = candidate
+                    .snapshot
+                    .as_ref()
+                    .expect("fresh routine candidate must retain its source snapshot")
+                    .read_source();
                 let source = match source_result {
                     Ok(source) => source,
                     Err(e) => {
+                        self.verify_bound_authority(
+                            &runtime_root,
+                            current_dir_override.as_deref(),
+                        )?;
                         let now = Instant::now();
-                        if self.should_retry_candidate(&candidate_key, None, now, has_existing) {
-                            let retry_delay = self.record_failure(&candidate_key, None, now);
+                        if Self::should_retry_candidate_in(
+                            &mut staged_failures,
+                            &candidate_key,
+                            None,
+                            now,
+                            has_existing,
+                        ) {
+                            let retry_delay = Self::record_failure_in(
+                                &mut staged_failures,
+                                &candidate_key,
+                                None,
+                                now,
+                            );
                             #[cfg(test)]
                             self.state
                                 .load_error_emissions
@@ -376,8 +595,13 @@ impl RoutineScriptLoader {
                 {
                     hook(&candidate.path);
                 }
+                self.verify_bound_authority(
+                    &runtime_root,
+                    current_dir_override.as_deref(),
+                )?;
                 let now = Instant::now();
-                if !self.should_retry_candidate(
+                if !Self::should_retry_candidate_in(
+                    &mut staged_failures,
                     &candidate_key,
                     Some(&source_version),
                     now,
@@ -389,21 +613,26 @@ impl RoutineScriptLoader {
                     continue;
                 }
 
+                self.verify_bound_authority(
+                    &runtime_root,
+                    current_dir_override.as_deref(),
+                )?;
                 #[cfg(test)]
                 self.state
                     .evaluation_attempts
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                match load_single_routine_script_from_source(
+                let evaluation = load_single_routine_script_from_source(
                     &candidate.root,
                     &candidate.path,
                     source,
-                ) {
+                );
+                self.verify_bound_authority(
+                    &runtime_root,
+                    current_dir_override.as_deref(),
+                )?;
+                match evaluation {
                     Ok(script) => {
-                        self.state
-                            .failed_scripts
-                            .lock()
-                            .unwrap_or_else(recover_poisoned_lock)
-                            .remove(&candidate_key);
+                        staged_failures.remove(&candidate_key);
                         if candidates.len() > 1 {
                             tracing::info!(
                                 routine_script = %script_ref,
@@ -416,8 +645,12 @@ impl RoutineScriptLoader {
                         break;
                     }
                     Err(e) => {
-                        let retry_delay =
-                            self.record_failure(&candidate_key, Some(source_version.clone()), now);
+                        let retry_delay = Self::record_failure_in(
+                            &mut staged_failures,
+                            &candidate_key,
+                            Some(source_version.clone()),
+                            now,
+                        );
                         #[cfg(test)]
                         self.state
                             .load_error_emissions
@@ -448,12 +681,17 @@ impl RoutineScriptLoader {
             }
         }
 
-        self.state
+        staged_failures.retain(|path, _| candidate_paths.contains(path));
+        self.verify_bound_authority(
+            &runtime_root,
+            current_dir_override.as_deref(),
+        )?;
+        let pruned = self.apply_dir_reload(loaded_scripts, &seen_refs)?;
+        *self
+            .state
             .failed_scripts
             .lock()
-            .unwrap_or_else(recover_poisoned_lock)
-            .retain(|path, _| candidate_paths.contains(path));
-        let pruned = self.apply_dir_reload(loaded_scripts, &seen_refs)?;
+            .unwrap_or_else(recover_poisoned_lock) = staged_failures;
         if pruned > 0 {
             tracing::info!(count = pruned, "pruned missing routine scripts");
         }
@@ -461,18 +699,13 @@ impl RoutineScriptLoader {
         Ok(loaded)
     }
 
-    fn should_retry_candidate(
-        &self,
+    fn should_retry_candidate_in(
+        failures: &mut HashMap<PathBuf, RoutineScriptFailure>,
         path: &Path,
         source_version: Option<&String>,
         now: Instant,
         has_existing: bool,
     ) -> bool {
-        let mut failures = self
-            .state
-            .failed_scripts
-            .lock()
-            .unwrap_or_else(recover_poisoned_lock);
         let Some(failure) = failures.get_mut(path) else {
             return true;
         };
@@ -503,6 +736,7 @@ impl RoutineScriptLoader {
         false
     }
 
+    #[cfg(test)]
     fn record_failure(
         &self,
         path: &Path,
@@ -514,6 +748,15 @@ impl RoutineScriptLoader {
             .failed_scripts
             .lock()
             .unwrap_or_else(recover_poisoned_lock);
+        Self::record_failure_in(&mut failures, path, source_version, now)
+    }
+
+    fn record_failure_in(
+        failures: &mut HashMap<PathBuf, RoutineScriptFailure>,
+        path: &Path,
+        source_version: Option<String>,
+        now: Instant,
+    ) -> Duration {
         let consecutive_failures = failures
             .get(path)
             .filter(|failure| failure.source_version == source_version)
@@ -536,20 +779,24 @@ impl RoutineScriptLoader {
     }
 
     pub fn get_script(&self, script_ref: &str) -> Result<Option<LoadedRoutineScript>> {
+        self.verify_bound_authority(&self.runtime_root, None)?;
         let scripts = self
             .state
             .scripts
             .lock()
             .unwrap_or_else(recover_poisoned_lock);
-        if let Some(script) = scripts.get(script_ref).cloned() {
-            return Ok(Some(script));
-        }
-        if script_ref == LEGACY_AUTOMATION_CANDIDATE_EXECUTOR_REF {
-            return Ok(scripts
+        let script = if let Some(script) = scripts.get(script_ref).cloned() {
+            Some(script)
+        } else if script_ref == LEGACY_AUTOMATION_CANDIDATE_EXECUTOR_REF {
+            scripts
                 .get(CANONICAL_AUTOMATION_CANDIDATE_EXECUTOR_REF)
-                .cloned());
-        }
-        Ok(None)
+                .cloned()
+        } else {
+            None
+        };
+        drop(scripts);
+        self.verify_bound_authority(&self.runtime_root, None)?;
+        Ok(script)
     }
 
     pub fn execute_tick(
@@ -560,7 +807,10 @@ impl RoutineScriptLoader {
         let Some(script) = self.get_script(script_ref)? else {
             return Err(anyhow!("routine script {script_ref} is not loaded"));
         };
-        let action_json = evaluate_tick_action(&script, &tick_context)?;
+        self.verify_bound_authority(&self.runtime_root, None)?;
+        let evaluation = evaluate_tick_action(&script, &tick_context);
+        self.verify_bound_authority(&self.runtime_root, None)?;
+        let action_json = evaluation?;
         crate::services::routines::RoutineAction::validate(action_json)
     }
 
@@ -606,7 +856,15 @@ impl RoutineScriptLoader {
     }
 }
 
-pub fn load_single_routine_script(root: &Path, path: &Path) -> Result<LoadedRoutineScript> {
+#[cfg(test)]
+fn test_runtime_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("routine-loader-test-authority")
+}
+
+#[cfg(test)]
+fn load_single_routine_script(root: &Path, path: &Path) -> Result<LoadedRoutineScript> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| anyhow!("read routine script {}: {e}", path.display()))?;
     load_single_routine_script_from_source(root, path, source)
@@ -922,7 +1180,10 @@ fn ensure_acyclic_js_value<'js>(
 
 #[cfg(test)]
 mod tests {
-    use super::discovery::{RoutineRootValidationError, stable_absolute_path};
+    use super::discovery::{
+        PathResolutionError, RoutineRootValidationError, validate_routine_authority_with_hook,
+        validate_routine_roots,
+    };
     use super::*;
     use std::io::{self, Write};
     use std::sync::Barrier;
@@ -1016,9 +1277,8 @@ mod tests {
         );
         let source_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_source_reads = Arc::clone(&source_reads);
-        *loader.source_reader.lock().unwrap() = Some(Arc::new(move |path| {
+        *loader.source_read_observer.lock().unwrap() = Some(Arc::new(move |_| {
             observed_source_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            std::fs::read_to_string(path)
         }));
         (loader, source_reads, failure_sentinel)
     }
@@ -1223,12 +1483,11 @@ mod tests {
         let loader = RoutineScriptLoader::new().unwrap();
         let source_reads = Arc::new(Mutex::new(Vec::new()));
         let observed_source_reads = Arc::clone(&source_reads);
-        *loader.source_reader.lock().unwrap() = Some(Arc::new(move |path| {
+        *loader.source_read_observer.lock().unwrap() = Some(Arc::new(move |path| {
             observed_source_reads
                 .lock()
                 .unwrap()
                 .push(path.to_path_buf());
-            std::fs::read_to_string(path)
         }));
 
         assert_eq!(loader.load_dir(&routines).unwrap(), 2);
@@ -1246,6 +1505,9 @@ mod tests {
             2
         );
         let source_reads = source_reads.lock().unwrap();
+        let nested_routine = nested_routine.canonicalize().unwrap();
+        let root_routine = root_routine.canonicalize().unwrap();
+        let node_helper = node_helper.canonicalize().unwrap();
         assert_eq!(source_reads.len(), 2);
         assert!(source_reads.contains(&nested_routine));
         assert!(source_reads.contains(&root_routine));
@@ -1258,9 +1520,10 @@ mod tests {
 
     #[test]
     fn preflight_rejects_sibling_helper_as_additional_root_without_side_effects() {
-        let (_release, routines, helpers) = isolated_release_surfaces();
+        let (release, routines, helpers) = isolated_release_surfaces();
 
         let (loader, source_reads, failure_sentinel) = preflight_observed_loader();
+        *loader.runtime_root_override.lock().unwrap() = Some(release.path().to_path_buf());
         let error = loader.load_dirs(&[routines, helpers]).unwrap_err();
         assert!(matches!(
             error.downcast_ref::<RoutineRootValidationError>(),
@@ -1269,7 +1532,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("overlaps reserved sibling helper surface")
+                .contains("overlaps reserved runtime helper surface")
         );
         assert_preflight_rejection_has_no_load_side_effects(
             &loader,
@@ -1279,10 +1542,93 @@ mod tests {
     }
 
     #[test]
+    fn preflight_rejects_dot_root_that_contains_runtime_helper_surface() {
+        let (release, _routines, _helpers) = isolated_release_surfaces();
+        let (loader, source_reads, failure_sentinel) = preflight_observed_loader();
+        *loader.runtime_root_override.lock().unwrap() = Some(release.path().to_path_buf());
+        *loader.current_dir_override.lock().unwrap() = Some(release.path().to_path_buf());
+
+        let error = loader.load_dirs(&[PathBuf::from(".")]).unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<RoutineRootValidationError>(),
+            Some(RoutineRootValidationError::HelperSurfaceOverlap { root_index: 0, .. })
+        ));
+        assert_preflight_rejection_has_no_load_side_effects(
+            &loader,
+            source_reads.as_ref(),
+            &failure_sentinel,
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_runtime_helper_with_custom_primary_root() {
+        let (release, _routines, helpers) = isolated_release_surfaces();
+        let custom = tempfile::tempdir().unwrap();
+        std::fs::write(
+            custom.path().join("custom.js"),
+            "agentdesk.routines.register({ name: 'Custom', tick() { return { action: 'skip' }; } });",
+        )
+        .unwrap();
+        let (loader, source_reads, failure_sentinel) = preflight_observed_loader();
+        *loader.runtime_root_override.lock().unwrap() = Some(release.path().to_path_buf());
+
+        let error = loader
+            .load_dirs(&[custom.path().to_path_buf(), helpers])
+            .unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<RoutineRootValidationError>(),
+            Some(RoutineRootValidationError::HelperSurfaceOverlap { root_index: 1, .. })
+        ));
+        assert_preflight_rejection_has_no_load_side_effects(
+            &loader,
+            source_reads.as_ref(),
+            &failure_sentinel,
+        );
+    }
+
+    #[test]
+    fn disjoint_custom_sibling_and_cwd_helper_named_roots_are_allowed() {
+        let release = tempfile::tempdir().unwrap();
+        let custom = tempfile::tempdir().unwrap();
+        let routines = custom.path().join("routines");
+        let custom_helpers = custom.path().join("routine-helpers");
+        std::fs::create_dir_all(&routines).unwrap();
+        std::fs::create_dir_all(&custom_helpers).unwrap();
+        std::fs::write(
+            routines.join("primary.js"),
+            "agentdesk.routines.register({ name: 'Primary', tick() { return { action: 'skip' }; } });",
+        )
+        .unwrap();
+        std::fs::write(
+            custom_helpers.join("operator.js"),
+            "agentdesk.routines.register({ name: 'Operator', tick() { return { action: 'skip' }; } });",
+        )
+        .unwrap();
+
+        let loader = RoutineScriptLoader::new().unwrap();
+        *loader.runtime_root_override.lock().unwrap() = Some(release.path().to_path_buf());
+        *loader.current_dir_override.lock().unwrap() = Some(custom.path().to_path_buf());
+
+        assert_eq!(
+            loader
+                .load_dirs(&[
+                    PathBuf::from("routines"),
+                    PathBuf::from("routine-helpers"),
+                ])
+                .unwrap(),
+            2
+        );
+        assert_eq!(loader.script_refs().unwrap(), vec!["operator.js", "primary.js"]);
+    }
+
+    #[test]
     fn preflight_rejects_release_parent_as_additional_root_without_side_effects() {
         let (release, routines, _helpers) = isolated_release_surfaces();
 
         let (loader, source_reads, failure_sentinel) = preflight_observed_loader();
+        *loader.runtime_root_override.lock().unwrap() = Some(release.path().to_path_buf());
         let error = loader
             .load_dirs(&[routines, release.path().to_path_buf()])
             .unwrap_err();
@@ -1299,11 +1645,12 @@ mod tests {
 
     #[test]
     fn preflight_rejects_root_below_sibling_helper_without_side_effects() {
-        let (_release, routines, helpers) = isolated_release_surfaces();
+        let (release, routines, helpers) = isolated_release_surfaces();
         let nested_helper_root = helpers.join("nested");
         std::fs::create_dir_all(&nested_helper_root).unwrap();
 
         let (loader, source_reads, failure_sentinel) = preflight_observed_loader();
+        *loader.runtime_root_override.lock().unwrap() = Some(release.path().to_path_buf());
         let error = loader
             .load_dirs(&[routines, nested_helper_root])
             .unwrap_err();
@@ -1374,6 +1721,558 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn validated_root_alias_retarget_cannot_redirect_discovery_to_helpers() {
+        use std::os::unix::fs::symlink;
+
+        let (release, routines, helpers) = isolated_release_surfaces();
+        let aliases = tempfile::tempdir().unwrap();
+        let root_alias = aliases.path().join("routines");
+        symlink(&routines, &root_alias).unwrap();
+
+        let loader = RoutineScriptLoader::new().unwrap();
+        *loader.runtime_root_override.lock().unwrap() = Some(release.path().to_path_buf());
+        let alias_to_replace = root_alias.clone();
+        let helper_target = helpers.clone();
+        *loader.before_scan_hook.lock().unwrap() = Some(Arc::new(move || {
+            std::fs::remove_file(&alias_to_replace).unwrap();
+            symlink(&helper_target, &alias_to_replace).unwrap();
+        }));
+        let source_reads = Arc::new(Mutex::new(Vec::new()));
+        let observed_source_reads = Arc::clone(&source_reads);
+        *loader.source_read_observer.lock().unwrap() = Some(Arc::new(move |path| {
+            observed_source_reads
+                .lock()
+                .unwrap()
+                .push(path.to_path_buf());
+        }));
+
+        assert_eq!(loader.load_dirs(&[root_alias]).unwrap(), 1);
+        assert_eq!(loader.script_refs().unwrap(), vec!["tracked.js"]);
+        let expected_source = routines.canonicalize().unwrap().join("tracked.js");
+        assert_eq!(
+            source_reads.lock().unwrap().as_slice(),
+            &[expected_source]
+        );
+        assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validated_canonical_root_replacement_cannot_redirect_discovery_to_helpers() {
+        use std::os::unix::fs::symlink;
+
+        let (release, routines, helpers) = isolated_release_surfaces();
+        let original_routines = release.path().join("routines-original");
+        let loader = RoutineScriptLoader::new().unwrap();
+        *loader.runtime_root_override.lock().unwrap() = Some(release.path().to_path_buf());
+        let routines_to_replace = routines.clone();
+        let original_target = original_routines.clone();
+        let helper_target = helpers.clone();
+        *loader.before_scan_hook.lock().unwrap() = Some(Arc::new(move || {
+            std::fs::rename(&routines_to_replace, &original_target).unwrap();
+            symlink(&helper_target, &routines_to_replace).unwrap();
+        }));
+        let source_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_reads = Arc::clone(&source_reads);
+        *loader.source_read_observer.lock().unwrap() = Some(Arc::new(move |_| {
+            observed_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }));
+
+        assert_eq!(loader.load_dirs(&[routines]).unwrap(), 0);
+        assert_eq!(
+            source_reads.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            loader
+                .state
+                .evaluation_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_root_alias_retarget_cannot_change_bound_routine_authority() {
+        use std::os::unix::fs::symlink;
+
+        let layout = tempfile::tempdir().unwrap();
+        let first_runtime = layout.path().join("runtime-one");
+        let second_runtime = layout.path().join("runtime-two");
+        let first_routines = first_runtime.join("routines");
+        let second_helpers = second_runtime.join("routine-helpers");
+        std::fs::create_dir_all(&first_routines).unwrap();
+        std::fs::create_dir_all(&second_helpers).unwrap();
+        std::fs::write(
+            first_routines.join("tracked.js"),
+            "agentdesk.routines.register({ name: 'Tracked', tick() { return { action: 'skip' }; } });",
+        )
+        .unwrap();
+        std::fs::write(
+            second_helpers.join("helper.js"),
+            "throw new Error('retargeted runtime helper must never be read');",
+        )
+        .unwrap();
+        symlink(&second_helpers, second_runtime.join("routines")).unwrap();
+        let runtime_alias = layout.path().join("current-runtime");
+        symlink(&first_runtime, &runtime_alias).unwrap();
+        let roots = vec![runtime_alias.join("routines")];
+        let loader = RoutineScriptLoader::new_shared(&roots, &runtime_alias).unwrap();
+
+        std::fs::remove_file(&runtime_alias).unwrap();
+        symlink(&second_runtime, &runtime_alias).unwrap();
+        let source_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_reads = Arc::clone(&source_reads);
+        *loader.source_read_observer.lock().unwrap() = Some(Arc::new(move |_| {
+            observed_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }));
+
+        let error = loader.load_dirs(&roots).unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<RoutineRootValidationError>(),
+            Some(RoutineRootValidationError::RuntimeRootAuthorityChanged { .. })
+        ));
+        assert_eq!(
+            source_reads.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_root_alias_retarget_rejects_new_actual_helper_as_external_root() {
+        use std::os::unix::fs::symlink;
+
+        let layout = tempfile::tempdir().unwrap();
+        let first_runtime = layout.path().join("runtime-one");
+        let second_runtime = layout.path().join("runtime-two");
+        let first_helpers = first_runtime.join("routine-helpers");
+        let second_helpers = second_runtime.join("routine-helpers");
+        std::fs::create_dir_all(&first_helpers).unwrap();
+        std::fs::create_dir_all(&second_helpers).unwrap();
+        std::fs::write(
+            second_helpers.join("helper.js"),
+            "agentdesk.routines.register({ name: 'External Before Retarget', tick() { return { action: 'skip' }; } });",
+        )
+        .unwrap();
+        let runtime_alias = layout.path().join("current-runtime");
+        symlink(&first_runtime, &runtime_alias).unwrap();
+        let roots = vec![second_helpers];
+        let loader = RoutineScriptLoader::new_shared(&roots, &runtime_alias).unwrap();
+        assert_eq!(loader.load_dirs(&roots).unwrap(), 1);
+
+        std::fs::remove_file(&runtime_alias).unwrap();
+        symlink(&second_runtime, &runtime_alias).unwrap();
+        let source_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_reads = Arc::clone(&source_reads);
+        *loader.source_read_observer.lock().unwrap() = Some(Arc::new(move |_| {
+            observed_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }));
+
+        let lookup_error = loader.get_script("helper.js").unwrap_err();
+        let error = loader.load_dirs(&roots).unwrap_err();
+
+        assert!(matches!(
+            lookup_error.downcast_ref::<RoutineRootValidationError>(),
+            Some(RoutineRootValidationError::RuntimeRootAuthorityChanged { .. })
+        ));
+        assert!(matches!(
+            error.downcast_ref::<RoutineRootValidationError>(),
+            Some(RoutineRootValidationError::RuntimeRootAuthorityChanged { .. })
+        ));
+        assert_eq!(
+            source_reads.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            loader
+                .state
+                .evaluation_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_helper_cannot_hide_same_path_runtime_root_replacement() {
+        let layout = tempfile::tempdir().unwrap();
+        let runtime = layout.path().join("runtime");
+        let original_runtime = layout.path().join("runtime-original");
+        let routines = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(
+            routines.path().join("tracked.js"),
+            "agentdesk.routines.register({ name: 'Tracked', tick() { return { action: 'skip' }; } });",
+        )
+        .unwrap();
+        let roots = vec![routines.path().to_path_buf()];
+        let loader = RoutineScriptLoader::new_shared(&roots, &runtime).unwrap();
+
+        std::fs::rename(&runtime, &original_runtime).unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        let replacement_loader = RoutineScriptLoader::new_shared(&roots, &runtime).unwrap();
+
+        assert!(!Arc::ptr_eq(&loader.state, &replacement_loader.state));
+        let error = loader.load_dirs(&roots).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<RoutineRootValidationError>(),
+            Some(RoutineRootValidationError::RuntimeRootAuthorityChanged { .. })
+        ));
+        assert_eq!(
+            loader
+                .state
+                .evaluation_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_root_alias_retarget_during_binding_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let layout = tempfile::tempdir().unwrap();
+        let first_runtime = layout.path().join("runtime-one");
+        let second_runtime = layout.path().join("runtime-two");
+        std::fs::create_dir_all(first_runtime.join("routines")).unwrap();
+        std::fs::create_dir_all(second_runtime.join("routine-helpers")).unwrap();
+        symlink(
+            second_runtime.join("routine-helpers"),
+            second_runtime.join("routines"),
+        )
+        .unwrap();
+        let runtime_alias = layout.path().join("current-runtime");
+        symlink(&first_runtime, &runtime_alias).unwrap();
+        let roots = vec![runtime_alias.join("routines")];
+        let alias_to_retarget = runtime_alias.clone();
+        let second_target = second_runtime.clone();
+
+        let error = bind_routine_root_authority_with_hook(
+            &roots,
+            &runtime_alias,
+            move || {
+                std::fs::remove_file(&alias_to_retarget).unwrap();
+                symlink(&second_target, &alias_to_retarget).unwrap();
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RoutineRootValidationError::RuntimeRootAuthorityChanged { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_loader_rejects_same_path_root_identity_replacement() {
+        let runtime = tempfile::tempdir().unwrap();
+        let layout = tempfile::tempdir().unwrap();
+        let routines = layout.path().join("routines");
+        let original = layout.path().join("routines-original");
+        std::fs::create_dir_all(&routines).unwrap();
+        std::fs::write(
+            routines.join("tracked.js"),
+            "agentdesk.routines.register({ name: 'Tracked', tick() { return { action: 'skip' }; } });",
+        )
+        .unwrap();
+        let roots = vec![routines.clone()];
+        let loader = RoutineScriptLoader::new_shared(&roots, runtime.path()).unwrap();
+
+        std::fs::rename(&routines, &original).unwrap();
+        std::fs::create_dir_all(&routines).unwrap();
+        std::fs::write(
+            routines.join("tracked.js"),
+            "throw new Error('replacement root must not be authorized');",
+        )
+        .unwrap();
+        let replacement_loader = RoutineScriptLoader::new_shared(&roots, runtime.path()).unwrap();
+        assert!(!Arc::ptr_eq(&loader.state, &replacement_loader.state));
+        let source_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_reads = Arc::clone(&source_reads);
+        *loader.source_read_observer.lock().unwrap() = Some(Arc::new(move |_| {
+            observed_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }));
+
+        let error = loader.load_dirs(&roots).unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<RoutineRootValidationError>(),
+            Some(RoutineRootValidationError::RootIdentityChanged { root_index: 0, .. })
+        ));
+        assert_eq!(
+            source_reads.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opened_candidate_survives_path_swap_to_helper_without_reading_helper() {
+        use std::os::unix::fs::symlink;
+
+        let (release, routines, helpers) = isolated_release_surfaces();
+        let candidate = routines.join("tracked.js");
+        let original = routines.join("tracked-original.js");
+        let helper = helpers.join("helper.js");
+        std::fs::write(
+            &helper,
+            "throw new Error('reserved helper must never be read or evaluated');",
+        )
+        .unwrap();
+
+        let loader = RoutineScriptLoader::new().unwrap();
+        *loader.runtime_root_override.lock().unwrap() = Some(release.path().to_path_buf());
+        let candidate_to_compare = candidate.canonicalize().unwrap();
+        let candidate_to_replace = candidate.clone();
+        let original_path = original.clone();
+        let helper_target = helper.clone();
+        *loader.before_source_read_hook.lock().unwrap() = Some(Arc::new(move |path| {
+            if path == candidate_to_compare.as_path() {
+                std::fs::rename(&candidate_to_replace, &original_path).unwrap();
+                symlink(&helper_target, &candidate_to_replace).unwrap();
+            }
+        }));
+
+        assert_eq!(loader.load_dirs(&[routines]).unwrap(), 1);
+        assert_eq!(
+            loader.get_script("tracked.js").unwrap().unwrap().name,
+            "Tracked"
+        );
+        assert_eq!(
+            loader
+                .state
+                .evaluation_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
+        assert!(std::fs::symlink_metadata(&candidate)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_identity_swap_to_helper_is_rejected_before_source_read() {
+        let (release, routines, helpers) = isolated_release_surfaces();
+        let candidate = routines.join("tracked.js");
+        let original = routines.join("tracked-original.js");
+        let helper = helpers.join("helper.js");
+        std::fs::write(
+            &helper,
+            "throw new Error('replacement helper must never be read');",
+        )
+        .unwrap();
+
+        let loader = RoutineScriptLoader::new().unwrap();
+        *loader.runtime_root_override.lock().unwrap() = Some(release.path().to_path_buf());
+        let candidate_to_compare = candidate.canonicalize().unwrap();
+        let candidate_to_replace = candidate.clone();
+        let original_target = original.clone();
+        let helper_to_move = helper.clone();
+        *loader.before_candidate_open_hook.lock().unwrap() = Some(Arc::new(move |path| {
+            if path == candidate_to_compare.as_path() {
+                std::fs::rename(&candidate_to_replace, &original_target).unwrap();
+                std::fs::rename(&helper_to_move, &candidate_to_replace).unwrap();
+            }
+        }));
+        let source_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_reads = Arc::clone(&source_reads);
+        *loader.source_read_observer.lock().unwrap() = Some(Arc::new(move |_| {
+            observed_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }));
+
+        assert_eq!(loader.load_dirs(&[routines]).unwrap(), 0);
+        assert_eq!(
+            source_reads.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            loader
+                .state
+                .evaluation_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_root_resolution_preserves_symlink_parent_semantics() {
+        use std::os::unix::fs::symlink;
+
+        let release = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("foo");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = release.path().join("link");
+        symlink(&target, &link).unwrap();
+        let configured = link.join("..").join("future-routines");
+
+        let validated =
+            validate_routine_roots(&[configured], release.path(), Some(release.path())).unwrap();
+
+        assert_eq!(
+            validated[0].canonical,
+            outside.path().canonicalize().unwrap().join("future-routines")
+        );
+        assert!(!validated[0].exists);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_root_symlink_insertion_during_validation_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let release = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let missing_parent = release.path().join("missing-parent");
+        let configured = missing_parent.join("routines");
+        let parent_to_create = missing_parent.clone();
+        let outside_target = outside.path().to_path_buf();
+
+        let error = validate_routine_authority_with_hook(
+            &[configured],
+            release.path(),
+            Some(release.path()),
+            move |root_index| {
+                assert_eq!(root_index, 0);
+                symlink(&outside_target, &parent_to_create).unwrap();
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RoutineRootValidationError::RootAuthorityChangedDuringValidation {
+                root_index: 0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn preflight_rejects_parent_after_missing_component_as_ambiguous() {
+        let release = tempfile::tempdir().unwrap();
+        let configured = release
+            .path()
+            .join("missing")
+            .join("..")
+            .join("routines");
+        let loader = RoutineScriptLoader::new().unwrap();
+        *loader.runtime_root_override.lock().unwrap() = Some(release.path().to_path_buf());
+
+        let error = loader.load_dirs(&[configured]).unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<RoutineRootValidationError>(),
+            Some(RoutineRootValidationError::RootCanonicalization {
+                source: PathResolutionError::AmbiguousMissingPath { .. },
+                ..
+            })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_parent_cannot_lexically_hide_runtime_helper_surface() {
+        use std::os::unix::fs::symlink;
+
+        let (release, _routines, helpers) = isolated_release_surfaces();
+        let nested = release.path().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let aliases = tempfile::tempdir().unwrap();
+        let link = aliases.path().join("link");
+        symlink(&nested, &link).unwrap();
+        let configured = link.join("..").join("routine-helpers");
+        let (loader, source_reads, failure_sentinel) = preflight_observed_loader();
+        *loader.runtime_root_override.lock().unwrap() = Some(release.path().to_path_buf());
+
+        let error = loader.load_dirs(&[configured]).unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<RoutineRootValidationError>(),
+            Some(RoutineRootValidationError::HelperSurfaceOverlap { root_index: 0, .. })
+        ));
+        assert!(helpers.exists());
+        assert_preflight_rejection_has_no_load_side_effects(
+            &loader,
+            source_reads.as_ref(),
+            &failure_sentinel,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_rejects_dangling_symlink_in_missing_root_prefix() {
+        use std::os::unix::fs::symlink;
+
+        let release = tempfile::tempdir().unwrap();
+        let dangling = release.path().join("dangling");
+        symlink(release.path().join("missing-target"), &dangling).unwrap();
+        let loader = RoutineScriptLoader::new().unwrap();
+        *loader.runtime_root_override.lock().unwrap() = Some(release.path().to_path_buf());
+
+        let error = loader
+            .load_dirs(&[dangling.join("nested").join("routines")])
+            .unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<RoutineRootValidationError>(),
+            Some(RoutineRootValidationError::RootCanonicalization {
+                source: PathResolutionError::DanglingSymlink { .. },
+                ..
+            })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_reports_typed_current_directory_failure() {
+        const CHILD_MARKER: &str = "AGENTDESK_TEST_DELETED_ROUTINE_CWD";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let deleted_cwd = tempfile::tempdir().unwrap();
+            std::env::set_current_dir(deleted_cwd.path()).unwrap();
+            std::fs::remove_dir(deleted_cwd.path()).unwrap();
+
+            let error = match RoutineScriptLoader::new_shared(
+                &[PathBuf::from("routines")],
+                Path::new("runtime"),
+            ) {
+                Ok(_) => panic!("deleted cwd must not authorize relative routine paths"),
+                Err(error) => error,
+            };
+            assert!(matches!(
+                error.downcast_ref::<RoutineRootValidationError>(),
+                Some(RoutineRootValidationError::CurrentDirectoryUnavailable { .. })
+            ));
+            std::mem::forget(deleted_cwd);
+            return;
+        }
+
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("preflight_reports_typed_current_directory_failure")
+            .arg("--nocapture")
+            .env(CHILD_MARKER, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
     #[test]
     fn load_dir_hashes_and_evaluates_the_same_source_snapshot() {
         let dir = tempfile::tempdir().unwrap();
@@ -1381,11 +2280,12 @@ mod tests {
         std::fs::write(&path, "throw new Error('broken snapshot');").unwrap();
 
         let loader = RoutineScriptLoader::new().unwrap();
+        let replacement_compare = path.canonicalize().unwrap();
         let replacement_path = path.clone();
         *loader.source_read_hook.lock().unwrap() = Some(Arc::new(move |candidate| {
-            if candidate == replacement_path {
+            if candidate == replacement_compare.as_path() {
                 std::fs::write(
-                    candidate,
+                    &replacement_path,
                     "agentdesk.routines.register({ name: 'Replacement', tick() { return { action: 'skip' }; } });",
                 )
                 .unwrap();
@@ -1477,6 +2377,7 @@ mod tests {
     fn request_loader_reuses_runtime_lkg_during_backoff_and_recovers() {
         let dir = tempfile::tempdir().unwrap();
         let roots = vec![dir.path().to_path_buf()];
+        let runtime_root = test_runtime_root();
         let path = dir.path().join("request-routine.js");
         std::fs::write(
             &path,
@@ -1484,7 +2385,7 @@ mod tests {
         )
         .unwrap();
 
-        let runtime = RoutineScriptLoader::new_shared(&roots).unwrap();
+        let runtime = RoutineScriptLoader::new_shared(&roots, &runtime_root).unwrap();
         assert_eq!(runtime.load_dirs(&roots).unwrap(), 1);
         std::fs::write(&path, "throw new Error('transient request failure');").unwrap();
         assert_eq!(runtime.load_dirs(&roots).unwrap(), 0);
@@ -1496,7 +2397,7 @@ mod tests {
             2
         );
 
-        let request = RoutineScriptLoader::new_shared(&roots).unwrap();
+        let request = RoutineScriptLoader::new_shared(&roots, &runtime_root).unwrap();
         assert!(Arc::ptr_eq(&runtime.state, &request.state));
         assert_eq!(request.load_dirs(&roots).unwrap(), 0);
         assert_eq!(
@@ -1521,7 +2422,7 @@ mod tests {
             "agentdesk.routines.register({ name: 'Recovered Request', tick() { return { action: 'skip' }; } });",
         )
         .unwrap();
-        let recovered = RoutineScriptLoader::new_shared(&roots).unwrap();
+        let recovered = RoutineScriptLoader::new_shared(&roots, &runtime_root).unwrap();
         assert_eq!(recovered.load_dirs(&roots).unwrap(), 1);
         assert_eq!(
             recovered
@@ -1537,11 +2438,14 @@ mod tests {
     fn concurrent_shared_loaders_singleflight_one_failure() {
         let dir = tempfile::tempdir().unwrap();
         let roots = vec![dir.path().to_path_buf()];
+        let runtime_root = test_runtime_root();
         let path = dir.path().join("concurrent.js");
         std::fs::write(&path, "throw new Error('singleflight failure');").unwrap();
 
         let loaders = (0..8)
-            .map(|_| Arc::new(RoutineScriptLoader::new_shared(&roots).unwrap()))
+            .map(|_| {
+                Arc::new(RoutineScriptLoader::new_shared(&roots, &runtime_root).unwrap())
+            })
             .collect::<Vec<_>>();
         let state = Arc::clone(&loaders[0].state);
         let barrier = Arc::new(Barrier::new(loaders.len()));
@@ -1580,12 +2484,146 @@ mod tests {
     }
 
     #[test]
-    fn missing_relative_root_keeps_shared_authority_after_creation() {
+    fn shared_loader_identity_includes_runtime_helper_authority() {
+        let routines = tempfile::tempdir().unwrap();
+        let first_runtime = tempfile::tempdir().unwrap();
+        let second_runtime = tempfile::tempdir().unwrap();
+        let roots = vec![routines.path().to_path_buf()];
+
+        let first = RoutineScriptLoader::new_shared(&roots, first_runtime.path()).unwrap();
+        let second = RoutineScriptLoader::new_shared(&roots, second_runtime.path()).unwrap();
+
+        assert!(!Arc::ptr_eq(&first.state, &second.state));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_loader_identity_separates_distinct_runtime_alias_authorities() {
+        use std::os::unix::fs::symlink;
+
+        let layout = tempfile::tempdir().unwrap();
+        let runtime = layout.path().join("runtime");
+        let first_alias = layout.path().join("runtime-first");
+        let second_alias = layout.path().join("runtime-second");
+        let routines = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        symlink(&runtime, &first_alias).unwrap();
+        symlink(&runtime, &second_alias).unwrap();
+        let roots = vec![routines.path().to_path_buf()];
+
+        let first = RoutineScriptLoader::new_shared(&roots, &first_alias).unwrap();
+        let second = RoutineScriptLoader::new_shared(&roots, &second_alias).unwrap();
+
+        assert!(!Arc::ptr_eq(&first.state, &second.state));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_loader_identity_changes_when_helper_surface_is_replaced() {
+        let routines = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let helper = runtime.path().join("routine-helpers");
+        let old_helper = runtime.path().join("routine-helpers-old");
+        std::fs::create_dir_all(&helper).unwrap();
+        let roots = vec![routines.path().to_path_buf()];
+
+        let first = RoutineScriptLoader::new_shared(&roots, runtime.path()).unwrap();
+        std::fs::rename(&helper, &old_helper).unwrap();
+        std::fs::create_dir_all(&helper).unwrap();
+        let second = RoutineScriptLoader::new_shared(&roots, runtime.path()).unwrap();
+
+        assert!(!Arc::ptr_eq(&first.state, &second.state));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn helper_surface_alias_change_before_candidate_read_aborts_without_side_effects() {
+        use std::os::unix::fs::symlink;
+
+        let (release, routines, helper) = isolated_release_surfaces();
+        let helper_original = release.path().join("routine-helpers-original");
+        let roots = vec![routines.clone()];
+        let loader = RoutineScriptLoader::new_shared(&roots, release.path()).unwrap();
+        assert_eq!(loader.load_dirs(&roots).unwrap(), 1);
+        let loaded_version = loader
+            .get_script("tracked.js")
+            .unwrap()
+            .unwrap()
+            .script_version;
+        let evaluation_attempts = loader
+            .state
+            .evaluation_attempts
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let failure_sentinel = routines.join("failure-sentinel.js");
+        let retry_at = Instant::now() + Duration::from_secs(17);
+        loader.state.failed_scripts.lock().unwrap().insert(
+            failure_sentinel.clone(),
+            RoutineScriptFailure {
+                source_version: Some("sentinel".to_owned()),
+                consecutive_failures: 4,
+                retry_at,
+                warning_emitted: true,
+            },
+        );
+
+        let helper_to_replace = helper.clone();
+        let helper_backup = helper_original.clone();
+        let helper_alias_target = routines.clone();
+        *loader.before_source_read_hook.lock().unwrap() = Some(Arc::new(move |_| {
+            std::fs::rename(&helper_to_replace, &helper_backup).unwrap();
+            symlink(&helper_alias_target, &helper_to_replace).unwrap();
+        }));
+        let source_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_reads = Arc::clone(&source_reads);
+        *loader.source_read_observer.lock().unwrap() = Some(Arc::new(move |_| {
+            observed_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }));
+
+        let error = loader.load_dirs(&roots).unwrap_err();
+
+        assert!(matches!(
+            error.downcast_ref::<RoutineRootValidationError>(),
+            Some(RoutineRootValidationError::HelperSurfaceAuthorityChanged { .. })
+        ));
+        assert_eq!(
+            source_reads.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            loader
+                .state
+                .evaluation_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            evaluation_attempts
+        );
+        assert_eq!(
+            loader
+                .state
+                .scripts
+                .lock()
+                .unwrap()
+                .get("tracked.js")
+                .unwrap()
+                .script_version,
+            loaded_version
+        );
+        let failures = loader.state.failed_scripts.lock().unwrap();
+        assert_eq!(failures.len(), 1);
+        let sentinel = failures.get(&failure_sentinel).unwrap();
+        assert_eq!(sentinel.source_version.as_deref(), Some("sentinel"));
+        assert_eq!(sentinel.consecutive_failures, 4);
+        assert_eq!(sentinel.retry_at, retry_at);
+        assert!(sentinel.warning_emitted);
+    }
+
+    #[test]
+    fn missing_relative_root_creation_gets_fresh_shared_authority() {
         let relative =
             PathBuf::from("target").join(format!("routine-root-{}", uuid::Uuid::new_v4()));
-        let absolute = stable_absolute_path(&relative);
+        let absolute = std::env::current_dir().unwrap().join(&relative);
         let configured = vec![relative.clone()];
-        let before = RoutineScriptLoader::new_shared(&configured).unwrap();
+        let runtime_root = test_runtime_root();
+        let before = RoutineScriptLoader::new_shared(&configured, &runtime_root).unwrap();
 
         std::fs::create_dir_all(&absolute).unwrap();
         std::fs::write(
@@ -1593,11 +2631,17 @@ mod tests {
             "agentdesk.routines.register({ name: 'Created Later', tick() { return { action: 'skip' }; } });",
         )
         .unwrap();
-        let after = RoutineScriptLoader::new_shared(&[absolute.clone()]).unwrap();
+        let after =
+            RoutineScriptLoader::new_shared(&[absolute.clone()], &runtime_root).unwrap();
 
-        assert!(Arc::ptr_eq(&before.state, &after.state));
+        assert!(!Arc::ptr_eq(&before.state, &after.state));
         assert_eq!(after.load_dirs(&[absolute.clone()]).unwrap(), 1);
-        assert!(before.has_script("created.js").unwrap());
+        let error = before.load_dirs(&configured).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<RoutineRootValidationError>(),
+            Some(RoutineRootValidationError::RootIdentityChanged { root_index: 0, .. })
+        ));
+        assert!(!before.has_script("created.js").unwrap());
         std::fs::remove_dir_all(absolute).unwrap();
     }
 
@@ -1606,12 +2650,13 @@ mod tests {
     fn preflight_rejects_symlink_alias_to_sibling_helper_without_side_effects() {
         use std::os::unix::fs::symlink;
 
-        let (_release, routines, helpers) = isolated_release_surfaces();
+        let (release, routines, helpers) = isolated_release_surfaces();
         let alias_parent = tempfile::tempdir().unwrap();
         let helper_alias = alias_parent.path().join("helper-alias");
         symlink(&helpers, &helper_alias).unwrap();
 
         let (loader, source_reads, failure_sentinel) = preflight_observed_loader();
+        *loader.runtime_root_override.lock().unwrap() = Some(release.path().to_path_buf());
         let error = loader.load_dirs(&[routines, helper_alias]).unwrap_err();
         assert!(matches!(
             error.downcast_ref::<RoutineRootValidationError>(),
@@ -1930,21 +2975,13 @@ mod tests {
     fn read_failure_emits_one_error_during_backoff() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("unreadable.js");
-        std::fs::write(
-            &path,
-            "agentdesk.routines.register({ name: 'Unreadable', tick() { return { action: 'skip' }; } });",
-        )
-        .unwrap();
+        std::fs::write(&path, [0xff]).unwrap();
 
         let loader = RoutineScriptLoader::new().unwrap();
         let read_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_attempts = Arc::clone(&read_attempts);
-        *loader.source_reader.lock().unwrap() = Some(Arc::new(move |_| {
+        *loader.source_read_observer.lock().unwrap() = Some(Arc::new(move |_| {
             observed_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "test read failure",
-            ))
         }));
 
         let logs = capture_debug_logs(|| {

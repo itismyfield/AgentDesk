@@ -167,10 +167,10 @@ pub(crate) fn load_runtime_config(root: &Path) -> Result<LoadedRuntimeConfig, St
 
     let existed = path.is_file();
     let mut config = if existed {
-        crate::config::load_from_path(&path)
+        crate::config::load_from_path_at_runtime_root(&path, root)
             .map_err(|err| format!("Failed to load config '{}': {err}", path.display()))?
     } else {
-        Config::default()
+        Config::default().resolve_runtime_relative_paths(Some(root))
     };
 
     precheck_voice_alias_collisions(&mut config)?;
@@ -180,6 +180,47 @@ pub(crate) fn load_runtime_config(root: &Path) -> Result<LoadedRuntimeConfig, St
         path,
         existed,
     })
+}
+
+#[cfg(test)]
+mod runtime_config_tests {
+    use super::load_runtime_config;
+
+    #[test]
+    fn missing_config_preserves_explicit_runtime_root_authority() {
+        let runtime = tempfile::tempdir().unwrap();
+
+        let loaded = load_runtime_config(runtime.path()).unwrap();
+
+        assert!(!loaded.existed);
+        assert_eq!(
+            loaded.config.runtime_root_authority().unwrap(),
+            runtime.path()
+        );
+        assert_eq!(
+            loaded.config.routines.dir,
+            runtime.path().join("routines")
+        );
+    }
+
+    #[test]
+    fn legacy_config_under_root_named_config_keeps_explicit_authority() {
+        let layout = tempfile::tempdir().unwrap();
+        let runtime = layout.path().join("config");
+        std::fs::create_dir_all(&runtime).unwrap();
+        let config_path = runtime.join("agentdesk.yaml");
+        crate::config::save_to_path(&config_path, &crate::config::Config::default()).unwrap();
+
+        let loaded = load_runtime_config(&runtime).unwrap();
+
+        assert!(loaded.existed);
+        assert_eq!(loaded.path, config_path);
+        assert_eq!(
+            loaded.config.runtime_root_authority().unwrap(),
+            runtime.as_path()
+        );
+        assert_eq!(loaded.config.routines.dir, runtime.join("routines"));
+    }
 }
 
 /// Pre-check voice alias collisions at yaml-load time so we never let the

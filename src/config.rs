@@ -8,6 +8,12 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
+    /// Runtime-root authority derived from the config source path (or the
+    /// explicit `AGENTDESK_ROOT_DIR` override). This is process provenance,
+    /// not operator-authored configuration, so it must never round-trip into
+    /// `agentdesk.yaml`.
+    #[serde(skip)]
+    pub(crate) runtime_root: Option<PathBuf>,
     pub server: ServerConfig,
     #[serde(default)]
     pub discord: DiscordConfig,
@@ -2403,10 +2409,10 @@ pub struct RoutinesConfig {
     pub dir: PathBuf,
     /// Additional operator-managed QuickJS routine entry roots. Node/Python
     /// helpers must live outside these roots. All configured roots must be
-    /// canonically disjoint from each other and from the sibling
-    /// `routine-helpers` surface. Entries load after `dir`, so a script with the
-    /// same relative path overrides the bundled script without being copied
-    /// into the release directory.
+    /// canonically disjoint from each other and from the source-derived runtime
+    /// root's reserved `routine-helpers` surface. Entries load after `dir`, so a
+    /// script with the same relative path overrides the bundled script without
+    /// being copied into the release directory.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_dirs: Vec<PathBuf>,
     /// How often the due-scan tick runs, in seconds. Defaults to 30.
@@ -2528,6 +2534,126 @@ mod routine_config_unit_tests {
     use super::*;
 
     #[test]
+    fn runtime_path_resolution_records_non_serialized_root_authority() {
+        let root = Path::new("/custom/agentdesk-runtime");
+        let config = Config::default().resolve_runtime_relative_paths(Some(root));
+
+        assert_eq!(config.runtime_root_authority().unwrap(), root);
+        assert_eq!(config.routines.dir, root.join("routines"));
+
+        let rendered = serde_yaml::to_string(&config).unwrap();
+        assert!(!rendered.contains("runtime_root"));
+        let decoded: Config = serde_yaml::from_str(&rendered).unwrap();
+        assert!(decoded.runtime_root.is_none());
+    }
+
+    #[test]
+    fn load_from_custom_config_root_records_explicit_authority() {
+        let _root_override = TestEnvVarGuard::remove("AGENTDESK_ROOT_DIR");
+        let runtime = tempfile::tempdir().unwrap();
+        let config_path = runtime.path().join("config").join("agentdesk.yaml");
+        let mut config = Config::default();
+        config.routines.dir = PathBuf::from(".");
+        save_to_path(&config_path, &config).unwrap();
+
+        let loaded = load_from_path_at_runtime_root(&config_path, runtime.path()).unwrap();
+
+        assert_eq!(
+            loaded.runtime_root_authority().unwrap(),
+            runtime.path()
+        );
+        assert_eq!(loaded.routines.dir, runtime.path().join("."));
+    }
+
+    #[test]
+    fn ambiguous_config_parent_without_provenance_has_no_authority() {
+        let _root_override = TestEnvVarGuard::remove("AGENTDESK_ROOT_DIR");
+        let runtime = tempfile::tempdir().unwrap();
+        let config_path = runtime.path().join("config").join("agentdesk.yaml");
+        save_to_path(&config_path, &Config::default()).unwrap();
+
+        let loaded = load_from_path(&config_path).unwrap();
+
+        assert!(loaded.runtime_root_authority().is_err());
+        assert_eq!(loaded.routines.dir, PathBuf::from("./routines"));
+    }
+
+    #[test]
+    fn unresolved_config_has_no_runtime_root_authority() {
+        let config = Config::default().resolve_runtime_relative_paths(None);
+
+        let error = config.runtime_root_authority().unwrap_err().to_string();
+        assert!(error.contains("runtime root authority unavailable"));
+    }
+
+    #[test]
+    fn relative_runtime_root_override_is_anchored_without_collapsing_parent_components() {
+        let relative_root = Path::new("runtime-link/../release");
+        let _root_override = TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", relative_root);
+        let current_dir = std::env::current_dir().unwrap();
+
+        let root = runtime_root_for_config_path(Path::new("ignored.yaml")).unwrap();
+
+        assert!(root.is_absolute());
+        assert_eq!(root, current_dir.join(relative_root));
+    }
+
+    #[test]
+    fn load_graceful_parse_failure_preserves_explicit_root_authority() {
+        let runtime = tempfile::tempdir().unwrap();
+        let config_path = runtime.path().join("config").join("agentdesk.yaml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, "[").unwrap();
+        let _config_path = TestEnvVarGuard::set_path("AGENTDESK_CONFIG", &config_path);
+        let _root_override = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime.path(),
+        );
+
+        let loaded = load_graceful();
+
+        assert_eq!(
+            loaded.runtime_root_authority().unwrap(),
+            runtime.path()
+        );
+        assert_eq!(loaded.routines.dir, runtime.path().join("routines"));
+    }
+
+    #[test]
+    fn load_graceful_missing_file_preserves_explicit_root_authority() {
+        let runtime = tempfile::tempdir().unwrap();
+        let config_path = runtime.path().join("config").join("agentdesk.yaml");
+        let _config_path = TestEnvVarGuard::set_path("AGENTDESK_CONFIG", &config_path);
+        let _root_override = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime.path(),
+        );
+
+        let loaded = load_graceful();
+
+        assert_eq!(
+            loaded.runtime_root_authority().unwrap(),
+            runtime.path()
+        );
+        assert_eq!(loaded.routines.dir, runtime.path().join("routines"));
+    }
+
+    #[test]
+    fn load_graceful_ambiguous_explicit_config_fails_closed() {
+        let runtime = tempfile::tempdir().unwrap();
+        let config_path = runtime.path().join("config").join("agentdesk.yaml");
+        save_to_path(&config_path, &Config::default()).unwrap();
+        let _config_path = TestEnvVarGuard::set_path("AGENTDESK_CONFIG", &config_path);
+        let _root_override =
+            TestEnvVarGuard::remove_after_shared_test_env_lock("AGENTDESK_ROOT_DIR");
+
+        let loaded = load_graceful();
+
+        assert!(loaded.runtime_root_authority().is_err());
+        assert_eq!(loaded.routines.dir, PathBuf::from("./routines"));
+    }
+
+    #[test]
     fn routine_script_dirs_preserve_default_then_operator_order() {
         let config = RoutinesConfig {
             additional_dirs: vec![
@@ -2643,7 +2769,8 @@ impl Config {
         self
     }
 
-    fn resolve_runtime_relative_paths(mut self, runtime_root: Option<&Path>) -> Self {
+    pub(crate) fn resolve_runtime_relative_paths(mut self, runtime_root: Option<&Path>) -> Self {
+        self.runtime_root = runtime_root.map(Path::to_path_buf);
         let Some(root) = runtime_root else {
             return self;
         };
@@ -2659,6 +2786,15 @@ impl Config {
             .collect();
         self
     }
+
+    /// Return the source-derived runtime root required by code-loading
+    /// surfaces. A deserialized/default config has no such authority until it
+    /// has passed through the config-path resolver.
+    pub(crate) fn runtime_root_authority(&self) -> Result<&Path> {
+        self.runtime_root.as_deref().context(
+            "runtime root authority unavailable; load config from an AgentDesk config path",
+        )
+    }
 }
 
 fn resolve_runtime_path(root: &Path, raw: &Path) -> PathBuf {
@@ -2672,21 +2808,50 @@ fn resolve_runtime_path(root: &Path, raw: &Path) -> PathBuf {
 }
 
 fn runtime_root_for_config_path(path: &Path) -> Option<PathBuf> {
-    if let Ok(override_root) = std::env::var("AGENTDESK_ROOT_DIR") {
-        let trimmed = override_root.trim();
-        if !trimmed.is_empty() {
-            return Some(PathBuf::from(trimmed));
-        }
+    let override_root = std::env::var("AGENTDESK_ROOT_DIR")
+        .ok()
+        .map(|root| root.trim().to_string())
+        .filter(|root| !root.is_empty())
+        .map(PathBuf::from);
+    let current_dir = std::env::current_dir().ok();
+    if let Some(root) = override_root {
+        return if root.is_absolute() {
+            Some(root)
+        } else {
+            current_dir.map(|cwd| cwd.join(root))
+        };
     }
 
-    let file_name = path.file_name()?;
-    if file_name != OsStr::new("agentdesk.yaml") {
+    let absolute_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        current_dir.as_ref()?.join(path)
+    };
+    let belongs_to_root = |root: &Path| {
+        absolute_path == crate::runtime_layout::config_file_path(root)
+            || absolute_path == crate::runtime_layout::legacy_config_file_path(root)
+    };
+    if let Some(current_dir) = current_dir
+        && belongs_to_root(&current_dir)
+    {
+        return Some(current_dir);
+    }
+    if let Some(release_root) = dirs::home_dir().map(|home| home.join(".adk").join("release"))
+        && belongs_to_root(&release_root)
+    {
+        return Some(release_root);
+    }
+
+    if absolute_path.file_name() != Some(OsStr::new("agentdesk.yaml")) {
         return None;
     }
-
-    let parent = path.parent()?;
+    let parent = absolute_path.parent()?;
     if parent.file_name() == Some(OsStr::new("config")) {
-        return parent.parent().map(Path::to_path_buf);
+        // `.../config/agentdesk.yaml` is ambiguous without source provenance:
+        // it can be a canonical file for the parent runtime or a legacy file
+        // for a runtime root literally named `config`. Fail closed instead of
+        // authorizing the wrong sibling code surface.
+        return None;
     }
     Some(parent.to_path_buf())
 }
@@ -2694,6 +2859,7 @@ fn runtime_root_for_config_path(path: &Path) -> Option<PathBuf> {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            runtime_root: None,
             server: ServerConfig::default(),
             discord: DiscordConfig::default(),
             providers: std::collections::BTreeMap::new(),
@@ -2772,20 +2938,35 @@ pub fn resolved_config_path() -> PathBuf {
     )
 }
 
-pub fn load_from_path(path: &Path) -> Result<Config> {
+fn load_from_path_with_runtime_root(
+    path: &Path,
+    runtime_root: Option<&Path>,
+) -> Result<Config> {
     crate::utils::redact::register_common_env_secrets();
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read config {}", path.display()))?;
     let config = serde_yaml::from_str::<Config>(&contents)
         .with_context(|| format!("Failed to parse config {}", path.display()))?;
-    let runtime_root = runtime_root_for_config_path(path);
     let config = config
         .apply_runtime_defaults()
-        .resolve_runtime_relative_paths(runtime_root.as_deref());
+        .resolve_runtime_relative_paths(runtime_root);
     register_config_secrets(&config);
     audit_config_file_permissions_if_secret_bearing(path, &config);
     validate_config(&config).with_context(|| format!("Invalid config {}", path.display()))?;
     Ok(config)
+}
+
+pub fn load_from_path(path: &Path) -> Result<Config> {
+    let runtime_root = runtime_root_for_config_path(path);
+    load_from_path_with_runtime_root(path, runtime_root.as_deref())
+}
+
+/// Load a config whose runtime-root provenance is already known by the caller.
+/// This avoids guessing canonical-vs-legacy layout from a parent directory
+/// named `config`, which is inherently ambiguous when the runtime root itself
+/// has that name.
+pub(crate) fn load_from_path_at_runtime_root(path: &Path, runtime_root: &Path) -> Result<Config> {
+    load_from_path_with_runtime_root(path, Some(runtime_root))
 }
 
 fn validate_config(config: &Config) -> Result<()> {
@@ -3058,22 +3239,21 @@ pub fn load_graceful() -> Config {
         dirs::home_dir(),
     );
     let path_display = path.display().to_string();
+    let runtime_root = runtime_root_for_config_path(&path);
 
     let config = match std::fs::read_to_string(&path) {
         Ok(contents) => match serde_yaml::from_str::<Config>(&contents) {
-            Ok(cfg) => {
-                let runtime_root = runtime_root_for_config_path(&path);
-                cfg.apply_runtime_defaults()
-                    .resolve_runtime_relative_paths(runtime_root.as_deref())
-            }
+            Ok(cfg) => cfg
+                .apply_runtime_defaults()
+                .resolve_runtime_relative_paths(runtime_root.as_deref()),
             Err(e) => {
                 tracing::warn!("  ⚠ Failed to parse {path_display}: {e} — using defaults");
-                Config::default()
+                Config::default().resolve_runtime_relative_paths(runtime_root.as_deref())
             }
         },
         Err(_) => {
             tracing::warn!("  ⚠ {path_display} not found — using defaults");
-            Config::default()
+            Config::default().resolve_runtime_relative_paths(runtime_root.as_deref())
         }
     };
 
@@ -3133,12 +3313,33 @@ pub(crate) struct TestEnvVarGuard {
 
 #[cfg(test)]
 impl TestEnvVarGuard {
+    pub(crate) fn remove(key: &'static str) -> Self {
+        let lock = test_env_lock::acquire_shared_test_env_lock();
+        let previous = std::env::var_os(key);
+        unsafe { std::env::remove_var(key) };
+        Self {
+            _lock: Some(lock),
+            key,
+            previous,
+        }
+    }
+
     pub(crate) fn set_path(key: &'static str, value: &std::path::Path) -> Self {
         let lock = test_env_lock::acquire_shared_test_env_lock();
         let previous = std::env::var_os(key);
         unsafe { std::env::set_var(key, value) };
         Self {
             _lock: Some(lock),
+            key,
+            previous,
+        }
+    }
+
+    pub(crate) fn remove_after_shared_test_env_lock(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe { std::env::remove_var(key) };
+        Self {
+            _lock: None,
             key,
             previous,
         }

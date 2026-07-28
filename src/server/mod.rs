@@ -17,6 +17,7 @@ mod worker_recovery;
 mod worker_registry;
 pub mod ws;
 
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
@@ -3165,6 +3166,7 @@ async fn routine_runtime_loop(
     pg_pool: Arc<PgPool>,
     health_registry: Option<Arc<HealthRegistry>>,
     routines_config: crate::config::RoutinesConfig,
+    runtime_root: PathBuf,
     routine_health_target: Option<String>,
     tick_interval_secs: u64,
 ) {
@@ -3182,8 +3184,12 @@ async fn routine_runtime_loop(
 
     let routine_script_dirs = routines_config.script_dirs();
     let initial_script_dirs = routine_script_dirs.clone();
+    let initial_runtime_root = runtime_root.clone();
     let script_loader = match tokio::task::spawn_blocking(move || {
-        let loader = Arc::new(RoutineScriptLoader::new_shared(&initial_script_dirs)?);
+        let loader = Arc::new(RoutineScriptLoader::new_shared(
+            &initial_script_dirs,
+            &initial_runtime_root,
+        )?);
         let count = loader.load_dirs(&initial_script_dirs)?;
         Ok::<_, anyhow::Error>((loader, count))
     })

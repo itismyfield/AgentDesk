@@ -532,8 +532,9 @@ pub(crate) const WORKER_SPECS: [WorkerSpec; 12] = [
         shutdown_policy: WorkerShutdownPolicy::RuntimeShutdown,
         execution_scope: WorkerExecutionScope::LeaderOnly,
         health_owner: "routine_runs row state and tracing logs",
-        notes: "Skipped when routines.enabled=false or postgres pool unavailable; \
-                performs boot recovery of stale running runs before the tick loop starts",
+        notes: "Skipped when routines.enabled=false, runtime-root authority is unavailable, or \
+                postgres pool is unavailable; performs boot recovery of stale running runs \
+                before the tick loop starts",
     },
     WorkerSpec {
         id: ServerWorkerId::DmReplyRetry,
@@ -1005,6 +1006,13 @@ impl SupervisedWorkerRegistry {
                         return Ok(None);
                     }
                 };
+                let routine_runtime_root = match self.config.runtime_root_authority() {
+                    Ok(root) => root.to_path_buf(),
+                    Err(error) => {
+                        self.log_skip(spec, &error.to_string());
+                        return Ok(None);
+                    }
+                };
                 let Some(routine_pg_pool) = self.pg_pool.clone() else {
                     self.log_skip(
                         spec,
@@ -1026,12 +1034,14 @@ impl SupervisedWorkerRegistry {
                     let routine_pg_pool = routine_pg_pool.clone();
                     let routine_health_registry = routine_health_registry.clone();
                     let routines_config = routines_config.clone();
+                    let routine_runtime_root = routine_runtime_root.clone();
                     let routine_health_target = routine_health_target.clone();
                     async move {
                         super::routine_runtime_loop(
                             routine_pg_pool,
                             routine_health_registry,
                             routines_config,
+                            routine_runtime_root,
                             routine_health_target,
                             tick_secs,
                         )

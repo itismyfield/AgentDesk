@@ -12,24 +12,33 @@ use crate::services::routines::{
 use super::super::AppState;
 use super::PARALLEL_SAFE_MIGRATED_LAUNCHD_SCRIPT_REF;
 
-pub(super) fn ensure_routine_runtime_runnable(
-    config: &crate::config::RoutinesConfig,
-) -> AppResult<()> {
-    if !config.enabled {
+pub(super) fn ensure_routine_runtime_runnable(config: &Config) -> AppResult<()> {
+    if !config.routines.enabled {
         return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             ErrorCode::Config,
             "routines are disabled by config",
         ));
     }
-    if let Err(error) = validate_routine_runtime_config(config) {
+    if let Err(error) = validate_routine_runtime_config(&config.routines) {
         return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             ErrorCode::Config,
             format!("routine runtime is not runnable: {}", error.message()),
         ));
     }
+    routine_runtime_root(config)?;
     Ok(())
+}
+
+pub(super) fn routine_runtime_root(config: &Config) -> AppResult<&std::path::Path> {
+    config.runtime_root_authority().map_err(|error| {
+        AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::Config,
+            format!("routine runtime is not runnable: {error}"),
+        )
+    })
 }
 
 pub(super) async fn migrated_launchd_metadata_for_state(
@@ -40,10 +49,11 @@ pub(super) async fn migrated_launchd_metadata_for_state(
         return Ok(None);
     }
     let routine_script_dirs = state.config.routines.script_dirs();
+    let runtime_root = routine_runtime_root(&state.config)?.to_path_buf();
     let requested_script_ref = script_ref.to_string();
     let script_ref_for_task = requested_script_ref.clone();
     let script = tokio::task::spawn_blocking(move || {
-        let loader = RoutineScriptLoader::new_shared(&routine_script_dirs)
+        let loader = RoutineScriptLoader::new_shared(&routine_script_dirs, &runtime_root)
             .map_err(|error| format!("routine script loader init failed: {error}"))?;
         loader
             .load_dirs(&routine_script_dirs)
@@ -257,14 +267,14 @@ mod tests {
     use super::super::PARALLEL_SAFE_MIGRATED_LAUNCHD_SCRIPT_REF;
     use super::{
         ensure_routine_runtime_runnable, initial_attach_status, normalize_script_ref,
-        validate_distinct_fallback_agent,
+        routine_runtime_root, validate_distinct_fallback_agent,
     };
-    use crate::config::RoutinesConfig;
+    use crate::config::Config;
     use crate::error::ErrorCode;
 
     #[test]
     fn run_now_guard_rejects_disabled_routines() {
-        let config = RoutinesConfig::default();
+        let config = Config::default();
 
         let err = ensure_routine_runtime_runnable(&config)
             .expect_err("disabled routines must reject run-now before DB access");
@@ -286,11 +296,11 @@ mod tests {
 
     #[test]
     fn run_now_guard_rejects_invalid_runtime_worker_config() {
-        let mut config = RoutinesConfig {
-            enabled: true,
-            ..RoutinesConfig::default()
-        };
-        config.max_agent_polls_per_tick = 0;
+        let mut config = Config::default().resolve_runtime_relative_paths(Some(
+            std::path::Path::new("/runtime-root"),
+        ));
+        config.routines.enabled = true;
+        config.routines.max_agent_polls_per_tick = 0;
 
         let err = ensure_routine_runtime_runnable(&config)
             .expect_err("worker-invalid routines config must reject run-now");
@@ -300,6 +310,31 @@ mod tests {
             err.message().contains("max_agent_polls_per_tick"),
             "unexpected message: {}",
             err.message()
+        );
+    }
+
+    #[test]
+    fn run_now_guard_rejects_missing_runtime_root_authority() {
+        let mut config = Config::default();
+        config.routines.enabled = true;
+
+        let err = ensure_routine_runtime_runnable(&config)
+            .expect_err("source-less config must not authorize routine code loading");
+
+        assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.code(), ErrorCode::Config);
+        assert!(err.message().contains("runtime root authority unavailable"));
+    }
+
+    #[test]
+    fn http_loader_uses_config_derived_runtime_root_authority() {
+        let config = Config::default().resolve_runtime_relative_paths(Some(
+            std::path::Path::new("/custom/runtime"),
+        ));
+
+        assert_eq!(
+            routine_runtime_root(&config).unwrap(),
+            std::path::Path::new("/custom/runtime")
         );
     }
 
