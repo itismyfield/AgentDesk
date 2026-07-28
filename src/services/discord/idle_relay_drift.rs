@@ -91,6 +91,8 @@ struct DriftState {
     last_warn_at: Option<Instant>,
     suppressed_count: u64,
     pending_emission_count: u64,
+    pending_provider: Option<String>,
+    pending_channel_id: Option<u64>,
     #[cfg_attr(not(unix), allow(dead_code))]
     last_repair_attempt_at: Option<Instant>,
     repair_inflight: bool,
@@ -104,6 +106,8 @@ impl DriftState {
             last_warn_at: None,
             suppressed_count: 0,
             pending_emission_count: 0,
+            pending_provider: None,
+            pending_channel_id: None,
             last_repair_attempt_at: None,
             repair_inflight: false,
         }
@@ -154,10 +158,44 @@ fn decide_drift_warn(state: &mut DriftState, now: Instant) -> WarnDecision {
 }
 
 fn purge_expired_locked(map: &mut HashMap<String, DriftState>, now: Instant) {
-    map.retain(|_, state| {
-        state.repair_inflight
-            || now.saturating_duration_since(state.last_touched_at) < DRIFT_STATE_TTL
-    });
+    let expired = map
+        .iter()
+        .filter_map(|(tmux_session_name, state)| {
+            (!state.repair_inflight
+                && now.saturating_duration_since(state.last_touched_at) >= DRIFT_STATE_TTL)
+                .then(|| {
+                    (
+                        tmux_session_name.clone(),
+                        state.pending_emission_count,
+                        state.pending_channel_id.unwrap_or(0),
+                        state
+                            .pending_provider
+                            .as_deref()
+                            .unwrap_or("unknown")
+                            .to_string(),
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+
+    for (tmux_session_name, pending_count, channel_id, provider) in expired {
+        if pending_count > 0 {
+            crate::services::observability::metrics::record_relay_permanent_loss(
+                channel_id,
+                &provider,
+                pending_count,
+            );
+            tracing::error!(
+                tmux_session_name = %tmux_session_name,
+                channel_id,
+                provider,
+                permanent_loss_count = pending_count,
+                permanent_loss_reason = "drift_state_ttl_expired",
+                "expired unresolved idle relay drift state with pending emissions"
+            );
+        }
+        map.remove(&tmux_session_name);
+    }
 }
 
 /// Rate-limit decision for the resolver-internal drift WARN (the
@@ -176,7 +214,12 @@ pub(super) fn should_emit_drift_warn(tmux_session_name: &str) -> WarnDecision {
     decide_drift_warn(state, now)
 }
 
-fn note_pending_emission_count(tmux_session_name: &str, count: u64) {
+fn note_pending_emission_count(
+    tmux_session_name: &str,
+    provider: &ProviderKind,
+    channel_id: Option<u64>,
+    count: u64,
+) {
     if count == 0 {
         return;
     }
@@ -189,6 +232,10 @@ fn note_pending_emission_count(tmux_session_name: &str, count: u64) {
         .entry(tmux_session_name.to_string())
         .or_insert_with(|| DriftState::new(now));
     state.pending_emission_count = state.pending_emission_count.saturating_add(count);
+    state.pending_provider = Some(provider.as_str().to_string());
+    if channel_id.is_some() {
+        state.pending_channel_id = channel_id;
+    }
 }
 
 fn take_pending_emission_count(tmux_session_name: &str) -> u64 {
@@ -404,7 +451,11 @@ pub(super) fn on_idle_relay_drift(
     tmux_session_name: &str,
     emission_count: u64,
 ) {
-    note_pending_emission_count(tmux_session_name, emission_count);
+    let channel_id = shared
+        .tmux_watchers
+        .owner_channel_for_tmux_session(tmux_session_name)
+        .map(|channel| channel.get());
+    note_pending_emission_count(tmux_session_name, &provider, channel_id, emission_count);
     if tokio::runtime::Handle::try_current().is_err() {
         return;
     }
@@ -819,7 +870,7 @@ mod tests {
         reset_drift_state_for_tests();
         let tmux = "AgentDesk-codex-confirmed-dead-orphan";
 
-        note_pending_emission_count(tmux, 3);
+        note_pending_emission_count(tmux, &ProviderKind::Codex, Some(4_794), 3);
         assert_eq!(
             record_confirmed_dead_orphan_loss(&ProviderKind::Codex, tmux, 4_794),
             3
@@ -833,6 +884,42 @@ mod tests {
     }
 
     // --- cooldown / single-flight state machine ------------------------
+
+    #[test]
+    fn ttl_expiry_accounts_pending_emissions_before_removal() {
+        let _serial = DRIFT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_drift_state_for_tests();
+        let tmux = "AgentDesk-claude-expired-pending";
+        let channel_id = 4_794_024;
+        let before = crate::services::observability::metrics::snapshot()
+            .into_iter()
+            .find(|row| row.channel_id == channel_id && row.provider == "claude")
+            .map(|row| row.relay_permanent_loss)
+            .unwrap_or(0);
+        let now = Instant::now();
+        let mut map = DRIFT_STATE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut state = DriftState::new(now - DRIFT_STATE_TTL - Duration::from_secs(1));
+        state.pending_emission_count = 4;
+        state.pending_provider = Some("claude".to_string());
+        state.pending_channel_id = Some(channel_id);
+        map.insert(tmux.to_string(), state);
+
+        purge_expired_locked(&mut map, now);
+        assert!(
+            !map.contains_key(tmux),
+            "expired drift state must be removed"
+        );
+        drop(map);
+        let after = crate::services::observability::metrics::snapshot()
+            .into_iter()
+            .find(|row| row.channel_id == channel_id && row.provider == "claude")
+            .map(|row| row.relay_permanent_loss)
+            .unwrap_or(0);
+        assert_eq!(after - before, 4, "TTL loss must be counted exactly once");
+        reset_drift_state_for_tests();
+    }
 
     #[cfg(unix)]
     #[test]
