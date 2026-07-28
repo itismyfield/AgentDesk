@@ -145,6 +145,7 @@ PERMANENT_LOSS_UNANNOUNCED_KEY = "permanent_loss_unannounced"
 PERMANENT_LOSS_TOTAL_KEY = "permanent_loss_total"
 PERMANENT_LOSS_SUSPECTED_KEY = "permanent_loss_suspected"
 PERMANENT_LOSS_OVERFLOW_TOTAL_KEY = "permanent_loss_overflow_total"
+PERMANENT_LOSS_IDENTITY_WARNING_KEY = "permanent_loss_identity_warnings"
 LAST_ACTUAL_DELIVERY_AT_KEY = "last_actual_delivery_at"
 LAST_ACTUAL_DELIVERY_BY_PATH_KEY = "last_actual_delivery_by_path"
 # Permanent loss requires two different delivered-frontier advances beyond the
@@ -4190,7 +4191,7 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
         if tombstone_update.corrupted:
             rt.log(
                 f"[{cid}] permanent-loss-state-corrupt path={path}; "
-                f"quarantined={tombstone_update.quarantined}"
+                "preserving raw state"
             )
         if tombstone_update.overflowed and not tombstone_update.corrupted:
             rt.log(
