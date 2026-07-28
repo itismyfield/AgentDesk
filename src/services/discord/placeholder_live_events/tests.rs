@@ -10,6 +10,66 @@ use super::common::{
 use super::*;
 use serde_json::json;
 
+/// #4953: keep INFO callsites process-globally "interested" so the log-capturing
+/// tests below survive the parallel test harness.
+///
+/// Those tests install their capturing subscriber with
+/// `tracing::subscriber::set_default`, which is **thread-local**, but
+/// tracing-core caches each callsite's `Interest` **process-globally**. A
+/// callsite is registered on its first-ever hit, and while only one dispatcher
+/// is registered tracing-core takes the `Rebuilder::JustOne` fast path
+/// (tracing-core 0.1.36, `callsite.rs`) which resolves that registration against
+/// the *hitting thread's* dispatcher. When a subscriber-less sibling test thread
+/// wins that race, the callsite is cached as `Interest::never()` for the whole
+/// process, the capturing thread stops receiving the event, and the assertion
+/// fails against an empty buffer. (`set_default` already rebuilds the interest
+/// of every *already registered* callsite, which is why an extra
+/// `rebuild_interest_cache()` call does not help — the hole is the
+/// not-yet-registered callsite.)
+///
+/// A process-global default that is interested in INFO closes the race: every
+/// registration path now resolves against an interested subscriber no matter
+/// which thread gets there first. `register_callsite` deliberately answers
+/// `Interest::sometimes()` rather than `always`, so the per-event decision still
+/// goes through the *current* thread's dispatcher — subscriber-less threads keep
+/// skipping the event entirely, and the scoped capturing subscriber stays the
+/// only observer.
+fn install_global_info_callsite_interest() {
+    struct InfoCallsiteInterestKeeper;
+
+    impl tracing::Subscriber for InfoCallsiteInterestKeeper {
+        fn register_callsite(
+            &self,
+            metadata: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            if *metadata.level() <= tracing::Level::INFO {
+                tracing::subscriber::Interest::sometimes()
+            } else {
+                tracing::subscriber::Interest::never()
+            }
+        }
+        fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+            Some(tracing::level_filters::LevelFilter::INFO)
+        }
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            false
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, _: &tracing::Event<'_>) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        let _ = tracing::subscriber::set_global_default(InfoCallsiteInterestKeeper);
+    });
+}
+
 #[test]
 fn render_block_compacts_newest_events_under_limit() {
     let events = PlaceholderLiveEvents::default();
@@ -7795,6 +7855,7 @@ fn idless_end_after_finished_slot_eviction_never_closes_the_live_respawn() {
 
     // A's real completion, late: id-less, desc is the only key. Capture the
     // panel's INFO logs across the apply to assert the tombstone drop reason.
+    install_global_info_callsite_interest();
     let buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -8173,6 +8234,7 @@ fn issue_4407_idless_workflow_end_for_unique_id_bearing_slot_drops_without_statu
         },
     );
 
+    install_global_info_callsite_interest();
     let buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
