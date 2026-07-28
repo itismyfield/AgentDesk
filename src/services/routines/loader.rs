@@ -2757,7 +2757,11 @@ mod tests {
         );
         let shared = loader.get_script("ops/shared.js").unwrap().unwrap();
         assert_eq!(shared.name, "Operator Shared");
-        assert!(shared.file.starts_with(operator.path()));
+        assert!(
+            shared
+                .file
+                .starts_with(operator.path().canonicalize().unwrap())
+        );
     }
 
     #[test]
@@ -2820,7 +2824,7 @@ mod tests {
         assert_eq!(loader.script_refs().unwrap(), vec!["healthy.js"]);
         assert_eq!(
             loader.get_script("healthy.js").unwrap().unwrap().file,
-            healthy_root.join("healthy.js")
+            healthy_root.canonicalize().unwrap().join("healthy.js")
         );
     }
 
