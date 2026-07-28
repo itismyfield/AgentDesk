@@ -4255,7 +4255,7 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
                 f"[{cid}] permanent-loss-state-corrupt path={path}; "
                 f"quarantined={tombstone_update.quarantined}"
             )
-        if tombstone_update.overflowed:
+        if tombstone_update.overflowed and not tombstone_update.corrupted:
             rt.log(
                 f"[{cid}] permanent-loss-state-overflow path={path} "
                 f"dropped={tombstone_update.overflowed} "

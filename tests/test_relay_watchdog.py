@@ -6525,6 +6525,41 @@ class TickChannelTests(unittest.TestCase):
         self.assertFalse(any("PERMANENT LOSS ALERT" in line for line in rt.log_lines))
         self.assertFalse(any("영구 릴레이 유실" in body for body, _ in rt.alerts))
 
+    def test_corrupt_tick_does_not_increment_overflow_projection(self):
+        path = str(self.proj_dir / "s.jsonl")
+        observations = {
+            f"{index:064x}": {
+                "path": path,
+                "epoch": self.now - 4000,
+                "evidence_frontiers": [self.now - 3000],
+                "last_observed_at": self.now - index,
+            }
+            for index in range(relay_watchdog.MAX_LOSS_OBSERVATIONS)
+        }
+        observations["bad"] = "shape"
+        state = {
+            "999": {
+                relay_watchdog.LOSS_OBSERVATIONS_KEY: observations,
+                relay_watchdog.PERMANENT_LOSS_OVERFLOW_TOTAL_KEY: 7,
+            }
+        }
+        self.write_transcript(
+            [
+                (self.now - 2000, "corrupt overflow candidate"),
+                (self.now - 1000, "corrupt overflow successor"),
+            ]
+        )
+        rt = self.make_rt()
+        rt.haystack = norm("corrupt overflow successor")
+
+        tick_channel(rt, TICK_CHANNEL, state, self.now)
+
+        chs = state["999"]
+        self.assertEqual(chs[relay_watchdog.PERMANENT_LOSS_OVERFLOW_TOTAL_KEY], 7)
+        self.assertFalse(
+            any("permanent-loss-state-overflow" in line for line in rt.log_lines)
+        )
+
     def test_corrupt_state_suppresses_same_tick_loss_confirmation(self):
         missing = (self.now - 4000, "corrupt unpersisted skipped response")
         first = (self.now - 3000, "corrupt first successor")
