@@ -4713,6 +4713,9 @@ mod watcher_short_replace_controller {
             .expect("current-thread runtime");
         runtime.block_on(async {
             let shared = crate::services::discord::make_shared_data_for_tests();
+            // #4911 R9: the guarded funnel advances only for a live immutable source
+            // generation, so the happy path needs a real generation marker.
+            set_generation("AgentDesk-claude-8141", 1_700_491_800, "live-generation");
             let cell = Arc::new(DeliveryLeaseCell::new(ch()));
             assert_eq!(shared.committed_relay_offset(ch()), 0);
             let gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, true);
@@ -4988,6 +4991,8 @@ mod watcher_short_replace_controller {
             .expect("current-thread runtime");
         runtime.block_on(async {
             let shared = crate::services::discord::make_shared_data_for_tests();
+            // #4911 R9: live immutable source generation for the guarded funnel.
+            set_generation("AgentDesk-claude-8141", 1_700_491_800, "live-generation");
             let cell = Arc::new(DeliveryLeaseCell::new(ch()));
             let gw = gateway(
                 ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
@@ -5164,6 +5169,8 @@ mod watcher_short_replace_controller {
             .expect("current-thread runtime");
         runtime.block_on(async {
             let shared = crate::services::discord::make_shared_data_for_tests();
+            // #4911 R9: live immutable source generation for the guarded funnel.
+            set_generation("AgentDesk-claude-8141", 1_700_491_800, "live-generation");
             let cell = Arc::new(DeliveryLeaseCell::new(ch()));
             let gw = long_gateway(true, true);
             let outcome = run_long(&gw, &shared, &cell).await;
@@ -5284,6 +5291,8 @@ mod watcher_short_replace_controller {
             .expect("current-thread runtime");
         runtime.block_on(async {
             let shared = crate::services::discord::make_shared_data_for_tests();
+            // #4911 R9: live immutable source generation for the guarded funnel.
+            set_generation("AgentDesk-claude-8141", 1_700_491_800, "live-generation");
             let cell = Arc::new(DeliveryLeaseCell::new(ch()));
             let gw = long_gateway(true, false);
             let outcome = run_long(&gw, &shared, &cell).await;
