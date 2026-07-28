@@ -1131,6 +1131,58 @@ mod tests {
         assert_eq!(selected_session_id.as_deref(), Some(target_session_id));
         assert_eq!(selected_cwd, target_cwd);
 
+        let transition = crate::services::discord::intake_runtime_transition_after_redirect(
+            &shared,
+            channel_id,
+            (None, false, old_cwd.clone()),
+        )
+        .await;
+        let blocked_resume_pool = pool.clone();
+        let blocked_resume_registry = HealthRegistry::new();
+        blocked_resume_registry
+            .register("claude".to_string(), Arc::clone(&shared))
+            .await;
+        let blocked_target_cwd = target_cwd.clone();
+        let blocked_resume = tokio::spawn(async move {
+            perform_resume_rebind(
+                &blocked_resume_pool,
+                Some(&blocked_resume_registry),
+                session_key,
+                Some(ProviderKind::Claude),
+                Some(channel_id),
+                tmux,
+                &ResumePreviousOptions {
+                    session_id: Some(target_session_id.to_string()),
+                    cwd: Some(blocked_target_cwd),
+                },
+            )
+            .await
+        });
+        let (claim_started_tx, claim_started_rx) = tokio::sync::oneshot::channel();
+        let (claim_release_tx, claim_release_rx) = tokio::sync::oneshot::channel();
+        let claim = tokio::spawn(async move {
+            transition
+                .complete_mailbox_claim(async move {
+                    let _ = claim_started_tx.send(());
+                    let _ = claim_release_rx.await;
+                })
+                .await;
+        });
+        claim_started_rx
+            .await
+            .expect("intake reaches the production claim span");
+        tokio::task::yield_now().await;
+        assert!(
+            !blocked_resume.is_finished(),
+            "resume must remain excluded until the intake claim completes"
+        );
+        let _ = claim_release_tx.send(());
+        claim.await.expect("claim span completes");
+        blocked_resume
+            .await
+            .expect("blocked resume task joins")
+            .expect("blocked resume succeeds after the claim");
+
         pool.close().await;
         pg_db.drop().await;
     }

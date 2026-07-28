@@ -544,6 +544,14 @@ pub(crate) struct IntakeRuntimeTransition {
     _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
+impl IntakeRuntimeTransition {
+    pub(crate) async fn complete_mailbox_claim<T>(self, claim: impl Future<Output = T>) -> T {
+        let output = claim.await;
+        drop(self);
+        output
+    }
+}
+
 pub(crate) async fn intake_runtime_transition_after_redirect(
     shared: &Arc<SharedData>,
     effective_channel_id: ChannelId,

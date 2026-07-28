@@ -1209,25 +1209,24 @@ pub(super) async fn handle_text_message(
     // because the async gap between check and insert allows interleaving.
     // If another message won the race, queue ourselves and clean up.
     let cancel_token = Arc::new(CancelToken::new());
-    let started = try_start_turn_with_stale_busy_heal(
-        shared,
-        channel_id,
-        cancel_token.clone(),
-        request_owner,
-        user_msg_id,
-        intake_claim_context(
-            adk_session_key.as_deref(),
-            &provider,
-            tmux_session_name.as_deref(),
-            &mut current_path,
-            &mut session_id,
-            &mut memento_context_loaded,
-            &mut session_strategy_reason,
-        ),
-    )
-    .await;
-
-    drop(intake_runtime_transition);
+    let started = intake_runtime_transition
+        .complete_mailbox_claim(try_start_turn_with_stale_busy_heal(
+            shared,
+            channel_id,
+            cancel_token.clone(),
+            request_owner,
+            user_msg_id,
+            intake_claim_context(
+                adk_session_key.as_deref(),
+                &provider,
+                tmux_session_name.as_deref(),
+                &mut current_path,
+                &mut session_id,
+                &mut memento_context_loaded,
+                &mut session_strategy_reason,
+            ),
+        ))
+        .await;
 
     // #3813 Phase 1a: intake latency span anchor (turn claimed; observation-only
     // — see latency_spans.rs). Never `.log()`'d on the early returns below.
