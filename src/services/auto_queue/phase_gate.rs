@@ -328,43 +328,72 @@ async fn create_activate_dispatch_pg_inner(
         .await
         .map_err(|error| format!("open postgres activate dispatch transaction: {error}"))?;
 
-    // #2048 F1: re-check paused-run state INSIDE the transaction under a
-    // per-run advisory lock. The earlier pool-scoped probe is TOCTOU-prone:
-    // `force_pause_with_pg` or `pause_run_on_pg` can flip the run to
-    // `paused` between probe and INSERT, breaking the #1564 RC10 circuit
-    // breaker. `force_pause_with_pg` (F2) acquires the same lock before
-    // flipping status, so the post-lock re-check observes the committed
-    // pause state if the race would otherwise have slipped through.
-    let paused_run_id_locked = sqlx::query_scalar::<_, String>(
-        "WITH candidate_runs AS (
-             SELECT r.id, r.status, MAX(e.created_at) AS latest_created_at
-             FROM auto_queue_entries e
-             JOIN auto_queue_runs r ON r.id = e.run_id
-             WHERE e.kanban_card_id = $1
-             GROUP BY r.id, r.status
-         ),
-         locked AS (
-             SELECT id,
-                    status,
-                    latest_created_at,
-                    pg_advisory_xact_lock(hashtext('aq_run:' || id)) AS _lock
-             FROM candidate_runs
-         )
-         SELECT id
-         FROM locked
-         WHERE status = 'paused'
-         ORDER BY latest_created_at DESC NULLS LAST
-         LIMIT 1",
-    )
-    .bind(card_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|error| format!("recheck paused run for {card_id} inside dispatch tx: {error}"))?;
-    if let Some(run_id) = paused_run_id_locked {
-        tx.rollback().await.ok();
-        return Err(format!(
-            "auto-queue run {run_id} paused: refusing to create {dispatch_type} dispatch for card {card_id}"
-        ));
+    // Re-check the owning run after taking the same lock used by pause and
+    // cancel. Separate lock and status statements are intentional: after a
+    // concurrent terminal transition commits, READ COMMITTED must take a new
+    // snapshot before deciding whether an entry can receive a dispatch.
+    if let Some(attachment) = entry_attachment.as_ref() {
+        let owning_run_id =
+            sqlx::query_scalar::<_, String>("SELECT run_id FROM auto_queue_entries WHERE id = $1")
+                .bind(&attachment.entry_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "load owning run for auto-queue entry {}: {error}",
+                        attachment.entry_id
+                    )
+                })?
+                .ok_or_else(|| format!("auto-queue entry {} not found", attachment.entry_id))?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_run:' || $1))")
+            .bind(&owning_run_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("lock auto-queue run {owning_run_id}: {error}"))?;
+        let owning_run_status =
+            sqlx::query_scalar::<_, String>("SELECT status FROM auto_queue_runs WHERE id = $1")
+                .bind(&owning_run_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|error| format!("reload auto-queue run {owning_run_id}: {error}"))?;
+        if !crate::db::auto_queue::run_status::is_live_run_status(&owning_run_status) {
+            tx.rollback().await.ok();
+            return Err(format!(
+                "auto-queue run {owning_run_id} is {owning_run_status}: refusing to create {dispatch_type} dispatch for card {card_id}"
+            ));
+        }
+    } else {
+        let paused_run_id_locked = sqlx::query_scalar::<_, String>(
+            "WITH candidate_runs AS (
+                 SELECT r.id, r.status, MAX(e.created_at) AS latest_created_at
+                 FROM auto_queue_entries e
+                 JOIN auto_queue_runs r ON r.id = e.run_id
+                 WHERE e.kanban_card_id = $1
+                 GROUP BY r.id, r.status
+             ),
+             locked AS (
+                 SELECT id,
+                        status,
+                        latest_created_at,
+                        pg_advisory_xact_lock(hashtext('aq_run:' || id)) AS _lock
+                 FROM candidate_runs
+             )
+             SELECT id
+             FROM locked
+             WHERE status = 'paused'
+             ORDER BY latest_created_at DESC NULLS LAST
+             LIMIT 1",
+        )
+        .bind(card_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("recheck paused run for {card_id} inside dispatch tx: {error}"))?;
+        if let Some(run_id) = paused_run_id_locked {
+            tx.rollback().await.ok();
+            return Err(format!(
+                "auto-queue run {run_id} paused: refusing to create {dispatch_type} dispatch for card {card_id}"
+            ));
+        }
     }
 
     if let Some(attachment) = entry_attachment.as_ref() {
@@ -573,7 +602,78 @@ async fn create_activate_dispatch_pg_inner(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::dispatch::sandbox_preflight_metadata_disables_external_side_effects;
+
+    #[tokio::test]
+    async fn cancelled_run_rejects_dispatch_attach() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ('agent-cancel-attach', 'Cancel Attach Agent', 'claude', '123')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed cancel attach agent");
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, metadata)
+             VALUES (
+                 'card-cancel-attach', 'Cancel Attach Card', 'in_progress',
+                 'agent-cancel-attach',
+                 '{\"sandbox_preflight\":true,\"production_mutation_allowed\":false}'::jsonb
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed cancel attach card");
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, agent_id, status, completed_at)
+             VALUES ('run-cancel-attach', 'agent-cancel-attach', 'cancelled', NOW())",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed cancelled run");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries
+                (id, run_id, kanban_card_id, agent_id, status, slot_index)
+             VALUES (
+                'entry-cancel-attach', 'run-cancel-attach', 'card-cancel-attach',
+                'agent-cancel-attach', 'pending', 0
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed pending cancelled entry");
+
+        let error = create_activate_dispatch_for_entry_pg(
+            &pool,
+            "card-cancel-attach",
+            "agent-cancel-attach",
+            "implementation",
+            "Late dispatch",
+            &json!({}),
+            ActivateDispatchEntryAttachment::new(
+                "entry-cancel-attach",
+                Some(0),
+                "cancel_race_regression",
+            ),
+        )
+        .await
+        .expect_err("cancelled run must reject dispatch attach");
+        assert!(error.contains("is cancelled"), "{error}");
+        let dispatch_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM task_dispatches WHERE kanban_card_id = 'card-cancel-attach'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count late dispatches");
+        assert_eq!(dispatch_count, 0);
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
 
     #[test]
     fn sandbox_preflight_metadata_disables_external_side_effects_only_when_safe() {
