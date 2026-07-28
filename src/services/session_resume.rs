@@ -1237,38 +1237,30 @@ mod tests {
 
         let resume_lock = shared.session_transition_lock(channel_id);
         let resume_guard = resume_lock.lock().await;
-        let intake_shared = Arc::clone(&shared);
-        let intake_old_cwd = old_cwd.clone();
-        let intake = tokio::spawn(async move {
-            let transition = crate::services::discord::intake_runtime_transition_after_redirect(
-                &intake_shared,
+        let busy_transition =
+            crate::services::discord::try_intake_runtime_transition_after_redirect(
+                &shared,
                 channel_id,
-                (None, false, intake_old_cwd),
+                (None, false, old_cwd.clone()),
             )
-            .await
-            .expect("intake acquires transition lock");
-            (transition.state.0, transition.state.2)
-        });
-        tokio::task::yield_now().await;
+            .await;
         assert!(
-            !intake.is_finished(),
-            "effective intake snapshot must share the resume lock"
+            busy_transition.is_err(),
+            "production intake must defer immediately while resume holds the lock"
         );
         drop(resume_guard);
 
         let outcome = resume.await.unwrap().expect("production resume succeeds");
         assert!(outcome.in_memory_rebound);
-        let (selected_session_id, selected_cwd) = intake.await.unwrap();
-        assert_eq!(selected_session_id.as_deref(), Some(target_session_id));
-        assert_eq!(selected_cwd, target_cwd);
-
-        let transition = crate::services::discord::intake_runtime_transition_after_redirect(
+        let transition = crate::services::discord::try_intake_runtime_transition_after_redirect(
             &shared,
             channel_id,
             (None, false, old_cwd.clone()),
         )
         .await
-        .expect("intake acquires transition lock");
+        .expect("production intake acquires the released transition lock");
+        assert_eq!(transition.state.0.as_deref(), Some(target_session_id));
+        assert_eq!(transition.state.2, target_cwd);
         let blocked_resume_pool = pool.clone();
         let blocked_resume_registry = HealthRegistry::new();
         blocked_resume_registry

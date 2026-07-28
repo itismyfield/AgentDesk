@@ -567,20 +567,6 @@ async fn intake_runtime_transition_with_guard(
     }
 }
 
-pub(crate) async fn intake_runtime_transition_after_redirect(
-    shared: &Arc<SharedData>,
-    effective_channel_id: ChannelId,
-    fallback_state: (Option<String>, bool, String),
-) -> Result<IntakeRuntimeTransition, super::super::SessionTransitionBusy> {
-    let guard = shared
-        .acquire_session_transition(effective_channel_id)
-        .await?;
-    Ok(
-        intake_runtime_transition_with_guard(shared, effective_channel_id, fallback_state, guard)
-            .await,
-    )
-}
-
 pub(crate) async fn try_intake_runtime_transition_after_redirect(
     shared: &Arc<SharedData>,
     effective_channel_id: ChannelId,

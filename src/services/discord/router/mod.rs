@@ -32,7 +32,9 @@ pub(crate) use turn_start::{
     HeadlessTurnStartStatus,
 };
 #[cfg(test)]
-pub(crate) use turn_start::{intake_runtime_transition_after_redirect, load_session_runtime_state};
+pub(crate) use turn_start::{
+    load_session_runtime_state, try_intake_runtime_transition_after_redirect,
+};
 
 // Re-export items used across submodules
 use thread_binding::{link_dispatch_thread, lookup_dispatch_info, verify_thread_accessible};
