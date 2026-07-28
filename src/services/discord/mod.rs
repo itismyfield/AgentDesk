@@ -1356,7 +1356,7 @@ mod tmux_watcher_registry_restore_tests {
     }
 
     #[test]
-    fn session_rebind_retains_owner_after_watcher_teardown() {
+    fn session_rebind_retains_owner_when_called_after_watcher_teardown() {
         let registry = TmuxWatcherRegistry::new();
         let tmux = "AgentDesk-claude-adk-cc";
         let channel = ChannelId::new(4794);
@@ -1364,14 +1364,14 @@ mod tmux_watcher_registry_restore_tests {
         let handle = live_watcher_handle(tmux);
         let cancel = handle.cancel.clone();
         registry.insert(channel, handle);
-        assert!(registry.retain_owner_during_session_rebind(tmux, channel));
-        assert_eq!(registry.owner_channel_for_tmux_session(tmux), Some(channel));
-
         registry.remove_tmux_session_if_current(tmux, &cancel);
+        assert_eq!(registry.owner_channel_for_tmux_session(tmux), None);
+
+        assert!(registry.retain_owner_during_session_rebind(tmux, channel));
         assert_eq!(
             registry.owner_channel_for_tmux_session(tmux),
             Some(channel),
-            "the owner-only binding must bridge watcher teardown until pane death"
+            "the owner-only binding must be restorable after teardown until pane death"
         );
     }
 
@@ -2557,6 +2557,26 @@ impl SharedData {
     // queued_placeholder_still_owned, add/remove_pending_queue_exit_placeholder_clear*,
     // pending_queue_exit_placeholder_clears) moved verbatim to the
     // `shared_state` sibling module alongside `QueuedPlaceholderState`.
+}
+
+#[cfg(test)]
+mod session_transition_lock_tests {
+    use super::*;
+
+    #[test]
+    fn inactive_channel_locks_are_pruned_on_next_lookup() {
+        let shared = make_shared_data_for_tests();
+        let old_channel = ChannelId::new(4_794_900);
+        let new_channel = ChannelId::new(4_794_901);
+
+        let old = shared.session_transition_lock(old_channel);
+        assert_eq!(shared.session_transition_locks.len(), 1);
+        drop(old);
+
+        let _new = shared.session_transition_lock(new_channel);
+        assert!(!shared.session_transition_locks.contains_key(&old_channel));
+        assert!(shared.session_transition_locks.contains_key(&new_channel));
+    }
 }
 
 #[cfg(test)]

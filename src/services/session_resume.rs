@@ -35,8 +35,9 @@ use crate::db::dispatched_sessions::{
     load_session_rebind_context_pg, rebind_session_provider_by_id_pg,
 };
 use crate::services::discord::health::{
-    HealthRegistry, channel_has_active_turn, rebind_channel_provider_session,
-    resume_runtime_for_channel,
+    HealthRegistry, channel_has_active_turn, clear_resume_runtime_owner_after_death,
+    rebind_channel_provider_session, resume_runtime_for_channel,
+    retain_resume_runtime_owner_before_teardown,
 };
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::provider::ProviderKind;
@@ -448,6 +449,16 @@ pub(crate) async fn perform_resume_rebind(
         return Err(ResumeRebindError::SessionNotFound);
     }
 
+    // Preserve the current authoritative owner before teardown can remove the
+    // watcher slot. If the pane survives, this owner-only entry bridges output
+    // until the resumed turn replaces it; confirmed pane death clears it below.
+    let owner_retained_before_teardown =
+        if let (Some(shared), Some(channel_id)) = (resume_runtime.as_deref(), channel_id) {
+            retain_resume_runtime_owner_before_teardown(shared, channel_id, tmux_name)
+        } else {
+            false
+        };
+
     // Teardown the channel's current tmux/turn via the shared lifecycle path.
     let mut tmux_killed = false;
     let mut lifecycle_path = "skipped-no-runtime";
@@ -482,6 +493,9 @@ pub(crate) async fn perform_resume_rebind(
             tmux_session: tmux_name.trim().to_string(),
         }
     } else {
+        if owner_retained_before_teardown && let Some(shared) = resume_runtime.as_deref() {
+            clear_resume_runtime_owner_after_death(shared, tmux_name);
+        }
         clear_resume_runtime_binding(tmux_name)
     };
 

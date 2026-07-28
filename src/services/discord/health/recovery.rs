@@ -92,6 +92,22 @@ pub(crate) async fn resume_runtime_for_channel(
     shared_for_provider(registry, provider, channel_id).await
 }
 
+pub(crate) fn retain_resume_runtime_owner_before_teardown(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+) -> bool {
+    shared
+        .tmux_watchers
+        .retain_owner_during_session_rebind(tmux_session_name, channel_id)
+}
+
+pub(crate) fn clear_resume_runtime_owner_after_death(shared: &SharedData, tmux_session_name: &str) {
+    shared
+        .tmux_watchers
+        .clear_restored_owner_for_tmux_session(tmux_session_name);
+}
+
 /// Mirror a successful durable `/resume` target into the owning Discord runtime.
 ///
 /// `retain_runtime_owner` means teardown left the tmux pane alive. In that case
