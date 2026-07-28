@@ -1452,7 +1452,11 @@ mod tests {
             STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
             Some(0),
         );
-        assert!(first.should_defer());
+        assert_eq!(
+            first.action,
+            StallWatchdogLivenessAction::ProceedNoEvidence,
+            "the initial backlog observation has no independent progress evidence"
+        );
         assert!(first.evidence.has_undelivered_backlog);
 
         for (tick, delivered_offset) in [(1, 64), (2, 128), (3, 192)] {
