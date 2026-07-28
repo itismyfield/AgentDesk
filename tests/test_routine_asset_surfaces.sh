@@ -633,11 +633,12 @@ unset -f ssh
 # artifact must fail before a binary marker or live assets change.
 extract_function() {
     local function_name="$1"
+    local source_file="${2:-$REPO_ROOT/scripts/install.sh}"
     awk -v start="^${function_name}[(][)] [{]$" '
+        printing && $0 ~ /^[A-Za-z_][A-Za-z0-9_]*[(][)] [{]$/ { exit }
         $0 ~ start { printing = 1 }
         printing { print }
-        printing && /^}$/ { exit }
-    ' "$REPO_ROOT/scripts/install.sh"
+    ' "$source_file"
 }
 eval "$(extract_function prepare_install_routine_asset_surfaces)"
 eval "$(extract_function promote_install_routine_asset_surfaces)"
@@ -828,6 +829,60 @@ printf 'operator helper\n' > "$INSTALL_RUNTIME/routine-helpers/operator-private.
     && [ -f "$INSTALL_RUNTIME/routines/operator-private.txt" ] \
     && [ -f "$INSTALL_RUNTIME/routine-helpers/operator-private.txt" ] \
     || fail_test 'installer did not atomically promote and finalize its paired payload'
+
+# Exact stale-backup sequence: v0/M100 backup survives a healthy v1/M101
+# cleanup failure, then v2 still embeds M101 and fails health. The rollback
+# guard must read M100 from the digest-bound backup sidecar, never M101 from the
+# now-newer live release manifest.
+eval "$(extract_function _sha256_file "$REPO_ROOT/scripts/deploy-release.sh")"
+eval "$(extract_function _manifest_latest_migration_name "$REPO_ROOT/scripts/deploy-release.sh")"
+eval "$(extract_function _write_rollback_backup_metadata "$REPO_ROOT/scripts/deploy-release.sh")"
+eval "$(extract_function _rollback_backup_latest_migration_name "$REPO_ROOT/scripts/deploy-release.sh")"
+eval "$(extract_function _latest_postgres_migration_path "$REPO_ROOT/scripts/deploy-release.sh")"
+eval "$(extract_function _rollback_would_brick_on_migration "$REPO_ROOT/scripts/deploy-release.sh")"
+eval "$(extract_function _migration_seq_from_name "$REPO_ROOT/scripts/_defaults.sh")"
+eval "$(extract_function _migration_advanced "$REPO_ROOT/scripts/_defaults.sh")"
+
+MIGRATION_REPO="$TMP_ROOT/migration-repo"
+MIGRATION_RUNTIME="$TMP_ROOT/migration-runtime"
+mkdir -p "$MIGRATION_REPO/migrations/postgres" "$MIGRATION_RUNTIME/bin" \
+    "$MIGRATION_RUNTIME/runtime"
+printf '%s\n' '-- M100' > "$MIGRATION_REPO/migrations/postgres/0100_m100.sql"
+printf '%s\n' '-- M101' > "$MIGRATION_REPO/migrations/postgres/0101_m101.sql"
+printf 'v0-binary\n' > "$MIGRATION_RUNTIME/bin/agentdesk.prev"
+printf '%s\n' '{"latest_postgres_migration":"0100_m100.sql"}' \
+    > "$MIGRATION_RUNTIME/runtime/release-source.json"
+ADK_REL="$MIGRATION_RUNTIME"
+REPO="$MIGRATION_REPO"
+REL_BINARY_BACKUP="$MIGRATION_RUNTIME/bin/agentdesk.prev"
+REL_BINARY_BACKUP_META="$REL_BINARY_BACKUP.meta"
+_write_rollback_backup_metadata "$REL_BINARY_BACKUP" "$REL_BINARY_BACKUP_META"
+[ "$(_rollback_backup_latest_migration_name)" = '0100_m100.sql' ] \
+    || fail_test 'rollback sidecar was not bound to the v0 backup generation'
+
+# v1 became healthy and wrote M101, but its simulated backup cleanup failed.
+printf 'v1-binary\n' > "$MIGRATION_RUNTIME/bin/agentdesk"
+printf '%s\n' '{"latest_postgres_migration":"0101_m101.sql"}' \
+    > "$MIGRATION_RUNTIME/runtime/release-source.json"
+set +e
+_rollback_would_brick_on_migration >/dev/null 2>&1
+STALE_BACKUP_GUARD_STATUS=$?
+set -e
+[ "$STALE_BACKUP_GUARD_STATUS" -eq 0 ] \
+    || fail_test 'v2 rollback guard trusted the v1 live manifest for stale v0 backup'
+
+# Force may skip migration ordering only after backup integrity succeeds. It
+# must never turn a digest-mismatched or metadata-less file into executable
+# rollback material.
+printf 'tampered-v0-binary\n' > "$REL_BINARY_BACKUP"
+AGENTDESK_DEPLOY_FORCE_ROLLBACK=1
+set +e
+_rollback_would_brick_on_migration >/dev/null 2>&1
+TAMPERED_BACKUP_GUARD_STATUS=$?
+set -e
+unset AGENTDESK_DEPLOY_FORCE_ROLLBACK
+[ "$TAMPERED_BACKUP_GUARD_STATUS" -eq 0 ] \
+    || fail_test 'forced rollback bypassed backup digest verification'
 
 # Gitignore keeps operator helpers private while the four bundled files remain
 # explicitly trackable.

@@ -791,6 +791,74 @@ print(value)
 PY
 }
 
+_write_rollback_backup_metadata() {
+    local backup_binary="$1"
+    local metadata_path="$2"
+    local binary_sha latest_migration
+
+    [ -f "$backup_binary" ] && [ ! -L "$backup_binary" ] \
+        && [ ! -L "$metadata_path" ] || return 1
+    binary_sha="$(_sha256_file "$backup_binary")"
+    [ -n "$binary_sha" ] || return 1
+    latest_migration="$(_manifest_latest_migration_name 2>/dev/null || true)"
+    AGENTDESK_BACKUP_BINARY_SHA256="$binary_sha" \
+    AGENTDESK_BACKUP_LATEST_MIGRATION="$latest_migration" \
+    python3 - "$metadata_path" <<'PY'
+import json
+import os
+import sys
+
+payload = {
+    "format_version": 1,
+    "binary_sha256": os.environ["AGENTDESK_BACKUP_BINARY_SHA256"],
+    "latest_postgres_migration": os.environ.get(
+        "AGENTDESK_BACKUP_LATEST_MIGRATION", ""
+    ),
+}
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, sort_keys=True)
+    handle.write("\n")
+PY
+}
+
+_rollback_backup_latest_migration_name() {
+    # Read migration compatibility from metadata cryptographically bound to
+    # the exact .prev bytes. The mutable live release manifest is never used to
+    # reason about a preserved backup from an older deploy generation.
+    local backup_binary="${REL_BINARY_BACKUP:-}"
+    local metadata_path="${REL_BINARY_BACKUP_META:-${backup_binary}.meta}"
+    local binary_sha
+
+    [ -n "$backup_binary" ] \
+        && [ -f "$backup_binary" ] \
+        && [ ! -L "$backup_binary" ] \
+        && [ -f "$metadata_path" ] \
+        && [ ! -L "$metadata_path" ] || return 1
+    binary_sha="$(_sha256_file "$backup_binary")"
+    [ -n "$binary_sha" ] || return 1
+    AGENTDESK_BACKUP_ACTUAL_SHA256="$binary_sha" \
+    python3 - "$metadata_path" <<'PY' 2>/dev/null
+import json
+import os
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(1)
+if data.get("format_version") != 1:
+    sys.exit(1)
+if data.get("binary_sha256") != os.environ["AGENTDESK_BACKUP_ACTUAL_SHA256"]:
+    sys.exit(1)
+migration = data.get("latest_postgres_migration") or ""
+if not re.fullmatch(r"[0-9]{4}_[A-Za-z0-9._-]+\.sql", migration):
+    sys.exit(1)
+print(migration)
+PY
+}
+
 _rollback_would_brick_on_migration() {
     # #4348 Defect 2: refuse a rollback that would strand the previous binary
     # behind a migration the new binary already applied to the SHARED Postgres.
@@ -799,22 +867,22 @@ _rollback_would_brick_on_migration() {
     # shared DB, every OTHER node bricks on its next restart too. Returns 0 =>
     # rollback unsafe (fail-forward); returns 1 => rollback safe. Fails CLOSED on
     # any ambiguity (safety > minimal-change): a rollback must never brick.
+    local new_path new_name old_name
+    old_name="$(_rollback_backup_latest_migration_name || true)"
+    if [ -z "$old_name" ]; then
+        echo "  ⚠ [rollback-guard] rollback backup metadata is missing, invalid, or does not match the backup digest — treating rollback as unsafe" >&2
+        return 0
+    fi
     if [ "${AGENTDESK_DEPLOY_FORCE_ROLLBACK:-0}" = "1" ]; then
-        echo "  ▸ [rollback-guard] AGENTDESK_DEPLOY_FORCE_ROLLBACK=1 — skipping migration-advance guard" >&2
+        echo "  ▸ [rollback-guard] AGENTDESK_DEPLOY_FORCE_ROLLBACK=1 — backup integrity verified; skipping migration-advance comparison" >&2
         return 1
     fi
-    local new_path new_name old_name
     new_path="$(_latest_postgres_migration_path 2>/dev/null || true)"
     if [ -z "$new_path" ]; then
         echo "  ⚠ [rollback-guard] cannot resolve the new binary's latest migration ($REPO/migrations/postgres) — treating rollback as unsafe" >&2
         return 0
     fi
     new_name="$(basename "$new_path")"
-    old_name="$(_manifest_latest_migration_name || true)"
-    if [ -z "$old_name" ]; then
-        echo "  ⚠ [rollback-guard] no previous-deploy migration record ($ADK_REL/runtime/release-source.json) — cannot prove the rollback binary handles ${new_name}; treating rollback as unsafe" >&2
-        return 0
-    fi
     if _migration_advanced "$new_name" "$old_name"; then
         echo "  ▸ [rollback-guard] new migration ${new_name} is ahead of rollback target ${old_name}" >&2
         return 0
@@ -886,6 +954,9 @@ _rollback_release_binary() {
     if ! mv -f "$rel_backup" "$rel_binary"; then
         echo "✗ Failed to restore previous binary from $rel_backup — manual intervention required"
         return 3
+    fi
+    if [ -n "${REL_BINARY_BACKUP_META:-}" ]; then
+        rm -f "$REL_BINARY_BACKUP_META" 2>/dev/null || true
     fi
     # #3858 finding 3: re-lock is best-effort and MUST NOT abort the restart
     # below. A failed chflags can never leave the good binary restored but the
@@ -2413,7 +2484,18 @@ unset POST_DEPLOY_SMOKE_LOG_FINGERPRINT_BYTES POST_DEPLOY_SMOKE_LOG_FINGERPRINT_
 # instead of leaving the release down with the last-good binary already gone.
 REL_BINARY="$ADK_REL/bin/agentdesk"
 REL_BINARY_BACKUP="$ADK_REL/bin/agentdesk.prev"
+REL_BINARY_BACKUP_META="$REL_BINARY_BACKUP.meta"
 chflags nouchg "$REL_BINARY" 2>/dev/null || true
+for rollback_path in \
+    "$REL_BINARY_BACKUP" \
+    "$REL_BINARY_BACKUP_META" \
+    "$REL_BINARY_BACKUP.tmp" \
+    "$REL_BINARY_BACKUP_META.tmp"; do
+    if [ -L "$rollback_path" ]; then
+        echo "✗ Refusing symlinked rollback artifact: $rollback_path"
+        exit 1
+    fi
+done
 if [ -f "$REL_BINARY_BACKUP" ]; then
     # #3858 (re-entrancy / finding 2): treat .prev as last-KNOWN-GOOD. A leftover
     # .prev means a PRIOR deploy failed before its success-path cleanup, so it
@@ -2421,7 +2503,12 @@ if [ -f "$REL_BINARY_BACKUP" ]; then
     # still healthy). The CURRENT live binary may be the unverified/bad binary the
     # prior deploy promoted — do NOT overwrite a good .prev with it. Preserve the
     # existing last-known-good as the rollback target so a re-run can still recover.
-    echo "▸ Preserving existing last-known-good backup for rollback (prior deploy left one)..."
+    if ! _rollback_backup_latest_migration_name >/dev/null; then
+        echo "✗ Existing rollback backup metadata is absent, corrupt, or digest-mismatched"
+        echo "  refusing to trust stale $REL_BINARY_BACKUP"
+        exit 1
+    fi
+    echo "▸ Preserving integrity-verified last-known-good backup for rollback (prior deploy left one)..."
     # Ensure it is mutable so the rollback's `mv -f` can consume it.
     chflags nouchg "$REL_BINARY_BACKUP" 2>/dev/null || true
 elif [ -f "$REL_BINARY" ]; then
@@ -2443,7 +2530,18 @@ elif [ -f "$REL_BINARY" ]; then
     # .prev.tmp, which the `[ -f "$REL_BINARY_BACKUP" ]` guard never consumes.
     echo "▸ Backing up current release binary for rollback..."
     cp -p "$REL_BINARY" "$REL_BINARY_BACKUP.tmp"
+    _write_rollback_backup_metadata \
+        "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP_META.tmp"
     mv -f "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP"
+    if ! mv -f "$REL_BINARY_BACKUP_META.tmp" "$REL_BINARY_BACKUP_META"; then
+        rm -f "$REL_BINARY_BACKUP" 2>/dev/null || true
+        echo "✗ Could not atomically bind rollback metadata to the backup"
+        exit 1
+    fi
+elif [ -e "$REL_BINARY_BACKUP_META" ]; then
+    # Metadata without its binary cannot be a rollback target. Remove this
+    # harmless half of an interrupted cleanup before creating any future pair.
+    rm -f "$REL_BINARY_BACKUP_META"
 fi
 
 # Promote the fully validated asset pair before the binary. The durable marker
@@ -2684,10 +2782,29 @@ fi
 # healthy serving binary must not fail the deploy.
 chflags uchg "$REL_BINARY" 2>/dev/null || true
 chflags nouchg "$REL_BINARY_BACKUP" 2>/dev/null || true
-rm -f "$REL_BINARY_BACKUP" 2>/dev/null || true
-# #3858 (re-review finding 1): also drop any stray atomic-backup temp so an
-# interrupted prior backup copy never lingers in bin/.
-rm -f "$REL_BINARY_BACKUP.tmp" 2>/dev/null || true
+ROLLBACK_BACKUP_CLEANUP_OK=1
+if ! rm -f "$REL_BINARY_BACKUP" 2>/dev/null \
+  || [ -e "$REL_BINARY_BACKUP" ]; then
+    ROLLBACK_BACKUP_CLEANUP_OK=0
+fi
+if [ "$ROLLBACK_BACKUP_CLEANUP_OK" = 1 ]; then
+    if ! rm -f "$REL_BINARY_BACKUP_META" 2>/dev/null \
+      || [ -e "$REL_BINARY_BACKUP_META" ]; then
+        ROLLBACK_BACKUP_CLEANUP_OK=0
+    fi
+fi
+# Also drop atomic temps. A persistent temp is not a rollback target, but a
+# failed cleanup is reported before the release manifest can bless this deploy.
+for rollback_tmp in "$REL_BINARY_BACKUP.tmp" "$REL_BINARY_BACKUP_META.tmp"; do
+    if ! rm -f "$rollback_tmp" 2>/dev/null || [ -e "$rollback_tmp" ]; then
+        ROLLBACK_BACKUP_CLEANUP_OK=0
+    fi
+done
+if [ "$ROLLBACK_BACKUP_CLEANUP_OK" != 1 ]; then
+    echo "✗ Healthy binary is serving, but rollback backup cleanup failed" >&2
+    echo "  release manifest was not advanced; repair $REL_BINARY_BACKUP and retry" >&2
+    exit 1
+fi
 
 if _health_json_unhealthy_only_no_provider_runtimes "${WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON:-}"; then
     echo "✓ Release is serving on :${REL_PORT} (deploy-ready: no provider runtimes registered —"
