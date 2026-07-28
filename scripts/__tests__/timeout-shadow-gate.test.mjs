@@ -38,7 +38,7 @@ test("aggregates current and rotated logs in deterministic section order", () =>
     assert.equal(result.exitCode, 0);
     assert.equal(result.output, JSON.stringify({
       _section_A: { total: 1, comparable: 1, agreement: 1, divergence: 0, error: 0 },
-      _section_J: { total: 1, incomparable: 1, ratio: 1, error: 0 },
+      _section_J: { total: 1, successful: 1, incomparable: 1, ratio: 1, error: 0 },
       _unclassified: { malformed: 0 }
     }));
   } finally {
@@ -76,6 +76,16 @@ test("time windows preserve microsecond boundaries and support zoned space times
   assert.equal(JSON.parse(zoned.output)._section_A.total, 2);
 });
 
+test("timestamp token parsing rejects partial offsets and accepts year zero leap day", () => {
+  const options = ["--stdin", "--since", "0000-02-29T00:00:00Z", "--min-a-samples", "0", "--min-j-samples", "0"];
+  const result = run(options, [
+    `0000-02-29T00:00:00Z INFO ${shadow("_section_A")}`,
+    `0000-02-29T00:00:00+09:000 INFO ${shadow("_section_A")}`,
+    `0000-02-29T00:00:00+09 INFO ${shadow("_section_A")}`
+  ].join("\n"));
+  assert.equal(JSON.parse(result.output)._section_A.total, 1);
+});
+
 test("counts malformed shadow records but ignores unrelated log noise", () => {
   const report = aggregateText([
     "INFO ordinary log with { bad json",
@@ -102,7 +112,7 @@ test("reports J incomparable ratio and preserves zero-sample null ratio", () => 
     shadow("_section_J", { reducer_decision: "incomparable", agree: false, incomparable: true }),
     shadow("_section_J", { reducer_decision: "retry", agree: true })
   ]);
-  assert.deepEqual(report._section_J, { total: 2, incomparable: 1, ratio: 0.5, error: 0 });
+  assert.deepEqual(report._section_J, { total: 2, successful: 2, incomparable: 1, ratio: 0.5, error: 0 });
   assert.equal(aggregateText([])._section_J.ratio, null);
 });
 
@@ -110,7 +120,16 @@ test("default positive sample thresholds fail on zero samples instead of passing
   const result = run([], "");
   assert.equal(result.exitCode, 1);
   assert.match(result.failures.join(" "), /_section_A comparable samples 0 < 1/);
-  assert.match(result.failures.join(" "), /_section_J samples 0 < 1/);
+  assert.match(result.failures.join(" "), /_section_J successful samples 0 < 1/);
+});
+
+test("J reducer errors are not successful minimum evidence and fail closed by default", () => {
+  const result = run(["--stdin", "--min-a-samples", "0"], shadow("_section_J", {
+    reducer_decision: "error", agree: false, error: "preview failed"
+  }));
+  assert.equal(result.exitCode, 1);
+  assert.match(result.failures.join(" "), /_section_J successful samples 0 < 1/);
+  assert.match(result.failures.join(" "), /shadow errors 1 > 0/);
 });
 
 test("rejects decimal counts and invalid ISO-8601 calendar timestamps", () => {
@@ -131,13 +150,120 @@ test("retries a changed opened-file snapshot without double counting", () => {
     const io = {
       ...fs,
       fstatSync(descriptor) {
-        const stat = fs.fstatSync(descriptor);
-        return { ...stat, mtimeMs: signatureMtimes[stats++] };
+        const stat = fs.fstatSync(descriptor, { bigint: true });
+        const stamp = BigInt(signatureMtimes[stats++]);
+        return { ...stat, mtimeNs: stamp, ctimeNs: stamp };
       }
     };
     const report = aggregateFile(log, {}, io);
     assert.equal(report._section_A.total, 1);
     assert.equal(stats, 4);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("content recheck rejects same-inode rewrite with restored metadata and keeps only the fresh retry aggregate", () => {
+  const directory = mkdtempSync(join(tmpdir(), "timeout-shadow-gate-"));
+  try {
+    const log = join(directory, "dcserver.stdout.log");
+    const oldRecord = `${shadow("_section_A")}\n`;
+    const newRecord = `${shadow("_section_J")}\n`;
+    assert.equal(Buffer.byteLength(oldRecord), Buffer.byteLength(newRecord));
+    writeFileSync(log, oldRecord);
+    const baseline = fs.statSync(log, { bigint: true });
+    let rewritten = false;
+    const io = {
+      ...fs,
+      fstatSync() { return { ...baseline }; },
+      readSync(...args) {
+        const bytes = fs.readSync(...args);
+        if (!rewritten) {
+          rewritten = true;
+          writeFileSync(log, newRecord);
+        }
+        return bytes;
+      }
+    };
+    const report = aggregateFile(log, {}, io);
+    assert.equal(report._section_A.total, 0);
+    assert.equal(report._section_J.total, 1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("shrink during first scan retries with a fresh snapshot", () => {
+  const directory = mkdtempSync(join(tmpdir(), "timeout-shadow-gate-"));
+  try {
+    const log = join(directory, "dcserver.stdout.log");
+    writeFileSync(log, `${shadow("_section_A")}\n`);
+    let shrunk = false;
+    const io = {
+      ...fs,
+      readSync(...args) {
+        const bytes = fs.readSync(...args);
+        if (!shrunk) {
+          shrunk = true;
+          writeFileSync(log, "");
+        }
+        return bytes;
+      }
+    };
+    assert.equal(aggregateFile(log, {}, io)._section_A.total, 0);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("opened-inode collision caused by rotation retries as one fresh all-file snapshot", () => {
+  const directory = mkdtempSync(join(tmpdir(), "timeout-shadow-gate-"));
+  try {
+    const current = join(directory, "dcserver.stdout.log");
+    const rotated = join(directory, "dcserver.stdout.log.1");
+    const archived = join(directory, "dcserver.stdout.log.2");
+    writeFileSync(current, `${shadow("_section_A")}\n`);
+    writeFileSync(rotated, `${shadow("_section_J")}\n`);
+    let rotatedOnce = false;
+    const io = {
+      ...fs,
+      openSync(path, flags) {
+        const descriptor = fs.openSync(path, flags);
+        if (!rotatedOnce) {
+          rotatedOnce = true;
+          renameSync(rotated, archived);
+          renameSync(current, rotated);
+          writeFileSync(current, `${shadow("_section_J")}\n`);
+        }
+        return descriptor;
+      }
+    };
+    const report = aggregateFiles([current, rotated], {}, io);
+    assert.equal(report._section_A.total, 1);
+    assert.equal(report._section_J.total, 1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("opened descriptors close on fstat and realpath failures", () => {
+  const directory = mkdtempSync(join(tmpdir(), "timeout-shadow-gate-"));
+  try {
+    const log = join(directory, "dcserver.stdout.log");
+    writeFileSync(log, `${shadow("_section_A")}\n`);
+    for (const failedMethod of ["fstatSync", "realpathSync"]) {
+      let closes = 0;
+      const io = {
+        ...fs,
+        [failedMethod]() { throw new Error(`${failedMethod} injected failure`); },
+        closeSync(descriptor) {
+          closes += 1;
+          return fs.closeSync(descriptor);
+        }
+      };
+      assert.throws(() => aggregateFile(log, {}, io), /injected failure/);
+      assert.equal(closes, 2);
+    }
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -167,7 +293,7 @@ test("opens all rotated inputs before reading so a mid-scan rotation cannot drop
     };
     const report = aggregateFiles([current, rotated], {}, io);
     assert.deepEqual(report._section_A, { total: 1, comparable: 1, agreement: 1, divergence: 0, error: 0 });
-    assert.deepEqual(report._section_J, { total: 1, incomparable: 1, ratio: 1, error: 0 });
+    assert.deepEqual(report._section_J, { total: 1, successful: 1, incomparable: 1, ratio: 1, error: 0 });
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -221,6 +347,12 @@ test("streamed stdin rejects an unterminated line over the documented record cap
   assert.match(result.stderr, /log line exceeds 1048576 bytes/);
 });
 
+test("text and run library exports enforce the same bounded scanner cap", () => {
+  const oversized = "x".repeat(1024 * 1024 + 1);
+  assert.throws(() => aggregateText([oversized]), /log line exceeds 1048576 bytes/);
+  assert.throws(() => run(["--min-a-samples", "0", "--min-j-samples", "0"], oversized), /log line exceeds 1048576 bytes/);
+});
+
 test("CLI readable input uses chunk iteration rather than a synchronous fd read", async () => {
   const readable = Readable.from([
     Buffer.from(`prefix ${shadow("_section_A")}\n`),
@@ -228,7 +360,7 @@ test("CLI readable input uses chunk iteration rather than a synchronous fd read"
   ]);
   const result = await runFromReadable(["--stdin"], readable);
   assert.equal(result.exitCode, 0);
-  assert.deepEqual(JSON.parse(result.output)._section_J, { total: 1, incomparable: 1, ratio: 1, error: 0 });
+  assert.deepEqual(JSON.parse(result.output)._section_J, { total: 1, successful: 1, incomparable: 1, ratio: 1, error: 0 });
 });
 
 test("enforces pass and fail threshold combinations", () => {

@@ -9,6 +9,7 @@
  */
 import fs from "node:fs";
 import process from "node:process";
+import { createHash } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -28,7 +29,7 @@ function emptySection() {
 function emptyReport() {
   return {
     _section_A: emptySection(),
-    _section_J: { total: 0, incomparable: 0, ratio: null, error: 0 },
+    _section_J: { total: 0, successful: 0, incomparable: 0, ratio: null, error: 0 },
     // A malformed line without a readable `section` cannot honestly be
     // attributed to A or J.  Keep it visible and include it in max-errors.
     _unclassified: { malformed: 0 }
@@ -55,7 +56,8 @@ function parseTimestamp(value, optionName) {
   const hour = Number(hourText);
   const minute = Number(minuteText);
   const second = Number(secondText);
-  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
   const zoneValid = zone === "Z" || (Number(zone.slice(1, 3)) <= 23 && Number(zone.slice(4, 6)) <= 59);
   if (month < 1 || month > 12 || day < 1 || day > daysInMonth || hour > 23 || minute > 59 || second > 59 || !zoneValid) {
     throw new Error(`${optionName} requires a valid ISO-8601 calendar timestamp`);
@@ -84,7 +86,8 @@ export function parseArgs(argv) {
     minASamples: 1,
     minJSamples: 1,
     maxDivergence: Number.POSITIVE_INFINITY,
-    maxErrors: Number.POSITIVE_INFINITY
+    // Reducer/malformed errors are never clean shadow evidence by default.
+    maxErrors: 0
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -131,9 +134,13 @@ function timestampFromPrefix(prefix) {
   // tracing's usual RFC 3339 timestamps and the common space-separated form.
   // The final timestamp before the payload is the only one belonging to the
   // log line; timestamps in the JSON itself are deliberately ignored.
-  const matches = prefix.match(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g);
-  if (!matches || matches.length === 0) return null;
-  const raw = matches[matches.length - 1];
+  const matches = [...prefix.matchAll(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g)];
+  if (matches.length === 0) return null;
+  const match = matches[matches.length - 1];
+  const raw = match[0];
+  // Do not turn a partial offset such as +09 or +09:000 into UTC by matching
+  // only the timestamp prefix.  A valid tracing timestamp is token-bounded.
+  if (/^[0-9:+-]/.test(prefix.slice(match.index + raw.length))) return null;
   const normalizedBase = raw.replace(" ", "T");
   const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/.test(normalizedBase)
     ? normalizedBase.replace(/([+-]\d{2})(\d{2})$/, "$1:$2")
@@ -190,6 +197,7 @@ function addRecord(report, record) {
     section.error += 1;
     return;
   }
+  if (record.section === "_section_J") section.successful += 1;
   if (record.section === "_section_A") {
     if (!isIncomparableRecord(record)) {
       section.comparable += 1;
@@ -203,7 +211,7 @@ function addRecord(report, record) {
 
 function finalizeReport(report) {
   const j = report._section_J;
-  j.ratio = j.total === 0 ? null : j.incomparable / j.total;
+  j.ratio = j.successful === 0 ? null : j.incomparable / j.successful;
   return report;
 }
 
@@ -221,7 +229,9 @@ export function aggregateText(inputs, options = {}) {
   const effectiveOptions = { since: null, until: null, ...options };
   const report = emptyReport();
   for (const input of inputs) {
-    for (const line of String(input).split(/\r?\n/)) processLine(report, line, effectiveOptions);
+    const scanner = createLineScanner((line) => processLine(report, line, effectiveOptions));
+    scanner.write(Buffer.from(String(input)));
+    scanner.end();
   }
   return finalizeReport(report);
 }
@@ -238,7 +248,7 @@ function processLine(report, line, options) {
 }
 
 function statSignature(stat) {
-  return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+  return `${stat.dev}:${stat.ino}:${stat.size}:${stat.ctimeNs}:${stat.mtimeNs}`;
 }
 
 function createLineScanner(onLine) {
@@ -282,7 +292,7 @@ function createLineScanner(onLine) {
   };
 }
 
-function forEachDescriptorLine(descriptor, byteLimit, onLine, io) {
+function forEachDescriptorLine(descriptor, byteLimit, onLine, io, hash = null) {
   const buffer = Buffer.allocUnsafe(FILE_READ_CHUNK_BYTES);
   const scanner = createLineScanner(onLine);
   let remaining = byteLimit;
@@ -295,13 +305,30 @@ function forEachDescriptorLine(descriptor, byteLimit, onLine, io) {
       if (remaining !== null) throw new Error("log shrank while reading snapshot");
       break;
     }
-    scanner.write(buffer.subarray(0, bytesRead));
+    const chunk = buffer.subarray(0, bytesRead);
+    if (hash) hash.update(chunk);
+    scanner.write(chunk);
     if (remaining !== null) {
       remaining -= bytesRead;
       position += bytesRead;
     }
   }
   scanner.end();
+}
+
+function hashDescriptor(descriptor, byteLimit, io) {
+  const hash = createHash("sha256");
+  const buffer = Buffer.allocUnsafe(FILE_READ_CHUNK_BYTES);
+  let remaining = byteLimit;
+  let position = 0;
+  while (remaining > 0) {
+    const bytesRead = io.readSync(descriptor, buffer, 0, Math.min(buffer.length, remaining), position);
+    if (bytesRead === 0) throw new Error("log shrank while re-reading snapshot");
+    hash.update(buffer.subarray(0, bytesRead));
+    remaining -= bytesRead;
+    position += bytesRead;
+  }
+  return hash.digest("hex");
 }
 
 function mergeReport(target, source) {
@@ -311,34 +338,34 @@ function mergeReport(target, source) {
   target._section_A.divergence += source._section_A.divergence;
   target._section_A.error += source._section_A.error;
   target._section_J.total += source._section_J.total;
+  target._section_J.successful += source._section_J.successful;
   target._section_J.incomparable += source._section_J.incomparable;
   target._section_J.error += source._section_J.error;
   target._unclassified.malformed += source._unclassified.malformed;
 }
 
-function openFileSnapshots(files, io) {
-  const snapshots = [];
+function openFileSnapshots(files, snapshots, io) {
   const canonicalPaths = new Set();
   const identities = new Set();
-  try {
-    for (const file of files) {
-      const descriptor = io.openSync(file, "r");
-      const stat = io.fstatSync(descriptor);
-      const canonical = io.realpathSync(file);
-      const identity = `${stat.dev}:${stat.ino}`;
-      if (canonicalPaths.has(canonical) || identities.has(identity)) {
-        io.closeSync(descriptor);
-        throw new Error(`duplicate log input: ${file}`);
-      }
-      canonicalPaths.add(canonical);
-      identities.add(identity);
-      snapshots.push({ descriptor, file, stat, signature: statSignature(stat) });
+  for (const file of files) {
+    const descriptor = io.openSync(file, "r");
+    // Push before every later failure so the enclosing attempt closes this fd.
+    const snapshot = { descriptor, file };
+    snapshots.push(snapshot);
+    const stat = io.fstatSync(descriptor, { bigint: true });
+    const canonical = io.realpathSync(file);
+    const identity = `${stat.dev}:${stat.ino}`;
+    if (canonicalPaths.has(canonical) || identities.has(identity)) {
+      throw new Error(`duplicate log input: ${file}`);
     }
-    return snapshots;
-  } catch (error) {
-    for (const snapshot of snapshots) io.closeSync(snapshot.descriptor);
-    throw error;
+    if (stat.size > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`log too large for bounded scan: ${file}`);
+    canonicalPaths.add(canonical);
+    identities.add(identity);
+    snapshot.stat = stat;
+    snapshot.signature = statSignature(stat);
+    snapshot.size = Number(stat.size);
   }
+  return snapshots;
 }
 
 function closeSnapshots(snapshots, io) {
@@ -352,20 +379,32 @@ function closeSnapshots(snapshots, io) {
  */
 export function aggregateFiles(files, options = {}, io = fs) {
   const effectiveOptions = { since: null, until: null, ...options };
+  let lastError = null;
   for (let attempt = 0; attempt < STABLE_READ_ATTEMPTS; attempt += 1) {
-    const snapshots = openFileSnapshots(files, io);
+    const snapshots = [];
     const report = emptyReport();
     try {
+      openFileSnapshots(files, snapshots, io);
       for (const snapshot of snapshots) {
-        forEachDescriptorLine(snapshot.descriptor, snapshot.stat.size, (line) => processLine(report, line, effectiveOptions), io);
+        const hash = createHash("sha256");
+        forEachDescriptorLine(snapshot.descriptor, snapshot.size, (line) => processLine(report, line, effectiveOptions), io, hash);
+        snapshot.firstHash = hash.digest("hex");
       }
-      const stable = snapshots.every((snapshot) => statSignature(io.fstatSync(snapshot.descriptor)) === snapshot.signature);
+      let stable = true;
+      for (const snapshot of snapshots) {
+        const contentMatches = snapshot.firstHash === hashDescriptor(snapshot.descriptor, snapshot.size, io);
+        const metadataMatches = statSignature(io.fstatSync(snapshot.descriptor, { bigint: true })) === snapshot.signature;
+        if (!contentMatches || !metadataMatches) stable = false;
+      }
       if (stable) return finalizeReport(report);
+      lastError = new Error("log changed while reading snapshot");
+    } catch (error) {
+      lastError = error;
     } finally {
       closeSnapshots(snapshots, io);
     }
   }
-  throw new Error("log changed while reading snapshot");
+  throw lastError || new Error("log changed while reading snapshot");
 }
 
 export function aggregateFile(file, options = {}, io = fs) {
@@ -400,8 +439,8 @@ export function thresholdFailures(report, options) {
   if (report._section_A.comparable < options.minASamples) {
     failures.push(`_section_A comparable samples ${report._section_A.comparable} < ${options.minASamples}`);
   }
-  if (report._section_J.total < options.minJSamples) {
-    failures.push(`_section_J samples ${report._section_J.total} < ${options.minJSamples}`);
+  if (report._section_J.successful < options.minJSamples) {
+    failures.push(`_section_J successful samples ${report._section_J.successful} < ${options.minJSamples}`);
   }
   if (report._section_A.divergence > options.maxDivergence) {
     failures.push(`_section_A divergence ${report._section_A.divergence} > ${options.maxDivergence}`);
@@ -419,9 +458,9 @@ export function helpText() {
     `  --since <ISO-8601>         Include timestamped records at or after this time\n` +
     `  --until <ISO-8601>         Include timestamped records at or before this time\n` +
     `  --min-a-samples <count>    Minimum comparable _section_A records (default: 1)\n` +
-    `  --min-j-samples <count>    Minimum _section_J records (default: 1)\n` +
+    `  --min-j-samples <count>    Minimum successful _section_J records (default: 1)\n` +
     `  --max-divergence <count>   Maximum comparable _section_A disagreements\n` +
-    `  --max-errors <count>       Maximum malformed/reducer-error records\n\n` +
+    `  --max-errors <count>       Maximum malformed/reducer-error records (default: 0)\n\n` +
     `Input records are streamed; each log line is limited to ${MAX_RECORD_LINE_BYTES} bytes.\n`;
 }
 
