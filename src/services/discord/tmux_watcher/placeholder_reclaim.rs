@@ -303,6 +303,29 @@ mod redrive_reclaim_e2e_tests {
                     .await
                     .expect("capped redrive pass")
             );
+            assert!(
+                !registry
+                    .redrive_undelivered_backlog_at(
+                        &provider,
+                        shared.clone(),
+                        channel_id,
+                        base + 4_529,
+                    )
+                    .await
+                    .expect("pre-rearm boundary pass")
+            );
+            assert!(
+                registry
+                    .redrive_undelivered_backlog_at(
+                        &provider,
+                        shared.clone(),
+                        channel_id,
+                        base + 4_530,
+                    )
+                    .await
+                    .expect("post-rearm boundary pass")
+            );
+            nudges += 1;
             (creates, deletes, nudges)
         });
 
@@ -311,7 +334,10 @@ mod redrive_reclaim_e2e_tests {
             delete_count, 0,
             "no post-nudge placeholder may churn inside 900s"
         );
-        assert_eq!(nudge_count, 6, "redrive must stop permanently at the cap");
+        assert_eq!(
+            nudge_count, 7,
+            "redrive must remain capped for one hour, then re-arm"
+        );
         assert_eq!(*resume_offset.lock().unwrap(), Some(0));
         if let Some((_, handle)) = shared.tmux_watchers.remove(&channel_id) {
             handle.cancel.store(true, Ordering::Release);
