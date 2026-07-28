@@ -1,7 +1,7 @@
 use super::*;
 use serde::Deserialize;
 
-use crate::services::auto_queue::thread_group_contract::THREAD_GROUP_SERIAL_LANE_CONTRACT;
+use crate::queue_contract::THREAD_GROUP_SERIAL_LANE_CONTRACT;
 
 /// POST /api/queue/request-generate (#2126)
 ///
@@ -322,6 +322,10 @@ mod tests {
 
     #[test]
     fn instruction_uses_exact_thread_group_serial_lane_contract() {
+        assert_eq!(
+            THREAD_GROUP_SERIAL_LANE_CONTRACT,
+            "Within one `batch_phase`, entries with the same `thread_group` share a serial lane with at most one active entry; entries with different `thread_group` values may run in parallel up to available capacity, and dependency-related entries must share a serial lane or use separate `batch_phase` values."
+        );
         let issues = vec![1i64, 2];
         let text = build_request_generate_instruction(&RequestGenerateInput {
             repo: "r",

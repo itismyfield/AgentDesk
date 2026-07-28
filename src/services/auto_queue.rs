@@ -1,8 +1,6 @@
 pub(crate) mod cancel_run;
 pub(crate) mod route;
 pub mod runtime;
-pub(crate) mod thread_group_contract;
-
 use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row as SqlxRow};

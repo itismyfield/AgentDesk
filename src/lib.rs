@@ -118,6 +118,7 @@ pub(crate) mod manual_intervention;
 // compatibility across staged rollout paths.
 pub(crate) mod phase_gate;
 pub(crate) mod pipeline;
+pub(crate) mod queue_contract;
 pub(crate) mod receipt;
 // Reconciliation sweep jobs are invoked by maintenance scheduling, not by every
 // compile target.

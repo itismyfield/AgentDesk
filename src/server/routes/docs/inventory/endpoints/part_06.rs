@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::services::auto_queue::thread_group_contract::THREAD_GROUP_SERIAL_LANE_CONTRACT;
+use crate::queue_contract::THREAD_GROUP_SERIAL_LANE_CONTRACT;
 
 #[allow(unused_imports)]
 use super::super::{EndpointDoc, ParamDoc, body_param, ep, header_param, path_param, query_param};
