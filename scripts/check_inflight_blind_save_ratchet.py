@@ -60,13 +60,13 @@ from pathlib import Path
 #   turn_bridge/stream_tick.rs .......... 0  (R1)
 #   turn_bridge/stream_loop.rs .......... 0  (R3 narrow locked patches)
 #   turn_bridge/post_loop_finalize.rs ... 0
-#   turn_bridge/mod.rs (hotfile, solo) .. 1  (R4)
+#   turn_bridge/mod.rs (hotfile, solo) .. 0  (R4)
 #   external (router/session/tui) ....... 0
 #
-# R3 converts cancel restart-mode sync and Done placeholder clearing to narrow
-# identity/authority-checked locked patches, so neither path can overwrite or
-# recreate a row owned by a newer turn.
-BASELINE = 1
+# R4 converts the final bridge-entry whole-row write to the strict guarded save;
+# a missing or re-owned durable row is now skipped rather than recreated or
+# overwritten.
+BASELINE = 0
 
 SCAN_ROOT = Path("src") / "services" / "discord"
 

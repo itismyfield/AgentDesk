@@ -52,6 +52,9 @@ use self::identity_gate::{
     save_inflight_state_if_identity_matches_allow_output_restamp_in_root,
     save_inflight_state_if_identity_unchanged_in_root,
 };
+#[cfg(test)]
+#[path = "save_store/bridge_entry_guard_tests.rs"]
+mod bridge_entry_guard_tests;
 
 /// Blind whole-blob write of `InflightTurnState`: serializes the ENTIRE row and
 /// clobbers whatever is on disk, with no compare-and-set on turn identity.
