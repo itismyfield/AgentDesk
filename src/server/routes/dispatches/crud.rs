@@ -796,7 +796,8 @@ async fn update_dispatch_result_pg(
 #[cfg(test)]
 mod tests {
     use super::{
-        get_dispatch_delivery_events, get_dispatch_delivery_reconcile_stats, update_dispatch,
+        UpdateDispatchBody, get_dispatch_delivery_events, get_dispatch_delivery_reconcile_stats,
+        update_dispatch,
     };
     use axum::extract::{Path, State};
     use axum::http::StatusCode;
