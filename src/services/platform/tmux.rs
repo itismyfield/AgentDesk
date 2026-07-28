@@ -895,12 +895,12 @@ pub fn has_live_pane(session_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// #3635: three-state liveness of a tmux session's panes. Unlike [`has_live_pane`]
-/// (which collapses both "session absent" and "probe failed" to `false`), this
-/// distinguishes a *definitive* negative (`DeadOrAbsent`) from a *probe failure*
-/// (`ProbeError`). Callers deciding to destroy state on death MUST treat
-/// `ProbeError` as "unknown ⇒ preserve" — a transient tmux hiccup is not proof
-/// the owner died.
+/// #4489 introduced three-state liveness of a tmux session's panes and the
+/// per-command two-second probe bound. Unlike [`has_live_pane`] (which collapses
+/// both "session absent" and "probe failed" to `false`), this distinguishes a
+/// *definitive* negative (`DeadOrAbsent`) from a *probe failure* (`ProbeError`).
+/// Callers deciding to destroy state on death MUST treat `ProbeError` as
+/// "unknown ⇒ preserve" — a transient tmux hiccup is not proof the owner died.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneLiveness {
     /// Session exists and has at least one non-dead pane.
@@ -1291,10 +1291,7 @@ mod timeout_tests {
             "an unexpected has-session failure is unknown, not confirmed death"
         );
         unsafe { std::env::set_var("FAKE_TMUX_MODE", "missing") };
-        assert_eq!(
-            pane_liveness("agentdesk-test"),
-            PaneLiveness::DeadOrAbsent
-        );
+        assert_eq!(pane_liveness("agentdesk-test"), PaneLiveness::DeadOrAbsent);
         unsafe { std::env::set_var("FAKE_TMUX_MODE", "present") };
         assert_eq!(pane_liveness("agentdesk-test"), PaneLiveness::Live);
         unsafe { std::env::remove_var("FAKE_TMUX_MODE") };

@@ -501,20 +501,27 @@ pub(crate) async fn perform_resume_rebind(
     // If teardown actually retired the pane, forget its stale transcript/session
     // mirror. Otherwise keep the live binding and its scan offset so output that
     // arrives during the rebind remains eligible for delayed delivery.
-    let tmux_still_present = if tmux_killed {
-        false
+    let pane_liveness = if tmux_killed {
+        crate::services::platform::tmux::PaneLiveness::DeadOrAbsent
     } else {
-        crate::services::tmux_diagnostics::probe_tmux_session_exists(tmux_name).await
+        // #4794 adopts #4489's existing three-state/two-second pane probe through
+        // its async adapter; this call site contributes only the conservative
+        // state decision, while JoinError is mapped to ProbeError by the adapter.
+        crate::services::tmux_diagnostics::probe_tmux_session_pane_liveness(tmux_name).await
     };
-    let runtime_binding_clear = if tmux_still_present {
-        ResumeRuntimeBindingClearOutcome::RetainedLive {
-            tmux_session: tmux_name.trim().to_string(),
+    let runtime_binding_clear = match pane_liveness {
+        crate::services::platform::tmux::PaneLiveness::DeadOrAbsent => {
+            if owner_retained_before_teardown && let Some(shared) = resume_runtime.as_deref() {
+                clear_resume_runtime_owner_after_death(shared, tmux_name);
+            }
+            clear_resume_runtime_binding(tmux_name)
         }
-    } else {
-        if owner_retained_before_teardown && let Some(shared) = resume_runtime.as_deref() {
-            clear_resume_runtime_owner_after_death(shared, tmux_name);
+        crate::services::platform::tmux::PaneLiveness::Live
+        | crate::services::platform::tmux::PaneLiveness::ProbeError => {
+            ResumeRuntimeBindingClearOutcome::RetainedLive {
+                tmux_session: tmux_name.trim().to_string(),
+            }
         }
-        clear_resume_runtime_binding(tmux_name)
     };
 
     // In-memory mirror so the next turn resumes without a restart.
