@@ -29,8 +29,15 @@ pub(in crate::services::discord::inflight) fn stamp_claude_e_process_if_matches_
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return GuardedSaveOutcome::IoError;
     };
-    let Some(mut on_disk) = load_inflight_state_unlocked(&path) else {
-        return GuardedSaveOutcome::Missing;
+    let mut on_disk = match read_inflight_state_for_guarded_write(
+        &path,
+        &provider,
+        requested.channel_id,
+        expected,
+        "stamp_claude_e_process_if_matches_identity",
+    ) {
+        Ok(on_disk) => on_disk,
+        Err(outcome) => return outcome,
     };
     if (expected.user_msg_id == 0 && expected.turn_start_offset.is_none())
         || on_disk.restart_mode.is_some()
@@ -96,9 +103,9 @@ pub(in crate::services::discord::inflight) fn stamp_claude_e_process_if_matches_
         tracing::warn!(
             provider = %provider.as_str(),
             channel_id = requested.channel_id,
-            "ClaudeE process-evidence stamp deferred because local and durable responses diverged"
+            "ClaudeE process-evidence stamp rejected because local and durable responses diverged"
         );
-        return GuardedSaveOutcome::IoError;
+        return GuardedSaveOutcome::IdentityMismatch;
     }
     if apply_process_runtime {
         on_disk.runtime_kind = Some(RuntimeHandoffKind::ClaudeEAdapter);
@@ -306,5 +313,68 @@ mod tests {
                 "stale {case} P1 must not overwrite P2",
             );
         }
+    }
+
+    #[test]
+    fn transient_claude_e_stamp_read_error_is_retryable_and_preserves_process_frame() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let channel_id = 42_592_563;
+        let seed = claude_e_seed(channel_id);
+        save_inflight_state_in_root(root.path(), &seed).expect("seed owner row");
+        let baseline = load(root.path(), channel_id);
+        let expected = InflightTurnIdentity::from_state(&baseline);
+        let mut local = claude_e_request(&baseline, "/runtime/claude-e-r9-retry.jsonl", 42_564);
+        let local_before = serde_json::to_value(&local).expect("serialize process frame");
+
+        let path = inflight_state_path(root.path(), &ProviderKind::Claude, channel_id);
+        std::fs::remove_file(&path).expect("replace row with deterministic read failure");
+        std::fs::create_dir(&path).expect("directory at row path forces read error");
+        assert_eq!(
+            stamp_claude_e_process_if_matches_identity_in_root(
+                root.path(),
+                (&baseline, &mut local),
+                &expected,
+            ),
+            GuardedSaveOutcome::IoError,
+        );
+        assert_eq!(
+            serde_json::to_value(&local).expect("serialize retained process frame"),
+            local_before,
+            "retryable guarded-read failure must preserve exact ClaudeE process evidence",
+        );
+    }
+
+    #[test]
+    fn divergent_claude_e_response_is_non_retryable_and_preserves_process_frame() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let channel_id = 42_592_564;
+        let mut seed = claude_e_seed(channel_id);
+        seed.full_response = "shared base".to_string();
+        save_inflight_state_in_root(root.path(), &seed).expect("seed owner row");
+        let baseline = load(root.path(), channel_id);
+        let expected = InflightTurnIdentity::from_state(&baseline);
+
+        let mut durable = baseline.clone();
+        durable.full_response = "durable watcher branch".to_string();
+        save_inflight_state_in_root(root.path(), &durable).expect("persist divergent durable row");
+        let durable_before = load(root.path(), channel_id);
+        let mut local = claude_e_request(&baseline, "/runtime/claude-e-r9-diverged.jsonl", 42_565);
+        local.full_response = "resolved terminal branch".to_string();
+        let local_before = serde_json::to_value(&local).expect("serialize process frame");
+
+        assert_eq!(
+            stamp_claude_e_process_if_matches_identity_in_root(
+                root.path(),
+                (&baseline, &mut local),
+                &expected,
+            ),
+            GuardedSaveOutcome::IdentityMismatch,
+            "semantic body divergence must not retain a permanently failing process frame",
+        );
+        assert_eq!(serde_json::to_value(&local).unwrap(), local_before);
+        assert_eq!(
+            serde_json::to_value(load(root.path(), channel_id)).unwrap(),
+            serde_json::to_value(durable_before).unwrap(),
+        );
     }
 }

@@ -21,7 +21,7 @@ use content_arms::{
 };
 use tool_arms::{
     StreamToolArmContext, StreamToolArmMessage, StreamToolArmOutcome, StreamToolArmState,
-    handle_stream_tool_message,
+    handle_stream_tool_message, retain_exact_stream_frame_on_tool_retry,
 };
 
 mod content_arms;
@@ -355,6 +355,7 @@ pub(super) async fn run_stream_loop(
         }
 
         let mut runtime_handoff_retry_pending = false;
+        let mut guarded_tool_frame_retry_pending = false;
         loop {
             // #2172 cancel boundary: re-check the cancel flag between
             // drained messages. Without this, the outer loop samples
@@ -564,6 +565,11 @@ pub(super) async fn run_stream_loop(
                             is_error,
                             tool_use_id,
                         } => {
+                            let retry_frame = StreamMessage::ToolResult {
+                                content: content.clone(),
+                                is_error,
+                                tool_use_id: tool_use_id.clone(),
+                            };
                             let outcome = handle_stream_tool_message(
                                 StreamToolArmMessage::ToolResult {
                                     content,
@@ -618,6 +624,14 @@ pub(super) async fn run_stream_loop(
                                 },
                             )
                             .await;
+                            if retain_exact_stream_frame_on_tool_retry(
+                                &mut pending_stream_messages,
+                                retry_frame,
+                                outcome,
+                            ) {
+                                guarded_tool_frame_retry_pending = true;
+                                break;
+                            }
                             stop_on_tool_authority_loss!(outcome, loop_outcome, 'outer);
                         }
                         StreamMessage::TaskNotification {
@@ -877,13 +891,13 @@ pub(super) async fn run_stream_loop(
             }
         }
 
-        if runtime_handoff_retry_pending {
-            // A multi-step handoff may have durably landed its first exact
-            // snapshot before a later stamp hit transient I/O. Its original
-            // stream identity is intentionally not refreshed until the whole
-            // handoff succeeds, so running the generic tick here would
-            // misclassify that exact partial snapshot as authority loss.
-            // Retry the retained frame on the next normal stream wake instead.
+        if runtime_handoff_retry_pending || guarded_tool_frame_retry_pending {
+            // A guarded frame hit transient I/O and remains at the front of the
+            // exact stream queue. A multi-step handoff may also have durably
+            // landed its first snapshot while retaining its original identity.
+            // Running the generic tick here could misclassify either retry as
+            // authority loss or advance state past the retained ToolResult.
+            // Retry the exact frame on the next normal stream wake instead.
             // Once a completed turn's residual drain expires there is no next
             // receiver wake, so keep the loop alive with a bounded retry
             // backoff rather than dropping the exact frame or busy-spinning.

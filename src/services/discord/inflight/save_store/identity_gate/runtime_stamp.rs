@@ -31,8 +31,15 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return GuardedSaveOutcome::IoError;
     };
-    let Some(mut on_disk) = load_inflight_state_unlocked(&path) else {
-        return GuardedSaveOutcome::Missing;
+    let mut on_disk = match read_inflight_state_for_guarded_write(
+        &path,
+        &provider,
+        requested.channel_id,
+        expected,
+        caller,
+    ) {
+        Ok(on_disk) => on_disk,
+        Err(outcome) => return outcome,
     };
     let durable = InflightTurnIdentity::from_state(&on_disk);
     if expected.user_msg_id == 0 && expected.turn_start_offset.is_none() {
@@ -79,9 +86,9 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
             provider = %provider.as_str(),
             channel_id = requested.channel_id,
             caller,
-            "runtime-handoff stamp deferred because local and durable responses diverged"
+            "runtime-handoff stamp rejected because local and durable responses diverged"
         );
-        return GuardedSaveOutcome::IoError;
+        return GuardedSaveOutcome::IdentityMismatch;
     }
 
     let requested_runtime = (
@@ -504,5 +511,76 @@ mod tests {
             Some("AgentDesk-codex-r7-exact")
         );
         assert_eq!(persisted.last_offset, 4_096);
+    }
+
+    #[test]
+    fn transient_runtime_stamp_read_error_is_retryable_and_preserves_local_frame() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let provider = ProviderKind::Codex;
+        let channel_id = 42_593_121;
+        let seed = runtime_seed(provider.clone(), channel_id, None);
+        save_inflight_state_in_root(root.path(), &seed).expect("seed owner row");
+        let baseline = load(root.path(), &provider, channel_id);
+        let expected = InflightTurnIdentity::from_state(&baseline);
+        let mut local = baseline.clone();
+        local.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
+        local.tmux_session_name = Some("AgentDesk-codex-r9-retry".to_string());
+        local.output_path = Some("/runtime/r9-retry.jsonl".to_string());
+        let local_before = serde_json::to_value(&local).expect("serialize local frame");
+
+        let path = inflight_state_path(root.path(), &provider, channel_id);
+        std::fs::remove_file(&path).expect("replace row with deterministic read failure");
+        std::fs::create_dir(&path).expect("directory at row path forces read error");
+        assert_eq!(
+            stamp_runtime_handoff_if_matches_identity_in_root(
+                root.path(),
+                (&baseline, &mut local),
+                &expected,
+                "test::transient_runtime_stamp_read_error",
+            ),
+            GuardedSaveOutcome::IoError,
+        );
+        assert_eq!(
+            serde_json::to_value(&local).expect("serialize retained local frame"),
+            local_before,
+            "retryable guarded-read failure must not adopt or mutate local handoff identity",
+        );
+    }
+
+    #[test]
+    fn divergent_runtime_response_is_non_retryable_and_preserves_both_snapshots() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let provider = ProviderKind::Codex;
+        let channel_id = 42_593_122;
+        let mut seed = runtime_seed(provider.clone(), channel_id, None);
+        seed.full_response = "shared base".to_string();
+        save_inflight_state_in_root(root.path(), &seed).expect("seed owner row");
+        let baseline = load(root.path(), &provider, channel_id);
+        let expected = InflightTurnIdentity::from_state(&baseline);
+
+        let mut durable = baseline.clone();
+        durable.full_response = "durable watcher branch".to_string();
+        save_inflight_state_in_root(root.path(), &durable).expect("persist divergent durable row");
+        let durable_before = load(root.path(), &provider, channel_id);
+        let mut local = baseline.clone();
+        local.full_response = "resolved terminal branch".to_string();
+        local.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
+        let local_before = serde_json::to_value(&local).expect("serialize local frame");
+
+        assert_eq!(
+            stamp_runtime_handoff_if_matches_identity_in_root(
+                root.path(),
+                (&baseline, &mut local),
+                &expected,
+                "test::divergent_runtime_response",
+            ),
+            GuardedSaveOutcome::IdentityMismatch,
+            "semantic body divergence must not enter the transient-I/O retry loop",
+        );
+        assert_eq!(serde_json::to_value(&local).unwrap(), local_before);
+        assert_eq!(
+            serde_json::to_value(load(root.path(), &provider, channel_id)).unwrap(),
+            serde_json::to_value(durable_before).unwrap(),
+        );
     }
 }

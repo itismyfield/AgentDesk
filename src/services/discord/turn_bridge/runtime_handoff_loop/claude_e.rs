@@ -129,7 +129,7 @@ mod tests {
     }
 
     #[test]
-    fn process_evidence_io_error_rolls_back_and_preserves_dirty_for_frame_requeue() {
+    fn process_evidence_body_divergence_is_non_retryable_and_preserves_durable() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -161,12 +161,18 @@ mod tests {
                 preexisting_dirty,
             );
 
-            assert_eq!(outcome, GuardedSaveOutcome::IoError);
+            assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
             assert_eq!(dirty, preexisting_dirty);
             assert_eq!(
-                serde_json::to_value(&local).expect("serialize rolled-back local"),
-                serde_json::to_value(&baseline).expect("serialize pre-mutation baseline"),
+                local.runtime_kind,
+                Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeEAdapter)
             );
+            assert_eq!(
+                local.output_path.as_deref(),
+                Some("/tmp/claude-e-failed-output")
+            );
+            assert_eq!(local.last_offset, 8_192);
+            assert_eq!(local.full_response, baseline.full_response);
             let still_durable = load_inflight_state(&ProviderKind::Claude, seed.channel_id)
                 .expect("load durable row after failed stamp");
             assert_eq!(

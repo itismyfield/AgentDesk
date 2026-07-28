@@ -32,6 +32,7 @@ pub(super) enum StreamToolArmMessage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StreamToolArmOutcome {
     Continue,
+    RetryExactFrame,
     AuthorityLost,
 }
 
@@ -43,6 +44,29 @@ fn stream_tool_outcome_after_restart_authority(
     } else {
         StreamToolArmOutcome::Continue
     }
+}
+
+fn terminal_tool_result_transition_permission(
+    authority: VisibleMutationAuthority,
+) -> Result<bool, StreamToolArmOutcome> {
+    match authority {
+        VisibleMutationAuthority::Authorized => Ok(true),
+        VisibleMutationAuthority::Suppressed => Ok(false),
+        VisibleMutationAuthority::Retry => Err(StreamToolArmOutcome::RetryExactFrame),
+        VisibleMutationAuthority::AuthorityLost => Err(StreamToolArmOutcome::AuthorityLost),
+    }
+}
+
+pub(super) fn retain_exact_stream_frame_on_tool_retry(
+    pending: &mut std::collections::VecDeque<StreamMessage>,
+    frame: StreamMessage,
+    outcome: StreamToolArmOutcome,
+) -> bool {
+    if outcome != StreamToolArmOutcome::RetryExactFrame {
+        return false;
+    }
+    pending.push_front(frame);
+    true
 }
 
 pub(super) struct StreamToolArmContext<'a> {
@@ -140,6 +164,7 @@ pub(super) async fn handle_stream_tool_message(
     let mut full_response = std::mem::take(state.full_response);
     let mut status_panel_dirty = *state.status_panel_dirty;
     let mut restart_visible_authority = None;
+    let mut tool_outcome = StreamToolArmOutcome::Continue;
 
     match message {
         StreamToolArmMessage::ToolUse {
@@ -426,7 +451,80 @@ pub(super) async fn handle_stream_tool_message(
             content,
             is_error,
             tool_use_id,
-        } => {
+        } => 'tool_result: {
+            // A queued ToolResult can arrive after a watcher/standby handoff or
+            // after another bridge advanced the Discord message epoch. Fence
+            // the terminal PATCH before any ToolResult side effect so an I/O
+            // failure can retain and replay this exact frame without duplicate
+            // transcript/status mutations.
+            let terminal_transition = long_running_placeholder_active.as_ref().and_then(
+                |(key, _, close_trigger, ack_consumed)| {
+                    let monitor_like = matches!(
+                        close_trigger,
+                        super::super::super::formatting::LongRunningCloseTrigger::MonitorLike
+                    );
+                    let is_dispatch_ack = !monitor_like && !ack_consumed;
+                    let pending_retarget_matches_key =
+                        pending_long_running_retarget_after_state_save
+                            .as_ref()
+                            .is_some_and(|(pending_key, _, _, _, _)| pending_key == key);
+                    (monitor_like || (is_dispatch_ack && is_error))
+                        .then_some(())
+                        .filter(|_| !pending_retarget_matches_key)
+                        .map(|()| {
+                            let target = if is_error {
+                                super::super::super::placeholder_controller::PlaceholderLifecycle::Aborted
+                            } else {
+                                super::super::super::placeholder_controller::PlaceholderLifecycle::Completed
+                            };
+                            (key.clone(), target)
+                        })
+                },
+            );
+            let mut prefenced_terminal_transition = None;
+            let mut terminal_transition_suppressed = false;
+            if let Some((key, target)) = terminal_transition {
+                let intended_authority =
+                    crate::services::discord::inflight::StreamRelayAuthority::from_state(
+                        inflight_state,
+                    );
+                let outcome =
+                    crate::services::discord::inflight::save_stream_tick_state_if_bridge_authority(
+                        persisted_inflight_baseline,
+                        inflight_state,
+                        stream_tick_expected_identity,
+                        expected_current_message.0,
+                        expected_current_message.1,
+                        "turn_bridge::stream_loop::terminal_tool_result_visible_fence",
+                    );
+                if outcome == crate::services::discord::inflight::GuardedSaveOutcome::Saved {
+                    *expected_current_message = (
+                        inflight_state.current_msg_id,
+                        inflight_state.current_msg_len,
+                    );
+                }
+                let authority = visible_mutation_authority_after_guarded_save(
+                    outcome,
+                    inflight_state,
+                    intended_authority,
+                );
+                match terminal_tool_result_transition_permission(authority) {
+                    Ok(true) => {
+                        prefenced_terminal_transition = Some(
+                            shared_owned
+                                .ui
+                                .placeholder_controller
+                                .transition(gateway.as_ref(), key, target)
+                                .await,
+                        );
+                    }
+                    Ok(false) => terminal_transition_suppressed = true,
+                    Err(outcome) => {
+                        tool_outcome = outcome;
+                        break 'tool_result;
+                    }
+                }
+            }
             // Resolve delayed results by id; preserve the FIFO fallback.
             let status_tool_name = match tool_use_id.as_deref() {
                 Some(id) => pending_status_tool_results_by_id
@@ -513,11 +611,6 @@ pub(super) async fn handle_stream_tool_message(
                         )
                         .await;
                     }
-                    let target = if is_error {
-                        super::super::super::placeholder_controller::PlaceholderLifecycle::Aborted
-                    } else {
-                        super::super::super::placeholder_controller::PlaceholderLifecycle::Completed
-                    };
                     let pending_retarget_matches_key =
                         pending_long_running_retarget_after_state_save
                             .as_ref()
@@ -530,12 +623,13 @@ pub(super) async fn handle_stream_tool_message(
                         shared_owned.ui.placeholder_controller.detach(&key);
                         inflight_state.long_running_placeholder_active = false;
                         state_dirty = true;
-                    } else {
-                        let outcome = shared_owned
-                            .ui
-                            .placeholder_controller
-                            .transition(gateway.as_ref(), key.clone(), target)
-                            .await;
+                    } else if terminal_transition_suppressed {
+                        // The exact same-turn durable row delegated visible
+                        // relay ownership. Its owner will settle the card; this
+                        // bridge keeps local retry state but must not PATCH it.
+                        long_running_placeholder_active =
+                            Some((key, snapshot, close_trigger, ack_consumed));
+                    } else if let Some(outcome) = prefenced_terminal_transition.take() {
                         // codex round-10 P2: only clear flag on
                         // committed/already-terminal outcome.
                         use super::super::super::placeholder_controller::PlaceholderControllerOutcome::*;
@@ -549,6 +643,16 @@ pub(super) async fn handle_stream_tool_message(
                             long_running_placeholder_active =
                                 Some((key, snapshot, close_trigger, ack_consumed));
                         }
+                    } else {
+                        // Every visible terminal transition must pass the
+                        // strict lock-held fence above. Fail closed if a future
+                        // control-flow edit violates that invariant.
+                        tracing::error!(
+                            channel_id = channel_id.get(),
+                            "terminal ToolResult reached placeholder mutation without authority fence"
+                        );
+                        long_running_placeholder_active =
+                            Some((key, snapshot, close_trigger, ack_consumed));
                     }
                 } else {
                     // Successful background dispatch ack OR a
@@ -737,7 +841,11 @@ pub(super) async fn handle_stream_tool_message(
     *state.full_response = full_response;
     *state.status_panel_dirty = status_panel_dirty;
 
-    stream_tool_outcome_after_restart_authority(restart_visible_authority)
+    if tool_outcome == StreamToolArmOutcome::Continue {
+        stream_tool_outcome_after_restart_authority(restart_visible_authority)
+    } else {
+        tool_outcome
+    }
 }
 
 #[cfg(test)]
@@ -792,5 +900,57 @@ mod authority_tests {
             stream_tool_outcome_after_restart_authority(Some(self_delegated)),
             StreamToolArmOutcome::Continue,
         );
+    }
+
+    #[test]
+    fn terminal_tool_result_fence_maps_handoff_loss_and_io_retry_fail_closed() {
+        assert_eq!(
+            terminal_tool_result_transition_permission(VisibleMutationAuthority::Authorized),
+            Ok(true),
+        );
+        assert_eq!(
+            terminal_tool_result_transition_permission(VisibleMutationAuthority::Suppressed),
+            Ok(false),
+        );
+        assert_eq!(
+            terminal_tool_result_transition_permission(VisibleMutationAuthority::AuthorityLost),
+            Err(StreamToolArmOutcome::AuthorityLost),
+        );
+        assert_eq!(
+            terminal_tool_result_transition_permission(VisibleMutationAuthority::Retry),
+            Err(StreamToolArmOutcome::RetryExactFrame),
+        );
+    }
+
+    #[test]
+    fn transient_terminal_tool_result_fence_requeues_the_exact_frame_at_front() {
+        let mut pending = std::collections::VecDeque::from([StreamMessage::Text {
+            content: "later frame".to_string(),
+        }]);
+        let frame = StreamMessage::ToolResult {
+            content: "exact terminal payload".to_string(),
+            is_error: true,
+            tool_use_id: Some("tool-4259-r9".to_string()),
+        };
+        assert!(retain_exact_stream_frame_on_tool_retry(
+            &mut pending,
+            frame,
+            StreamToolArmOutcome::RetryExactFrame,
+        ));
+        let Some(StreamMessage::ToolResult {
+            content,
+            is_error,
+            tool_use_id,
+        }) = pending.pop_front()
+        else {
+            panic!("exact ToolResult must remain at queue front");
+        };
+        assert_eq!(content, "exact terminal payload");
+        assert!(is_error);
+        assert_eq!(tool_use_id.as_deref(), Some("tool-4259-r9"));
+        assert!(matches!(
+            pending.pop_front(),
+            Some(StreamMessage::Text { content }) if content == "later frame"
+        ));
     }
 }
