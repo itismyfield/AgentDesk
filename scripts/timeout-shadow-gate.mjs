@@ -378,6 +378,21 @@ function aggregateDescriptor(descriptor, options, io = fs) {
   return finalizeReport(report);
 }
 
+/**
+ * Consume a Node Readable without touching its descriptor.  process.stdin is
+ * sometimes nonblocking under node:test; Readable owns readiness/EAGAIN
+ * handling, while this function keeps the existing bounded line scanner.
+ */
+async function aggregateReadable(readable, options) {
+  const report = emptyReport();
+  const scanner = createLineScanner((line) => processLine(report, line, options));
+  for await (const chunk of readable) {
+    scanner.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  scanner.end();
+  return finalizeReport(report);
+}
+
 export function thresholdFailures(report, options) {
   const failures = [];
   // A's meaningful evidence is comparable pairs.  J is intentionally
@@ -433,6 +448,16 @@ export function runFromStdin(argv, io = fs) {
   return { help: false, output: JSON.stringify(report), failures, exitCode: failures.length === 0 ? 0 : 1 };
 }
 
+export async function runFromReadable(argv, readable = process.stdin, io = fs) {
+  const options = parseArgs(argv);
+  if (options.help) return { help: true, output: helpText(), exitCode: 0 };
+  const report = aggregateFiles(options.files, options, io);
+  if (options.readStdin) mergeReport(report, await aggregateReadable(readable, options));
+  finalizeReport(report);
+  const failures = thresholdFailures(report, options);
+  return { help: false, output: JSON.stringify(report), failures, exitCode: failures.length === 0 ? 0 : 1 };
+}
+
 export function isMainModule(entry = process.argv[1], io = fs) {
   if (!entry) return false;
   try {
@@ -444,14 +469,13 @@ export function isMainModule(entry = process.argv[1], io = fs) {
 }
 
 if (isMainModule()) {
-  try {
-    const result = runFromStdin(process.argv.slice(2));
+  void runFromReadable(process.argv.slice(2)).then((result) => {
     if (result.help) process.stdout.write(result.output);
     else process.stdout.write(`${result.output}\n`);
     if (result.failures && result.failures.length > 0) process.stderr.write(`${result.failures.join("; ")}\n`);
     process.exitCode = result.exitCode;
-  } catch (error) {
+  }).catch((error) => {
     process.stderr.write(`timeout-shadow-gate: ${error.message}\n`);
     process.exitCode = 2;
-  }
+  });
 }

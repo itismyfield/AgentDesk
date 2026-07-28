@@ -6,8 +6,9 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { Readable } from "node:stream";
 
-import { aggregateFile, aggregateFiles, aggregateText, parseArgs, run } from "../timeout-shadow-gate.mjs";
+import { aggregateFile, aggregateFiles, aggregateText, parseArgs, run, runFromReadable } from "../timeout-shadow-gate.mjs";
 
 function record(section, overrides = {}) {
   return JSON.stringify({
@@ -218,6 +219,16 @@ test("streamed stdin rejects an unterminated line over the documented record cap
   });
   assert.equal(result.status, 2);
   assert.match(result.stderr, /log line exceeds 1048576 bytes/);
+});
+
+test("CLI readable input uses chunk iteration rather than a synchronous fd read", async () => {
+  const readable = Readable.from([
+    Buffer.from(`prefix ${shadow("_section_A")}\n`),
+    Buffer.from(shadow("_section_J", { reducer_decision: "incomparable", agree: false, incomparable: true }))
+  ]);
+  const result = await runFromReadable(["--stdin"], readable);
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(JSON.parse(result.output)._section_J, { total: 1, incomparable: 1, ratio: 1, error: 0 });
 });
 
 test("enforces pass and fail threshold combinations", () => {
