@@ -781,6 +781,7 @@ mod dispatch_failure_pg_tests {
 
     #[tokio::test]
     async fn fallback_failure_reduces_dispatch_entry_and_run_in_one_transaction_pg() {
+        let _config = runtime_config_fixture();
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, entry_id, dispatch_id) =
@@ -893,6 +894,7 @@ mod dispatch_failure_pg_tests {
 
     #[tokio::test]
     async fn restoring_retry_failure_terminalizes_dispatch_and_requeues_entry_pg() {
+        let _config = runtime_config_fixture();
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, entry_id, dispatch_id) =
