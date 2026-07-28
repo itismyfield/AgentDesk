@@ -884,6 +884,129 @@ unset AGENTDESK_DEPLOY_FORCE_ROLLBACK
 [ "$TAMPERED_BACKUP_GUARD_STATUS" -eq 0 ] \
     || fail_test 'forced rollback bypassed backup digest verification'
 
+# deploy.sh restart boundaries are independently armed. Model launchctl
+# performing bootstrap but returning a signal-like failure before the caller can
+# confirm start; cleanup must stop that possible new process, restore the old
+# pair, and restart it. A second case covers failure immediately after bootout.
+eval "$(extract_function stop_deploy_service_for_rollback "$REPO_ROOT/scripts/deploy.sh")"
+eval "$(extract_function cleanup_deploy_transaction "$REPO_ROOT/scripts/deploy.sh")"
+eval "$(extract_function restart_launchd "$REPO_ROOT/scripts/deploy.sh")"
+
+(
+    HOME="$TMP_ROOT/restart-gap-home"
+    mkdir -p "$HOME/Library/LaunchAgents"
+    : > "$HOME/Library/LaunchAgents/com.agentdesk.release.plist"
+    OS=darwin
+    LABEL='com.agentdesk.release'
+    AD_HOME="$TMP_ROOT/restart-gap-runtime"
+    DEPLOY_LOCK_FILE="$AD_HOME/runtime/deploy-release.lock"
+    DEPLOY_HEALTH_OK=0
+    DEPLOY_BINARY_PROMOTED=1
+    DEPLOY_RESTART_ARMED=1
+    DEPLOY_SERVICE_STOP_ATTEMPTED=0
+    DEPLOY_SERVICE_START_ATTEMPTED=0
+    DEPLOY_SERVICE_START_CONFIRMED=0
+    BACKUP_WRAPPER='old-wrapper'
+    BACKUP_REAL='old-real'
+    SERVICE_ACTIVE=0
+    RESTART_EVENTS=''
+    _launchd_domain() { printf 'gui/test\n'; }
+    _kickstart_launchd_job_if_needed() { :; }
+    info() { :; }
+    ok() { :; }
+    error() { :; }
+    sleep() { :; }
+    seq() { printf '1\n'; }
+    launchctl() {
+        case "${1:-}" in
+            bootout)
+                SERVICE_ACTIVE=0
+                RESTART_EVENTS="${RESTART_EVENTS}bootout "
+                return 0
+                ;;
+            bootstrap)
+                # Side effect succeeded, but the call reports TERM/failure.
+                SERVICE_ACTIVE=1
+                RESTART_EVENTS="${RESTART_EVENTS}bootstrap-gap "
+                return 143
+                ;;
+            print) [ "$SERVICE_ACTIVE" = 1 ] ;;
+        esac
+    }
+    set +e
+    restart_launchd
+    restart_status=$?
+    set -e
+    [ "$restart_status" -ne 0 ] \
+        && [ "$DEPLOY_SERVICE_STOP_ATTEMPTED" = 1 ] \
+        && [ "$DEPLOY_SERVICE_START_ATTEMPTED" = 1 ] \
+        && [ "$DEPLOY_SERVICE_START_CONFIRMED" = 0 ] \
+        && [ "$SERVICE_ACTIVE" = 1 ] \
+        || exit 81
+
+    RESTART_EVENTS=''
+    _adk_active_txn() { printf '%s\n' "$AD_HOME/runtime/fake-txn"; }
+    adk_routine_asset_transaction_phase() { printf 'promoted\n'; }
+    restore_previous_install() {
+        RESTART_EVENTS="${RESTART_EVENTS}restore-binary "
+    }
+    adk_rollback_routine_asset_transaction() {
+        RESTART_EVENTS="${RESTART_EVENTS}rollback-assets "
+    }
+    adk_commit_routine_asset_transaction_forward() { return 82; }
+    adk_release_routine_asset_lock() {
+        RESTART_EVENTS="${RESTART_EVENTS}release-lock "
+    }
+    cleanup_backup() { RESTART_EVENTS="${RESTART_EVENTS}cleanup-backup "; }
+    restart_launchd() {
+        SERVICE_ACTIVE=1
+        RESTART_EVENTS="${RESTART_EVENTS}restart-old "
+    }
+    set +e
+    cleanup_deploy_transaction 143
+    cleanup_status=$?
+    set -e
+    [ "$cleanup_status" -eq 143 ] \
+        && [ "$SERVICE_ACTIVE" = 1 ] \
+        && [ "$RESTART_EVENTS" = \
+            'bootout restore-binary rollback-assets restart-old release-lock cleanup-backup ' ]
+) || fail_test 'TERM after launchctl bootstrap escaped service-aware paired rollback'
+
+(
+    OS=linux
+    AD_HOME="$TMP_ROOT/restart-stop-runtime"
+    DEPLOY_LOCK_FILE="$AD_HOME/runtime/deploy-release.lock"
+    DEPLOY_HEALTH_OK=0
+    DEPLOY_BINARY_PROMOTED=1
+    DEPLOY_RESTART_ARMED=1
+    DEPLOY_SERVICE_STOP_ATTEMPTED=1
+    DEPLOY_SERVICE_START_ATTEMPTED=0
+    DEPLOY_SERVICE_START_CONFIRMED=0
+    STOP_EVENTS=''
+    error() { :; }
+    systemctl() {
+        case "$*" in
+            *' is-active '*) return 3 ;;
+            *' stop '*) STOP_EVENTS="${STOP_EVENTS}stop-new "; return 0 ;;
+        esac
+    }
+    _adk_active_txn() { printf '%s\n' "$AD_HOME/runtime/fake-txn"; }
+    adk_routine_asset_transaction_phase() { printf 'promoted\n'; }
+    restore_previous_install() { STOP_EVENTS="${STOP_EVENTS}restore-binary "; }
+    adk_rollback_routine_asset_transaction() { STOP_EVENTS="${STOP_EVENTS}rollback-assets "; }
+    adk_commit_routine_asset_transaction_forward() { return 83; }
+    adk_release_routine_asset_lock() { :; }
+    cleanup_backup() { :; }
+    restart_systemd() { STOP_EVENTS="${STOP_EVENTS}restart-old "; }
+    set +e
+    cleanup_deploy_transaction 75
+    cleanup_status=$?
+    set -e
+    [ "$cleanup_status" -eq 75 ] \
+        && [ "$STOP_EVENTS" = \
+            'stop-new restore-binary rollback-assets restart-old ' ]
+) || fail_test 'failure after service stop left the restored release stopped'
+
 # Gitignore keeps operator helpers private while the four bundled files remain
 # explicitly trackable.
 git -C "$REPO_ROOT" check-ignore --no-index -q -- routine-helpers/operator.py \

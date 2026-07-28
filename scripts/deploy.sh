@@ -319,7 +319,10 @@ BACKUP_WRAPPER=""
 BACKUP_REAL=""
 ROUTINE_ASSET_TXN=""
 DEPLOY_BINARY_PROMOTED=0
-DEPLOY_SERVICE_RESTARTED=0
+DEPLOY_RESTART_ARMED=0
+DEPLOY_SERVICE_STOP_ATTEMPTED=0
+DEPLOY_SERVICE_START_ATTEMPTED=0
+DEPLOY_SERVICE_START_CONFIRMED=0
 DEPLOY_HEALTH_OK=0
 DEPLOY_LOCK_FILE="${AGENTDESK_DEPLOY_LOCK_FILE:-$AD_HOME/runtime/deploy-release.lock}"
 DEPLOY_LOCK_TIMEOUT_SECS="${AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS:-1800}"
@@ -331,6 +334,26 @@ cleanup_backup() {
   if [ -n "${BACKUP_REAL:-}" ] && [ -f "$BACKUP_REAL" ]; then
     rm -f "$BACKUP_REAL"
   fi
+}
+
+stop_deploy_service_for_rollback() {
+  case "$OS" in
+    darwin)
+      launchctl bootout "$(_launchd_domain)/$LABEL" 2>/dev/null || true
+      if launchctl print "$(_launchd_domain)/$LABEL" >/dev/null 2>&1; then
+        error "New launchd process is still loaded; refusing in-place binary rollback"
+        return 1
+      fi
+      ;;
+    linux)
+      systemctl --user stop agentdesk-dcserver.service 2>/dev/null || true
+      if systemctl --user is-active --quiet agentdesk-dcserver.service \
+        >/dev/null 2>&1; then
+        error "New systemd process is still active; refusing in-place binary rollback"
+        return 1
+      fi
+      ;;
+  esac
 }
 
 cleanup_deploy_transaction() {
@@ -370,19 +393,20 @@ cleanup_deploy_transaction() {
     if [ "$active_phase" = "committing" ] || [ "$active_phase" = "committed" ]; then
       asset_action="commit"
     elif [ "$DEPLOY_BINARY_PROMOTED" = 1 ] && [ "$active_status" -le 1 ]; then
-      if [ "$DEPLOY_SERVICE_RESTARTED" = 1 ]; then
-        case "$OS" in
-          darwin)
-            launchctl bootout "$(_launchd_domain)/$LABEL" 2>/dev/null || true
-            service_stopped=1
-            ;;
-          linux)
-            systemctl --user stop agentdesk-dcserver.service 2>/dev/null || true
-            service_stopped=1
-            ;;
-        esac
+      if [ "$DEPLOY_RESTART_ARMED" = 1 ] \
+        || [ "$DEPLOY_SERVICE_STOP_ATTEMPTED" = 1 ] \
+        || [ "$DEPLOY_SERVICE_START_ATTEMPTED" = 1 ] \
+        || [ "$DEPLOY_SERVICE_START_CONFIRMED" = 1 ]; then
+        if stop_deploy_service_for_rollback; then
+          service_stopped=1
+        else
+          restore_ok=0
+          asset_action="commit"
+          status=1
+          error "Service could not be stopped; retaining matching new binary and assets"
+        fi
       fi
-      if ! restore_previous_install; then
+      if [ "$restore_ok" = 1 ] && ! restore_previous_install; then
         restore_ok=0
         asset_action="commit"
         status=1
@@ -699,14 +723,19 @@ restart_launchd() {
     return
   fi
 
-  # Unload (ignore errors if not loaded)
+  # Arm both boundaries before each control-plane command. Cleanup therefore
+  # stops any possibly-started new process even if launchctl performed the
+  # side effect and TERM/failure landed before the next assignment.
+  DEPLOY_SERVICE_STOP_ATTEMPTED=1
   launchctl bootout "$(_launchd_domain)/$LABEL" 2>/dev/null || true
   sleep 1
 
   # Load with retry because launchd can briefly report
   # "operation already in progress" immediately after bootout.
   for attempt in $(seq 1 "$max_attempts"); do
+    DEPLOY_SERVICE_START_ATTEMPTED=1
     if launchctl bootstrap "$(_launchd_domain)" "$PLIST" >/dev/null 2>&1; then
+      DEPLOY_SERVICE_START_CONFIRMED=1
       _kickstart_launchd_job_if_needed "$LABEL" || true
       ok "Service restarted via launchd"
       return
@@ -717,21 +746,31 @@ restart_launchd() {
   done
 
   # Surface the real launchctl error on the final attempt.
-  launchctl bootstrap "$(_launchd_domain)" "$PLIST"
+  DEPLOY_SERVICE_START_ATTEMPTED=1
+  launchctl bootstrap "$(_launchd_domain)" "$PLIST" || return $?
+  DEPLOY_SERVICE_START_CONFIRMED=1
   ok "Service restarted via launchd"
 }
 
 restart_systemd() {
+  DEPLOY_SERVICE_STOP_ATTEMPTED=1
+  DEPLOY_SERVICE_START_ATTEMPTED=1
   systemctl --user restart agentdesk-dcserver.service
+  DEPLOY_SERVICE_START_CONFIRMED=1
   ok "Service restarted via systemd"
 }
 
 case "$OS" in
-  darwin) restart_launchd ;;
-  linux)  restart_systemd ;;
+  darwin)
+    DEPLOY_RESTART_ARMED=1
+    restart_launchd
+    ;;
+  linux)
+    DEPLOY_RESTART_ARMED=1
+    restart_systemd
+    ;;
   *)      info "Restart manually" ;;
 esac
-DEPLOY_SERVICE_RESTARTED=1
 
 # ── Step 5: Smoke test ────────────────────────────────────────────────────────
 info "Waiting for health check (port $HEALTH_PORT)..."
