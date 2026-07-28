@@ -715,6 +715,24 @@ mod dispatch_failure_pg_tests {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
 
+    struct RuntimeConfigFixture {
+        _root_guard: crate::config::TestEnvVarGuard,
+        _root: tempfile::TempDir,
+    }
+
+    fn runtime_config_fixture() -> RuntimeConfigFixture {
+        let root = tempfile::tempdir().expect("create runtime config root");
+        let config_dir = root.path().join("config");
+        std::fs::create_dir_all(&config_dir).expect("create runtime config directory");
+        std::fs::write(config_dir.join("agentdesk.yaml"), "server: {}\n")
+            .expect("write minimal runtime config");
+        let root_guard = crate::config::set_agentdesk_root_for_test(root.path());
+        RuntimeConfigFixture {
+            _root_guard: root_guard,
+            _root: root,
+        }
+    }
+
     async fn seed_failure_fixture(
         pool: &sqlx::PgPool,
         suffix: &str,
@@ -816,6 +834,7 @@ mod dispatch_failure_pg_tests {
 
     #[tokio::test]
     async fn cancelled_run_window_terminalizes_dispatch_and_entry_pg() {
+        let _config = runtime_config_fixture();
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, entry_id, dispatch_id) =
@@ -1096,6 +1115,7 @@ mod dispatch_failure_pg_tests {
 
     #[tokio::test]
     async fn concurrent_failure_has_one_dispatch_and_entry_cas_winner_pg() {
+        let _config = runtime_config_fixture();
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, entry_id, dispatch_id) =
