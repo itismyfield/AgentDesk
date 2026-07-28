@@ -1535,7 +1535,7 @@ mod tests {
             *resume_offset.lock().expect("resume offset") = None;
         }
         let (_, capped_logs) = capture_errors(|| {
-            for elapsed in [960, 1_890] {
+            for elapsed in [960, 1_890, 930 + REDRIVE_CAPPED_REARM_SECS - 1] {
                 assert_eq!(
                     gated_nudge(&shared, &provider, &snapshot, channel_id, base + elapsed),
                     (false, None),
@@ -1543,9 +1543,15 @@ mod tests {
                 );
             }
             assert_eq!(
-                gated_nudge(&shared, &provider, &snapshot, channel_id, base + 86_400),
+                gated_nudge(
+                    &shared,
+                    &provider,
+                    &snapshot,
+                    channel_id,
+                    base + 930 + REDRIVE_CAPPED_REARM_SECS,
+                ),
                 (true, Some(1)),
-                "a still-stalled capped episode must re-arm after the long backoff"
+                "a still-stalled capped episode must re-arm at the long-backoff boundary"
             );
         });
         let alarm_count = logs.matches("redrive_no_progress_capped").count()
