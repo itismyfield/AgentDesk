@@ -67,7 +67,8 @@ use poise::serenity_prelude::ChannelId;
 
 #[cfg(unix)]
 use super::SharedData;
-#[cfg(unix)]
+// `note_pending_emission_count` / `record_confirmed_dead_orphan_loss` and their
+// unit test are platform-independent, so this import must not be unix-gated.
 use crate::services::provider::ProviderKind;
 
 /// Re-emit the per-session drift WARN at most once per this window after the
