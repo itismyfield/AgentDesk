@@ -1007,8 +1007,8 @@ mod tests {
         assert_eq!(event.event, "task_dispatch_updated");
         assert_eq!(event.data["id"], "dispatch-publish-only");
 
-        let state_row = sqlx::query_as::<_, (serde_json::Value, String, String, i64)>(
-            "SELECT d.result, pg.status, r.status,
+        let state_row = sqlx::query_as::<_, (String, String, String, i64)>(
+            "SELECT d.result::TEXT, pg.status, r.status,
                     (SELECT COUNT(*) FROM dispatch_events WHERE dispatch_id = d.id)
              FROM task_dispatches d
              JOIN auto_queue_phase_gates pg ON pg.dispatch_id = d.id
@@ -1018,7 +1018,11 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("load publish-only state");
-        assert_eq!(state_row.0, detailed_result);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&state_row.0)
+                .expect("decode persisted result"),
+            detailed_result
+        );
         assert_eq!(state_row.1, "failed");
         assert_eq!(state_row.2, "active");
         assert_eq!(
