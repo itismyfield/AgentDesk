@@ -1,5 +1,6 @@
 use sqlx::PgPool;
 
+use super::run_status::LIVE_RUN_STATUSES_SQL;
 use super::slot_predicate::{
     DispatchSlotPolarity, active_dispatch_on_slot_predicate, dispatch_slot_index_expr,
 };
@@ -44,11 +45,11 @@ pub async fn ensure_agent_slot_pool_rows_pg(
 }
 
 pub async fn clear_inactive_slot_assignments_pg(pool: &PgPool) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(
-        // #2048 F14: include `restoring` so a run in mid-restore does not
-        // have its slots yanked by a concurrent activate call. `restoring`
-        // is a transient holding status (see fsm::apply_restore_state_changes_pg)
-        // and must be treated as held-open for slot purposes.
+    // #2048 F14: include `restoring` so a run in mid-restore does not
+    // have its slots yanked by a concurrent activate call. `restoring`
+    // is a transient holding status (see fsm::apply_restore_state_changes_pg)
+    // and must be treated as held-open for slot purposes.
+    let query = format!(
         "UPDATE auto_queue_slots
          SET assigned_run_id = NULL,
              assigned_thread_group = NULL,
@@ -56,11 +57,10 @@ pub async fn clear_inactive_slot_assignments_pg(pool: &PgPool) -> Result<u64, sq
          WHERE assigned_run_id IS NOT NULL
            AND assigned_run_id NOT IN (
                SELECT id FROM auto_queue_runs
-               WHERE status IN ('active', 'paused', 'restoring')
-           )",
-    )
-    .execute(pool)
-    .await?;
+               WHERE status IN ({LIVE_RUN_STATUSES_SQL})
+           )"
+    );
+    let result = sqlx::query(&query).execute(pool).await?;
     Ok(result.rows_affected())
 }
 

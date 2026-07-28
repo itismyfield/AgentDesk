@@ -5,7 +5,7 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-const RUN_STATUS_RESTORING: &str = "restoring";
+use crate::db::auto_queue::run_status::{LIVE_RUN_STATUSES_SQL, is_live_run_status};
 
 impl AutoQueueService {
     pub async fn cancel_run_with_pg(
@@ -29,24 +29,20 @@ impl AutoQueueService {
                 .with_operation("auto_queue.cancel_run_with_pg.load_run")
         })?;
 
-        match run_status.flatten().as_deref() {
-            Some("active") | Some("paused") | Some(RUN_STATUS_RESTORING) => {
-                cancel_selected_runs_with_pg(
-                    health_registry,
-                    pool,
-                    &[run_id.to_string()],
-                    "auto_queue_cancel",
-                )
-                .await
-                .map_err(|error| {
-                    ServiceError::internal(error)
-                        .with_code(ErrorCode::Database)
-                        .with_context("run_id", run_id)
-                        .with_operation(
-                            "auto_queue.cancel_run_with_pg.cancel_selected_runs_with_pg",
-                        )
-                })
-            }
+        match run_status.flatten() {
+            Some(status) if is_live_run_status(&status) => cancel_selected_runs_with_pg(
+                health_registry,
+                pool,
+                &[run_id.to_string()],
+                "auto_queue_cancel",
+            )
+            .await
+            .map_err(|error| {
+                ServiceError::internal(error)
+                    .with_code(ErrorCode::Database)
+                    .with_context("run_id", run_id)
+                    .with_operation("auto_queue.cancel_run_with_pg.cancel_selected_runs_with_pg")
+            }),
             Some(status) => Err(ServiceError::bad_request(format!(
                 "auto-queue run '{run_id}' is not cancelable (status={status})"
             ))
@@ -892,10 +888,7 @@ pub(crate) async fn cancel_selected_runs_with_pg(
         for run_id in target_run_ids {
             separated.push_bind(run_id);
         }
-        separated.push_unseparated(format!(
-            ") AND status IN ('active', 'paused', '{}')",
-            RUN_STATUS_RESTORING
-        ));
+        separated.push_unseparated(format!(") AND status IN ({LIVE_RUN_STATUSES_SQL})"));
         query
             .build()
             .execute(pool)
