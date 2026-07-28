@@ -263,6 +263,7 @@ test("caller-order-independent rotation during open cannot erase divergence", ()
     const archived = join(directory, "dcserver.stdout.log.2");
     writeFileSync(current, `${shadow("_section_A")}\n`);
     writeFileSync(rotated, `${shadow("_section_J")}\n`);
+    const canonicalCurrent = fs.realpathSync(current);
     let rotatedOnce = false;
     const openedPaths = [];
     const io = {
@@ -280,7 +281,7 @@ test("caller-order-independent rotation during open cannot erase divergence", ()
       }
     };
     assert.throws(() => aggregateFiles([rotated, current], {}, io), /manifest|opened inode|changed while opening/);
-    assert.equal(openedPaths[0], current);
+    assert.equal(openedPaths[0], canonicalCurrent);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
