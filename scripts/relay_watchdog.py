@@ -2413,7 +2413,10 @@ def advance_delivered_watermark(
 
 
 def _forget_reclaimed_recovered_gap_lifecycles(
-    channel_state: dict[str, Any], paths: list[str]
+    channel_state: dict[str, Any],
+    paths: list[str],
+    *,
+    loss_state_corrupted: bool,
 ) -> None:
     """Drop all replay identity for guards proven absent for one full TTL."""
     reclaimed = set(paths)
@@ -2466,17 +2469,18 @@ def _forget_reclaimed_recovered_gap_lifecycles(
     else:
         channel_state.pop(DELIVERED_WATERMARKS_KEY, None)
 
-    observations = {
-        block_id: entry
-        for block_id, entry in _validated_loss_observations(channel_state).items()
-        if entry["path"] not in reclaimed
-    }
-    tombstones = {
-        block_id: entry
-        for block_id, entry in permanent_loss_tombstones(channel_state).items()
-        if entry["path"] not in reclaimed
-    }
-    _store_loss_state(channel_state, observations, tombstones)
+    if not loss_state_corrupted:
+        observations = {
+            block_id: entry
+            for block_id, entry in _validated_loss_observations(channel_state).items()
+            if entry["path"] not in reclaimed
+        }
+        tombstones = {
+            block_id: entry
+            for block_id, entry in permanent_loss_tombstones(channel_state).items()
+            if entry["path"] not in reclaimed
+        }
+        _store_loss_state(channel_state, observations, tombstones)
     raw_actual = channel_state.get(LAST_ACTUAL_DELIVERY_BY_PATH_KEY)
     if isinstance(raw_actual, dict):
         retained_actual = {
@@ -3553,11 +3557,23 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
     )
     _store_recovered_gap_guards(chs, recovered_gap_guards)
     if reclaimed_guard_paths:
-        _forget_reclaimed_recovered_gap_lifecycles(chs, reclaimed_guard_paths)
+        _, observations_corrupted = _validated_loss_observations_with_status(chs)
+        _, tombstones_corrupted = _permanent_loss_tombstones_with_status(chs)
+        loss_state_corrupted = observations_corrupted or tombstones_corrupted
+        _forget_reclaimed_recovered_gap_lifecycles(
+            chs,
+            reclaimed_guard_paths,
+            loss_state_corrupted=loss_state_corrupted,
+        )
         rt.log(
             f"[{cid}] recovered-gap-guard-reclaimed "
             f"count={len(reclaimed_guard_paths)}"
         )
+        if loss_state_corrupted:
+            rt.log(
+                f"[{cid}] permanent-loss-state-corrupt during lifecycle reclaim; "
+                "preserving raw state"
+            )
     previous_sizes = _validated_transcript_sizes(chs)
     previous_seen_at = _validated_transcript_seen_at(chs, previous_sizes, now)
     known_state_persisted = isinstance(chs.get(TRANSCRIPT_KNOWN_AT_KEY), dict)

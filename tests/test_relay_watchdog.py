@@ -6519,6 +6519,49 @@ class TickChannelTests(unittest.TestCase):
         }
         self.assertEqual(permanent_loss_total(state), 9)
 
+    def test_lifecycle_reclaim_preserves_and_escalates_corrupt_loss_state(self):
+        target = self.proj_dir / "corrupt-reclaim.jsonl"
+        target.write_text("{}\n", encoding="utf-8")
+        path = str(target)
+        raw_observations = {"bad": "shape"}
+        raw_tombstones = {"also-bad": "shape"}
+        state = {
+            "999": {
+                relay_watchdog.RECOVERED_GAP_GUARDS_KEY: {
+                    path: {
+                        "size": target.stat().st_size,
+                        "confirmed_at": self.now,
+                        "last_seen_at": self.now,
+                        "absent_since": self.now + 1,
+                    }
+                },
+                relay_watchdog.LOSS_OBSERVATIONS_KEY: raw_observations.copy(),
+                relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY: raw_tombstones.copy(),
+            }
+        }
+        target.unlink()
+        rt = self.make_rt()
+
+        tick_channel(
+            rt,
+            TICK_CHANNEL,
+            state,
+            self.now + relay_watchdog.RECOVERED_GAP_GUARD_TTL_SECS + 2,
+        )
+
+        chs = state["999"]
+        self.assertEqual(chs[relay_watchdog.LOSS_OBSERVATIONS_KEY], raw_observations)
+        self.assertEqual(
+            chs[relay_watchdog.PERMANENT_LOSS_TOMBSTONES_KEY], raw_tombstones
+        )
+        self.assertTrue(
+            any(
+                "permanent-loss-state-corrupt during lifecycle reclaim"
+                in line
+                for line in rt.log_lines
+            )
+        )
+
     def test_loss_state_is_bounded_ttl_pruned_and_lifecycle_cleaned(self):
         path = str(self.proj_dir / "s.jsonl")
         old = self.now - relay_watchdog.TRANSCRIPT_HISTORY_TTL_SECS - 1
@@ -6546,7 +6589,9 @@ class TickChannelTests(unittest.TestCase):
             relay_watchdog._validated_loss_observations(state, self.now), {}
         )
         self.assertEqual(permanent_loss_tombstones(state, self.now), {})
-        relay_watchdog._forget_reclaimed_recovered_gap_lifecycles(state, [path])
+        relay_watchdog._forget_reclaimed_recovered_gap_lifecycles(
+            state, [path], loss_state_corrupted=False
+        )
         self.assertNotIn(relay_watchdog.LAST_ACTUAL_DELIVERY_BY_PATH_KEY, state)
 
     # (d) persistent-gap issue auto-filing is deduplicated
