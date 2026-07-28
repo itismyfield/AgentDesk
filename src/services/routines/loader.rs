@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use rquickjs::{Context, Function, Runtime};
 use serde::Serialize;
 use serde_json::{Map, Number, Value};
@@ -255,7 +255,6 @@ impl RoutineScriptLoader {
             .unwrap_or_else(recover_poisoned_lock)
             .clone();
 
-        let primary_root_identity = roots.first().and_then(|root| root.canonicalize().ok());
         for (root_index, root) in roots.iter().enumerate() {
             if !root.exists() {
                 tracing::warn!("Routines directory does not exist: {}", root.display());
@@ -269,14 +268,8 @@ impl RoutineScriptLoader {
                 continue;
             }
 
-            let exclude_bundled_node_helpers = root
-                .canonicalize()
-                .ok()
-                .is_some_and(|identity| primary_root_identity.as_ref() == Some(&identity));
             let mut entries = Vec::new();
-            if let Err(e) =
-                collect_routine_script_paths(root, exclude_bundled_node_helpers, &mut entries)
-            {
+            if let Err(e) = collect_routine_script_paths(root, &mut entries) {
                 tracing::warn!(
                     routines_dir = %root.display(),
                     error = %e,
@@ -1134,31 +1127,67 @@ mod tests {
     }
 
     #[test]
-    fn load_dir_excludes_node_only_worktree_inventory_helper() {
-        let dir = tempfile::tempdir().unwrap();
-        let monitoring = dir.path().join("monitoring");
-        std::fs::create_dir_all(&monitoring).unwrap();
+    fn load_dir_ignores_sibling_node_helpers_and_preserves_quickjs_refs() {
+        let parent = tempfile::tempdir().unwrap();
+        let routines = parent.path().join("routines");
+        let nested = routines.join("monitoring");
+        let helpers = parent.path().join("routine-helpers");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&helpers).unwrap();
+
+        let nested_routine = nested.join("inventory.js");
+        let root_routine = routines.join("tracked.js");
+        let node_helper = helpers.join("local_worktree_inventory.js");
         std::fs::write(
-            monitoring.join("local_worktree_inventory.js"),
-            "const fs = require('node:fs'); module.exports = { fs };",
+            &node_helper,
+            "throw new Error('sibling Node helper must never be evaluated by QuickJS');",
         )
         .unwrap();
         std::fs::write(
-            dir.path().join("inventory-routine.js"),
-            "agentdesk.routines.register({ name: 'Inventory', tick() { return { action: 'skip' }; } });",
+            &nested_routine,
+            "agentdesk.routines.register({ name: 'Nested Inventory', tick() { return { action: 'skip' }; } });",
+        )
+        .unwrap();
+        std::fs::write(
+            &root_routine,
+            "agentdesk.routines.register({ name: 'Tracked Root', tick() { return { action: 'skip' }; } });",
         )
         .unwrap();
 
         let loader = RoutineScriptLoader::new().unwrap();
-        let logs = capture_debug_logs(|| {
-            assert_eq!(loader.load_dir(dir.path()).unwrap(), 1);
-        });
-        assert_eq!(loader.script_refs().unwrap(), vec!["inventory-routine.js"]);
-        assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
-        assert!(
-            logs.contains("excluded Node-only worktree inventory helper from QuickJS discovery"),
-            "logs={logs}"
+        let source_reads = Arc::new(Mutex::new(Vec::new()));
+        let observed_source_reads = Arc::clone(&source_reads);
+        *loader.source_reader.lock().unwrap() = Some(Arc::new(move |path| {
+            observed_source_reads
+                .lock()
+                .unwrap()
+                .push(path.to_path_buf());
+            std::fs::read_to_string(path)
+        }));
+
+        assert_eq!(loader.load_dir(&routines).unwrap(), 2);
+        assert_eq!(
+            loader.script_refs().unwrap(),
+            vec!["monitoring/inventory.js", "tracked.js"]
         );
+        assert!(loader.has_script("monitoring/inventory.js").unwrap());
+        assert!(loader.has_script("tracked.js").unwrap());
+        assert_eq!(
+            loader
+                .state
+                .evaluation_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+        let source_reads = source_reads.lock().unwrap();
+        assert_eq!(source_reads.len(), 2);
+        assert!(source_reads.contains(&nested_routine));
+        assert!(source_reads.contains(&root_routine));
+        assert!(
+            !source_reads.contains(&node_helper),
+            "sibling Node helper was source-read"
+        );
+        assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1195,7 +1224,7 @@ mod tests {
     }
 
     #[test]
-    fn operator_root_can_define_the_bundled_helper_relative_path_as_a_routine() {
+    fn operator_root_can_override_a_bundled_nested_routine() {
         let bundled = tempfile::tempdir().unwrap();
         let operator = tempfile::tempdir().unwrap();
         let bundled_monitoring = bundled.path().join("monitoring");
@@ -1203,12 +1232,12 @@ mod tests {
         std::fs::create_dir_all(&bundled_monitoring).unwrap();
         std::fs::create_dir_all(&operator_monitoring).unwrap();
         std::fs::write(
-            bundled_monitoring.join("local_worktree_inventory.js"),
-            "const fs = require('node:fs'); module.exports = { fs };",
+            bundled_monitoring.join("inventory.js"),
+            "agentdesk.routines.register({ name: 'Bundled Inventory', tick() { return { action: 'skip' }; } });",
         )
         .unwrap();
         std::fs::write(
-            operator_monitoring.join("local_worktree_inventory.js"),
+            operator_monitoring.join("inventory.js"),
             "agentdesk.routines.register({ name: 'Operator Inventory', tick() { return { action: 'skip' }; } });",
         )
         .unwrap();
@@ -1222,40 +1251,12 @@ mod tests {
         );
         assert_eq!(
             loader
-                .get_script("monitoring/local_worktree_inventory.js")
+                .get_script("monitoring/inventory.js")
                 .unwrap()
                 .unwrap()
                 .name,
             "Operator Inventory"
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn additional_alias_of_primary_root_keeps_bundled_helper_excluded() {
-        use std::os::unix::fs::symlink;
-
-        let bundled = tempfile::tempdir().unwrap();
-        let alias_parent = tempfile::tempdir().unwrap();
-        let monitoring = bundled.path().join("monitoring");
-        std::fs::create_dir_all(&monitoring).unwrap();
-        std::fs::write(
-            monitoring.join("local_worktree_inventory.js"),
-            "const fs = require('node:fs'); module.exports = { fs };",
-        )
-        .unwrap();
-        let alias = alias_parent.path().join("bundled-alias");
-        symlink(bundled.path(), &alias).unwrap();
-
-        let loader = RoutineScriptLoader::new().unwrap();
-        assert_eq!(
-            loader
-                .load_dirs(&[bundled.path().to_path_buf(), alias])
-                .unwrap(),
-            0
-        );
-        assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
-        assert!(loader.script_refs().unwrap().is_empty());
     }
 
     #[test]

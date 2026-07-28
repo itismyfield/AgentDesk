@@ -2397,13 +2397,14 @@ pub struct RoutinesConfig {
     /// unavailable without the PG control plane.
     #[serde(default)]
     pub enabled: bool,
-    /// Release-managed directory containing bundled *.js routine scripts.
-    /// Defaults to `./routines`.
+    /// Release-managed directory containing QuickJS routine entry scripts only.
+    /// Node/Python helpers must live outside this root. Defaults to `./routines`.
     #[serde(default = "default_routines_dir")]
     pub dir: PathBuf,
-    /// Additional operator-managed routine script directories. These are loaded
-    /// after `dir`, so a script with the same relative path overrides the
-    /// bundled script without being copied into the release directory.
+    /// Additional operator-managed QuickJS routine entry roots. Node/Python
+    /// helpers must live outside these roots. Entries load after `dir`, so a
+    /// script with the same relative path overrides the bundled script without
+    /// being copied into the release directory.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_dirs: Vec<PathBuf>,
     /// How often the due-scan tick runs, in seconds. Defaults to 30.

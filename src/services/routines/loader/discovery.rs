@@ -1,4 +1,4 @@
-use super::{LoadedRoutineScript, RoutineScriptCandidate, full_source_version};
+use super::{full_source_version, LoadedRoutineScript, RoutineScriptCandidate};
 use anyhow::Result;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -73,43 +73,20 @@ pub(super) fn add_cached_candidates_for_root(
     }
 }
 
-pub(super) fn collect_routine_script_paths(
-    root: &Path,
-    exclude_bundled_node_helpers: bool,
-    out: &mut Vec<PathBuf>,
-) -> Result<()> {
-    collect_routine_script_paths_inner(root, root, exclude_bundled_node_helpers, out)
+pub(super) fn collect_routine_script_paths(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    collect_routine_script_paths_inner(root, out)
 }
 
-fn collect_routine_script_paths_inner(
-    root: &Path,
-    current_dir: &Path,
-    exclude_bundled_node_helpers: bool,
-    out: &mut Vec<PathBuf>,
-) -> Result<()> {
+fn collect_routine_script_paths_inner(current_dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in std::fs::read_dir(current_dir)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
         let path = entry.path();
         if file_type.is_dir() {
-            collect_routine_script_paths_inner(root, &path, exclude_bundled_node_helpers, out)?;
+            collect_routine_script_paths_inner(&path, out)?;
         } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "js") {
-            if exclude_bundled_node_helpers && is_bundled_node_only_helper(root, &path) {
-                tracing::debug!(
-                    routine_script = %path.display(),
-                    "excluded Node-only worktree inventory helper from QuickJS discovery"
-                );
-            } else {
-                out.push(path);
-            }
+            out.push(path);
         }
     }
     Ok(())
-}
-
-// #4900/#4902: `local-worktree-gc.js` executes this bundled read-only helper with Node.
-fn is_bundled_node_only_helper(root: &Path, path: &Path) -> bool {
-    path.strip_prefix(root).is_ok_and(|relative| {
-        relative == Path::new("monitoring").join("local_worktree_inventory.js")
-    })
 }
