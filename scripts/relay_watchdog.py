@@ -1642,6 +1642,7 @@ def update_permanent_loss_tombstones(
         channel_state, now
     )
     corrupted = tombstones_corrupted or observations_corrupted
+    durable_tombstone_ids = set(tombstones)
     if len(block_source_ids) != len(blocks):
         raise ValueError("block_source_ids must identify every source block")
     block_ids = [
@@ -1705,6 +1706,11 @@ def update_permanent_loss_tombstones(
         _store_loss_state(channel_state, observations, tombstones)
         channel_state[PERMANENT_LOSS_TOTAL_KEY] = len(tombstones)
     else:
+        active_blocks = [
+            block
+            for block, identity in zip(blocks, block_ids)
+            if identity not in durable_tombstone_ids
+        ]
         newly_tombstoned.clear()
         retracted.clear()
     if overflowed:
