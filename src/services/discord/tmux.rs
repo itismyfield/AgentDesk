@@ -242,11 +242,18 @@ pub(super) fn restored_watcher_turn_from_inflight(
     let current_msg_id = super::inflight::opt_message_id(state.current_msg_id)?;
     let response_sent_offset =
         normalize_response_sent_offset(&state.full_response, state.response_sent_offset);
+    let delivery_channel_id = super::inflight::opt_channel_id(state.channel_id).map(ChannelId::get);
+    let offset_authority_channel_id = match state.watcher_owner_channel_id {
+        Some(raw) => super::inflight::opt_channel_id(raw).map(ChannelId::get),
+        None => delivery_channel_id,
+    };
     let delivery_source = state
         .turn_start_offset
         .zip(state.turn_nonce.as_deref())
         .filter(|(start, nonce)| state.last_offset > *start && !nonce.is_empty())
         .and_then(|(start, nonce)| {
+            let delivery_channel_id = delivery_channel_id?;
+            let offset_authority_channel_id = offset_authority_channel_id?;
             let generation_mtime_ns =
                 super::outbound::delivery_record::current_generation_mtime_ns(tmux_session_name);
             (generation_mtime_ns != 0).then(|| {
@@ -256,8 +263,8 @@ pub(super) fn restored_watcher_turn_from_inflight(
                     turn_nonce: nonce.to_string(),
                     range: (start, state.last_offset),
                     generation_mtime_ns,
-                    offset_authority_channel_id: state.delivery_record_owner_channel_id(),
-                    delivery_channel_id: state.channel_id,
+                    offset_authority_channel_id,
+                    delivery_channel_id,
                 }
             })
         });
@@ -342,9 +349,16 @@ fn restored_seed_reassigned_to_different_turn(
         let Some(provider) = ProviderKind::from_str(&source.provider) else {
             return false;
         };
+        let Some(delivery_channel) = super::inflight::opt_channel_id(source.delivery_channel_id)
+        else {
+            return false;
+        };
+        if super::inflight::opt_channel_id(source.offset_authority_channel_id).is_none() {
+            return false;
+        }
         super::outbound::delivery_record::confirmed_delivery_receipt_exists(
             &provider,
-            ChannelId::new(source.delivery_channel_id),
+            delivery_channel,
             restored.current_msg_id.get(),
             source,
         )
@@ -388,15 +402,15 @@ mod restored_seed_discard_tests {
         delivery_record::current_generation_mtime_ns(tmux_session_name)
     }
 
-    fn restored_seed_fixture(
+    fn restored_state_fixture(
         provider: ProviderKind,
-        delivery_channel: ChannelId,
-        owner_channel: ChannelId,
+        delivery_channel_id: u64,
+        owner_channel_id: Option<u64>,
         tmux_session_name: &str,
-    ) -> RestoredWatcherTurn {
+    ) -> InflightTurnState {
         let mut state = InflightTurnState::new(
             provider,
-            delivery_channel.get(),
+            delivery_channel_id,
             Some("phase-a".into()),
             7,
             49_110,
@@ -413,7 +427,28 @@ mod restored_seed_discard_tests {
         state.response_sent_offset = 0;
         state.streaming_rollover_frozen_msg_ids = vec![49_112];
         state.turn_nonce = Some("turn-nonce-N".into());
-        state.set_watcher_owner_channel_id(owner_channel.get());
+        if let Some(owner_channel_id) = owner_channel_id {
+            if owner_channel_id == 0 {
+                state.watcher_owner_channel_id = Some(0);
+            } else {
+                state.set_watcher_owner_channel_id(owner_channel_id);
+            }
+        }
+        state
+    }
+
+    fn restored_seed_fixture(
+        provider: ProviderKind,
+        delivery_channel: ChannelId,
+        owner_channel: ChannelId,
+        tmux_session_name: &str,
+    ) -> RestoredWatcherTurn {
+        let state = restored_state_fixture(
+            provider,
+            delivery_channel.get(),
+            Some(owner_channel.get()),
+            tmux_session_name,
+        );
         crate::services::discord::inflight::save_inflight_state(&state)
             .expect("persist receipt source row");
         let mut restored = restored_watcher_turn_from_inflight(&state, tmux_session_name, false)
@@ -426,7 +461,7 @@ mod restored_seed_discard_tests {
         provider: &ProviderKind,
         source: delivery_record::ExactJsonlSourceIdentity,
         message_id: u64,
-    ) {
+    ) -> Result<(), String> {
         let owner = source.offset_authority_channel_id;
         let delivery = source.delivery_channel_id;
         delivery_record::write_confirmed_delivery(
@@ -445,7 +480,6 @@ mod restored_seed_discard_tests {
                 message_id,
             },
         )
-        .expect("write exact confirmed receipt");
     }
 
     #[test]
@@ -555,7 +589,8 @@ mod restored_seed_discard_tests {
 
         // The bridge then commits the exact split-channel receipt and clears the
         // inflight before the watcher consumes its stale clone.
-        write_receipt(&provider, source, restored.current_msg_id.get());
+        write_receipt(&provider, source, restored.current_msg_id.get())
+            .expect("write exact confirmed receipt");
         crate::services::discord::inflight::delete_inflight_state_file(
             &provider,
             delivery_channel.get(),
@@ -589,7 +624,8 @@ mod restored_seed_discard_tests {
         let restored = restored_seed_fixture(provider.clone(), channel, channel, tmux_session_name);
         let source = restored.delivery_source.clone().expect("captured source");
 
-        write_receipt(&provider, source.clone(), restored.current_msg_id.get() + 1);
+        write_receipt(&provider, source.clone(), restored.current_msg_id.get() + 1)
+            .expect("write destination-mismatch receipt");
         assert!(!restored_seed_reassigned_to_different_turn(
             Some(&restored),
             None,
@@ -598,7 +634,8 @@ mod restored_seed_discard_tests {
 
         let mut wrong_nonce = source.clone();
         wrong_nonce.turn_nonce = "different-turn-same-body".into();
-        write_receipt(&provider, wrong_nonce, restored.current_msg_id.get());
+        write_receipt(&provider, wrong_nonce, restored.current_msg_id.get())
+            .expect("write nonce-mismatch receipt");
         assert!(!restored_seed_reassigned_to_different_turn(
             Some(&restored),
             None,
@@ -607,7 +644,8 @@ mod restored_seed_discard_tests {
 
         let mut wrong_range = source;
         wrong_range.range = (100, 201);
-        write_receipt(&provider, wrong_range, restored.current_msg_id.get());
+        write_receipt(&provider, wrong_range, restored.current_msg_id.get())
+            .expect("write range-mismatch receipt");
         assert!(!restored_seed_reassigned_to_different_turn(
             Some(&restored),
             None,
@@ -654,12 +692,76 @@ mod restored_seed_discard_tests {
         // rejected against the current generation marker.
         let mut stale_source = source;
         stale_source.generation_mtime_ns = stale_source.generation_mtime_ns.saturating_add(1);
-        write_receipt(
-            &provider,
-            stale_source.clone(),
-            restored.current_msg_id.get(),
+        assert!(
+            write_receipt(
+                &provider,
+                stale_source.clone(),
+                restored.current_msg_id.get(),
+            )
+            .is_err(),
+            "the guarded writer must reject stale-incarnation authority"
         );
         restored.delivery_source = Some(stale_source);
+        assert!(!restored_seed_reassigned_to_different_turn(
+            Some(&restored),
+            None,
+            None,
+        ));
+        assert_eq!(
+            watcher_stream_seed(Some(restored)).full_response,
+            "N delivered body"
+        );
+    }
+
+    #[test]
+    fn zero_persisted_delivery_channel_preserves_restored_seed_4911() {
+        let root = tempfile::tempdir().expect("isolated root");
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        let tmux_session_name = "AgentDesk-codex-phase-a-zero-delivery";
+        let generation = touch_generation_marker(tmux_session_name);
+        let state = restored_state_fixture(ProviderKind::Codex, 0, Some(49_141), tmux_session_name);
+        let mut restored = restored_watcher_turn_from_inflight(&state, tmux_session_name, false)
+            .expect("zero destination must not erase the conservative restored body");
+        assert!(restored.delivery_source.is_none());
+        restored.delivery_source = Some(delivery_record::ExactJsonlSourceIdentity {
+            provider: ProviderKind::Codex.as_str().to_string(),
+            tmux_session_name: tmux_session_name.to_string(),
+            turn_nonce: "zero-delivery".into(),
+            range: (100, 200),
+            generation_mtime_ns: generation,
+            offset_authority_channel_id: 49_141,
+            delivery_channel_id: 0,
+        });
+        assert!(!restored_seed_reassigned_to_different_turn(
+            Some(&restored),
+            None,
+            None,
+        ));
+        assert_eq!(
+            watcher_stream_seed(Some(restored)).full_response,
+            "N delivered body"
+        );
+    }
+
+    #[test]
+    fn zero_persisted_owner_channel_preserves_restored_seed_4911() {
+        let root = tempfile::tempdir().expect("isolated root");
+        let _root = crate::config::set_agentdesk_root_for_test(root.path());
+        let tmux_session_name = "AgentDesk-codex-phase-a-zero-owner";
+        let generation = touch_generation_marker(tmux_session_name);
+        let state = restored_state_fixture(ProviderKind::Codex, 49_151, Some(0), tmux_session_name);
+        let mut restored = restored_watcher_turn_from_inflight(&state, tmux_session_name, false)
+            .expect("zero owner must not erase the conservative restored body");
+        assert!(restored.delivery_source.is_none());
+        restored.delivery_source = Some(delivery_record::ExactJsonlSourceIdentity {
+            provider: ProviderKind::Codex.as_str().to_string(),
+            tmux_session_name: tmux_session_name.to_string(),
+            turn_nonce: "zero-owner".into(),
+            range: (100, 200),
+            generation_mtime_ns: generation,
+            offset_authority_channel_id: 0,
+            delivery_channel_id: 49_151,
+        });
         assert!(!restored_seed_reassigned_to_different_turn(
             Some(&restored),
             None,

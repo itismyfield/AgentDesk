@@ -451,20 +451,57 @@ fn write_confirmed_delivery_at(
     {
         return Err("delivery_record: refusing incomplete or frontier-mismatched receipt".into());
     }
-    mutate_record_at(path, |record| {
-        record.delivered_frontier = Some(frontier);
-        record
-            .confirmed_deliveries
-            .retain(|existing| existing != &receipt);
-        record.confirmed_deliveries.push(receipt);
-        let excess = record
-            .confirmed_deliveries
-            .len()
-            .saturating_sub(CONFIRMED_DELIVERY_RECEIPT_LIMIT);
-        if excess > 0 {
-            record.confirmed_deliveries.drain(..excess);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let _lock = lock_record_path(path)?;
+
+    // Revalidate the transcript incarnation only after acquiring the record
+    // lock. Receipt construction can race a wrapper rotation; a receipt that
+    // was valid before waiting for this lock must not overwrite the new
+    // incarnation's frontier after it acquires the lock.
+    let current_generation = current_generation_mtime_ns(&receipt.source.tmux_session_name);
+    if current_generation == 0 || current_generation != receipt.source.generation_mtime_ns {
+        return Err("delivery_record: refusing receipt from a stale JSONL incarnation".into());
+    }
+
+    let mut record = read_record_at(path).unwrap_or_default();
+    let next_frontier = match record.delivered_frontier.as_ref() {
+        Some(existing) if existing.generation_mtime_ns == frontier.generation_mtime_ns => {
+            let merged_range = (
+                existing.range.0.min(frontier.range.0),
+                existing.range.1.max(frontier.range.1),
+            );
+            if frontier.range.1 > existing.range.1 {
+                DeliveredCommit {
+                    range: merged_range,
+                    ..frontier
+                }
+            } else {
+                DeliveredCommit {
+                    range: merged_range,
+                    ..existing.clone()
+                }
+            }
         }
-    })
+        _ => frontier,
+    };
+    record.delivered_frontier = Some(next_frontier);
+
+    // A delayed, lower-range receipt remains exact proof for its own restored
+    // seed. Append it even when the monotonic frontier correctly stays put.
+    record
+        .confirmed_deliveries
+        .retain(|existing| existing != &receipt);
+    record.confirmed_deliveries.push(receipt);
+    let excess = record
+        .confirmed_deliveries
+        .len()
+        .saturating_sub(CONFIRMED_DELIVERY_RECEIPT_LIMIT);
+    if excess > 0 {
+        record.confirmed_deliveries.drain(..excess);
+    }
+    write_record_at(path, &record)
 }
 
 /// Atomically persist the monotonic frontier and the exact Discord receipt.
@@ -639,7 +676,8 @@ fn resolved_receipt_owner_channel(
         return None;
     }
 
-    let captured_owner = ChannelId::new(source.offset_authority_channel_id);
+    let captured_owner =
+        crate::services::discord::inflight::opt_channel_id(source.offset_authority_channel_id)?;
     match watcher_owner_channel_for_delivery_channel(
         provider,
         delivery_channel,
@@ -1969,6 +2007,51 @@ mod tests {
         }
     }
 
+    fn set_phase_a_generation(tmux_session_name: &str, unix_secs: i64) -> i64 {
+        let path = crate::services::tmux_common::session_temp_path(tmux_session_name, "generation");
+        if let Some(parent) = Path::new(&path).parent() {
+            fs::create_dir_all(parent).expect("create generation parent");
+        }
+        fs::write(&path, "phase-a-r2").expect("write generation marker");
+        filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(unix_secs, 123))
+            .expect("set deterministic generation mtime");
+        current_generation_mtime_ns(tmux_session_name)
+    }
+
+    fn exact_delivery_fixture(
+        provider: &ProviderKind,
+        tmux_session_name: &str,
+        turn_nonce: &str,
+        range: (u64, u64),
+        generation_mtime_ns: i64,
+        channels: (u64, u64),
+        message_id: u64,
+    ) -> (DeliveredCommit, ConfirmedDeliveryReceipt) {
+        let (owner_channel_id, delivery_channel_id) = channels;
+        (
+            DeliveredCommit {
+                range,
+                generation_mtime_ns,
+                attempts: 1,
+                panel_msg_id: Some(message_id),
+                panel_channel_id: Some(delivery_channel_id),
+            },
+            ConfirmedDeliveryReceipt {
+                source: ExactJsonlSourceIdentity {
+                    provider: provider.as_str().to_string(),
+                    tmux_session_name: tmux_session_name.to_string(),
+                    turn_nonce: turn_nonce.to_string(),
+                    range,
+                    generation_mtime_ns,
+                    offset_authority_channel_id: owner_channel_id,
+                    delivery_channel_id,
+                },
+                delivery_channel_id,
+                message_id,
+            },
+        )
+    }
+
     #[test]
     fn ordered_jsonl_commit_is_generation_scoped_and_monotonic() {
         let temp = tempfile::tempdir().unwrap();
@@ -3290,6 +3373,145 @@ mod tests {
                 .expect("owner record path")
                 .starts_with(root.path())
         );
+    }
+
+    #[test]
+    fn confirmed_receipts_reverse_order_merge_without_frontier_regression_4911() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Claude;
+        let owner = 4_911_101;
+        let delivery = 4_911_102;
+        let tmux = "AgentDesk-claude-phase-a-r2-reverse";
+        let generation = set_phase_a_generation(tmux, 1_700_491_101);
+
+        let (newer_frontier, newer_receipt) = exact_delivery_fixture(
+            &provider,
+            tmux,
+            "newer-turn",
+            (100, 300),
+            generation,
+            (owner, delivery),
+            4_911_103,
+        );
+        write_confirmed_delivery(&provider, owner, newer_frontier, newer_receipt)
+            .expect("write newer receipt first");
+
+        let (older_frontier, older_receipt) = exact_delivery_fixture(
+            &provider,
+            tmux,
+            "delayed-older-turn",
+            (0, 200),
+            generation,
+            (owner, delivery),
+            4_911_104,
+        );
+        write_confirmed_delivery(&provider, owner, older_frontier, older_receipt)
+            .expect("append delayed lower receipt without regressing frontier");
+
+        let (equal_frontier, equal_receipt) = exact_delivery_fixture(
+            &provider,
+            tmux,
+            "delayed-equal-end-turn",
+            (50, 300),
+            generation,
+            (owner, delivery),
+            4_911_105,
+        );
+        write_confirmed_delivery(&provider, owner, equal_frontier, equal_receipt)
+            .expect("append delayed equal-end receipt without replacing frontier metadata");
+
+        let record = read_record(&provider, owner).expect("merged record");
+        let frontier = record.delivered_frontier.expect("monotonic frontier");
+        assert_eq!(frontier.range, (0, 300));
+        assert_eq!(frontier.panel_msg_id, Some(4_911_103));
+        assert_eq!(record.confirmed_deliveries.len(), 3);
+        assert_eq!(
+            record
+                .confirmed_deliveries
+                .iter()
+                .map(|receipt| receipt.message_id)
+                .collect::<Vec<_>>(),
+            vec![4_911_103, 4_911_104, 4_911_105]
+        );
+    }
+
+    #[test]
+    fn rotate_after_receipt_validation_preserves_current_incarnation_4911() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Codex;
+        let owner = 4_911_201;
+        let delivery = 4_911_202;
+        let tmux = "AgentDesk-codex-phase-a-r2-rotate";
+        let old_generation = set_phase_a_generation(tmux, 1_700_491_201);
+        let (delayed_frontier, delayed_receipt) = exact_delivery_fixture(
+            &provider,
+            tmux,
+            "validated-before-rotate",
+            (0, 400),
+            old_generation,
+            (owner, delivery),
+            4_911_203,
+        );
+        assert!(delayed_receipt.is_authoritative());
+
+        let current_generation = set_phase_a_generation(tmux, 1_700_491_202);
+        assert_ne!(old_generation, current_generation);
+        let (current_frontier, current_receipt) = exact_delivery_fixture(
+            &provider,
+            tmux,
+            "current-incarnation",
+            (0, 100),
+            current_generation,
+            (owner, delivery),
+            4_911_204,
+        );
+        write_confirmed_delivery(&provider, owner, current_frontier, current_receipt)
+            .expect("write current incarnation");
+        let before = read_record(&provider, owner).expect("current record");
+
+        assert!(
+            write_confirmed_delivery(&provider, owner, delayed_frontier, delayed_receipt).is_err(),
+            "the guarded writer must recheck generation after receipt construction"
+        );
+        assert_eq!(read_record(&provider, owner), Some(before));
+    }
+
+    #[test]
+    fn confirmed_receipt_write_rejects_destination_owner_and_provider_mismatch_4911() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Claude;
+        let owner = 4_911_301;
+        let delivery = 4_911_302;
+        let tmux = "AgentDesk-claude-phase-a-r2-mismatch";
+        let generation = set_phase_a_generation(tmux, 1_700_491_301);
+        let (frontier, receipt) = exact_delivery_fixture(
+            &provider,
+            tmux,
+            "mismatch-turn",
+            (0, 100),
+            generation,
+            (owner, delivery),
+            4_911_303,
+        );
+
+        let mut wrong_destination = receipt.clone();
+        wrong_destination.delivery_channel_id = delivery + 1;
+        assert!(
+            write_confirmed_delivery(&provider, owner, frontier.clone(), wrong_destination,)
+                .is_err()
+        );
+        let mut missing_anchor_channel = frontier.clone();
+        missing_anchor_channel.panel_channel_id = None;
+        assert!(
+            write_confirmed_delivery(&provider, owner, missing_anchor_channel, receipt.clone(),)
+                .is_err()
+        );
+        assert!(
+            write_confirmed_delivery(&provider, owner + 1, frontier.clone(), receipt.clone())
+                .is_err()
+        );
+        assert!(write_confirmed_delivery(&ProviderKind::Codex, owner, frontier, receipt).is_err());
+        assert!(read_record(&provider, owner).is_none());
     }
 
     // ---- #3610 PR-1c: long-chunk terminal arm anchor recording -----------------
