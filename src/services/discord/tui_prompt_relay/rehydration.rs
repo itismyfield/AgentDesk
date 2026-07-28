@@ -39,7 +39,7 @@ pub(super) fn claude_tui_session_is_dead_orphaned(
     }
     pane_is_confirmed_dead_orphaned(
         || crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name),
-        || crate::services::tmux_diagnostics::tmux_session_exists(tmux_session_name),
+        || crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
         DEAD_ORPHANED_PANE_PROBE_SAMPLES,
         Some(DEAD_ORPHANED_PANE_PROBE_DELAY),
     )
@@ -55,7 +55,7 @@ pub(super) fn claude_tui_session_is_dead_orphaned(
 #[cfg(unix)]
 pub(super) fn pane_is_confirmed_dead_orphaned(
     mut has_live_pane: impl FnMut() -> bool,
-    session_exists: impl FnOnce() -> bool,
+    session_liveness: impl FnOnce() -> crate::services::platform::tmux::PaneLiveness,
     samples: usize,
     inter_probe_delay: Option<Duration>,
 ) -> bool {
@@ -77,9 +77,12 @@ pub(super) fn pane_is_confirmed_dead_orphaned(
             }
         }
     }
-    // Every soft probe agreed the pane is dead. Require the hard has-session check
-    // to confirm the session truly does not exist before declaring it orphaned.
-    !session_exists()
+    // Every soft probe agreed the pane is dead. Require the three-state hard
+    // probe to confirm death; transport/permission failures preserve the mirror.
+    matches!(
+        session_liveness(),
+        crate::services::platform::tmux::PaneLiveness::DeadOrAbsent
+    )
 }
 
 /// #3105 (codex P1 sub-case B): evict the stale dedupe mirror for every Claude
@@ -142,7 +145,7 @@ fn codex_tui_session_is_dead_orphaned(shared: &Arc<SharedData>, tmux_session_nam
     }
     pane_is_confirmed_dead_orphaned(
         || crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name),
-        || crate::services::tmux_diagnostics::tmux_session_exists(tmux_session_name),
+        || crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
         DEAD_ORPHANED_PANE_PROBE_SAMPLES,
         Some(DEAD_ORPHANED_PANE_PROBE_DELAY),
     )

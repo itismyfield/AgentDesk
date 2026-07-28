@@ -665,7 +665,7 @@ fn transient_pane_flake_on_live_session_is_not_dead_orphaned() {
     let is_dead = pane_is_confirmed_dead_orphaned(
         || live_reads.borrow_mut().next().unwrap_or(true),
         // session_exists must NOT even be consulted once a live pane is seen.
-        || panic!("session_exists must not be probed once a live pane is observed"),
+        || panic!("session liveness must not be probed once a live pane is observed"),
         DEAD_ORPHANED_PANE_PROBE_SAMPLES,
         None,
     );
@@ -690,7 +690,7 @@ fn genuinely_gone_session_is_still_dead_orphaned_after_retries() {
             probe_count.set(probe_count.get() + 1);
             false // never a live pane
         },
-        || false, // hard has-session: session truly gone
+        || crate::services::platform::tmux::PaneLiveness::DeadOrAbsent,
         DEAD_ORPHANED_PANE_PROBE_SAMPLES,
         None,
     );
@@ -715,13 +715,28 @@ fn genuinely_gone_session_is_still_dead_orphaned_after_retries() {
 fn confirmed_existing_session_is_not_dead_even_if_pane_probes_flake() {
     let is_dead = pane_is_confirmed_dead_orphaned(
         || false, // soft pane probe: reads dead on every sample
-        || true,  // hard has-session: the session IS present on this host
+        || crate::services::platform::tmux::PaneLiveness::Live,
         DEAD_ORPHANED_PANE_PROBE_SAMPLES,
         None,
     );
     assert!(
         !is_dead,
         "a session still present per has-session must not be evicted on soft pane reads alone"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn hard_probe_failure_preserves_dead_looking_session() {
+    let is_dead = pane_is_confirmed_dead_orphaned(
+        || false,
+        || crate::services::platform::tmux::PaneLiveness::ProbeError,
+        DEAD_ORPHANED_PANE_PROBE_SAMPLES,
+        None,
+    );
+    assert!(
+        !is_dead,
+        "a failed hard probe is unknown and must not evict the runtime mirror"
     );
 }
 
