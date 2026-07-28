@@ -1445,6 +1445,7 @@ mod tests {
                     .expect("production redrive entrypoint"),
                 "producer liveness must not suppress admitted relay recovery attempt at +{elapsed}s"
             );
+            *resume_offset.lock().expect("resume offset") = None;
         }
         assert!(
             !registry
@@ -1459,7 +1460,11 @@ mod tests {
             capped_alarm_count, 1,
             "a vouched producer must neither suppress nor duplicate the capped relay alarm"
         );
-        assert_eq!(*resume_offset.lock().unwrap(), Some(128));
+        assert_eq!(
+            *resume_offset.lock().unwrap(),
+            None,
+            "the fixture consumes each admitted request before the next health pass"
+        );
 
         crate::services::discord::inflight::clear_inflight_state(&provider, channel_id.get());
         clear_redrive_test_state(&shared, &provider, channel_id, tmux_session);
@@ -2063,12 +2068,13 @@ mod tests {
         let tmux_session = "AgentDesk-codex-4299-owner-shield";
         let output_path = "/tmp/agentdesk-4299-owner-shield.jsonl";
         let shared = crate::services::discord::make_shared_data_for_tests();
+        let resume_offset = Arc::new(Mutex::new(None));
         shared.tmux_watchers.insert(
             owner_channel_id,
             watcher_handle(
                 tmux_session,
                 output_path,
-                Arc::new(Mutex::new(None)),
+                resume_offset.clone(),
                 Arc::new(AtomicBool::new(true)),
             ),
         );
@@ -2149,6 +2155,7 @@ mod tests {
             gated_nudge(&shared, &provider, &snapshot, channel_id, base),
             (true, Some(1))
         );
+        *resume_offset.lock().expect("resume offset") = None;
         let episode_started = shared
             .redrive_placeholder_shield_context(&provider, owner_channel_id)
             .expect("first attempt re-arms the owner shield")
