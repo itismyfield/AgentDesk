@@ -2378,6 +2378,12 @@ pub(crate) struct SharedData {
     readopted_mailbox_ledger: readopted_mailbox_ledger::ReadoptedMailboxLedger, // #4370
 }
 
+pub(crate) const SESSION_TRANSITION_LOCK_WAIT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(2);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SessionTransitionBusy;
+
 impl SharedData {
     pub(super) fn has_runtime_storage(&self) -> bool {
         self.pg_pool.is_some()
@@ -2418,6 +2424,18 @@ impl SharedData {
                 lock
             }
         }
+    }
+
+    pub(crate) async fn acquire_session_transition(
+        &self,
+        channel_id: ChannelId,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, SessionTransitionBusy> {
+        tokio::time::timeout(
+            SESSION_TRANSITION_LOCK_WAIT_TIMEOUT,
+            self.session_transition_lock(channel_id).lock_owned(),
+        )
+        .await
+        .map_err(|_| SessionTransitionBusy)
     }
 
     /// #3293: non-creating mailbox lookup for probes — `mailbox()` mints a
@@ -2598,6 +2616,32 @@ impl SharedData {
 #[cfg(test)]
 mod session_transition_lock_tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn transition_acquisition_times_out_after_contract_window() {
+        let shared = make_shared_data_for_tests();
+        let channel_id = ChannelId::new(4_794_899);
+        let held = shared
+            .session_transition_lock(channel_id)
+            .lock_owned()
+            .await;
+        let waiting_shared = Arc::clone(&shared);
+        let waiter =
+            tokio::spawn(
+                async move { waiting_shared.acquire_session_transition(channel_id).await },
+            );
+
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        tokio::time::advance(SESSION_TRANSITION_LOCK_WAIT_TIMEOUT).await;
+        tokio::task::yield_now().await;
+        assert!(
+            waiter.is_finished(),
+            "transition wait must end at the configured two-second boundary"
+        );
+        assert!(matches!(waiter.await.unwrap(), Err(SessionTransitionBusy)));
+        drop(held);
+    }
 
     #[test]
     fn inactive_channel_locks_are_pruned_only_on_vacant_insertion() {

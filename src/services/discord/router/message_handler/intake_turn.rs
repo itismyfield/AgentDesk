@@ -833,12 +833,45 @@ pub(super) async fn handle_text_message(
 
     // Redirect resolution is complete: serialize the effective channel's runtime
     // snapshot and mailbox claim with `/resume` for this same channel.
-    let intake_runtime_transition = intake_runtime_transition_after_redirect(
+    let intake_runtime_transition = match intake_runtime_transition_after_redirect(
         shared,
         channel_id,
         (session_id, memento_context_loaded, current_path),
     )
-    .await;
+    .await
+    {
+        Ok(transition) => transition,
+        Err(_) => {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                wait_timeout_secs =
+                    super::super::super::SESSION_TRANSITION_LOCK_WAIT_TIMEOUT.as_secs(),
+                "session transition stayed busy; preserving intake as a durable queued intervention"
+            );
+            return race_loss::handle_race_loss_enqueue(
+                http,
+                shared,
+                token,
+                &provider,
+                channel_id,
+                original_channel_id,
+                turn_kind,
+                original_request_owner,
+                user_msg_id,
+                user_text,
+                &reply_context,
+                has_reply_boundary,
+                merge_consecutive,
+                &pending_uploads,
+                &voice_announcement,
+                reply_to_user_message,
+                &dispatch_id_for_thread,
+                turn_start_attempt,
+                preserve_on_cancel,
+            )
+            .await;
+        }
+    };
     let (mut session_id, mut memento_context_loaded, current_path) =
         intake_runtime_transition.state.clone();
     let mut session_strategy_reason = if session_id.is_some() {
@@ -2655,6 +2688,28 @@ mod tui_busy_pre_submit_queue_reaction_tests {
         assert!(
             refusal_branch.contains(accepted_clear),
             "refused busy enqueue must still clear the optimistic pending view"
+        );
+    }
+}
+
+#[cfg(test)]
+mod session_transition_timeout_tests {
+    #[test]
+    fn busy_transition_routes_intake_to_durable_queue_before_runtime_snapshot_use() {
+        let module_src = include_str!("intake_turn.rs");
+        let transition_pos = module_src
+            .find("let intake_runtime_transition = match intake_runtime_transition_after_redirect(")
+            .expect("bounded transition acquisition exists");
+        let busy_branch = &module_src[transition_pos..];
+        let queue_pos = busy_branch
+            .find("return race_loss::handle_race_loss_enqueue(")
+            .expect("timeout branch preserves intake through the durable queue helper");
+        let state_pos = busy_branch
+            .find("intake_runtime_transition.state.clone()")
+            .expect("runtime snapshot is consumed after transition acquisition");
+        assert!(
+            queue_pos < state_pos,
+            "busy intake must queue before any runtime snapshot can launch a turn"
         );
     }
 }

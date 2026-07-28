@@ -110,6 +110,9 @@ pub(crate) enum ResumeRebindError {
     /// The channel has an in-flight dispatch or active turn; rebinding now would
     /// leave the running process writing to the old transcript.
     ActiveTurn,
+    /// Another intake/resume transition held the channel lock beyond the bounded
+    /// acquisition window. The caller may retry without partial mutation.
+    TransitionBusy,
     /// Auto mode found no prior provider session to resume.
     NoPreviousSession,
     /// Explicit `session_id` given but no `cwd` is known (row has no `cwd` and
@@ -134,6 +137,15 @@ impl ResumeRebindError {
                 StatusCode::CONFLICT,
                 Json(json!({
                     "error": "channel has an active turn or dispatch; stop it before resuming a previous session"
+                })),
+            ),
+            ResumeRebindError::TransitionBusy => (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": format!(
+                        "channel session transition stayed busy for {} seconds; retry /resume",
+                        crate::services::discord::SESSION_TRANSITION_LOCK_WAIT_TIMEOUT.as_secs()
+                    )
                 })),
             ),
             ResumeRebindError::NoPreviousSession => (
@@ -354,19 +366,20 @@ pub(crate) async fn perform_resume_rebind(
     } else {
         None
     };
-    let transition_lock = resume_runtime
-        .as_ref()
-        .zip(channel_id)
-        .map(|(shared, channel_id)| shared.session_transition_lock(channel_id));
-    let _transition_guard = match transition_lock.as_ref() {
-        Some(lock) => Some(lock.lock().await),
+    let _transition_guard = match resume_runtime.as_ref().zip(channel_id) {
+        Some((shared, channel_id)) => Some(
+            shared
+                .acquire_session_transition(channel_id)
+                .await
+                .map_err(|_| ResumeRebindError::TransitionBusy)?,
+        ),
         None => None,
     };
-    // Keep the guard through the bounded, conservatively-biased pane probe below.
-    // Releasing it earlier would let intake claim the channel from the old runtime
-    // snapshot while `/resume` is still deciding whether that runtime must be kept.
-    // The maximum 10-second pause is preferable to launching against a stale
-    // provider session; probe failures preserve the runtime rather than destroy it.
+    // Keep the guard through the conservatively-biased pane probe below. Releasing
+    // it earlier would let intake claim the channel from the old runtime snapshot
+    // while `/resume` is still deciding whether that runtime must be kept. Lock
+    // acquisition is bounded above; once acquired, correctness keeps the critical
+    // section intact and probe failures preserve rather than destroy the runtime.
 
     let Some(SessionRebindContext {
         resolved_session_key: _,
@@ -700,6 +713,17 @@ mod tests {
 
     use super::*;
     use filetime::{FileTime, set_file_mtime};
+
+    #[test]
+    fn transition_busy_response_exposes_retryable_two_second_contract() {
+        let (status, Json(body)) = ResumeRebindError::TransitionBusy.into_response();
+        assert_eq!(status, StatusCode::CONFLICT);
+        let error = body["error"]
+            .as_str()
+            .expect("busy response has error text");
+        assert!(error.contains("2 seconds"));
+        assert!(error.contains("retry /resume"));
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn off_runtime_discovery_preserves_selection_and_runtime_progress() {
@@ -1115,7 +1139,8 @@ mod tests {
                 channel_id,
                 (None, false, intake_old_cwd),
             )
-            .await;
+            .await
+            .expect("intake acquires transition lock");
             (transition.state.0, transition.state.2)
         });
         tokio::task::yield_now().await;
@@ -1136,7 +1161,8 @@ mod tests {
             channel_id,
             (None, false, old_cwd.clone()),
         )
-        .await;
+        .await
+        .expect("intake acquires transition lock");
         let blocked_resume_pool = pool.clone();
         let blocked_resume_registry = HealthRegistry::new();
         blocked_resume_registry

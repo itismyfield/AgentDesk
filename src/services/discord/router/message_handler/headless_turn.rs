@@ -302,8 +302,16 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             status: HeadlessTurnStartStatus::Consumed,
         });
     }
-    let session_transition_lock = shared.session_transition_lock(channel_id);
-    let session_transition_guard = session_transition_lock.lock().await;
+    let session_transition_guard = shared
+        .acquire_session_transition(channel_id)
+        .await
+        .map_err(|_| {
+            HeadlessTurnStartError::Conflict(format!(
+                "session transition stayed busy for {} seconds on channel {}",
+                super::super::super::SESSION_TRANSITION_LOCK_WAIT_TIMEOUT.as_secs(),
+                channel_id.get()
+            ))
+        })?;
     let cancel_token = Arc::new(CancelToken::new());
     let started = super::super::super::mailbox_try_start_turn(
         shared,
