@@ -503,6 +503,16 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
         .expect("completion bus open");
     assert_eq!(a_release.channel_id, channel_id);
 
+    // The idle-queue listener can publish a second QueueEligible event after it
+    // consumes A's release. Drain that worker-derived event before asserting the
+    // local-only `/model` window is completion-event free.
+    let queued_dispatch =
+        tokio::time::timeout(std::time::Duration::from_secs(2), completion_rx.recv())
+            .await
+            .expect("A release must wake the idle durable queue listener")
+            .expect("completion bus open");
+    assert_eq!(queued_dispatch.channel_id, channel_id);
+
     let before_model = mailbox_snapshot(&shared, channel_id).await;
     assert!(before_model.active_user_message_id.is_none());
     assert_eq!(
