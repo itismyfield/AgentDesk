@@ -644,6 +644,8 @@ jobs:
         run: |
           cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1
           cargo test --lib services::discord::recovery_engine::state_extractors::tests -- --test-threads=1
+          cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1
+          cargo test --lib services::discord::terminal_ui_obligation::tests -- --test-threads=1
 
       - name: Stop PostgreSQL service
         if: always()

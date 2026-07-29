@@ -255,6 +255,12 @@ pub(super) fn idle_tmux_repair_snapshot_ready_for_input(
         .map(str::trim)
         .filter(|path| !path.is_empty())
     else {
+        if crate::services::tui_turn_state::claude_tui_output_path_missing(
+            state.runtime_kind,
+            state.output_path.as_deref(),
+        ) {
+            return false;
+        }
         return pane_ready_for_input(tmux_session, provider);
     };
     let output_path = Path::new(output_path);

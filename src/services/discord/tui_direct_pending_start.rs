@@ -760,8 +760,10 @@ fn restart_orphan_evidence_at(
 }
 
 fn claude_tui_output_path_missing(state: &super::inflight::InflightTurnState) -> bool {
-    state.runtime_kind == Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui)
-        && state.output_path.is_none()
+    crate::services::tui_turn_state::claude_tui_output_path_missing(
+        state.runtime_kind,
+        state.output_path.as_deref(),
+    )
 }
 
 fn restart_orphan_independent_pane_ready(

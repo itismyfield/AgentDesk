@@ -1850,6 +1850,52 @@ fn set_output_mtime_age(output_path: &std::path::Path, age: std::time::Duration)
 }
 
 #[test]
+fn idle_tmux_snapshot_missing_output_path_denies_claude_tui_but_keeps_legacy_pane_fallback() {
+    let provider = ProviderKind::Claude;
+    let channel_id = 4_997_004;
+    let mut state = super::super::inflight::InflightTurnState::new(
+        provider.clone(),
+        channel_id,
+        None,
+        1,
+        4_997_005,
+        4_997_006,
+        "freshly seeded ClaudeTui turn".to_string(),
+        None,
+        Some("AgentDesk-claude-4997-idle-tmux".to_string()),
+        None,
+        None,
+        0,
+    );
+    state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+    assert!(state.full_response.is_empty());
+    assert_eq!(state.last_offset, 0);
+    assert!(
+        !idle_tmux_repair_snapshot_ready_for_input(
+            &provider,
+            channel_id,
+            "AgentDesk-claude-4997-idle-tmux",
+            &state,
+            |_tmux, _provider| true,
+        ),
+        "missing ClaudeTui runtime output must override a ready pane fallback"
+    );
+
+    state.runtime_kind =
+        Some(crate::services::agent_protocol::RuntimeHandoffKind::LegacyTmuxWrapper);
+    assert!(
+        idle_tmux_repair_snapshot_ready_for_input(
+            &provider,
+            channel_id,
+            "AgentDesk-claude-4997-idle-tmux",
+            &state,
+            |_tmux, _provider| true,
+        ),
+        "non-ClaudeTui missing-output rows must retain the existing ready pane fallback"
+    );
+}
+
+#[test]
 fn frozen_busy_jsonl_uses_ready_pane_fallback_after_stale_window() {
     let _guard = auto_heal_test_lock().blocking_lock();
     let (_root_guard, temp) = isolated_agentdesk_root();

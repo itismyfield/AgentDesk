@@ -290,14 +290,11 @@ async fn resolve_terminal_ui_session(
             tmux_session_name,
             state.output_path.as_deref(),
         );
-        return TerminalUiSessionLookup::Current(TerminalUiSessionSnapshot {
-            tmux_session_name: tmux_session_name.to_string(),
-            current_offset: output_path.as_deref().map(output_file_len).unwrap_or(0),
+        return TerminalUiSessionLookup::Current(terminal_ui_snapshot_from_inflight(
+            &state,
+            tmux_session_name,
             output_path,
-            inflight_claude_tui_output_path_missing: state.runtime_kind
-                == Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui)
-                && state.output_path.is_none(),
-        });
+        ));
     }
 
     let Some(tmux_session_name) =
@@ -319,6 +316,23 @@ async fn resolve_terminal_ui_session(
         output_path,
         inflight_claude_tui_output_path_missing: false,
     })
+}
+
+fn terminal_ui_snapshot_from_inflight(
+    state: &inflight::InflightTurnState,
+    tmux_session_name: &str,
+    output_path: Option<String>,
+) -> TerminalUiSessionSnapshot {
+    TerminalUiSessionSnapshot {
+        tmux_session_name: tmux_session_name.to_string(),
+        current_offset: output_path.as_deref().map(output_file_len).unwrap_or(0),
+        output_path,
+        inflight_claude_tui_output_path_missing:
+            crate::services::tui_turn_state::claude_tui_output_path_missing(
+                state.runtime_kind,
+                state.output_path.as_deref(),
+            ),
+    }
 }
 
 async fn resolve_terminal_ui_tmux_session(
@@ -564,6 +578,39 @@ mod tests {
         ));
         assert!(read_obligation_in_root(temp.path(), ProviderKind::Claude.as_str(), 123).is_none());
         assert!(list_obligations_in_root(temp.path()).is_empty());
+    }
+
+    #[test]
+    fn terminal_ui_snapshot_from_inflight_preserves_missing_claude_tui_output_flag() {
+        let mut state = inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            4_997_002,
+            None,
+            1,
+            2,
+            3,
+            "pending ClaudeTui runtime handoff".to_string(),
+            None,
+            Some("AgentDesk-claude-4997".to_string()),
+            None,
+            Some("/runtime/input.fifo".to_string()),
+            0,
+        );
+        state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        let snapshot = terminal_ui_snapshot_from_inflight(
+            &state,
+            "AgentDesk-claude-4997",
+            Some("/fallback/output.jsonl".to_string()),
+        );
+
+        assert!(
+            snapshot.inflight_claude_tui_output_path_missing,
+            "the resolved terminal UI snapshot must retain the inflight ClaudeTui missing-output guard"
+        );
+        assert!(
+            !terminal_ui_fallback_ready(&snapshot, true),
+            "the state-derived missing-output guard must override a ready pane fallback"
+        );
     }
 
     #[test]
