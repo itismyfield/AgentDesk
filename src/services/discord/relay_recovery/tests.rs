@@ -1881,18 +1881,35 @@ fn idle_tmux_snapshot_missing_output_path_denies_claude_tui_but_keeps_legacy_pan
         "missing ClaudeTui runtime output must override a ready pane fallback"
     );
 
+    for blank_output_path in ["", "   "] {
+        state.output_path = Some(blank_output_path.to_string());
+        assert!(
+            !idle_tmux_repair_snapshot_ready_for_input(
+                &provider,
+                channel_id,
+                "AgentDesk-claude-4997-idle-tmux",
+                &state,
+                |_tmux, _provider| true,
+            ),
+            "blank ClaudeTui runtime output must override a ready pane fallback: {blank_output_path:?}"
+        );
+    }
+
     state.runtime_kind =
         Some(crate::services::agent_protocol::RuntimeHandoffKind::LegacyTmuxWrapper);
-    assert!(
-        idle_tmux_repair_snapshot_ready_for_input(
-            &provider,
-            channel_id,
-            "AgentDesk-claude-4997-idle-tmux",
-            &state,
-            |_tmux, _provider| true,
-        ),
-        "non-ClaudeTui missing-output rows must retain the existing ready pane fallback"
-    );
+    for blank_output_path in [None, Some(""), Some("   ")] {
+        state.output_path = blank_output_path.map(str::to_string);
+        assert!(
+            idle_tmux_repair_snapshot_ready_for_input(
+                &provider,
+                channel_id,
+                "AgentDesk-claude-4997-idle-tmux",
+                &state,
+                |_tmux, _provider| true,
+            ),
+            "non-ClaudeTui blank output must retain the existing ready pane fallback: {blank_output_path:?}"
+        );
+    }
 }
 
 #[test]

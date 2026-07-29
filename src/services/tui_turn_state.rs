@@ -189,7 +189,11 @@ pub(crate) fn claude_tui_output_path_missing(
     runtime_kind: Option<RuntimeHandoffKind>,
     output_path: Option<&str>,
 ) -> bool {
-    runtime_kind == Some(RuntimeHandoffKind::ClaudeTui) && output_path.is_none()
+    runtime_kind == Some(RuntimeHandoffKind::ClaudeTui)
+        && output_path
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .is_none()
 }
 
 pub(crate) fn jsonl_ready_for_input(
