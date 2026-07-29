@@ -1178,6 +1178,7 @@ mod cold_start_retry_tests {
             Some("/tmp/agentdesk-cold-start-retry-output.jsonl".to_string()),
             42,
             "unit-test-cold-start-restore",
+            None,
         );
 
         assert_eq!(owner, channel);
@@ -1241,6 +1242,7 @@ mod cold_start_retry_tests {
             Some(output_path.to_string()),
             0,
             "turn_start_headless",
+            None,
         );
 
         assert_eq!(owner, channel);
