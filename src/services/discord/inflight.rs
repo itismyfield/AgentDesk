@@ -1344,7 +1344,10 @@ mod stall_recovery_tests {
             },
         );
         assert_eq!(outcome, WatcherProgressOutcome::Saved);
-        assert_eq!(loaded_row(temp.path(), channel_id).last_watcher_relayed_at_unix, Some(123));
+        assert_eq!(
+            loaded_row(temp.path(), channel_id).last_watcher_relayed_at_unix,
+            Some(123)
+        );
     }
 
     #[test]
@@ -1366,7 +1369,11 @@ mod stall_recovery_tests {
             },
         );
         assert_eq!(outcome, WatcherRelayWatermarkOutcome::Saved);
-        assert!(loaded_row(temp.path(), relay_channel).last_watcher_relayed_at_unix.is_some());
+        assert!(
+            loaded_row(temp.path(), relay_channel)
+                .last_watcher_relayed_at_unix
+                .is_some()
+        );
 
         let terminal_channel = 49_920_012;
         let mut terminal = seed_watcher_stream_state(
@@ -1393,7 +1400,10 @@ mod stall_recovery_tests {
             },
         );
         assert_eq!(outcome, WatcherTerminalCommitOutcome::Committed);
-        assert_eq!(loaded_row(temp.path(), terminal_channel).last_watcher_relayed_at_unix, Some(456));
+        assert_eq!(
+            loaded_row(temp.path(), terminal_channel).last_watcher_relayed_at_unix,
+            Some(456)
+        );
     }
 
     /// #3558: a streaming write must be SKIPPED when a fresh turn (row B) with a

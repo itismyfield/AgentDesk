@@ -3,10 +3,13 @@ use std::time::Duration;
 
 // Child module (file lives alongside in discord/) — declared here instead of
 // the ratcheted discord/mod.rs; this gate is its only consumer.
-#[path = "destructive_cancel_capture.rs"]
-mod destructive_cancel_capture;
+#[path = "destructive_cancel_liveness.rs"]
+mod destructive_cancel_liveness;
 use super::{SharedData, inflight, mailbox_snapshot};
-use destructive_cancel_capture::{CaptureProgressEvidence, fresh_watcher_heartbeat_blocks_rebind};
+use destructive_cancel_liveness::{
+    WatcherRelayLivenessEvidence, fresh_watcher_heartbeat_blocks_rebind, relay_liveness_forfeited,
+    turn_age_secs,
+};
 use poise::serenity_prelude::{ChannelId, MessageId};
 
 use crate::services::provider::ProviderKind;
@@ -137,12 +140,14 @@ pub(in crate::services::discord) fn terminal_envelope_present(
     })
 }
 
-fn fresh_watcher_heartbeat_should_block(
+fn liveness_evidence<'a>(
     shared: &SharedData,
     watcher_owner_channel: ChannelId,
     snapshot: &DestructiveCancelProbeSnapshot,
+    state: &'a inflight::InflightTurnState,
     watcher_output_path: &str,
-) -> bool {
+) -> WatcherRelayLivenessEvidence<'a> {
+    let now_unix = inflight::now_unix();
     let output_len_now = std::fs::metadata(watcher_output_path)
         .ok()
         .map(|metadata| metadata.len());
@@ -151,18 +156,41 @@ fn fresh_watcher_heartbeat_should_block(
         .as_deref()
         .filter(|path| Path::new(path) == Path::new(watcher_output_path))
         .and(snapshot.output_len);
+    WatcherRelayLivenessEvidence {
+        output_len_at_snapshot,
+        output_len_now,
+        output_mtime_age_secs: output_mtime_age_secs(watcher_output_path),
+        relay_frontier_at_snapshot: snapshot.relay_frontier,
+        relay_frontier_now: relay_frontier_for_current_generation(
+            shared,
+            watcher_owner_channel,
+            snapshot.pin.tmux_session_name.as_deref(),
+        ),
+        last_watcher_relayed_offset: state.last_watcher_relayed_offset,
+        last_watcher_relayed_at_unix: state.last_watcher_relayed_at_unix,
+        terminal_delivery_committed: state.terminal_delivery_committed,
+        full_response: &state.full_response,
+        response_sent_offset: state.response_sent_offset,
+        turn_age_secs: turn_age_secs(state, now_unix),
+        now_unix,
+    }
+}
+
+fn fresh_watcher_heartbeat_should_block(
+    shared: &SharedData,
+    watcher_owner_channel: ChannelId,
+    snapshot: &DestructiveCancelProbeSnapshot,
+    state: &inflight::InflightTurnState,
+    watcher_output_path: &str,
+) -> bool {
     fresh_watcher_heartbeat_blocks_rebind(
-        CaptureProgressEvidence {
-            output_len_at_snapshot,
-            output_len_now,
-            output_mtime_age_secs: output_mtime_age_secs(watcher_output_path),
-            relay_frontier_at_snapshot: snapshot.relay_frontier,
-            relay_frontier_now: relay_frontier_for_current_generation(
-                shared,
-                watcher_owner_channel,
-                snapshot.pin.tmux_session_name.as_deref(),
-            ),
-        },
+        liveness_evidence(
+            shared,
+            watcher_owner_channel,
+            snapshot,
+            state,
+            watcher_output_path,
+        ),
         crate::services::tui_turn_state::STALE_USER_SUBMITTED_RECLAIM_SECS,
     )
 }
@@ -214,6 +242,12 @@ pub(in crate::services::discord) async fn evaluate(
     if snapshot.pin.finalizer_turn_id == 0 {
         return DestructiveCancelGate::Denied("missing_finalizer_turn_id");
     }
+    let Some(initial_state) = inflight::load_inflight_state(provider, channel.get()) else {
+        return DestructiveCancelGate::Denied("inflight_missing_before_probe");
+    };
+    if !snapshot.pin.matches_state(&initial_state) {
+        return DestructiveCancelGate::Denied("identity_mismatch_before_probe");
+    }
 
     // Fresh watcher heartbeat wins before terminal-envelope evidence. A live
     // watcher is the safer owner for a just-finished turn; if it disappears, the
@@ -228,6 +262,7 @@ pub(in crate::services::discord) async fn evaluate(
                         shared,
                         watcher_owner_channel,
                         snapshot,
+                        &initial_state,
                         &output_path,
                     ) {
                         return DestructiveCancelGate::Denied("fresh_watcher_heartbeat");
@@ -245,6 +280,7 @@ pub(in crate::services::discord) async fn evaluate(
                 shared,
                 watcher_owner_channel,
                 snapshot,
+                &initial_state,
                 &watcher.output_path,
             )
         {
@@ -299,9 +335,6 @@ pub(in crate::services::discord) async fn evaluate(
         let output_len_now = std::fs::metadata(expected_output_path)
             .ok()
             .map(|metadata| metadata.len());
-        if output_len_now != Some(expected_output_len) {
-            return DestructiveCancelGate::Denied("capture_progress_on_reprobe");
-        }
         let current_relay_frontier = relay_frontier_for_current_generation(
             shared,
             watcher_owner_channel,
@@ -309,6 +342,27 @@ pub(in crate::services::discord) async fn evaluate(
         );
         if relay_frontier_advanced(previous_relay_frontier, current_relay_frontier) {
             return DestructiveCancelGate::Denied("relay_frontier_progress_on_reprobe");
+        }
+        if output_len_now != Some(expected_output_len)
+            && !relay_liveness_forfeited(
+                WatcherRelayLivenessEvidence {
+                    output_len_at_snapshot: Some(expected_output_len),
+                    output_len_now,
+                    output_mtime_age_secs: output_mtime_age_secs(expected_output_path),
+                    relay_frontier_at_snapshot: snapshot.relay_frontier,
+                    relay_frontier_now: current_relay_frontier,
+                    last_watcher_relayed_offset: current.last_watcher_relayed_offset,
+                    last_watcher_relayed_at_unix: current.last_watcher_relayed_at_unix,
+                    terminal_delivery_committed: current.terminal_delivery_committed,
+                    full_response: &current.full_response,
+                    response_sent_offset: current.response_sent_offset,
+                    turn_age_secs: turn_age_secs(&current, inflight::now_unix()),
+                    now_unix: inflight::now_unix(),
+                },
+                crate::services::tui_turn_state::STALE_USER_SUBMITTED_RECLAIM_SECS,
+            )
+        {
+            return DestructiveCancelGate::Denied("capture_progress_on_reprobe");
         }
         previous_relay_frontier =
             relay_frontier_high_water(previous_relay_frontier, current_relay_frontier);
@@ -332,11 +386,7 @@ pub(in crate::services::discord) async fn evaluate(
 }
 
 fn relay_frontier_advanced(previous: Option<u64>, current: Option<u64>) -> bool {
-    match (previous, current) {
-        (Some(previous), Some(current)) => current > previous,
-        (None, Some(current)) => current > 0,
-        _ => false,
-    }
+    destructive_cancel_liveness::relay_frontier_advanced(previous, current)
 }
 
 fn relay_frontier_high_water(previous: Option<u64>, current: Option<u64>) -> Option<u64> {
@@ -421,6 +471,19 @@ mod tests {
         inflight::load_inflight_state(&provider, channel_id).expect("saved inflight state")
     }
 
+    fn qualify_zero_delivery_forfeit(state: &mut inflight::InflightTurnState) {
+        state.full_response = "captured but unsent response".to_string();
+        state.response_sent_offset = 0;
+        state.terminal_delivery_committed = false;
+        state.last_watcher_relayed_offset = None;
+        state.started_at = (chrono::Local::now()
+            - chrono::Duration::seconds(
+                destructive_cancel_liveness::ZERO_DELIVERY_FORFEIT_MIN_AGE_SECS + 60,
+            ))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    }
+
     fn stale_mtime(path: &std::path::Path) {
         filetime::set_file_mtime(
             path,
@@ -461,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn growing_capture_for_zero_origin_busy_turn_denies_destructive_cancel() {
+    fn destructive_cancel_growing_capture_busy_readiness_denies() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -471,14 +534,14 @@ mod tests {
         current_thread_rt().block_on(async {
             let shared = super::super::make_shared_data_for_tests();
             let provider = ProviderKind::Claude;
-            let channel = ChannelId::new(4_974_010);
-            let tmux = "tmux-4974-zero-origin-busy";
-            let output_path = root.path().join("zero-origin-busy.jsonl");
+            let channel = ChannelId::new(4_992_004);
+            let tmux = "tmux-4992-growing-busy";
+            let output_path = root.path().join("growing-busy.jsonl");
             let len = write_jsonl(
                 &output_path,
                 &[r#"{"type":"assistant","message":{"content":[{"type":"text","text":"tool still running"}]}}"#],
             );
-            let state = save_gate_state(
+            let mut state = save_gate_state(
                 provider.clone(),
                 channel.get(),
                 0,
@@ -486,7 +549,9 @@ mod tests {
                 &output_path,
                 len,
             );
-            assert!(!state.rebind_origin);
+            qualify_zero_delivery_forfeit(&mut state);
+            inflight::save_inflight_state(&state).expect("save forfeitable state");
+            let state = inflight::load_inflight_state(&provider, channel.get()).unwrap();
             shared
                 .tmux_watchers
                 .insert(channel, fresh_watcher_handle(tmux, &output_path));
@@ -501,11 +566,96 @@ mod tests {
 
             let gate = evaluate(&shared, &provider, channel, channel, &snapshot).await;
 
-            assert_eq!(gate.denied_reason(), Some("fresh_watcher_heartbeat"));
-            assert!(
-                inflight::load_inflight_state(&provider, channel.get()).is_some(),
-                "a live zero-origin row with growing capture must be preserved"
+            assert_eq!(
+                gate.denied_reason(),
+                Some("tmux_pane_not_ready_for_input")
             );
+            assert!(inflight::load_inflight_state(&provider, channel.get()).is_some());
+        });
+    }
+
+    #[test]
+    fn destructive_cancel_growing_capture_ready_readiness_allows() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+        current_thread_rt().block_on(async {
+            let shared = super::super::make_shared_data_for_tests();
+            let provider = ProviderKind::Claude;
+            let channel = ChannelId::new(4_992_005);
+            let tmux = "tmux-4992-growing-ready";
+            let output_path = root.path().join("growing-ready.jsonl");
+            let len = write_jsonl(
+                &output_path,
+                &[r#"{"type":"system","subtype":"init","session_id":"s"}"#],
+            );
+            let mut state =
+                save_gate_state(provider.clone(), channel.get(), 0, tmux, &output_path, len);
+            qualify_zero_delivery_forfeit(&mut state);
+            inflight::save_inflight_state(&state).expect("save forfeitable state");
+            let state = inflight::load_inflight_state(&provider, channel.get()).unwrap();
+            shared
+                .tmux_watchers
+                .insert(channel, fresh_watcher_handle(tmux, &output_path));
+            let snapshot =
+                DestructiveCancelProbeSnapshot::from_state(&shared, &state, None, channel);
+            let grown_len = write_jsonl(
+                &output_path,
+                &[
+                    r#"{"type":"assistant","message":{"content":[{"type":"text","text":"captured response"}]}}"#,
+                    r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+                ],
+            );
+            assert!(grown_len > len, "capture must grow before reprobe");
+
+            let gate = evaluate(&shared, &provider, channel, channel, &snapshot).await;
+
+            assert_eq!(
+                gate.allowed_reason(),
+                Some("capture_and_jsonl_halted"),
+                "unexpected gate: {gate:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn destructive_cancel_tool_only_ready_readiness_still_denies() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+        current_thread_rt().block_on(async {
+            let shared = super::super::make_shared_data_for_tests();
+            let provider = ProviderKind::Claude;
+            let channel = ChannelId::new(4_992_011);
+            let tmux = "tmux-4992-tool-only-ready";
+            let output_path = root.path().join("tool-only-ready.jsonl");
+            let len = write_jsonl(
+                &output_path,
+                &[r#"{"type":"system","subtype":"init","session_id":"s"}"#],
+            );
+            let mut state =
+                save_gate_state(provider.clone(), channel.get(), 0, tmux, &output_path, len);
+            qualify_zero_delivery_forfeit(&mut state);
+            state.full_response.clear();
+            inflight::save_inflight_state(&state).expect("save tool-only state");
+            let state = inflight::load_inflight_state(&provider, channel.get()).unwrap();
+            shared
+                .tmux_watchers
+                .insert(channel, fresh_watcher_handle(tmux, &output_path));
+            let snapshot =
+                DestructiveCancelProbeSnapshot::from_state(&shared, &state, None, channel);
+            std::fs::write(&output_path, vec![b'x'; usize::try_from(len + 1).unwrap()])
+                .expect("grow tool-only capture");
+
+            let gate = evaluate(&shared, &provider, channel, channel, &snapshot).await;
+
+            assert_eq!(gate.denied_reason(), Some("fresh_watcher_heartbeat"));
         });
     }
 
@@ -742,19 +892,15 @@ mod tests {
             shared
                 .tmux_watchers
                 .insert(channel, fresh_watcher_handle(tmux, &output_path));
-            let snapshot = DestructiveCancelProbeSnapshot::from_state(
-                &shared,
-                &state,
-                None,
-                channel,
-            );
+            let snapshot =
+                DestructiveCancelProbeSnapshot::from_state(&shared, &state, None, channel);
 
             let gate = evaluate(&shared, &provider, channel, channel, &snapshot).await;
 
             assert_eq!(
-                gate.allowed_reason(),
-                Some("capture_and_jsonl_halted"),
-                "fresh heartbeat plus stale capture is allowed, but must not be logged as stale watcher evidence"
+                gate.denied_reason(),
+                Some("fresh_watcher_heartbeat"),
+                "producer inactivity alone cannot forfeit a fresh watcher without an unsent payload"
             );
         });
     }
