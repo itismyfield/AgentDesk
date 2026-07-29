@@ -73,9 +73,11 @@ pub(super) use self::output_policy::*;
 
 #[path = "lifecycle/claims.rs"]
 mod claims;
+#[cfg(test)]
+pub(in crate::services::discord) use self::claims::claim_cross_channel_tmux_watcher_for_test;
 pub(super) use self::claims::*;
 pub(in crate::services::discord) use self::claims::{
-    claim_or_replace_watcher, claim_or_reuse_watcher,
+    claim_or_replace_watcher, claim_or_reuse_watcher, claim_or_reuse_watcher_for_thread_follow_up,
 };
 
 #[path = "lifecycle/restore.rs"]

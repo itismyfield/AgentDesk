@@ -586,6 +586,7 @@ struct PausedTurnWatcherAttachRequest {
     output_path: String,
     initial_offset: u64,
     source: &'static str,
+    thread_parent_channel_id: Option<serenity::ChannelId>,
 }
 
 #[cfg(unix)]
@@ -766,6 +767,7 @@ pub(super) fn attach_paused_turn_watcher(
     output_path: Option<String>,
     initial_offset: u64,
     source: &'static str,
+    thread_parent_channel_id: Option<serenity::ChannelId>,
 ) -> serenity::ChannelId {
     #[cfg(unix)]
     if let (Some(tmux_session_name), Some(output_path)) = (tmux_session_name, output_path) {
@@ -779,6 +781,7 @@ pub(super) fn attach_paused_turn_watcher(
                 output_path,
                 initial_offset,
                 source,
+                thread_parent_channel_id,
             },
             true,
         );
@@ -794,6 +797,7 @@ pub(super) fn attach_paused_turn_watcher(
             output_path,
             initial_offset,
             source,
+            thread_parent_channel_id,
         );
     }
 
@@ -810,6 +814,7 @@ pub(super) fn attach_paused_turn_watcher_for_inflight(
     output_path: Option<String>,
     initial_offset: u64,
     source: &'static str,
+    thread_parent_channel_id: Option<serenity::ChannelId>,
     inflight_state: &mut InflightTurnState,
 ) -> serenity::ChannelId {
     let owner_channel_id = attach_paused_turn_watcher(
@@ -821,6 +826,7 @@ pub(super) fn attach_paused_turn_watcher_for_inflight(
         output_path,
         initial_offset,
         source,
+        thread_parent_channel_id,
     );
     if inflight_state.set_watcher_owner_channel_id(owner_channel_id.get()) {
         let outcome = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
@@ -852,6 +858,7 @@ fn attach_paused_turn_watcher_inner(
         output_path,
         initial_offset,
         source,
+        thread_parent_channel_id,
     } = request;
     let mut watcher_owner_channel_id = channel_id;
 
@@ -876,6 +883,7 @@ fn attach_paused_turn_watcher_inner(
                     output_path,
                     initial_offset,
                     source,
+                    thread_parent_channel_id,
                 });
             }
             return watcher_owner_channel_id;
@@ -899,13 +907,24 @@ fn attach_paused_turn_watcher_inner(
             turn_delivered: turn_delivered.clone(),
             last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
         };
-        let claim = super::super::super::tmux::claim_or_reuse_watcher(
-            &shared.tmux_watchers,
-            channel_id,
-            handle,
-            &provider,
-            source,
-        );
+        let claim = if let Some(thread_parent_channel_id) = thread_parent_channel_id {
+            super::super::super::tmux::claim_or_reuse_watcher_for_thread_follow_up(
+                &shared.tmux_watchers,
+                channel_id,
+                handle,
+                &provider,
+                source,
+                thread_parent_channel_id,
+            )
+        } else {
+            super::super::super::tmux::claim_or_reuse_watcher(
+                &shared.tmux_watchers,
+                channel_id,
+                handle,
+                &provider,
+                source,
+            )
+        };
         watcher_owner_channel_id = claim.owner_channel_id();
         if claim.should_spawn() {
             let ts = chrono::Local::now().format("%H:%M:%S");

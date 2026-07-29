@@ -2187,7 +2187,7 @@ pub(super) async fn handle_text_message(
     }
 
     let (logical_channel_id, thread_id, thread_title) =
-        if let Some((parent_id, _parent_name)) = final_thread_parent {
+        if let Some((parent_id, _parent_name)) = final_thread_parent.as_ref() {
             let (live_thread_title, _) =
                 super::super::super::resolve_channel_category(http, cache, channel_id).await;
             (parent_id.get(), Some(channel_id.get()), live_thread_title)
@@ -2279,6 +2279,7 @@ pub(super) async fn handle_text_message(
         watcher_output_path,
         inflight_offset,
         "turn_start_message",
+        final_thread_parent.map(|(parent_channel_id, _)| parent_channel_id),
         &mut inflight_state,
     );
 

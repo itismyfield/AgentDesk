@@ -10,6 +10,7 @@ use crate::services::dispatches::discord_delivery::{
     send_dispatch_with_delivery_guard,
 };
 use crate::services::dispatches::outbox_queue::{OutboxNotifier, process_outbox_batch_with_pg};
+use crate::services::observability;
 
 struct PgRecoveryTestDatabase {
     _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
@@ -67,6 +68,64 @@ impl PgRecoveryTestDatabase {
         .await
         .expect("drop postgres recovery test db");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn cross_channel_tmux_claim_observability_distinguishes_thread_follow_up_4984() {
+    let _guard = observability::test_runtime_lock();
+    observability::reset_for_tests();
+    let parent_channel_id = poise::serenity_prelude::ChannelId::new(4_984_001);
+    let thread_channel_id = poise::serenity_prelude::ChannelId::new(4_984_002);
+    let unrelated_channel_id = poise::serenity_prelude::ChannelId::new(4_984_003);
+
+    crate::services::discord::claim_cross_channel_tmux_watcher_for_high_risk_test(
+        unrelated_channel_id,
+        parent_channel_id,
+        None,
+    );
+    crate::services::discord::claim_cross_channel_tmux_watcher_for_high_risk_test(
+        thread_channel_id,
+        parent_channel_id,
+        Some(parent_channel_id),
+    );
+
+    let cross_channel_events: Vec<_> = observability::events::recent(20)
+        .into_iter()
+        .filter(|event| {
+            event.event_type == "invariant_violation"
+                && event.payload["invariant"] == "watcher_cross_channel_tmux_claim_observed"
+        })
+        .collect();
+    assert_eq!(
+        cross_channel_events.len(),
+        1,
+        "only an unintended cross-channel tmux claim must persist an invariant event"
+    );
+    let event = &cross_channel_events[0];
+    assert_eq!(event.channel_id, Some(unrelated_channel_id.get()));
+    assert_eq!(event.provider.as_deref(), Some("claude"));
+    assert_eq!(
+        event.payload["details"]["requested_channel_id"],
+        unrelated_channel_id.get()
+    );
+    assert_eq!(
+        event.payload["details"]["existing_channel_id"],
+        parent_channel_id.get()
+    );
+    assert_eq!(
+        event.payload["details"]["tmux_session_name"],
+        "AgentDesk-claude-4984-cross-channel-claim"
+    );
+    assert_eq!(
+        event.payload["details"]["claim_classification"],
+        "unintended_cross_channel_claim"
+    );
+    assert_eq!(
+        event.payload["details"]["intention_basis"],
+        "existing owner does not match the requesting thread parent"
+    );
+    assert!(event.payload["details"]["thread_parent_channel_id"].is_null());
 }
 
 fn pg_test_base_database_url() -> String {

@@ -10,6 +10,12 @@
 >
 > Last refreshed: 2026-07-21 (against #4706 acceptance repair: structural lint allow baseline, giant-registry issue validation, and production-count sync).
 >
+> Last refreshed: 2026-07-30 (#4984 S1 records unintended cross-channel tmux
+> watcher claims through the existing WARN-level `invariant_violation` event
+> surface. The thread-follow-up path carries the request's parent-channel identity
+> and remains observationally excluded when that parent is the incumbent owner;
+> claim, session-name, and delivery behavior remain unchanged).
+>
 > Last refreshed: 2026-07-29 (#4911/#4961 Phase A R9 — `tmux.rs` gains the
 > generation-scoped `advance_watcher_confirmed_end_for_generation` used only by the
 > guarded watcher/sink delivery funnel. The watcher surface's offset authority is

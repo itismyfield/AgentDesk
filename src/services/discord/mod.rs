@@ -108,6 +108,18 @@ pub(in crate::services::discord) mod task_supervisor;
 mod terminal_ui_obligation;
 #[cfg(unix)]
 mod tmux;
+#[cfg(all(test, unix))]
+pub(crate) fn claim_cross_channel_tmux_watcher_for_high_risk_test(
+    requested_channel_id: ChannelId,
+    existing_channel_id: ChannelId,
+    thread_parent_channel_id: Option<ChannelId>,
+) {
+    tmux::claim_cross_channel_tmux_watcher_for_test(
+        requested_channel_id,
+        existing_channel_id,
+        thread_parent_channel_id,
+    );
+}
 mod turn_completion_events;
 pub(in crate::services::discord) mod turn_end_wip_warning;
 #[cfg(unix)]

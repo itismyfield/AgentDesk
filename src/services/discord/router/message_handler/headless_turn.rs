@@ -1169,6 +1169,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         watcher_output_path,
         inflight_offset,
         "turn_start_headless",
+        None,
         &mut inflight_state,
     );
     let (tx, rx) = mpsc::channel();
