@@ -8035,18 +8035,20 @@ fn issue_4407_workflow_end_matching_rules_preserve_legacy_and_current_paths() {
             summary: None,
         },
     );
-    let legacy_entry = events
-        .status_by_channel
-        .get(&legacy_channel)
-        .expect("status panel state");
-    let legacy = legacy_entry
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    assert_eq!(
-        legacy.workflows[0].finished,
-        Some(true),
-        "id-less legacy end must still close the unique id-less slot"
-    );
+    {
+        let legacy_entry = events
+            .status_by_channel
+            .get(&legacy_channel)
+            .expect("status panel state");
+        let legacy = legacy_entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            legacy.workflows[0].finished,
+            Some(true),
+            "id-less legacy end must still close the unique id-less slot"
+        );
+    }
 
     let adopt_channel = ChannelId::new(4_407_005);
     events.push_status_event(
@@ -8074,6 +8076,58 @@ fn issue_4407_workflow_end_matching_rules_preserve_legacy_and_current_paths() {
     assert_eq!(adopt.workflows.len(), 1, "adopt must close in place");
     assert_eq!(adopt.workflows[0].task_id.as_deref(), Some("wf-adopted"));
     assert_eq!(adopt.workflows[0].finished, Some(true));
+}
+
+// #4970: the legacy DashMap `Ref` must be destroyed before another channel can
+// enter the same map. Keeping this inspection in its own block makes a same-shard
+// re-entry structurally impossible, rather than probabilistic.
+#[test]
+fn issue_4970_releases_status_map_ref_before_next_channel_entry() {
+    let events = PlaceholderLiveEvents::default();
+    let inspected_channel = ChannelId::new(4_970_001);
+    events.push_status_event(
+        inspected_channel,
+        StatusEvent::WorkflowStart {
+            task_id: Some("wf-inspected".to_string()),
+            name: Some("inspected workflow".to_string()),
+        },
+    );
+
+    {
+        let entry = events
+            .status_by_channel
+            .get(&inspected_channel)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            guard.workflows.len(),
+            1,
+            "inspection must observe the seeded workflow before releasing the map ref"
+        );
+    }
+
+    let entered_channel = ChannelId::new(4_970_002);
+    events.push_status_event(
+        entered_channel,
+        StatusEvent::WorkflowStart {
+            task_id: Some("wf-entered".to_string()),
+            name: Some("entered workflow".to_string()),
+        },
+    );
+    let entry = events
+        .status_by_channel
+        .get(&entered_channel)
+        .expect("next channel state");
+    let guard = entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(
+        guard.workflows[0].task_id.as_deref(),
+        Some("wf-entered"),
+        "next channel entry must remain usable after the prior inspection"
+    );
 }
 
 #[test]
