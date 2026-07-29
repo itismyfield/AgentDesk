@@ -342,7 +342,7 @@
     late-frame fresh row B is rejected; -576 from #3841 extracting placeholder
     suppression helpers to `tmux_placeholder_suppression/`;
     still giant-file territory).
-  - `src/services/discord/tmux_watcher.rs` (frozen giant surface; #4895 removes the obsolete auth/overload prose-authority fields from the thin collector→exit wiring; untyped prose now remains a bounded diagnostic and cannot reach provider-clear/tmux-kill/retry execution; #4799 adds thin suppressed-terminal wiring only: footer-owned background completions enqueue one semantic-event-keyed lifecycle marker, while card-owned subagents are deliberately excluded to prevent a duplicate card+marker surface; #4229 S4
+  - `src/services/discord/tmux_watcher.rs` (frozen giant surface; #4229 W7b S-A moved the terminal token update and disabled auto-compact tail verbatim to the non-giant `tmux_watcher/terminal_token_update.rs` child module, ratcheting the root down after behavior-preserving decompose; #4895 removes the obsolete auth/overload prose-authority fields from the thin collector→exit wiring; untyped prose now remains a bounded diagnostic and cannot reach provider-clear/tmux-kill/retry execution; #4799 adds thin suppressed-terminal wiring only: footer-owned background completions enqueue one semantic-event-keyed lifecycle marker, while card-owned subagents are deliberately excluded to prevent a duplicate card+marker surface; #4229 S4
     moved the turn stream collector (seed restore/first parse-forward/monitor
     auto-turn claim/active read-parse loop) verbatim to
     `src/services/discord/tmux_watcher/turn_stream_collector.rs` (frozen giant surface), ratcheting
