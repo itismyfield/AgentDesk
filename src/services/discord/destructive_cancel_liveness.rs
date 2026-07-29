@@ -14,6 +14,7 @@ pub(super) struct WatcherRelayLivenessEvidence<'a> {
     pub(super) terminal_delivery_committed: bool,
     pub(super) full_response: &'a str,
     pub(super) response_sent_offset: usize,
+    pub(super) prior_delivery_evidence: bool,
     pub(super) turn_age_secs: Option<i64>,
     pub(super) now_unix: i64,
 }
@@ -33,8 +34,9 @@ pub(super) fn relay_liveness_forfeited(
         evidence.output_len_at_snapshot,
         evidence.output_mtime_age_secs,
     );
-    let unsent_response_payload_exists =
-        !evidence.full_response.trim().is_empty() && evidence.response_sent_offset == 0;
+    let unsent_response_payload_exists = !evidence.full_response.trim().is_empty()
+        && evidence.response_sent_offset == 0
+        && !evidence.prior_delivery_evidence;
     if !unsent_response_payload_exists {
         return false;
     }
@@ -47,20 +49,24 @@ pub(super) fn relay_liveness_forfeited(
 
     let stalled_relay_forfeited = match (
         evidence.last_watcher_relayed_offset,
-        evidence.last_watcher_relayed_at_unix,
+        valid_elapsed_secs(evidence.last_watcher_relayed_at_unix, evidence.now_unix),
     ) {
-        (Some(_), Some(last_relayed_at)) => {
+        (Some(_), Some(stall_age_secs)) => {
             !relay_frontier_advanced(
                 evidence.relay_frontier_at_snapshot,
                 evidence.relay_frontier_now,
             ) && evidence.output_len_now.unwrap_or(0) > evidence.relay_frontier_now.unwrap_or(0)
-                && evidence.now_unix.saturating_sub(last_relayed_at)
-                    >= ZERO_DELIVERY_FORFEIT_MIN_AGE_SECS
+                && stall_age_secs >= ZERO_DELIVERY_FORFEIT_MIN_AGE_SECS
         }
         _ => false,
     };
 
     zero_delivery_forfeited || stalled_relay_forfeited
+}
+
+fn valid_elapsed_secs(timestamp: Option<i64>, now_unix: i64) -> Option<i64> {
+    let timestamp = timestamp?;
+    (timestamp >= 0 && timestamp <= now_unix).then(|| now_unix - timestamp)
 }
 
 fn watcher_relay_progress_recent(evidence: WatcherRelayLivenessEvidence<'_>) -> bool {
@@ -99,6 +105,7 @@ mod tests {
             terminal_delivery_committed: false,
             full_response: "captured but unsent response",
             response_sent_offset: 0,
+            prior_delivery_evidence: false,
             turn_age_secs: Some(ZERO_DELIVERY_FORFEIT_MIN_AGE_SECS + 1),
             now_unix: 100_000,
         }
@@ -163,6 +170,37 @@ mod tests {
         };
         assert!(!relay_liveness_forfeited(legacy, 600));
         assert!(fresh_watcher_heartbeat_blocks_rebind(legacy, 600));
+    }
+
+    #[test]
+    fn destructive_cancel_rewound_offset_with_prior_delivery_abstains() {
+        let rewound = WatcherRelayLivenessEvidence {
+            response_sent_offset: 0,
+            prior_delivery_evidence: true,
+            ..evidence()
+        };
+        assert!(!relay_liveness_forfeited(rewound, 600));
+        assert!(fresh_watcher_heartbeat_blocks_rebind(rewound, 600));
+    }
+
+    #[test]
+    fn destructive_cancel_invalid_relay_timestamp_abstains() {
+        for invalid in [Some(-1), Some(100_001)] {
+            let invalid_timestamp = WatcherRelayLivenessEvidence {
+                last_watcher_relayed_offset: Some(6_281_996),
+                last_watcher_relayed_at_unix: invalid,
+                output_len_now: Some(6_282_100),
+                relay_frontier_at_snapshot: Some(6_281_996),
+                relay_frontier_now: Some(6_281_996),
+                now_unix: 100_000,
+                ..evidence()
+            };
+            assert!(!relay_liveness_forfeited(invalid_timestamp, 600));
+            assert!(fresh_watcher_heartbeat_blocks_rebind(
+                invalid_timestamp,
+                600
+            ));
+        }
     }
 
     #[test]

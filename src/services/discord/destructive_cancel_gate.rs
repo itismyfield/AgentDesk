@@ -171,9 +171,18 @@ fn liveness_evidence<'a>(
         terminal_delivery_committed: state.terminal_delivery_committed,
         full_response: &state.full_response,
         response_sent_offset: state.response_sent_offset,
+        prior_delivery_evidence: prior_delivery_evidence(state),
         turn_age_secs: turn_age_secs(state, now_unix),
         now_unix,
     }
+}
+
+fn prior_delivery_evidence(state: &inflight::InflightTurnState) -> bool {
+    state.last_watcher_relayed_offset.is_some()
+        || state.last_watcher_relayed_at_unix.is_some()
+        || state.session_bound_delivered
+        || state.anchor_reposted
+        || !state.streaming_rollover_frozen_msg_ids.is_empty()
 }
 
 fn fresh_watcher_heartbeat_should_block(
@@ -356,6 +365,7 @@ pub(in crate::services::discord) async fn evaluate(
                     terminal_delivery_committed: current.terminal_delivery_committed,
                     full_response: &current.full_response,
                     response_sent_offset: current.response_sent_offset,
+                    prior_delivery_evidence: prior_delivery_evidence(&current),
                     turn_age_secs: turn_age_secs(&current, inflight::now_unix()),
                     now_unix: inflight::now_unix(),
                 },
@@ -618,6 +628,50 @@ mod tests {
                 Some("capture_and_jsonl_halted"),
                 "unexpected gate: {gate:?}"
             );
+        });
+    }
+
+    #[test]
+    fn destructive_cancel_rewound_offset_after_rollover_delivery_still_denies() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+        current_thread_rt().block_on(async {
+            let shared = super::super::make_shared_data_for_tests();
+            let provider = ProviderKind::Claude;
+            let channel = ChannelId::new(4_992_012);
+            let tmux = "tmux-4992-rewound-delivery";
+            let output_path = root.path().join("rewound-delivery-ready.jsonl");
+            let len = write_jsonl(
+                &output_path,
+                &[r#"{"type":"system","subtype":"init","session_id":"s"}"#],
+            );
+            let mut state =
+                save_gate_state(provider.clone(), channel.get(), 0, tmux, &output_path, len);
+            qualify_zero_delivery_forfeit(&mut state);
+            state.streaming_rollover_frozen_msg_ids = vec![9_001];
+            inflight::save_inflight_state(&state).expect("save rewound state");
+            let state = inflight::load_inflight_state(&provider, channel.get()).unwrap();
+            shared
+                .tmux_watchers
+                .insert(channel, fresh_watcher_handle(tmux, &output_path));
+            let snapshot =
+                DestructiveCancelProbeSnapshot::from_state(&shared, &state, None, channel);
+            let grown_len = write_jsonl(
+                &output_path,
+                &[
+                    r#"{"type":"assistant","message":{"content":[{"type":"text","text":"authoritative body"}]}}"#,
+                    r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+                ],
+            );
+            assert!(grown_len > len);
+
+            let gate = evaluate(&shared, &provider, channel, channel, &snapshot).await;
+
+            assert_eq!(gate.denied_reason(), Some("fresh_watcher_heartbeat"));
         });
     }
 

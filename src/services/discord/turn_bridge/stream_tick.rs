@@ -659,6 +659,8 @@ pub(super) async fn run_bridge_stream_tick(
                             );
                             response_sent_offset = next_response_sent_offset;
                             bridge_confirmed_response_sent_offset = response_sent_offset;
+                            inflight_state.last_watcher_relayed_at_unix =
+                                Some(crate::services::discord::inflight::now_unix());
                             streaming_rollover_frozen_msg_ids.push(current_msg_id);
                             mirror_frozen_prefix_ids(
                                 &streaming_rollover_frozen_msg_ids,
@@ -858,6 +860,10 @@ pub(super) async fn run_bridge_stream_tick(
             last_status_edit = tokio::time::Instant::now();
             if edit_ok {
                 first_answer_relayed |= !raw_current_portion.is_empty();
+                if !raw_current_portion.is_empty() {
+                    inflight_state.last_watcher_relayed_at_unix =
+                        Some(crate::services::discord::inflight::now_unix());
+                }
                 // #3813 AC#1 tail: first bridge-owned relay delivered.
                 bridge_spans.mark_first_relay(!raw_current_portion.is_empty());
                 last_edit_text = stable_display_text;

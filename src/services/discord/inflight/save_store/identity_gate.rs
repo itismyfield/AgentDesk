@@ -888,7 +888,13 @@ pub(in crate::services::discord::inflight) fn lock_and_save_existing_inflight_re
         updated.last_watcher_relayed_offset = state.last_watcher_relayed_offset;
         updated.last_watcher_relayed_generation_mtime_ns =
             state.last_watcher_relayed_generation_mtime_ns;
-        updated.last_watcher_relayed_at_unix = state.last_watcher_relayed_at_unix;
+        updated.last_watcher_relayed_at_unix = match (
+            updated.last_watcher_relayed_at_unix,
+            state.last_watcher_relayed_at_unix,
+        ) {
+            (Some(durable), Some(snapshot)) => Some(durable.max(snapshot)),
+            (durable, snapshot) => durable.or(snapshot),
+        };
     }
     updated.ensure_finalizer_turn_id();
     let _ = validate_inflight_state_for_save(
@@ -936,6 +942,42 @@ mod tests {
             None,
             512,
         )
+    }
+
+    #[test]
+    fn rebind_rebase_preserves_newer_durable_relay_timestamp() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let mut snapshot = drain_restart_seed(49_920_201, "AgentDesk-codex-4992-rebind");
+        snapshot.last_offset = 512;
+        snapshot.turn_start_offset = Some(512);
+        snapshot.last_watcher_relayed_offset = Some(256);
+        snapshot.last_watcher_relayed_generation_mtime_ns = Some(7);
+        snapshot.last_watcher_relayed_at_unix = Some(100);
+        save_inflight_state_in_root(temp.path(), &snapshot).expect("seed snapshot row");
+        let expected = InflightTurnIdentity::from_state(&snapshot);
+
+        let path = inflight_state_path(temp.path(), &ProviderKind::Codex, snapshot.channel_id);
+        let mut durable: InflightTurnState =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read snapshot row"))
+                .expect("parse snapshot row");
+        durable.last_watcher_relayed_at_unix = Some(200);
+        let json = serde_json::to_string_pretty(&durable).expect("serialize durable row");
+        atomic_write(&path, &json).expect("write newer durable timestamp");
+
+        snapshot.output_path = Some("/tmp/rebound.jsonl".to_string());
+        assert_eq!(
+            save_existing_inflight_rebind_adoption_if_matches_identity_in_root(
+                temp.path(),
+                &snapshot,
+                &expected,
+                Some(512),
+            ),
+            GuardedSaveOutcome::Saved,
+        );
+        let persisted: InflightTurnState =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("read rebound row"))
+                .expect("parse rebound row");
+        assert_eq!(persisted.last_watcher_relayed_at_unix, Some(200));
     }
 
     #[test]
