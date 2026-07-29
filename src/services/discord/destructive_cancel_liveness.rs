@@ -30,15 +30,15 @@ pub(super) fn relay_liveness_forfeited(evidence: WatcherRelayLivenessEvidence<'_
         evidence.output_len_at_snapshot,
         evidence.output_mtime_age_secs,
     );
-    let unsent_response_payload_exists = !evidence.full_response.trim().is_empty()
-        && evidence.response_sent_offset == 0
-        && !evidence.prior_delivery_evidence;
+    let unsent_response_payload_exists =
+        !evidence.full_response.trim().is_empty() && evidence.response_sent_offset == 0;
     if !unsent_response_payload_exists {
         return false;
     }
 
     let zero_delivery_forfeited = evidence.last_watcher_relayed_offset.is_none()
         && !evidence.terminal_delivery_committed
+        && !evidence.prior_delivery_evidence
         && evidence
             .turn_age_secs
             .is_some_and(|age| age >= ZERO_DELIVERY_FORFEIT_MIN_AGE_SECS);
