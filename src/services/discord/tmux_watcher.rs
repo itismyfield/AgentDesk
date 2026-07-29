@@ -1888,6 +1888,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             Some(&watcher_lease_key),
         );
         let mut watcher_terminal_delivery_proof = None;
+        let mut watcher_terminal_delivery_landed_unproven = false;
         let mut watcher_task_response_claim = None;
         let watcher_lease_cell = shared.delivery_lease(channel_id);
         // Lease only a watcher-direct real body; zero/inverted ranges never deliver.
@@ -2157,6 +2158,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     watcher_terminal_delivery_proof: &mut watcher_terminal_delivery_proof,
                     completion_footer_terminal_target: &mut completion_footer_terminal_target,
                     retry_terminal_delivery_from_offset: &mut retry_terminal_delivery_from_offset,
+                    terminal_delivery_landed_unproven:
+                        &mut watcher_terminal_delivery_landed_unproven,
                     tui_direct_anchor_or_lease_present_for_lifecycle:
                         &mut tui_direct_anchor_or_lease_present_for_lifecycle,
                     watcher_direct_terminal_idle_committed:
@@ -2785,7 +2788,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 watcher_lease_start,
                 watcher_lease_end,
             );
-        } else if terminal_output_committed && !lifecycle_stage_paused {
+        // #4911 R10: `landed_unproven` keeps a proof-less cut-over landing out of
+        // this unguarded advance (see `terminal_delivery_landed_unproven`).
+        } else if terminal_output_committed
+            && !lifecycle_stage_paused
+            && !watcher_terminal_delivery_landed_unproven
+        {
             // Non-watcher-direct committed paths (relay-suppressed task notifications,
             // empty-turn cleanup, session-bound delegation that consumed the range) keep
             // the inline monotonic-CAS advance — NOT the lease-governed delivery path.

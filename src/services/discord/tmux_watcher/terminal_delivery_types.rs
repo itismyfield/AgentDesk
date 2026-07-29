@@ -15,6 +15,7 @@ pub(in crate::services::discord) struct WatcherDirectFallbackLocals<'a> {
     pub(in crate::services::discord) completion_footer_terminal_target:
         &'a mut Option<WatcherCompletionFooterTerminalTarget>,
     pub(in crate::services::discord) retry_terminal_delivery_from_offset: &'a mut bool,
+    pub(in crate::services::discord) terminal_delivery_landed_unproven: &'a mut bool,
     pub(in crate::services::discord) tui_direct_anchor_or_lease_present_for_lifecycle: &'a mut bool,
     pub(in crate::services::discord) watcher_direct_terminal_idle_committed: &'a mut bool,
     pub(in crate::services::discord) last_relayed_offset: &'a mut Option<u64>,

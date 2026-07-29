@@ -390,6 +390,10 @@ pub(in crate::services::discord) struct WatcherShortReplaceLocals<'a> {
     pub(in crate::services::discord) completion_footer_terminal_target:
         &'a mut Option<WatcherCompletionFooterTerminalTarget>,
     pub(in crate::services::discord) retry_terminal_delivery_from_offset: &'a mut bool,
+    /// #4911 R10: the POST landed but carries no Phase-A durable proof. The root
+    /// must NOT fall through to its unguarded committed-path advance, which would
+    /// attribute this landing to whatever incarnation is current now.
+    pub(in crate::services::discord) terminal_delivery_landed_unproven: &'a mut bool,
 }
 
 /// #3089 A4: run the controller short-replace then write the outcome back into the
@@ -630,6 +634,7 @@ pub(in crate::services::discord) fn apply_watcher_short_replace_result(
                 reason,
                 "watcher terminal POST landed without Phase-A durable proof; suppressing re-send"
             );
+            *locals.terminal_delivery_landed_unproven = true;
             *locals.direct_send_delivered = true;
             *locals.tui_direct_anchor_terminal_body_visible = true;
             *locals.external_input_lease_consumed_by_relay =

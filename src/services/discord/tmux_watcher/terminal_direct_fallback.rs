@@ -67,6 +67,7 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
         watcher_terminal_delivery_proof,
         completion_footer_terminal_target,
         retry_terminal_delivery_from_offset,
+        terminal_delivery_landed_unproven,
         tui_direct_anchor_or_lease_present_for_lifecycle,
         watcher_direct_terminal_idle_committed,
         last_relayed_offset,
@@ -300,6 +301,8 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                                 &mut *completion_footer_terminal_target,
                             retry_terminal_delivery_from_offset:
                                 &mut *retry_terminal_delivery_from_offset,
+                            terminal_delivery_landed_unproven:
+                                &mut *terminal_delivery_landed_unproven,
                         },
                     )
                     .await;

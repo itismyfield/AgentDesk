@@ -269,6 +269,13 @@ pub(super) async fn poll_watcher_output_or_continue(
     )
     .await;
     if rotated_from_head {
+        // The decoder's pending tail is anchored to a PRE-rotation
+        // `pending_start_offset`. Leaving it would survive the buffer discard and,
+        // because the discard makes the next decode see an empty buffer, that stale
+        // offset would overwrite the post-rotation `all_data_start_offset` and pin
+        // the reader past the new EOF. Drop it with the bytes it belongs to — the
+        // sibling post-terminal suppress path clears it for the same reason.
+        loop_poll_state.utf8_decoder.clear_pending();
         commit_poll_state!();
         return PollOutcome::DiscardPendingBufferAndContinue;
     }

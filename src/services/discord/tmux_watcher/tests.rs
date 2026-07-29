@@ -5061,6 +5061,7 @@ mod watcher_short_replace_controller {
         let mut last_edit_text = "streamed body".to_string();
         let mut completion_footer_terminal_target = None;
         let mut retry_terminal_delivery_from_offset = false;
+        let mut terminal_delivery_landed_unproven = false;
         apply_watcher_short_replace_result(
             result,
             &shared,
@@ -5082,6 +5083,7 @@ mod watcher_short_replace_controller {
                 last_edit_text: &mut last_edit_text,
                 completion_footer_terminal_target: &mut completion_footer_terminal_target,
                 retry_terminal_delivery_from_offset: &mut retry_terminal_delivery_from_offset,
+                terminal_delivery_landed_unproven: &mut terminal_delivery_landed_unproven,
             },
         );
         assert!(!relay_ok);
@@ -5119,6 +5121,7 @@ mod watcher_short_replace_controller {
         let mut last_edit_text = "streamed body".to_string();
         let mut completion_footer_terminal_target = None;
         let mut retry_terminal_delivery_from_offset = false;
+        let mut terminal_delivery_landed_unproven = false;
         apply_watcher_short_replace_result(
             result,
             &shared,
@@ -5140,6 +5143,7 @@ mod watcher_short_replace_controller {
                 last_edit_text: &mut last_edit_text,
                 completion_footer_terminal_target: &mut completion_footer_terminal_target,
                 retry_terminal_delivery_from_offset: &mut retry_terminal_delivery_from_offset,
+                terminal_delivery_landed_unproven: &mut terminal_delivery_landed_unproven,
             },
         );
         assert!(!relay_ok);
@@ -5505,6 +5509,7 @@ mod watcher_short_replace_controller {
                 WatcherCompletionFooterTerminalTarget,
             > = None;
             let mut retry_terminal_delivery_from_offset = false;
+            let mut terminal_delivery_landed_unproven = false;
             apply_watcher_short_replace_result(
                 result,
                 &shared,
@@ -5527,6 +5532,7 @@ mod watcher_short_replace_controller {
                     last_edit_text: &mut last_edit_text,
                     completion_footer_terminal_target: &mut completion_footer_terminal_target,
                     retry_terminal_delivery_from_offset: &mut retry_terminal_delivery_from_offset,
+                    terminal_delivery_landed_unproven: &mut terminal_delivery_landed_unproven,
                 },
             );
             let footer_registered = completion_footer_terminal_target.is_some();

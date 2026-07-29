@@ -66,7 +66,7 @@ count = 2
 ratchet = "hotfile_ratchet"
 file = "src/services/discord/tmux_watcher.rs"
 old_cap = 3558
-new_cap = 3561
+new_cap = 3571
 decompose_issue = 4712
 count = 2
 
@@ -74,6 +74,6 @@ count = 2
 ratchet = "giant_file_ratchet"
 file = "src/services/discord/tmux_watcher.rs"
 old_cap = 3558
-new_cap = 3561
+new_cap = 3571
 decompose_issue = 4712
 count = 3
