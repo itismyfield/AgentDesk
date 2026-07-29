@@ -36,6 +36,7 @@ pub(super) fn relay_liveness_forfeited(evidence: WatcherRelayLivenessEvidence<'_
         return false;
     }
 
+    // Zero-delivery arm: prior delivery must be absent; turn age supplies grace.
     let zero_delivery_forfeited = evidence.last_watcher_relayed_offset.is_none()
         && !evidence.terminal_delivery_committed
         && !evidence.prior_delivery_evidence
@@ -43,6 +44,8 @@ pub(super) fn relay_liveness_forfeited(evidence: WatcherRelayLivenessEvidence<'_
             .turn_age_secs
             .is_some_and(|age| age >= ZERO_DELIVERY_FORFEIT_MIN_AGE_SECS);
 
+    // Stalled-delivery arm: prior delivery is expected; its valid timestamp is
+    // the grace anchor, so the zero-delivery exclusion must not gate this arm.
     let stalled_relay_forfeited = match (
         evidence.last_watcher_relayed_offset,
         valid_elapsed_secs(evidence.last_watcher_relayed_at_unix, evidence.now_unix),
@@ -166,6 +169,22 @@ mod tests {
         };
         assert!(!relay_liveness_forfeited(legacy));
         assert!(fresh_watcher_heartbeat_blocks_rebind(legacy));
+    }
+
+    #[test]
+    fn destructive_cancel_stalled_delivery_arm_is_reachable() {
+        let stalled = WatcherRelayLivenessEvidence {
+            last_watcher_relayed_offset: Some(6_281_996),
+            last_watcher_relayed_at_unix: Some(90_000),
+            output_len_now: Some(6_282_100),
+            relay_frontier_at_snapshot: Some(6_281_996),
+            relay_frontier_now: Some(6_281_996),
+            prior_delivery_evidence: true,
+            now_unix: 100_000,
+            ..evidence()
+        };
+        assert!(relay_liveness_forfeited(stalled));
+        assert!(!fresh_watcher_heartbeat_blocks_rebind(stalled));
     }
 
     #[test]
