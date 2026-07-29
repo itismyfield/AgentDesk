@@ -319,7 +319,8 @@ pub(super) fn reserve_current_episode(
         || decision.affected.provider != provider.as_str()
         || decision.affected.channel_id != decision.channel_id
         || decision.affected.finalizer_turn_id != Some(state.effective_finalizer_turn_id())
-        || decision.affected.mailbox_active_user_msg_id != Some(state.user_msg_id)
+        || (state.user_msg_id != 0
+            && decision.affected.mailbox_active_user_msg_id != Some(state.user_msg_id))
         || decision.affected.tmux_session != state.tmux_session_name
     {
         return CircuitReservation::StaleIdentity;
@@ -1078,6 +1079,83 @@ mod tests {
                 "each hidden provider episode axis must change the exact fingerprint"
             );
         }
+    }
+
+    #[test]
+    fn zero_originating_message_reserves_with_a_distinct_mailbox_anchor() {
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(temp.path());
+        let provider = ProviderKind::Codex;
+        let mut state = state(44_662);
+        state.user_msg_id = 0;
+        super::super::super::inflight::save_inflight_state(&state)
+            .expect("seed zero-origin inflight");
+        let mut decision = decision_for_state(&state);
+        decision.affected.mailbox_active_user_msg_id = Some(44_662_900);
+
+        assert!(matches!(
+            reserve_current_episode(&provider, &decision, 1),
+            CircuitReservation::Reserved { attempt: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn nonzero_originating_message_rejects_a_distinct_mailbox_anchor() {
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(temp.path());
+        let provider = ProviderKind::Codex;
+        let state = state(44_663);
+        super::super::super::inflight::save_inflight_state(&state).expect("seed inflight");
+        let mut decision = decision_for_state(&state);
+        decision.affected.mailbox_active_user_msg_id = Some(state.user_msg_id + 1);
+
+        assert_eq!(
+            reserve_current_episode(&provider, &decision, 1),
+            CircuitReservation::StaleIdentity
+        );
+    }
+
+    #[test]
+    fn nonzero_originating_message_reserves_with_the_same_mailbox_anchor() {
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(temp.path());
+        let provider = ProviderKind::Codex;
+        let state = state(44_664);
+        super::super::super::inflight::save_inflight_state(&state).expect("seed inflight");
+        let decision = decision_for_state(&state);
+
+        assert!(matches!(
+            reserve_current_episode(&provider, &decision, 1),
+            CircuitReservation::Reserved { attempt: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn zero_originating_message_still_rejects_episode_identity_mismatches() {
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(temp.path());
+        let mut old = state(44_665);
+        old.user_msg_id = 0;
+        let old_episode = RelayReattachEpisode::from_state(&old);
+
+        let mut replacement = old.clone();
+        replacement.session_id = Some("provider-session-zero-origin-replacement".to_string());
+        replacement.output_path = Some("/tmp/relay-zero-origin-replacement.jsonl".to_string());
+        replacement.turn_nonce = Some("nonce-zero-origin-replacement".to_string());
+        let replacement_episode = RelayReattachEpisode::from_state(&replacement);
+        super::super::super::inflight::save_inflight_state(&replacement)
+            .expect("install authoritative replacement inflight");
+
+        assert_eq!(
+            reserve_in_root(temp.path(), &old, &old_episode, 0, 1),
+            CircuitReservation::StaleIdentity,
+            "the authoritative re-read must reject the replaced episode"
+        );
+        assert_eq!(
+            reserve_in_root(temp.path(), &old, &replacement_episode, 0, 1),
+            CircuitReservation::StaleIdentity,
+            "the pre-lock snapshot must match the episode it is reserving"
+        );
     }
 
     #[test]

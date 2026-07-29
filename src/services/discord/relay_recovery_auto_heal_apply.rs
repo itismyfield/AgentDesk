@@ -230,7 +230,7 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
     settle_auto_heal_confirmation(&mut apply_result, confirmation, &key, now_ms);
     let skipped = apply_result.status == "reattach_episode_changed";
     if skipped {
-        decision.auto_heal.skipped_reason = Some("durable_reattach_stale_identity");
+        decision.auto_heal.skipped_reason = Some("durable_reattach_confirmation_episode_changed");
     }
     decision.auto_heal.remaining_attempts =
         remaining_auto_heal_attempts(&key, now_ms, decision.auto_heal.max_attempts_per_window);
@@ -596,7 +596,7 @@ mod tests {
         assert!(response.skipped);
         assert_eq!(
             response.decision.auto_heal.skipped_reason,
-            Some("durable_reattach_stale_identity")
+            Some("durable_reattach_confirmation_episode_changed")
         );
         assert_eq!(
             serde_json::to_value(

@@ -124,6 +124,121 @@ async fn durable_reattach_circuit_open_preserves_every_live_turn_authority() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zero_originating_message_with_a_distinct_mailbox_anchor_reaches_reattach_apply() {
+    let _guard = auto_heal_test_lock().lock().await;
+    clear_auto_heal_attempts_for_tests();
+    let (_root_guard, root_dir) = isolated_agentdesk_root();
+    if !crate::services::platform::tmux::is_available() {
+        eprintln!("skipping #4974 zero-origin reattach: tmux unavailable");
+        return;
+    }
+    let provider = ProviderKind::Claude;
+    let (registry, shared) = registry_with_shared(provider.clone()).await;
+    registry
+        .register_http(
+            provider.as_str().to_string(),
+            Arc::new(poise::serenity_prelude::Http::new("Bot test-token")),
+        )
+        .await;
+    let channel = ChannelId::new(4_974_002);
+    let mailbox_message = MessageId::new(4_974_102);
+    let response_message = MessageId::new(4_974_202);
+    let tmux_session = format!("AgentDesk-claude-e2e4974-{}-cc", std::process::id());
+    let created = crate::services::platform::tmux::create_session(&tmux_session, None, "sleep 60")
+        .expect("create tmux session");
+    assert!(created.status.success());
+    crate::services::tmux_common::write_tmux_runtime_kind_marker(
+        &tmux_session,
+        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+    )
+    .expect("runtime marker");
+    let output_path = root_dir.path().join("relay-4974-zero-origin.jsonl");
+    std::fs::write(&output_path, vec![b'x'; 128]).expect("seed output");
+
+    let token = start_test_turn(&shared, channel, mailbox_message).await;
+    token.bind_claude_tmux_session(&tmux_session);
+    let mut state = super::super::super::inflight::InflightTurnState::new(
+        provider.clone(),
+        channel.get(),
+        Some("adk-claude".to_string()),
+        0,
+        0,
+        response_message.get(),
+        "zero-origin live turn".to_string(),
+        Some("provider-session-4974-zero-origin".to_string()),
+        Some(tmux_session.clone()),
+        Some(output_path.to_string_lossy().to_string()),
+        None,
+        0,
+    );
+    state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+    state.turn_nonce = Some("nonce-4974-zero-origin".to_string());
+    state.set_relay_owner_kind(super::super::super::inflight::RelayOwnerKind::Watcher);
+    super::super::super::inflight::save_inflight_state_create_new(&state).expect("seed inflight");
+    let (watcher, old_cancel) = test_watcher_handle(&tmux_session, &output_path);
+    watcher.last_heartbeat_ts_ms.store(1, Ordering::Release);
+    shared.tmux_watchers.insert(channel, watcher);
+
+    let snapshot = RelayHealthSnapshot {
+        provider: provider.as_str().to_string(),
+        channel_id: channel.get(),
+        active_turn: RelayActiveTurn::Foreground,
+        tmux_session: Some(tmux_session.clone()),
+        tmux_alive: Some(true),
+        watcher_attached: true,
+        watcher_owner_channel_id: Some(channel.get()),
+        watcher_owns_live_relay: true,
+        bridge_inflight_present: true,
+        bridge_current_msg_id: Some(response_message.get()),
+        mailbox_has_cancel_token: true,
+        mailbox_active_user_msg_id: Some(mailbox_message.get()),
+        mailbox_turn_started_at_ms: None,
+        last_capture_offset: Some(128),
+        last_relay_offset: 0,
+        unread_bytes: Some(128),
+        desynced: true,
+        ..snapshot()
+    };
+    let mut decision = plan_relay_recovery(
+        &snapshot,
+        RelayStallState::TmuxAliveRelayDead,
+        chrono::Utc::now().timestamp_millis(),
+    );
+    decision.affected.finalizer_turn_id = Some(state.effective_finalizer_turn_id());
+    let response = apply_relay_recovery_plan(
+        &registry,
+        &shared,
+        &provider,
+        decision,
+        chrono::Utc::now().timestamp_millis(),
+        RelayRecoveryApplySource::ProbeAutoHeal,
+    )
+    .await;
+
+    let _ = crate::services::platform::tmux::kill_session(
+        &tmux_session,
+        "#4974 zero-origin reattach test cleanup",
+    );
+    assert!(!response.skipped, "{response:?}");
+    assert_ne!(
+        response.decision.auto_heal.skipped_reason,
+        Some("durable_reattach_stale_identity")
+    );
+    assert!(response.applied, "{response:?}");
+    let apply = response.apply_result.expect("apply result");
+    assert_eq!(apply.reattach_watcher_spawned, Some(true));
+    assert_eq!(apply.reattach_watcher_replaced, Some(true));
+    assert!(old_cancel.load(Ordering::Relaxed));
+    assert!(!token.cancelled.load(Ordering::Relaxed));
+    let after =
+        super::super::super::inflight::load_inflight_state_read_only(&provider, channel.get())
+            .expect("zero-origin episode survives");
+    assert_eq!(after.user_msg_id, 0);
+    assert_eq!(after.turn_nonce, state.turn_nonce);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn first_reserved_dead_frontier_apply_preserves_episode_and_reattaches_watcher() {
     let _guard = auto_heal_test_lock().lock().await;
     clear_auto_heal_attempts_for_tests();

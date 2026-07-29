@@ -396,13 +396,18 @@ mod tests {
         output_path: &std::path::Path,
         last_offset: u64,
     ) -> inflight::InflightTurnState {
+        let current_msg_id = if user_msg_id == 0 {
+            channel_id + 1
+        } else {
+            user_msg_id + 1
+        };
         let mut state = inflight::InflightTurnState::new(
             provider.clone(),
             channel_id,
             None,
             1,
             user_msg_id,
-            user_msg_id + 1,
+            current_msg_id,
             "gate fixture".to_string(),
             None,
             Some(tmux.to_string()),
@@ -456,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn busy_pane_reprobe_freeze_denies_destructive_cancel() {
+    fn growing_capture_for_zero_origin_busy_turn_denies_destructive_cancel() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -466,8 +471,9 @@ mod tests {
         current_thread_rt().block_on(async {
             let shared = super::super::make_shared_data_for_tests();
             let provider = ProviderKind::Claude;
-            let channel = ChannelId::new(4_035_010);
-            let output_path = root.path().join("busy.jsonl");
+            let channel = ChannelId::new(4_974_010);
+            let tmux = "tmux-4974-zero-origin-busy";
+            let output_path = root.path().join("zero-origin-busy.jsonl");
             let len = write_jsonl(
                 &output_path,
                 &[r#"{"type":"assistant","message":{"content":[{"type":"text","text":"tool still running"}]}}"#],
@@ -475,11 +481,61 @@ mod tests {
             let state = save_gate_state(
                 provider.clone(),
                 channel.get(),
-                4_035_110,
-                "tmux-4035-busy",
+                0,
+                tmux,
                 &output_path,
                 len,
             );
+            assert!(!state.rebind_origin);
+            shared
+                .tmux_watchers
+                .insert(channel, fresh_watcher_handle(tmux, &output_path));
+            let snapshot = DestructiveCancelProbeSnapshot::from_state(
+                &shared,
+                &state,
+                None,
+                channel,
+            );
+            std::fs::write(&output_path, vec![b'x'; usize::try_from(len + 1).unwrap()])
+                .expect("grow live capture");
+
+            let gate = evaluate(&shared, &provider, channel, channel, &snapshot).await;
+
+            assert_eq!(gate.denied_reason(), Some("fresh_watcher_heartbeat"));
+            assert!(
+                inflight::load_inflight_state(&provider, channel.get()).is_some(),
+                "a live zero-origin row with growing capture must be preserved"
+            );
+        });
+    }
+
+    #[test]
+    fn frozen_capture_for_zero_origin_busy_turn_still_denies_destructive_cancel() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+        current_thread_rt().block_on(async {
+            let shared = super::super::make_shared_data_for_tests();
+            let provider = ProviderKind::Claude;
+            let channel = ChannelId::new(4_974_011);
+            let output_path = root.path().join("zero-origin-busy-frozen.jsonl");
+            let len = write_jsonl(
+                &output_path,
+                &[r#"{"type":"assistant","message":{"content":[{"type":"text","text":"tool still running"}]}}"#],
+            );
+            stale_mtime(&output_path);
+            let state = save_gate_state(
+                provider.clone(),
+                channel.get(),
+                0,
+                "tmux-4974-zero-origin-busy-frozen",
+                &output_path,
+                len,
+            );
+            assert!(!state.rebind_origin);
             let snapshot = DestructiveCancelProbeSnapshot::from_state(
                 &shared,
                 &state,
@@ -496,7 +552,7 @@ mod tests {
             );
             assert!(
                 inflight::load_inflight_state(&provider, channel.get()).is_some(),
-                "denied destructive gate must preserve the live row"
+                "denied destructive gate must preserve the live zero-origin row"
             );
         });
     }
