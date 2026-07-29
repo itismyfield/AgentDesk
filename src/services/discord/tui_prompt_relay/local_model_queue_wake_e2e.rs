@@ -471,7 +471,7 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
     // completion event. `broadcast` only buffers sends that happen after a receiver exists, so
     // subscribing later left the negative assertion below racing A's normal `QueueEligible`
     // publish instead of observing the local-only halves.
-    let mut completion_rx =
+    let mut a_release_rx =
         super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
 
     state.release_first_placeholder.notify_waiters();
@@ -497,7 +497,7 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
 
     // Drain A's release event explicitly so the local-only assertion below observes only the
     // `/model` halves rather than whatever A left buffered.
-    let a_release = tokio::time::timeout(std::time::Duration::from_secs(2), completion_rx.recv())
+    let a_release = tokio::time::timeout(std::time::Duration::from_secs(2), a_release_rx.recv())
         .await
         .expect("A placeholder-failure release must publish one completion event")
         .expect("completion bus open");
@@ -528,6 +528,11 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
         .insert(channel_id, test_watcher_handle(tmux, &transcript_path));
     super::spawn_tui_prompt_relay(shared.clone(), ProviderKind::Claude);
 
+    // Subscribe after draining A's release event. This excludes events published between that
+    // drain and this subscription from the local-only assertion. The relay spawn in that interval
+    // is a likely publisher, but its event source has not yet been characterized.
+    let mut local_only_completion_rx =
+        super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
     let command_half = "<command-message>x</command-message>\n<command-name>/model</command-name>";
     let stdout_half = "<local-command-stdout>Set model to Fable 5</local-command-stdout>";
     assert_eq!(
@@ -597,12 +602,21 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
         !super::tui_direct_watcher_synthetic_inflight_matches(inflight.as_ref(), tmux, 1),
         "local-only halves must not create synthetic inflight ownership"
     );
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(100), completion_rx.recv())
-            .await
-            .is_err(),
-        "local-only halves must not publish completion events"
-    );
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        local_only_completion_rx.recv(),
+    )
+    .await
+    {
+        Err(_) => {}
+        Ok(Ok(event)) => panic!(
+            "local-only halves must not publish completion events; received phase={:?}, turn_id={:?}, channel_id={}",
+            event.phase, event.turn_id, event.channel_id
+        ),
+        Ok(Err(error)) => {
+            panic!("local-only completion receiver must remain open; recv error={error:?}")
+        }
+    }
 
     drop(_dedupe_guard);
     drop(_intake_mode_guard);
