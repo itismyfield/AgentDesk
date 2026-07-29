@@ -29,11 +29,10 @@ pub(super) fn relay_liveness_forfeited(
     evidence: WatcherRelayLivenessEvidence<'_>,
     _stale_after_secs: i64,
 ) -> bool {
-    let _producer_activity = evidence
-        .output_len_at_snapshot
-        .zip(evidence.output_len_now)
-        .is_some_and(|(previous, current)| current > previous)
-        || evidence.output_mtime_age_secs.is_some_and(|age| age >= 0);
+    let _producer_evidence = (
+        evidence.output_len_at_snapshot,
+        evidence.output_mtime_age_secs,
+    );
     let unsent_response_payload_exists =
         !evidence.full_response.trim().is_empty() && evidence.response_sent_offset == 0;
     if !unsent_response_payload_exists {
@@ -155,6 +154,10 @@ mod tests {
         let legacy = WatcherRelayLivenessEvidence {
             last_watcher_relayed_offset: Some(6_281_996),
             last_watcher_relayed_at_unix: None,
+            output_len_now: Some(6_282_100),
+            relay_frontier_at_snapshot: Some(6_281_996),
+            relay_frontier_now: Some(6_281_996),
+            now_unix: 200_000,
             turn_age_secs: Some(86_400),
             ..evidence()
         };

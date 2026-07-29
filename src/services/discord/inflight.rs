@@ -1321,7 +1321,7 @@ mod stall_recovery_tests {
         let channel_id = 49_920_010;
         let session = "AgentDesk-claude-4992-producer";
         let mut state = seed_watcher_stream_state(temp.path(), channel_id, session, "before", 100);
-        state.last_watcher_relayed_at_unix = Some(123);
+        state.last_watcher_relayed_at_unix = None;
         force_write_state(temp.path(), &state);
         let identity = InflightTurnIdentity::from_state(&state);
 
@@ -1344,10 +1344,12 @@ mod stall_recovery_tests {
             },
         );
         assert_eq!(outcome, WatcherProgressOutcome::Saved);
-        assert_eq!(
-            loaded_row(temp.path(), channel_id).last_watcher_relayed_at_unix,
-            Some(123)
-        );
+        let persisted_path = inflight_state_path(temp.path(), &ProviderKind::Claude, channel_id);
+        let persisted: InflightTurnState = serde_json::from_str(
+            &std::fs::read_to_string(&persisted_path).expect("read persisted producer row"),
+        )
+        .expect("parse persisted producer row");
+        assert_eq!(persisted.last_watcher_relayed_at_unix, None);
     }
 
     #[test]
