@@ -714,8 +714,10 @@ decompose_issue = "#4712"
 [[entry]]
 # Crossed the 1000-prod-LoC threshold in #4992 when the persisted watcher
 # relay-progress timestamp was added to distinguish consumer liveness from
-# producer-side stream writes. Decompose model helpers without splitting the
-# serialized InflightTurnState compatibility surface.
+# producer-side stream writes. Net-zero was possible only by compressing
+# compatibility comments, a worse maintenance tradeoff than explicit admission.
+# Decompose model helpers without splitting the serialized InflightTurnState
+# compatibility surface.
 file = "src/services/discord/inflight/model.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"

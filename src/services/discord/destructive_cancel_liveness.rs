@@ -21,15 +21,11 @@ pub(super) struct WatcherRelayLivenessEvidence<'a> {
 
 pub(super) fn fresh_watcher_heartbeat_blocks_rebind(
     evidence: WatcherRelayLivenessEvidence<'_>,
-    stale_after_secs: i64,
 ) -> bool {
-    watcher_relay_progress_recent(evidence) || !relay_liveness_forfeited(evidence, stale_after_secs)
+    watcher_relay_progress_recent(evidence) || !relay_liveness_forfeited(evidence)
 }
 
-pub(super) fn relay_liveness_forfeited(
-    evidence: WatcherRelayLivenessEvidence<'_>,
-    _stale_after_secs: i64,
-) -> bool {
+pub(super) fn relay_liveness_forfeited(evidence: WatcherRelayLivenessEvidence<'_>) -> bool {
     let _producer_evidence = (
         evidence.output_len_at_snapshot,
         evidence.output_mtime_age_secs,
@@ -113,8 +109,8 @@ mod tests {
 
     #[test]
     fn destructive_cancel_producer_growth_does_not_prove_consumer_liveness() {
-        assert!(relay_liveness_forfeited(evidence(), 600));
-        assert!(!fresh_watcher_heartbeat_blocks_rebind(evidence(), 600));
+        assert!(relay_liveness_forfeited(evidence()));
+        assert!(!fresh_watcher_heartbeat_blocks_rebind(evidence()));
     }
 
     #[test]
@@ -125,14 +121,14 @@ mod tests {
             output_mtime_age_secs: Some(601),
             ..evidence()
         };
-        assert!(fresh_watcher_heartbeat_blocks_rebind(advanced, 600));
+        assert!(fresh_watcher_heartbeat_blocks_rebind(advanced));
 
         let first_advance = WatcherRelayLivenessEvidence {
             relay_frontier_at_snapshot: None,
             relay_frontier_now: Some(1),
             ..advanced
         };
-        assert!(fresh_watcher_heartbeat_blocks_rebind(first_advance, 600));
+        assert!(fresh_watcher_heartbeat_blocks_rebind(first_advance));
     }
 
     #[test]
@@ -141,7 +137,7 @@ mod tests {
             turn_age_secs: Some(ZERO_DELIVERY_FORFEIT_MIN_AGE_SECS - 1),
             ..evidence()
         };
-        assert!(fresh_watcher_heartbeat_blocks_rebind(within_grace, 600));
+        assert!(fresh_watcher_heartbeat_blocks_rebind(within_grace));
     }
 
     #[test]
@@ -153,7 +149,7 @@ mod tests {
             last_watcher_relayed_at_unix: Some(90_000),
             ..evidence()
         };
-        assert!(fresh_watcher_heartbeat_blocks_rebind(no_divergence, 600));
+        assert!(fresh_watcher_heartbeat_blocks_rebind(no_divergence));
     }
 
     #[test]
@@ -168,8 +164,8 @@ mod tests {
             turn_age_secs: Some(86_400),
             ..evidence()
         };
-        assert!(!relay_liveness_forfeited(legacy, 600));
-        assert!(fresh_watcher_heartbeat_blocks_rebind(legacy, 600));
+        assert!(!relay_liveness_forfeited(legacy));
+        assert!(fresh_watcher_heartbeat_blocks_rebind(legacy));
     }
 
     #[test]
@@ -179,8 +175,8 @@ mod tests {
             prior_delivery_evidence: true,
             ..evidence()
         };
-        assert!(!relay_liveness_forfeited(rewound, 600));
-        assert!(fresh_watcher_heartbeat_blocks_rebind(rewound, 600));
+        assert!(!relay_liveness_forfeited(rewound));
+        assert!(fresh_watcher_heartbeat_blocks_rebind(rewound));
     }
 
     #[test]
@@ -195,11 +191,8 @@ mod tests {
                 now_unix: 100_000,
                 ..evidence()
             };
-            assert!(!relay_liveness_forfeited(invalid_timestamp, 600));
-            assert!(fresh_watcher_heartbeat_blocks_rebind(
-                invalid_timestamp,
-                600
-            ));
+            assert!(!relay_liveness_forfeited(invalid_timestamp));
+            assert!(fresh_watcher_heartbeat_blocks_rebind(invalid_timestamp));
         }
     }
 
@@ -209,7 +202,7 @@ mod tests {
             full_response: "",
             ..evidence()
         };
-        assert!(!relay_liveness_forfeited(tool_only, 600));
-        assert!(fresh_watcher_heartbeat_blocks_rebind(tool_only, 600));
+        assert!(!relay_liveness_forfeited(tool_only));
+        assert!(fresh_watcher_heartbeat_blocks_rebind(tool_only));
     }
 }

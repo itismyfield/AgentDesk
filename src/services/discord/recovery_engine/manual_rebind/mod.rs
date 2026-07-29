@@ -587,6 +587,7 @@ async fn rebind_inflight_for_channel_inner(
             existing.turn_start_offset = Some(rebased_last_offset);
             existing.last_watcher_relayed_offset = None;
             existing.last_watcher_relayed_generation_mtime_ns = None;
+            existing.last_watcher_relayed_at_unix = None;
         }
         if let Some(runtime_kind) = runtime_kind_for_state {
             existing.runtime_kind = Some(runtime_kind);

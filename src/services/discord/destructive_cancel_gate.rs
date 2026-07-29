@@ -192,16 +192,13 @@ fn fresh_watcher_heartbeat_should_block(
     state: &inflight::InflightTurnState,
     watcher_output_path: &str,
 ) -> bool {
-    fresh_watcher_heartbeat_blocks_rebind(
-        liveness_evidence(
-            shared,
-            watcher_owner_channel,
-            snapshot,
-            state,
-            watcher_output_path,
-        ),
-        crate::services::tui_turn_state::STALE_USER_SUBMITTED_RECLAIM_SECS,
-    )
+    fresh_watcher_heartbeat_blocks_rebind(liveness_evidence(
+        shared,
+        watcher_owner_channel,
+        snapshot,
+        state,
+        watcher_output_path,
+    ))
 }
 
 fn output_mtime_age_secs(output_path: &str) -> Option<i64> {
@@ -353,24 +350,21 @@ pub(in crate::services::discord) async fn evaluate(
             return DestructiveCancelGate::Denied("relay_frontier_progress_on_reprobe");
         }
         if output_len_now != Some(expected_output_len)
-            && !relay_liveness_forfeited(
-                WatcherRelayLivenessEvidence {
-                    output_len_at_snapshot: Some(expected_output_len),
-                    output_len_now,
-                    output_mtime_age_secs: output_mtime_age_secs(expected_output_path),
-                    relay_frontier_at_snapshot: snapshot.relay_frontier,
-                    relay_frontier_now: current_relay_frontier,
-                    last_watcher_relayed_offset: current.last_watcher_relayed_offset,
-                    last_watcher_relayed_at_unix: current.last_watcher_relayed_at_unix,
-                    terminal_delivery_committed: current.terminal_delivery_committed,
-                    full_response: &current.full_response,
-                    response_sent_offset: current.response_sent_offset,
-                    prior_delivery_evidence: prior_delivery_evidence(&current),
-                    turn_age_secs: turn_age_secs(&current, inflight::now_unix()),
-                    now_unix: inflight::now_unix(),
-                },
-                crate::services::tui_turn_state::STALE_USER_SUBMITTED_RECLAIM_SECS,
-            )
+            && !relay_liveness_forfeited(WatcherRelayLivenessEvidence {
+                output_len_at_snapshot: Some(expected_output_len),
+                output_len_now,
+                output_mtime_age_secs: output_mtime_age_secs(expected_output_path),
+                relay_frontier_at_snapshot: snapshot.relay_frontier,
+                relay_frontier_now: current_relay_frontier,
+                last_watcher_relayed_offset: current.last_watcher_relayed_offset,
+                last_watcher_relayed_at_unix: current.last_watcher_relayed_at_unix,
+                terminal_delivery_committed: current.terminal_delivery_committed,
+                full_response: &current.full_response,
+                response_sent_offset: current.response_sent_offset,
+                prior_delivery_evidence: prior_delivery_evidence(&current),
+                turn_age_secs: turn_age_secs(&current, inflight::now_unix()),
+                now_unix: inflight::now_unix(),
+            })
         {
             return DestructiveCancelGate::Denied("capture_progress_on_reprobe");
         }
