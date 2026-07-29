@@ -1,6 +1,312 @@
 # 릴레이 도달(reachability) 기반 판정 모델 재설계
 
-- 작성: 2026-07-29
+> **R2 개정본.** 카운터리뷰(gpt-5.6-luna)가 R1/R2/R3로 수용 기준 3개 중 2개를
+> 코드로 반증했다. **§-1을 먼저 읽어라.** §2.5 / §6 / §8.2 / §9 / §11은 §-1이 대체한다.
+
+---
+
+## -1. 카운터리뷰 반영 (R2)
+
+### -1.0 한 줄 요약
+
+**진단은 살아남았고, 의무 좌표는 갈아엎었다.** 1라운드는 의무를 *턴*에 묶으려 했고
+(그래서 `turn_nonce`가 필요했고, 행이 없으면 무너졌다), 개정본은 의무를
+**트랜스크립트 화신(incarnation)의 바이트 구간**에 묶는다. 화신 identity는
+`.generation` mtime / `.spawn_nonce` / inode로 **디스크에 실재하며 행과 독립**임을
+코드로 확인했다. 턴 identity는 의무 좌표에서 **완전히 제거**했다.
+
+### -1.1 반증 수용 — 다투지 않는다
+
+#### R1. `TuiRuntimeBinding::relay_output_path()`는 독립 좌표가 아니다 — **수용**
+
+`relay_output_path`가 비면 자기 `output_path`로 fallback하고, Codex 생성부는
+`tmux_common::session_temp_path(...)` 즉 **행과 같은 wrapper 계열**이다.
+1라운드 §6.2가 이걸 "이미 있는 제2 좌표"라고 쓴 것은 **틀렸다. 철회한다.**
+
+**개정**: 독립 좌표의 출처를 **워처 레지스트리 엔트리**로 교체한다.
+`TmuxWatcherRegistry`의 엔트리는 자기 `output_path`를 들고 있고
+[확인 `watchers/lifecycle/claims.rs:60-72` — `find_watcher_by_tmux_session`가
+`entry.output_path.clone()`을 반환], `claims.rs:196-205`의 가드는 바로 이 값이
+provider-native로 승격된 뒤 wrapper 경로로 **강등되지 않도록** 보호한다.
+#4986 이슈 본문이 이 분리를 직접 진술한다:
+
+> *"이 가드는 watcher 레지스트리 바인딩만 보호하고 인플라이트 행의 `output_path`는
+> 보호하지 않는다. 즉 watcher는 native를 보고 있어도 행은 wrapper를 들고 있을 수 있다
+> — 관측된 상태가 정확히 그것이다."*
+
+즉 **사고 당시 두 좌표는 실제로 갈라져 있었고, 하나는 옳았다.**
+그런데 health로 가는 통로가 없다: `channel_binding()`은
+`{owner_channel_id, tmux_session_name}`만 반환한다
+[확인 `mod.rs:1208-1219`]. **`entry.output_path`는 health 스냅샷에 노출된 적이 없다.**
+
+#### R2. rowless 의무 산출이 `turn_nonce` 때문에 성립하지 않는다 — **수용, 그리고 좌표를 바꾼다**
+
+`ExactJsonlSourceIdentity`에 `turn_nonce`가 있고 [확인 `delivery_record.rs:124-150`],
+트랜스크립트 assistant 레코드에서 nonce를 뽑는 계약은 없다. 맞다.
+
+**개정 — 근본 대응**: 의무는 `ExactJsonlSourceIdentity`를 쓰지 않는다.
+**턴 identity가 애초에 필요 없다.** 도달 질문은
+*"이 턴이 배달됐나"* 가 아니라 *"이 트랜스크립트 화신의 이 바이트들이 채널에 닿았나"* 다.
+바이트 커버리지는 턴에 대해 **불가지(turn-agnostic)** 하다 — 같은 파일의 같은 구간을
+어느 턴의 영수증이 덮었든 그 바이트는 배달된 것이다.
+
+그래서 개정 좌표는 turn_nonce를 뺀 6개다(§-1.3). 그리고 **영수증 대조는 사영(projection)**
+으로 한다: 영수증 `R`이 의무 `[a,b)`를 덮는지는
+`(provider, tmux_session_name, generation_mtime_ns)` 일치 + 구간 포함으로 판정하고
+**`turn_nonce`는 보지 않는다.**
+
+이 사영의 방향성이 중요하다: nonce를 무시하면 매칭이 **느슨해지므로 "덮였다"로 더 많이
+판정**한다. 즉 **false `Unreachable`(오탐)을 만들 수 없다.** 오탐만이 비용을 만드는
+설계이므로(§7) 안전한 방향의 느슨함이다.
+
+R2의 두 번째 지적 — *"assistant 블록이 있다"와 "라이브 턴이 배달해야 할 산문이 있다"는
+다른 명제* — 도 수용한다. **개정본은 후자를 주장하지 않는다.** 전자만 주장한다.
+그리고 그것으로 충분하다: out-of-band 워치독이 3개 형상을 전부 잡을 때 쓴 명제가
+정확히 전자이고, 워치독도 턴 identity를 모른다 [확인 `relay_watchdog.py:1333`].
+
+#### R3. `AnchorWithoutReceipt`와 "identity 미참조" 주장 — **수용, 신호 삭제**
+
+`current_msg_id`(스트리밍 placeholder)와 `panel_msg_id`(terminal anchor)가 같은
+객체라는 계약은 없다 [확인 `delivery_record.rs:203-225` — `panel_msg_id`는
+"terminal-replace edited in place" 대상으로만 규정]. 정상 스트리밍 중간 상태를
+`Degraded`로 오탐한다.
+
+**개정**: `AnchorWithoutReceipt`를 **설계에서 삭제한다.** #4974는 Tier A 구간
+커버리지만으로 잡힌다(§-1.4). 그리고 1라운드의
+*"identity를 전혀 참조하지 않는다"* 는 문장은 **거짓이었다. 철회한다.**
+정확한 문장으로 교체한다:
+
+> 개정 의무 좌표는 **턴 identity를 참조하지 않으며, 인플라이트 행을 참조하지 않는다.**
+> **화신(incarnation) identity는 참조한다** — 그리고 그 identity의 권위는 디스크
+> 사이드카이지 행이 아니다.
+
+### -1.2 사이드카 조사 결과 — 뼈대는 복구되는가
+
+코디네이터가 준 단서를 코드로 검증했다.
+
+| 사이드카 | 쓰는 곳 | 읽는 곳 | 행 독립? | `ExactJsonlSourceIdentity` 매핑 |
+|---|---|---|---|---|
+| `.generation` **mtime** | 스폰 시 1회 (`claude.rs`/`codex.rs`가 `tmux::create_session` 직후), 이후 라이브 wrapper가 **절대 안 건드림** [확인 `tmux_session_files.rs:12-15`] | `read_generation_file_mtime_ns(tmux_session_name)` [확인 `:19-36`] ← `current_generation_mtime_ns` [확인 `delivery_record.rs:1277-1287`] | **YES** — 키가 `tmux_session_name` | **`generation_mtime_ns` 그 자체.** 즉 영수증 좌표의 이 필드는 **이미 행 독립이다** |
+| `.spawn_nonce` **content** | `write_spawn_nonce()` 스폰당 1회, v4 UUID, atomic rename [확인 `:69-91`] | `read_spawn_nonce(tmux_session_name)` [확인 `:100-111`] | **YES** | 매핑 없음 (신규 좌표 항으로 추가) |
+| `.owner` / `.runtime-kind` | 스폰 시 | — | YES | 미사용 |
+| `tmux_session_name` | — | `authoritative_tmux_session(enriched, mailbox_cancel_session)` [확인 `snapshot.rs:391-398`] | **YES — 이중 출처** (워처 레지스트리 + mailbox cancel token) | `tmux_session_name` |
+
+**핵심 발견 [확인]:**
+
+> `DeliveredCommit` / `ExactJsonlSourceIdentity`의 `generation_mtime_ns`는
+> **`tmux_session_name`으로 `.generation` 파일을 stat한 mtime**이다.
+> 즉 **영수증 좌표계는 이미 절반이 행 독립이었다.** 1라운드는 이걸 못 봤고,
+> 그래서 의무를 행/턴에 묶는 잘못된 경로로 갔다.
+
+`.generation`이 스폰 후 절대 재기록되지 않고(그래서 mtime이 wrapper 인스턴스를 유일하게
+식별하고 #1270 rotation 대응), adoption이 내용을 고칠 때조차 **mtime을 보존**한다는 것도
+확인했다 [확인 `tmux_session_files.rs:141-150`]. 화신 identity로 쓰기에 적합하다.
+
+**단, 코디네이터 단서 중 하나는 범주 오류다 [확인]:**
+`born_generation`(=50)은 `.generation` 파일의 **내용**(=49)과 비교 대상이 아니다.
+`born_generation`은 **dcserver 재시작 세대**다 — `shared.restart.current_generation`이
+대입되고 [확인 `tmux_reaper.rs:1117,1245,1343`] 같은 값과 비교된다
+[확인 `tui_direct_pending_start.rs:736-743`]. 서로 다른 카운터가 우연히 인접한 정수였다.
+**따라서 "50 vs 49 불일치"는 그 자체로 이상 증거가 아니다.**
+그럼에도 단서의 결론(*행과 독립인 generation 권위가 디스크에 실재한다*)은 **참이다** —
+다만 근거는 파일 **내용**이 아니라 파일 **mtime**이고, 그 mtime은 이미 영수증 좌표다.
+
+**판정: 뼈대는 복구된다. 단 1라운드보다 좁아진다.**
+
+### -1.3 개정 좌표 — `IncarnationRange` (턴 아님, 행 아님)
+
+```rust
+/// 행·턴과 독립인 도달 좌표. `ExactJsonlSourceIdentity`를 대체하지 않고
+/// 그 위로 **사영**된다 (turn_nonce를 무시하는 방향으로만).
+struct IncarnationRange {
+    provider: ProviderKind,          // 채널→provider, 행 무관
+    tmux_session_name: String,       // 워처 레지스트리 or mailbox cancel token
+    generation_mtime_ns: i64,        // .generation mtime  ← 영수증과 동일 권위
+    spawn_nonce: Option<String>,     // .spawn_nonce content (없으면 None, 위조 금지)
+    transcript_file_id: (u64, u64),  // (dev, ino) — 경로가 아니라 파일 자체
+    range: (u64, u64),               // 바이트 구간
+}
+```
+
+`turn_nonce` **없음**. `user_msg_id` **없음**. `current_msg_id` **없음**. 행 참조 **없음**.
+
+**트랜스크립트 경로 해결 — 3순위 폴백, 실패 시 fail-closed [제안]:**
+
+| 순위 | 출처 | 행 독립 | 비고 |
+|---|---|---|---|
+| 1 | **워처 레지스트리 엔트리 `output_path`** [확인 `claims.rs:60-72`] | YES | #4986-1에서 native를 들고 있던 값. **health에 노출 필요** (신규 배선) |
+| 2 | `TuiRuntimeBinding` | **부분적** — R1대로 wrapper로 fallback 가능 | 1과 **다를 때만** 의미 있는 비교 피연산자로 사용 |
+| 3 | 파일시스템 discovery (워치독 방식) | YES | provider별 휴리스틱. 비용·위험 큼 |
+| — | 전부 실패 | — | `Unknown{TranscriptUnresolved}` — **`Reachable`이 아니다** |
+
+그리고 **divergence는 경로 문자열 비교가 아니라 파일 identity 비교**로 재정의한다:
+`(dev, ino, size)` 를 비교한다. #4986-1은 행 경로가 stat 실패(파일 없음)인데
+레지스트리 경로는 살아 있는 파일 → `RowPathUnresolvableWhileRegistryLive`.
+R1이 지적한 "둘 다 같이 틀릴 수 있다"는 **경로 문자열 비교에만 해당**하고,
+"한쪽은 열리고 한쪽은 안 열린다"는 문자열이 같든 다르든 성립하는 관측이다.
+
+### -1.3b 개정 판정 상태 — `TransportUnknown` 신설
+
+계약이 success→commit 크래시 창을 `Unknown`으로 유지하는데
+[확인 `relay-state-contract.md:45-48`], 1라운드는 `NoReceipt`를 곧바로
+`Unreachable`로 보냈다. 그러면 사람이 수동 재배달해 **중복**을 만든다 —
+#4986이 수동 개입을 거부한 바로 그 실패 모드다.
+
+```rust
+enum ReachabilityVerdict {
+    Reachable,
+    Degraded { .. },
+    /// 영수증 없음 + 전송이 실제로 일어났을 실증적 근거 있음
+    /// (릴리즈되지 않은 lease 흔적, 재시작 경계 교차, placeholder 존재 등).
+    /// **Unreachable이 아니다. 알람 문구가 다르고 "수동 재배달 금지"를 명시한다.**
+    TransportUnknown { since_secs: u64, evidence: TransportUnknownEvidence },
+    /// 영수증 없음 + 전송 흔적 없음.
+    Unreachable { .. },
+    Unknown { reason: ReachabilityUnknownReason, since_secs: u64 },
+}
+```
+
+`TransportUnknown`은 **건강이 아니고**(degraded에 기여) **재배달 권한도 아니다**.
+계약 I11의 "positive delivered-elsewhere proof 없으면 보존" 규율과 같은 자리에 놓인다.
+
+### -1.4 개정 후 세 형상 검출 재증명
+
+**전제가 하나 바뀌었다.** 극성 반전(§4.1) 덕분에 **수용 기준은 "Unreachable을 낸다"가
+아니라 "GREEN이 아니다"** 이다. `Unknown`도 GREEN이 아니다. 따라서 검출은
+*discovery 성공에 의존하지 않는다* — discovery가 실패하면 그 실패 자체가 non-GREEN이다.
+이것이 R1의 공격(좌표가 같이 틀릴 수 있다)에 대한 구조적 방어다.
+
+| 형상 | 1차 검출 (Tier A) | 즉시 파생 | discovery 실패 시 | 결과 |
+|---|---|---|---|---|
+| **#4974** | 화신 구간 의무 누적, 해당 구간 영수증 0 → `Unreachable` | (없음 — `AnchorWithoutReceipt` **삭제됨**) | `Unknown{TranscriptUnresolved}` | **non-GREEN** |
+| **#4986-1** | 레지스트리 경로로 해결한 native 트랜스크립트에서 의무 누적, 영수증 0 → `Unreachable` | `RowPathUnresolvableWhileRegistryLive` (파일 identity 비교, 문자열 아님) | `Unknown{TranscriptUnresolved}` | **non-GREEN** |
+| **#4986-2** | mailbox cancel token → `tmux_session_name` → 사이드카 → 화신 좌표 → 의무 누적, 영수증 0 → `Unreachable`. **행·턴 identity 불필요** | `RowlessActiveTurn` (설명 속성으로 강등, 판정 생산 안 함) | `Unknown{TranscriptUnresolved}` | **non-GREEN** |
+
+#### 각 형상의 행 독립성 근거 (개정)
+
+- **#4974**: 의무는 화신 구간이고 `user_msg_id`/anchor identity를 참조하지 않는다.
+  `restart_mode`, `drain_restart`, zero-origin 여부와 **무관하게** 성립한다.
+- **#4986-1**: `generation_mtime_ns`는 `tmux_session_name`으로 `.generation`을 stat하므로
+  [확인 `tmux_session_files.rs:19-36`] 행의 깨진 `output_path`와 **무관하게** 해결된다.
+  이것이 1라운드가 놓친 진짜 독립 좌표다.
+  **[추정]** 사고 시점 레지스트리 `output_path`가 실제로 native였는지는 이슈 본문의
+  진술만 있고 값 자체는 덤프되지 않았다. 그러나 위 표대로 이 추정이 틀려도
+  결과는 `Unknown` = non-GREEN이므로 **수용 기준은 추정에 의존하지 않는다.**
+- **#4986-2**: `tmux_session_name`의 행 독립 출처가 코드에 실재한다
+  [확인 `snapshot.rs:391-398` `authoritative_tmux_session(enriched, mailbox_cancel_session)`].
+  거기서 사이드카가 전부 해결되고, `turn_nonce`는 좌표에서 제거됐으므로 R2가 지적한
+  결손이 발생하지 않는다.
+
+#### 오탐 반례 — 인수 테스트에 필수 포함 [제안]
+
+카운터리뷰가 요구한 7개를 그대로 인수 조건에 넣는다. **각각이 `Unreachable`을 내면 실패다.**
+
+| # | 반례 | 기대 판정 |
+|---|---|---|
+| 1 | POST 성공 + receipt write 실패 (크래시 창) | `TransportUnknown`, **not** `Unreachable` |
+| 2 | 다른 generation의 receipt만 존재 | `Unreachable` (정탐 — generation 게이팅이 작동) |
+| 3 | 이전 턴 블록만 존재, 현재 턴 산문 없음 | `Reachable` (의무 0) |
+| 4 | wrapper·native가 같은 크기 다른 inode | divergence 검출 (파일 identity 비교이므로 크기 일치가 가리지 못함) |
+| 5 | bounded read가 오래된 메시지 미반환 | 워치독 `Unknown` (§-1.5), dcserver 판정 **불변** |
+| 6 | placeholder 존재 + terminal receipt 아직 없음 | grace 내 `Reachable`, 초과 시 `Degraded` — **`Unreachable` 금지** |
+| 7 | ledger malformed | `Unknown{ReceiptStoreUnreadable}`, **not** `Unreachable` |
+
+#### 여전히 남은 blind spot — 정직하게
+
+**의무 0의 GREEN.** 트랜스크립트 ingestion 자체가 죽으면 assistant 블록이 안 보이고
+"산문 없음"과 구별되지 않는다. 1라운드 §A7은 이걸 "정확한 동작"이라 했는데,
+**틀렸다.** 개정: `Reachable`을 선언하려면 **화신이 살아 있다는 양성 증거**가 필요하다 —
+`transcript_file_id` 해결 성공 **그리고** (파일 크기 전진 **또는** pane idle 확증).
+둘 다 없으면 `Unknown{TranscriptUnresolved}`. 즉 **"안 보인다"는 절대 GREEN이 아니다.**
+
+### -1.5 나머지 FLAWED 반영
+
+| 지적 | 반영 |
+|---|---|
+| **I13이 I10과 충돌** (`:420-432`가 intentional classified drop으로 cursor 소비 허용) | **I13 재작성.** 의무 소멸 사유를 typed로 분리: `ReceiptCovered` / `ClassifiedDrop{reason}` / `IncarnationRetired`. I13의 금지 대상은 **암묵적 소멸**(프론티어 전진·offset 전진·grace 만료)이지 분류된 drop이 아니다. 그리고 **건강을 `Reachable`로 승격하는 증거는 `ReceiptCovered`뿐**이고, `ClassifiedDrop`은 의무를 닫되 **별도 카운터로 관측**된다. cursor 소비 규칙(I10)과 건강 승격 규칙을 분리했다 |
+| **I14는 컴파일러 강제가 아니다** (`InflightTurnState`가 `pub(in crate::services::discord)`) | **"컴파일러가 강제한다" 철회.** 대체 수단 3택 중 **소스 게이트**를 채택: `scripts/check_reachability_row_independence.py` — `health/reachability/**`의 `use` 구문에 `inflight::` 경로가 나오면 CI 실패. `check_contract_symbol_refs.py`와 같은 장르다. **이것은 린트이지 타입 증명이 아니다**라고 문서에 명시. 진짜 강제를 원하면 별도 crate 분리가 필요하고 그건 범위 밖 |
+| **I15도 타입 제약이 아니다** (`plan_relay_recovery`가 단일 상태에서 파괴적 action 직접 산출) | **주장 하향 + 실제 수단 명시.** `RelayRecoveryActionKind`의 파괴적 variant를 private 생성자 뒤로 옮기고, 그 생성자를 가진 모듈(`relay_recovery::destructive`)을 `reachability`가 import하지 못하게 한다(위 소스 게이트가 같이 검사). 이는 **리팩터 비용이 있는 실제 제약**이며, 하지 않을 경우 I15는 **규율(convention)** 임을 명시한다 |
+| **성공→commit 크래시 창을 false `Unreachable`로 만듦** | `TransportUnknown` 신설 (§-1.3b). 알람 문구에 **"수동 재배달 금지"** 명시 |
+| **"DB migration 불요"를 GO 근거로 쓰지 마라** | 표현 하향: *"이번 관측 슬라이스는 DB를 건드리지 않는다."* host-local sidecar는 **cluster authority가 아니다** [`relay-live-state-taxonomy.md:17-20, 52-74`]. 다중 노드에서 이 판정은 **호스트 로컬 관측**일 뿐이며, 계약 §Task-32의 canonical authority로 승격하려면 PG 마이그레이션 + `immutable-checksums.json` 등록이 필요하다. **GO 근거 목록에서 삭제** |
+| **워치독 `unreachable`을 즉시 최종 권위로 승격 금지** | **수용.** 현재 워치독은 bounded read(`--limit 100`)라 pagination 불완전·edit/delete·stale transcript 선택으로 false `unreachable` 가능. **개정**: sidecar 스키마에 `generation_mtime_ns` / `spawn_nonce` / `transcript_file_id` / `watchdog_epoch` / `read_complete: bool` 를 넣고, ① `read_complete=false` → **`Unknown`** (권위 없음), ② 화신 identity가 현재와 불일치 → **무시**, ③ 일치 + `read_complete=true` 일 때만 **동일 화신 내에서 단조 악화** 권위. **freshness 기반이 아니라 identity-gated monotonicity** |
+| **B1 fixture 사각지대** (Python이 `(epoch, text)`만 반환, byte offset·CRLF·partial line·multi-byte slicing 없음) | **수용 — B1 범위 확대.** 양쪽이 canonical schema `(generation, start, end, identity, reason)` 를 내도록 **Python 측 `assistant_blocks_from_lines`를 확장**해야 한다 [확인 `relay_watchdog.py:1321-1333` 현재 스키마 부족]. 게이트에 **뮤테이션 테스트** 포함: 한쪽 구현만 바꾸면 반드시 실패. partial line / CRLF / multi-byte 경계 / rotation 좌표를 fixture에 포함 |
+| **의무 0 blind spot** | §-1.4 말미에서 재작성 — `Reachable` 선언에 화신 생존 양성 증거 요구 |
+| **오탐 반례 7종** | §-1.4 표로 인수 조건화 |
+
+### -1.6 개정 슬라이스 — 신규/변경분
+
+§9 표는 유효하되 아래가 **추가·변경**된다.
+
+| # | 변경 | 파일 | 핫파일 | 비고 |
+|---|---|---|---|---|
+| **S0 (신규, 선행)** | 워처 레지스트리 `entry.output_path`를 health에 노출 | `mod.rs` (`channel_binding` → `TmuxWatcherBinding`에 `output_path` 추가), `health/session_enrichment.rs` | **없음** | `mod.rs` 5808줄 = giant → **레지스트리 admission 노트 필요**. 순수 가산 read 노출 |
+| **S1 변경** | 의무 좌표를 `IncarnationRange`로 (turn_nonce 제거), `Reachable`에 화신 생존 양성 증거 요구 | `health/reachability/**` | 없음 | – |
+| **S1 변경** | **B1 확대**: Python `assistant_blocks_from_lines` 스키마 확장 (byte offset/CRLF/partial line/multi-byte/rotation) | `scripts/relay_watchdog.py` | 없음 | 1라운드 추정보다 **작업량 큼** |
+| **S3 변경** | `TransportUnknown` 추가, I13 typed 소멸 사유, I15 파괴적 variant private 생성자 리팩터 | `relay_recovery/decision.rs` 등 | 없음 | I15 리팩터는 **비용 있음**. 안 하면 I15는 규율 수준 |
+| **S6 축소** | 워치독 sidecar에 화신 identity + `read_complete` 추가, **identity-gated monotonic** 권위로 제한 | `relay_watchdog.py`, `reachability/external_verdict.rs` | 없음 | `read_complete=false` → `Unknown` |
+| **신규 게이트** | `scripts/check_reachability_row_independence.py` (소스 린트) | `scripts/`, `ci-script-checks.sh` | 없음 | 타입 증명 아님을 명시 |
+
+`AnchorWithoutReceipt`(S4 일부)는 **삭제**. `RowlessActiveTurn`은 판정 생산자에서
+설명 속성으로 **강등**.
+
+### -1.7 개정 GO / NO-GO
+
+#### **조건부 GO — 관측 슬라이스(S0/S1/S2)만. 판정 권한(S3)은 NO-GO(게이트 전).**
+
+1라운드는 "GO — S1,S2,S6 즉시"였다. 개정본은 **더 좁다.** 이유:
+검출 논거가 **2~3중 중복에서 사실상 단일 메커니즘(Tier A 화신 구간 커버리지)으로 축소**됐다.
+`AnchorWithoutReceipt`는 삭제됐고 divergence는 재소싱됐으며 그 재소싱은
+**레지스트리 값이 실제로 native였다는 미덤프 추정**에 일부 기댄다.
+여유(margin)가 줄었으므로 권한 부여는 더 늦춘다.
+
+**GO 근거 (개정):**
+1. 화신 identity의 행 독립 권위가 **코드로 실재 확인**됐다 —
+   `generation_mtime_ns`는 이미 `tmux_session_name`으로 해결되는 영수증 좌표다
+   [확인 `delivery_record.rs:1277-1287` → `tmux_session_files.rs:19-36`].
+2. 극성 반전 덕에 **수용 기준이 "non-GREEN"** 이므로 discovery 실패도 검출이다(§-1.4).
+   R1의 "좌표가 같이 틀릴 수 있다"가 검출을 무력화하지 못한다.
+3. 세 형상 모두 **행·턴 identity 없이** non-GREEN에 도달한다(§-1.4 표).
+4. S0~S2는 핫파일 0, `tmux_watcher.rs` +0줄.
+
+**GO 근거에서 삭제된 것**: "DB migration 불요" — host-local sidecar는 cluster
+authority가 아니므로 장점이 아니라 **범위 한정 사실**이다.
+
+#### Blocker (전부 닫히기 전 S3 진행 금지)
+
+| # | blocker | 비고 |
+|---|---|---|
+| **B1′** | Rust↔Python canonical schema `(generation,start,end,identity,reason)` 동치 + **뮤테이션 게이트** | 1라운드보다 범위 큼 — Python이 byte range를 아예 안 낸다 |
+| **B2** | 30일 관측, `SuppressedByDedup < 0.1%` | 유지 |
+| **B3** | 틱 소요 p99 계측 | 유지 |
+| **B4 (신규)** | 사고 재현 환경에서 **레지스트리 `output_path`가 실제로 native인지 실측** | 참이면 divergence가 1차 검출로 승격, 거짓이면 `Unknown` 경로만 남음 — 어느 쪽이든 설계는 성립하나 **문서의 주장 강도를 확정해야** 함 |
+| **B5 (신규)** | I15 파괴적 variant private 생성자 리팩터 착수 여부 결정 | 안 하면 I15를 "규율"로 하향 표기하고 계약에 그대로 기재 |
+
+#### NO-GO (개정)
+
+| 항목 | 판정 | 사유 |
+|---|---|---|
+| **S3 판정 권한 부여** | **NO-GO (게이트 전)** | B1′~B5 미해소. 단일 메커니즘 의존으로 여유 축소 |
+| **`ExactJsonlSourceIdentity`를 의무 좌표로 사용** | **NO-GO** | `turn_nonce`의 행 독립 출처 없음 (R2). `IncarnationRange`로 대체 |
+| **`AnchorWithoutReceipt`** | **NO-GO (삭제)** | `current_msg_id`↔`panel_msg_id` 계약 부재, 스트리밍 중간 상태 오탐 (R3) |
+| **`TuiRuntimeBinding`을 독립 좌표로 사용** | **NO-GO** | wrapper로 fallback (R1) |
+| **워치독 `unreachable`의 무조건 권위** | **NO-GO** | pagination completeness 증명 없으면 `Unknown` |
+| **S7 재배달** | **NO-GO (범위 밖)** | 유지 |
+| **의무 원장 PG 승격** | **NO-GO (범위 밖)** | 유지 |
+
+### -1.8 §-1이 대체하는 절
+
+| 절 | 상태 |
+|---|---|
+| §2.5 (좌표계 — `ExactJsonlSourceIdentity` 재사용) | **대체** → §-1.3 `IncarnationRange` |
+| §6.1 `AnchorWithoutReceipt` | **삭제** |
+| §6.2 `TuiRuntimeBinding` 독립 좌표 주장 | **철회** → §-1.1 R1, §-1.3 |
+| §6.3 "행 등장하지 않는다" | **유지** (개정 좌표에서 더 강해짐) |
+| §6.4 요약표 (2~3중 검출) | **대체** → §-1.4 표 (단일 1차 + fail-closed) |
+| §8.2 I13/I14/I15 | **대체** → §-1.5 (typed 소멸 사유 / 소스 린트 / 주장 하향) |
+| §9 슬라이스 표 | **보완** → §-1.6 (S0 신설, B1 확대) |
+| §11 GO/NO-GO | **대체** → §-1.7 |
+| §A5 (증상 패치 반박) | **약화** — `AnchorWithoutReceipt` 삭제로 논거 일부 소멸. 핵심(의무 뺄셈이 무게중심)은 유지 |
+| §A7 (의무 0은 정확한 동작) | **철회** → §-1.4 말미 (화신 생존 양성 증거 요구) |
 - 대상: `#4974` / `#4986 형상1` / `#4986 형상2`
 - 성격: **판정 모델 구조 변경**. 증상 조건 추가가 아니다.
 - 권위 문서: [`docs/relay-state-contract.md`](../docs/relay-state-contract.md) — 본 설계는 이 계약을 **개정**한다(§8).
@@ -252,6 +558,9 @@ typed states, never wildcards" 원칙의 연장이다.
 fixture 불일치는 CI 실패다. 이것은 S1의 인수 조건이며 선택 사항이 아니다(§10-A4).
 
 ### 2.5 좌표계 — 새 좌표를 만들지 않는다
+
+> **[R2 대체됨 → §-1.3]** 아래 "`ExactJsonlSourceIdentity`를 그대로 재사용" 주장은
+> `turn_nonce`의 행 독립 출처가 없어 **무효**다(R2). 의무 좌표는 `IncarnationRange`다.
 
 E0 의무는 `ExactJsonlSourceIdentity`를 **그대로 재사용**한다 [확인 `:124-151`].
 문서 주석이 이미 이 확장을 예고한다:
@@ -542,6 +851,9 @@ runtime/discord_external_relay_verdicts/<provider>/<channel_id>.json
 
 ## 6. 세 형상 검출 증명 — **이 설계의 수용 기준**
 
+> **[R2 대체됨 → §-1.4]** 이 절의 `AnchorWithoutReceipt`(§6.1)는 **삭제**됐고,
+> §6.2의 `TuiRuntimeBinding` 독립 좌표 주장은 **철회**됐다. 개정 증명은 §-1.4다.
+
 각 형상에 대해 (1) 현재 왜 통과하는지, (2) 제안 모델의 어느 항이 잡는지,
 (3) 그것을 증명하는 **뮤테이션 테스트**를 명시한다. 테스트를 쓸 수 없으면 설계 실패다.
 
@@ -756,6 +1068,9 @@ typed outcome 원칙(`Delivered`/`FreshDelivered`/`NotDelivered`/`Unknown`)과 �
 | **Terminal reachability** (신규) | **없음.** 구조 liveness(`relay_stall_state`, `desynced`)가 사실상 배달 대리 지표로 쓰이나 배달을 측정하지 않음 | 소스 파생 의무 원장 + 기존 영수증/프론티어의 뺄셈이 1급 건강 신호 | 의무는 `ExactJsonlSourceIdentity` 재사용. 의무 산출은 **인플라이트 행과 독립**이어야 함 | 구조 liveness, watcher attach, tmux alive, capture offset 전진은 **배달 증거가 아니다**. 증거 부재는 건강이 아니다 |
 
 ### 8.2 신규 불변식
+
+> **[R2 대체됨 → §-1.5]** I13은 I10(intentional classified drop)과 충돌해 **재작성**됐고,
+> I14의 "컴파일러가 강제한다"와 I15의 타입 제약 주장은 **철회**됐다(소스 린트/리팩터로 대체).
 
 #### I13. 도달 의무는 확정 영수증으로만 소멸한다
 - Definition: `ReachabilityObligation` (신규, `health/reachability/obligation.rs`).
@@ -1031,7 +1346,10 @@ range 집합**을 산출해야 하며, 불일치는 CI 실패다.
 `SuppressedByDedup < 0.1%`를 S3 진입 조건으로 걸었다.
 **S1 머지 시점에 임계값을 코드에 넣지 않는다** — 히스토그램만 수집한다.
 
-### A7. 의무가 0인 정상 턴
+### A7. 의무가 0인 정상 턴 — **[R2 철회됨 → §-1.4 말미]**
+
+> 아래 "이건 정확한 동작이다"는 **틀렸다.** transcript ingestion이 죽어도 의무 0으로
+> 보여 동일하게 GREEN이 된다. `Reachable` 선언에 화신 생존 양성 증거를 요구하도록 개정.
 
 **공격**: 툴만 쓰고 산문을 안 낸 턴은 의무가 0 → `Reachable`. 릴레이가 죽어 있어도 GREEN.
 
@@ -1052,7 +1370,11 @@ range 집합**을 산출해야 하며, 불일치는 CI 실패다.
 
 ## 11. GO / NO-GO
 
-### **GO — S1, S2, S6 즉시. S4는 S1 직후. S3·S5는 관측 게이트 통과 후. S7은 범위 밖.**
+> **[R2 대체됨 → §-1.7]** 아래 판정은 1라운드 것이다. 개정 판정은 **더 좁다**:
+> 관측 슬라이스만 GO, 판정 권한(S3)은 blocker 전 NO-GO. "DB migration 불요"는
+> GO 근거에서 **삭제**됐다.
+
+### (1라운드, 무효) GO — S1, S2, S6 즉시. S4는 S1 직후. S3·S5는 관측 게이트 통과 후.
 
 근거:
 1. 세 형상 전부에 대한 검출 경로가 **행과 독립인 단일 항(Tier A 의무 뺄셈)** 으로
