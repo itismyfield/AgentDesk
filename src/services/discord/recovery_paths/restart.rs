@@ -580,6 +580,7 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
             anchor_channel_id,
             Some(anchor.range),
             shared.restart.current_generation,
+            (anchor.panel_channel_id, anchor.panel_msg_id),
         )
         .with_record_channel_id(record_channel_id);
     let outcome = super::super::recovery_engine::relay_recovered_terminal_text_to_placeholder(
@@ -998,6 +999,7 @@ mod tests {
         delivery_record::write_delivered_frontier(
             provider,
             channel_id,
+            tmux_session_name,
             delivery_record::DeliveredCommit {
                 range,
                 generation_mtime_ns,

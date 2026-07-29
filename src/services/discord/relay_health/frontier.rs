@@ -66,6 +66,34 @@ impl SharedData {
         drop(state);
         Some(RelayFrontierMutationGuard { coord })
     }
+
+    /// Admission for a delivery whose authority is the source **incarnation**,
+    /// not a whole frontier snapshot.
+    ///
+    /// #4911 R10: this guard is NOT mutual exclusion — it is an admission
+    /// counter whose only effect is to keep [`TmuxRelayCoord::reset_confirmed_frontier`]
+    /// from rewinding the frontier while a delivery is in flight. Admitting on
+    /// the full [`RelayFrontierToken`] therefore gates on `committed_offset`,
+    /// which a HARMLESS concurrent advance changes; that turned valid deliveries
+    /// into spurious `LandedStale`. Reset incarnation is the only field that
+    /// actually says "these bytes are still from the source I captured".
+    pub(in crate::services::discord) fn acquire_relay_frontier_mutation_for_incarnation(
+        &self,
+        channel_id: ChannelId,
+        reset_incarnation: u64,
+    ) -> Option<RelayFrontierMutationGuard> {
+        let coord = self.tmux_relay_coord(channel_id);
+        let mut state = coord
+            .reset_state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.incarnation != reset_incarnation {
+            return None;
+        }
+        state.active_mutations += 1;
+        drop(state);
+        Some(RelayFrontierMutationGuard { coord })
+    }
 }
 
 impl TmuxRelayCoord {

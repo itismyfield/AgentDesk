@@ -864,6 +864,7 @@ async fn split_terminal_forward_signals_trailing_turn_and_keeps_terminal_ack() {
         &registry,
         &mut cached,
         fence.clone(),
+        77,
     );
     assert!(
         split_forward.trailing_turn_follows,
@@ -906,6 +907,7 @@ async fn split_terminal_forward_signals_trailing_turn_and_keeps_terminal_ack() {
         &registry,
         &mut cached,
         fence,
+        77,
     );
     assert!(
         !single_forward.trailing_turn_follows,

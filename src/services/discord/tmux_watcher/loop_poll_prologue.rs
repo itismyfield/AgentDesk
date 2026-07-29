@@ -3,14 +3,27 @@ use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct WatcherSourceAuthority {
+    pub(super) generation_mtime_ns: i64,
+    pub(super) reset_incarnation: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PollOutcome {
     ContinueWatcherLoop,
+    /// #4911 R10: the 20 MB cap rewrote the jsonl from its head, so every byte
+    /// still pending in the watcher's accumulation buffer belongs to a coordinate
+    /// space that no longer exists. The root must drop that buffer before the next
+    /// poll, otherwise pre-rotation bytes would be delivered under the NEW source
+    /// incarnation captured after the rewrite.
+    DiscardPendingBufferAndContinue,
     BreakWatcherLoop,
     OutputReady {
         data: Vec<u8>,
         data_start_offset: u64,
         epoch_snapshot: u64,
+        source_authority: WatcherSourceAuthority,
     },
 }
 
@@ -238,10 +251,12 @@ pub(super) async fn poll_watcher_output_or_continue(
     }
 
     rotation_tick = rotation_tick.wrapping_add(1);
+    let rotated_from_head;
     (
         current_offset,
         last_relayed_offset,
         last_observed_generation_mtime_ns,
+        rotated_from_head,
     ) = rotate_watcher_jsonl_if_due(
         rotation_tick,
         output_path,
@@ -253,9 +268,31 @@ pub(super) async fn poll_watcher_output_or_continue(
         channel_id,
     )
     .await;
+    if rotated_from_head {
+        // The decoder's pending tail is anchored to a PRE-rotation
+        // `pending_start_offset`. Leaving it would survive the buffer discard and,
+        // because the discard makes the next decode see an empty buffer, that stale
+        // offset would overwrite the post-rotation `all_data_start_offset` and pin
+        // the reader past the new EOF. Drop it with the bytes it belongs to — the
+        // sibling post-terminal suppress path clears it for the same reason.
+        loop_poll_state.utf8_decoder.clear_pending();
+        commit_poll_state!();
+        return PollOutcome::DiscardPendingBufferAndContinue;
+    }
 
     // Snapshot pause epoch — if this changes later, a Discord turn claimed this data
     let epoch_snapshot = pause_epoch.load(Ordering::Relaxed);
+    let source_frontier_token = shared.relay_frontier_token(channel_id);
+    let Some(source_frontier_mutation) =
+        shared.acquire_relay_frontier_mutation(channel_id, source_frontier_token)
+    else {
+        commit_poll_state!();
+        return PollOutcome::ContinueWatcherLoop;
+    };
+    // Bind the bytes about to be read to the wrapper generation observed before
+    // opening the JSONL. A rotation after this snapshot makes the old authority
+    // stale; it can never relabel already-buffered bytes as the new incarnation.
+    let source_generation_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
 
     // Try to read new data from output file
     let read_result = tokio::time::timeout(
@@ -275,6 +312,7 @@ pub(super) async fn poll_watcher_output_or_continue(
         }),
     )
     .await;
+    drop(source_frontier_mutation);
 
     let (data, new_offset) = match read_result {
         Ok(Ok(Ok((data, off)))) => (data, off),
@@ -605,5 +643,9 @@ pub(super) async fn poll_watcher_output_or_continue(
         data,
         data_start_offset,
         epoch_snapshot,
+        source_authority: WatcherSourceAuthority {
+            generation_mtime_ns: source_generation_mtime_ns,
+            reset_incarnation: source_frontier_token.reset_incarnation,
+        },
     }
 }

@@ -145,7 +145,8 @@ mod watcher_lifecycle_decision;
 
 pub(crate) use meeting_orchestrator as meeting;
 pub(in crate::services::discord) use {
-    delivery_lease_key::DeliveryLeaseKey, relay_health::RelayFrontierToken,
+    delivery_lease_key::DeliveryLeaseKey,
+    relay_health::{RelayFrontierMutationGuard, RelayFrontierToken},
 };
 // #3479 item-2: re-export the catch-up subsystem entry points referenced
 // outside the extracted cluster (`maybe_schedule_catch_up_retry_after_queue_drain`

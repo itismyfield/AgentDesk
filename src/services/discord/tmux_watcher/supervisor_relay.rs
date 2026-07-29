@@ -299,6 +299,7 @@ pub(super) fn forward_chunk_to_supervisor_relay(
         crate::services::cluster::relay_producer_registry::RelayProducerRegistry,
     >,
     cached_producer: &mut Option<crate::services::cluster::stream_relay::RelayProducer>,
+    source_generation_mtime_ns: i64,
 ) -> SupervisorRelayForward {
     forward_chunk_to_supervisor_relay_inner(
         tmux_session_name,
@@ -307,6 +308,7 @@ pub(super) fn forward_chunk_to_supervisor_relay(
         cached_producer,
         None,
         None,
+        Some(source_generation_mtime_ns),
     )
 }
 
@@ -318,6 +320,7 @@ pub(super) fn forward_chunk_to_supervisor_relay_for_turn(
     >,
     cached_producer: &mut Option<crate::services::cluster::stream_relay::RelayProducer>,
     turn_identity: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
+    source_generation_mtime_ns: i64,
 ) -> SupervisorRelayForward {
     let frame_identity = relay_turn_identity_for_session(turn_identity, tmux_session_name);
     forward_chunk_to_supervisor_relay_inner(
@@ -327,6 +330,7 @@ pub(super) fn forward_chunk_to_supervisor_relay_for_turn(
         cached_producer,
         None,
         frame_identity,
+        Some(source_generation_mtime_ns),
     )
 }
 
@@ -345,6 +349,7 @@ pub(super) fn forward_terminal_chunk_to_supervisor_relay(
     >,
     cached_producer: &mut Option<crate::services::cluster::stream_relay::RelayProducer>,
     terminal: crate::services::cluster::stream_relay::TerminalCommitFence,
+    source_generation_mtime_ns: i64,
 ) -> SupervisorRelayForward {
     forward_chunk_to_supervisor_relay_inner(
         tmux_session_name,
@@ -353,6 +358,7 @@ pub(super) fn forward_terminal_chunk_to_supervisor_relay(
         cached_producer,
         Some(terminal),
         None,
+        Some(source_generation_mtime_ns),
     )
 }
 
@@ -380,6 +386,7 @@ pub(super) fn forward_terminal_chunk_with_trailing_to_supervisor_relay(
     >,
     cached_producer: &mut Option<crate::services::cluster::stream_relay::RelayProducer>,
     terminal: crate::services::cluster::stream_relay::TerminalCommitFence,
+    source_generation_mtime_ns: i64,
 ) -> SupervisorRelayForward {
     let (terminal_part, tail_part) =
         split_decoded_chunk_at_terminal_boundary(decoded, leftover_len);
@@ -389,6 +396,7 @@ pub(super) fn forward_terminal_chunk_with_trailing_to_supervisor_relay(
         registry,
         cached_producer,
         terminal,
+        source_generation_mtime_ns,
     );
     if tail_part.is_empty() {
         return terminal_forward;
@@ -414,8 +422,13 @@ pub(super) fn forward_terminal_chunk_with_trailing_to_supervisor_relay(
     // ACK-correlation hazard is closed in the sink (`deliver`): a fence-less frame
     // reports `FrameAccepted`, NEVER a terminal commit, so B's post can never
     // satisfy turn A's terminal-ACK and the ACK stays bound to A's terminal frame.
-    let tail_forward =
-        forward_chunk_to_supervisor_relay(tmux_session_name, tail_part, registry, cached_producer);
+    let tail_forward = forward_chunk_to_supervisor_relay(
+        tmux_session_name,
+        tail_part,
+        registry,
+        cached_producer,
+        source_generation_mtime_ns,
+    );
     let mirrored = terminal_forward.mirrored && tail_forward.mirrored;
     let ack_target = terminal_forward.ack_target;
     let first_forwarded_sequence = terminal_forward
@@ -486,6 +499,7 @@ pub(super) fn forward_chunk_to_supervisor_relay_inner(
     cached_producer: &mut Option<crate::services::cluster::stream_relay::RelayProducer>,
     terminal: Option<crate::services::cluster::stream_relay::TerminalCommitFence>,
     frame_identity: Option<RelayTurnIdentity>,
+    source_generation_mtime_ns: Option<i64>,
 ) -> SupervisorRelayForward {
     if chunk.is_empty() {
         return SupervisorRelayForward::mirrored_without_ack();
@@ -508,8 +522,16 @@ pub(super) fn forward_chunk_to_supervisor_relay_inner(
     // target is produced (the `outcome.sequence.map` below yields `None`).
     let ack_turn_start_offset = terminal.as_ref().and_then(|fence| fence.turn_start_offset);
     let outcome = match terminal {
-        Some(fence) => producer.try_send_terminal_frame_with_sequence(payload, fence),
-        None => producer.try_send_frame_with_sequence_and_identity(payload, frame_identity),
+        Some(fence) => producer.try_send_terminal_frame_with_sequence_and_generation(
+            payload,
+            fence,
+            source_generation_mtime_ns.unwrap_or(0),
+        ),
+        None => producer.try_send_frame_with_sequence_identity_and_generation(
+            payload,
+            frame_identity,
+            source_generation_mtime_ns.unwrap_or(0),
+        ),
     };
     if !outcome.is_alive() {
         // Relay was torn down between our registry read and the send —

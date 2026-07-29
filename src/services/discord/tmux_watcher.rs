@@ -71,8 +71,11 @@ mod single_message_footer_tests;
 #[path = "tmux_watcher/terminal_send.rs"]
 mod terminal_send;
 
+#[path = "tmux_watcher/terminal_delivery_types.rs"]
+mod terminal_delivery_types;
+
 #[path = "tmux_watcher/terminal_long_chunks.rs"]
-mod terminal_long_chunks;
+pub(in crate::services::discord) mod terminal_long_chunks;
 
 #[path = "tmux_watcher/terminal_direct_fallback.rs"]
 mod terminal_direct_fallback;
@@ -426,7 +429,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     };
 
     'watcher_loop: loop {
-        let (data, data_start_offset, epoch_snapshot) = {
+        let (data, data_start_offset, epoch_snapshot, source_authority) = {
             let mut relay_offset_state = RelayOffsetState {
                 current_offset: &mut current_offset,
                 terminal_delivery_observed: &mut terminal_delivery_observed,
@@ -465,8 +468,20 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     data,
                     data_start_offset,
                     epoch_snapshot,
-                } => (data, data_start_offset, epoch_snapshot),
+                    source_authority,
+                } => (data, data_start_offset, epoch_snapshot, source_authority),
                 PollOutcome::ContinueWatcherLoop => continue,
+                PollOutcome::DiscardPendingBufferAndContinue => {
+                    discard_watcher_pending_buffer_after_suppressed_turn(
+                        &mut all_data,
+                        &mut all_data_start_offset,
+                        &mut all_data_fully_mirrored_to_session_relay,
+                        &mut all_data_session_bound_relay_ack,
+                        &mut all_data_first_forwarded_relay_sequence,
+                        current_offset,
+                    );
+                    continue;
+                }
                 PollOutcome::BreakWatcherLoop => break 'watcher_loop,
             }
         };
@@ -517,6 +532,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 data,
                 data_start_offset,
                 epoch_snapshot,
+                source_authority,
             },
             &mut turn_parse_state,
             &mut supervisor_relay_state,
@@ -530,6 +546,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         };
         let CollectedTurnStream {
             turn_data_start_offset,
+            source_authority,
             split_trailing_turn_follows,
             state,
             restored_response_seed,
@@ -1844,17 +1861,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             prompt_anchor_present_before_relay || external_input_lease_before_relay;
 
         // #3041 P1-1: acquire the delivery lease BEFORE the watcher direct-sends. Lease
-        // identity = the turn-pinned id (`pinned_finalizer_turn_id`, the #3141
-        // id-pinning) + the byte range `[data_start_offset, terminal_event_consumed_offset)`
+        // identity = the turn-pinned id plus the byte range
+        // `[data_start_offset, terminal_event_consumed_offset)`
         // — the SAME consumed end the commit/advance uses, so acquire and commit carry one
         // identity. Acquire only on the watcher-direct path (delegation is the sink's lease
         // P1-2; suppression/no-response deliver nothing).
         //
         // B2 (single-holder, §5.2): if a DIFFERENT watcher instance holds this cell
         // (Leased) `try_acquire` fails → this watcher MUST NOT direct-send (skip arm
-        // below). Acquire is the atomic fast-path (B4); commit/advance/release run INLINE
-        // (preserving the pre-P1-1 advance timing, avoiding an actor-deferral duplicate).
-        // The actor CommitDelivery/ReleaseDelivery messages remain dormant.
+        // below). Commit/advance/release stay inline; actor messages remain dormant.
         let watcher_lease_start = data_start_offset;
         let watcher_lease_end = terminal_event_consumed_offset(current_offset, &all_data);
         let (watcher_lease_turn, watcher_lease_key, watcher_lease_holder) =
@@ -1867,10 +1882,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 current_offset,
                 watcher_lease_start,
             );
-        // #3610 PR-1d: capture the legacy long-chunk anchor here; record it only
-        // after the post-advance M4 commit below.
-        let mut watcher_long_chunk_anchor_msg_id: Option<MessageId> = None;
-        let mut watcher_long_chunk_delivered_body: Option<String> = None;
+        let watcher_long_chunk_identity = terminal_long_chunks::watcher_delivery_identity(
+            source_authority.generation_mtime_ns,
+            source_authority.reset_incarnation,
+            Some(&watcher_lease_key),
+        );
+        let mut watcher_terminal_delivery_proof = None;
+        let mut watcher_terminal_delivery_landed_unproven = false;
         let mut watcher_task_response_claim = None;
         let watcher_lease_cell = shared.delivery_lease(channel_id);
         // Lease only a watcher-direct real body; zero/inverted ranges never deliver.
@@ -2119,6 +2137,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 watcher_lease_turn,
                 &watcher_lease_key,
                 watcher_instance_id,
+                source_authority,
                 watcher_lease_start,
                 watcher_lease_end,
                 &inflight_before_relay,
@@ -2136,10 +2155,11 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     last_edit_text: &mut last_edit_text,
                     watcher_streaming_rollover_frozen_msg_ids:
                         &mut watcher_streaming_rollover_frozen_msg_ids,
-                    watcher_long_chunk_anchor_msg_id: &mut watcher_long_chunk_anchor_msg_id,
-                    watcher_long_chunk_delivered_body: &mut watcher_long_chunk_delivered_body,
+                    watcher_terminal_delivery_proof: &mut watcher_terminal_delivery_proof,
                     completion_footer_terminal_target: &mut completion_footer_terminal_target,
                     retry_terminal_delivery_from_offset: &mut retry_terminal_delivery_from_offset,
+                    terminal_delivery_landed_unproven:
+                        &mut watcher_terminal_delivery_landed_unproven,
                     tui_direct_anchor_or_lease_present_for_lifecycle:
                         &mut tui_direct_anchor_or_lease_present_for_lifecycle,
                     watcher_direct_terminal_idle_committed:
@@ -2746,32 +2766,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 "watcher must be able to commit its own freshly-acquired lease"
             );
             if committed && commit_outcome == crate::services::discord::LeaseOutcome::Delivered {
-                // INLINE advance — exactly the pre-P1-1 call site/timing.
-                advance_watcher_confirmed_end(
-                    &shared,
-                    &watcher_provider,
-                    channel_id,
-                    &tmux_session_name,
-                    watcher_lease_end,
-                    "src/services/discord/tmux_watcher.rs:watcher_lease_commit_advance",
-                );
-                watcher_response_frontier_committed = true;
-                // #3610 PR-1d: record the durable terminal anchor for the legacy
-                // long-chunk fallback arm ONLY here — gated on the SAME successful
-                // commit+advance (M4) AND `Some` anchor (⇒ the long-chunk arm ran and
-                // fully committed, (A)). Same-channel; logic in the sibling.
-                if let Some(anchor) = watcher_long_chunk_anchor_msg_id {
-                    if let Some(body) = watcher_long_chunk_delivered_body.as_deref() {
-                        terminal_send::record_watcher_long_chunk_terminal_delivery(
-                            &shared,
-                            &watcher_provider,
+                watcher_response_frontier_committed =
+                    terminal_long_chunks::commit_legacy_watcher_delivery(
+                        crate::services::discord::tmux::WatcherDeliveryTarget {
+                            shared: &shared,
+                            provider: &watcher_provider,
                             channel_id,
-                            (watcher_lease_start, watcher_lease_end),
-                            Some(anchor.get()),
-                            body,
-                        );
-                    }
-                }
+                            tmux_session_name: &tmux_session_name,
+                        },
+                        watcher_long_chunk_identity,
+                        (watcher_lease_start, watcher_lease_end),
+                        watcher_terminal_delivery_proof.as_ref(),
+                    );
             }
             // Release (Unleased for the next turn). Inline same-holder compare-and-
             // release; idempotent no-op if the identity no longer matches (e.g. a dead
@@ -2782,7 +2788,12 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 watcher_lease_start,
                 watcher_lease_end,
             );
-        } else if terminal_output_committed && !lifecycle_stage_paused {
+        // #4911 R10: `landed_unproven` keeps a proof-less cut-over landing out of
+        // this unguarded advance (see `terminal_delivery_landed_unproven`).
+        } else if terminal_output_committed
+            && !lifecycle_stage_paused
+            && !watcher_terminal_delivery_landed_unproven
+        {
             // Non-watcher-direct committed paths (relay-suppressed task notifications,
             // empty-turn cleanup, session-bound delegation that consumed the range) keep
             // the inline monotonic-CAS advance — NOT the lease-governed delivery path.

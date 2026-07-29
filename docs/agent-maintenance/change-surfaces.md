@@ -10,6 +10,14 @@
 >
 > Last refreshed: 2026-07-21 (against #4706 acceptance repair: structural lint allow baseline, giant-registry issue validation, and production-count sync).
 >
+> Last refreshed: 2026-07-29 (#4911/#4961 Phase A R9 — `tmux.rs` gains the
+> generation-scoped `advance_watcher_confirmed_end_for_generation` used only by the
+> guarded watcher/sink delivery funnel. The watcher surface's offset authority is
+> unchanged in shape: raw monotonic-CAS advances remain for non-lease-governed
+> committed paths, while lease-governed terminal deliveries capture their source
+> identity before transport and advance only under the frontier mutation guard.
+> No new coordinate field, no migration-sensitive surface added).
+>
 > PR #3456 dcserver-robustness: frozen giant-surface entries were reviewed after
 > the reconcile row-allocation churn reduction and the OpenCode warm-server
 > reuse/cancel recovery; no new logic added to either giant file, and the line

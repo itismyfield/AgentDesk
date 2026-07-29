@@ -18,6 +18,7 @@ use crate::services::discord::{DeliveryLeaseCell, LeaseHolder, SharedData, lease
 use crate::services::provider::ProviderKind;
 
 use super::controller_heartbeat::WatcherPostHeartbeat;
+pub(in crate::services::discord) use super::terminal_delivery_types::WatcherShortReplaceResult;
 
 #[path = "committed_placeholder_cleanup.rs"]
 pub(super) mod committed_placeholder_cleanup;
@@ -181,9 +182,23 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
     turn: TurnKey,
     lease_key: Option<crate::services::discord::DeliveryLeaseKey>,
     instance_id: u64,
+    source_authority: WatcherSourceAuthority,
     start: u64,
     end: u64,
 ) -> WatcherShortReplaceResult {
+    let delivery_identity = super::terminal_long_chunks::watcher_delivery_identity(
+        source_authority.generation_mtime_ns,
+        source_authority.reset_incarnation,
+        lease_key.as_ref(),
+    );
+    let delivery_target = crate::services::discord::tmux::WatcherDeliveryTarget {
+        shared,
+        provider,
+        channel_id,
+        tmux_session_name,
+    };
+    let delivery_mutation = std::sync::Mutex::new(None);
+    let landed_stale = std::sync::atomic::AtomicBool::new(false);
     let holder = LeaseHolder::Watcher { instance_id };
     // Self-heal like the legacy acquire (tmux_watcher.rs:5964): reclaim an EXPIRED
     // prior holder before the controller's acquire (a stale dead lease must not make
@@ -198,14 +213,26 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
     // and returns `true` → Delivered.
     let advance = |range: (u64, u64)| -> bool {
         debug_assert_eq!(range, (start, end));
-        crate::services::discord::tmux::advance_watcher_confirmed_end(
+        let Some(mutation) = super::terminal_long_chunks::begin_watcher_delivery_mutation(
             shared,
-            provider,
             channel_id,
             tmux_session_name,
+            delivery_identity,
+        ) else {
+            landed_stale.store(true, Ordering::Release);
+            return true;
+        };
+        if !mutation.advance(
+            delivery_target,
             end,
             "src/services/discord/tmux_watcher/terminal_send.rs:watcher_controller_advance",
-        );
+        ) {
+            landed_stale.store(true, Ordering::Release);
+            return true;
+        }
+        *delivery_mutation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(mutation);
         true
     };
     let expected_transcript =
@@ -267,28 +294,43 @@ pub(in crate::services::discord) async fn deliver_short_replace_via_controller<
         }
     };
 
-    // #3089 B2a: shadow-mirror durable delivered frontier — flag-gated,
-    // observe-only, Delivered-only (I2). #4081 still records confirmed body
-    // fingerprints when the frontier mirror is OFF. Extends B1's sink coverage to
-    // the watcher (A4) before B2b's authority flip.
+    // #4081 fingerprints remain retry evidence alongside durable authority.
     // #3610 PR-1: anchor = `msg_id` — the controller active-slot `current_msg_id`
     // (the assistant response message terminal-replace edits in place), NOT
     // `status_message_id`. Records the true terminal anchor for PR-2.
     // #3610 PR-1b: the anchor pair's channel is this same `channel_id` (same-channel
     // path — the frontier key, edit target, and placeholder all share `channel_id`).
-    dr::shadow_mirror_delivered_frontier(
-        shared,
-        provider,
-        channel_id,
-        (start, end),
-        dr::outcome_is_shadow_delivered(&outcome),
-        Some(msg_id.get()),
-        Some(channel_id.get()),
-        Some(delivered_body),
-        // #4564: same-channel watcher path — `channel_id` IS the inbound channel, so
-        // `None` lets the funnel reload it (race-safe under identity-gated advance).
-        None,
-    );
+    if dr::outcome_is_shadow_delivered(&outcome) {
+        if landed_stale.load(Ordering::Acquire) {
+            return WatcherShortReplaceResult::LandedStale;
+        }
+        let terminal_anchor_msg_id = match &outcome {
+            toc::DeliveryOutcome::Delivered {
+                replace_kind:
+                    Some(toc::ReplaceDeliveryKind::FreshFallbackAfterEditFailure {
+                        replacement_anchor,
+                        ..
+                    }),
+                ..
+            } => replacement_anchor.map(|anchor| anchor.get()),
+            _ => Some(msg_id.get()),
+        };
+        let persisted = delivery_mutation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+            .is_some_and(|mutation| {
+                mutation.persist(
+                    delivery_target,
+                    (start, end),
+                    terminal_anchor_msg_id,
+                    delivered_body,
+                )
+            });
+        if !persisted {
+            return WatcherShortReplaceResult::LandedUnrecorded;
+        }
+    }
 
     match outcome {
         // Confirmed POST (edit OR #2757 fallback): the controller already ran
@@ -348,6 +390,10 @@ pub(in crate::services::discord) struct WatcherShortReplaceLocals<'a> {
     pub(in crate::services::discord) completion_footer_terminal_target:
         &'a mut Option<WatcherCompletionFooterTerminalTarget>,
     pub(in crate::services::discord) retry_terminal_delivery_from_offset: &'a mut bool,
+    /// #4911 R10: the POST landed but carries no Phase-A durable proof. The root
+    /// must NOT fall through to its unguarded committed-path advance, which would
+    /// attribute this landing to whatever incarnation is current now.
+    pub(in crate::services::discord) terminal_delivery_landed_unproven: &'a mut bool,
 }
 
 /// #3089 A4: run the controller short-replace then write the outcome back into the
@@ -378,6 +424,7 @@ pub(in crate::services::discord) async fn apply_watcher_short_replace_controller
     turn: TurnKey,
     lease_key: Option<crate::services::discord::DeliveryLeaseKey>,
     instance_id: u64,
+    source_authority: WatcherSourceAuthority,
     range: (u64, u64),
     response_sent_offset: usize,
     single_message_panel_footer_mode: bool,
@@ -404,6 +451,7 @@ pub(in crate::services::discord) async fn apply_watcher_short_replace_controller
         turn,
         lease_key,
         instance_id,
+        source_authority,
         range.0,
         range.1,
     )
@@ -563,6 +611,51 @@ pub(in crate::services::discord) fn apply_watcher_short_replace_result(
         WatcherShortReplaceResult::AlreadyCommittedAfterEditFailure { .. } => {
             unreachable!("async controller wrapper owns guarded committed reconciliation")
         }
+        // #4911 R10: the POST LANDED, but its Phase-A durable proof does not exist
+        // (`LandedStale`: the source incarnation was replaced before the epilogue;
+        // `LandedUnrecorded`: the durable record write itself failed). Both must
+        // suppress any re-send — the body is already on Discord — so they set the
+        // same "body is visible" locals as `Delivered`. They must NOT be laundered
+        // into a proven delivery: no completion-footer target is registered (there
+        // is no durable anchor to edit later) and the cleanup is recorded as a
+        // failure, so a later reconciliation still sees this turn as unproven
+        // rather than silently `Succeeded`.
+        WatcherShortReplaceResult::LandedStale | WatcherShortReplaceResult::LandedUnrecorded => {
+            let reason = if matches!(result, WatcherShortReplaceResult::LandedStale) {
+                "source incarnation replaced before the delivery epilogue"
+            } else {
+                "durable delivery record write failed"
+            };
+            tracing::warn!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                message = msg_id.get(),
+                tmux_session = %tmux_session_name,
+                reason,
+                "watcher terminal POST landed without Phase-A durable proof; suppressing re-send"
+            );
+            *locals.terminal_delivery_landed_unproven = true;
+            *locals.direct_send_delivered = true;
+            *locals.tui_direct_anchor_terminal_body_visible = true;
+            *locals.external_input_lease_consumed_by_relay =
+                super::watcher_inflight_represents_external_input(inflight_before_relay);
+            *locals.placeholder_msg_id = None;
+            *locals.placeholder_from_restored_inflight = false;
+            locals.last_edit_text.clear();
+            drop_placeholder_orphan_record(provider, shared, channel_id, msg_id);
+            super::super::record_placeholder_cleanup(
+                shared,
+                provider,
+                channel_id,
+                msg_id,
+                tmux_session_name,
+                crate::services::discord::placeholder_cleanup::PlaceholderCleanupOperation::EditTerminal,
+                crate::services::discord::placeholder_cleanup::PlaceholderCleanupOutcome::failed(
+                    reason.to_string(),
+                ),
+                "watcher_terminal_relay_controller",
+            );
+        }
         WatcherShortReplaceResult::B2Skip | WatcherShortReplaceResult::Skipped => {
             *locals.relay_ok = false;
         }
@@ -574,112 +667,14 @@ pub(in crate::services::discord) fn apply_watcher_short_replace_result(
     }
 }
 
-/// #3610 PR-1d: record the durable terminal anchor for the WATCHER legacy
-/// long-chunk fallback arm (`tmux_watcher.rs` — the
-/// `watcher_should_send_ordered_new_chunks_for_terminal_fallback` branch:
-/// `send_long_message_raw_with_rollback` send-new-chunks + placeholder delete).
-/// This arm is the watcher-owned counterpart of the bridge long-chunk arm PR-1c
-/// instrumented. S1-d routes the flag-ON long-chunk path through the controller;
-/// this helper remains the shared durable-anchor record point for the controller
-/// path and the flag-OFF legacy path.
-///
-/// The caller (the FROZEN giant `tmux_watcher.rs`) invokes this with a SINGLE line,
-/// ONLY when BOTH gates hold (matching PR-1c's M4 discipline at the bridge):
-/// - (A) the send fully committed: `send_long_message_raw_with_rollback` is
-///   all-or-nothing — a partial chunk failure rolls back the already-sent chunks
-///   and returns `Err` (formatting.rs), so the `last_chunk_anchor_msg_id` is only
-///   `Some` on the full-commit `Ok` arm; and
-/// - (M4) the watcher lease `commit` returned `true` AND advanced (the caller gates
-///   on `committed && commit_outcome == Delivered`, the exact site that runs
-///   `advance_watcher_confirmed_end` to `watcher_lease_end`). Recording without an
-///   in-memory advance would leave the durable frontier END ahead of
-///   `confirmed_end_offset` (M4 violation), so the caller passes the anchor through
-///   to the post-advance site rather than recording at the send arm.
-///
-/// Same-channel (unlike the bridge cutover's channel split): the watcher acquires
-/// its lease on, advances, and edits the SAME `channel_id`, so the frontier key
-/// (offset authority) and the anchor pair's channel are BOTH `channel_id`. `range`
-/// is `(watcher_lease_start, watcher_lease_end)` — the SAME offset range the lease
-/// committed and `confirmed_end_offset` advanced to (never mix offset spaces).
-/// Delegates to the shared `dr::record_long_chunk_terminal_delivery` (PR-1c) with
-/// `watcher_owner_channel_id == delivery_channel_id == channel_id`; the delivered
-/// frontier still obeys the shadow flag, while #4081 records the confirmed body
-/// fingerprint for degenerate-key duplicate refusal.
-pub(in crate::services::discord) fn record_watcher_long_chunk_terminal_delivery(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    range: (u64, u64),
-    last_chunk_anchor_msg_id: Option<u64>,
-    delivered_body: &str,
-) {
-    dr::record_long_chunk_terminal_delivery(
-        shared,
-        provider,
-        channel_id,
-        channel_id,
-        range,
-        last_chunk_anchor_msg_id,
-        delivered_body,
-        // #4564: same-channel watcher long-chunk (owner == delivery == channel_id),
-        // so `None` reloads `channel_id` for the inbound id (race-safe here).
-        None,
-    );
-}
-
-/// #3089 A4: the controller-path result mapped back into the watcher's send-arm
-/// locals by `apply_watcher_short_replace_controller`. Keeps the `DeliveryOutcome`
-/// → `(relay_ok, direct_send_delivered, retry)` translation in one testable place.
-///
-/// NOT `Copy` (the `DeliveredFallback` arm carries the `edit_error` `String` so the
-/// write-back reproduces the legacy `PlaceholderCleanupOutcome::failed(edit_error)`
-/// record — #3089 A4 r2).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::services::discord) enum WatcherShortReplaceResult {
-    /// Confirmed transport via the in-place edit (`EditedOriginal`). The
-    /// controller committed + advanced + released. `relay_ok = true`,
-    /// `direct_send_delivered = true`. The original IS the final message →
-    /// register it as the completion-footer target + `EditTerminal`/`Succeeded`
-    /// cleanup (legacy `EditedOriginal` arm, tmux_watcher.rs:6247-6288).
-    Delivered,
-    /// Confirmed transport via a FRESH fallback send after the in-place edit
-    /// FAILED (`SentFallbackAfterEditFailure`). The body landed (advance), but the
-    /// original placeholder is PRESERVED (#2757) and is NOT the final message.
-    /// The preserved original is never a footer target; `replacement_anchor` lets
-    /// the caller target the delivered fresh message while retaining
-    /// `EditTerminal`/`Failed(edit_error)` cleanup and original preservation.
-    DeliveredFallback {
-        edit_error: String,
-        replacement_anchor: Option<MessageId>,
-    },
-    /// The edit failed, and a fresh current-generation frontier read proved the
-    /// range was already committed by another owner. No fallback POST or new
-    /// commit occurred; the watcher reconciles its local lifecycle to that proof.
-    AlreadyCommittedAfterEditFailure { edit_error: String },
-    /// Lost acquire → the legacy `watcher_lease_b2_skip` arm: another holder owns
-    /// the range. No transport. `relay_ok = false`, `direct_send_delivered = false`
-    /// (the live holder advances the offset).
-    B2Skip,
-    /// Partial / ambiguous failure (I2, no advance). `relay_ok = false` and the
-    /// caller resets the retry offset (tmux_watcher.rs:6546-6579).
-    PartialFailureRetry,
-    /// No-op/no-retry: empty body (cut-over gate excludes it) or permanent
-    /// watcher transport failure from the controller.
-    Skipped,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use poise::serenity_prelude::ChannelId;
 
-    /// #3610 PR-1d: the watcher long-chunk delivery helper under the default-OFF
-    /// shadow flag must be a COMPLETE no-op (no panic, no durable write) regardless
-    /// of the resolved anchor — the deploy-safe property (tests never set
-    /// `AGENTDESK_DELIVERY_RECORD_SHADOW`, so the OnceLock reads OFF and the call
-    /// short-circuits inside `shadow_mirror_delivered_frontier`). This is the
-    /// watcher-arm counterpart of delivery_record.rs's
-    /// `record_long_chunk_terminal_delivery_off_is_noop_3610c`.
+    /// Legacy test name retained: an invalid/missing captured generation must
+    /// remain a complete no-op even when the shadow flag is OFF. The flag controls
+    /// telemetry only; durable authority still fails closed on identity.
     #[test]
     fn watcher_long_chunk_delivery_off_is_noop_3610d() {
         let temp = tempfile::TempDir::new().expect("temp runtime root");
@@ -687,11 +682,19 @@ mod tests {
         let _shadow = dr::shadow_test_seam::force(false);
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel = ChannelId::new(556_677_889);
-        // Does not panic; OFF → writes nothing.
-        record_watcher_long_chunk_terminal_delivery(
-            &shared,
-            &ProviderKind::Claude,
-            channel,
+        // Does not panic; missing generation → writes nothing.
+        super::super::terminal_long_chunks::record_watcher_terminal_delivery(
+            crate::services::discord::tmux::WatcherDeliveryTarget {
+                shared: &shared,
+                provider: &ProviderKind::Claude,
+                channel_id: channel,
+                tmux_session_name: "AgentDesk-claude-watcher-off-noop",
+            },
+            super::super::terminal_long_chunks::WatcherDeliveryIdentity {
+                generation_mtime_ns: 0,
+                lease_reset_incarnation: 0,
+                ledger_user_msg_id: None,
+            },
             (0, 8192),
             Some(912_345_678),
             "",
@@ -702,8 +705,8 @@ mod tests {
 
     /// #3610 PR-1d gate (D), `last = None`: the empty-Vec anchor (impossible on the
     /// full-commit `Ok` path, but type-honest) is forwarded as `None` and the helper
-    /// still no-ops under OFF without panicking. Pins that a null anchor is a legal
-    /// input to the watcher wrapper (range-only record when the flag is ON).
+    /// still no-ops with invalid generation without panicking. Pins that a null
+    /// anchor is a legal input to the watcher wrapper.
     #[test]
     fn watcher_long_chunk_delivery_none_anchor_is_noop_3610d() {
         let temp = tempfile::TempDir::new().expect("temp runtime root");
@@ -711,10 +714,18 @@ mod tests {
         let _shadow = dr::shadow_test_seam::force(false);
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel = ChannelId::new(112_233_445);
-        record_watcher_long_chunk_terminal_delivery(
-            &shared,
-            &ProviderKind::Claude,
-            channel,
+        super::super::terminal_long_chunks::record_watcher_terminal_delivery(
+            crate::services::discord::tmux::WatcherDeliveryTarget {
+                shared: &shared,
+                provider: &ProviderKind::Claude,
+                channel_id: channel,
+                tmux_session_name: "AgentDesk-claude-watcher-none-anchor-noop",
+            },
+            super::super::terminal_long_chunks::WatcherDeliveryIdentity {
+                generation_mtime_ns: 0,
+                lease_reset_incarnation: 0,
+                ledger_user_msg_id: None,
+            },
             (0, 2048),
             None,
             "",
