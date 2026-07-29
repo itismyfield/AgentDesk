@@ -471,7 +471,7 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
     // completion event. `broadcast` only buffers sends that happen after a receiver exists, so
     // subscribing later left the negative assertion below racing A's normal `QueueEligible`
     // publish instead of observing the local-only halves.
-    let mut completion_rx =
+    let mut a_release_rx =
         super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
 
     state.release_first_placeholder.notify_waiters();
@@ -497,7 +497,7 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
 
     // Drain A's release event explicitly so the local-only assertion below observes only the
     // `/model` halves rather than whatever A left buffered.
-    let a_release = tokio::time::timeout(std::time::Duration::from_secs(2), completion_rx.recv())
+    let a_release = tokio::time::timeout(std::time::Duration::from_secs(2), a_release_rx.recv())
         .await
         .expect("A placeholder-failure release must publish one completion event")
         .expect("completion bus open");
@@ -528,6 +528,11 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
         .insert(channel_id, test_watcher_handle(tmux, &transcript_path));
     super::spawn_tui_prompt_relay(shared.clone(), ProviderKind::Claude);
 
+    // Start a fresh receiver after A's recovery completed. The preceding
+    // receiver intentionally saw A's QueueEligible event; reusing it makes the
+    // local-only assertion observe that earlier release on slow CI runners.
+    let mut local_only_completion_rx =
+        super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
     let command_half = "<command-message>x</command-message>\n<command-name>/model</command-name>";
     let stdout_half = "<local-command-stdout>Set model to Fable 5</local-command-stdout>";
     assert_eq!(
@@ -598,9 +603,12 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
         "local-only halves must not create synthetic inflight ownership"
     );
     assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(100), completion_rx.recv())
-            .await
-            .is_err(),
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            local_only_completion_rx.recv(),
+        )
+        .await
+        .is_err(),
         "local-only halves must not publish completion events"
     );
 
