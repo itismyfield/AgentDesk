@@ -407,7 +407,6 @@ services::discord::tmux::terminal_finalize_liveness_tests
 services::discord::tmux::tmux_kill_policy::recent_turn_stop_range_tests
 services::discord::tmux::tmux_output_stream::tests
 services::discord::tmux::tmux_session_files::tests
-services::discord::tmux::tmux_watcher::commit_decisions::runtime_binding_offset_tests
 services::discord::tmux::tmux_watcher::completion_gate::matched_session_jsonl_gate_tests
 services::discord::tmux::tmux_watcher::liveness::relay_state_contract_refs
 services::discord::tmux::tmux_watcher::liveness::tests

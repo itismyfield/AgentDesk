@@ -287,3 +287,208 @@ mod runtime_binding_offset_tests {
         ));
     }
 }
+
+/// #4961 Phase B: break the redrive livelock at the soft-terminal authority
+/// refusal.
+///
+/// When a re-read frame cannot authenticate soft-terminal authority the watcher
+/// drops the range and continues. That is correct for an unproven range, but it
+/// is also the point where the livelock closes: redrive rewound the reader to a
+/// frontier `F`, the re-read range is refused here, `confirmed_end_offset` never
+/// moves, redrive sees "no progress", backs off, and rewinds to `F` again. Each
+/// pass re-creates a streaming panel whose anchor was lost, which is why the same
+/// body is posted five to seven times while other blocks are never posted at all.
+///
+/// The escape is durable proof, not relaxed authority (#4030 forbids widening the
+/// identity equality). If the delivery record already proves this generation
+/// delivered past the reader, the range WAS delivered and only the frontier lags:
+/// advance it through the guarded funnel so the next redrive observes progress.
+/// An unproven range still falls through untouched — this never invents delivery.
+pub(super) fn commit_proven_soft_terminal_backlog(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    output_path: &str,
+    source_authority: WatcherSourceAuthority,
+) -> bool {
+    let transcript_eof = std::fs::metadata(output_path).ok().map(|meta| meta.len());
+    let proven_end = dr::delivered_frontier_end_current_generation(
+        provider,
+        channel_id,
+        tmux_session_name,
+        transcript_eof,
+    );
+    if proven_end == 0 {
+        return false;
+    }
+    let committed = shared.committed_relay_offset(channel_id);
+    if proven_end <= committed {
+        return false;
+    }
+    let identity = terminal_long_chunks::watcher_delivery_identity(
+        source_authority.generation_mtime_ns,
+        source_authority.reset_incarnation,
+        None,
+    );
+    let advanced = matches!(
+        terminal_long_chunks::advance_watcher_terminal_delivery(
+            crate::services::discord::tmux::WatcherDeliveryTarget {
+                shared,
+                provider,
+                channel_id,
+                tmux_session_name,
+            },
+            identity,
+            proven_end,
+        ),
+        terminal_long_chunks::GuardedWatcherDeliveryResult::AdvancedWithoutProof
+            | terminal_long_chunks::GuardedWatcherDeliveryResult::Persisted
+    );
+    tracing::warn!(
+        target: "agentdesk::discord::relay_recovery",
+        event = "soft_terminal_frontier_catchup",
+        provider = provider.as_str(),
+        channel_id = channel_id.get(),
+        tmux_session = %tmux_session_name,
+        committed,
+        proven_end,
+        advanced,
+        "soft terminal refused authority over a range the delivery record already proves delivered; advancing the frontier so redrive observes progress"
+    );
+    advanced
+}
+
+#[cfg(test)]
+mod soft_terminal_backlog_catchup_tests_4961 {
+    use super::*;
+
+    const CH: u64 = 4_961_801;
+    const SESSION: &str = "AgentDesk-claude-soft-catchup-4961";
+
+    fn set_generation(session: &str, unix_secs: i64) -> i64 {
+        let path = crate::services::tmux_common::session_temp_path(session, "generation");
+        std::fs::create_dir_all(std::path::Path::new(&path).parent().unwrap()).unwrap();
+        std::fs::write(&path, "phase-b").unwrap();
+        filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(unix_secs, 13)).unwrap();
+        dr::current_generation_mtime_ns(session)
+    }
+
+    /// The livelock exit: a refused soft terminal whose range the record already
+    /// proves delivered must move `confirmed_end_offset`, so the next redrive
+    /// round observes progress instead of rewinding to the same point forever.
+    #[test]
+    fn proven_backlog_advances_the_frontier_4961() {
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(CH);
+        let provider = ProviderKind::Claude;
+        let generation = set_generation(SESSION, 1_700_492_300);
+        let output = temp.path().join("catchup.jsonl");
+        std::fs::write(&output, vec![b'z'; 8192]).expect("transcript");
+
+        dr::write_delivered_frontier(
+            &provider,
+            CH,
+            SESSION,
+            dr::DeliveredCommit {
+                range: (0, 5000),
+                generation_mtime_ns: generation,
+                attempts: 1,
+                panel_msg_id: Some(4_961_802),
+                panel_channel_id: Some(CH),
+            },
+        )
+        .expect("seed proven frontier");
+
+        assert_eq!(shared.committed_relay_offset(channel), 0);
+        let authority = WatcherSourceAuthority {
+            generation_mtime_ns: generation,
+            reset_incarnation: shared.relay_frontier_token(channel).reset_incarnation,
+        };
+        assert!(commit_proven_soft_terminal_backlog(
+            &shared,
+            &provider,
+            channel,
+            SESSION,
+            output.to_str().unwrap(),
+            authority,
+        ));
+        assert_eq!(
+            shared.committed_relay_offset(channel),
+            5000,
+            "the frontier must catch up to the proven delivered end"
+        );
+    }
+
+    /// Without durable proof the range is genuinely undelivered: the helper must
+    /// stay inert so it can never invent a delivery the user never received.
+    #[test]
+    fn unproven_backlog_is_left_alone_4961() {
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let session = "AgentDesk-claude-soft-catchup-noproof-4961";
+        let channel = ChannelId::new(4_961_803);
+        let generation = set_generation(session, 1_700_492_400);
+        let output = temp.path().join("noproof.jsonl");
+        std::fs::write(&output, vec![b'z'; 256]).expect("transcript");
+        let authority = WatcherSourceAuthority {
+            generation_mtime_ns: generation,
+            reset_incarnation: shared.relay_frontier_token(channel).reset_incarnation,
+        };
+        assert!(!commit_proven_soft_terminal_backlog(
+            &shared,
+            &ProviderKind::Claude,
+            channel,
+            session,
+            output.to_str().unwrap(),
+            authority,
+        ));
+        assert_eq!(shared.committed_relay_offset(channel), 0);
+    }
+
+    /// A replaced source incarnation must not be advanced by an older frame's
+    /// catch-up — that is the misattribution the guarded funnel exists to stop.
+    #[test]
+    fn stale_incarnation_catchup_is_refused_4961() {
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let session = "AgentDesk-claude-soft-catchup-stale-4961";
+        let channel = ChannelId::new(4_961_804);
+        let generation = set_generation(session, 1_700_492_500);
+        let output = temp.path().join("stale.jsonl");
+        std::fs::write(&output, vec![b'z'; 8192]).expect("transcript");
+        dr::write_delivered_frontier(
+            &ProviderKind::Claude,
+            4_961_804,
+            session,
+            dr::DeliveredCommit {
+                range: (0, 5000),
+                generation_mtime_ns: generation,
+                attempts: 1,
+                panel_msg_id: Some(4_961_805),
+                panel_channel_id: Some(4_961_804),
+            },
+        )
+        .expect("seed proven frontier");
+        let stale = WatcherSourceAuthority {
+            generation_mtime_ns: generation,
+            reset_incarnation: shared
+                .relay_frontier_token(channel)
+                .reset_incarnation
+                .wrapping_add(1),
+        };
+        assert!(!commit_proven_soft_terminal_backlog(
+            &shared,
+            &ProviderKind::Claude,
+            channel,
+            session,
+            output.to_str().unwrap(),
+            stale,
+        ));
+        assert_eq!(shared.committed_relay_offset(channel), 0);
+    }
+}

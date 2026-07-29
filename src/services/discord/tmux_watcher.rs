@@ -2330,6 +2330,15 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             }
         }
         if watcher_direct_fallback_requested && !watcher_direct_fallback_authorized {
+            // #4961 Phase B: see `commit_proven_soft_terminal_backlog`.
+            commit_proven_soft_terminal_backlog(
+                &shared,
+                &watcher_provider,
+                channel_id,
+                &tmux_session_name,
+                &output_path,
+                source_authority,
+            );
             slot_guard.release();
             continue 'watcher_loop;
         }
