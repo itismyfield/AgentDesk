@@ -8078,11 +8078,12 @@ fn issue_4407_workflow_end_matching_rules_preserve_legacy_and_current_paths() {
     assert_eq!(adopt.workflows[0].finished, Some(true));
 }
 
-// #4970: the legacy DashMap `Ref` must be destroyed before another channel can
-// enter the same map. Keeping this inspection in its own block makes a same-shard
-// re-entry structurally impossible, rather than probabilistic.
+/// Verifies that the corrected inspection-before-next-entry ordering preserves
+/// status state for both channels. It has no deadlock-detection power because
+/// its lexical scope removes the deadlock shape; CI's per-test timeout detects a
+/// future reintroduction that blocks instead of failing an assertion.
 #[test]
-fn issue_4970_releases_status_map_ref_before_next_channel_entry() {
+fn issue_4970_inspection_before_next_channel_entry_preserves_status_state() {
     let events = PlaceholderLiveEvents::default();
     let inspected_channel = ChannelId::new(4_970_001);
     events.push_status_event(

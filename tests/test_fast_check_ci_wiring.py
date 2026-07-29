@@ -218,13 +218,26 @@ class FastCheckCiWiringTests(unittest.TestCase):
         )
         self.assertEqual(workflow.count(command), 2)
 
-    def test_macos_pr_lane_runs_placeholder_live_events_tests(self) -> None:
+    def test_macos_hosted_lane_bounds_placeholder_live_events_tests(self) -> None:
         workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
         command = (
-            "env -u AGENTDESK_ROOT_DIR cargo test --lib "
+            "python3 scripts/ci-timeout.py 900 env -u AGENTDESK_ROOT_DIR cargo "
+            "test --lib placeholder_live_events -- --skip _pg --skip pg_ --skip postgres"
+        )
+        self.assertEqual(workflow.count(command), 1)
+
+    def test_macos_hosted_lane_has_explicit_job_timeout(self) -> None:
+        workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
+        hosted_job = job_block(workflow, "macos_hosted")
+        self.assertIn("timeout-minutes: 45", hosted_job)
+
+    def test_macos_self_hosted_lane_retains_placeholder_live_events_tests(self) -> None:
+        workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
+        command = (
+            "nice -n 10 env -u AGENTDESK_ROOT_DIR cargo test --lib "
             "placeholder_live_events -- --skip _pg --skip pg_ --skip postgres"
         )
-        self.assertEqual(workflow.count(command), 2)
+        self.assertEqual(workflow.count(command), 1)
 
     def test_main_and_nightly_retain_non_pg_test_coverage(self) -> None:
         justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
