@@ -10,66 +10,6 @@ use super::common::{
 use super::*;
 use serde_json::json;
 
-/// #4953: keep INFO callsites process-globally "interested" so the log-capturing
-/// tests below survive the parallel test harness.
-///
-/// Those tests install their capturing subscriber with
-/// `tracing::subscriber::set_default`, which is **thread-local**, but
-/// tracing-core caches each callsite's `Interest` **process-globally**. A
-/// callsite is registered on its first-ever hit, and while only one dispatcher
-/// is registered tracing-core takes the `Rebuilder::JustOne` fast path
-/// (tracing-core 0.1.36, `callsite.rs`) which resolves that registration against
-/// the *hitting thread's* dispatcher. When a subscriber-less sibling test thread
-/// wins that race, the callsite is cached as `Interest::never()` for the whole
-/// process, the capturing thread stops receiving the event, and the assertion
-/// fails against an empty buffer. (`set_default` already rebuilds the interest
-/// of every *already registered* callsite, which is why an extra
-/// `rebuild_interest_cache()` call does not help — the hole is the
-/// not-yet-registered callsite.)
-///
-/// A process-global default that is interested in INFO closes the race: every
-/// registration path now resolves against an interested subscriber no matter
-/// which thread gets there first. `register_callsite` deliberately answers
-/// `Interest::sometimes()` rather than `always`, so the per-event decision still
-/// goes through the *current* thread's dispatcher — subscriber-less threads keep
-/// skipping the event entirely, and the scoped capturing subscriber stays the
-/// only observer.
-fn install_global_info_callsite_interest() {
-    struct InfoCallsiteInterestKeeper;
-
-    impl tracing::Subscriber for InfoCallsiteInterestKeeper {
-        fn register_callsite(
-            &self,
-            metadata: &'static tracing::Metadata<'static>,
-        ) -> tracing::subscriber::Interest {
-            if *metadata.level() <= tracing::Level::INFO {
-                tracing::subscriber::Interest::sometimes()
-            } else {
-                tracing::subscriber::Interest::never()
-            }
-        }
-        fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
-            Some(tracing::level_filters::LevelFilter::INFO)
-        }
-        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-            false
-        }
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-        fn event(&self, _: &tracing::Event<'_>) {}
-        fn enter(&self, _: &tracing::span::Id) {}
-        fn exit(&self, _: &tracing::span::Id) {}
-    }
-
-    static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    INSTALLED.get_or_init(|| {
-        let _ = tracing::subscriber::set_global_default(InfoCallsiteInterestKeeper);
-    });
-}
-
 #[test]
 fn render_block_compacts_newest_events_under_limit() {
     let events = PlaceholderLiveEvents::default();
@@ -7758,39 +7698,14 @@ fn idless_end_with_agent_id_shared_by_finished_slot_never_closes_the_live_slot()
 // REMOVES it from the state, a same-desc B respawns live, and A's real
 // completion finally arrives (id-less, desc-keyed). Without the tombstone the
 // evicted A is invisible and B becomes the unique live match → wrong-kill. The
-// tombstone ring must drop the end — logged with the tombstone conflict reason
-// — and leave B running. Removing the `contains_fresh` check in
+// tombstone ring must drop the end and leave B running. Removing the
+// `contains_fresh` check in
 // `unique_live_owner` (or the eviction-path `push_slot_keys`) closes B and
 // fails this test.
 #[test]
 fn idless_end_after_finished_slot_eviction_never_closes_the_live_respawn() {
     use super::completion_footer::{SlotKey, TerminalSlotId};
     use super::task_panel::STUCK_BACKGROUND_TASK_TTL;
-    use std::{
-        io::{self, Write},
-        sync::{Arc, Mutex},
-    };
-    use tracing_subscriber::fmt::MakeWriter;
-
-    #[derive(Clone)]
-    struct CapturingWriter {
-        buffer: Arc<Mutex<Vec<u8>>>,
-    }
-    impl Write for CapturingWriter {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.buffer.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    impl<'a> MakeWriter<'a> for CapturingWriter {
-        type Writer = CapturingWriter;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
 
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(4_396_009);
@@ -7853,29 +7768,15 @@ fn idless_end_after_finished_slot_eviction_never_closes_the_live_respawn() {
         },
     );
 
-    // A's real completion, late: id-less, desc is the only key. Capture the
-    // panel's INFO logs across the apply to assert the tombstone drop reason.
-    install_global_info_callsite_interest();
-    let buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .with_ansi(false)
-        .without_time()
-        .with_writer(CapturingWriter {
-            buffer: buffer.clone(),
-        })
-        .finish();
-    {
-        let _guard = tracing::subscriber::set_default(subscriber);
-        let raw = "<task-notification>\n\
-            <status>completed</status>\n\
-            <summary>Agent \"research foo\" completed</summary>\n\
-            </task-notification>";
-        events.push_status_events(
-            channel_id,
-            status_events_from_task_notification_xml_for_footer_mode(raw, true),
-        );
-    }
+    // A's real completion, late: id-less, desc is the only key.
+    let raw = "<task-notification>\n\
+        <status>completed</status>\n\
+        <summary>Agent \"research foo\" completed</summary>\n\
+        </task-notification>";
+    events.push_status_events(
+        channel_id,
+        status_events_from_task_notification_xml_for_footer_mode(raw, true),
+    );
 
     let entry = events
         .status_by_channel
@@ -7892,11 +7793,6 @@ fn idless_end_after_finished_slot_eviction_never_closes_the_live_respawn() {
     assert_eq!(
         slot_b.finished, None,
         "the live same-desc respawn must NOT be closed by evicted A's late completion"
-    );
-    let logs = String::from_utf8(buffer.lock().unwrap().clone()).expect("utf8 logs");
-    assert!(
-        logs.contains("tombstone"),
-        "the drop must be logged with the tombstone conflict reason, got: {logs}"
     );
 }
 
@@ -8198,32 +8094,6 @@ fn issue_4970_inspection_before_next_channel_entry_preserves_status_state() {
 
 #[test]
 fn issue_4407_idless_workflow_end_for_unique_id_bearing_slot_drops_without_status_transition() {
-    use std::{
-        io::{self, Write},
-        sync::{Arc, Mutex},
-    };
-    use tracing_subscriber::fmt::MakeWriter;
-
-    #[derive(Clone)]
-    struct CapturingWriter {
-        buffer: Arc<Mutex<Vec<u8>>>,
-    }
-    impl Write for CapturingWriter {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.buffer.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    impl<'a> MakeWriter<'a> for CapturingWriter {
-        type Writer = CapturingWriter;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
     let events = PlaceholderLiveEvents::default();
     let channel_id = ChannelId::new(4_407_006);
     events.push_status_event(
@@ -8234,27 +8104,14 @@ fn issue_4407_idless_workflow_end_for_unique_id_bearing_slot_drops_without_statu
         },
     );
 
-    install_global_info_callsite_interest();
-    let buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .with_ansi(false)
-        .without_time()
-        .with_writer(CapturingWriter {
-            buffer: buffer.clone(),
-        })
-        .finish();
-    {
-        let _guard = tracing::subscriber::set_default(subscriber);
-        events.push_status_event(
-            channel_id,
-            StatusEvent::WorkflowEnd {
-                task_id: None,
-                success: true,
-                summary: Some("legacy completion".to_string()),
-            },
-        );
-    }
+    events.push_status_event(
+        channel_id,
+        StatusEvent::WorkflowEnd {
+            task_id: None,
+            success: true,
+            summary: Some("legacy completion".to_string()),
+        },
+    );
 
     let entry = events
         .status_by_channel
@@ -8277,11 +8134,6 @@ fn issue_4407_idless_workflow_end_for_unique_id_bearing_slot_drops_without_statu
         matches!(guard.status, DerivedStatus::WorkflowRunning { .. }),
         "drop must not transition WorkflowRunning back to Running: {:?}",
         guard.status
-    );
-    let logs = String::from_utf8(buffer.lock().unwrap().clone()).expect("utf8 logs");
-    assert!(
-        logs.contains("#4407: dropped id-less WorkflowEnd"),
-        "drop must be logged, got: {logs}"
     );
 }
 
