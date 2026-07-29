@@ -8085,7 +8085,7 @@ fn issue_4407_workflow_end_matching_rules_preserve_legacy_and_current_paths() {
 /// lane (`ci-macos-trusted.yml:264` runs it bare); the only backstop is the
 /// 45-minute `macos_self_hosted` job cap at `ci-macos-trusted.yml:169`, which
 /// turns the hang into a red job without identifying the stuck test and holds
-/// the shared production host for the full window. See #4983.
+/// the shared production host until that job-level timeout expires. See #4983.
 #[test]
 fn issue_4970_inspection_before_next_channel_entry_preserves_status_state() {
     let events = PlaceholderLiveEvents::default();
