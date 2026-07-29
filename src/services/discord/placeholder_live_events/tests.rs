@@ -8080,7 +8080,7 @@ fn issue_4407_workflow_end_matching_rules_preserve_legacy_and_current_paths() {
 
 /// Verifies that the corrected inspection-before-next-entry ordering preserves
 /// status state for both channels. It has no deadlock-detection power because
-/// its lexical scope removes the deadlock shape; CI's per-test timeout detects a
+/// its lexical scope removes the deadlock shape; CI's command timeout detects a
 /// future reintroduction that blocks instead of failing an assertion.
 #[test]
 fn issue_4970_inspection_before_next_channel_entry_preserves_status_state() {
