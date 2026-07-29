@@ -56,6 +56,10 @@ pub(in crate::services::discord) struct DestructiveCancelProbeSnapshot {
     pub output_path: Option<String>,
     pub output_len: Option<u64>,
     pub relay_frontier: Option<u64>,
+    /// `0` is the codebase-wide "no turn identity" sentinel (see
+    /// `delivery_lease_key`, `abandon_request_store`). A row carrying it owns no
+    /// user turn, so it cannot own an undelivered user-visible response.
+    pub user_msg_id: u64,
 }
 
 impl DestructiveCancelProbeSnapshot {
@@ -97,6 +101,7 @@ impl DestructiveCancelProbeSnapshot {
             output_path,
             output_len,
             relay_frontier,
+            user_msg_id: state.user_msg_id,
         }
     }
 }
@@ -135,6 +140,14 @@ pub(in crate::services::discord) fn terminal_envelope_present(
     snapshot.output_path.as_deref().is_some_and(|path| {
         crate::services::tui_turn_state::jsonl_turn_end_terminator_idle(provider, Path::new(path))
     })
+}
+
+/// A row with no turn identity that has never relayed a frame owns nothing a
+/// destructive demotion could lose. Both halves are required: `user_msg_id == 0`
+/// alone can be a creation-time race, and a non-`None` relay frontier means the
+/// row did put bytes on the wire.
+fn identityless_row_owns_no_response(snapshot: &DestructiveCancelProbeSnapshot) -> bool {
+    snapshot.user_msg_id == 0 && snapshot.relay_frontier.is_none()
 }
 
 fn fresh_watcher_heartbeat_should_block(
@@ -213,6 +226,16 @@ pub(in crate::services::discord) async fn evaluate(
 ) -> DestructiveCancelGate {
     if snapshot.pin.finalizer_turn_id == 0 {
         return DestructiveCancelGate::Denied("missing_finalizer_turn_id");
+    }
+
+    // An ownership-only row carries no turn identity and has never relayed a
+    // frame, so demoting it cannot drop user-visible output. The capture
+    // evidence consulted below is drawn from the *shared* tmux session, which
+    // keeps advancing because the next turn is running; attributing that
+    // liveness to this row makes it immortal and livelocks every subsequent
+    // synthetic start.
+    if identityless_row_owns_no_response(snapshot) {
+        return DestructiveCancelGate::Allowed("identityless_row_never_relayed");
     }
 
     // Fresh watcher heartbeat wins before terminal-envelope evidence. A live
@@ -376,6 +399,48 @@ mod tests {
         body.push('\n');
         std::fs::write(path, body).expect("write jsonl");
         std::fs::metadata(path).expect("jsonl metadata").len()
+    }
+
+    fn probe_snapshot(
+        user_msg_id: u64,
+        relay_frontier: Option<u64>,
+    ) -> DestructiveCancelProbeSnapshot {
+        DestructiveCancelProbeSnapshot {
+            pin: DestructiveCancelIdentityPin {
+                finalizer_turn_id: 4242,
+                mailbox_active_user_msg_id: None,
+                tmux_session_name: Some("AgentDesk-claude-test".to_string()),
+            },
+            updated_at: "2026-07-29 16:57:51".to_string(),
+            save_generation: 7,
+            output_path: None,
+            output_len: None,
+            relay_frontier,
+            user_msg_id,
+        }
+    }
+
+    #[test]
+    fn identityless_row_that_never_relayed_is_demotable() {
+        // The livelock shape: an ownership-only row froze with no turn identity
+        // and no relayed frame, while the shared tmux session kept advancing for
+        // the next turn. Capture-progress evidence must not protect it.
+        assert!(identityless_row_owns_no_response(&probe_snapshot(0, None)));
+    }
+
+    #[test]
+    fn row_with_turn_identity_or_relayed_bytes_is_protected() {
+        // A real turn is never demotable on this path...
+        assert!(!identityless_row_owns_no_response(&probe_snapshot(
+            1531926242671071404,
+            None
+        )));
+        // ...nor is an identity-less row that already put bytes on the wire,
+        // which guards the creation-time race where the identity is not yet set.
+        assert!(!identityless_row_owns_no_response(&probe_snapshot(
+            0,
+            Some(934_552)
+        )));
     }
 
     #[test]
