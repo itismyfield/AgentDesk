@@ -907,24 +907,14 @@ fn attach_paused_turn_watcher_inner(
             turn_delivered: turn_delivered.clone(),
             last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
         };
-        let claim = if let Some(thread_parent_channel_id) = thread_parent_channel_id {
-            super::super::super::tmux::claim_or_reuse_watcher_for_thread_follow_up(
-                &shared.tmux_watchers,
-                channel_id,
-                handle,
-                &provider,
-                source,
-                thread_parent_channel_id,
-            )
-        } else {
-            super::super::super::tmux::claim_or_reuse_watcher(
-                &shared.tmux_watchers,
-                channel_id,
-                handle,
-                &provider,
-                source,
-            )
-        };
+        let claim = super::super::super::tmux::claim_or_reuse_watcher_with_thread_parent(
+            &shared.tmux_watchers,
+            channel_id,
+            handle,
+            &provider,
+            source,
+            thread_parent_channel_id,
+        );
         watcher_owner_channel_id = claim.owner_channel_id();
         if claim.should_spawn() {
             let ts = chrono::Local::now().format("%H:%M:%S");

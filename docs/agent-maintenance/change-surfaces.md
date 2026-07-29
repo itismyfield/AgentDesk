@@ -12,9 +12,9 @@
 >
 > Last refreshed: 2026-07-30 (#4984 S1 records unintended cross-channel tmux
 > watcher claims through the existing WARN-level `invariant_violation` event
-> surface. The thread-follow-up path carries the request's parent-channel identity
-> and remains observationally excluded when that parent is the incumbent owner;
-> claim, session-name, and delivery behavior remain unchanged).
+> surface. Watcher-claim paths derive the persisted thread follow-up parent from
+> inflight logical-channel/thread identity and exclude only a matching incumbent
+> owner; claim, session-name, and delivery behavior remain unchanged).
 >
 > Last refreshed: 2026-07-29 (#4911/#4961 Phase A R9 — `tmux.rs` gains the
 > generation-scoped `advance_watcher_confirmed_end_for_generation` used only by the

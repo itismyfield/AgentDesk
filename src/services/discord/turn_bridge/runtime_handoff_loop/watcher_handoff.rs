@@ -161,12 +161,17 @@ pub(super) fn handle_watcher_runtime_handoff(
     let pre_claim_persisted = inflight_state.clone();
     #[cfg(unix)]
     let (watcher_claimed, watcher_claim_replaced_existing, owner_changed_after_claim) = {
-        let claim = super::super::tmux::claim_or_reuse_watcher(
+        let claim = super::super::tmux::claim_or_reuse_watcher_with_thread_parent(
             &shared_owned.tmux_watchers,
             channel_id,
             handle,
             provider,
             "turn_bridge_runtime_ready",
+            super::super::tmux::thread_follow_up_parent_channel_id(
+                channel_id,
+                inflight_state.logical_channel_id,
+                inflight_state.thread_id,
+            ),
         );
         *watcher_owner_channel_id = claim.owner_channel_id();
         let owner_changed =

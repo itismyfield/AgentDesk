@@ -81,6 +81,18 @@ fn cross_channel_claim_is_intended_thread_follow_up(
             .is_some_and(|parent_channel_id| parent_channel_id == existing_channel_id)
 }
 
+pub(crate) fn thread_follow_up_parent_channel_id(
+    channel_id: ChannelId,
+    logical_channel_id: Option<u64>,
+    thread_id: Option<u64>,
+) -> Option<ChannelId> {
+    (thread_id == Some(channel_id.get()))
+        .then_some(logical_channel_id)
+        .flatten()
+        .filter(|parent_channel_id| *parent_channel_id != channel_id.get())
+        .map(ChannelId::new)
+}
+
 fn observe_unintended_cross_channel_tmux_claim(
     provider: Option<&ProviderKind>,
     requested_channel_id: ChannelId,
@@ -141,6 +153,15 @@ pub(in crate::services::discord) fn try_claim_watcher(
     channel_id: ChannelId,
     handle: TmuxWatcherHandle,
 ) -> bool {
+    try_claim_watcher_with_thread_parent(watchers, channel_id, handle, None)
+}
+
+pub(in crate::services::discord) fn try_claim_watcher_with_thread_parent(
+    watchers: &TmuxWatcherRegistry,
+    channel_id: ChannelId,
+    handle: TmuxWatcherHandle,
+    thread_parent_channel_id: Option<ChannelId>,
+) -> bool {
     let guard = lock_tmux_watcher_registry();
     let requested_tmux = handle.tmux_session_name.clone();
     let requested_output_path = handle.output_path.clone();
@@ -152,7 +173,7 @@ pub(in crate::services::discord) fn try_claim_watcher(
                 existing.0,
                 &requested_tmux,
                 "try_claim_watcher",
-                None,
+                thread_parent_channel_id,
             );
         }
         if existing.1 || existing.2 || existing.3 != requested_output_path {
@@ -223,16 +244,16 @@ pub(in crate::services::discord) fn claim_or_reuse_watcher(
     provider: &ProviderKind,
     source: &str,
 ) -> WatcherClaimOutcome {
-    claim_watcher(watchers, channel_id, handle, provider, source, false, None)
+    claim_or_reuse_watcher_with_thread_parent(watchers, channel_id, handle, provider, source, None)
 }
 
-pub(in crate::services::discord) fn claim_or_reuse_watcher_for_thread_follow_up(
+pub(in crate::services::discord) fn claim_or_reuse_watcher_with_thread_parent(
     watchers: &TmuxWatcherRegistry,
     channel_id: ChannelId,
     handle: TmuxWatcherHandle,
     provider: &ProviderKind,
     source: &str,
-    thread_parent_channel_id: ChannelId,
+    thread_parent_channel_id: Option<ChannelId>,
 ) -> WatcherClaimOutcome {
     claim_watcher(
         watchers,
@@ -241,7 +262,7 @@ pub(in crate::services::discord) fn claim_or_reuse_watcher_for_thread_follow_up(
         provider,
         source,
         false,
-        Some(thread_parent_channel_id),
+        thread_parent_channel_id,
     )
 }
 
@@ -256,7 +277,28 @@ pub(in crate::services::discord) fn claim_or_replace_watcher(
     provider: &ProviderKind,
     source: &str,
 ) -> WatcherClaimOutcome {
-    claim_watcher(watchers, channel_id, handle, provider, source, true, None)
+    claim_or_replace_watcher_with_thread_parent(
+        watchers, channel_id, handle, provider, source, None,
+    )
+}
+
+pub(in crate::services::discord) fn claim_or_replace_watcher_with_thread_parent(
+    watchers: &TmuxWatcherRegistry,
+    channel_id: ChannelId,
+    handle: TmuxWatcherHandle,
+    provider: &ProviderKind,
+    source: &str,
+    thread_parent_channel_id: Option<ChannelId>,
+) -> WatcherClaimOutcome {
+    claim_watcher(
+        watchers,
+        channel_id,
+        handle,
+        provider,
+        source,
+        true,
+        thread_parent_channel_id,
+    )
 }
 
 pub(crate) fn claim_watcher(

@@ -741,12 +741,17 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                         let watcher_claimed = {
                             #[cfg(unix)]
                             {
-                                let claim = super::tmux::claim_or_reuse_watcher(
+                                let claim = super::tmux::claim_or_reuse_watcher_with_thread_parent(
                                     &shared.tmux_watchers,
                                     channel_id,
                                     handle,
                                     provider,
                                     "restart_report_recovery",
+                                    super::tmux::thread_follow_up_parent_channel_id(
+                                        channel_id,
+                                        state.logical_channel_id,
+                                        state.thread_id,
+                                    ),
                                 );
                                 claim.should_spawn()
                             }
@@ -1911,12 +1916,17 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 let watcher_claimed = {
                     #[cfg(unix)]
                     {
-                        let claim = super::tmux::claim_or_reuse_watcher(
+                        let claim = super::tmux::claim_or_reuse_watcher_with_thread_parent(
                             &shared.tmux_watchers,
                             channel_id,
                             handle,
                             provider,
                             "inflight_recovery",
+                            super::tmux::thread_follow_up_parent_channel_id(
+                                channel_id,
+                                state.logical_channel_id,
+                                state.thread_id,
+                            ),
                         );
                         claim.should_spawn()
                     }
