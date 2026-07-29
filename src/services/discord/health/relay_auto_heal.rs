@@ -619,6 +619,7 @@ fn nudge_existing_watcher_for_backlog(
         snapshot,
         watcher.value(),
         channel_id,
+        owner_channel_id,
         token,
     ) {
         return false;
@@ -637,26 +638,26 @@ fn nudge_existing_watcher_for_backlog(
     true
 }
 
-/// True when the durable delivery record for the CURRENT generation already
-/// reaches past `requested_frontier`, i.e. the bytes redrive wants to re-read
-/// were delivered and only the in-memory frontier lags. Returns false whenever
-/// proof is absent, so a genuinely undelivered backlog still redrives.
-fn redrive_target_is_already_proven_delivered(
+/// Current-generation durable frontier END for the channel that owns the offset
+/// authority, or `0` when nothing is proven.
+///
+/// #4961 Phase B R2: the lookup MUST use the offset-authority owner channel. A
+/// duplicate attach reuses an existing watcher, so the requesting channel can be a
+/// different id whose record holds none of this session's proof; reading it would
+/// silently report "unproven" and re-read delivered bytes.
+fn redrive_proven_delivered_end(
     provider: &ProviderKind,
-    channel_id: ChannelId,
+    owner_channel_id: ChannelId,
     tmux_session_name: &str,
     output_path: &str,
-    requested_frontier: u64,
-) -> bool {
+) -> u64 {
     let transcript_eof = std::fs::metadata(output_path).ok().map(|meta| meta.len());
-    let proven_end =
-        crate::services::discord::outbound::delivery_record::delivered_frontier_end_current_generation(
-            provider,
-            channel_id,
-            tmux_session_name,
-            transcript_eof,
-        );
-    proven_end > requested_frontier
+    crate::services::discord::outbound::delivery_record::delivered_frontier_end_current_generation(
+        provider,
+        owner_channel_id,
+        tmux_session_name,
+        transcript_eof,
+    )
 }
 
 fn nudge_watcher_handle_for_backlog(
@@ -665,6 +666,7 @@ fn nudge_watcher_handle_for_backlog(
     snapshot: &WatcherStateSnapshot,
     watcher: &crate::services::discord::TmuxWatcherHandle,
     channel_id: ChannelId,
+    offset_authority_channel_id: ChannelId,
     token: RelayFrontierToken,
 ) -> bool {
     if watcher.cancel.load(Ordering::Relaxed)
@@ -682,30 +684,20 @@ fn nudge_watcher_handle_for_backlog(
         return false;
     }
     let requested_frontier = snapshot.last_relay_offset.max(token.committed_offset);
-    // #4961 Phase B: never rewind INTO a range the delivery record already proves
-    // this generation delivered. Re-reading proven bytes is what mints the
-    // duplicate — the reader re-posts a streaming panel whose anchor was lost —
-    // while the frontier stays behind, so the next round reports "no progress" and
-    // rewinds to the same point again. Proof of delivery is the exit: leave the
-    // reader alone and let the watcher-side catch-up move the frontier instead.
-    if redrive_target_is_already_proven_delivered(
+    // #4961 Phase B R2: do not RE-READ bytes the record already proves delivered,
+    // but do not cancel the redrive either. Proof is usually a PREFIX of the
+    // backlog, so vetoing the whole nudge would black-hole the unproven suffix —
+    // and, worse, this function's `false` is the caller's signal to escalate to a
+    // destructive `ReattachWatcher`, whose fresh watcher resumes from the inflight
+    // row rather than the proven frontier and re-reads the very bytes the veto was
+    // meant to protect. Clamping keeps the redrive alive over exactly the suffix
+    // that still needs delivery and skips only the proven prefix.
+    let requested_frontier = requested_frontier.max(redrive_proven_delivered_end(
         provider,
-        channel_id,
+        offset_authority_channel_id,
         &watcher.tmux_session_name,
         &watcher.output_path,
-        requested_frontier,
-    ) {
-        tracing::warn!(
-            target: "agentdesk::discord::relay_recovery",
-            event = "redrive_skipped_proven_delivered",
-            channel_id = channel_id.get(),
-            tmux_session = %watcher.tmux_session_name,
-            requested_frontier,
-            committed_frontier = token.committed_offset,
-            "redrive refused to rewind into a range the delivery record proves delivered"
-        );
-        return false;
-    }
+    ));
     if resume_offset
         .as_ref()
         .is_some_and(|pending| *pending <= token.committed_offset || *pending == requested_frontier)
@@ -1232,6 +1224,7 @@ mod tests {
                 &shared,
                 &snapshot,
                 shared.tmux_watchers.get(&channel_id).unwrap().value(),
+                channel_id,
                 channel_id,
                 shared.relay_frontier_token(channel_id),
             ),
@@ -2299,7 +2292,8 @@ mod redrive_proven_delivery_tests_4961 {
     use crate::services::discord::outbound::delivery_record as dr;
     use poise::serenity_prelude::ChannelId;
 
-    const CH: u64 = 4_961_701;
+    const OWNER: u64 = 4_961_701;
+    const REQUESTER: u64 = 4_961_709;
     const SESSION: &str = "AgentDesk-claude-redrive-proven-4961";
 
     fn set_generation(session: &str, unix_secs: i64) -> i64 {
@@ -2310,68 +2304,103 @@ mod redrive_proven_delivery_tests_4961 {
         dr::current_generation_mtime_ns(session)
     }
 
-    /// Redrive must not rewind into bytes the record already proves delivered —
-    /// that re-read is what mints the duplicate while the frontier stays put.
-    #[test]
-    fn proven_range_blocks_the_rewind_4961() {
-        let temp = tempfile::tempdir().expect("runtime root");
-        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
-        let provider = ProviderKind::Claude;
-        let generation = set_generation(SESSION, 1_700_492_100);
-        let output = temp.path().join("out.jsonl");
-        std::fs::write(&output, vec![b'x'; 4096]).expect("transcript");
-
+    fn seed_frontier(channel: u64, session: &str, generation: i64, range: (u64, u64)) {
         dr::write_delivered_frontier(
-            &provider,
-            CH,
-            SESSION,
+            &ProviderKind::Claude,
+            channel,
+            session,
             dr::DeliveredCommit {
-                range: (0, 3000),
+                range,
                 generation_mtime_ns: generation,
                 attempts: 1,
                 panel_msg_id: Some(4_961_702),
-                panel_channel_id: Some(CH),
+                panel_channel_id: Some(channel),
             },
         )
         .expect("seed proven frontier");
+    }
 
-        assert!(
-            redrive_target_is_already_proven_delivered(
-                &provider,
-                ChannelId::new(CH),
-                SESSION,
-                output.to_str().unwrap(),
-                2000,
-            ),
-            "a frontier proving delivery past the rewind target must block the rewind"
+    /// The proven prefix clamps the rewind instead of cancelling it. Cancelling
+    /// would black-hole the unproven suffix AND hand the caller a `false` that it
+    /// reads as "escalate to ReattachWatcher".
+    #[test]
+    fn proven_prefix_clamps_but_never_cancels_4961() {
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+        let generation = set_generation(SESSION, 1_700_492_100);
+        let output = temp.path().join("out.jsonl");
+        std::fs::write(&output, vec![b'x'; 8192]).expect("transcript");
+        seed_frontier(OWNER, SESSION, generation, (0, 5000));
+
+        let proven = redrive_proven_delivered_end(
+            &ProviderKind::Claude,
+            ChannelId::new(OWNER),
+            SESSION,
+            output.to_str().unwrap(),
         );
-        assert!(
-            !redrive_target_is_already_proven_delivered(
-                &provider,
-                ChannelId::new(CH),
-                SESSION,
-                output.to_str().unwrap(),
-                3000,
-            ),
-            "proof that only reaches the target is NOT proof past it — genuine backlog still redrives"
+        assert_eq!(proven, 5000);
+        // A backlog starting behind the proof is lifted to the proven end; the
+        // suffix past 5000 still redrives.
+        assert_eq!(2000u64.max(proven), 5000);
+        assert_eq!(
+            6000u64.max(proven),
+            6000,
+            "an already-newer request is untouched"
         );
     }
 
-    /// No record at all means no proof: an undelivered backlog must still redrive,
-    /// otherwise this gate would itself become a black-hole.
+    /// Without a record there is no proof, so the rewind target is unchanged and a
+    /// genuinely undelivered backlog still redrives in full.
     #[test]
-    fn absent_record_still_allows_the_rewind_4961() {
+    fn absent_record_leaves_the_target_untouched_4961() {
         let temp = tempfile::tempdir().expect("runtime root");
         let _root = crate::config::set_agentdesk_root_for_test(temp.path());
-        set_generation("AgentDesk-claude-redrive-noproof-4961", 1_700_492_200);
+        let session = "AgentDesk-claude-redrive-noproof-4961";
+        set_generation(session, 1_700_492_200);
         let output = temp.path().join("out2.jsonl");
         std::fs::write(&output, vec![b'y'; 100]).expect("transcript");
-        assert!(!redrive_target_is_already_proven_delivered(
-            &ProviderKind::Claude,
-            ChannelId::new(4_961_703),
-            "AgentDesk-claude-redrive-noproof-4961",
-            output.to_str().unwrap(),
+        assert_eq!(
+            redrive_proven_delivered_end(
+                &ProviderKind::Claude,
+                ChannelId::new(4_961_703),
+                session,
+                output.to_str().unwrap(),
+            ),
+            0
+        );
+    }
+
+    /// A duplicate attach reuses one watcher across channels. The proof lives under
+    /// the offset-authority OWNER, so looking it up under the requesting channel
+    /// reports "unproven" and re-reads delivered bytes.
+    #[test]
+    fn proof_is_keyed_on_the_offset_authority_owner_4961() {
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+        let generation = set_generation(SESSION, 1_700_492_150);
+        let output = temp.path().join("out3.jsonl");
+        std::fs::write(&output, vec![b'x'; 8192]).expect("transcript");
+        seed_frontier(OWNER, SESSION, generation, (0, 5000));
+
+        assert_eq!(
+            redrive_proven_delivered_end(
+                &ProviderKind::Claude,
+                ChannelId::new(OWNER),
+                SESSION,
+                output.to_str().unwrap(),
+            ),
+            5000,
+            "owner lookup sees the proof"
+        );
+        assert_eq!(
+            redrive_proven_delivered_end(
+                &ProviderKind::Claude,
+                ChannelId::new(REQUESTER),
+                SESSION,
+                output.to_str().unwrap(),
+            ),
             0,
-        ));
+            "the requesting channel holds no record — this is why the owner id is load-bearing"
+        );
     }
 }

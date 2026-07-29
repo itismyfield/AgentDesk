@@ -289,41 +289,53 @@ mod runtime_binding_offset_tests {
 }
 
 /// #4961 Phase B: break the redrive livelock at the soft-terminal authority
-/// refusal.
+/// refusal — but only over bytes the record proves CONTIGUOUSLY delivered.
 ///
 /// When a re-read frame cannot authenticate soft-terminal authority the watcher
-/// drops the range and continues. That is correct for an unproven range, but it
-/// is also the point where the livelock closes: redrive rewound the reader to a
-/// frontier `F`, the re-read range is refused here, `confirmed_end_offset` never
-/// moves, redrive sees "no progress", backs off, and rewinds to `F` again. Each
-/// pass re-creates a streaming panel whose anchor was lost, which is why the same
-/// body is posted five to seven times while other blocks are never posted at all.
+/// drops the range and continues. That is correct for an unproven range, and it
+/// is also where the livelock closes: redrive rewound the reader to a frontier
+/// `F`, the re-read range is refused here, `confirmed_end_offset` never moves,
+/// redrive sees "no progress", backs off, and rewinds to `F` again. Each pass
+/// re-creates a streaming panel whose anchor was lost, which is why the same body
+/// is posted five to seven times while other blocks are never posted at all.
 ///
 /// The escape is durable proof, not relaxed authority (#4030 forbids widening the
-/// identity equality). If the delivery record already proves this generation
-/// delivered past the reader, the range WAS delivered and only the frontier lags:
-/// advance it through the guarded funnel so the next redrive observes progress.
-/// An unproven range still falls through untouched — this never invents delivery.
+/// identity equality). Proof here has to be stronger than "some delivery in this
+/// generation ended past the watermark": `merge_confirmed_frontier` keeps the
+/// highest END and never requires it to start where the last one stopped, so an
+/// END-only test can jump the watermark ACROSS an undelivered hole and convert a
+/// noisy duplicate loop into a silent, unalarmed loss. This therefore requires the
+/// proven range to START at or before what is already committed — an unbroken
+/// prefix — and it never advances past the range the caller actually refused.
 pub(super) fn commit_proven_soft_terminal_backlog(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     tmux_session_name: &str,
     output_path: &str,
+    refused_range: (u64, u64),
     source_authority: WatcherSourceAuthority,
 ) -> bool {
     let transcript_eof = std::fs::metadata(output_path).ok().map(|meta| meta.len());
-    let proven_end = dr::delivered_frontier_end_current_generation(
+    let Some((proven_start, proven_end)) = dr::delivered_frontier_range_current_generation(
         provider,
         channel_id,
         tmux_session_name,
         transcript_eof,
-    );
-    if proven_end == 0 {
+    ) else {
+        return false;
+    };
+    let committed = shared.committed_relay_offset(channel_id);
+    // Contiguity: a frontier that begins past `committed` leaves a hole whose
+    // bytes were never proven delivered. Advancing over it would erase the very
+    // backlog the redrive exists to re-deliver.
+    if proven_start > committed || proven_end <= committed {
         return false;
     }
-    let committed = shared.committed_relay_offset(channel_id);
-    if proven_end <= committed {
+    // Never claim more than the caller refused: the refusal is what this catch-up
+    // is settling, and bytes past it belong to a frame nobody has consumed yet.
+    let target = proven_end.min(refused_range.1.max(committed));
+    if target <= committed {
         return false;
     }
     let identity = terminal_long_chunks::watcher_delivery_identity(
@@ -340,7 +352,7 @@ pub(super) fn commit_proven_soft_terminal_backlog(
                 tmux_session_name,
             },
             identity,
-            proven_end,
+            target,
         ),
         terminal_long_chunks::GuardedWatcherDeliveryResult::AdvancedWithoutProof
             | terminal_long_chunks::GuardedWatcherDeliveryResult::Persisted
@@ -352,9 +364,13 @@ pub(super) fn commit_proven_soft_terminal_backlog(
         channel_id = channel_id.get(),
         tmux_session = %tmux_session_name,
         committed,
+        proven_start,
         proven_end,
+        refused_start = refused_range.0,
+        refused_end = refused_range.1,
+        target,
         advanced,
-        "soft terminal refused authority over a range the delivery record already proves delivered; advancing the frontier so redrive observes progress"
+        "soft terminal refused authority over a contiguously proven range; advancing the frontier so redrive observes progress"
     );
     advanced
 }
@@ -374,51 +390,120 @@ mod soft_terminal_backlog_catchup_tests_4961 {
         dr::current_generation_mtime_ns(session)
     }
 
-    /// The livelock exit: a refused soft terminal whose range the record already
-    /// proves delivered must move `confirmed_end_offset`, so the next redrive
+    fn seed_frontier(channel: u64, session: &str, generation: i64, range: (u64, u64)) {
+        dr::write_delivered_frontier(
+            &ProviderKind::Claude,
+            channel,
+            session,
+            dr::DeliveredCommit {
+                range,
+                generation_mtime_ns: generation,
+                attempts: 1,
+                panel_msg_id: Some(4_961_802),
+                panel_channel_id: Some(channel),
+            },
+        )
+        .expect("seed proven frontier");
+    }
+
+    fn authority(
+        shared: &Arc<crate::services::discord::SharedData>,
+        channel: ChannelId,
+        generation: i64,
+    ) -> WatcherSourceAuthority {
+        WatcherSourceAuthority {
+            generation_mtime_ns: generation,
+            reset_incarnation: shared.relay_frontier_token(channel).reset_incarnation,
+        }
+    }
+
+    /// The livelock exit: a refused soft terminal whose range the record proves
+    /// contiguously delivered must move `confirmed_end_offset`, so the next redrive
     /// round observes progress instead of rewinding to the same point forever.
     #[test]
-    fn proven_backlog_advances_the_frontier_4961() {
+    fn contiguous_proof_advances_the_frontier_4961() {
         let temp = tempfile::tempdir().expect("runtime root");
         let _root = crate::config::set_agentdesk_root_for_test(temp.path());
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel = ChannelId::new(CH);
-        let provider = ProviderKind::Claude;
         let generation = set_generation(SESSION, 1_700_492_300);
         let output = temp.path().join("catchup.jsonl");
         std::fs::write(&output, vec![b'z'; 8192]).expect("transcript");
-
-        dr::write_delivered_frontier(
-            &provider,
-            CH,
-            SESSION,
-            dr::DeliveredCommit {
-                range: (0, 5000),
-                generation_mtime_ns: generation,
-                attempts: 1,
-                panel_msg_id: Some(4_961_802),
-                panel_channel_id: Some(CH),
-            },
-        )
-        .expect("seed proven frontier");
+        seed_frontier(CH, SESSION, generation, (0, 5000));
 
         assert_eq!(shared.committed_relay_offset(channel), 0);
-        let authority = WatcherSourceAuthority {
-            generation_mtime_ns: generation,
-            reset_incarnation: shared.relay_frontier_token(channel).reset_incarnation,
-        };
         assert!(commit_proven_soft_terminal_backlog(
             &shared,
-            &provider,
+            &ProviderKind::Claude,
             channel,
             SESSION,
             output.to_str().unwrap(),
-            authority,
+            (5000, 6200),
+            authority(&shared, channel, generation),
+        ));
+        assert_eq!(shared.committed_relay_offset(channel), 5000);
+    }
+
+    /// The regression this guard exists for: a frontier that STARTS past the
+    /// watermark leaves an undelivered hole. Advancing over it would erase the very
+    /// backlog redrive is meant to re-deliver and would silence the alarm with it —
+    /// a noisy duplicate loop traded for a quiet loss.
+    #[test]
+    fn non_contiguous_proof_must_not_jump_the_hole_4961() {
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let session = "AgentDesk-claude-soft-catchup-hole-4961";
+        let channel = ChannelId::new(4_961_806);
+        let generation = set_generation(session, 1_700_492_350);
+        let output = temp.path().join("hole.jsonl");
+        std::fs::write(&output, vec![b'z'; 8192]).expect("transcript");
+        // [0, 3000) was never delivered; only [3000, 5000) is proven.
+        seed_frontier(4_961_806, session, generation, (3000, 5000));
+
+        assert!(!commit_proven_soft_terminal_backlog(
+            &shared,
+            &ProviderKind::Claude,
+            channel,
+            session,
+            output.to_str().unwrap(),
+            (5000, 6200),
+            authority(&shared, channel, generation),
         ));
         assert_eq!(
             shared.committed_relay_offset(channel),
-            5000,
-            "the frontier must catch up to the proven delivered end"
+            0,
+            "the undelivered prefix must keep the watermark pinned"
+        );
+    }
+
+    /// The catch-up settles the refusal; it must not claim bytes past the range the
+    /// caller actually refused, which belong to a frame nobody has consumed.
+    #[test]
+    fn advance_is_capped_at_the_refused_range_4961() {
+        let temp = tempfile::tempdir().expect("runtime root");
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let session = "AgentDesk-claude-soft-catchup-cap-4961";
+        let channel = ChannelId::new(4_961_807);
+        let generation = set_generation(session, 1_700_492_360);
+        let output = temp.path().join("cap.jsonl");
+        std::fs::write(&output, vec![b'z'; 16384]).expect("transcript");
+        seed_frontier(4_961_807, session, generation, (0, 9000));
+
+        assert!(commit_proven_soft_terminal_backlog(
+            &shared,
+            &ProviderKind::Claude,
+            channel,
+            session,
+            output.to_str().unwrap(),
+            (0, 4000),
+            authority(&shared, channel, generation),
+        ));
+        assert_eq!(
+            shared.committed_relay_offset(channel),
+            4000,
+            "proof reached 9000 but only the refused range may be settled here"
         );
     }
 
@@ -434,17 +519,14 @@ mod soft_terminal_backlog_catchup_tests_4961 {
         let generation = set_generation(session, 1_700_492_400);
         let output = temp.path().join("noproof.jsonl");
         std::fs::write(&output, vec![b'z'; 256]).expect("transcript");
-        let authority = WatcherSourceAuthority {
-            generation_mtime_ns: generation,
-            reset_incarnation: shared.relay_frontier_token(channel).reset_incarnation,
-        };
         assert!(!commit_proven_soft_terminal_backlog(
             &shared,
             &ProviderKind::Claude,
             channel,
             session,
             output.to_str().unwrap(),
-            authority,
+            (0, 256),
+            authority(&shared, channel, generation),
         ));
         assert_eq!(shared.committed_relay_offset(channel), 0);
     }
@@ -461,19 +543,7 @@ mod soft_terminal_backlog_catchup_tests_4961 {
         let generation = set_generation(session, 1_700_492_500);
         let output = temp.path().join("stale.jsonl");
         std::fs::write(&output, vec![b'z'; 8192]).expect("transcript");
-        dr::write_delivered_frontier(
-            &ProviderKind::Claude,
-            4_961_804,
-            session,
-            dr::DeliveredCommit {
-                range: (0, 5000),
-                generation_mtime_ns: generation,
-                attempts: 1,
-                panel_msg_id: Some(4_961_805),
-                panel_channel_id: Some(4_961_804),
-            },
-        )
-        .expect("seed proven frontier");
+        seed_frontier(4_961_804, session, generation, (0, 5000));
         let stale = WatcherSourceAuthority {
             generation_mtime_ns: generation,
             reset_incarnation: shared
@@ -487,6 +557,7 @@ mod soft_terminal_backlog_catchup_tests_4961 {
             channel,
             session,
             output.to_str().unwrap(),
+            (5000, 6200),
             stale,
         ));
         assert_eq!(shared.committed_relay_offset(channel), 0);

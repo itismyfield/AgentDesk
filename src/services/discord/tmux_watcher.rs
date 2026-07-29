@@ -2337,6 +2337,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 channel_id,
                 &tmux_session_name,
                 &output_path,
+                (watcher_lease_start, watcher_lease_end),
                 source_authority,
             );
             slot_guard.release();
@@ -2797,8 +2798,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 watcher_lease_start,
                 watcher_lease_end,
             );
-        // #4911 R10: `landed_unproven` keeps a proof-less cut-over landing out of
-        // this unguarded advance (see `terminal_delivery_landed_unproven`).
         } else if terminal_output_committed
             && !lifecycle_stage_paused
             && !watcher_terminal_delivery_landed_unproven

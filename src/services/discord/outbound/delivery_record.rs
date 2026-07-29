@@ -1297,6 +1297,26 @@ pub(in crate::services::discord) fn current_generation_mtime_ns(tmux_session_nam
 /// of #3520 under BOTH authority states. Returning `0` (not `None`) keeps the
 /// caller's `committed.max(this)` fusion a plain `u64` op; `0` is the safe floor
 /// (`range_already_committed` suppresses NOTHING at `committed == 0`).
+/// #4961 Phase B R2: the current-generation durable frontier as a RANGE.
+///
+/// The end alone is not proof about any particular byte: `merge_confirmed_frontier`
+/// keeps the highest END for the generation and never requires the winning commit
+/// to start where the previous one stopped. A caller that only compares ENDs can
+/// therefore step over an undelivered hole. Callers that need to reason about
+/// coverage must take the range and check its START against what they already
+/// consider committed.
+pub(in crate::services::discord) fn delivered_frontier_range_current_generation(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    tmux_session_name: &str,
+    current_transcript_eof: Option<u64>,
+) -> Option<(u64, u64)> {
+    let path = delivery_record_path(provider, channel.get())?;
+    let current_gen = current_generation_mtime_ns(tmux_session_name);
+    current_generation_durable_frontier_at(&path, current_gen, current_transcript_eof)
+        .map(|frontier| frontier.range)
+}
+
 pub(in crate::services::discord) fn delivered_frontier_end_current_generation(
     provider: &ProviderKind,
     channel: ChannelId,
