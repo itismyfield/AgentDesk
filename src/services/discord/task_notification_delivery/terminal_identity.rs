@@ -13,7 +13,46 @@ pub(in crate::services::discord) fn footer_background_marker_session_key(
     format!("footer_background:ch:{}:{event_key}", channel_id.get())
 }
 
+/// Stable outbox identity shared by prompt observation and watcher suppression
+/// for one terminal task-notification lifecycle marker.
+pub(in crate::services::discord) fn task_notification_marker_session_key(
+    channel_id: ChannelId,
+    event_key: &str,
+    kind: TaskNotificationKind,
+) -> Option<String> {
+    match kind {
+        TaskNotificationKind::Background => {
+            Some(footer_background_marker_session_key(channel_id, event_key))
+        }
+        TaskNotificationKind::MonitorAutoTurn => Some(format!(
+            "monitor_auto_turn:ch:{}:event:{event_key}",
+            channel_id.get()
+        )),
+        TaskNotificationKind::Subagent => None,
+    }
+}
+
 impl TaskCardEvent {
+    pub(in crate::services::discord) fn supports_footer_deferral(&self) -> bool {
+        (self.task_id.is_some() || self.tool_use_id.is_some())
+            && !matches!(self.routing_kind, TaskNotificationKind::Subagent)
+    }
+
+    pub(in crate::services::discord) fn routing_kind(&self) -> TaskNotificationKind {
+        self.routing_kind
+    }
+
+    pub(in crate::services::discord) fn event_key(&self) -> &str {
+        &self.scope.event_key
+    }
+
+    pub(in crate::services::discord) fn lifecycle_marker_session_key(
+        &self,
+        channel_id: ChannelId,
+    ) -> Option<String> {
+        task_notification_marker_session_key(channel_id, self.event_key(), self.routing_kind)
+    }
+
     pub(in crate::services::discord) fn from_task_prompt(
         channel_id: u64,
         provider: &str,
@@ -40,6 +79,7 @@ impl TaskCardEvent {
         let task_id = note.task_id.clone().and_then(clean_owned);
         let tool_use_id = note.tool_use_id.clone().and_then(clean_owned);
         let kind = note.kind().to_string();
+        let routing_kind = note.routing_kind();
         let normalized_payload = normalized_task_payload_fingerprint(
             task_id.as_deref(),
             tool_use_id.as_deref(),
@@ -69,6 +109,7 @@ impl TaskCardEvent {
             task_id,
             tool_use_id,
             kind,
+            routing_kind,
             payload: TaskCardPayload::Task(note),
         }
     }
@@ -128,6 +169,7 @@ impl TaskCardEvent {
             task_id: semantic.task_id,
             tool_use_id: semantic.tool_use_id,
             kind: "subagent".to_string(),
+            routing_kind: TaskNotificationKind::Subagent,
             payload: TaskCardPayload::Subagent(
                 super::super::response_sanitizer::subagent_notification_card::format_subagent_notification_card(
                     Some(session_key),

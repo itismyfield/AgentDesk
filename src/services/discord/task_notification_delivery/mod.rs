@@ -22,7 +22,9 @@ use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::session_backend::{StreamLineState, classify_task_notification_kind};
 
 use self::card_post::deliver_card_post_claim;
-pub(in crate::services::discord) use self::terminal_identity::footer_background_marker_session_key;
+pub(in crate::services::discord) use self::terminal_identity::{
+    footer_background_marker_session_key, task_notification_marker_session_key,
+};
 pub(super) use gateway::{
     CardBot, CardDeliveryClients, CardPostReconcile, DiscordTaskCardTransport, TaskCardTransport,
     TaskCardTransportError,
@@ -51,6 +53,7 @@ pub(super) struct TaskNotificationContext {
     status: String,
     summary: String,
     kind: String,
+    routing_kind: TaskNotificationKind,
     event_key: String,
 }
 
@@ -111,22 +114,22 @@ impl TaskNotificationContext {
             &payload_fingerprint,
         );
 
+        let routing_kind = TaskNotificationKind::from_str(&kind)
+            .unwrap_or_else(|| classify_task_notification_kind(value, state));
+
         Some(Self {
             task_id,
             tool_use_id,
             status,
             summary,
             kind,
+            routing_kind,
             event_key,
         })
     }
 
     pub(super) fn routing_kind(&self) -> TaskNotificationKind {
-        match self.kind.as_str() {
-            "subagent" => TaskNotificationKind::Subagent,
-            "monitor_auto_turn" => TaskNotificationKind::MonitorAutoTurn,
-            _ => TaskNotificationKind::Background,
-        }
+        self.routing_kind
     }
 
     pub(super) fn event_key(&self) -> &str {
@@ -165,6 +168,7 @@ impl TaskNotificationContext {
             task_id: self.task_id.clone(),
             tool_use_id: self.tool_use_id.clone(),
             kind: self.kind.clone(),
+            routing_kind: self.routing_kind,
             payload: TaskCardPayload::Task(note),
         }
     }
@@ -257,6 +261,7 @@ pub(super) struct TaskCardEvent {
     task_id: Option<String>,
     tool_use_id: Option<String>,
     kind: String,
+    routing_kind: TaskNotificationKind,
     payload: TaskCardPayload,
 }
 
@@ -286,12 +291,9 @@ impl TaskCardEvent {
             task_id: None,
             tool_use_id: None,
             kind: kind.as_str().to_string(),
+            routing_kind: kind,
             payload: TaskCardPayload::Task(note),
         }
-    }
-
-    pub(super) fn supports_footer_deferral(&self) -> bool {
-        (self.task_id.is_some() || self.tool_use_id.is_some()) && self.kind != "subagent"
     }
 
     pub(super) fn tool_use_id(&self) -> Option<&str> {
@@ -300,10 +302,6 @@ impl TaskCardEvent {
 
     pub(super) fn kind(&self) -> &str {
         &self.kind
-    }
-
-    pub(super) fn event_key(&self) -> &str {
-        &self.scope.event_key
     }
 
     pub(in crate::services::discord) fn with_persisted_event_key(

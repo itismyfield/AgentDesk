@@ -414,7 +414,6 @@ services::discord::tmux::tmux_watcher::liveness::tests
 services::discord::tmux::tmux_watcher::panel_decisions::completion_footer_suppression_tests
 services::discord::tmux::tmux_watcher::panel_decisions::redrive_placeholder_shield_tests
 services::discord::tmux::tmux_watcher::placeholder_reclaim::redrive_reclaim_e2e_tests
-services::discord::tmux::tmux_watcher::provider_output_guard::tests
 services::discord::tmux::tmux_watcher::provider_session_persistence::tests
 services::discord::tmux::tmux_watcher::session_bound_ack::tests
 services::discord::tmux::tmux_watcher::single_message_footer::tests

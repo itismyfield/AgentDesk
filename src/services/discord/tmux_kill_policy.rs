@@ -13,8 +13,7 @@ pub(in crate::services::discord) const RECENT_TURN_STOP_METADATA_FALLBACK_TTL: s
 /// bound below the smallest observed Codex TUI follow-up rollout frame so a
 /// reset/cancel tombstone cannot suppress the next pane-death lifecycle.
 pub(in crate::services::discord) const CANCEL_TEARDOWN_GRACE_BYTES: u64 = 4 * 1024;
-pub(in crate::services::discord) const MONITOR_AUTO_TURN_REASON_CODE: &str =
-    "lifecycle.monitor_auto_turn";
+pub(crate) const MONITOR_AUTO_TURN_REASON_CODE: &str = "lifecycle.monitor_auto_turn";
 pub(in crate::services::discord) const MONITOR_AUTO_TURN_DEFERRED_REASON_CODE: &str =
     "lifecycle.monitor_auto_turn.deferred";
 /// #2441 (H4) — current cadence at which `tmux_output_watcher_with_restore`

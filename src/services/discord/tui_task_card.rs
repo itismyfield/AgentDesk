@@ -20,6 +20,8 @@
 
 use serde_json::Value;
 
+use crate::services::agent_protocol::TaskNotificationKind;
+
 /// Preview budget for a free-form Markdown `result` body rendered into a card.
 /// Long subagent reports are truncated to keep the card scannable on mobile; the
 /// full payload remains available via the existing output/log path.
@@ -57,6 +59,9 @@ pub(super) struct TaskNotification {
     pub subagent_tokens: Option<String>,
     pub agent_count: Option<String>,
     pub duration_ms: Option<String>,
+    pub(crate) task_notification_kind: Option<String>,
+    pub(crate) task_type: Option<String>,
+    pub(crate) tool_name: Option<String>,
 }
 
 /// Parse a `<task-notification>` payload into its structured fields (#3075).
@@ -110,6 +115,14 @@ pub(super) fn parse_task_notification(raw: &str) -> TaskNotification {
         subagent_tokens: extract_tag(usage_inner, &["subagent-tokens", "subagent_tokens"]),
         agent_count: extract_tag(usage_inner, &["agent-count", "agent_count"]),
         duration_ms: extract_tag(usage_inner, &["duration-ms", "duration_ms"]),
+        task_notification_kind: extract_tag(
+            trimmed,
+            &["task-notification-kind", "task_notification_kind"],
+        )
+        .or_else(|| task_notification_root_attribute(trimmed, "task_notification_kind"))
+        .or_else(|| task_notification_root_attribute(trimmed, "task-notification-kind")),
+        task_type: extract_tag(trimmed, &["task-type", "task_type"]),
+        tool_name: extract_tag(trimmed, &["tool-name", "tool_name"]),
         usage,
     }
 }
@@ -136,6 +149,50 @@ impl TaskNotification {
             "subagent"
         }
     }
+
+    /// Restores the closed task-notification policy used by stream JSON. XML
+    /// notifications can carry the same explicit kind, Monitor tool, task type,
+    /// or summary evidence even though their rendering kind retains `workflow`.
+    pub(super) fn routing_kind(&self) -> TaskNotificationKind {
+        if let Some(kind) = self
+            .task_notification_kind
+            .as_deref()
+            .and_then(TaskNotificationKind::from_str)
+        {
+            return kind;
+        }
+        if self.tool_name.as_deref() == Some("Monitor")
+            || self.task_type.as_deref() == Some("monitor")
+            || self
+                .summary
+                .as_deref()
+                .is_some_and(|summary| summary.trim_start().starts_with("Monitor event:"))
+        {
+            return TaskNotificationKind::MonitorAutoTurn;
+        }
+        if self.task_type.as_deref() == Some("local_agent") {
+            return TaskNotificationKind::Subagent;
+        }
+        match self.kind() {
+            "subagent" => TaskNotificationKind::Subagent,
+            _ => TaskNotificationKind::Background,
+        }
+    }
+}
+
+fn task_notification_root_attribute(raw: &str, name: &str) -> Option<String> {
+    let start = raw.find("<task-notification")?;
+    let tag = &raw[start..raw[start..].find('>')? + start];
+    let attribute = format!("{name}=");
+    let value_start = tag.find(&attribute)? + attribute.len();
+    let quote = tag[value_start..].chars().next()?;
+    if !matches!(quote, '\'' | '\"') {
+        return None;
+    }
+    let value = &tag[value_start + quote.len_utf8()..];
+    let end = value.find(quote)?;
+    let value = value[..end].trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// #3169: format a raw millisecond duration as a human-readable string
@@ -689,7 +746,7 @@ fn sanitize_multiline(value: &str) -> String {
 /// single left-to-right scan that never re-examines emitted output guarantees the
 /// single-layer property independent of entity ordering (`&amp;lt;` → `&lt;`, not
 /// `<`). Unrecognized `&…;` sequences and bare `&` pass through verbatim.
-pub(super) fn decode_entities_once(input: &str) -> String {
+pub(crate) fn decode_entities_once(input: &str) -> String {
     // Fast path: nothing to decode (also preserves exact bytes for the common
     // no-entity case).
     if !input.contains('&') {

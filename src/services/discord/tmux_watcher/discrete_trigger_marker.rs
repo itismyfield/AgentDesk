@@ -13,7 +13,7 @@ struct SuppressedTaskNotificationMarker<'a> {
     tmux_session_name: &'a str,
     data_start_offset: u64,
     kind: TaskNotificationKind,
-    footer_only_event_key: Option<&'a str>,
+    task_notification_event_key: Option<&'a str>,
     background_context: Option<&'a task_notification_delivery::TaskNotificationContext>,
     event_count: usize,
     monitor_entry_keys: &'a [String],
@@ -23,11 +23,22 @@ impl SuppressedTaskNotificationMarker<'_> {
     fn render(&self) -> Option<(String, &'static str, String)> {
         Some(match self.kind {
             TaskNotificationKind::MonitorAutoTurn => {
-                let session_key = format!(
-                    "monitor_auto_turn:ch:{}:off:{}",
-                    self.channel_id.get(),
-                    self.data_start_offset
-                );
+                let session_key = self
+                    .task_notification_event_key
+                    .and_then(|event_key| {
+                        task_notification_delivery::task_notification_marker_session_key(
+                            self.channel_id,
+                            event_key,
+                            TaskNotificationKind::MonitorAutoTurn,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        format!(
+                            "monitor_auto_turn:ch:{}:off:{}",
+                            self.channel_id.get(),
+                            self.data_start_offset
+                        )
+                    });
                 let label = crate::services::provider::parse_provider_and_channel_from_tmux_name(
                     self.tmux_session_name,
                 )
@@ -53,10 +64,11 @@ impl SuppressedTaskNotificationMarker<'_> {
                 )
             }
             TaskNotificationKind::Background => (
-                task_notification_delivery::footer_background_marker_session_key(
+                task_notification_delivery::task_notification_marker_session_key(
                     self.channel_id,
-                    self.footer_only_event_key?,
-                ),
+                    self.task_notification_event_key?,
+                    TaskNotificationKind::Background,
+                )?,
                 "lifecycle.background_task_complete",
                 self.background_context?.footer_only_marker_content(),
             ),
@@ -111,7 +123,7 @@ mod tests {
             tmux_session_name: "AgentDesk-claude-4912",
             data_start_offset: 44,
             kind: TaskNotificationKind::Background,
-            footer_only_event_key: Some("event-identity"),
+            task_notification_event_key: Some("event-identity"),
             background_context: Some(&background_context(
                 "Background command \"short task\" completed (exit code 0)",
             )),
@@ -137,7 +149,7 @@ mod tests {
             tmux_session_name: "AgentDesk-claude-4912",
             data_start_offset: 44,
             kind: TaskNotificationKind::Background,
-            footer_only_event_key: Some("event-identity"),
+            task_notification_event_key: Some("event-identity"),
             background_context: Some(&context),
             event_count: 1,
             monitor_entry_keys: &[],
@@ -156,7 +168,7 @@ mod tests {
                 tmux_session_name: "AgentDesk-claude-4912",
                 data_start_offset: 44,
                 kind: TaskNotificationKind::Subagent,
-                footer_only_event_key: Some("subagent-event"),
+                task_notification_event_key: Some("subagent-event"),
                 background_context: Some(&background_context("Agent completed")),
                 event_count: 1,
                 monitor_entry_keys: &[],
@@ -190,8 +202,7 @@ pub(super) async fn enqueue_suppressed_machine_trigger_marker(
     } else {
         Vec::new()
     };
-    let footer_only_event_key =
-        task_notification_context.and_then(|context| context.footer_only_marker_event_key());
+    let task_notification_event_key = task_notification_context.map(|context| context.event_key());
     let background_context = task_notification_context
         .filter(|context| matches!(context.routing_kind(), TaskNotificationKind::Background));
     let marker_kind = task_notification_kind.filter(|kind| {
@@ -208,7 +219,7 @@ pub(super) async fn enqueue_suppressed_machine_trigger_marker(
                 tmux_session_name,
                 data_start_offset,
                 kind,
-                footer_only_event_key,
+                task_notification_event_key,
                 background_context,
                 event_count: monitor_event_count,
                 monitor_entry_keys: &monitor_entry_keys,

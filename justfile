@@ -33,6 +33,8 @@ test-non-pg:
     cargo test --lib services::task_completion_v1::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib source_registry -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib task_notification -- --skip _pg --skip pg_ --skip postgres
+    # #4985: provider-control anchor canonicalization is a fail-safe relay boundary.
+    cargo test --lib provider_output_guard::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib delivery_lease_key -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib services::discord::e2e_control::tests -- --skip _pg --skip pg_ --skip postgres
