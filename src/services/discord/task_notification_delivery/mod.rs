@@ -291,7 +291,7 @@ impl TaskCardEvent {
     }
 
     pub(super) fn supports_footer_deferral(&self) -> bool {
-        (self.task_id.is_some() || self.tool_use_id.is_some()) && self.kind == "background"
+        (self.task_id.is_some() || self.tool_use_id.is_some()) && self.kind != "subagent"
     }
 
     pub(super) fn tool_use_id(&self) -> Option<&str> {

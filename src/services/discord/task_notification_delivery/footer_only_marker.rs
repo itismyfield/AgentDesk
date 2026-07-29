@@ -23,7 +23,9 @@ impl TaskCardEvent {
 fn footer_only_background_marker_content(rendered_card: &str) -> String {
     // Any harness control anchor invalidates the whole detail. Per-line redaction
     // could expose the value between a private opening and closing tag.
-    if crate::services::provider_output_guard::contains_provider_control_anchor(rendered_card) {
+    if crate::services::provider_output_guard::markdown_contains_provider_control_anchor(
+        rendered_card,
+    ) {
         return FOOTER_ONLY_MARKER_PREFIX.to_string();
     }
     // Card metadata (`-#`) includes internal task identity; the lifecycle notice

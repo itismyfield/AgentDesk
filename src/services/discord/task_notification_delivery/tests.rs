@@ -84,6 +84,43 @@ fn footer_only_marker_drops_multiline_private_anchor_value_and_closer() {
     assert!(!marker.contains(private_path));
 }
 
+#[test]
+fn footer_only_marker_drops_double_escaped_tool_wrapper_blocked_by_provider_guard() {
+    let double_escaped_wrapper =
+        "&amp;lt;invoke name=\"Bash\"&amp;gt; &amp;lt;parameter name=\"command\"&amp;gt;";
+    let event = TaskCardEvent::from_task_prompt(
+        4_912,
+        "claude",
+        "AgentDesk-claude-4912",
+        &format!(
+            "<task-notification><task-id>background-4912</task-id><status>completed</status><summary>Background command \"short task\" completed (exit code 0)</summary><result>{double_escaped_wrapper}</result></task-notification>"
+        ),
+    );
+    let rendered_card = event.payload.render(1);
+    assert!(matches!(
+        crate::services::provider_output_guard::inspect_provider_output(
+            &crate::services::provider::ProviderKind::Claude,
+            &rendered_card,
+        ),
+        crate::services::provider_output_guard::ProviderOutputVerdict::Blocked { .. }
+    ));
+
+    let (_, marker) = event.rendered_footer_only_content();
+    assert_eq!(marker, "⚙️ Background complete");
+}
+
+#[test]
+fn keyed_workflow_event_can_be_deferred_to_footer() {
+    let event = TaskCardEvent::from_task_prompt(
+        44_055,
+        "claude",
+        "AgentDesk-claude-4055",
+        "<task-notification><task-id>workflow-4055</task-id><status>completed</status><summary>Dynamic workflow \"#4055\" completed</summary></task-notification>",
+    );
+    assert_eq!(event.kind(), "workflow");
+    assert!(event.supports_footer_deferral());
+}
+
 #[tokio::test]
 async fn footer_only_observation_keeps_full_card_for_later_promotion() {
     let transport = FakeTransport::new();

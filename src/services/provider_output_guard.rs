@@ -40,6 +40,10 @@ pub(crate) fn contains_provider_control_anchor(text: &str) -> bool {
     CONTROL_ANCHORS.iter().any(|anchor| text.contains(anchor))
 }
 
+pub(crate) fn markdown_contains_provider_control_anchor(text: &str) -> bool {
+    contains_provider_control_anchor(&markdown_prose(text))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProviderOutputKind {
     ClaudeSystemNotification,
