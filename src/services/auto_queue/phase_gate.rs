@@ -601,10 +601,9 @@ async fn create_activate_dispatch_pg_inner(
 }
 
 #[cfg(test)]
-mod tests {
+mod pg_tests {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
-    use crate::dispatch::sandbox_preflight_metadata_disables_external_side_effects;
 
     #[tokio::test]
     async fn cancelled_run_rejects_dispatch_attach() {
@@ -674,6 +673,11 @@ mod tests {
         pool.close().await;
         pg_db.drop().await;
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::dispatch::sandbox_preflight_metadata_disables_external_side_effects;
 
     #[test]
     fn sandbox_preflight_metadata_disables_external_side_effects_only_when_safe() {
