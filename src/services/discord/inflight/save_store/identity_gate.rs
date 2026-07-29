@@ -888,6 +888,7 @@ pub(in crate::services::discord::inflight) fn lock_and_save_existing_inflight_re
         updated.last_watcher_relayed_offset = state.last_watcher_relayed_offset;
         updated.last_watcher_relayed_generation_mtime_ns =
             state.last_watcher_relayed_generation_mtime_ns;
+        updated.last_watcher_relayed_at_unix = state.last_watcher_relayed_at_unix;
     }
     updated.ensure_finalizer_turn_id();
     let _ = validate_inflight_state_for_save(

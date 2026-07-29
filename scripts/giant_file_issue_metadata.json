@@ -119,7 +119,8 @@
         "src/services/discord/tui_prompt_relay/synthetic_start.rs",
         "src/services/tmux_common.rs",
         "src/services/discord/recovery_engine/manual_rebind/mod.rs",
-        "src/services/discord/catch_up.rs"
+        "src/services/discord/catch_up.rs",
+        "src/services/discord/inflight/model.rs"
       ]
     },
     {

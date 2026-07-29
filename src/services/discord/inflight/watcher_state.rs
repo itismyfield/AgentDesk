@@ -249,6 +249,9 @@ pub(super) fn commit_watcher_terminal_delivery_locked_in_root(
     state.last_offset = patch.last_offset.max(state.last_offset);
     state.last_watcher_relayed_offset = patch.last_watcher_relayed_offset;
     state.last_watcher_relayed_generation_mtime_ns = patch.last_watcher_relayed_generation_mtime_ns;
+    if patch.last_watcher_relayed_offset.is_some() {
+        state.last_watcher_relayed_at_unix = Some(super::now_unix());
+    }
 
     match persist_under_lock(
         root,
@@ -349,6 +352,9 @@ pub(super) fn persist_watcher_relay_watermark_locked_in_root(
 
     state.last_watcher_relayed_offset = patch.last_watcher_relayed_offset;
     state.last_watcher_relayed_generation_mtime_ns = patch.last_watcher_relayed_generation_mtime_ns;
+    if patch.last_watcher_relayed_offset.is_some() {
+        state.last_watcher_relayed_at_unix = Some(super::now_unix());
+    }
     // `last_offset` / `response_sent_offset` / `full_response` /
     // `terminal_delivery_committed` intentionally untouched — preserved from the
     // in-lock reload.

@@ -304,6 +304,10 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// (#1270). `None` for offsets persisted before this field existed.
     #[serde(default)]
     pub last_watcher_relayed_generation_mtime_ns: Option<i64>,
+    /// Unix seconds of the last confirmed watcher relay advance. Legacy rows
+    /// deserialize as `None`, which destructive recovery must treat as abstention.
+    #[serde(default)]
+    pub last_watcher_relayed_at_unix: Option<i64>,
     /// Lifecycle-aware restart/handoff mode for recovery semantics.
     #[serde(default)]
     pub restart_mode: Option<InflightRestartMode>,
@@ -1023,6 +1027,7 @@ impl InflightTurnState {
             turn_nonce: Some(uuid::Uuid::new_v4().to_string()),
             last_watcher_relayed_offset: None,
             last_watcher_relayed_generation_mtime_ns: None,
+            last_watcher_relayed_at_unix: None,
             restart_mode: None,
             restart_generation: None,
             rebind_origin: false,

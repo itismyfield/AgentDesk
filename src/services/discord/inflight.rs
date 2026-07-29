@@ -944,6 +944,27 @@ mod stall_recovery_tests {
         assert!(!legacy.followup_preserve_on_cancel);
     }
 
+    #[test]
+    fn watcher_relay_timestamp_defaults_for_legacy_v8_row() {
+        let temp = TempDir::new().unwrap();
+        let channel_id = 49_920_009;
+        let mut state = spinner_row(channel_id, 8, 9001);
+        state.version = 8;
+        let mut value = serde_json::to_value(&state).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("last_watcher_relayed_at_unix");
+        let path = inflight_state_path(temp.path(), &ProviderKind::Claude, channel_id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].version, 8);
+        assert_eq!(loaded[0].last_watcher_relayed_at_unix, None);
+    }
+
     // ---- #3558: watcher locked read-modify-write (offset TOCTOU) tests ----
 
     /// Seeds a watcher-streaming inflight row in `root` and returns it, with
@@ -1292,6 +1313,87 @@ mod stall_recovery_tests {
             persisted.last_offset, 200,
             "last_offset must be preserved at the concurrently-advanced value, NOT clobbered to 100"
         );
+    }
+
+    #[test]
+    fn watcher_stream_progress_does_not_stamp_relay_timestamp() {
+        let temp = TempDir::new().unwrap();
+        let channel_id = 49_920_010;
+        let session = "AgentDesk-claude-4992-producer";
+        let mut state = seed_watcher_stream_state(temp.path(), channel_id, session, "before", 100);
+        state.last_watcher_relayed_at_unix = Some(123);
+        force_write_state(temp.path(), &state);
+        let identity = InflightTurnIdentity::from_state(&state);
+
+        let outcome = persist_watcher_stream_progress_locked_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            channel_id,
+            Some(&identity),
+            session,
+            WatcherStreamProgressPatch {
+                current_msg_id: Some(43),
+                full_response: "after".to_string(),
+                response_sent_offset: 0,
+                current_tool_line: None,
+                prev_tool_status: None,
+                task_notification_kind: None,
+                any_tool_used: false,
+                has_post_tool_text: false,
+                streaming_rollover_frozen_msg_ids: Vec::new(),
+            },
+        );
+        assert_eq!(outcome, WatcherProgressOutcome::Saved);
+        assert_eq!(loaded_row(temp.path(), channel_id).last_watcher_relayed_at_unix, Some(123));
+    }
+
+    #[test]
+    fn watcher_relay_success_stamps_timestamp_but_empty_terminal_commit_does_not() {
+        let temp = TempDir::new().unwrap();
+        let relay_channel = 49_920_011;
+        let session = "AgentDesk-claude-4992-consumer";
+        let state = seed_watcher_stream_state(temp.path(), relay_channel, session, "body", 100);
+        let identity = InflightTurnIdentity::from_state(&state);
+        let outcome = persist_watcher_relay_watermark_locked_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            relay_channel,
+            &identity,
+            session,
+            WatcherRelayWatermarkPatch {
+                last_watcher_relayed_offset: Some(64),
+                last_watcher_relayed_generation_mtime_ns: Some(11),
+            },
+        );
+        assert_eq!(outcome, WatcherRelayWatermarkOutcome::Saved);
+        assert!(loaded_row(temp.path(), relay_channel).last_watcher_relayed_at_unix.is_some());
+
+        let terminal_channel = 49_920_012;
+        let mut terminal = seed_watcher_stream_state(
+            temp.path(),
+            terminal_channel,
+            "AgentDesk-claude-4992-terminal",
+            "body",
+            100,
+        );
+        terminal.last_watcher_relayed_at_unix = Some(456);
+        force_write_state(temp.path(), &terminal);
+        let terminal_identity = InflightTurnIdentity::from_state(&terminal);
+        let outcome = commit_watcher_terminal_delivery_locked_in_root(
+            temp.path(),
+            &ProviderKind::Claude,
+            terminal_channel,
+            &terminal_identity,
+            "AgentDesk-claude-4992-terminal",
+            WatcherTerminalCommitPatch {
+                full_response: "body".to_string(),
+                last_offset: 100,
+                last_watcher_relayed_offset: None,
+                last_watcher_relayed_generation_mtime_ns: None,
+            },
+        );
+        assert_eq!(outcome, WatcherTerminalCommitOutcome::Committed);
+        assert_eq!(loaded_row(temp.path(), terminal_channel).last_watcher_relayed_at_unix, Some(456));
     }
 
     /// #3558: a streaming write must be SKIPPED when a fresh turn (row B) with a
