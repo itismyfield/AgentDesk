@@ -471,6 +471,17 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     source_authority,
                 } => (data, data_start_offset, epoch_snapshot, source_authority),
                 PollOutcome::ContinueWatcherLoop => continue,
+                PollOutcome::DiscardPendingBufferAndContinue => {
+                    discard_watcher_pending_buffer_after_suppressed_turn(
+                        &mut all_data,
+                        &mut all_data_start_offset,
+                        &mut all_data_fully_mirrored_to_session_relay,
+                        &mut all_data_session_bound_relay_ack,
+                        &mut all_data_first_forwarded_relay_sequence,
+                        current_offset,
+                    );
+                    continue;
+                }
                 PollOutcome::BreakWatcherLoop => break 'watcher_loop,
             }
         };

@@ -314,8 +314,17 @@ impl super::SessionBoundDiscordRelaySink {
         task_response_claim: Option<ResponseDeliveryClaim>,
         trace: &super::SessionRelayTraceContext,
         sink_lease_guard: Option<&super::SinkDeliveryLeaseGuard>,
+        sink_delivery_ctx: super::delivery_frontier::SinkDeliveryCtx<'_>,
     ) -> Result<super::SessionRelayDeliveryOutcome, RelaySinkError> {
         let channel = ChannelId::new(channel_id);
+        // #4911 R10 (P1-5): a NewMessage route reached WITHOUT a task card is a
+        // plain terminal body POST. It used to advance through the generic
+        // `advance_after_confirmed_post` path — no lease-time source generation,
+        // no durable frontier/receipt/ledger — so it stayed the last terminal
+        // delivery outside the guarded funnel. Track which arm ran so only that
+        // arm switches to the funnel; the task-card arm keeps its own fence.
+        let mut plain_body_anchor_msg_id = None;
+        let mut plain_body_posted = false;
         let prompt_anchor = super::relay_format::ssh_direct_prompt_anchor_for_response(
             provider,
             &delivery.session_name,
@@ -408,15 +417,18 @@ impl super::SessionBoundDiscordRelaySink {
             .map_err(RelaySinkError::Transient)?;
             response_heartbeat = Some(heartbeat);
         } else {
-            super::super::formatting::send_long_message_raw_with_reference(
-                http,
-                channel,
-                relay_text,
-                shared,
-                prompt_anchor_reference,
-            )
-            .await
-            .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
+            let message_ids =
+                super::super::formatting::send_long_message_raw_with_reference_returning_message_ids(
+                    http,
+                    channel,
+                    relay_text,
+                    shared,
+                    prompt_anchor_reference,
+                )
+                .await
+                .map_err(|error| RelaySinkError::Transient(error.to_string()))?;
+            plain_body_anchor_msg_id = message_ids.last().map(|message_id| message_id.get());
+            plain_body_posted = true;
         }
         prompt_anchor_reference = answer_reference(channel, task_card_message_id, prompt_anchor);
         if let Some(prompt_anchor) = prompt_anchor {
@@ -457,14 +469,41 @@ impl super::SessionBoundDiscordRelaySink {
             Some("new message"),
         );
         // #3041 P1-3: post-POST fresh identity re-check before frontier advance.
-        self.advance_after_confirmed_post(
-            shared,
-            provider,
-            channel_id,
-            &delivery.session_name,
-            delivery,
-            sink_lease_guard,
-        );
+        // #4911 R10: the plain terminal body takes the guarded funnel so its
+        // advance is bound to the lease-time source generation and leaves the
+        // Phase-A durable proof; a stale/unrecorded landing is surfaced instead of
+        // being reported as an ordinary delivery.
+        let plain_body_proof = if plain_body_posted {
+            Some(super::delivery_frontier::finish_sink_delivery(
+                sink_delivery_ctx,
+                plain_body_anchor_msg_id,
+                &delivery.response_text,
+                sink_lease_guard,
+                "src/services/discord/session_relay_sink/task_notification_context.rs:sink_new_message_terminal_advance",
+            ))
+        } else {
+            self.advance_after_confirmed_post(
+                shared,
+                provider,
+                channel_id,
+                &delivery.session_name,
+                delivery,
+                sink_lease_guard,
+            );
+            None
+        };
+        if let Some(proof) = plain_body_proof
+            && proof != super::delivery_frontier::SinkDeliveryProofResult::Persisted
+        {
+            // The plain-body arm and the task-card arm are mutually exclusive, so
+            // no task-response heartbeat can be running here; the bounded final
+            // delivery CAS below belongs to the card path only.
+            debug_assert!(
+                response_heartbeat.is_none(),
+                "plain terminal body never runs under a task response heartbeat"
+            );
+            return Ok(super::SessionRelayDeliveryOutcome::from_proof(proof));
+        }
         let commit_outcome =
             commit_response_fence(shared, delivery, task_response_claim.as_ref()).await;
         if let Some(heartbeat) = response_heartbeat {

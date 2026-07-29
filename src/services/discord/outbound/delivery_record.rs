@@ -459,17 +459,20 @@ enum EqualRangeAnchorPolicy {
 }
 
 #[derive(Clone, Copy)]
+/// The identity a watcher/sink delivery is allowed to write under, revalidated
+/// after the record flock. #4911 R10: the load-bearing authority is the
+/// lease-time source generation plus the reset incarnation — deliberately NOT the
+/// full frontier token. Requiring `committed_offset` equality here would let one
+/// harmless concurrent advance discard an otherwise valid delivery.
 struct WatcherFrontierLockAuthority<'a> {
     shared: &'a crate::services::discord::SharedData,
     channel: ChannelId,
-    frontier_token: crate::services::discord::RelayFrontierToken,
     lease_reset_incarnation: u64,
     generation_mtime_ns: i64,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub(in crate::services::discord) struct WatcherDeliveryRecordAuthority {
-    pub(in crate::services::discord) frontier_token: crate::services::discord::RelayFrontierToken,
     pub(in crate::services::discord) lease_reset_incarnation: u64,
     pub(in crate::services::discord) generation_mtime_ns: i64,
     pub(in crate::services::discord) ledger_user_msg_id: Option<u64>,
@@ -529,8 +532,11 @@ fn write_confirmed_frontier_guarded_at_with_lock_authority(
         let current_coord_generation = coord
             .confirmed_end_generation_mtime_ns
             .load(Ordering::Acquire);
-        if current_token != authority.frontier_token
-            || current_token.reset_incarnation != authority.lease_reset_incarnation
+        // #4911 R10: incarnation + generation only. A concurrent delivery that
+        // advanced `committed_offset` between the caller's token read and this
+        // flock is HARMLESS — it does not change which source incarnation these
+        // bytes came from — so it must not discard this record.
+        if current_token.reset_incarnation != authority.lease_reset_incarnation
             || current_coord_generation != authority.generation_mtime_ns
             || current_generation != authority.generation_mtime_ns
         {
@@ -2113,7 +2119,6 @@ fn shadow_mirror_delivered_frontier_inner(
     let lock_authority = watcher_authority.map(|authority| WatcherFrontierLockAuthority {
         shared,
         channel,
-        frontier_token: authority.frontier_token,
         lease_reset_incarnation: authority.lease_reset_incarnation,
         generation_mtime_ns: authority.generation_mtime_ns,
     });

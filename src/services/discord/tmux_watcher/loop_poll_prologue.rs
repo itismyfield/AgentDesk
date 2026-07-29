@@ -12,6 +12,12 @@ pub(super) struct WatcherSourceAuthority {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PollOutcome {
     ContinueWatcherLoop,
+    /// #4911 R10: the 20 MB cap rewrote the jsonl from its head, so every byte
+    /// still pending in the watcher's accumulation buffer belongs to a coordinate
+    /// space that no longer exists. The root must drop that buffer before the next
+    /// poll, otherwise pre-rotation bytes would be delivered under the NEW source
+    /// incarnation captured after the rewrite.
+    DiscardPendingBufferAndContinue,
     BreakWatcherLoop,
     OutputReady {
         data: Vec<u8>,
@@ -245,10 +251,12 @@ pub(super) async fn poll_watcher_output_or_continue(
     }
 
     rotation_tick = rotation_tick.wrapping_add(1);
+    let rotated_from_head;
     (
         current_offset,
         last_relayed_offset,
         last_observed_generation_mtime_ns,
+        rotated_from_head,
     ) = rotate_watcher_jsonl_if_due(
         rotation_tick,
         output_path,
@@ -260,6 +268,10 @@ pub(super) async fn poll_watcher_output_or_continue(
         channel_id,
     )
     .await;
+    if rotated_from_head {
+        commit_poll_state!();
+        return PollOutcome::DiscardPendingBufferAndContinue;
+    }
 
     // Snapshot pause epoch — if this changes later, a Discord turn claimed this data
     let epoch_snapshot = pause_epoch.load(Ordering::Relaxed);

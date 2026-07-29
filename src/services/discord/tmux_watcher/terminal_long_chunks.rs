@@ -55,19 +55,29 @@ pub(in crate::services::discord) struct WatcherTerminalDeliveryProof {
     pub(in crate::services::discord) raw_body: String,
 }
 
+/// Admit a delivery epilogue for the captured source identity.
+///
+/// #4911 R10: the returned guard is an admission counter, not mutual exclusion —
+/// it keeps a frontier RESET from rewinding underneath an in-flight delivery, and
+/// nothing more. Two concurrent deliveries are serialized by the record flock in
+/// `delivery_record.rs`, not here, so this must not be read as "the epilogue runs
+/// atomically". Admission gates on the source incarnation only; a concurrent
+/// advance of `committed_offset` is harmless and must not reject a live delivery.
 pub(in crate::services::discord) fn begin_watcher_delivery_mutation(
     shared: &SharedData,
     channel_id: ChannelId,
     tmux_session_name: &str,
     identity: WatcherDeliveryIdentity,
 ) -> Option<WatcherDeliveryMutation> {
-    let frontier_token = shared.relay_frontier_token(channel_id);
-    if frontier_token.reset_incarnation != identity.lease_reset_incarnation
-        || dr::current_generation_mtime_ns(tmux_session_name) != identity.generation_mtime_ns
-    {
+    if dr::current_generation_mtime_ns(tmux_session_name) != identity.generation_mtime_ns {
         return None;
     }
-    let guard = shared.acquire_relay_frontier_mutation(channel_id, frontier_token)?;
+    let guard = shared.acquire_relay_frontier_mutation_for_incarnation(
+        channel_id,
+        identity.lease_reset_incarnation,
+    )?;
+    // Re-read under the guard: a reset can no longer land, so an unchanged
+    // generation here holds for the rest of this epilogue.
     (dr::current_generation_mtime_ns(tmux_session_name) == identity.generation_mtime_ns).then_some(
         WatcherDeliveryMutation {
             _guard: guard,
@@ -104,14 +114,12 @@ impl WatcherDeliveryMutation {
             channel_id,
             tmux_session_name,
         } = target;
-        let frontier_token = shared.relay_frontier_token(channel_id);
         dr::record_watcher_terminal_delivery(
             shared,
             provider,
             channel_id,
             tmux_session_name,
             dr::WatcherDeliveryRecordAuthority {
-                frontier_token,
                 lease_reset_incarnation: self.identity.lease_reset_incarnation,
                 generation_mtime_ns: self.identity.generation_mtime_ns,
                 ledger_user_msg_id: self.identity.ledger_user_msg_id,

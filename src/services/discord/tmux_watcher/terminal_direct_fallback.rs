@@ -677,6 +677,19 @@ pub(in crate::services::discord) async fn apply_watcher_direct_fallback_send(
                                 external_input_lease_consumed_by_relay =
                                     external_input_lease_before_relay || prompt_anchor.is_some();
                                 direct_send_delivered = true;
+                                // #4911 R10: the placeholderless fresh send is a
+                                // confirmed terminal delivery like the edit arms, so
+                                // it must carry a delivery proof. Without it the
+                                // outer commit takes the proof-less
+                                // `AdvancedWithoutProof` branch: the frontier moves
+                                // but no DeliveredCommit / receipt / ledger entry /
+                                // #4081 fingerprint is written, which is exactly the
+                                // missing-fingerprint precondition #4911 replays on.
+                                *watcher_terminal_delivery_proof =
+                                    Some(terminal_long_chunks::WatcherTerminalDeliveryProof {
+                                        anchor_msg_id: message_ids.last().copied(),
+                                        raw_body: direct_terminal_response.to_string(),
+                                    });
                                 if let Some(msg_id) = message_ids.last().copied() {
                                     let tail = crate::services::discord::formatting::split_message(
                                         &relay_text,

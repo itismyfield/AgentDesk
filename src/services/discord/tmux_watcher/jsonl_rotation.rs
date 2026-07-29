@@ -12,10 +12,11 @@ pub(super) async fn rotate_watcher_jsonl_if_due(
     mut last_observed_generation_mtime_ns: Option<i64>,
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
-) -> (u64, Option<u64>, Option<i64>) {
+) -> (u64, Option<u64>, Option<i64>, bool) {
     // Periodic size-cap rotation for the session jsonl. Running this off
     // the watcher loop keeps the wrapper child process simple while
     // still enforcing a 20 MB soft cap (see issue #892).
+    let mut rewrote_from_head = false;
     if rotation_tick % ROTATION_CHECK_EVERY == 0 {
         let path = output_path.to_string();
         let session = tmux_session_name.to_string();
@@ -42,6 +43,7 @@ pub(super) async fn rotate_watcher_jsonl_if_due(
                 // so the watcher doesn't seek past the new EOF. Also
                 // reset the duplicate-relay guard.
                 if prev_offset > new_size {
+                    rewrote_from_head = true;
                     current_offset = new_size;
                     last_relayed_offset = Some(new_size);
                     // #1270 codex P2: snapshot the current `.generation`
@@ -74,5 +76,6 @@ pub(super) async fn rotate_watcher_jsonl_if_due(
         current_offset,
         last_relayed_offset,
         last_observed_generation_mtime_ns,
+        rewrote_from_head,
     )
 }

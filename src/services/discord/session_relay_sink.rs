@@ -1203,6 +1203,7 @@ impl SessionBoundDiscordRelaySink {
                 task_response_claim,
                 &trace,
                 sink_lease_guard.as_ref(),
+                sink_delivery_ctx,
             )
             .await
         }

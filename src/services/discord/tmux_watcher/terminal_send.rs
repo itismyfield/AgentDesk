@@ -607,7 +607,50 @@ pub(in crate::services::discord) fn apply_watcher_short_replace_result(
         WatcherShortReplaceResult::AlreadyCommittedAfterEditFailure { .. } => {
             unreachable!("async controller wrapper owns guarded committed reconciliation")
         }
-        WatcherShortReplaceResult::LandedStale | WatcherShortReplaceResult::LandedUnrecorded => {}
+        // #4911 R10: the POST LANDED, but its Phase-A durable proof does not exist
+        // (`LandedStale`: the source incarnation was replaced before the epilogue;
+        // `LandedUnrecorded`: the durable record write itself failed). Both must
+        // suppress any re-send — the body is already on Discord — so they set the
+        // same "body is visible" locals as `Delivered`. They must NOT be laundered
+        // into a proven delivery: no completion-footer target is registered (there
+        // is no durable anchor to edit later) and the cleanup is recorded as a
+        // failure, so a later reconciliation still sees this turn as unproven
+        // rather than silently `Succeeded`.
+        WatcherShortReplaceResult::LandedStale | WatcherShortReplaceResult::LandedUnrecorded => {
+            let reason = if matches!(result, WatcherShortReplaceResult::LandedStale) {
+                "source incarnation replaced before the delivery epilogue"
+            } else {
+                "durable delivery record write failed"
+            };
+            tracing::warn!(
+                provider = provider.as_str(),
+                channel_id = channel_id.get(),
+                message = msg_id.get(),
+                tmux_session = %tmux_session_name,
+                reason,
+                "watcher terminal POST landed without Phase-A durable proof; suppressing re-send"
+            );
+            *locals.direct_send_delivered = true;
+            *locals.tui_direct_anchor_terminal_body_visible = true;
+            *locals.external_input_lease_consumed_by_relay =
+                super::watcher_inflight_represents_external_input(inflight_before_relay);
+            *locals.placeholder_msg_id = None;
+            *locals.placeholder_from_restored_inflight = false;
+            locals.last_edit_text.clear();
+            drop_placeholder_orphan_record(provider, shared, channel_id, msg_id);
+            super::super::record_placeholder_cleanup(
+                shared,
+                provider,
+                channel_id,
+                msg_id,
+                tmux_session_name,
+                crate::services::discord::placeholder_cleanup::PlaceholderCleanupOperation::EditTerminal,
+                crate::services::discord::placeholder_cleanup::PlaceholderCleanupOutcome::failed(
+                    reason.to_string(),
+                ),
+                "watcher_terminal_relay_controller",
+            );
+        }
         WatcherShortReplaceResult::B2Skip | WatcherShortReplaceResult::Skipped => {
             *locals.relay_ok = false;
         }
