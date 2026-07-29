@@ -95,7 +95,7 @@ jobs:
     if: needs.resolve_macos_runner.outputs.mode == 'hosted'
     runs-on: macos-latest
     # Bound the complete hosted job rather than GitHub's six-hour default. Forty-five
-    # minutes leaves ample room for the observed four-minute targeted lane plus
+    # minutes leaves ample room above the observed under-eight-minute full job for
     # dependency setup, a cold Cargo cache, and the portable smoke test.
     timeout-minutes: 45
     steps:
