@@ -8035,18 +8035,20 @@ fn issue_4407_workflow_end_matching_rules_preserve_legacy_and_current_paths() {
             summary: None,
         },
     );
-    let legacy_entry = events
-        .status_by_channel
-        .get(&legacy_channel)
-        .expect("status panel state");
-    let legacy = legacy_entry
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    assert_eq!(
-        legacy.workflows[0].finished,
-        Some(true),
-        "id-less legacy end must still close the unique id-less slot"
-    );
+    {
+        let legacy_entry = events
+            .status_by_channel
+            .get(&legacy_channel)
+            .expect("status panel state");
+        let legacy = legacy_entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            legacy.workflows[0].finished,
+            Some(true),
+            "id-less legacy end must still close the unique id-less slot"
+        );
+    }
 
     let adopt_channel = ChannelId::new(4_407_005);
     events.push_status_event(
@@ -8074,6 +8076,63 @@ fn issue_4407_workflow_end_matching_rules_preserve_legacy_and_current_paths() {
     assert_eq!(adopt.workflows.len(), 1, "adopt must close in place");
     assert_eq!(adopt.workflows[0].task_id.as_deref(), Some("wf-adopted"));
     assert_eq!(adopt.workflows[0].finished, Some(true));
+}
+
+/// Verifies that the corrected inspection-before-next-entry ordering preserves
+/// status state for both channels. It has no deadlock-detection power because
+/// its lexical scope removes the deadlock shape. A future reintroduction would
+/// hang rather than fail an assertion, and no command-level timeout wraps this
+/// lane (`ci-macos-trusted.yml:264` runs it bare); the only backstop is the
+/// 45-minute `macos_self_hosted` job cap at `ci-macos-trusted.yml:169`, which
+/// turns the hang into a red job without identifying the stuck test and holds
+/// the shared production host until that job-level timeout expires. See #4983.
+#[test]
+fn issue_4970_inspection_before_next_channel_entry_preserves_status_state() {
+    let events = PlaceholderLiveEvents::default();
+    let inspected_channel = ChannelId::new(4_970_001);
+    events.push_status_event(
+        inspected_channel,
+        StatusEvent::WorkflowStart {
+            task_id: Some("wf-inspected".to_string()),
+            name: Some("inspected workflow".to_string()),
+        },
+    );
+
+    {
+        let entry = events
+            .status_by_channel
+            .get(&inspected_channel)
+            .expect("status panel state");
+        let guard = entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            guard.workflows.len(),
+            1,
+            "inspection must observe the seeded workflow before releasing the map ref"
+        );
+    }
+
+    let entered_channel = ChannelId::new(4_970_002);
+    events.push_status_event(
+        entered_channel,
+        StatusEvent::WorkflowStart {
+            task_id: Some("wf-entered".to_string()),
+            name: Some("entered workflow".to_string()),
+        },
+    );
+    let entry = events
+        .status_by_channel
+        .get(&entered_channel)
+        .expect("next channel state");
+    let guard = entry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(
+        guard.workflows[0].task_id.as_deref(),
+        Some("wf-entered"),
+        "next channel entry must remain usable after the prior inspection"
+    );
 }
 
 #[test]
