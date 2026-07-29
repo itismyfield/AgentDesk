@@ -47,11 +47,21 @@ pub(in crate::services::discord) fn save_missing_session_handoff(
     );
 }
 
+fn claude_tui_output_path_missing(state: &inflight::InflightTurnState) -> bool {
+    crate::services::tui_turn_state::claude_tui_output_path_missing(
+        state.runtime_kind,
+        state.output_path.as_deref(),
+    )
+}
+
 fn inflight_ready_for_input_without_tui_pane(
     provider: &ProviderKind,
     state: &inflight::InflightTurnState,
     require_consumed: bool,
 ) -> Option<crate::services::tui_turn_state::TuiReadyState> {
+    if claude_tui_output_path_missing(state) {
+        return Some(crate::services::tui_turn_state::TuiReadyState::Unknown);
+    }
     let output_path = state
         .output_path
         .as_deref()
@@ -65,22 +75,31 @@ fn inflight_ready_for_input_without_tui_pane(
     )
 }
 
+fn inflight_or_legacy_tmux_ready_from_structured_state(
+    structured_state: Option<crate::services::tui_turn_state::TuiReadyState>,
+    pane_fallback_ready: impl FnOnce() -> bool,
+) -> bool {
+    structured_state
+        .map(crate::services::tui_turn_state::TuiReadyState::is_ready)
+        .unwrap_or_else(pane_fallback_ready)
+}
+
 pub(super) fn inflight_or_legacy_tmux_ready_for_input(
     provider: &ProviderKind,
     state: &inflight::InflightTurnState,
     tmux_session_name: &str,
     require_consumed: bool,
 ) -> bool {
-    inflight_ready_for_input_without_tui_pane(provider, state, require_consumed)
-        .map(crate::services::tui_turn_state::TuiReadyState::is_ready)
-        .unwrap_or_else(|| {
-            crate::services::provider::tmux_session_fallback_ready_for_input(
-                tmux_session_name,
-                provider,
-                state.runtime_kind,
-            )
-            .is_some_and(crate::services::pane_readiness::FallbackPaneReadiness::is_ready)
-        })
+    let structured_state =
+        inflight_ready_for_input_without_tui_pane(provider, state, require_consumed);
+    inflight_or_legacy_tmux_ready_from_structured_state(structured_state, || {
+        crate::services::provider::tmux_session_fallback_ready_for_input(
+            tmux_session_name,
+            provider,
+            state.runtime_kind,
+        )
+        .is_some_and(crate::services::pane_readiness::FallbackPaneReadiness::is_ready)
+    })
 }
 
 fn recovery_worktree_path(state: &inflight::InflightTurnState) -> Option<&str> {
@@ -217,4 +236,47 @@ pub(super) fn recovery_spawn_adk_cwd(
     }
 
     Ok(persisted_session_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structured_ready_state_skips_pane_fallback_evaluation() {
+        assert!(inflight_or_legacy_tmux_ready_from_structured_state(
+            Some(crate::services::tui_turn_state::TuiReadyState::Ready),
+            || panic!("structured readiness must not probe pane fallback"),
+        ));
+    }
+
+    #[test]
+    fn claude_tui_without_runtime_output_path_stays_not_ready() {
+        let mut state = inflight::InflightTurnState::new(
+            ProviderKind::Claude,
+            4_997_001,
+            None,
+            1,
+            2,
+            3,
+            "pending ClaudeTui runtime handoff".to_string(),
+            None,
+            Some("AgentDesk-claude-4997".to_string()),
+            None,
+            Some("/runtime/input.fifo".to_string()),
+            0,
+        );
+        state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        assert_eq!(
+            inflight_ready_for_input_without_tui_pane(&ProviderKind::Claude, &state, true),
+            Some(crate::services::tui_turn_state::TuiReadyState::Unknown)
+        );
+        assert!(
+            !inflight_or_legacy_tmux_ready_from_structured_state(
+                inflight_ready_for_input_without_tui_pane(&ProviderKind::Claude, &state, true),
+                || true,
+            ),
+            "missing ClaudeTui runtime output must override a ready pane fallback"
+        );
+    }
 }

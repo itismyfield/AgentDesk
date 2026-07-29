@@ -17,6 +17,17 @@ fn build_tmux_death_diagnostic(_name: &str, _output_path: Option<&str>) -> Optio
     None
 }
 
+fn recovery_output_path_with_tmux_fallback(
+    state: &inflight::InflightTurnState,
+    fallback_output: String,
+) -> Option<String> {
+    state
+        .output_path
+        .clone()
+        .filter(|path| !path.is_empty())
+        .or_else(|| (!fallback_output.is_empty()).then_some(fallback_output))
+}
+
 pub(in crate::services::discord) async fn finish_recovered_turn_mailbox(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -871,17 +882,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             .map(tmux_runtime_paths)
             .unwrap_or_else(|| (String::new(), String::new()));
         let runtime_kind = state.runtime_kind_for_recovery();
-        let output_path = state
-            .output_path
-            .clone()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                if !fallback_output.is_empty() {
-                    Some(fallback_output.clone())
-                } else {
-                    None
-                }
-            });
+        let output_path = recovery_output_path_with_tmux_fallback(&state, fallback_output);
         let input_fifo_path = if runtime_kind.requires_input_fifo() {
             state
                 .input_fifo_path
@@ -2425,6 +2426,34 @@ mod tests {
         assert_eq!(
             persisted.effective_relay_owner_kind(),
             RelayOwnerKind::Watcher
+        );
+    }
+
+    #[test]
+    fn restore_claude_tui_without_runtime_output_uses_tmux_fallback_path() {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            4_997_002,
+            None,
+            1,
+            2,
+            3,
+            "pending ClaudeTui recovery".to_string(),
+            None,
+            Some("AgentDesk-claude-4997".to_string()),
+            None,
+            Some("/runtime/input.fifo".to_string()),
+            0,
+        );
+        state.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        let output_path = super::recovery_output_path_with_tmux_fallback(
+            &state,
+            "/runtime/AgentDesk-claude-4997.output".to_string(),
+        );
+        assert_eq!(
+            output_path.as_deref(),
+            Some("/runtime/AgentDesk-claude-4997.output"),
+            "ClaudeTui None must take the tmux fallback instead of recovery_missing_output_path"
         );
     }
 

@@ -185,6 +185,17 @@ pub(crate) fn pane_ready_fallback_allowed(
     !provider_runtime_has_structured_jsonl_turn_state(provider, runtime_kind)
 }
 
+pub(crate) fn claude_tui_output_path_missing(
+    runtime_kind: Option<RuntimeHandoffKind>,
+    output_path: Option<&str>,
+) -> bool {
+    runtime_kind == Some(RuntimeHandoffKind::ClaudeTui)
+        && output_path
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .is_none()
+}
+
 pub(crate) fn jsonl_ready_for_input(
     provider: &ProviderKind,
     runtime_kind: Option<RuntimeHandoffKind>,

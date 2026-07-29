@@ -279,6 +279,37 @@ mod tests {
     }
 
     #[test]
+    fn claude_tui_runtime_stamp_accepts_none_to_projects_output_path() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let provider = ProviderKind::Claude;
+        let channel_id = 42_592_150;
+        let mut seed = runtime_seed(provider.clone(), channel_id, Some("AgentDesk-claude-4997"));
+        seed.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        seed.output_path = None;
+        seed.input_fifo_path = Some("/runtime/claude-4997.input".to_string());
+        save_inflight_state_in_root(root.path(), &seed).expect("seed ClaudeTui row");
+        let expected = InflightTurnIdentity::from_state(&seed);
+
+        let mut handoff = seed.clone();
+        handoff.output_path = Some("/projects/claude-4997.jsonl".to_string());
+        assert_eq!(
+            stamp_runtime_handoff_if_matches_identity_in_root(
+                root.path(),
+                &handoff,
+                &expected,
+                "test::claude_tui_none_to_projects_output",
+            ),
+            GuardedSaveOutcome::Saved,
+        );
+        let persisted = load(root.path(), &provider, channel_id);
+        assert_eq!(
+            persisted.output_path.as_deref(),
+            Some("/projects/claude-4997.jsonl")
+        );
+        assert_eq!(persisted.input_fifo_path, seed.input_fifo_path);
+    }
+
+    #[test]
     fn runtime_stamp_accepts_same_session_restamp_and_rejects_changed_session() {
         let root = tempfile::tempdir().expect("runtime root");
         let provider = ProviderKind::Codex;

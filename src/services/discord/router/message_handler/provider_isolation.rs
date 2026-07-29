@@ -127,6 +127,68 @@ pub(super) fn prelaunch_runtime_kind_for_managed_session(
     None
 }
 
+/// Seeds the durable inflight runtime fields before runtime handoff binds the
+/// provider-owned transcript path.
+fn prelaunch_inflight_runtime_seed_from_paths(
+    tmux_name: &str,
+    output_path: String,
+    input_fifo_path: String,
+    session_exists: bool,
+    prelaunch_runtime_kind: Option<RuntimeHandoffKind>,
+) -> (Option<String>, Option<String>, Option<String>, u64) {
+    let is_claude_tui = prelaunch_runtime_kind == Some(RuntimeHandoffKind::ClaudeTui);
+    let last_offset = (!is_claude_tui)
+        .then(|| {
+            std::fs::metadata(&output_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    (
+        Some(tmux_name.to_string()),
+        (!is_claude_tui).then_some(output_path),
+        Some(input_fifo_path),
+        session_exists.then_some(last_offset).unwrap_or(0),
+    )
+}
+
+pub(super) fn prelaunch_inflight_runtime_seed(
+    provider: &ProviderKind,
+    remote_profile_is_none: bool,
+    tmux_session_name: Option<&str>,
+    prelaunch_runtime_kind: Option<RuntimeHandoffKind>,
+) -> (Option<String>, Option<String>, Option<String>, u64) {
+    #[cfg(unix)]
+    {
+        if remote_profile_is_none
+            && provider.uses_managed_tmux_backend()
+            && claude::is_tmux_available()
+            && let Some(tmux_name) = tmux_session_name
+        {
+            let (output_path, input_fifo_path) = tmux_runtime_paths(tmux_name);
+            let session_exists =
+                crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_name);
+            return prelaunch_inflight_runtime_seed_from_paths(
+                tmux_name,
+                output_path,
+                input_fifo_path,
+                session_exists,
+                prelaunch_runtime_kind,
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            provider,
+            remote_profile_is_none,
+            tmux_session_name,
+            prelaunch_runtime_kind,
+        );
+    }
+    (None, None, None, 0)
+}
+
 #[cfg(unix)]
 pub(super) fn observed_runtime_kind_for_managed_tmux(
     provider: &ProviderKind,
@@ -634,6 +696,43 @@ pub(super) async fn reset_provider_session_after_worktree_isolation(
 #[cfg(test)]
 mod thread_role_inheritance_tests {
     use super::*;
+
+    #[test]
+    fn prelaunch_claude_tui_seed_omits_wrapper_output_but_preserves_fifo() {
+        let seed = prelaunch_inflight_runtime_seed_from_paths(
+            "AgentDesk-claude-seed",
+            "/runtime/wrapper-stream.log".to_string(),
+            "/runtime/input.fifo".to_string(),
+            true,
+            Some(RuntimeHandoffKind::ClaudeTui),
+        );
+        assert_eq!(seed.0.as_deref(), Some("AgentDesk-claude-seed"));
+        assert_eq!(
+            seed.1, None,
+            "ClaudeTui must wait for RuntimeReady transcript binding"
+        );
+        assert_eq!(seed.2.as_deref(), Some("/runtime/input.fifo"));
+        assert_eq!(seed.3, 0);
+    }
+
+    #[test]
+    fn prelaunch_seed_is_identical_for_intake_and_headless_callers() {
+        let intake = prelaunch_inflight_runtime_seed_from_paths(
+            "AgentDesk-claude-symmetric",
+            "/runtime/wrapper-stream.log".to_string(),
+            "/runtime/input.fifo".to_string(),
+            true,
+            Some(RuntimeHandoffKind::ClaudeTui),
+        );
+        let headless = prelaunch_inflight_runtime_seed_from_paths(
+            "AgentDesk-claude-symmetric",
+            "/runtime/wrapper-stream.log".to_string(),
+            "/runtime/input.fifo".to_string(),
+            true,
+            Some(RuntimeHandoffKind::ClaudeTui),
+        );
+        assert_eq!(intake, headless);
+    }
 
     #[test]
     fn managed_linked_worktree_skips_provider_reisolation_without_session_state() {

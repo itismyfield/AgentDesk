@@ -394,7 +394,6 @@ services::discord::startup_reclaim::tests
 services::discord::status_panel_orphan_store::tests
 services::discord::streaming_finalizer::tests
 services::discord::task_supervisor::tests
-services::discord::terminal_ui_obligation::tests
 services::discord::tmux::active_bridge_turn_guard_tests
 services::discord::tmux::buffer_offset_tests
 services::discord::tmux::lifecycle_stage_pause_matrix_tests

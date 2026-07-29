@@ -759,6 +759,24 @@ fn restart_orphan_evidence_at(
     }
 }
 
+fn claude_tui_output_path_missing(state: &super::inflight::InflightTurnState) -> bool {
+    crate::services::tui_turn_state::claude_tui_output_path_missing(
+        state.runtime_kind,
+        state.output_path.as_deref(),
+    )
+}
+
+fn restart_orphan_independent_pane_ready(
+    state: &super::inflight::InflightTurnState,
+    readiness: crate::services::tmux_turn_liveness::IndependentTmuxReadiness,
+) -> bool {
+    !claude_tui_output_path_missing(state)
+        && matches!(
+            readiness,
+            crate::services::tmux_turn_liveness::IndependentTmuxReadiness::ReadyForInput
+        )
+}
+
 fn restart_orphan_pane_ready_for_input(
     provider: &crate::services::provider::ProviderKind,
     state: &super::inflight::InflightTurnState,
@@ -770,16 +788,14 @@ fn restart_orphan_pane_ready_for_input(
         .map(str::trim)
         .filter(|path| !path.is_empty())
         .map(std::path::Path::new);
-    matches!(
-        crate::services::tmux_turn_liveness::independent_tmux_readiness(
-            tmux_session_name,
-            provider,
-            state.runtime_kind,
-            output_path,
-            Some(state.last_offset),
-        ),
-        crate::services::tmux_turn_liveness::IndependentTmuxReadiness::ReadyForInput
-    )
+    let readiness = crate::services::tmux_turn_liveness::independent_tmux_readiness(
+        tmux_session_name,
+        provider,
+        state.runtime_kind,
+        output_path,
+        Some(state.last_offset),
+    );
+    restart_orphan_independent_pane_ready(state, readiness)
 }
 
 async fn submit_stale_foreign_inflight_cancel(
@@ -1989,6 +2005,20 @@ mod tests {
         state.born_generation = current_generation.saturating_sub(1);
         state.updated_at = local_timestamp_age_secs(committed_age_secs);
         state
+    }
+
+    #[test]
+    fn restart_orphan_claude_tui_without_runtime_output_path_stays_not_ready() {
+        let mut state = restart_orphan_state(17, RESTART_ORPHAN_COMMITTED_GRACE_SECS + 1);
+        state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        assert!(claude_tui_output_path_missing(&state));
+        assert!(
+            !restart_orphan_independent_pane_ready(
+                &state,
+                crate::services::tmux_turn_liveness::IndependentTmuxReadiness::ReadyForInput,
+            ),
+            "missing ClaudeTui runtime output must override independent pane readiness"
+        );
     }
 
     #[test]
