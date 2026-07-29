@@ -291,7 +291,7 @@ impl TaskCardEvent {
     }
 
     pub(super) fn supports_footer_deferral(&self) -> bool {
-        self.task_id.is_some() || self.tool_use_id.is_some()
+        (self.task_id.is_some() || self.tool_use_id.is_some()) && self.kind == "background"
     }
 
     pub(super) fn tool_use_id(&self) -> Option<&str> {
@@ -652,9 +652,9 @@ pub(super) enum CardEnsureError {
 pub(super) async fn record_footer_only(
     pool: Option<&PgPool>,
     event: &TaskCardEvent,
+    content: &str,
 ) -> Result<(), CardEnsureError> {
-    let content = event.payload.render(1);
-    store::record_footer_only(pool, &event.scope, &content, &content_hash(&content))
+    store::record_footer_only(pool, &event.scope, content, &content_hash(content))
         .await
         .map_err(CardEnsureError::Store)
 }

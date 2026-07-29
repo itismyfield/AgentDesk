@@ -20,23 +20,25 @@ const PRIVATE_TASK_ANCHORS: &[&str] = &[
     "<tool-use-id>",
     "<output-file>",
 ];
-
-pub(crate) fn contains_private_task_anchor(text: &str) -> bool {
-    PRIVATE_TASK_ANCHORS
-        .iter()
-        .any(|anchor| text.contains(anchor))
-}
 const CONTROL_ANCHORS: &[&str] = &[
     SYSTEM_BANNER,
     "<task-notification>",
+    "</task-notification>",
     "<task-id>",
+    "</task-id>",
     "<tool-use-id>",
+    "</tool-use-id>",
     "<output-file>",
+    "</output-file>",
     "<invoke name=",
     "<parameter",
     "</parameter>",
     "</invoke>",
 ];
+
+pub(crate) fn contains_provider_control_anchor(text: &str) -> bool {
+    CONTROL_ANCHORS.iter().any(|anchor| text.contains(anchor))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProviderOutputKind {
@@ -170,7 +172,7 @@ fn tokens_separated_only_by_whitespace(text: &str, first: &str, second: &str) ->
 }
 
 fn contains_control_anchor(prose: &str) -> bool {
-    CONTROL_ANCHORS.iter().any(|anchor| prose.contains(anchor))
+    contains_provider_control_anchor(prose)
 }
 
 fn trailing_control_prefix(prose: &str) -> bool {

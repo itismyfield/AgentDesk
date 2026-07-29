@@ -8,15 +8,13 @@ use super::*;
 use crate::services::discord::task_notification_delivery;
 use crate::services::message_outbox::enqueue_lifecycle_notification_best_effort;
 
-const MONITOR_AUTO_TURN_REASON_CODE: &str = "lifecycle.monitor_auto_turn";
-
 struct SuppressedTaskNotificationMarker<'a> {
     channel_id: ChannelId,
     tmux_session_name: &'a str,
     data_start_offset: u64,
     kind: TaskNotificationKind,
     footer_only_event_key: Option<&'a str>,
-    background_summary: Option<&'a str>,
+    background_context: Option<&'a task_notification_delivery::TaskNotificationContext>,
     event_count: usize,
     monitor_entry_keys: &'a [String],
 }
@@ -60,19 +58,10 @@ impl SuppressedTaskNotificationMarker<'_> {
                     self.footer_only_event_key?,
                 ),
                 "lifecycle.background_task_complete",
-                format!(
-                    "⚙️ Background complete{}",
-                    self.background_summary
-                        .filter(|summary| !summary.trim().is_empty())
-                        .filter(|summary| {
-                            !crate::services::provider_output_guard::contains_private_task_anchor(
-                                summary,
-                            )
-                        })
-                        .map(|summary| format!(" · {summary}"))
-                        .unwrap_or_default()
-                ),
+                self.background_context?.footer_only_marker_content(),
             ),
+            // Subagent completions are durable-card owned, so a suppressed watcher
+            // terminal must not add a duplicate discrete marker.
             TaskNotificationKind::Subagent => return None,
         })
     }
@@ -99,6 +88,21 @@ fn enqueue_suppressed_task_notification(
 mod tests {
     use super::*;
 
+    fn background_context(summary: &str) -> task_notification_delivery::TaskNotificationContext {
+        task_notification_delivery::TaskNotificationContext::from_stream_json(
+            &serde_json::json!({
+                "type": "system",
+                "subtype": "task_notification",
+                "task_id": "background-4912",
+                "status": "completed",
+                "summary": summary,
+                "task_notification_kind": "background",
+            }),
+            &crate::services::session_backend::StreamLineState::new(),
+        )
+        .expect("background context")
+    }
+
     #[test]
     fn background_marker_includes_summary_and_preserves_event_identity() {
         let channel_id = ChannelId::new(4_912);
@@ -108,7 +112,9 @@ mod tests {
             data_start_offset: 44,
             kind: TaskNotificationKind::Background,
             footer_only_event_key: Some("event-identity"),
-            background_summary: Some("Background command \"short task\" completed (exit code 0)"),
+            background_context: Some(&background_context(
+                "Background command \"short task\" completed (exit code 0)",
+            )),
             event_count: 1,
             monitor_entry_keys: &[],
         }
@@ -118,25 +124,28 @@ mod tests {
         assert_eq!(marker.1, "lifecycle.background_task_complete");
         assert_eq!(
             marker.2,
-            "⚙️ Background complete · Background command \"short task\" completed (exit code 0)"
+            "⚙️ Background complete\n✅ Task completed\n**Background command \"short task\" completed (exit code 0)**"
         );
     }
 
     #[test]
-    fn background_marker_omits_summary_with_private_task_anchor() {
+    fn background_marker_matches_shared_projection_and_bound() {
+        let summary = "x".repeat(1_000);
+        let context = background_context(&summary);
         let marker = SuppressedTaskNotificationMarker {
             channel_id: ChannelId::new(4_912),
             tmux_session_name: "AgentDesk-claude-4912",
             data_start_offset: 44,
             kind: TaskNotificationKind::Background,
             footer_only_event_key: Some("event-identity"),
-            background_summary: Some("<tool-use-id> toolu-private"),
+            background_context: Some(&context),
             event_count: 1,
             monitor_entry_keys: &[],
         }
         .render()
         .expect("background marker");
-        assert_eq!(marker.2, "⚙️ Background complete");
+        assert_eq!(marker.2, context.footer_only_marker_content());
+        assert!(marker.2.chars().count() <= 603);
     }
 
     #[test]
@@ -148,7 +157,7 @@ mod tests {
                 data_start_offset: 44,
                 kind: TaskNotificationKind::Subagent,
                 footer_only_event_key: Some("subagent-event"),
-                background_summary: Some("Agent completed"),
+                background_context: Some(&background_context("Agent completed")),
                 event_count: 1,
                 monitor_entry_keys: &[],
             }
@@ -183,9 +192,8 @@ pub(super) async fn enqueue_suppressed_machine_trigger_marker(
     };
     let footer_only_event_key =
         task_notification_context.and_then(|context| context.footer_only_marker_event_key());
-    let background_summary = task_notification_context
-        .filter(|context| matches!(context.routing_kind(), TaskNotificationKind::Background))
-        .map(task_notification_delivery::TaskNotificationContext::summary);
+    let background_context = task_notification_context
+        .filter(|context| matches!(context.routing_kind(), TaskNotificationKind::Background));
     let marker_kind = task_notification_kind.filter(|kind| {
         matches!(
             kind,
@@ -201,7 +209,7 @@ pub(super) async fn enqueue_suppressed_machine_trigger_marker(
                 data_start_offset,
                 kind,
                 footer_only_event_key,
-                background_summary,
+                background_context,
                 event_count: monitor_event_count,
                 monitor_entry_keys: &monitor_entry_keys,
             },

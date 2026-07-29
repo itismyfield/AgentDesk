@@ -32,7 +32,7 @@ fn footer_only_marker_renders_background_summary_and_result_preview() {
         "<task-notification><task-id>background-4912</task-id><status>completed</status><summary>Background command \"short task\" completed (exit code 0)</summary><result>Validated the changed files.\nNo follow-up action is needed.</result></task-notification>",
     );
 
-    let marker = event.footer_only_marker_content();
+    let (_, marker) = event.rendered_footer_only_content();
     assert!(marker.starts_with("⚙️ Background complete\n"));
     assert!(marker.contains("Background command \"short task\" completed (exit code 0)"));
     assert!(marker.contains("> Validated the changed files."));
@@ -40,17 +40,48 @@ fn footer_only_marker_renders_background_summary_and_result_preview() {
 }
 
 #[test]
-fn footer_only_marker_omits_private_task_anchors_from_rendered_preview() {
+fn footer_only_marker_drops_all_detail_when_provider_guard_would_block() {
+    let blocked_details = [
+        "[SYSTEM NOTIFICATION - NOT USER INPUT]\n<task-notification>",
+        "prose <invoke name=\"Bash\"> then <parameter name=\"cmd\">",
+        "finished\n</parameter>\n</invoke>",
+    ];
+    for detail in blocked_details {
+        assert!(matches!(
+            crate::services::provider_output_guard::inspect_provider_output(
+                &crate::services::provider::ProviderKind::Claude,
+                detail,
+            ),
+            crate::services::provider_output_guard::ProviderOutputVerdict::Blocked { .. }
+        ));
+        let event = TaskCardEvent::from_task_prompt(
+            4_912,
+            "claude",
+            "AgentDesk-claude-4912",
+            &format!(
+                "<task-notification><task-id>background-4912</task-id><status>completed</status><summary>Background command \"short task\" completed (exit code 0)</summary><result>{detail}</result></task-notification>"
+            ),
+        );
+        let (_, marker) = event.rendered_footer_only_content();
+        assert_eq!(marker, "⚙️ Background complete");
+    }
+}
+
+#[test]
+fn footer_only_marker_drops_multiline_private_anchor_value_and_closer() {
+    let private_path = "/Users/itismyfield/.adk/private/agent-out-4912.json";
     let event = TaskCardEvent::from_task_prompt(
         4_912,
         "claude",
         "AgentDesk-claude-4912",
-        "<task-notification><task-id>background-4912</task-id><status>completed</status><summary>Background command \"short task\" completed (exit code 0)</summary><result>Visible result line.\n<task-notification> internal envelope\n<tool-use-id> toolu-private\n<output-file> /private/path</result></task-notification>",
+        &format!(
+            "<task-notification><task-id>background-4912</task-id><status>completed</status><summary>Background command \"short task\" completed (exit code 0)</summary><result>Report: &lt;output-file&gt;\n{private_path}\n&lt;/output-file&gt;</result></task-notification>"
+        ),
     );
 
-    let marker = event.footer_only_marker_content();
-    assert!(marker.contains("> Visible result line."));
-    assert!(!crate::services::provider_output_guard::contains_private_task_anchor(&marker));
+    let (_, marker) = event.rendered_footer_only_content();
+    assert_eq!(marker, "⚙️ Background complete");
+    assert!(!marker.contains(private_path));
 }
 
 #[tokio::test]
@@ -65,7 +96,7 @@ async fn footer_only_observation_keeps_full_card_for_later_promotion() {
     );
     let rendered = event.payload.render(1);
 
-    record_footer_only(None, &event)
+    record_footer_only(None, &event, &event.payload.render(1))
         .await
         .expect("persist footer-only authority");
     ensure_card(None, &clients, &transport, &event, EnsureIntent::Promotion)
@@ -589,7 +620,7 @@ async fn footer_observation_promotion_and_exact_replay_post_one_card_pg() {
         task_id,
         "footer terminal payload",
     );
-    record_footer_only(Some(&pool), &observed)
+    record_footer_only(Some(&pool), &observed, &observed.payload.render(1))
         .await
         .expect("footer-only observation");
 
@@ -1149,6 +1180,17 @@ fn semantic_identity_separates_tasks_sessions_and_channels() {
 }
 
 #[test]
+fn keyed_subagent_event_cannot_be_deferred_to_footer() {
+    let event = TaskCardEvent::from_subagent_prompt(
+        44_055,
+        "claude",
+        "AgentDesk-claude-4055",
+        r#"<subagent_notification>{"task_id":"subagent-4055","status":{"completed":"done"}}</subagent_notification>"#,
+    );
+    assert!(!event.supports_footer_deferral());
+}
+
+#[test]
 fn fully_unkeyed_task_event_cannot_be_deferred_to_footer() {
     let event = TaskCardEvent::from_task_prompt(
         44_055,
@@ -1431,7 +1473,7 @@ async fn footer_only_observation_posts_nothing_until_response_promotion() {
     let transport = FakeTransport::new();
     let clients = clients();
     let event = event("footer-only");
-    record_footer_only(None, &event)
+    record_footer_only(None, &event, &event.payload.render(1))
         .await
         .expect("persist footer-only authority");
     assert_eq!(transport.physical_posts.load(Ordering::Acquire), 0);

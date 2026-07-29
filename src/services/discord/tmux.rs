@@ -84,9 +84,10 @@ mod tmux_kill_policy;
 #[allow(unused_imports)]
 pub(super) use self::tmux_kill_policy::{
     CANCEL_TEARDOWN_GRACE_BYTES, MONITOR_AUTO_TURN_DEFERRED_REASON_CODE,
-    RECENT_TURN_STOP_METADATA_FALLBACK_TTL, TMUX_LIVENESS_PROBE_INTERVAL,
-    cancel_induced_watcher_death, cancel_induced_watcher_death_async, recent_turn_stop_for_channel,
-    recent_turn_stop_for_watcher_range, record_recent_turn_stop, tmux_output_offset,
+    MONITOR_AUTO_TURN_REASON_CODE, RECENT_TURN_STOP_METADATA_FALLBACK_TTL,
+    TMUX_LIVENESS_PROBE_INTERVAL, cancel_induced_watcher_death, cancel_induced_watcher_death_async,
+    recent_turn_stop_for_channel, recent_turn_stop_for_watcher_range, record_recent_turn_stop,
+    tmux_output_offset,
 };
 
 pub(in crate::services::discord) async fn sniff_background_agent_pending_for_completion(

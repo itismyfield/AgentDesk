@@ -91,9 +91,11 @@ pub(super) async fn resolve_gate(
             super::super::placeholder_live_events::TaskCompletionDisplayPolicy::FooterOnly
         );
     if footer_only {
+        let (rendered_card, marker_content) = event.rendered_footer_only_content();
         if let Err(error) = super::super::task_notification_delivery::record_footer_only(
             shared.pg_pool.as_ref(),
             event,
+            &rendered_card,
         )
         .await
         {
@@ -105,7 +107,7 @@ pub(super) async fn resolve_gate(
             );
             return None;
         }
-        enqueue_footer_only_background_marker(shared, channel_id, event);
+        enqueue_footer_only_background_marker(shared, channel_id, event, &marker_content);
         clear_observed_external_turn_lease_if_current(prompt, channel_id, lease);
         return None;
     }
@@ -197,6 +199,7 @@ fn enqueue_footer_only_background_marker(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
     event: &super::super::task_notification_delivery::TaskCardEvent,
+    content: &str,
 ) {
     let target = format!("channel:{}", channel_id.get());
     let session_key =
@@ -204,13 +207,12 @@ fn enqueue_footer_only_background_marker(
             channel_id,
             event.event_key(),
         );
-    let content = event.footer_only_marker_content();
     let _ = crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
         shared.pg_pool.as_ref(),
         target.as_str(),
         Some(session_key.as_str()),
         "lifecycle.background_task_complete",
-        content.as_str(),
+        content,
     );
 }
 
