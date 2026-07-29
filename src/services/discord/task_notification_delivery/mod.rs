@@ -6,6 +6,7 @@
 
 mod card_post;
 mod card_render;
+mod footer_only_marker;
 mod gateway;
 mod response_chunks;
 mod store;
@@ -307,10 +308,6 @@ impl TaskCardEvent {
 
     pub(super) fn event_key(&self) -> &str {
         &self.scope.event_key
-    }
-
-    pub(super) fn footer_only_marker_content(&self) -> String {
-        footer_only_background_marker_content(&self.payload.render(1))
     }
 
     pub(in crate::services::discord) fn with_persisted_event_key(
@@ -654,37 +651,6 @@ pub(super) enum CardEnsureError {
     Ambiguous(String),
     #[error("task card state error: {0}")]
     Store(String),
-}
-
-const FOOTER_ONLY_MARKER_PREFIX: &str = "⚙️ Background complete";
-const FOOTER_ONLY_MARKER_DETAIL_LIMIT: usize = 600;
-
-/// Project the already-rendered footer card into a bounded lifecycle marker.
-pub(super) fn footer_only_background_marker_content(rendered_card: &str) -> String {
-    let detail = rendered_card
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .filter(|line| !line.starts_with("-#"))
-        .filter(|line| {
-            ![
-                "<task-notification>",
-                "<task-id>",
-                "<tool-use-id>",
-                "<output-file>",
-            ]
-            .iter()
-            .any(|anchor| line.contains(anchor))
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    if detail.is_empty() {
-        return FOOTER_ONLY_MARKER_PREFIX.to_string();
-    }
-    let content = format!("{FOOTER_ONLY_MARKER_PREFIX}\n{detail}");
-    super::tui_task_card::clamp_discord_message_content(
-        &super::tui_task_card::truncate_chars_ascii(&content, FOOTER_ONLY_MARKER_DETAIL_LIMIT),
-    )
 }
 
 pub(super) async fn record_footer_only(
