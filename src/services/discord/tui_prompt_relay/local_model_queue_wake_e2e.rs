@@ -303,7 +303,7 @@ async fn completion_guard_must_panic(
 }
 
 #[tokio::test]
-async fn completion_lifecycle_guard_rejects_duplicate_and_out_of_order_edges() {
+async fn completion_lifecycle_rejects_duplicate_mailbox_release() {
     let channel_id = ChannelId::new(CHANNEL_ID);
     completion_guard_must_panic(vec![
         super::super::turn_completion_events::TurnCompletionEvent::mailbox_released(
@@ -320,6 +320,11 @@ async fn completion_lifecycle_guard_rejects_duplicate_and_out_of_order_edges() {
         ),
     ])
     .await;
+}
+
+#[tokio::test]
+async fn completion_lifecycle_rejects_event_after_queue_eligible() {
+    let channel_id = ChannelId::new(CHANNEL_ID);
     completion_guard_must_panic(vec![
         super::super::turn_completion_events::TurnCompletionEvent::mailbox_released(
             channel_id,
@@ -335,6 +340,11 @@ async fn completion_lifecycle_guard_rejects_duplicate_and_out_of_order_edges() {
         ),
     ])
     .await;
+}
+
+#[tokio::test]
+async fn completion_lifecycle_rejects_queue_eligible_before_mailbox_release() {
+    let channel_id = ChannelId::new(CHANNEL_ID);
     completion_guard_must_panic(vec![
         super::super::turn_completion_events::TurnCompletionEvent::queue_eligible(
             channel_id,
