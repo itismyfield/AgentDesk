@@ -34,20 +34,10 @@ mod busy_retry_fifo_tests {
         intervention
     }
 
-    // SAFETY: holds shared_test_env_lock across await to serialize the
-    // AGENTDESK_ROOT_DIR mutation (RuntimeRootGuard tempdir) against parallel
-    // tests. Test-only; the guard is a process-wide test serializer that cannot
-    // deadlock a live task. Releasing it before the mailbox awaits would let a
-    // concurrent test stomp the runtime root while this one is mid-flight.
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
     async fn headless_runtime_mismatch_defer_is_bounded_and_appended_5015() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
         let temp = tempfile::tempdir().expect("temporary runtime root");
-        let _root_guard = RuntimeRootGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
-        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        let _root_guard = crate::config::set_agentdesk_root_for_test(temp.path());
 
         let shared = make_shared_data_for_tests();
         let provider = ProviderKind::Claude;
