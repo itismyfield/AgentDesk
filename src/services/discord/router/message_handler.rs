@@ -62,6 +62,8 @@ mod voice_announcement_scope;
 mod watchdog;
 
 use self::goal_lifecycle::*;
+#[cfg(test)]
+use self::headless_turn::preserved_headless_defer_result;
 use self::provider_isolation::*;
 use self::tui_followup::*;
 use self::tui_followup_retry::*;

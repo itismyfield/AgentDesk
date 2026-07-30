@@ -45,7 +45,7 @@ fn fresh_routine_turn(metadata: Option<&serde_json::Value>) -> bool {
         != Some("persistent")
 }
 
-fn preserved_headless_defer_result(
+pub(super) fn preserved_headless_defer_result(
     channel_id: ChannelId,
     reservation: HeadlessTurnReservation,
     retry_preserved: bool,
@@ -1493,39 +1493,6 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         turn_id: reservation.turn_id(channel_id),
         status: HeadlessTurnStartStatus::Started,
     })
-}
-
-#[cfg(test)]
-mod runtime_mismatch_defer_outcome_tests {
-    use super::*;
-
-    fn reservation() -> HeadlessTurnReservation {
-        HeadlessTurnReservation {
-            user_msg_id: MessageId::new(50_150_301),
-            placeholder_msg_id: MessageId::new(50_150_302),
-        }
-    }
-
-    #[test]
-    fn preserved_runtime_mismatch_defer_is_accepted_not_conflict_5015() {
-        let channel_id = ChannelId::new(50_150_300);
-        let reservation = reservation();
-
-        let outcome = preserved_headless_defer_result(channel_id, reservation, true)
-            .expect("durably preserved defer must be accepted");
-
-        assert_eq!(outcome.turn_id, reservation.turn_id(channel_id));
-        assert_eq!(outcome.status, HeadlessTurnStartStatus::Consumed);
-    }
-
-    #[test]
-    fn unpreserved_runtime_mismatch_defer_remains_internal_5015() {
-        let error =
-            preserved_headless_defer_result(ChannelId::new(50_150_300), reservation(), false)
-                .expect_err("unpreserved defer must remain a real failure");
-
-        assert!(matches!(error, HeadlessTurnStartError::Internal(_)));
-    }
 }
 
 #[cfg(test)]

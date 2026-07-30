@@ -34,6 +34,37 @@ mod busy_retry_fifo_tests {
         intervention
     }
 
+    fn headless_reservation() -> HeadlessTurnReservation {
+        HeadlessTurnReservation {
+            user_msg_id: serenity::MessageId::new(50_150_301),
+            placeholder_msg_id: serenity::MessageId::new(50_150_302),
+        }
+    }
+
+    #[test]
+    fn preserved_runtime_mismatch_defer_is_accepted_not_conflict_5015() {
+        let channel_id = serenity::ChannelId::new(50_150_300);
+        let reservation = headless_reservation();
+
+        let outcome = preserved_headless_defer_result(channel_id, reservation, true)
+            .expect("durably preserved defer must be accepted");
+
+        assert_eq!(outcome.turn_id, reservation.turn_id(channel_id));
+        assert_eq!(outcome.status, HeadlessTurnStartStatus::Consumed);
+    }
+
+    #[test]
+    fn unpreserved_runtime_mismatch_defer_remains_internal_5015() {
+        let error = preserved_headless_defer_result(
+            serenity::ChannelId::new(50_150_300),
+            headless_reservation(),
+            false,
+        )
+        .expect_err("unpreserved defer must remain a real failure");
+
+        assert!(matches!(error, HeadlessTurnStartError::Internal(_)));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn headless_runtime_mismatch_defer_preserves_distinct_prompts_in_fifo_order_5015() {
         let temp = tempfile::tempdir().expect("temporary runtime root");
