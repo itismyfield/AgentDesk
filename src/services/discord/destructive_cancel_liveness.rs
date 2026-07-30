@@ -1,5 +1,7 @@
 use super::inflight;
 
+// Conservative, currently unmeasured threshold inherited from #4992 rollout;
+// would-forfeit remains observation-only pending calibrated #5007 activation.
 pub(super) const ZERO_DELIVERY_FORFEIT_MIN_AGE_SECS: i64 = 1_800;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,29 +35,30 @@ pub(super) fn relay_forfeit_arm(prior_delivery_evidence: bool) -> RelayForfeitAr
     }
 }
 
-fn unsent_response_payload_exists(evidence: WatcherRelayLivenessEvidence<'_>) -> bool {
-    !evidence.full_response.trim().is_empty() && evidence.response_sent_offset == 0
+fn undelivered_response_suffix_exists(evidence: WatcherRelayLivenessEvidence<'_>) -> bool {
+    !evidence.full_response.trim().is_empty()
+        && evidence.response_sent_offset < evidence.full_response.len()
+        && evidence
+            .full_response
+            .is_char_boundary(evidence.response_sent_offset)
 }
 
 pub(super) fn fresh_watcher_heartbeat_blocks_rebind(
     evidence: WatcherRelayLivenessEvidence<'_>,
     relay_liveness_forfeited: bool,
 ) -> bool {
-    watcher_relay_progress_recent(evidence)
-        || (unsent_response_payload_exists(evidence) && !relay_liveness_forfeited)
+    capture_progress_recent(evidence)
+        || (undelivered_response_suffix_exists(evidence) && !relay_liveness_forfeited)
 }
 
 pub(super) fn relay_liveness_forfeited(evidence: WatcherRelayLivenessEvidence<'_>) -> bool {
-    let _producer_evidence = (
-        evidence.output_len_at_snapshot,
-        evidence.output_mtime_age_secs,
-    );
-    if !unsent_response_payload_exists(evidence) {
+    if !undelivered_response_suffix_exists(evidence) {
         return false;
     }
 
     let zero_delivery_forfeited = relay_forfeit_arm(evidence.prior_delivery_evidence)
         == RelayForfeitArm::ZeroDelivery
+        && evidence.response_sent_offset == 0
         && evidence.last_watcher_relayed_offset.is_none()
         && !evidence.terminal_delivery_committed
         && evidence
@@ -64,6 +67,9 @@ pub(super) fn relay_liveness_forfeited(evidence: WatcherRelayLivenessEvidence<'_
 
     // The complementary prior-delivery arm still requires a valid watcher clock
     // and stalled consumer frontier before destructive recovery may proceed.
+    // Legacy/rebind rows without a relay timestamp and rows without a parseable
+    // turn age conservatively abstain. A large forward wall-clock jump can inflate
+    // both ages together; #5007 activation must add a monotonic-clock safeguard.
     let stalled_relay_forfeited = relay_forfeit_arm(evidence.prior_delivery_evidence)
         == RelayForfeitArm::StalledDelivery
         && match (
@@ -89,11 +95,16 @@ fn valid_elapsed_secs(timestamp: Option<i64>, now_unix: i64) -> Option<i64> {
     (timestamp >= 0 && timestamp <= now_unix).then(|| now_unix - timestamp)
 }
 
-fn watcher_relay_progress_recent(evidence: WatcherRelayLivenessEvidence<'_>) -> bool {
-    relay_frontier_advanced(
+fn capture_progress_recent(evidence: WatcherRelayLivenessEvidence<'_>) -> bool {
+    matches!(
+        (evidence.output_len_at_snapshot, evidence.output_len_now),
+        (Some(previous), Some(current)) if current > previous
+    ) || relay_frontier_advanced(
         evidence.relay_frontier_at_snapshot,
         evidence.relay_frontier_now,
-    )
+    ) || evidence.output_mtime_age_secs.is_some_and(|age_secs| {
+        age_secs < crate::services::tui_turn_state::STALE_USER_SUBMITTED_RECLAIM_SECS
+    })
 }
 
 pub(super) fn relay_frontier_advanced(previous: Option<u64>, current: Option<u64>) -> bool {
@@ -132,11 +143,24 @@ mod tests {
     }
 
     #[test]
-    fn destructive_cancel_producer_growth_does_not_prove_consumer_liveness() {
+    fn destructive_cancel_recent_capture_growth_blocks_rebind() {
         assert!(relay_liveness_forfeited(evidence()));
-        assert!(!fresh_watcher_heartbeat_blocks_rebind(
+        assert!(fresh_watcher_heartbeat_blocks_rebind(
             evidence(),
             relay_liveness_forfeited(evidence()),
+        ));
+    }
+
+    #[test]
+    fn destructive_cancel_fresh_capture_mtime_blocks_rebind() {
+        let fresh = WatcherRelayLivenessEvidence {
+            output_len_now: evidence().output_len_at_snapshot,
+            relay_frontier_now: evidence().relay_frontier_at_snapshot,
+            ..evidence()
+        };
+        assert!(fresh_watcher_heartbeat_blocks_rebind(
+            fresh,
+            relay_liveness_forfeited(fresh),
         ));
     }
 
@@ -211,18 +235,29 @@ mod tests {
     }
 
     #[test]
-    fn destructive_cancel_stalled_delivery_arm_is_reachable() {
+    fn destructive_cancel_partial_delivery_stalled_arm_is_reachable() {
+        let full_response = "delivered prefix and undelivered suffix";
+        let response_sent_offset = "delivered prefix".len();
+        assert!(full_response.is_char_boundary(response_sent_offset));
         let stalled = WatcherRelayLivenessEvidence {
             last_watcher_relayed_offset: Some(6_281_996),
             last_watcher_relayed_at_unix: Some(90_000),
+            output_len_at_snapshot: Some(6_282_100),
             output_len_now: Some(6_282_100),
+            output_mtime_age_secs: Some(601),
             relay_frontier_at_snapshot: Some(6_281_996),
             relay_frontier_now: Some(6_281_996),
+            full_response,
+            response_sent_offset,
             prior_delivery_evidence: true,
             turn_age_secs: Some(20_000),
             now_unix: 100_000,
             ..evidence()
         };
+        assert_eq!(
+            relay_forfeit_arm(stalled.prior_delivery_evidence),
+            RelayForfeitArm::StalledDelivery
+        );
         assert!(relay_liveness_forfeited(stalled));
         assert!(!fresh_watcher_heartbeat_blocks_rebind(
             stalled,
@@ -231,40 +266,12 @@ mod tests {
     }
 
     #[test]
-    fn destructive_cancel_delivery_signals_partition_all_combinations() {
-        for bits in 0_u8..32 {
-            let signals = [
-                bits & 1 != 0,
-                bits & 2 != 0,
-                bits & 4 != 0,
-                bits & 8 != 0,
-                bits & 16 != 0,
-            ];
-            let prior_delivery_evidence = signals.into_iter().any(|signal| signal);
-            let arm = relay_forfeit_arm(prior_delivery_evidence);
-            assert_eq!(
-                matches!(arm, RelayForfeitArm::ZeroDelivery) as u8
-                    + matches!(arm, RelayForfeitArm::StalledDelivery) as u8,
-                1,
-                "signals={signals:?} must select exactly one arm"
-            );
-            assert_eq!(
-                arm,
-                if prior_delivery_evidence {
-                    RelayForfeitArm::StalledDelivery
-                } else {
-                    RelayForfeitArm::ZeroDelivery
-                },
-                "signals={signals:?} selected the wrong arm"
-            );
-        }
-    }
-
-    #[test]
     fn destructive_cancel_rewound_offset_with_prior_delivery_uses_stalled_arm() {
         let rewound = WatcherRelayLivenessEvidence {
             last_watcher_relayed_at_unix: Some(90_000),
+            output_len_at_snapshot: Some(6_282_100),
             output_len_now: Some(6_282_100),
+            output_mtime_age_secs: Some(601),
             relay_frontier_at_snapshot: Some(6_281_996),
             relay_frontier_now: Some(6_281_996),
             prior_delivery_evidence: true,
@@ -305,6 +312,8 @@ mod tests {
     #[test]
     fn destructive_cancel_without_unsent_payload_preserves_halted_recovery() {
         let no_payload = WatcherRelayLivenessEvidence {
+            output_len_now: evidence().output_len_at_snapshot,
+            output_mtime_age_secs: Some(601),
             full_response: "",
             ..evidence()
         };
@@ -334,6 +343,8 @@ mod tests {
     #[test]
     fn destructive_cancel_tool_only_turn_abstains_from_payload_forfeit() {
         let tool_only = WatcherRelayLivenessEvidence {
+            output_len_now: evidence().output_len_at_snapshot,
+            output_mtime_age_secs: Some(601),
             full_response: "",
             ..evidence()
         };

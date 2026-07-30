@@ -344,9 +344,10 @@ pub(in crate::services::discord) async fn evaluate(
         return DestructiveCancelGate::Denied("identity_mismatch_before_probe");
     }
 
-    // Fresh watcher heartbeat wins before terminal-envelope evidence. A live
-    // watcher is the safer owner for a just-finished turn; if it disappears, the
-    // next gate pass can still accept the terminal envelope.
+    // Fresh watcher heartbeat evidence wins before terminal-envelope evidence.
+    // Preserve base parity: capture growth, relay-frontier growth, or capture
+    // mtime inside the 600-second reclaim floor keeps the live watcher authoritative.
+    // If those signals disappear, the next gate pass can accept the envelope.
     let watcher_heartbeat_stale = if let Some(tmux_session) =
         snapshot.pin.tmux_session_name.as_deref()
     {
@@ -654,6 +655,48 @@ mod tests {
         .to_string();
     }
 
+    #[test]
+    fn destructive_cancel_delivery_signals_partition_all_production_combinations() {
+        for bits in 0_u8..32 {
+            let output_path = std::path::Path::new("/tmp/unused-partition.jsonl");
+            let mut state = inflight::InflightTurnState::new(
+                ProviderKind::Claude,
+                4_992_032 + u64::from(bits),
+                None,
+                1,
+                4_992_100 + u64::from(bits),
+                4_992_200 + u64::from(bits),
+                "partition fixture".to_string(),
+                None,
+                Some("tmux-4992-partition".to_string()),
+                Some(output_path.to_string_lossy().to_string()),
+                None,
+                0,
+            );
+            state.last_watcher_relayed_offset = (bits & 1 != 0).then_some(1);
+            state.last_watcher_relayed_at_unix = (bits & 2 != 0).then_some(2);
+            state.session_bound_delivered = bits & 4 != 0;
+            state.anchor_reposted = bits & 8 != 0;
+            state.streaming_rollover_frozen_msg_ids =
+                (bits & 16 != 0).then_some(vec![3]).unwrap_or_default();
+            let expected = bits != 0;
+            let production_prior = prior_delivery_evidence(&state);
+            assert_eq!(
+                production_prior, expected,
+                "bits={bits:05b} production prior-delivery wiring mismatch"
+            );
+            assert_eq!(
+                relay_forfeit_arm(production_prior),
+                if expected {
+                    RelayForfeitArm::StalledDelivery
+                } else {
+                    RelayForfeitArm::ZeroDelivery
+                },
+                "bits={bits:05b} selected the wrong arm"
+            );
+        }
+    }
+
     fn stale_mtime(path: &std::path::Path) {
         filetime::set_file_mtime(
             path,
@@ -694,7 +737,7 @@ mod tests {
     }
 
     #[test]
-    fn destructive_cancel_growing_capture_busy_readiness_denies() {
+    fn destructive_cancel_zero_origin_capture_growth_blocks_before_terminal_allow() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -719,8 +762,9 @@ mod tests {
                 &output_path,
                 len,
             );
-            qualify_zero_delivery_forfeit(&mut state);
-            inflight::save_inflight_state(&state).expect("save forfeitable state");
+            state.full_response.clear();
+            state.response_sent_offset = 0;
+            inflight::save_inflight_state(&state).expect("save zero-origin state");
             let state = inflight::load_inflight_state(&provider, channel.get()).unwrap();
             shared
                 .tmux_watchers
@@ -833,6 +877,53 @@ mod tests {
     }
 
     #[test]
+    fn destructive_cancel_partial_delivery_terminal_envelope_recent_mtime_denies() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::TempDir::new().expect("runtime root");
+        let _env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", root.path()) };
+        current_thread_rt().block_on(async {
+            let shared = super::super::make_shared_data_for_tests();
+            let provider = ProviderKind::Claude;
+            let channel = ChannelId::new(4_992_013);
+            let tmux = "tmux-4992-partial-terminal";
+            let output_path = root.path().join("partial-terminal.jsonl");
+            let len = write_jsonl(
+                &output_path,
+                &[
+                    r#"{"type":"assistant","message":{"content":[{"type":"text","text":"prefix and suffix"}]}}"#,
+                    r#"{"type":"result","subtype":"success","result":"done"}"#,
+                ],
+            );
+            let mut state =
+                save_gate_state(provider.clone(), channel.get(), 0, tmux, &output_path, len);
+            state.full_response = "delivered prefix and undelivered suffix".to_string();
+            state.response_sent_offset = "delivered prefix".len();
+            assert!(state.full_response.is_char_boundary(state.response_sent_offset));
+            state.last_watcher_relayed_offset = Some(1);
+            state.last_watcher_relayed_at_unix = Some(inflight::now_unix());
+            inflight::save_inflight_state(&state).expect("save partial-delivery state");
+            let state = inflight::load_inflight_state(&provider, channel.get()).unwrap();
+            shared
+                .tmux_watchers
+                .insert(channel, fresh_watcher_handle(tmux, &output_path));
+            let snapshot =
+                DestructiveCancelProbeSnapshot::from_state(&shared, &state, None, channel);
+            assert!(terminal_envelope_present(&provider, &snapshot));
+
+            let gate = evaluate(&shared, &provider, channel, channel, &snapshot).await;
+
+            assert_eq!(
+                gate.denied_reason(),
+                Some("fresh_watcher_heartbeat"),
+                "recent mtime must block before terminal-envelope allow: {gate:?}"
+            );
+        });
+    }
+
+    #[test]
     fn destructive_cancel_tool_only_ready_readiness_still_denies() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
@@ -866,7 +957,7 @@ mod tests {
 
             let gate = evaluate(&shared, &provider, channel, channel, &snapshot).await;
 
-            assert_eq!(gate.denied_reason(), Some("capture_progress_on_reprobe"));
+            assert_eq!(gate.denied_reason(), Some("fresh_watcher_heartbeat"));
         });
     }
 
