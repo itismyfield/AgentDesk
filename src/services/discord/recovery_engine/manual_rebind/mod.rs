@@ -793,6 +793,11 @@ async fn rebind_inflight_for_channel_inner(
                 handle,
                 provider,
                 discard_restored_render_seed,
+                super::tmux::thread_follow_up_parent_channel_id(
+                    discord_channel_id,
+                    recovered_state_for_session.logical_channel_id,
+                    recovered_state_for_session.thread_id,
+                ),
             );
             if watcher_should_spawn {
                 if let Some(PendingCodexTuiRebindRelay {

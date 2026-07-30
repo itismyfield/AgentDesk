@@ -311,7 +311,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: High-risk recovery lane
-        run: "cargo test --bin agentdesk high_risk_recovery:: -- --test-threads=1"
+        run: "cargo test --lib high_risk_recovery:: -- --test-threads=1"
 
       - name: Stop PostgreSQL service
         if: always()
