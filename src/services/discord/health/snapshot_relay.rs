@@ -45,11 +45,16 @@ pub(super) fn relay_active_turn_from_inflight(
     if !mailbox_has_cancel_token && inflight.is_none() {
         return RelayActiveTurn::None;
     }
+    // #3631: a rebind-origin row is a synthetic origin marker, not a real
+    // user/agent turn; treat it as idle when no live mailbox turn exists.
     if inflight.is_some_and(|state| {
         rebind_origin_inflight_is_idle(mailbox_has_cancel_token, state.rebind_origin)
     }) {
         return RelayActiveTurn::None;
     }
+    // A stale bridge-owned TUI-direct synthetic row has no live relay owner
+    // after restart. A recreated mailbox token does not prove that its lost
+    // bridge tail can still make progress.
     if ownerless_external_input_inflight_is_idle(inflight) {
         return RelayActiveTurn::None;
     }
