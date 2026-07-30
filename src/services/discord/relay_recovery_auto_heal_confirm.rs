@@ -45,7 +45,7 @@ pub(super) async fn classify_reattach_confirmation(
     now_unix: i64,
 ) -> ReattachConfirmation {
     if decision.action != super::RelayRecoveryActionKind::ReattachWatcher
-        || apply_result.reattach_watcher_spawned != Some(true)
+        || apply_result.status != "reattached_watcher"
     {
         return ReattachConfirmation::NotRequired;
     }
@@ -222,6 +222,65 @@ mod tests {
         assert_eq!(
             confirmation_at_deadline(&shared, channel, &probe),
             SpawnedWatcherConfirmation::RelayEmissionInFlight
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_recovery_repaired_round_without_spawn_still_requires_probe() {
+        let shared = make_shared_data_for_tests();
+        let channel = ChannelId::new(4_423_206);
+        let tmux_session = "AgentDesk-codex-4423-repaired-reuse";
+        shared.tmux_watchers.insert(
+            channel,
+            watcher_handle(tmux_session, Arc::new(AtomicI64::new(100))),
+        );
+        let decision = super::super::plan_relay_recovery(
+            &super::super::RelayHealthSnapshot {
+                provider: "codex".to_string(),
+                channel_id: channel.get(),
+                active_turn: super::super::RelayActiveTurn::Foreground,
+                tmux_session: Some(tmux_session.to_string()),
+                tmux_alive: Some(true),
+                watcher_attached: false,
+                watcher_attached_stale: false,
+                watcher_owner_channel_id: None,
+                watcher_owns_live_relay: false,
+                bridge_inflight_present: true,
+                bridge_current_msg_id: Some(4_423_216),
+                mailbox_has_cancel_token: true,
+                mailbox_active_user_msg_id: Some(4_423_226),
+                mailbox_turn_started_at_ms: None,
+                queue_depth: 0,
+                pending_discord_callback_msg_id: None,
+                pending_thread_proof: false,
+                parent_channel_id: None,
+                thread_channel_id: None,
+                last_relay_ts_ms: None,
+                last_outbound_activity_ms: None,
+                last_capture_offset: Some(128),
+                last_relay_offset: 0,
+                unread_bytes: Some(128),
+                desynced: true,
+                stale_thread_proof: false,
+            },
+            super::super::RelayStallState::TmuxAliveRelayDead,
+            1_000,
+        );
+        let apply_result = RelayRecoveryApplyResult {
+            status: "reattached_watcher",
+            removed_thread_proofs: 0,
+            removed_mailbox_token: false,
+            post_mailbox_has_cancel_token: None,
+            post_mailbox_queue_depth: None,
+            reattach_watcher_spawned: Some(false),
+            reattach_watcher_replaced: Some(false),
+            reattach_initial_offset: Some(0),
+            reattach_error: None,
+        };
+
+        assert_eq!(
+            classify_reattach_confirmation(&shared, &decision, &apply_result, 0, 200).await,
+            ReattachConfirmation::Failed
         );
     }
 
