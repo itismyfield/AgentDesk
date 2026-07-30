@@ -752,16 +752,13 @@ mod tests {
             let output_path = root.path().join("growing-busy.jsonl");
             let len = write_jsonl(
                 &output_path,
-                &[r#"{"type":"assistant","message":{"content":[{"type":"text","text":"tool still running"}]}}"#],
+                &[
+                    r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+                    r#"{"type":"result","subtype":"success","result":"done"}"#,
+                ],
             );
-            let mut state = save_gate_state(
-                provider.clone(),
-                channel.get(),
-                0,
-                tmux,
-                &output_path,
-                len,
-            );
+            let mut state =
+                save_gate_state(provider.clone(), channel.get(), 0, tmux, &output_path, len);
             state.full_response.clear();
             state.response_sent_offset = 0;
             inflight::save_inflight_state(&state).expect("save zero-origin state");
@@ -769,12 +766,9 @@ mod tests {
             shared
                 .tmux_watchers
                 .insert(channel, fresh_watcher_handle(tmux, &output_path));
-            let snapshot = DestructiveCancelProbeSnapshot::from_state(
-                &shared,
-                &state,
-                None,
-                channel,
-            );
+            let snapshot =
+                DestructiveCancelProbeSnapshot::from_state(&shared, &state, None, channel);
+            assert!(terminal_envelope_present(&provider, &snapshot));
             std::fs::write(&output_path, vec![b'x'; usize::try_from(len + 1).unwrap()])
                 .expect("grow live capture");
 
