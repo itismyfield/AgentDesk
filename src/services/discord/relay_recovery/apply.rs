@@ -223,7 +223,7 @@ pub(super) async fn apply_relay_recovery_decision(
                                         == probe.inflight_identity.clone()
                             })
                             .map(|state| {
-                                super::DeliveryLeaseKey::from_inflight_state_for_site(
+                                crate::services::discord::DeliveryLeaseKey::from_inflight_state_for_site(
                                     owner_channel_id,
                                     shared.restart.current_generation,
                                     &state,
@@ -232,11 +232,11 @@ pub(super) async fn apply_relay_recovery_decision(
                             })
                             .as_ref()
                             .map(
-                                super::outbound::delivery_evidence_store::relay_evidence_for_turn,
+                                crate::services::discord::outbound::delivery_evidence_store::relay_evidence_for_turn,
                             );
                             let post_gate_blocked = shared.relay_emission_in_flight(owner_channel_id)
                                 || latest_evidence
-                                    != Some(super::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered);
+                                    != Some(crate::services::discord::outbound::delivery_evidence_store::RelayDeliveryEvidence::NotDelivered);
                             if post_gate_blocked {
                                 tracing::warn!(
                                     target: "agentdesk::discord::relay_recovery",
