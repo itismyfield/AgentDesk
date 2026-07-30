@@ -808,42 +808,69 @@ async fn submit_stale_foreign_inflight_cancel(
     if finalizer_turn_id == 0 {
         return false;
     }
-    let Some(current) = super::inflight::load_inflight_state(provider, channel_id.get()) else {
-        tracing::info!(
-            provider = %provider.as_str(),
-            channel_id = channel_id.get(),
-            finalizer_turn_id,
-            "tui_direct_pending_start: stale FOREIGN cancel no-op; inflight disappeared before finalizer submit"
-        );
-        return false;
-    };
     let mailbox_active_user_msg_id = super::mailbox_snapshot(shared, channel_id)
         .await
         .active_user_message_id
         .map(|id| id.get());
-    if !probe.pin.matches_state(&current)
-        || mailbox_active_user_msg_id != probe.pin.mailbox_active_user_msg_id
-        || current.updated_at != probe.updated_at
-        || current.save_generation != probe.save_generation
+    if mailbox_active_user_msg_id != probe.pin.mailbox_active_user_msg_id {
+        tracing::info!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            expected_mailbox_active_user_msg_id = probe.pin.mailbox_active_user_msg_id.unwrap_or(0),
+            mailbox_active_user_msg_id = mailbox_active_user_msg_id.unwrap_or(0),
+            "tui_direct_pending_start: stale FOREIGN cancel no-op; mailbox episode changed"
+        );
+        return false;
+    }
+    let expected_cancel = probe
+        .pin
+        .tmux_session_name
+        .as_deref()
+        .and_then(|tmux_session| shared.tmux_watchers.cancel_for_tmux_session(tmux_session));
+    let cancel_for_commit = expected_cancel.clone();
+    let commit_outcome = super::inflight::commit_destructive_cancel_locked(
+        provider,
+        channel_id.get(),
+        &probe.inflight_identity,
+        &probe.updated_at,
+        probe.save_generation,
+        move |_| {
+            if let Some(cancel) = cancel_for_commit {
+                cancel.store(true, std::sync::atomic::Ordering::Release);
+            }
+            Ok(super::inflight::CommitEvidence)
+        },
+    );
+    if commit_outcome != super::inflight::DestructiveCancelCommitOutcome::Committed {
+        tracing::info!(
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            ?commit_outcome,
+            "tui_direct_pending_start: stale FOREIGN cancel no-op; flock-held pin commit failed"
+        );
+        return false;
+    }
+    // The flock is released before registry CAS; the two lock domains never overlap.
+    if let (Some(tmux_session), Some(cancel)) = (
+        probe.pin.tmux_session_name.as_deref(),
+        expected_cancel.as_ref(),
+    ) && shared
+        .tmux_watchers
+        .remove_tmux_session_if_current(tmux_session, cancel)
+        .is_none()
     {
         tracing::info!(
             provider = %provider.as_str(),
             channel_id = channel_id.get(),
-            expected_finalizer_turn_id = finalizer_turn_id,
-            current_finalizer_turn_id = current.effective_finalizer_turn_id(),
-            expected_mailbox_active_user_msg_id = probe.pin.mailbox_active_user_msg_id.unwrap_or(0),
-            mailbox_active_user_msg_id = mailbox_active_user_msg_id.unwrap_or(0),
-            expected_tmux_session = ?probe.pin.tmux_session_name,
-            current_tmux_session = ?current.tmux_session_name,
-            expected_updated_at = %probe.updated_at,
-            current_updated_at = %current.updated_at,
-            expected_save_generation = probe.save_generation,
-            current_save_generation = current.save_generation,
-            "tui_direct_pending_start: stale FOREIGN cancel no-op; identity/death-evidence pin no longer matches"
+            tmux_session,
+            "tui_direct_pending_start: stale FOREIGN cancel committed but watcher incarnation changed; finalizer skipped"
         );
         return false;
     }
-    let stale_identity = super::inflight::InflightTurnIdentity::from_state(&current);
+    // E1 closes the watcher left behind at destruction time. It does not close a
+    // last pre-cancel self-heal iteration or later restoration/reclaim recreation
+    // (#5012/E3), nor durable observation of finalizer degradation (E2/E6).
+    let stale_identity = probe.inflight_identity.clone();
     let _ = shared
         .turn_finalizer
         .submit_terminal(
