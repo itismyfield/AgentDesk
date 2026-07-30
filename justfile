@@ -112,6 +112,6 @@ test-non-pg:
     cargo test --doc ClaudeBinary
 
 test-postgres:
-    cargo test -- _pg pg_ postgres --nocapture --test-threads=1
+    cargo test --lib -- _pg pg_ postgres --nocapture --test-threads=1
 
 check: fmt-check lint cargo-check test

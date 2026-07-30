@@ -146,11 +146,6 @@ jobs:
       PGPORT: "5432"
       PGUSER: postgres
       PGPASSWORD: postgres
-      # A cold PostgreSQL test build links the full PG-selected test binary.
-      # Splitting LLVM work across 256 codegen units lowers rustc's peak RSS;
-      # two cargo jobs retain adequate timeout headroom on hosted runners.
-      CARGO_BUILD_JOBS: "2"
-      CARGO_PROFILE_TEST_CODEGEN_UNITS: "256"
     steps:
       - uses: actions/checkout@v4
 
