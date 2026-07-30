@@ -1261,6 +1261,7 @@ mod thread_role_inheritance_tests {
         let channel_id = ChannelId::new(50_150_011);
         clear_test_defer(channel_id);
         let mut calls = Vec::new();
+        let probe_calls = std::cell::Cell::new(0_u32);
         for _ in 0..(RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT + 3) {
             let verdict = reconcile_managed_tmux_runtime_kind_for_config(
                 &ProviderKind::Claude,
@@ -1281,12 +1282,20 @@ mod thread_role_inheritance_tests {
                     open: true,
                     stale: true,
                 },
-                || crate::services::tui_turn_state::TuiTurnState::Streaming,
+                || {
+                    probe_calls.set(probe_calls.get() + 1);
+                    crate::services::tui_turn_state::TuiTurnState::Streaming
+                },
                 |_| true,
                 |name, _, _| calls.push(name.to_string()),
             );
             assert_eq!(verdict, RuntimeMismatchVerdict::Defer);
         }
+        assert_eq!(
+            probe_calls.get(),
+            RUNTIME_MISMATCH_DEFER_ESCALATION_COUNT + 3,
+            "every stale inflight decision must query the transcript"
+        );
         assert!(
             calls.is_empty(),
             "busy transcript must veto destructive cleanup"
