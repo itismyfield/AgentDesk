@@ -186,6 +186,25 @@ impl DiscordHealthSnapshot {
     }
 }
 
+fn resolve_bound_selector(
+    inflight_output_path: Option<&str>,
+    inflight_session_id: Option<&str>,
+    binding: Option<&crate::services::tui_prompt_dedupe::TuiRuntimeBinding>,
+) -> (Option<String>, Option<String>) {
+    fn non_blank(value: Option<&str>) -> Option<String> {
+        value
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    }
+
+    let bound_output_path = non_blank(inflight_output_path)
+        .or_else(|| non_blank(binding.map(|binding| binding.relay_output_path())));
+    let bound_session_id = non_blank(inflight_session_id)
+        .or_else(|| non_blank(binding.and_then(|binding| binding.session_id.as_deref())));
+    (bound_output_path, bound_session_id)
+}
+
 fn authoritative_tmux_session(
     enriched_session: Option<&str>,
     mailbox_cancel_session: Option<&str>,

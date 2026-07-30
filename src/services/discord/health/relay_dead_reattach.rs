@@ -107,8 +107,8 @@ pub(super) async fn try_apply(
 mod tests {
     use super::*;
     use crate::services::discord::relay_health::{RelayActiveTurn, RelayHealthSnapshot};
-    use std::sync::atomic::Ordering;
     use chrono::TimeZone;
+    use std::sync::atomic::Ordering;
 
     fn local_string(unix: i64) -> String {
         chrono::Local

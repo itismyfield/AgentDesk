@@ -85,9 +85,8 @@ impl SessionEnrichment {
             watcher_binding_tmux_session.as_deref(),
         );
         let relay_coord = shared.tmux_relay_coords.get(&channel);
-        let last_relay_offset_recorded = relay_offset_was_recorded(
-            relay_coord.as_ref().map(|coord| coord.value().as_ref()),
-        );
+        let last_relay_offset_recorded =
+            relay_offset_was_recorded(relay_coord.as_ref().map(|coord| coord.value().as_ref()));
         let (last_relay_offset, last_relay_ts_ms, reconnect_count) = relay_coord
             .as_ref()
             .map(|coord| {
@@ -269,9 +268,7 @@ fn liveness_probe_session(inflight: Option<&str>, watcher: Option<&str>) -> Opti
     inflight.or(watcher).map(str::to_string)
 }
 
-fn relay_offset_was_recorded(
-    coord: Option<&crate::services::discord::TmuxRelayCoord>,
-) -> bool {
+fn relay_offset_was_recorded(coord: Option<&crate::services::discord::TmuxRelayCoord>) -> bool {
     coord.is_some_and(|coord| {
         coord
             .confirmed_end_recorded

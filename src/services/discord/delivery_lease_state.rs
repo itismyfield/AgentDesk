@@ -1,4 +1,5 @@
 use super::{DeliveryLeaseKey, delivery_lease_evidence};
+use poise::serenity_prelude::ChannelId;
 
 // ===========================================================================
 // #3041 §2-§3 — Delivery-lease `DeliveryLeaseCell` state machine.

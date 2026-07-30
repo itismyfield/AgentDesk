@@ -1673,8 +1673,8 @@ mod relay_coord_tests {
 
 mod delivery_lease_state;
 pub(in crate::services::discord) use delivery_lease_state::{
-    DeliveryLeaseCell, DeliveryLeaseHeartbeat, LeaseSnapshot, DELIVERY_LEASE_DEADLINE_MS,
-    DELIVERY_LEASE_HEARTBEAT_MS, lease_now_ms,
+    DELIVERY_LEASE_DEADLINE_MS, DELIVERY_LEASE_HEARTBEAT_MS, DeliveryLeaseCell,
+    DeliveryLeaseHeartbeat, LeaseHolder, LeaseOutcome, LeaseSnapshot, lease_now_ms,
 };
 
 #[derive(Clone)]
