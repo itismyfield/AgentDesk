@@ -4796,7 +4796,7 @@ mod active_turn_kind_tests {
     }
 
     #[tokio::test]
-    async fn concurrent_exact_head_claims_have_one_winner_and_preserve_survivor_fifo() {
+    async fn stale_manual_claim_cannot_skip_oldest_queued_head() {
         let _lock = lock_test_env();
         let _env_guard = EnvGuard;
         let tmp = tempfile::tempdir().unwrap();
@@ -4813,8 +4813,36 @@ mod active_turn_kind_tests {
             );
         }
 
-        let first = handle.take_soft_matching(test_persistence(), Some(MessageId::new(102)));
-        let second = handle.take_soft_matching(test_persistence(), Some(MessageId::new(102)));
+        let active = Arc::new(CancelToken::new());
+        handle
+            .restore_active_turn(active, UserId::new(1), MessageId::new(99))
+            .await;
+        let stale = handle
+            .take_queue_head_matching_while_active(test_persistence(), MessageId::new(102))
+            .await;
+        assert!(
+            stale.intervention.is_none(),
+            "a card for a later item must not skip the oldest queued message"
+        );
+        assert_eq!(
+            handle
+                .snapshot()
+                .await
+                .intervention_queue
+                .iter()
+                .map(|item| item.message_id)
+                .collect::<Vec<_>>(),
+            vec![
+                MessageId::new(101),
+                MessageId::new(102),
+                MessageId::new(103)
+            ]
+        );
+
+        let first =
+            handle.take_queue_head_matching_while_active(test_persistence(), MessageId::new(101));
+        let second =
+            handle.take_queue_head_matching_while_active(test_persistence(), MessageId::new(101));
         let (first, second) = tokio::join!(first, second);
         let results = [first, second];
         assert_eq!(
@@ -4823,7 +4851,7 @@ mod active_turn_kind_tests {
                 .filter(|result| result.intervention.is_some())
                 .count(),
             1,
-            "two stale/concurrent button clicks must have exactly one atomic claimant"
+            "two clicks for the head must have exactly one atomic claimant"
         );
         let winner = results
             .iter()
@@ -4831,21 +4859,22 @@ mod active_turn_kind_tests {
             .expect("one claimant");
         assert_eq!(
             winner.intervention.as_ref().map(|item| item.message_id),
-            Some(MessageId::new(102))
+            Some(MessageId::new(101))
         );
         assert!(
             winner.dispatch_lease.is_some(),
             "the winner needs the rollback lease"
         );
-        let snapshot = handle.snapshot().await;
         assert_eq!(
-            snapshot
+            handle
+                .snapshot()
+                .await
                 .intervention_queue
                 .iter()
                 .map(|item| item.message_id)
                 .collect::<Vec<_>>(),
-            vec![MessageId::new(101), MessageId::new(103)],
-            "manual exact-head claim must not reorder remaining FIFO entries"
+            vec![MessageId::new(102), MessageId::new(103)],
+            "head claim must preserve FIFO among remaining entries"
         );
     }
 

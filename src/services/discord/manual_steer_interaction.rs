@@ -89,6 +89,16 @@ async fn render_current_head_card(
         queued_card_components(head.message_id),
     )
     .await?;
+    let key = crate::services::discord::placeholder_controller::PlaceholderKey {
+        provider: provider.clone(),
+        channel_id,
+        message_id: placeholder_message_id,
+    };
+    shared
+        .ui
+        .placeholder_controller
+        .invalidate_render_cache(&key)
+        .await;
     let persist_lock = shared.queued_placeholders_persist_lock(channel_id);
     let _persist_guard = persist_lock.lock().await;
     let stale_owners: Vec<_> = shared
@@ -104,16 +114,6 @@ async fn render_current_head_card(
         shared.remove_queued_placeholder_locked(channel_id, owner);
     }
     shared.insert_queued_placeholder_locked(channel_id, head.message_id, placeholder_message_id);
-    let key = crate::services::discord::placeholder_controller::PlaceholderKey {
-        provider: provider.clone(),
-        channel_id,
-        message_id: placeholder_message_id,
-    };
-    shared
-        .ui
-        .placeholder_controller
-        .invalidate_render_cache(&key)
-        .await;
     Ok(true)
 }
 
