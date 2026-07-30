@@ -220,13 +220,15 @@ class FastCheckCiWiringTests(unittest.TestCase):
         for path in (
             "src/services/discord/inflight.rs",
             "src/services/discord/inflight/**",
-            "src/services/discord/tmux_watcher/commit_decisions.rs",
+            "src/services/discord/tmux_watcher.rs",
+            "src/services/discord/tmux_watcher/**",
             "src/services/discord/turn_bridge/terminal_outcome_delivery.rs",
-            "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue.rs",
+            "src/services/discord/turn_bridge/terminal_outcome_delivery/**",
         ):
             self.assertIn(f"- '{path}'", changes_job)
         for command in (
             "cargo test --lib inflight::terminal_delivery_evidence_loss::tests",
+            "cargo test --lib terminal_delivery_epilogue_routes_identity_mismatch_to_warn",
             "cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row",
             "cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn",
         ):
