@@ -729,8 +729,11 @@ src/
 │   │   │   │   ├── intake_turn.rs
 │   │   │   │   ├── latency_spans.rs
 │   │   │   │   ├── provider_isolation.rs
+│   │   │   │   ├── runtime_mismatch.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
 │   │   │   │   ├── tui_followup.rs
+│   │   │   │   ├── tui_followup_retry.rs
+│   │   │   │   ├── tui_followup_retry_tests.rs
 │   │   │   │   ├── turn_lifecycle.rs
 │   │   │   │   ├── typing_indicator.rs
 │   │   │   │   ├── voice_announcement_route.rs

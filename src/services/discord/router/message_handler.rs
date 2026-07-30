@@ -53,6 +53,9 @@ mod latency_spans;
 mod provider_isolation;
 mod runtime_mismatch;
 mod tui_followup;
+mod tui_followup_retry;
+#[cfg(test)]
+mod tui_followup_retry_tests;
 mod turn_lifecycle;
 pub(in crate::services::discord) mod typing_indicator;
 mod voice_announcement_route;
@@ -63,6 +66,7 @@ use self::goal_lifecycle::*;
 use self::provider_isolation::*;
 use self::runtime_mismatch::*;
 use self::tui_followup::*;
+use self::tui_followup_retry::*;
 pub(in crate::services::discord) use self::turn_lifecycle::mailbox_try_start_turn_with_terminal_marker_cleanup;
 use self::turn_lifecycle::{
     cleanup_terminal_delivery_marker_after_turn_start, should_add_turn_pending_reaction,
