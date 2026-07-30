@@ -723,6 +723,8 @@ src/
 │   │   │   │   │   ├── turn_watchdog.rs
 │   │   │   │   │   ├── voice_intake.rs
 │   │   │   │   │   └── worker_entry.rs
+│   │   │   │   ├── provider_isolation/
+│   │   │   │   │   └── runtime_mismatch.rs
 │   │   │   │   ├── attachments.rs
 │   │   │   │   ├── busy_retry.rs
 │   │   │   │   ├── control.rs
