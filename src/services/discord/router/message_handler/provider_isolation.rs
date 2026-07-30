@@ -426,6 +426,7 @@ fn managed_runtime_transcript_state(
 #[cfg(unix)]
 #[path = "provider_isolation/runtime_mismatch.rs"]
 mod runtime_mismatch;
+#[cfg(unix)]
 pub(super) use runtime_mismatch::reconcile_managed_tmux_runtime_kind_using_runtime;
 #[cfg(unix)]
 use runtime_mismatch::{
