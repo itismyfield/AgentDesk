@@ -24,6 +24,7 @@ pub(super) struct RelayReattachEpisode {
     key: String,
     owner_user_id: u64,
     pin: super::super::inflight::InflightEpisodePin,
+    reservation_generation: Option<u64>,
 }
 
 impl RelayReattachEpisode {
@@ -59,6 +60,7 @@ impl RelayReattachEpisode {
             key: hasher.finalize().to_hex().to_string(),
             owner_user_id: state.request_owner_user_id,
             pin: super::super::inflight::InflightEpisodePin::from_state(state),
+            reservation_generation: None,
         }
     }
 
@@ -291,8 +293,10 @@ fn reserve_in_root(
     if persist_record(&path, &record).is_err() {
         return CircuitReservation::IoError;
     }
+    let mut reserved_episode = expected.clone();
+    reserved_episode.reservation_generation = Some(record.open_generation);
     CircuitReservation::Reserved {
-        episode: expected.clone(),
+        episode: reserved_episode,
         attempt: record.attempts,
         orphaned_staged_alert_ids: record.orphaned_staged_alert_ids.clone(),
     }
@@ -305,15 +309,14 @@ pub(super) fn should_use_durable_circuit(
     action == RelayRecoveryActionKind::ReattachWatcher && source != RelayRecoveryApplySource::Manual
 }
 
-pub(super) fn reserve_current_episode(
+pub(super) fn inspect_current_episode(
     provider: &ProviderKind,
     decision: &RelayRecoveryDecision,
-    max_attempts: u32,
-) -> CircuitReservation {
+) -> Result<RelayReattachEpisode, CircuitReservation> {
     let Some(state) =
         super::super::inflight::load_inflight_state_read_only(provider, decision.channel_id)
     else {
-        return CircuitReservation::MissingInflight;
+        return Err(CircuitReservation::MissingInflight);
     };
     if decision.provider != provider.as_str()
         || decision.affected.provider != provider.as_str()
@@ -323,9 +326,22 @@ pub(super) fn reserve_current_episode(
             && decision.affected.mailbox_active_user_msg_id != Some(state.user_msg_id))
         || decision.affected.tmux_session != state.tmux_session_name
     {
-        return CircuitReservation::StaleIdentity;
+        return Err(CircuitReservation::StaleIdentity);
     }
-    let expected = RelayReattachEpisode::from_state(&state);
+    Ok(RelayReattachEpisode::from_state(&state))
+}
+
+pub(super) fn reserve_inspected_episode(
+    provider: &ProviderKind,
+    decision: &RelayRecoveryDecision,
+    expected: &RelayReattachEpisode,
+    max_attempts: u32,
+) -> CircuitReservation {
+    let Some(state) =
+        super::super::inflight::load_inflight_state_read_only(provider, decision.channel_id)
+    else {
+        return CircuitReservation::MissingInflight;
+    };
     let Some(root) = super::super::runtime_store::runtime_root()
         .map(|root| root.join("discord_relay_recovery_circuit"))
     else {
@@ -334,10 +350,53 @@ pub(super) fn reserve_current_episode(
     reserve_in_root(
         &root,
         &state,
-        &expected,
+        expected,
         decision.evidence.last_relay_offset,
         max_attempts,
     )
+}
+
+pub(super) fn reserve_current_episode(
+    provider: &ProviderKind,
+    decision: &RelayRecoveryDecision,
+    max_attempts: u32,
+) -> CircuitReservation {
+    let expected = match inspect_current_episode(provider, decision) {
+        Ok(expected) => expected,
+        Err(reservation) => return reservation,
+    };
+    reserve_inspected_episode(provider, decision, &expected, max_attempts)
+}
+
+pub(super) fn refund_unhanded_episode_attempt(
+    provider: &ProviderKind,
+    channel_id: u64,
+    episode: &RelayReattachEpisode,
+) -> bool {
+    let Some(generation) = episode.reservation_generation else {
+        return false;
+    };
+    let Some(root) = super::super::runtime_store::runtime_root()
+        .map(|root| root.join("discord_relay_recovery_circuit"))
+    else {
+        return false;
+    };
+    let path = circuit_path(&root, provider, channel_id);
+    let Ok(_lock) = lock_path(&path) else {
+        return false;
+    };
+    let Ok(Some(mut record)) = load_record(&path) else {
+        return false;
+    };
+    if record.version != CIRCUIT_VERSION
+        || record.episode_key != episode.key
+        || record.open_generation != generation
+        || record.attempts == 0
+    {
+        return false;
+    }
+    record.attempts -= 1;
+    persist_record(&path, &record).is_ok()
 }
 
 fn open_alert_cas_in_root(
@@ -909,6 +968,36 @@ mod tests {
         );
         decision.affected.finalizer_turn_id = Some(state.effective_finalizer_turn_id());
         decision
+    }
+
+    #[test]
+    fn unhanded_attempt_refund_prevents_no_watcher_frontier_deadlock() {
+        let temp = tempfile::tempdir().expect("circuit root");
+        let _env = crate::config::set_agentdesk_root_for_test(temp.path());
+        let provider = ProviderKind::Codex;
+        let state = state(44_649);
+        let decision = decision_for_state(&state);
+        super::super::super::inflight::save_inflight_state(&state)
+            .expect("seed authoritative inflight");
+
+        for _ in 0..2 {
+            let expected = inspect_current_episode(&provider, &decision).expect("inspect episode");
+            let CircuitReservation::Reserved { episode, .. } =
+                reserve_inspected_episode(&provider, &decision, &expected, 2)
+            else {
+                panic!("a pre-handoff failure must be allowed to retry")
+            };
+            assert!(
+                refund_unhanded_episode_attempt(&provider, state.channel_id, &episode),
+                "failure before watcher handoff must release the durable spend"
+            );
+        }
+
+        let expected = inspect_current_episode(&provider, &decision).expect("inspect episode");
+        assert!(matches!(
+            reserve_inspected_episode(&provider, &decision, &expected, 2),
+            CircuitReservation::Reserved { attempt: 1, .. }
+        ));
     }
 
     #[test]

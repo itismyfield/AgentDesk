@@ -91,16 +91,35 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
 
     let mut reserved_episode = None;
     if circuit_breaker::should_use_durable_circuit(decision.action, source) {
-        match circuit_breaker::reserve_current_episode(
+        reserved_episode = match circuit_breaker::inspect_current_episode(provider, &decision) {
+            Ok(episode) => Some(episode),
+            Err(reservation) => {
+                return skipped_durable_reservation_response(
+                    shared,
+                    provider,
+                    decision,
+                    &key,
+                    reservation,
+                    alert_enqueue,
+                )
+                .await;
+            }
+        };
+    }
+
+    if let Some(episode) = reserved_episode.as_mut() {
+        match circuit_breaker::reserve_inspected_episode(
             provider,
             &decision,
+            episode,
             decision.auto_heal.max_attempts_per_window,
         ) {
             circuit_breaker::CircuitReservation::Reserved {
                 attempt,
-                episode,
+                episode: reserved,
                 orphaned_staged_alert_ids,
             } => {
+                *episode = reserved;
                 for staged_alert_id in orphaned_staged_alert_ids {
                     match alert_enqueue
                         .cancel(shared.pg_pool.as_ref(), staged_alert_id)
@@ -130,83 +149,19 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
                     episode = episode.short_key(),
                     "reserved durable relay reattach episode attempt"
                 );
-                reserved_episode = Some(episode);
             }
-            circuit_breaker::CircuitReservation::Open {
-                episode,
-                open,
-                alert_needed,
-                staged_alert_id,
-            } => {
-                cancel_unapplied_auto_heal_attempt(&key);
-                decision.auto_heal.remaining_attempts = 0;
-                decision.auto_heal.skipped_reason = Some("durable_reattach_circuit_open");
-                if alert_needed || staged_alert_id.is_some() {
-                    circuit_breaker::queue_or_resume_open_alert_with_enqueue(
-                        shared,
-                        provider,
-                        poise::serenity_prelude::ChannelId::new(decision.channel_id),
-                        &episode,
-                        &open,
-                        decision.auto_heal.max_attempts_per_window,
-                        staged_alert_id,
-                        alert_enqueue,
-                    )
-                    .await;
-                }
-                trace_relay_recovery_skipped(&decision, decision.auto_heal.skipped_reason);
-                return RelayRecoveryResponse {
-                    ok: false,
-                    mode: "apply",
-                    applied: false,
-                    skipped: true,
+            reservation => {
+                return skipped_durable_reservation_response(
+                    shared,
+                    provider,
                     decision,
-                    apply_result: None,
-                };
-            }
-            circuit_breaker::CircuitReservation::StaleIdentity => {
-                cancel_unapplied_auto_heal_attempt(&key);
-                decision.auto_heal.skipped_reason = Some("durable_reattach_stale_identity");
-                trace_relay_recovery_skipped(&decision, decision.auto_heal.skipped_reason);
-                return RelayRecoveryResponse {
-                    ok: false,
-                    mode: "apply",
-                    applied: false,
-                    skipped: true,
-                    decision,
-                    apply_result: None,
-                };
-            }
-            circuit_breaker::CircuitReservation::MissingInflight => {
-                cancel_unapplied_auto_heal_attempt(&key);
-                decision.auto_heal.skipped_reason = Some("durable_reattach_missing_inflight");
-                trace_relay_recovery_skipped(&decision, decision.auto_heal.skipped_reason);
-                return RelayRecoveryResponse {
-                    ok: false,
-                    mode: "apply",
-                    applied: false,
-                    skipped: true,
-                    decision,
-                    apply_result: None,
-                };
-            }
-            circuit_breaker::CircuitReservation::IoError => {
-                cancel_unapplied_auto_heal_attempt(&key);
-                decision.auto_heal.skipped_reason = Some("durable_reattach_store_unavailable");
-                trace_relay_recovery_skipped(&decision, decision.auto_heal.skipped_reason);
-                return RelayRecoveryResponse {
-                    ok: false,
-                    mode: "apply",
-                    applied: false,
-                    skipped: true,
-                    decision,
-                    apply_result: None,
-                };
+                    &key,
+                    reservation,
+                    alert_enqueue,
+                )
+                .await;
             }
         }
-    }
-
-    if let Some(episode) = reserved_episode.as_ref() {
         apply_boundary.after_reserve(episode).await;
     }
 
@@ -219,6 +174,22 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
         source,
     )
     .await;
+    if matches!(
+        apply_result.status,
+        "rebind_failed" | "provider_unavailable" | "reattach_episode_changed"
+    ) && let Some(episode) = reserved_episode.as_ref()
+    {
+        if !circuit_breaker::refund_unhanded_episode_attempt(provider, decision.channel_id, episode)
+        {
+            tracing::warn!(
+                target: "agentdesk::discord::relay_recovery",
+                provider = provider.as_str(),
+                channel_id = decision.channel_id,
+                episode = episode.short_key(),
+                "failed to refund durable relay reattach attempt before watcher handoff"
+            );
+        }
+    }
     let confirmation = classify_reattach_confirmation(
         shared,
         &decision,
@@ -255,6 +226,56 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
         skipped,
         decision,
         apply_result: Some(apply_result),
+    }
+}
+
+async fn skipped_durable_reservation_response(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    mut decision: RelayRecoveryDecision,
+    key: &str,
+    reservation: circuit_breaker::CircuitReservation,
+    alert_enqueue: &dyn circuit_breaker::CircuitAlertEnqueue,
+) -> RelayRecoveryResponse {
+    cancel_unapplied_auto_heal_attempt(key);
+    decision.auto_heal.skipped_reason = Some(match reservation {
+        circuit_breaker::CircuitReservation::Open {
+            episode,
+            open,
+            alert_needed,
+            staged_alert_id,
+        } => {
+            decision.auto_heal.remaining_attempts = 0;
+            if alert_needed || staged_alert_id.is_some() {
+                circuit_breaker::queue_or_resume_open_alert_with_enqueue(
+                    shared,
+                    provider,
+                    poise::serenity_prelude::ChannelId::new(decision.channel_id),
+                    &episode,
+                    &open,
+                    decision.auto_heal.max_attempts_per_window,
+                    staged_alert_id,
+                    alert_enqueue,
+                )
+                .await;
+            }
+            "durable_reattach_circuit_open"
+        }
+        circuit_breaker::CircuitReservation::StaleIdentity => "durable_reattach_stale_identity",
+        circuit_breaker::CircuitReservation::MissingInflight => "durable_reattach_missing_inflight",
+        circuit_breaker::CircuitReservation::IoError => "durable_reattach_store_unavailable",
+        circuit_breaker::CircuitReservation::Reserved { .. } => {
+            "durable_reattach_unexpected_reservation"
+        }
+    });
+    trace_relay_recovery_skipped(&decision, decision.auto_heal.skipped_reason);
+    RelayRecoveryResponse {
+        ok: false,
+        mode: "apply",
+        applied: false,
+        skipped: true,
+        decision,
+        apply_result: None,
     }
 }
 
