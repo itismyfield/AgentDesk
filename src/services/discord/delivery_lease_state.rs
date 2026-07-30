@@ -70,7 +70,7 @@ pub(in crate::services::discord) enum LeaseOutcome {
 /// #3041 P1-0: dormant, wired in P1-1...
 #[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
 #[derive(Clone, Debug)]
-pub(super) enum LeaseState {
+enum LeaseState {
     /// No holder; the lease is available to acquire.
     Unleased,
     /// Held by `holder` for delivery identity `key` until `deadline` (monotonic ms
@@ -122,9 +122,9 @@ pub(in crate::services::discord) fn lease_now_ms() -> u64 {
 /// a non-`UNLEASED` tag under the lock. The tag is taken/flipped under the
 /// payload mutex (never on its own); it is NOT a lock-free read fast path —
 /// `read()` always takes the mutex (#3041 R1 coherence fix).
-pub(super) const TAG_UNLEASED: u8 = 0;
-pub(super) const TAG_LEASED: u8 = 1;
-pub(super) const TAG_COMMITTED: u8 = 2;
+const TAG_UNLEASED: u8 = 0;
+const TAG_LEASED: u8 = 1;
+const TAG_COMMITTED: u8 = 2;
 
 /// One-time terminal-delivery right for a single `(channel, turn, byte_range)`
 /// (#3041 §2-§3). DORMANT in P1-0 — added alongside, NOT replacing,
@@ -137,14 +137,14 @@ pub(super) const TAG_COMMITTED: u8 = 2;
 #[allow(dead_code)] // #3041 P1-0: dormant, wired in P1-1..
 pub(in crate::services::discord) struct DeliveryLeaseCell {
     /// The channel this lease coordinates. Part of the lease identity.
-    pub(super) channel_id: ChannelId,
+    channel_id: ChannelId,
     /// Internal CAS gate tag (`TAG_*`). The acquire CAS on this word is the
     /// single-winner gate; it is flipped under the payload mutex, NOT lock-free
     /// for readers — `read()` takes the mutex.
-    pub(super) state_tag: std::sync::atomic::AtomicU8,
+    state_tag: std::sync::atomic::AtomicU8,
     /// Rich lease payload. Mutated by the CAS winner or a deadline reclaim, and
     /// read by `read()` — all under this one mutex (the coherence invariant).
-    pub(super) payload: std::sync::Mutex<LeaseState>,
+    payload: std::sync::Mutex<LeaseState>,
 }
 
 /// A point-in-time snapshot of a [`DeliveryLeaseCell`], returned by `read()`
