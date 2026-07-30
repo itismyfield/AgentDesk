@@ -619,6 +619,9 @@ pub(crate) enum EnqueueRefusalReason {
     /// A front-restored source is already reserved for dispatch or active.
     /// Re-inserting it would execute the same message again after that turn.
     SourceIdPendingOrActive,
+    /// A manual steering claim holds the final queue slot for a possible
+    /// front rollback. Accepting new work would make that rollback overflow.
+    QueueCapacityReserved,
     /// The queue's last entry matches the incoming intervention on
     /// `(author_id, text, reply_context, has_reply_boundary)` within
     /// `INTERVENTION_DEDUP_WINDOW` — rapid-resend dedup.
@@ -637,6 +640,7 @@ impl EnqueueRefusalReason {
             EnqueueRefusalReason::AlreadyActiveTurn => "already_active_turn",
             EnqueueRefusalReason::SourceIdAlreadyQueued => "source_id_already_queued",
             EnqueueRefusalReason::SourceIdPendingOrActive => "source_id_pending_or_active",
+            EnqueueRefusalReason::QueueCapacityReserved => "queue_capacity_reserved",
             EnqueueRefusalReason::LastItemDedup => "last_item_dedup",
             EnqueueRefusalReason::ActorUnreachable => "actor_unreachable",
             EnqueueRefusalReason::MailboxClosed => "mailbox_closed",
@@ -1969,6 +1973,9 @@ struct ChannelMailboxState {
     /// or by the bounded safety valve below.
     pending_user_dispatch: Option<MessageId>,
     pending_user_dispatch_lease: Option<Arc<DispatchLease>>,
+    /// A manual-steer claim temporarily reserves one queue slot so a failed
+    /// injection can restore its head without evicting newly accepted work.
+    manual_steer_capacity_lease: Option<Arc<DispatchLease>>,
     /// #3167 BLOCKER-2 SAFETY VALVE — consecutive `Background` starts refused
     /// SOLELY because of `pending_user_dispatch` (the queue is already empty).
     /// If a dequeued user turn is lost and never claims nor requeues, the
@@ -2606,6 +2613,18 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         });
                         continue;
                     }
+                    if state.intervention_queue.len() >= MAX_INTERVENTIONS_PER_CHANNEL - 1
+                        && state.manual_steer_capacity_lease.is_some()
+                    {
+                        let _ = reply.send(EnqueueInterventionResult {
+                            enqueued: false,
+                            merged: false,
+                            refusal_reason: Some(EnqueueRefusalReason::QueueCapacityReserved),
+                            queue_exit_events: Vec::new(),
+                            persistence_error: None,
+                        });
+                        continue;
+                    }
                     let previous_queue = state.intervention_queue.clone();
                     let mut enqueue_result = enqueue_intervention(
                         &mut state.intervention_queue,
@@ -2759,6 +2778,10 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         // the window so a Background start cannot slip in ahead.
                         if let Some(head) = dispatched_head {
                             let dispatch_lease = set_pending_user_dispatch(&mut state, head);
+                            if require_queue_head {
+                                state.manual_steer_capacity_lease =
+                                    Some(Arc::clone(&dispatch_lease));
+                            }
                             TakeNextSoftResult {
                                 intervention: next_result.intervention,
                                 dispatch_lease: Some(dispatch_lease),
@@ -2832,6 +2855,17 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             );
                             clear_pending_user_dispatch(&mut state);
                         }
+                        if state
+                            .manual_steer_capacity_lease
+                            .as_ref()
+                            .is_some_and(|lease| {
+                                dispatch_lease
+                                    .as_ref()
+                                    .is_some_and(|candidate| Arc::ptr_eq(lease, candidate))
+                            })
+                        {
+                            state.manual_steer_capacity_lease = None;
+                        }
                         RequeueInterventionResult {
                             enqueued: true,
                             refusal_reason: None,
@@ -2857,6 +2891,14 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                                 .is_some_and(|stored| Arc::ptr_eq(lease, stored))
                     });
                     if authorized {
+                        let clears_manual_capacity = state
+                            .manual_steer_capacity_lease
+                            .as_ref()
+                            .is_some_and(|lease| {
+                                dispatch_lease
+                                    .as_ref()
+                                    .is_some_and(|candidate| Arc::ptr_eq(lease, candidate))
+                            });
                         abandon_pending_dispatch_reservation(
                             &mut state,
                             channel_id,
@@ -2870,6 +2912,9 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                                 "clear_pending_dispatch_reservation"
                             },
                         );
+                        if clears_manual_capacity {
+                            state.manual_steer_capacity_lease = None;
+                        }
                     }
                     let _ = reply.send(authorized);
                 }

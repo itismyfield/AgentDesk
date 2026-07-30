@@ -20,6 +20,9 @@ pub(super) fn claude_tui_busy_followup_refusal_notice(
         Some(crate::services::turn_orchestrator::EnqueueRefusalReason::SourceIdAlreadyQueued) => {
             CLAUDE_TUI_BUSY_FOLLOWUP_ALREADY_QUEUED_NOTICE
         }
+        Some(crate::services::turn_orchestrator::EnqueueRefusalReason::QueueCapacityReserved) => {
+            "📬 수동 주입 처리 중이라 큐를 잠시 보호하고 있습니다. 잠시 후 다시 보내 주세요."
+        }
         Some(crate::services::turn_orchestrator::EnqueueRefusalReason::LastItemDedup) => {
             CLAUDE_TUI_BUSY_FOLLOWUP_DEDUP_NOTICE
         }
