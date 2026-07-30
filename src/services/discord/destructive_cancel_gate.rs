@@ -769,8 +769,10 @@ mod tests {
             let snapshot =
                 DestructiveCancelProbeSnapshot::from_state(&shared, &state, None, channel);
             assert!(terminal_envelope_present(&provider, &snapshot));
-            std::fs::write(&output_path, vec![b'x'; usize::try_from(len + 1).unwrap()])
-                .expect("grow live capture");
+            let mut grown = std::fs::read(&output_path).expect("read terminal capture");
+            grown.push(b'\n');
+            assert_eq!(grown.len(), usize::try_from(len + 1).unwrap());
+            std::fs::write(&output_path, grown).expect("grow live terminal capture");
             stale_mtime(&output_path);
 
             let gate = evaluate(&shared, &provider, channel, channel, &snapshot).await;
