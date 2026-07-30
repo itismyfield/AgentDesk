@@ -123,8 +123,27 @@ pub(super) async fn handle_delivery_epilogue(
                     );
                 }
                 crate::services::discord::inflight::GuardedSaveOutcome::Saved
-                | crate::services::discord::inflight::GuardedSaveOutcome::Missing
-                | crate::services::discord::inflight::GuardedSaveOutcome::IdentityMismatch => {}
+                | crate::services::discord::inflight::GuardedSaveOutcome::Missing => {}
+                // #5025: the terminal answer WAS delivered, but the row that
+                // would record it is now owned by another turn identity, so the
+                // mirror is (correctly) not clobbered — see the identity-gate
+                // invariant. Dropping it silently is what is wrong: the row then
+                // reads `terminal_delivery_committed = false` forever even though
+                // delivery succeeded, and every downstream consumer reads that as
+                // "never delivered". That drives the #4030 stale-demotion gate
+                // into an unbounded ~32s retry it can never satisfy, and feeds the
+                // out-of-band watchdog false RELAY-WEDGE alerts for a finished
+                // turn. Keep the non-clobber behaviour; make the evidence loss
+                // observable.
+                crate::services::discord::inflight::GuardedSaveOutcome::IdentityMismatch => {
+                    tracing::warn!(
+                        provider = %provider.as_str(),
+                        channel_id = channel_id.get(),
+                        current_msg_id = current_msg_id.get(),
+                        response_sent_offset,
+                        "turn bridge delivered the terminal answer but could not mirror terminal_delivery_committed: the inflight row is owned by a different turn identity, so this turn's delivery evidence is lost (row will read as undelivered)"
+                    );
+                }
             }
             for frozen_msg_id in terminal_full_replay_cleanup_msg_ids.drain(..) {
                 // #5413/#3607: current_msg_id is the terminal answer and is

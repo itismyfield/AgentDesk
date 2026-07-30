@@ -77,7 +77,26 @@ pub(super) fn mark_watcher_terminal_delivery_committed(
     );
     match outcome {
         crate::services::discord::inflight::WatcherTerminalCommitOutcome::Committed => true,
-        crate::services::discord::inflight::WatcherTerminalCommitOutcome::Skipped => false,
+        // #5025: the watcher relayed a terminal answer, but the identity guard
+        // refused the commit (a newer turn owns the row, or the pinned identity
+        // no longer matches). Not committing is correct — clobbering another
+        // turn's row is the thing the guard exists to prevent — but returning
+        // `false` with no trace made a delivered turn indistinguishable from a
+        // turn that never delivered, with nothing in the log to say which. That
+        // is what leaves `terminal_delivery_committed = false` on a finished
+        // turn and keeps the #4030 stale-demotion gate retrying forever.
+        crate::services::discord::inflight::WatcherTerminalCommitOutcome::Skipped => {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id = channel_id.get(),
+                tmux_session = %tmux_session_name,
+                expected_user_msg_id = expected_identity.user_msg_id,
+                last_offset,
+                turn_data_start_offset,
+                "watcher relayed a terminal answer but the inflight identity guard refused the commit; this turn's delivery evidence is lost (row will read as undelivered)"
+            );
+            false
+        }
         crate::services::discord::inflight::WatcherTerminalCommitOutcome::IoError => {
             tracing::warn!(
                 provider = %provider.as_str(),
