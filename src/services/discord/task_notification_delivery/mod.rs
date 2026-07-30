@@ -6,6 +6,7 @@
 
 mod card_post;
 mod card_render;
+mod footer_only_marker;
 mod gateway;
 mod response_chunks;
 mod store;
@@ -132,6 +133,10 @@ impl TaskNotificationContext {
         &self.event_key
     }
 
+    pub(super) fn summary(&self) -> Option<&str> {
+        (!self.summary.is_empty()).then_some(self.summary.as_str())
+    }
+
     /// Mirrors the footer-only eligibility used by the card policy: background
     /// notifications need a stable task or tool identity to own a footer slot.
     /// All other terminal notifications remain card-owned.
@@ -139,11 +144,6 @@ impl TaskNotificationContext {
         (matches!(self.routing_kind(), TaskNotificationKind::Background)
             && (self.task_id.is_some() || self.tool_use_id.is_some()))
         .then_some(self.event_key())
-    }
-
-    #[cfg(test)]
-    pub(super) fn footer_only_marker_event_key_for_test(&self) -> Option<&str> {
-        self.footer_only_marker_event_key()
     }
 
     pub(super) fn to_event(

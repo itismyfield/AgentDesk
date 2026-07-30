@@ -24,6 +24,76 @@ fn terminal_task_card_includes_shared_completion_metadata_4806() {
 }
 
 #[test]
+fn footer_only_marker_renders_background_summary_and_result_preview() {
+    let event = TaskCardEvent::from_task_prompt(
+        4_912,
+        "claude",
+        "AgentDesk-claude-4912",
+        "<task-notification><task-id>background-4912</task-id><status>completed</status><summary>Background command \"short task\" completed (exit code 0)</summary><result>Validated the changed files.\nNo follow-up action is needed.</result></task-notification>",
+    );
+
+    let marker = event.footer_only_marker_content();
+    assert!(marker.starts_with("⚙️ Background complete\n"));
+    assert!(marker.contains("Background command \"short task\" completed (exit code 0)"));
+    assert!(marker.contains("> Validated the changed files."));
+    assert!(marker.contains("> No follow-up action is needed."));
+}
+
+#[test]
+fn footer_only_marker_omits_private_task_anchors_from_rendered_preview() {
+    let event = TaskCardEvent::from_task_prompt(
+        4_912,
+        "claude",
+        "AgentDesk-claude-4912",
+        "<task-notification><task-id>background-4912</task-id><status>completed</status><summary>Background command \"short task\" completed (exit code 0)</summary><result>Visible result line.\n<task-notification> internal envelope\n<tool-use-id> toolu-private\n<output-file> /private/path</result></task-notification>",
+    );
+
+    let marker = event.footer_only_marker_content();
+    assert!(marker.contains("> Visible result line."));
+    assert!(
+        ![
+            "<task-notification>",
+            "<task-id>",
+            "<tool-use-id>",
+            "<output-file>",
+        ]
+        .iter()
+        .any(|anchor| marker.contains(anchor))
+    );
+}
+
+#[tokio::test]
+async fn footer_only_observation_keeps_full_card_for_later_promotion() {
+    let transport = FakeTransport::new();
+    let clients = clients();
+    let event = TaskCardEvent::from_task_prompt(
+        4_912,
+        "claude",
+        "AgentDesk-claude-4912",
+        "<task-notification><task-id>background-4912</task-id><status>completed</status><summary>Background command \"short task\" completed (exit code 0)</summary><result>Promotion retains this full card preview.</result></task-notification>",
+    );
+    let rendered = event.payload.render(1);
+
+    record_footer_only(None, &event)
+        .await
+        .expect("persist footer-only authority");
+    ensure_card(None, &clients, &transport, &event, EnsureIntent::Promotion)
+        .await
+        .expect("footer-only promotion");
+
+    assert_eq!(
+        transport
+            .content_hash_by_nonce
+            .lock()
+            .expect("fake card content hashes")
+            .values()
+            .next()
+            .cloned(),
+        Some(content_hash(&rendered))
+    );
+}
+
+#[test]
 fn footer_background_marker_key_is_stable_across_delivery_paths() {
     assert_eq!(
         footer_background_marker_session_key(
