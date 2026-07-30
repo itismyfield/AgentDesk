@@ -181,14 +181,13 @@ pub(super) fn resolve_ledger_key(
 /// (wired into the `bridge_handoff_finds_watcher_handle` invariant).
 fn ledger_has_live_watcher_pending(
     ledger: &HashMap<LedgerKey, LedgerEntry>,
-    channel_id: ChannelId,
-    generation: u64,
-    user_msg_id: Option<u64>,
+    key: TurnKey,
+    exact: bool,
 ) -> bool {
     ledger.iter().any(|(lk, entry)| {
-        lk.channel_id == channel_id
-            && lk.generation == generation
-            && user_msg_id.is_none_or(|expected| lk.user_msg_id == expected)
+        lk.channel_id == key.channel_id
+            && lk.generation == key.generation
+            && (!exact || lk.user_msg_id == key.user_msg_id)
             && entry.phase != Phase::Finalized
             && entry.relay_owner == RelayOwnerKind::Watcher
     })
@@ -563,35 +562,22 @@ impl TurnFinalizer {
         channel_id: ChannelId,
         generation: u64,
     ) -> bool {
-        let (ack, rx) = oneshot::channel();
-        if self
-            .tx
-            .send(FinalizeMsg::QueryWatcherPending {
-                channel_id,
-                generation,
-                user_msg_id: None,
-                ack,
-            })
-            .is_err()
-        {
-            return false;
-        }
-        rx.await.unwrap_or(false)
+        self.query_live_watcher_pending(TurnKey::new(channel_id, 0, generation), false)
+            .await
     }
 
     pub(in crate::services::discord) async fn has_exact_live_watcher_pending(
         &self,
         key: TurnKey,
     ) -> bool {
+        self.query_live_watcher_pending(key, true).await
+    }
+
+    async fn query_live_watcher_pending(&self, key: TurnKey, exact: bool) -> bool {
         let (ack, rx) = oneshot::channel();
         if self
             .tx
-            .send(FinalizeMsg::QueryWatcherPending {
-                channel_id: key.channel_id,
-                generation: key.generation,
-                user_msg_id: Some(key.user_msg_id),
-                ack,
-            })
+            .send(FinalizeMsg::QueryWatcherPending { key, exact, ack })
             .is_err()
         {
             return false;
@@ -818,19 +804,8 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         let _ = ack.send(released);
                     }
                     // #3016 S1: pure read of the actor-owned ledger — no mutation.
-                    FinalizeMsg::QueryWatcherPending {
-                        channel_id,
-                        generation,
-                        user_msg_id,
-                        ack,
-                    } => {
-                        let pending = ledger_has_live_watcher_pending(
-                            &ledger,
-                            channel_id,
-                            generation,
-                            user_msg_id,
-                        );
-                        let _ = ack.send(pending);
+                    FinalizeMsg::QueryWatcherPending { key, exact, ack } => {
+                        let _ = ack.send(ledger_has_live_watcher_pending(&ledger, key, exact));
                     }
                 }
             }

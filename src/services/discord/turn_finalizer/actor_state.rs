@@ -92,9 +92,8 @@ pub(super) enum FinalizeMsg {
         ack: oneshot::Sender<bool>,
     },
     QueryWatcherPending {
-        channel_id: ChannelId,
-        generation: u64,
-        user_msg_id: Option<u64>,
+        key: TurnKey,
+        exact: bool,
         ack: oneshot::Sender<bool>,
     },
 }
