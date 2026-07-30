@@ -102,8 +102,18 @@ targets = {
     "runs_on" => "ubuntu-latest",
     # #5025 re-pins after adding the production bridge-epilogue routing test to
     # the existing toolchain-provisioned targeted lane whose mirror is required.
-    "job_sha256" => "561114d54ad205a9e65f82c5ce27c79b03069e26c94af0d35b515fe6fce3f082",
+    # #4985 keeps footer-marker regressions in that same branch-protected lane;
+    # both land in one job block, so the pin is recomputed for the merged content.
+    "job_sha256" => "6c60e700d0e2417135e76ae69e316fd79b94180fae74eebee672dc288e39fee5",
     "cargo_steps" => {
+      "Footer-only marker regressions" => {
+        "commands" => [
+          "cargo test --lib task_notification -- --skip _pg --skip pg_ --skip postgres",
+          "cargo test --lib services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests -- --skip _pg --skip pg_ --skip postgres",
+        ],
+        "continue_on_error" => nil,
+        "timeout_minutes" => 10,
+      },
       "Trusted session forwarding tests" => {
         "commands" => ["env -u AGENTDESK_ROOT_DIR cargo test --lib services::session_forwarding -- --skip _pg --skip pg_ --skip postgres"],
         "continue_on_error" => nil,

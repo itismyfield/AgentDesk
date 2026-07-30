@@ -144,6 +144,15 @@ jobs:
               - 'src/services/scheduled_messages.rs'
               - 'src/services/scheduled_messages/**'
               - 'src/services/discord/outbound/source_registry.rs'
+              # #4985: footer marker changes require the protected targeted lane.
+              # Glob rather than a file list: enumerating siblings silently drops
+              # newly extracted modules (footer_only_marker.rs was created by this
+              # PR and missed the list), which skips the lane for the very file
+              # the change lives in.
+              - 'src/services/discord/task_notification_delivery/**'
+              - 'src/services/discord/tmux.rs'
+              - 'src/services/discord/tmux_watcher/discrete_trigger_marker.rs'
+              - 'src/services/discord/tui_prompt_relay/task_notification_prompt.rs'
               - 'src/services/message_outbox.rs'
               - 'src/services/message_outbox_recovery.rs'
               - 'src/services/message_outbox_recovery_support.rs'
@@ -585,6 +594,17 @@ jobs:
           cache-bin: false
           shared-key: cargo-dependencies-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Footer-only marker regressions
+        timeout-minutes: 10
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          cargo test --lib task_notification -- --skip _pg --skip pg_ --skip postgres
+          cargo test --lib services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests -- --skip _pg --skip pg_ --skip postgres
 
       - name: Trusted session forwarding tests
         timeout-minutes: 10
