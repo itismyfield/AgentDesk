@@ -45,6 +45,23 @@ fn fresh_routine_turn(metadata: Option<&serde_json::Value>) -> bool {
         != Some("persistent")
 }
 
+fn preserved_headless_defer_result(
+    channel_id: ChannelId,
+    reservation: HeadlessTurnReservation,
+    retry_preserved: bool,
+) -> Result<HeadlessTurnStartOutcome, HeadlessTurnStartError> {
+    if !retry_preserved {
+        return Err(HeadlessTurnStartError::Internal(format!(
+            "managed runtime mismatch retry could not be preserved for channel {}",
+            channel_id.get()
+        )));
+    }
+    Ok(HeadlessTurnStartOutcome {
+        turn_id: reservation.turn_id(channel_id),
+        status: HeadlessTurnStartStatus::Consumed,
+    })
+}
+
 async fn persist_boundary_before_provider_clear<B, BFut, C, CFut, E>(
     persist_boundary: bool,
     clear_provider: bool,
@@ -1122,16 +1139,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             .cancelled
             .store(true, std::sync::atomic::Ordering::Relaxed);
         super::super::super::clear_watchdog_deadline_override(channel_id.get()).await;
-        if !retry_preserved {
-            return Err(HeadlessTurnStartError::Internal(format!(
-                "managed runtime mismatch retry could not be preserved for channel {}",
-                channel_id.get()
-            )));
-        }
-        return Ok(headless_runtime_mismatch_defer_outcome(
-            channel_id,
-            reservation,
-        ));
+        return preserved_headless_defer_result(channel_id, reservation, retry_preserved);
     }
     let effective_runtime_kind = prelaunch_runtime_kind.map(|expectation| expectation.runtime_kind);
 
@@ -1487,32 +1495,39 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     })
 }
 
-fn headless_runtime_mismatch_defer_outcome(
-    channel_id: ChannelId,
-    reservation: HeadlessTurnReservation,
-) -> HeadlessTurnStartOutcome {
-    HeadlessTurnStartOutcome {
-        turn_id: reservation.turn_id(channel_id),
-        status: HeadlessTurnStartStatus::Consumed,
-    }
-}
-
 #[cfg(test)]
 mod runtime_mismatch_defer_outcome_tests {
     use super::*;
 
+    fn reservation() -> HeadlessTurnReservation {
+        HeadlessTurnReservation {
+            user_msg_id: MessageId::new(50_150_301),
+            placeholder_msg_id: MessageId::new(50_150_302),
+        }
+    }
+
     #[test]
     fn preserved_runtime_mismatch_defer_is_accepted_not_conflict_5015() {
         let channel_id = ChannelId::new(50_150_300);
-        let reservation = HeadlessTurnReservation {
-            user_msg_id: MessageId::new(50_150_301),
-            placeholder_msg_id: MessageId::new(50_150_302),
-        };
+        let reservation = reservation();
 
-        let outcome = headless_runtime_mismatch_defer_outcome(channel_id, reservation);
+        let outcome = preserved_headless_defer_result(channel_id, reservation, true)
+            .expect("durably preserved defer must be accepted");
 
         assert_eq!(outcome.turn_id, reservation.turn_id(channel_id));
         assert_eq!(outcome.status, HeadlessTurnStartStatus::Consumed);
+    }
+
+    #[test]
+    fn unpreserved_runtime_mismatch_defer_remains_internal_5015() {
+        let error = preserved_headless_defer_result(
+            ChannelId::new(50_150_300),
+            reservation(),
+            false,
+        )
+        .expect_err("unpreserved defer must remain a real failure");
+
+        assert!(matches!(error, HeadlessTurnStartError::Internal(_)));
     }
 }
 
