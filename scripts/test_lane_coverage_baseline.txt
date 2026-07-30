@@ -489,7 +489,6 @@ services::discord::turn_bridge::streaming_edit_text::pre_submission_tui_prompt_e
 services::discord::turn_bridge::streaming_edit_text::streaming_edit_text_tests
 services::discord::turn_bridge::terminal_controller_cutover::tests
 services::discord::turn_bridge::terminal_delivery::relay_state_contract_refs
-services::discord::turn_bridge::terminal_delivery::tests
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::guidance::tests
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::handler::tests
 services::discord::turn_bridge::terminal_outcome_delivery::prompt_too_long_guidance::tests
