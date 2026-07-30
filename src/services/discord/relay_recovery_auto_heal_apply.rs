@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use super::auto_heal_attempts::{
-    auto_heal_key, cancel_unapplied_auto_heal_attempt, commit_auto_heal_attempt,
-    record_auto_heal_confirm_failure, refund_auto_heal_attempt, remaining_auto_heal_attempts,
-    reserve_auto_heal_attempt,
+    auto_heal_attempt_generation, auto_heal_key, cancel_unapplied_auto_heal_attempt_if_current,
+    commit_auto_heal_attempt_if_current, record_auto_heal_confirm_failure_if_current,
+    refund_auto_heal_attempt_if_current, remaining_auto_heal_attempts, reserve_auto_heal_attempt,
 };
 use super::auto_heal_confirm::{ReattachConfirmation, classify_reattach_confirmation};
 use super::*;
@@ -88,6 +88,8 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
             };
         }
     }
+    let attempt_generation = auto_heal_attempt_generation(&key)
+        .expect("successful auto-heal reservation must publish a generation");
 
     let mut reserved_episode = None;
     if circuit_breaker::should_use_durable_circuit(decision.action, source) {
@@ -99,6 +101,7 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
                     provider,
                     decision,
                     &key,
+                    attempt_generation,
                     reservation,
                     alert_enqueue,
                 )
@@ -156,6 +159,7 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
                     provider,
                     decision,
                     &key,
+                    attempt_generation,
                     reservation,
                     alert_enqueue,
                 )
@@ -198,7 +202,13 @@ pub(super) async fn apply_relay_recovery_plan_with_seams(
         chrono::Utc::now().timestamp(),
     )
     .await;
-    settle_auto_heal_confirmation(&mut apply_result, confirmation, &key, now_ms);
+    settle_auto_heal_confirmation(
+        &mut apply_result,
+        confirmation,
+        &key,
+        attempt_generation,
+        now_ms,
+    );
     let skipped = apply_result.status == "reattach_episode_changed";
     if skipped {
         decision.auto_heal.skipped_reason = Some("durable_reattach_confirmation_episode_changed");
@@ -234,10 +244,11 @@ async fn skipped_durable_reservation_response(
     provider: &ProviderKind,
     mut decision: RelayRecoveryDecision,
     key: &str,
+    attempt_generation: u64,
     reservation: circuit_breaker::CircuitReservation,
     alert_enqueue: &dyn circuit_breaker::CircuitAlertEnqueue,
 ) -> RelayRecoveryResponse {
-    cancel_unapplied_auto_heal_attempt(key);
+    cancel_unapplied_auto_heal_attempt_if_current(key, attempt_generation);
     decision.auto_heal.skipped_reason = Some(match reservation {
         circuit_breaker::CircuitReservation::Open {
             episode,
@@ -283,23 +294,24 @@ fn settle_auto_heal_confirmation(
     apply_result: &mut RelayRecoveryApplyResult,
     confirmation: ReattachConfirmation,
     key: &str,
+    attempt_generation: u64,
     now_ms: i64,
 ) {
     match confirmation {
         ReattachConfirmation::StartupGrace => {
             apply_result.status = "reattach_confirm_startup_grace";
-            commit_auto_heal_attempt(&key);
+            commit_auto_heal_attempt_if_current(key, attempt_generation);
         }
         ReattachConfirmation::RelayEmissionInFlight => {
             apply_result.status = "reattach_confirm_emission_in_flight";
-            commit_auto_heal_attempt(&key);
+            commit_auto_heal_attempt_if_current(key, attempt_generation);
         }
         ReattachConfirmation::Failed => {
             apply_result.status = "reattach_confirm_failed";
             apply_result.reattach_error = Some(
                 "spawned watcher did not confirm heartbeat or relay-frontier progress".to_string(),
             );
-            record_auto_heal_confirm_failure(&key, now_ms);
+            record_auto_heal_confirm_failure_if_current(key, attempt_generation, now_ms);
         }
         ReattachConfirmation::NotRequired | ReattachConfirmation::Confirmed => {
             // #5021: `NotRequired` is "confirmation was skipped", not
@@ -313,9 +325,9 @@ fn settle_auto_heal_confirmation(
                 "rebind_failed" | "provider_unavailable" | "reattach_episode_changed"
             ) || relay_recovery_status_repaired_nothing(apply_result.status)
             {
-                refund_auto_heal_attempt(&key, now_ms);
+                refund_auto_heal_attempt_if_current(key, attempt_generation, now_ms);
             } else {
-                commit_auto_heal_attempt(&key);
+                commit_auto_heal_attempt_if_current(key, attempt_generation);
             }
         }
     }
@@ -414,6 +426,7 @@ mod tests {
             &mut apply_result,
             ReattachConfirmation::RelayEmissionInFlight,
             &key,
+            auto_heal_attempt_generation(&key).expect("reservation generation"),
             2_000,
         );
 
@@ -476,6 +489,7 @@ mod tests {
                 &mut apply_result,
                 ReattachConfirmation::NotRequired,
                 &key,
+                auto_heal_attempt_generation(&key).expect("reservation generation"),
                 now_ms,
             );
             assert_eq!(apply_result.status, "reuse_existing_live_watcher");
@@ -519,6 +533,7 @@ mod tests {
                 &mut apply_result,
                 ReattachConfirmation::Confirmed,
                 &key,
+                auto_heal_attempt_generation(&key).expect("reservation generation"),
                 now_ms,
             );
             now_ms += 1_000;
@@ -640,6 +655,7 @@ mod tests {
             &mut apply_result,
             ReattachConfirmation::StartupGrace,
             &key,
+            auto_heal_attempt_generation(&key).expect("reservation generation"),
             2_000,
         );
 

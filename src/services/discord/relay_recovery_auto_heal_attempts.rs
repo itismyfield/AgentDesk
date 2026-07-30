@@ -40,6 +40,7 @@ struct AttemptWindow {
     attempts: u32,
     consecutive_refunds: u32,
     retry_not_before_ms: Option<i64>,
+    generation: u64,
 }
 
 impl AttemptWindow {
@@ -49,6 +50,7 @@ impl AttemptWindow {
             attempts: 0,
             consecutive_refunds: 0,
             retry_not_before_ms: None,
+            generation: 0,
         }
     }
 
@@ -60,11 +62,13 @@ impl AttemptWindow {
             self.retry_not_before_ms = None;
             self.window_start_ms = now_ms;
             self.attempts = 0;
+            self.generation = self.generation.wrapping_add(1);
         } else if self.retry_not_before_ms.is_none()
             && now_ms.saturating_sub(self.window_start_ms) >= AUTO_HEAL_WINDOW_SECS * 1000
         {
             self.window_start_ms = now_ms;
             self.attempts = 0;
+            self.generation = self.generation.wrapping_add(1);
         }
     }
 
@@ -131,12 +135,49 @@ pub(super) fn reserve_auto_heal_attempt(
         return Err("auto_heal_rate_limited");
     }
     window.attempts += 1;
+    window.generation = window.generation.wrapping_add(1);
     Ok(max_attempts_per_window.saturating_sub(window.attempts))
 }
 
 /// Return a reservation consumed by a spawn/rebind failure. Consecutive
 /// refunds are retained across ordinary windows; the third failure opens a
 /// 1,200s retry window and later consecutive failures expand it exponentially.
+pub(super) fn auto_heal_attempt_generation(key: &str) -> Option<u64> {
+    auto_heal_attempts()
+        .lock()
+        .expect("relay recovery attempt map poisoned")
+        .get(key)
+        .map(|window| window.generation)
+}
+
+fn current_attempt_generation(key: &str, generation: u64) -> bool {
+    auto_heal_attempt_generation(key) == Some(generation)
+}
+
+pub(super) fn refund_auto_heal_attempt_if_current(key: &str, generation: u64, now_ms: i64) {
+    if current_attempt_generation(key, generation) {
+        refund_auto_heal_attempt(key, now_ms);
+    }
+}
+
+pub(super) fn cancel_unapplied_auto_heal_attempt_if_current(key: &str, generation: u64) {
+    if current_attempt_generation(key, generation) {
+        cancel_unapplied_auto_heal_attempt(key);
+    }
+}
+
+pub(super) fn record_auto_heal_confirm_failure_if_current(key: &str, generation: u64, now_ms: i64) {
+    if current_attempt_generation(key, generation) {
+        record_auto_heal_confirm_failure(key, now_ms);
+    }
+}
+
+pub(super) fn commit_auto_heal_attempt_if_current(key: &str, generation: u64) {
+    if current_attempt_generation(key, generation) {
+        commit_auto_heal_attempt(key);
+    }
+}
+
 pub(super) fn refund_auto_heal_attempt(key: &str, now_ms: i64) {
     let mut attempts = auto_heal_attempts()
         .lock()
@@ -317,6 +358,28 @@ mod tests {
             reserve_auto_heal_attempt(&internal, 2_000, 1),
             Ok(0),
             "manual exhaustion must not consume the internal budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn late_settlement_cannot_mutate_new_window_reservation() {
+        let _guard = auto_heal_test_lock().lock().await;
+        clear_auto_heal_attempts_for_tests();
+        let key = key();
+        assert_eq!(reserve_auto_heal_attempt(&key, 1_000, 1), Ok(0));
+        let stale_generation = auto_heal_attempt_generation(&key).expect("old generation");
+        assert_eq!(
+            reserve_auto_heal_attempt(&key, 1_000 + AUTO_HEAL_WINDOW_SECS * 1000, 1),
+            Ok(0)
+        );
+        let current_generation = auto_heal_attempt_generation(&key).expect("new generation");
+        assert_ne!(stale_generation, current_generation);
+
+        refund_auto_heal_attempt_if_current(&key, stale_generation, 2_000);
+        assert_eq!(
+            reserve_auto_heal_attempt(&key, 1_000 + AUTO_HEAL_WINDOW_SECS * 1000 + 1, 1),
+            Err("auto_heal_rate_limited"),
+            "late settlement from the old round must not refund the new reservation"
         );
     }
 
