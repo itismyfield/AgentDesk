@@ -224,6 +224,23 @@ impl SharedData {
             .remove(&(provider.clone(), channel_id));
     }
 
+    pub(in crate::services::discord) fn has_readopted_mailbox_owner_for_episode(
+        &self,
+        provider: &ProviderKind,
+        channel_id: u64,
+        state: &InflightTurnState,
+    ) -> bool {
+        let turn_pin = ReadoptedMailboxTurnPin::from_state(state);
+        self.readopted_mailbox_ledger
+            .entries
+            .get(&(provider.clone(), channel_id))
+            .is_some_and(|entry| {
+                entry.owner_user_id == state.request_owner_user_id
+                    && entry.active_user_message_id == state.effective_finalizer_turn_id()
+                    && entry.turn_pin.as_ref() == Some(&turn_pin)
+            })
+    }
+
     #[cfg(test)]
     pub(in crate::services::discord) fn readopted_mailbox_turn_pin_for_test(
         &self,

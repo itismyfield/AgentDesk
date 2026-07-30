@@ -271,7 +271,13 @@ async fn reregister_active_turn_from_inflight_inner(
             );
             // #4370: a real-user turn re-bound to the mailbox across a restart.
             if readopted_ledger_record_allowed(state) {
-                let marker_changed = !state.readopted_from_inflight;
+                let ledger_changed = !persist_durable_marker
+                    && !shared.has_readopted_mailbox_owner_for_episode(
+                        &provider,
+                        channel_id.get(),
+                        state,
+                    );
+                let marker_changed = persist_durable_marker && !state.readopted_from_inflight;
                 let marker_outcome = mark_readopted_from_inflight(
                     shared,
                     &provider,
@@ -279,8 +285,8 @@ async fn reregister_active_turn_from_inflight_inner(
                     state,
                     persist_durable_marker,
                 );
-                mailbox_binding_changed |=
-                    marker_changed && matches!(marker_outcome, inflight::GuardedSaveOutcome::Saved);
+                mailbox_binding_changed |= (ledger_changed || marker_changed)
+                    && matches!(marker_outcome, inflight::GuardedSaveOutcome::Saved);
             }
         }
         return ActiveTurnReregisterOutcome {
