@@ -6,5 +6,6 @@
 # (e.g. an entire suite behind #[cfg(target_os = "...")]) and document the
 # reason in a `#` comment directly above the entry.
 #
-# Do NOT allowlist target-mismatch violations (wrong --lib/--bin/--test
-# pairing): fix the command instead.
+# target-mismatch violations (wrong --lib/--bin/--test pairing) can NOT be
+# allowlisted — check_test_target_integrity.py ignores allowlist entries for
+# that kind in code. Fix the command instead.

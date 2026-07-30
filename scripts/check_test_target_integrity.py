@@ -6,7 +6,9 @@ pairing the wrong target flag (e.g. `--bin agentdesk`) with a lib-only module
 filter runs 0 tests while its required check stays green. This gate statically
 cross-checks each workflow `cargo test` command's `--lib`/`--bin`/`--test`
 selection against where the filtered module is declared (module tree walked
-from Cargo.toml target roots; no compilation). Default mode is warn-only
+from Cargo.toml target roots, following `#[path = "..."]` redirections; no
+compilation). A filtered command whose selected target declares no modules at
+all is always flagged. Default mode is warn-only
 (rc=0) until the known offenders are repaired; `--enforce` makes violations
 fatal, and opt-in `--run-list-check` additionally runs
 `cargo test ... -- --list` (compiles) to flag lanes selecting 0 tests.
@@ -28,6 +30,8 @@ from pathlib import Path
 MOD_DECL = re.compile(
     r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*([;{])"
 )
+ATTR_PATH = re.compile(r'^\s*#\[path\s*=\s*"([^"]+)"\s*\]')
+ATTR_LINE = re.compile(r"^\s*#\[")
 # Options consuming a value; their value must not be read as a filter.
 CARGO_VALUE_OPTIONS = {
     "-p", "--package", "--exclude", "-j", "--jobs", "--features", "--profile",
@@ -50,8 +54,10 @@ class Violation:
     detail: str
 
     def render(self) -> str:
-        return (f"{self.workflow}:{self.line}: [{self.kind}] {self.detail}\n"
-                f"    command: {self.command}")
+        # Single line: GitHub `::warning::` annotations only surface the
+        # first line, so the command must live on the same line.
+        return (f"{self.workflow}:{self.line}: [{self.kind}] {self.detail} "
+                f"(command: {self.command})")
 
 
 def load_allowlist(path: Path) -> set[str]:
@@ -90,19 +96,35 @@ def collect_modules(root: Path, repo_root: Path) -> dict[str, str]:
         if source in seen or not source.is_file():
             continue
         seen.add(source)
+        pending_path: str | None = None
         for lineno, line in enumerate(source.read_text("utf-8").splitlines(), 1):
+            attr = ATTR_PATH.match(line)
+            if attr:
+                pending_path = attr.group(1)
+                continue
             match = MOD_DECL.match(line)
             if not match:
+                # Other attributes (#[cfg], ...) may sit between #[path] and
+                # the mod item; any other non-blank line detaches the attr.
+                if line.strip() and not ATTR_LINE.match(line):
+                    pending_path = None
                 continue
             name, terminator = match.groups()
+            redirect, pending_path = pending_path, None
             modules.setdefault(name, f"{source.relative_to(repo_root)}:{lineno}")
             if terminator != ";":
                 continue  # inline module: same-file lines are already scanned
-            if source.name in ("lib.rs", "main.rs", "mod.rs"):
+            if redirect is not None:
+                # #[path = "..."] outside inline blocks is relative to the
+                # directory of the declaring source file.
+                candidates: tuple[Path, ...] = (source.parent / redirect,)
+            elif source.name in ("lib.rs", "main.rs", "mod.rs"):
                 base = source.parent
+                candidates = (base / f"{name}.rs", base / name / "mod.rs")
             else:
                 base = source.parent / source.stem
-            for candidate in (base / f"{name}.rs", base / name / "mod.rs"):
+                candidates = (base / f"{name}.rs", base / name / "mod.rs")
+            for candidate in candidates:
                 if candidate.is_file():
                     queue.append(candidate)
                     break
@@ -224,6 +246,12 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
             findings.append(("unknown-module", (
                 f"module-path filter `{filt}`: leading segment `{lead}` is "
                 f"not a module in any known target")))
+    if spec.filters and not selected and not findings:
+        # Decisive signal: the selected target declares no modules at all, so
+        # ANY filter (typo'd, ::-less, whatever) selects 0 tests there.
+        findings.append(("empty-target", (
+            f"selected target(s) {'/'.join(spec.targets)} declare no modules; "
+            f"every libtest filter runs 0 tests there and cargo still exits 0")))
     return findings
 
 
@@ -247,15 +275,21 @@ def check_workflows(repo_root: Path, workflows: list[Path], allowlist: set[str],
     }
     violations: list[Violation] = []
     for workflow in workflows:
-        rel = str(workflow.relative_to(repo_root))
+        rel = (str(workflow.relative_to(repo_root))
+               if workflow.is_relative_to(repo_root) else str(workflow))
         for lineno, words, normalized in extract_commands(workflow):
-            if normalized in allowlist:
-                continue
+            allowlisted = normalized in allowlist
             spec = parse_command(words)
             if spec.skipped:
                 continue
             findings = validate_command(spec, inventories, repo_root)
-            if with_list_check and not findings:
+            if allowlisted:
+                # The allowlist only excuses legitimately-empty lanes; a
+                # target-mismatch means the command itself is wrong and must
+                # be fixed, never allowlisted (enforced here, not just docs).
+                findings = [(kind, detail) for kind, detail in findings
+                            if kind == "target-mismatch"]
+            if with_list_check and not findings and not allowlisted:
                 detail = run_list_check(words, repo_root)
                 if detail:
                     findings.append(("zero-match", detail))
