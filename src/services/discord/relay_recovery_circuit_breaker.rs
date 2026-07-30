@@ -420,7 +420,7 @@ fn open_alert_cas_in_root(
     else {
         return false;
     };
-    if RelayReattachEpisode::from_state(&authoritative) != *expected
+    if RelayReattachEpisode::from_state(&authoritative).key() != expected.key()
         || record.version != CIRCUIT_VERSION
         || record.episode_key != open.episode_key
         || record.baseline_relay_offset != open.baseline_relay_offset
@@ -722,8 +722,8 @@ pub(super) async fn queue_or_resume_open_alert_with_enqueue(
         )
         .is_ok_and(|locked_episode| {
             debug_assert_eq!(
-                RelayReattachEpisode::from_state(locked_episode.state()),
-                validate_episode
+                RelayReattachEpisode::from_state(locked_episode.state()).key(),
+                validate_episode.key()
             );
             open_alert_cas_in_root(
                 &validate_root,
