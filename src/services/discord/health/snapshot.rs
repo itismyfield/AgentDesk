@@ -799,6 +799,7 @@ async fn build_health_snapshot_with_options(
                     watcher_owns_live_relay: session.watcher_owns_live_relay(),
                     last_relay_ts_ms: session.last_relay_ts_ms,
                     last_relay_offset: session.last_relay_offset,
+                    last_relay_offset_recorded: session.last_relay_offset_recorded,
                     last_capture_offset: session.last_capture_offset,
                     unread_bytes: session.unread_bytes,
                     desynced,

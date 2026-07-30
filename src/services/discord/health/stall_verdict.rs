@@ -528,6 +528,7 @@ mod tests {
             inflight_state_present: updated_at.is_some(),
             tmux_session_mismatch: false,
             last_relay_offset: 10,
+            last_relay_offset_recorded: true,
             last_relay_ts_ms: 0,
             reconnect_count: 0,
             last_capture_offset: Some(20),
