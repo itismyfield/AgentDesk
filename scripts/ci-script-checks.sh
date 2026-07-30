@@ -134,6 +134,10 @@ echo "=== Test-target integrity gate (#5003, warn-only rollout) ==="
 "$PYTHON" scripts/check_test_target_integrity.py
 "$PYTHON" -m unittest tests.test_check_test_target_integrity
 
+echo "=== PostgreSQL test-lane membership gate (#4979, enforced) ==="
+"$PYTHON" scripts/check_pg_test_lane_membership.py --baseline-ref "$TEST_LANE_BASELINE_REF"
+"$PYTHON" -m unittest tests.test_check_pg_test_lane_membership
+
 echo "=== Scheduled-message PG path-filter wiring contract ==="
 "$PYTHON" -m unittest tests.test_scheduled_messages_ci_wiring
 
