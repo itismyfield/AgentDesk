@@ -169,6 +169,26 @@ mod restart_seed_retry_tests {
     };
     use std::sync::{Arc, Mutex};
 
+    #[tokio::test]
+    async fn restart_accepted_defer_does_not_retry_5015() {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = attempts.clone();
+
+        let status = retry_restart_seed_turn_for_test(move |reservation| {
+            seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            async move {
+                Ok(HeadlessTurnStartOutcome {
+                    turn_id: reservation.turn_id(poise::serenity_prelude::ChannelId::new(50_15)),
+                    status: HeadlessTurnStartStatus::Consumed,
+                })
+            }
+        })
+        .await;
+
+        assert_eq!(status, RestartSeedStatus::Started);
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn restart_conflict_retries_reuse_one_logical_request_identity_5015() {
         let reservations = Arc::new(Mutex::new(Vec::new()));
