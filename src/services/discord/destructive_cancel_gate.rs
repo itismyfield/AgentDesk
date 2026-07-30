@@ -771,6 +771,7 @@ mod tests {
             assert!(terminal_envelope_present(&provider, &snapshot));
             std::fs::write(&output_path, vec![b'x'; usize::try_from(len + 1).unwrap()])
                 .expect("grow live capture");
+            stale_mtime(&output_path);
 
             let gate = evaluate(&shared, &provider, channel, channel, &snapshot).await;
 
