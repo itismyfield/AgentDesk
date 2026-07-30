@@ -23,23 +23,28 @@ use super::*;
 /// watcher owner. Ownerless/non-watcher terminal paths do not emit a watcher
 /// projection edge, so they use immediate admission; watcher-owned rows retain
 /// the deferred projection barrier and far-backstop.
-fn reseed_recovered_finalizer_ledger(
+async fn reseed_recovered_finalizer_ledger(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
     finalizer_turn_id: u64,
     provider: &ProviderKind,
     relay_owner: super::inflight::RelayOwnerKind,
-) {
+) -> bool {
     // id-0 would key the channel-only orphan slot. Only seed a full-identity
     // Watcher entry; synthetic live turns use their persisted finalizer_turn_id.
     if finalizer_turn_id == 0 {
-        return;
+        return false;
     }
     let completion_admission_plan = if relay_owner == super::inflight::RelayOwnerKind::Watcher {
         super::turn_finalizer::CompletionAdmissionPlan::AfterTerminalProjectionSettled
     } else {
         super::turn_finalizer::CompletionAdmissionPlan::Immediate
     };
+    let changed = relay_owner == super::inflight::RelayOwnerKind::Watcher
+        && !shared
+            .turn_finalizer
+            .has_live_watcher_pending(channel_id, shared.restart.current_generation)
+            .await;
     shared
         .turn_finalizer
         .register_start_with_completion_admission(
@@ -53,6 +58,7 @@ fn reseed_recovered_finalizer_ledger(
             completion_admission_plan,
             shared, // #3016 phase-5a: prime the reconcile cache at register time.
         );
+    changed
 }
 
 /// #4370 (review r3): may THIS re-adopted row own a ledger entry / on-disk marker?
@@ -262,13 +268,14 @@ async fn reregister_active_turn_from_inflight_inner(
                 mailbox_binding_changed =
                     before != (token.tmux_session_name(), token.child_pid_value());
             }
-            reseed_recovered_finalizer_ledger(
+            mailbox_binding_changed |= reseed_recovered_finalizer_ledger(
                 shared,
                 channel_id,
                 finalizer_turn_id,
                 &provider,
                 state.effective_relay_owner_kind(),
-            );
+            )
+            .await;
             // #4370: a real-user turn re-bound to the mailbox across a restart.
             if readopted_ledger_record_allowed(state) {
                 let ledger_changed = !persist_durable_marker
@@ -296,14 +303,18 @@ async fn reregister_active_turn_from_inflight_inner(
     }
 
     if state.request_owner_user_id == 0 {
-        reseed_recovered_finalizer_ledger(
+        let mailbox_binding_changed = reseed_recovered_finalizer_ledger(
             shared,
             channel_id,
             finalizer_turn_id,
             &provider,
             state.effective_relay_owner_kind(),
-        );
-        return ActiveTurnReregisterOutcome::default();
+        )
+        .await;
+        return ActiveTurnReregisterOutcome {
+            finish_mailbox_on_completion: false,
+            mailbox_binding_changed,
+        };
     }
 
     let cancel_token = Arc::new(CancelToken::new());
@@ -323,13 +334,14 @@ async fn reregister_active_turn_from_inflight_inner(
     )
     .await;
     if started {
-        reseed_recovered_finalizer_ledger(
+        let _ = reseed_recovered_finalizer_ledger(
             shared,
             channel_id,
             finalizer_turn_id,
             &provider,
             state.effective_relay_owner_kind(),
-        );
+        )
+        .await;
         // #4370: the mailbox now carries a re-adopted-from-inflight REAL user turn
         // (owner == request_owner_user_id). Record it in the ledger + on-disk
         // marker so a later starved injection / task-notification synthetic turn
