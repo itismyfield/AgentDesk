@@ -3,9 +3,9 @@ use super::*;
 fn should_silence_requeued_response(
     retry_candidate: bool,
     claude_tui_followup_busy_readiness_timeout: bool,
-    queue_status_card_enabled: bool,
+    _queue_status_card_enabled: bool,
 ) -> bool {
-    retry_candidate && !claude_tui_followup_busy_readiness_timeout && !queue_status_card_enabled
+    retry_candidate && !claude_tui_followup_busy_readiness_timeout
 }
 
 pub(super) fn apply(
@@ -37,6 +37,6 @@ mod tests {
     #[test]
     fn other_requeue_paths_keep_legacy_silencing() {
         assert!(should_silence_requeued_response(true, false, false));
-        assert!(!should_silence_requeued_response(true, false, true));
+        assert!(should_silence_requeued_response(true, false, true));
     }
 }

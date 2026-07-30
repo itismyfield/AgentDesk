@@ -2398,7 +2398,11 @@ mod tests {
         )
         .expect_err("a stranded draft must not report steering success");
 
-        assert!(error.contains("remained in the composer"));
+        assert!(matches!(
+            error,
+            SteeringPromptInjectionError::PossiblyDelivered(ref reason)
+                if reason.contains("remained in the composer")
+        ));
         assert_eq!(
             *events.lock().unwrap(),
             vec![
@@ -2437,7 +2441,12 @@ mod tests {
         )
         .expect_err("an unconfirmed submit must not report steering success");
 
-        assert_eq!(error, "submit could not be confirmed");
+        assert_eq!(
+            error,
+            SteeringPromptInjectionError::PossiblyDelivered(
+                "submit could not be confirmed".to_string()
+            )
+        );
         assert_eq!(
             *events.lock().unwrap(),
             vec![
