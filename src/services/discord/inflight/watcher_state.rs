@@ -120,12 +120,20 @@ pub(super) fn persist_watcher_stream_progress_locked_in_root(
     if let Some(msg_id) = patch.current_msg_id {
         state.current_msg_id = msg_id;
     }
-    state.full_response = patch.full_response;
-    // Recompute the boundary clamp against the freshly reloaded full_response so
-    // the persisted offset stays in-bounds even if the disk row's body differs
-    // from the caller's last unlocked snapshot.
-    state.response_sent_offset =
-        normalize_response_sent_offset(&state.full_response, patch.response_sent_offset);
+    let patch_response_sent_offset =
+        normalize_response_sent_offset(&patch.full_response, patch.response_sent_offset);
+    let preserves_delivered_prefix = state
+        .full_response
+        .get(..state.response_sent_offset)
+        .zip(patch.full_response.get(..state.response_sent_offset))
+        .is_some_and(|(durable, incoming)| durable == incoming);
+    if preserves_delivered_prefix {
+        state.full_response = patch.full_response;
+        state.response_sent_offset = normalize_response_sent_offset(
+            &state.full_response,
+            state.response_sent_offset.max(patch_response_sent_offset),
+        );
+    }
     state.current_tool_line = patch.current_tool_line;
     state.prev_tool_status = patch.prev_tool_status;
     state.any_tool_used = patch.any_tool_used;
