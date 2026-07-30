@@ -280,6 +280,14 @@ class FastCheckCiWiringTests(unittest.TestCase):
         for command in commands:
             self.assertEqual(test_job.count(command), 1)
         self.assertIn("- 'src/services/discord/**'", changes)
+        for path in (
+            "src/services/discord/router/message_handler/provider_isolation.rs",
+            "src/services/discord/router/message_handler/provider_isolation/**",
+            "src/services/discord/router/message_handler/tui_followup_retry.rs",
+            "src/services/discord/router/message_handler/tui_followup_retry_tests.rs",
+            "src/services/discord/router/turn_start.rs",
+        ):
+            self.assertIn(f"- '{path}'", changes)
         self.assertIn("- test_fast", mirror_job)
         self.assertIn("FILTER_NAME: pg_db", mirror_job)
 

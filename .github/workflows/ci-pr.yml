@@ -167,6 +167,13 @@ jobs:
               - 'src/services/cluster/intake_router_hook/**'
               - 'src/services/discord/router/intake_dispatch.rs'
               - 'src/services/discord/router/intake_dispatch/**'
+              # #5001/#5015: runtime mismatch verdict, turn reservation, and
+              # headless retry changes must run the required targeted tests.
+              - 'src/services/discord/router/message_handler/provider_isolation.rs'
+              - 'src/services/discord/router/message_handler/provider_isolation/**'
+              - 'src/services/discord/router/message_handler/tui_followup_retry.rs'
+              - 'src/services/discord/router/message_handler/tui_followup_retry_tests.rs'
+              - 'src/services/discord/router/turn_start.rs'
               - 'src/services/observability/**'
               - 'src/config.rs'
               - 'Cargo.toml'
