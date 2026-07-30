@@ -596,8 +596,6 @@ async fn rebind_inflight_for_channel_inner(
             existing.session_id = session_id_for_state.clone();
         }
         existing.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
-        adoption_changed =
-            serde_json::to_value(&rollback_state).ok() != serde_json::to_value(&existing).ok();
         let rollback_expected = super::inflight::InflightTurnIdentity::from_state(&existing);
         let rollback_expected_turn_start_offset = existing.turn_start_offset;
         let rollback_expected_last_offset_for_rebase =
@@ -641,6 +639,7 @@ async fn rebind_inflight_for_channel_inner(
                 expected_turn_start_offset,
             )
         };
+        adoption_changed = rebind_adoption_repaired_state(&rollback_state, &existing);
         if !matches!(save_outcome, super::inflight::GuardedSaveOutcome::Saved) {
             tracing::warn!(
                 channel_id,
@@ -915,6 +914,24 @@ async fn rebind_inflight_for_channel_inner(
             watcher_replaced,
         ),
     })
+}
+
+fn rebind_adoption_repaired_state(
+    before: &super::inflight::InflightTurnState,
+    after: &super::inflight::InflightTurnState,
+) -> bool {
+    before.tmux_session_name != after.tmux_session_name
+        || before.output_path != after.output_path
+        || before.input_fifo_path != after.input_fifo_path
+        || before.runtime_kind != after.runtime_kind
+        || before.session_id != after.session_id
+        || before.effective_relay_owner_kind() != after.effective_relay_owner_kind()
+        || before.last_offset != after.last_offset
+        || before.turn_start_offset != after.turn_start_offset
+        || before.last_watcher_relayed_offset != after.last_watcher_relayed_offset
+        || before.last_watcher_relayed_generation_mtime_ns
+            != after.last_watcher_relayed_generation_mtime_ns
+        || before.finalizer_turn_id != after.finalizer_turn_id
 }
 
 fn rebind_repaired_state(

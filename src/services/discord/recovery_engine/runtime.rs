@@ -223,6 +223,7 @@ async fn reregister_active_turn_from_inflight_inner(
             finalizer_turn_id,
             "inflight reregister skipped: terminal delivery already committed; clearing stale active turn state"
         );
+        let mailbox_binding_changed = snapshot.cancel_token.is_some();
         finish_recovered_turn_mailbox(
             shared,
             &provider,
@@ -230,34 +231,36 @@ async fn reregister_active_turn_from_inflight_inner(
             "recovery_terminal_delivery_already_committed",
         )
         .await;
-        if persist_durable_marker {
+        let durable_state_changed = if persist_durable_marker {
             clear_inflight_state(&provider, state.channel_id);
+            true
         } else {
             tracing::warn!(
                 provider = %provider.as_str(),
                 channel_id = state.channel_id,
                 "inflight reregister skipped recursive clear while exact-episode guard owns the sidecar flock"
             );
-        }
-        return ActiveTurnReregisterOutcome::default();
+            false
+        };
+        return ActiveTurnReregisterOutcome {
+            finish_mailbox_on_completion: false,
+            mailbox_binding_changed: mailbox_binding_changed || durable_state_changed,
+        };
     }
     if snapshot.cancel_token.is_some() {
         let restored = snapshot.active_user_message_id == Some(finalizer_msg_id);
-        let mailbox_binding_changed = if restored {
-            snapshot.cancel_token.as_ref().is_some_and(|token| {
-                token.tmux_session_name().as_deref() != state.tmux_session_name.as_deref()
-            })
-        } else {
-            false
-        };
+        let mut mailbox_binding_changed = false;
         if restored {
             if let Some(token) = snapshot.cancel_token.as_ref() {
+                let before = (token.tmux_session_name(), token.child_pid_value());
                 super::ensure_cancel_token_bound_from_inflight_state(
                     &provider,
                     state,
                     token,
                     "inflight reregister existing active turn",
                 );
+                mailbox_binding_changed =
+                    before != (token.tmux_session_name(), token.child_pid_value());
             }
             reseed_recovered_finalizer_ledger(
                 shared,
@@ -268,13 +271,16 @@ async fn reregister_active_turn_from_inflight_inner(
             );
             // #4370: a real-user turn re-bound to the mailbox across a restart.
             if readopted_ledger_record_allowed(state) {
-                let _ = mark_readopted_from_inflight(
+                let marker_changed = !state.readopted_from_inflight;
+                let marker_outcome = mark_readopted_from_inflight(
                     shared,
                     &provider,
                     channel_id,
                     state,
                     persist_durable_marker,
                 );
+                mailbox_binding_changed |=
+                    marker_changed && matches!(marker_outcome, inflight::GuardedSaveOutcome::Saved);
             }
         }
         return ActiveTurnReregisterOutcome {

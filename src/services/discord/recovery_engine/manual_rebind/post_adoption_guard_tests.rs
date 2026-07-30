@@ -488,6 +488,195 @@ fn replacement_after_adoption_before_claim_is_untouched() {
 
 #[cfg(unix)]
 #[test]
+fn full_rebind_noop_reuse_reports_no_repair_and_mutation_reports_repair() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        tmp.path(),
+    );
+    if !crate::services::platform::tmux::is_available() {
+        eprintln!("skipping full-path repair detector test: tmux unavailable");
+        return;
+    }
+
+    let provider = ProviderKind::Claude;
+    let channel_id = 4_465_880_000_003_u64;
+    let channel = ChannelId::new(channel_id);
+    let tmux_session = format!("AgentDesk-claude-e2e5021-{}-cc", std::process::id());
+    let created = crate::services::platform::tmux::create_session(&tmux_session, None, "sleep 60")
+        .expect("create tmux session");
+    assert!(created.status.success());
+    crate::services::tmux_common::write_tmux_runtime_kind_marker(
+        &tmux_session,
+        RuntimeHandoffKind::ClaudeTui,
+    )
+    .expect("runtime marker");
+    let output_path = tmp
+        .path()
+        .join("78fdb7f3-0000-4000-8000-000000005021.jsonl");
+    std::fs::write(&output_path, vec![b'x'; 128]).expect("seed transcript");
+    let mut state = super::inflight::InflightTurnState::new(
+        provider.clone(),
+        channel_id,
+        None,
+        343_742_347,
+        5_021_001,
+        5_021_002,
+        "repair detector".to_string(),
+        Some("78fdb7f3-0000-4000-8000-000000005021".to_string()),
+        Some(tmux_session.clone()),
+        Some(output_path.display().to_string()),
+        None,
+        128,
+    );
+    state.finalizer_turn_id = state.user_msg_id;
+    state.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+    state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
+    state.readopted_from_inflight = true;
+    super::inflight::save_inflight_state(&state).expect("seed inflight");
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let shared = runtime.block_on(async { crate::services::discord::make_shared_data_for_tests() });
+    let http = std::sync::Arc::new(serenity::Http::new("Bot test-token"));
+    runtime.block_on(async {
+        let token = std::sync::Arc::new(crate::services::provider::CancelToken::new());
+        super::turn_bridge::bind_cancel_token_tmux_runtime(
+            &provider,
+            &token,
+            &tmux_session,
+            "seed repair detector",
+        );
+        assert!(
+            super::mailbox_try_start_turn(
+                &shared,
+                channel,
+                token,
+                UserId::new(state.request_owner_user_id),
+                MessageId::new(state.user_msg_id),
+            )
+            .await
+        );
+    });
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    shared.tmux_watchers.insert(
+        channel,
+        TmuxWatcherHandle {
+            tmux_session_name: tmux_session.clone(),
+            output_path: output_path.display().to_string(),
+            paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            resume_offset: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            cancel: cancel.clone(),
+            pause_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_delivered: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_heartbeat_ts_ms: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(
+                super::tmux_watcher_now_ms(),
+            )),
+        },
+    );
+    crate::services::tui_prompt_dedupe::register_rehydrated_tmux_runtime_binding(
+        provider.as_str(),
+        &tmux_session,
+        channel_id,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: output_path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: state.session_id.clone(),
+            last_offset: 128,
+            relay_last_offset: None,
+        },
+    );
+
+    let pin = super::inflight::InflightEpisodePin::from_state(&state);
+    let first = runtime
+        .block_on(rebind_inflight_for_channel(
+            &http,
+            &shared,
+            &provider,
+            channel_id,
+            Some(tmux_session.clone()),
+            ManualRebindOverrides::default(),
+            Some(&pin),
+        ))
+        .expect("initial session repair");
+    assert!(
+        first.repaired_state,
+        "missing session must be detected as repair"
+    );
+
+    let pin = super::inflight::InflightEpisodePin::from_state(
+        &super::inflight::load_inflight_state(&provider, channel_id).expect("reload inflight"),
+    );
+    let noop = runtime
+        .block_on(rebind_inflight_for_channel(
+            &http,
+            &shared,
+            &provider,
+            channel_id,
+            Some(tmux_session.clone()),
+            ManualRebindOverrides::default(),
+            Some(&pin),
+        ))
+        .expect("no-op rebind");
+    assert!(!noop.watcher_spawned);
+    assert!(
+        !noop.repaired_state,
+        "true no-op reuse must not report repair"
+    );
+
+    let regressed = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+        runtime_kind: RuntimeHandoffKind::ClaudeTui,
+        output_path: output_path.display().to_string(),
+        relay_output_path: None,
+        input_fifo_path: None,
+        session_id: state.session_id.clone(),
+        last_offset: 64,
+        relay_last_offset: None,
+    };
+    crate::services::tui_prompt_dedupe::register_rehydrated_tmux_runtime_binding(
+        provider.as_str(),
+        &tmux_session,
+        channel_id,
+        regressed,
+    );
+    let pin = super::inflight::InflightEpisodePin::from_state(
+        &super::inflight::load_inflight_state(&provider, channel_id).expect("reload inflight"),
+    );
+    let repaired = runtime
+        .block_on(rebind_inflight_for_channel(
+            &http,
+            &shared,
+            &provider,
+            channel_id,
+            Some(tmux_session.clone()),
+            ManualRebindOverrides::default(),
+            Some(&pin),
+        ))
+        .expect("repair rebind");
+    assert!(!repaired.watcher_spawned);
+    assert!(
+        repaired.repaired_state,
+        "runtime-binding mutation must be detected through the full rebind path"
+    );
+
+    if let Some((_, handle)) = shared.tmux_watchers.remove(&channel) {
+        handle
+            .cancel
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    let _ = crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&tmux_session);
+    let _ = crate::services::platform::tmux::kill_session(&tmux_session, "#5021 test cleanup");
+}
+
+#[cfg(unix)]
+#[test]
 fn replacement_writer_linearizes_after_episode_authority_handoff() {
     let _lock = crate::config::shared_test_env_lock()
         .lock()
