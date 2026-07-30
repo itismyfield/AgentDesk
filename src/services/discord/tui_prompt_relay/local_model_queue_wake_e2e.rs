@@ -194,79 +194,25 @@ async fn gateway_socket(ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(|mut socket| async move { while socket.recv().await.is_some() {} })
 }
 
-async fn assert_local_only_completion_window(
+async fn assert_no_local_only_completion_event(
     rx: &mut tokio::sync::broadcast::Receiver<
         super::super::turn_completion_events::TurnCompletionEvent,
     >,
-    channel_id: ChannelId,
     window: std::time::Duration,
 ) {
     let deadline = tokio::time::Instant::now() + window;
-    let expected_mailbox_release =
-        super::super::turn_completion_events::TurnCompletionEvent::mailbox_released(
-            channel_id,
-            Some(B_MESSAGE_ID),
-        );
-    let mut mailbox_release_seen = false;
-
     loop {
         match tokio::time::timeout_at(deadline, rx.recv()).await {
             Err(_) => return,
-            Ok(Ok(event)) if event.queue_is_eligible() => panic!(
-                "local-only halves must not make a turn queue-eligible; received phase={:?}, turn_id={:?}, channel_id={}",
+            Ok(Ok(event)) => panic!(
+                "local-only halves must not publish a completion event; received phase={:?}, turn_id={:?}, channel_id={}",
                 event.phase, event.turn_id, event.channel_id
-            ),
-            Ok(Ok(event)) if event == expected_mailbox_release => {
-                assert!(
-                    !std::mem::replace(&mut mailbox_release_seen, true),
-                    "the exact B mailbox-release edge may appear at most once"
-                );
-            }
-            Ok(Ok(event)) => assert_eq!(
-                event, expected_mailbox_release,
-                "the only non-eligible edge admitted in this window is the exact B mailbox release"
             ),
             Ok(Err(error)) => {
                 panic!("local-only completion receiver must remain open; recv error={error:?}")
             }
         }
     }
-}
-
-#[tokio::test]
-async fn local_only_completion_window_drains_past_mailbox_release() {
-    let (tx, mut rx) = tokio::sync::broadcast::channel(4);
-    let channel_id = ChannelId::new(CHANNEL_ID);
-    tx.send(
-        super::super::turn_completion_events::TurnCompletionEvent::mailbox_released(
-            channel_id,
-            Some(B_MESSAGE_ID),
-        ),
-    )
-    .expect("mailbox-release receiver registered");
-    tx.send(
-        super::super::turn_completion_events::TurnCompletionEvent::queue_eligible(
-            channel_id,
-            Some(B_MESSAGE_ID),
-        ),
-    )
-    .expect("queue-eligible receiver registered");
-
-    let task = tokio::spawn(async move {
-        assert_local_only_completion_window(
-            &mut rx,
-            channel_id,
-            std::time::Duration::from_millis(100),
-        )
-        .await;
-    });
-    let join_error = task
-        .await
-        .expect_err("the guard must inspect and reject an event after MailboxReleased(B)");
-    assert!(
-        join_error.is_panic(),
-        "queue-eligible rejection must terminate through the guard assertion"
-    );
 }
 
 async fn start_mock_discord(
@@ -603,10 +549,10 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
         .insert(channel_id, test_watcher_handle(tmux, &transcript_path));
     super::spawn_tui_prompt_relay(shared.clone(), ProviderKind::Claude);
 
-    // Subscribe after draining A's release event. The local-only path must not emit the
-    // queue-eligible edge that drives another dequeue. One exact MailboxReleased edge for promoted
-    // B is provisionally admitted without attributing its cause; the idle-queue consumer withholds
-    // dispatch for this phase, while the typing-indicator consumer may stop B's indicator.
+    // Subscribe after draining A's release event. Events published between that drain and this
+    // subscription are outside the local-only observation window. Neither `/model` half may publish
+    // a completion edge: queue-eligible would drive another dequeue, while MailboxReleased would
+    // falsely claim that a promoted turn had already reached bridge or watcher finalization.
     let mut local_only_completion_rx =
         super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
     let command_half = "<command-message>x</command-message>\n<command-name>/model</command-name>";
@@ -678,9 +624,8 @@ async fn local_model_observation_wakes_idle_durable_queue_through_production_wor
         !super::tui_direct_watcher_synthetic_inflight_matches(inflight.as_ref(), tmux, 1),
         "local-only halves must not create synthetic inflight ownership"
     );
-    assert_local_only_completion_window(
+    assert_no_local_only_completion_event(
         &mut local_only_completion_rx,
-        channel_id,
         std::time::Duration::from_millis(100),
     )
     .await;
