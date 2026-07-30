@@ -156,8 +156,7 @@ impl RelayHealthSnapshot {
     pub(in crate::services::discord) fn relay_frontier_never_advanced_with_unread_tail(
         &self,
     ) -> bool {
-        self.dead_frontier_shape()
-            && self.delivery_evidence == RelayDeliveryEvidence::NotDelivered
+        self.dead_frontier_shape() && self.delivery_evidence == RelayDeliveryEvidence::NotDelivered
     }
 
     /// True for a post-restart dead-frontier shape whose process-local evidence

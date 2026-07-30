@@ -1999,10 +1999,7 @@ impl SharedData {
         .unwrap_or(0)
     }
 
-    pub(super) fn committed_relay_offset_publication(
-        &self,
-        channel_id: ChannelId,
-    ) -> Option<u64> {
+    pub(super) fn committed_relay_offset_publication(&self, channel_id: ChannelId) -> Option<u64> {
         published_relay_offset(
             self.tmux_relay_coord(channel_id)
                 .confirmed_end_offset

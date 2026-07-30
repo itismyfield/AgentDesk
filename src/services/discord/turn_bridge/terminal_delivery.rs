@@ -769,9 +769,9 @@ mod tests {
         bridge_epilogue_skip_save_is_identity_guarded, empty_sink_commits_fully_consumed_response,
         empty_sink_preserves_retry, mirror_frozen_prefix_ids,
         record_stopped_turn_terminal_replace_delivery, replace_outcome_commits_terminal_delivery,
-        turn_bridge_replace_outcome_committed,
         send_ordered_long_terminal_chunks, should_complete_work_dispatch_after_terminal_delivery,
         should_fail_dispatch_after_terminal_delivery, terminal_delivery_should_send_new_chunks,
+        turn_bridge_replace_outcome_committed,
     };
     use crate::services::discord::formatting;
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;

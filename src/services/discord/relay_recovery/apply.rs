@@ -247,7 +247,9 @@ pub(super) async fn apply_relay_recovery_decision(
                                     ?latest_evidence,
                                     "relay recovery skipped destructive watcher cancel after gate; terminal delivery became active or was no longer proven undelivered"
                                 );
-                            } else if mailbox_active_user_msg_id != probe.pin.mailbox_active_user_msg_id {
+                            } else if mailbox_active_user_msg_id
+                                != probe.pin.mailbox_active_user_msg_id
+                            {
                                 tracing::warn!(
                                     target: "agentdesk::discord::relay_recovery",
                                     provider = provider.as_str(),

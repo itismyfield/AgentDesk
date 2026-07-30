@@ -323,7 +323,10 @@ mod tests {
             .confirmed_end_offset
             .store(128, std::sync::atomic::Ordering::Release);
         assert_eq!(published_relay_frontier(Some(&coord)), (true, 128));
-        assert_eq!(shared.committed_relay_offset_publication(channel), Some(128));
+        assert_eq!(
+            shared.committed_relay_offset_publication(channel),
+            Some(128)
+        );
 
         assert!(coord.reset_confirmed_frontier(128, 0));
         assert_eq!(
